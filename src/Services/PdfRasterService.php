@@ -1,0 +1,299 @@
+<?php
+declare(strict_types=1);
+
+namespace App\Services;
+
+use App\Support\Logger;
+use App\Support\Programm;
+
+/**
+ * PDF-Grundrisse zu Rasterstreifen rechnen.
+ *
+ * Vorgeschichte: gekachelt wurde ein PDF bisher im Browser mit pdf.js –
+ * jede Kachel bekam ihren Ausschnitt direkt aus den Vektordaten. Auf dem
+ * Papier ist das die schönere Lösung (auf jeder Zoomstufe scharf, kein
+ * Werkzeug auf dem Server). In der Praxis scheitert sie an einer Grenze,
+ * die kein Fehler meldet: pdf.js bekommt den Ausschnitt über einen
+ * Viewport der *ganzen* Seite in Kachelauflösung. Auf der tiefsten Stufe
+ * eines A3-Plans sind das über eine Milliarde Pixel. Legt pdf.js dafür
+ * eine Zwischenfläche an – bei Transparenz und Weichmasken tut es das –,
+ * verweigert der Browser sie stillschweigend und die Kachel bleibt weiß.
+ * Safari ist dabei mit rund 16,8 Megapixeln je Canvas deutlich strenger
+ * als Chrome und steigt entsprechend früher aus.
+ *
+ * Hier wird der Plan deshalb einmalig auf dem Server gerastert. Danach ist
+ * ein PDF-Grundriss genau das, was ein JPEG-Grundriss schon immer war: ein
+ * Stapel gewöhnlicher Bildkacheln. Kein Modul, kein Worker, keine
+ * Canvas-Grenze – das läuft in jedem Browser.
+ *
+ * Gerechnet wird streifenweise: poppler rendert einen Ausschnitt über die
+ * volle Breite und eine Kachelhöhe, der wird geschnitten, dann der
+ * nächste. Damit liegt nie mehr als ein Streifen im Speicher (bei 6144 px
+ * Breite rund 8 MB) statt der ganzen Seite (rund 100 MB).
+ */
+final class PdfRasterService
+{
+    /**
+     * Lange Kante des gerasterten Plans in Pixeln.
+     *
+     * Bei A3 sind das rund 370 dpi – deutlich mehr, als ein Bildschirm auf
+     * der tiefsten Zoomstufe zeigt, und noch weit unter der Obergrenze von
+     * PlanTileService::MAX_PIXEL. Höher kostet vor allem Rechenzeit beim
+     * Hochladen und bringt nichts mehr.
+     */
+    public const KANTE = 6144;
+
+
+    /**
+     * Welches Werkzeug rastert hier PDF – und wenn keines, warum nicht.
+     *
+     * Bewusst keine Bibliothek, sondern ein Programm: Imagick braucht für
+     * PDF ohnehin Ghostscript und ist in Debians Vorgabe-policy.xml für
+     * PDF gesperrt. poppler-utils ist klein, ohne Zusatzdienste und auf
+     * einem LXC in Sekunden nachinstalliert.
+     *
+     * @return array{werkzeug:?string,pfad:?string,hinweis:string}
+     */
+    public static function werkzeug(): array
+    {
+        foreach (['pdftoppm', 'pdftocairo'] as $name) {
+            $pfad = self::finden($name);
+            if ($pfad !== null) {
+                return ['werkzeug' => $name, 'pfad' => $pfad, 'hinweis' => ''];
+            }
+        }
+
+        return [
+            'werkzeug' => null,
+            'pfad'     => null,
+            'hinweis'  => 'Zum Rastern von PDF-Grundrissen fehlt poppler-utils. '
+                . 'Auf dem Server nachinstallieren: apt-get install -y poppler-utils',
+        ];
+    }
+
+    public static function verfuegbar(): bool
+    {
+        return self::werkzeug()['werkzeug'] !== null;
+    }
+
+    /**
+     * Ein Programm suchen, ohne eine Shell zu bemühen.
+     *
+     * Über Programm::finden(), weil der PHP-FPM-Pool open_basedir setzt:
+     * dort sah is_file('/usr/bin/pdftoppm') nichts, und die Oberfläche
+     * hielt poppler-utils für fehlend, obwohl es installiert war.
+     * poppler-Werkzeuge melden ihre Version mit „-v“ und enden mit 0.
+     */
+    private static function finden(string $name): ?string
+    {
+        return Programm::finden($name, ['-v']);
+    }
+
+    // ------------------------------------------------------------ Rastern
+
+    /**
+     * Einen Ausschnitt der Seite als PNG-Datei rendern.
+     *
+     * Die Maße beziehen sich auf die Seite, die auf `$kante` skaliert ist.
+     * `$hoehe` darf über den unteren Rand hinausreichen – poppler schneidet
+     * dann ab und liefert einen niedrigeren Streifen.
+     *
+     * Vorsicht bei `$y`: liegt der Wert *hinter* dem Seitenende, ignoriert
+     * poppler den Ausschnitt und rendert die ganze Seite. Ein Streifen, der
+     * höher zurückkommt als angefordert, ist deshalb kein Streifen, sondern
+     * genau dieser Fall – der Aufrufer muss ihn verwerfen.
+     *
+     * @return array{ok:bool,pfad:?string,breite:int,hoehe:int,message:string}
+     */
+    public static function streifen(
+        string $pdf,
+        int $seite,
+        int $kante,
+        int $y,
+        int $hoehe,
+        string $zielOhneEndung
+    ): array {
+        $w = self::werkzeug();
+        if ($w['pfad'] === null) {
+            return ['ok' => false, 'pfad' => null, 'breite' => 0, 'hoehe' => 0, 'message' => $w['hinweis']];
+        }
+
+        $argumente = [
+            $w['pfad'],
+            '-f', (string) $seite,
+            '-l', (string) $seite,
+            '-scale-to', (string) $kante,
+            '-x', '0',
+            '-y', (string) max(0, $y),
+            // Absichtlich zu breit: poppler klemmt auf die Seitenbreite.
+            // So muss die Breite nicht vorher ausgerechnet werden.
+            '-W', (string) ($kante * 2),
+            '-H', (string) max(1, $hoehe),
+            '-png',
+            '-r', '0',
+            $pdf,
+            $zielOhneEndung,
+        ];
+
+        $ergebnis = self::starten($argumente);
+        if (!$ergebnis['ok']) {
+            return ['ok' => false, 'pfad' => null, 'breite' => 0, 'hoehe' => 0, 'message' => $ergebnis['message']];
+        }
+
+        // poppler hängt die Seitennummer an: ziel-1.png, ziel-01.png, …
+        $treffer = glob($zielOhneEndung . '*.png') ?: [];
+        if ($treffer === []) {
+            return ['ok' => false, 'pfad' => null, 'breite' => 0, 'hoehe' => 0, 'message' => 'Kein Bild erzeugt.'];
+        }
+        $pfad  = $treffer[0];
+        $masse = @getimagesize($pfad);
+        if ($masse === false) {
+            @unlink($pfad);
+            return ['ok' => false, 'pfad' => null, 'breite' => 0, 'hoehe' => 0, 'message' => 'Erzeugtes Bild ist unlesbar.'];
+        }
+
+        return [
+            'ok'      => true,
+            'pfad'    => $pfad,
+            'breite'  => (int) $masse[0],
+            'hoehe'   => (int) $masse[1],
+            'message' => '',
+        ];
+    }
+
+    /**
+     * Maße der gerasterten Seite, ohne sie in voller Größe zu rendern.
+     *
+     * Dafür wird die Seite auf eine Briefmarke gerechnet; das Verhältnis
+     * stimmt, der Rest ist Dreisatz. Die wirkliche Höhe stellt sich beim
+     * Schneiden heraus und wird dort nachgezogen.
+     *
+     * @return array{breite:int,hoehe:int}|null
+     */
+    public static function masse(string $pdf, int $seite, int $kante = self::KANTE): ?array
+    {
+        $ziel = self::tempName('masse');
+        $klein = self::streifen($pdf, $seite, 256, 0, 4096, $ziel);
+        if (!$klein['ok'] || $klein['breite'] === 0) {
+            self::aufraeumen($ziel);
+            return null;
+        }
+        $verhaeltnis = $klein['hoehe'] / $klein['breite'];
+        self::aufraeumen($ziel);
+
+        // Quer wie hoch: die lange Kante bekommt die Zielauflösung.
+        if ($verhaeltnis <= 1.0) {
+            $breite = $kante;
+            $hoehe  = max(1, (int) round($kante * $verhaeltnis));
+        } else {
+            $hoehe  = $kante;
+            $breite = max(1, (int) round($kante / $verhaeltnis));
+        }
+
+        return ['breite' => $breite, 'hoehe' => $hoehe];
+    }
+
+    /**
+     * Seitengröße in Punkt, mit Drehung – so, wie die Seite gedruckt wird.
+     *
+     * @return array{breite:float,hoehe:float}|null
+     */
+    public static function punkte(string $pdf, int $seite): ?array
+    {
+        $pfad = self::finden('pdfinfo');
+        if ($pfad === null) {
+            return null;
+        }
+        $ergebnis = self::starten([$pfad, '-f', (string) $seite, '-l', (string) $seite, $pdf]);
+        if (!$ergebnis['ok']
+            || !preg_match('/^Page\s+\d+\s+size:\s+([\d.]+)\s+x\s+([\d.]+)/m', $ergebnis['ausgabe'], $m)) {
+            // Ohne Seitenangabe nennt pdfinfo die Größe ohne Nummer.
+            if (!preg_match('/^Page size:\s+([\d.]+)\s+x\s+([\d.]+)/m', $ergebnis['ausgabe'] ?? '', $m)) {
+                return null;
+            }
+        }
+
+        $breite = (float) $m[1];
+        $hoehe  = (float) $m[2];
+
+        // Eine um 90 Grad gedrehte Seite wird quer gedruckt; poppler
+        // rendert sie so, also gehört die Drehung hier mitgerechnet.
+        if (preg_match('/^Page\s+\d+\s+rot:\s+(\d+)/m', $ergebnis['ausgabe'], $r)
+            || preg_match('/^Page rot:\s+(\d+)/m', $ergebnis['ausgabe'], $r)) {
+            if (((int) $r[1]) % 180 === 90) {
+                [$breite, $hoehe] = [$hoehe, $breite];
+            }
+        }
+
+        return ['breite' => $breite, 'hoehe' => $hoehe];
+    }
+
+    /** Seitenzahl eines PDF, soweit poppler sie hergibt. */
+    public static function seiten(string $pdf): int
+    {
+        $pfad = self::finden('pdfinfo');
+        if ($pfad === null) {
+            return 0;
+        }
+        $ergebnis = self::starten([$pfad, $pdf]);
+        if (!$ergebnis['ok'] || !preg_match('/^Pages:\s+(\d+)/m', $ergebnis['ausgabe'], $m)) {
+            return 0;
+        }
+        return (int) $m[1];
+    }
+
+    // -------------------------------------------------------------- Innen
+
+    /** Eindeutiger Name für eine Zwischendatei im Kachelordner. */
+    public static function tempName(string $zweck): string
+    {
+        $dir = PlanTileService::dir() . '/.tmp';
+        if (!is_dir($dir)) {
+            mkdir($dir, 0775, true);
+        }
+        return $dir . '/' . $zweck . '_' . bin2hex(random_bytes(6));
+    }
+
+    /** Alles wegräumen, was zu einem Zwischennamen gehört. */
+    public static function aufraeumen(string $zielOhneEndung): void
+    {
+        foreach (glob($zielOhneEndung . '*') ?: [] as $datei) {
+            @unlink($datei);
+        }
+    }
+
+    /**
+     * Ein Programm ohne Shell starten.
+     *
+     * Ohne Shell heißt: der Dateiname eines Grundrisses kann enthalten was
+     * er will, er wird nie interpretiert.
+     *
+     * @param list<string> $argumente
+     * @return array{ok:bool,ausgabe:string,message:string}
+     */
+    private static function starten(array $argumente): array
+    {
+        $deskriptoren = [1 => ['pipe', 'w'], 2 => ['pipe', 'w']];
+        $prozess = @proc_open($argumente, $deskriptoren, $rohre);
+        if (!is_resource($prozess)) {
+            return ['ok' => false, 'ausgabe' => '', 'message' => 'Programm ließ sich nicht starten: ' . $argumente[0]];
+        }
+
+        $ausgabe = (string) stream_get_contents($rohre[1]);
+        $fehler  = (string) stream_get_contents($rohre[2]);
+        fclose($rohre[1]);
+        fclose($rohre[2]);
+        $rc = proc_close($prozess);
+
+        if ($rc !== 0) {
+            Logger::info('PDF-Rastern fehlgeschlagen (rc=' . $rc . '): ' . trim($fehler));
+            return [
+                'ok'      => false,
+                'ausgabe' => $ausgabe,
+                'message' => trim($fehler) !== '' ? trim($fehler) : 'Rückgabewert ' . $rc,
+            ];
+        }
+
+        return ['ok' => true, 'ausgabe' => $ausgabe, 'message' => ''];
+    }
+}

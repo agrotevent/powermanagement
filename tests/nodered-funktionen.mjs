@@ -1,0 +1,547 @@
+#!/usr/bin/env node
+/*
+ * Prüft die Function-Nodes aus deploy/node-red/flows.json – ohne Node-RED
+ * und ohne Testrahmen:
+ *
+ *   node tests/nodered-funktionen.mjs
+ *
+ * Jede Function-Node wird über ihren Namen aus flows.json geholt und ihr
+ * Code in node:vm ausgeführt, mit Attrappen für msg, node, context, flow,
+ * global und env – so, wie Node-RED ihn ausführt. Geprüft wird der Code,
+ * der tatsächlich ausgeliefert wird, nicht eine Kopie davon.
+ *
+ * Die Uhr (Date) ist ebenfalls eine Attrappe: Puffer, Wartezeiten und
+ * „jünger als 30 s" lassen sich so prüfen, ohne zu warten.
+ *
+ * Exit-Code 0, wenn alles stimmt; sonst 1 mit einer Beschreibung dessen,
+ * was abweicht.
+ */
+
+import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
+import { readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import vm from 'node:vm';
+
+const WURZEL = join(dirname(fileURLToPath(import.meta.url)), '..');
+const FLOWS_DATEI = join(WURZEL, 'deploy', 'node-red', 'flows.json');
+const flows = JSON.parse(readFileSync(FLOWS_DATEI, 'utf8'));
+
+// ------------------------------------------------------------ Attrappen
+
+const uhr = { jetzt: 1727200000000 };
+
+// Date, dessen „jetzt" die Prüfung bestimmt. Date mit Argumenten bleibt
+// das echte.
+class Uhrzeit extends Date {
+    constructor(...args) {
+        if (args.length === 0) {
+            super(uhr.jetzt);
+        } else {
+            super(...args);
+        }
+    }
+
+    static now() {
+        return uhr.jetzt;
+    }
+}
+
+function speicher() {
+    const daten = new Map();
+    return {
+        get: (k) => daten.get(k),
+        set: (k, v) => {
+            if (v === undefined) {
+                daten.delete(k);
+            } else {
+                daten.set(k, v);
+            }
+        },
+        keys: () => [...daten.keys()],
+    };
+}
+
+// Holt eine Function-Node über ihren Namen und macht sie aufrufbar.
+// Rückgabe von lauf(msg): ein Feld je Ausgang, darin die Liste der
+// Nachrichten – so, wie Node-RED die Rückgabe verteilt.
+function funktion(name, { flow = speicher(), env = {} } = {}) {
+    const def = flows.find((n) => n.type === 'function' && n.name === name);
+    if (!def) {
+        throw new Error('Function-Node „' + name + '" fehlt in flows.json');
+    }
+    const protokoll = { warnungen: [], fehler: [], status: [] };
+    const gesendet = [];
+    const node = {
+        id: def.id,
+        name: def.name,
+        warn: (t) => protokoll.warnungen.push(String(t)),
+        error: (t) => protokoll.fehler.push(String(t)),
+        log: () => {},
+        debug: () => {},
+        trace: () => {},
+        status: (s) => protokoll.status.push(s),
+        send: (m) => gesendet.push(m),
+        done: () => {},
+    };
+    const sandbox = vm.createContext({
+        node,
+        context: speicher(),
+        flow,
+        global: speicher(),
+        env: { get: (k) => env[k] },
+        Buffer,
+        Date: Uhrzeit,
+        console,
+        setTimeout,
+        clearTimeout,
+    });
+    const code = vm.runInContext('(function (msg) {\n' + def.func + '\n})', sandbox, { filename: def.name });
+
+    function verteilen(ergebnis) {
+        const ausgaenge = Array.from({ length: def.outputs }, () => []);
+        if (ergebnis === null || ergebnis === undefined) {
+            return ausgaenge;
+        }
+        const liste = Array.isArray(ergebnis) ? ergebnis : [ergebnis];
+        liste.forEach((eintrag, i) => {
+            if (i >= def.outputs || eintrag === null || eintrag === undefined) {
+                return;
+            }
+            for (const m of Array.isArray(eintrag) ? eintrag : [eintrag]) {
+                if (m !== null && m !== undefined) {
+                    ausgaenge[i].push(m);
+                }
+            }
+        });
+        return ausgaenge;
+    }
+
+    return {
+        def,
+        protokoll,
+        lauf(msg) {
+            const ausgaenge = verteilen(code(msg));
+            for (const m of gesendet.splice(0)) {
+                verteilen(m).forEach((liste, i) => ausgaenge[i].push(...liste));
+            }
+            return ausgaenge;
+        },
+    };
+}
+
+// ------------------------------------------------------------ Prüfungen
+
+const pruefungen = [];
+function pruefe(titel, fn) {
+    pruefungen.push({ titel, fn });
+}
+
+const lp = funktion('Messwert → Line Protocol');
+
+// Normalisierte Nachrichten (und msg.punkte) durch den Umwandler schicken
+// und alle entstandenen Zeilen einsammeln.
+function zeilenAus(nachrichten) {
+    const zeilen = [];
+    for (const m of nachrichten) {
+        const [aus] = lp.lauf(m);
+        for (const a of aus) {
+            zeilen.push(...a.zeilen);
+        }
+    }
+    return zeilen;
+}
+
+const T = () => String(uhr.jetzt);
+
+pruefe('flows.json nutzt nur Kern-Nodes und ist in sich stimmig', () => {
+    const erlaubt = new Set(['tab', 'comment', 'mqtt-broker', 'mqtt in', 'mqtt out', 'function', 'inject',
+        'http request', 'link in', 'link out', 'switch', 'change', 'debug', 'catch', 'status']);
+    const ids = new Set(flows.map((n) => n.id));
+    assert.equal(ids.size, flows.length, 'IDs sind nicht eindeutig');
+    for (const n of flows) {
+        assert.ok(erlaubt.has(n.type), 'kein Kern-Node: ' + n.type + ' (' + n.id + ')');
+        for (const ziele of n.wires || []) {
+            for (const ziel of ziele) {
+                assert.ok(ids.has(ziel), n.id + ' verweist auf unbekannte Node ' + ziel);
+            }
+        }
+        if (n.z) {
+            assert.ok(ids.has(n.z), n.id + ' liegt auf unbekanntem Tab ' + n.z);
+        }
+        if (n.type === 'link out') {
+            for (const ziel of n.links) {
+                const gegen = flows.find((x) => x.id === ziel);
+                assert.ok(gegen && gegen.type === 'link in' && gegen.links.includes(n.id), 'Link ' + n.id + ' → ' + ziel + ' einseitig');
+            }
+        }
+        if (n.type === 'mqtt in' || n.type === 'mqtt out') {
+            assert.equal(n.broker, 'pm_broker', n.id + ' nutzt einen anderen Broker');
+        }
+        if (n.type === 'function') {
+            assert.deepEqual(n.libs, [], n.id + ' lädt Zusatzmodule');
+        }
+    }
+    const broker = flows.find((n) => n.id === 'pm_broker');
+    assert.equal(broker.broker, '${MQTT_HOST}');
+    assert.equal(broker.port, '${MQTT_PORT}');
+    assert.ok(!('credentials' in broker) && !('user' in broker) && !('password' in broker), 'Zugangsdaten stehen in flows.json');
+    const themen = flows.filter((n) => n.type === 'mqtt in').map((n) => n.topic).sort();
+    assert.deepEqual(themen, ['+/online', '+/status/#', 'pm-nodered/rpc', 'pm/messwert/#',
+        'shellies/#', 'shelly/+/online', 'shelly/+/status/#']);
+    const status = flows.find((n) => n.id === 'pm_status_aus');
+    assert.equal(status.topic, 'pm/status/nodered');
+    assert.equal(status.retain, 'true');
+});
+
+pruefe('flows.json entspricht den Quellen in deploy/node-red/funktionen', () => {
+    execFileSync(process.execPath, [join(WURZEL, 'deploy', 'node-red', 'flows-bauen.mjs'), '--pruefen'], { stdio: 'pipe' });
+});
+
+pruefe('Shelly Pro 3EM: em:0 ergibt Phasen L1–L3 und Summe, leeres N entfällt', () => {
+    const gen2 = funktion('Shelly Gen2+ übersetzen');
+    const [aus] = gen2.lauf({
+        topic: 'shellypro3em-a0b1c2d3e4f5/status/em:0',
+        payload: JSON.stringify({
+            id: 0, a_current: 1.234, a_voltage: 230.1, a_act_power: 250.3, a_aprt_power: 260, a_pf: 0.95, a_freq: 50,
+            b_current: 0.5, b_voltage: 231, b_act_power: 100, b_aprt_power: 110, b_pf: 0.9, b_freq: 50,
+            c_current: 0, c_voltage: 229.5, c_act_power: 0, c_aprt_power: 0, c_pf: 0, c_freq: 50,
+            n_current: null, total_current: 1.734, total_act_power: 350.3, total_aprt_power: 370,
+            user_calibrated_phase: [],
+        }),
+    });
+    const zeilen = zeilenAus(aus).filter((z) => z.startsWith('strom,'));
+    const g = 'geraet=shellypro3em-a0b1c2d3e4f5,kanal=em:0';
+    assert.deepEqual(zeilen, [
+        `strom,${g},phase=L1,typ=shelly u=230.1,i=1.234,p=250.3,s=260,pf=0.95,f=50 ${T()}`,
+        `strom,${g},phase=L2,typ=shelly u=231,i=0.5,p=100,s=110,pf=0.9,f=50 ${T()}`,
+        `strom,${g},phase=L3,typ=shelly u=229.5,i=0,p=0,s=0,pf=0,f=50 ${T()}`,
+        `strom,${g},phase=sum,typ=shelly i=1.734,p=350.3,s=370 ${T()}`,
+    ]);
+});
+
+pruefe('Shelly Pro 3EM: emdata:0 landet als Energie im Kanal em:0', () => {
+    const gen2 = funktion('Shelly Gen2+ übersetzen');
+    const [aus] = gen2.lauf({
+        topic: 'shellypro3em-a0b1c2d3e4f5/status/emdata:0',
+        payload: JSON.stringify({
+            id: 0, a_total_act_energy: 1000.5, a_total_act_ret_energy: 0, b_total_act_energy: 2000,
+            b_total_act_ret_energy: 1.5, c_total_act_energy: 3000, c_total_act_ret_energy: 0,
+            total_act: 6000.5, total_act_ret: 1.5,
+        }),
+    });
+    const zeilen = zeilenAus(aus).filter((z) => z.startsWith('strom,'));
+    const g = 'geraet=shellypro3em-a0b1c2d3e4f5,kanal=em:0';
+    assert.deepEqual(zeilen, [
+        `strom,${g},phase=L1,typ=shelly e=1000.5,e_rueck=0 ${T()}`,
+        `strom,${g},phase=L2,typ=shelly e=2000,e_rueck=1.5 ${T()}`,
+        `strom,${g},phase=L3,typ=shelly e=3000,e_rueck=0 ${T()}`,
+        `strom,${g},phase=sum,typ=shelly e=6000.5,e_rueck=1.5 ${T()}`,
+    ]);
+});
+
+pruefe('Shelly Gen2 switch:0 ergibt Leistung (sum) und Zustand (Schalter, Temperatur)', () => {
+    const gen2 = funktion('Shelly Gen2+ übersetzen');
+    const [aus] = gen2.lauf({
+        topic: 'shelly/kuehlhaus/status/switch:0',
+        payload: JSON.stringify({
+            id: 0, source: 'init', output: true, apower: 1200.5, voltage: 229.8, freq: 49.98, current: 5.3, pf: 0.99,
+            aenergy: { total: 12345.678, by_minute: [1, 2, 3], minute_ts: 1727199960 },
+            ret_aenergy: { total: 0 }, temperature: { tC: 41.2, tF: 106.2 },
+        }),
+    });
+    const zeilen = zeilenAus(aus).filter((z) => !z.startsWith('geraet,'));
+    assert.deepEqual(zeilen, [
+        `strom,geraet=kuehlhaus,kanal=switch:0,phase=sum,typ=shelly u=229.8,i=5.3,p=1200.5,pf=0.99,f=49.98,e=12345.678,e_rueck=0 ${T()}`,
+        `zustand,geraet=kuehlhaus,kanal=switch:0,typ=shelly schalter=1,temperatur=41.2 ${T()}`,
+    ]);
+});
+
+pruefe('Shelly Gen2: online, Geräteinfo per RPC und fremde Themen', () => {
+    const flow = speicher();
+    const gen2 = funktion('Shelly Gen2+ übersetzen', { flow });
+    const info = funktion('Shelly Gen2+ Geräteinfo', { flow });
+
+    // Verbindungszustand – Kanal „geraet"
+    const [online] = gen2.lauf({ topic: 'shellyplus1pm-aabbcc/online', payload: 'true' });
+    assert.deepEqual(zeilenAus(online), [`zustand,geraet=shellyplus1pm-aabbcc,kanal=geraet,typ=shelly online=1 ${T()}`]);
+
+    // Erstes Sehen: Geräteeintrag sofort, RPC-Anfrage an das Präfix
+    const [aus, rpc] = gen2.lauf({ topic: 'shelly/Halle 3/status/sys', payload: '{"mac":"A0B1C2D3E4F5"}' });
+    assert.deepEqual(zeilenAus(aus), [`geraet,geraet=halle-3,typ=shelly generation=2,praefix="shelly/Halle 3" ${T()}`]);
+    assert.equal(rpc.length, 1);
+    assert.equal(rpc[0].topic, 'shelly/Halle 3/rpc');
+    const anfrage = JSON.parse(rpc[0].payload);
+    assert.deepEqual({ src: anfrage.src, method: anfrage.method }, { src: 'pm-nodered', method: 'Shelly.GetDeviceInfo' });
+
+    // Antwort: Zuordnung über die Anfrage-ID, nicht über src
+    const [punkte] = info.lauf({
+        topic: 'pm-nodered/rpc',
+        payload: JSON.stringify({
+            id: anfrage.id, src: 'shellyplus1pm-a0b1c2d3e4f5', dst: 'pm-nodered',
+            result: { name: 'Halle "3"', id: 'shellyplus1pm-a0b1c2d3e4f5', mac: 'A0B1C2D3E4F5', model: 'SNSW-001P16EU', gen: 2, ver: '1.4.4', app: 'Plus1PM' },
+        }),
+    });
+    assert.deepEqual(zeilenAus(punkte), [
+        `geraet,geraet=halle-3,typ=shelly modell="SNSW-001P16EU",produkt="Plus1PM",name="Halle \\"3\\"",firmware="1.4.4",generation=2,mac="A0B1C2D3E4F5",praefix="shelly/Halle 3" ${T()}`,
+    ]);
+
+    // Innerhalb von 6 h keine zweite Anfrage, danach wieder
+    assert.equal(gen2.lauf({ topic: 'shelly/Halle 3/status/sys', payload: '{}' })[1].length, 0);
+    uhr.jetzt += 6 * 3600 * 1000 + 1;
+    assert.equal(gen2.lauf({ topic: 'shelly/Halle 3/status/sys', payload: '{}' })[1].length, 1);
+    uhr.jetzt -= 6 * 3600 * 1000 + 1;
+
+    // Eigene Themen und Gen1 gehören nicht hierher
+    assert.deepEqual(gen2.lauf({ topic: 'pm/status/nodered', payload: '{"geschrieben":1}' }), [[], []]);
+    assert.deepEqual(gen2.lauf({ topic: 'shellies/online', payload: 'true' }), [[], []]);
+});
+
+pruefe('Shelly Gen1: Relais – energy in Wattminuten wird zu Wh, Schaltzustand 1/0', () => {
+    const gen1 = funktion('Shelly Gen1 übersetzen');
+    const zeilen = [
+        ...zeilenAus(gen1.lauf({ topic: 'shellies/shelly1pm-84CCA8A1B2C3/relay/0/energy', payload: '600' })[0]),
+        ...zeilenAus(gen1.lauf({ topic: 'shellies/shelly1pm-84CCA8A1B2C3/relay/0/power', payload: '42.5' })[0]),
+        ...zeilenAus(gen1.lauf({ topic: 'shellies/shelly1pm-84CCA8A1B2C3/relay/0', payload: 'on' })[0]),
+        ...zeilenAus(gen1.lauf({ topic: 'shellies/shelly1pm-84CCA8A1B2C3/relay/0/command', payload: 'off' })[0]),
+    ];
+    const g = 'geraet=shelly1pm-84cca8a1b2c3,kanal=relay:0';
+    assert.deepEqual(zeilen, [
+        `geraet,geraet=shelly1pm-84cca8a1b2c3,typ=shelly generation=1,praefix="shellies/shelly1pm-84CCA8A1B2C3" ${T()}`,
+        `strom,${g},phase=sum,typ=shelly e=10 ${T()}`,
+        `strom,${g},phase=sum,typ=shelly p=42.5 ${T()}`,
+        `zustand,${g},typ=shelly schalter=1 ${T()}`,
+    ]);
+});
+
+pruefe('Shelly Gen1 3EM: Phasen L1–L3, Summe erst wenn alle frisch sind', () => {
+    const gen1 = funktion('Shelly Gen1 übersetzen');
+    const id = 'shellies/shellyem3-A1B2C3';
+    const lauf = (feld, n, wert) => zeilenAus(gen1.lauf({ topic: `${id}/emeter/${n}/${feld}`, payload: String(wert) })[0])
+        .filter((z) => !z.startsWith('geraet,'));
+    const g = 'geraet=shellyem3-a1b2c3,kanal=emeter';
+
+    // Erste Runde: noch unklar, wie viele Phasen das Gerät hat – keine Summe
+    assert.deepEqual(lauf('power', 0, 100), [`strom,${g},phase=L1,typ=shelly p=100 ${T()}`]);
+    assert.deepEqual(lauf('reactive_power', 0, -3.5), [`strom,${g},phase=L1,typ=shelly q=-3.5 ${T()}`]);
+    assert.equal(lauf('power', 1, 200).length, 1);
+    assert.equal(lauf('power', 2, 300.5).length, 1);
+    // Zweite Runde: Summe mit dem Wert der letzten Phase, alle aus dieser Runde
+    assert.equal(lauf('power', 0, 110).length, 1);
+    assert.equal(lauf('power', 1, 210).length, 1);
+    assert.deepEqual(lauf('power', 2, 310.5), [
+        `strom,${g},phase=L3,typ=shelly p=310.5 ${T()}`,
+        `strom,${g},phase=sum,typ=shelly p=630.5 ${T()}`,
+    ]);
+    // L2 und L3 kommen erst nach 31 s – L1 ist dann zu alt, keine Summe
+    lauf('power', 0, 120);
+    uhr.jetzt += 31000;
+    lauf('power', 1, 220);
+    assert.equal(lauf('power', 2, 320).length, 1);
+    // nächste vollständige Runde: wieder eine Summe
+    lauf('power', 0, 130);
+    lauf('power', 1, 230);
+    assert.deepEqual(lauf('power', 2, 330).slice(1), [`strom,${g},phase=sum,typ=shelly p=690 ${T()}`]);
+    // Zählerstände in Wh gehen unverändert als e/e_rueck
+    assert.deepEqual(lauf('total_returned', 0, 12.5), [`strom,${g},phase=L1,typ=shelly e_rueck=12.5 ${T()}`]);
+    uhr.jetzt -= 31000;
+});
+
+pruefe('Shelly Gen1: announce ergibt einen Geräteeintrag mit generation=1', () => {
+    const gen1 = funktion('Shelly Gen1 übersetzen');
+    const [aus] = gen1.lauf({
+        topic: 'shellies/announce',
+        payload: JSON.stringify({ id: 'shellyem3-A1B2C3', model: 'SHEM-3', mac: 'A0B1C2A1B2C3', ip: '192.168.10.23', new_fw: false, fw_ver: '20230913-114244/v1.14.0-gcb84623' }),
+    });
+    assert.deepEqual(zeilenAus(aus), [
+        `geraet,geraet=shellyem3-a1b2c3,typ=shelly generation=1,praefix="shellies/shellyem3-A1B2C3",modell="SHEM-3",firmware="20230913-114244/v1.14.0-gcb84623",mac="A0B1C2A1B2C3",ip="192.168.10.23" ${T()}`,
+    ]);
+});
+
+pruefe('Escaping: Tags und Feldschlüssel (Komma, Leerzeichen, =, \\), Texte (" und \\)', () => {
+    const zeilen = zeilenAus([{
+        topic: 'pm/messwert/gen 1,a=b/kanal\\',
+        payload: {
+            ts: 1727200000123,
+            typ: 'generator',
+            zustand: { 'motor zustand': 'Läuft "gut"', 'a,b=c': 1, pfad: 'C:\\Temp\\', mehrzeilig: 'eins\nzwei' },
+        },
+    }]);
+    assert.deepEqual(zeilen, [
+        'zustand,geraet=gen\\ 1\\,a\\=b,kanal=kanal\\\\,typ=generator motor\\ zustand="Läuft \\"gut\\"",a\\,b\\=c=1,pfad="C:\\\\Temp\\\\",mehrzeilig="eins zwei" 1727200000123',
+    ]);
+});
+
+pruefe('Float-Regel: kein i-Suffix, Wahrheitswerte 1/0, null/NaN/Infinity entfallen, leere Punkte fehlen', () => {
+    const zeilen = zeilenAus([{
+        topic: 'pm/messwert/victron-gx/batterie',
+        payload: JSON.stringify({
+            ts: 1727200000000,
+            typ: 'victron',
+            phasen: {
+                sum: { u: 52, i: -12, p: '624.5', leer: null, text: 'n/a' },
+                L1: { u: null, i: null },
+                L2: {},
+            },
+            zustand: { soc: 87, laden: true, fehler: false, zahl_als_text: '42', nichts: null, gross: 1e21, tief: -0.000001 },
+        }),
+    }]);
+    assert.deepEqual(zeilen, [
+        'strom,geraet=victron-gx,kanal=batterie,phase=sum,typ=victron u=52,i=-12,p=624.5,text="n/a" 1727200000000',
+        'zustand,geraet=victron-gx,kanal=batterie,typ=victron soc=87,laden=1,fehler=0,zahl_als_text="42",gross=1e+21,tief=-0.000001 1727200000000',
+    ]);
+    // NaN/Infinity kommen nicht über JSON, wohl aber über interne Nachrichten
+    const [aus] = lp.lauf({ topic: 'pm/messwert/x/y', payload: { phasen: { sum: { p: NaN, q: Infinity, s: -Infinity } } } });
+    assert.equal(aus.length, 0);
+    for (const z of zeilen) {
+        assert.ok(!/=-?\d+(\.\d+)?i[, ]/.test(z), 'Integer-Feld in: ' + z);
+    }
+});
+
+pruefe('Generischer Eingang pm/messwert: Beispiel aus der Schnittstelle, Zeit in Sekunden', () => {
+    const zeilen = zeilenAus([{
+        topic: 'pm/messwert/comap-ig200/generator',
+        payload: JSON.stringify({
+            ts: 1727200000,
+            typ: 'comap',
+            modell: 'InteliGen 200',
+            phasen: {
+                L1: { u: 230.1, i: 1.2, p: 250.3, q: 0, s: 260, pf: 0.95, f: 50.0, e: 1234.5, e_rueck: 0 },
+                N: { i: 0.3 },
+                sum: { p: 800.2, i: 3.5, e: 123456.7 },
+            },
+            zustand: { soc: 87, schalter: 1, motorzustand: 'Läuft' },
+        }),
+    }]);
+    const g = 'geraet=comap-ig200,kanal=generator';
+    assert.deepEqual(zeilen, [
+        `strom,${g},phase=L1,typ=comap u=230.1,i=1.2,p=250.3,q=0,s=260,pf=0.95,f=50,e=1234.5,e_rueck=0 1727200000000`,
+        `strom,${g},phase=N,typ=comap i=0.3 1727200000000`,
+        `strom,${g},phase=sum,typ=comap p=800.2,i=3.5,e=123456.7 1727200000000`,
+        `zustand,${g},typ=comap soc=87,schalter=1,motorzustand="Läuft" 1727200000000`,
+    ]);
+    // Ohne ts gilt die Empfangszeit, ohne typ entfällt der Tag
+    assert.deepEqual(zeilenAus([{ topic: 'pm/messwert/zaehler', payload: '{"phasen":{"sum":{"e":5}}}' }]),
+        [`strom,geraet=zaehler,kanal=geraet,phase=sum e=5 ${T()}`]);
+    // Kaputtes JSON: nichts schreiben, aber zählen und melden
+    const vorher = lp.protokoll.warnungen.length;
+    assert.equal(lp.lauf({ topic: 'pm/messwert/a/b', payload: '{kaputt' })[0].length, 0);
+    assert.equal(lp.protokoll.warnungen.length, vorher + 1);
+});
+
+pruefe('Schreiber: bündelt, meldet sich an, puffert bei Fehlern und wiederholt', () => {
+    const env = { INFLUX_URL: 'http://127.0.0.1:8086/', INFLUX_DB: 'strom', INFLUX_TOKEN: 'geheim==' };
+    const s = funktion('InfluxDB-Schreiber', { env });
+    const zeilen = (n, p = 'z') => Array.from({ length: n }, (_, i) => `test,q=${p} w=${i} 1`);
+
+    // unter 500 Zeilen: warten auf den Takt
+    assert.deepEqual(s.lauf({ zeilen: zeilen(10) }), [[], []]);
+    let [anfrage] = s.lauf({ takt: true });
+    assert.equal(anfrage.length, 1);
+    assert.equal(anfrage[0].url, 'http://127.0.0.1:8086/write?db=strom&precision=ms');
+    assert.equal(anfrage[0].headers.Authorization, 'Token geheim==');
+    assert.equal(anfrage[0].payload.split('\n').length, 10);
+    assert.equal(anfrage[0].method, undefined, 'msg.method brächte im http-request-Node eine Warnung');
+
+    // während eine Anfrage läuft, geht keine zweite hinaus
+    s.lauf({ zeilen: zeilen(600) });
+    assert.equal(s.lauf({ takt: true })[0].length, 0);
+
+    // Antwort 204: sofort der nächste Stapel, weil ≥ 500 Zeilen warten
+    [anfrage] = s.lauf({ pmStapel: anfrage[0].pmStapel, statusCode: 204, payload: '' });
+    assert.equal(anfrage.length, 1);
+    assert.equal(anfrage[0].payload.split('\n').length, 600);
+
+    // Verbindungsfehler: kommt doppelt (Ausgang und Catch), zählt einmal
+    const stapel = anfrage[0].pmStapel;
+    s.lauf({ pmStapel: stapel, statusCode: 'ECONNREFUSED', payload: 'Error: connect ECONNREFUSED' });
+    s.lauf({ pmStapel: stapel, error: { message: 'connect ECONNREFUSED' } });
+    assert.equal(s.lauf({ takt: true })[0].length, 0, 'sofort erneut statt nach einer Pause');
+    uhr.jetzt += 2000;
+    [anfrage] = s.lauf({ takt: true });
+    assert.equal(anfrage.length, 1);
+    assert.equal(anfrage[0].payload.split('\n').length, 600, 'Zeilen gingen beim Fehler verloren');
+    s.lauf({ pmStapel: anfrage[0].pmStapel, statusCode: 204 });
+
+    // Herzschlag: Zeile in den Puffer, Status retained auf MQTT
+    let [, meldung] = s.lauf({ herzschlag: true });
+    assert.equal(meldung[0].topic, 'pm/status/nodered');
+    assert.equal(meldung[0].retain, true);
+    const zahlen = JSON.parse(meldung[0].payload);
+    assert.deepEqual({ g: zahlen.geschrieben, f: zahlen.fehler, p: zahlen.puffer, v: zahlen.verworfen, ts: zahlen.ts },
+        { g: 610, f: 1, p: 0, v: 0, ts: uhr.jetzt });
+    [anfrage] = s.lauf({ takt: true });
+    assert.equal(anfrage[0].payload, `pipeline,quelle=nodered geschrieben=610,fehler=1,puffer=0,verworfen=0 ${T()}`);
+
+    // 400: Inhalt abgelehnt – nicht wiederholen, sondern verwerfen und zählen
+    s.lauf({ pmStapel: anfrage[0].pmStapel, statusCode: 400, payload: '{"error":"unable to parse"}' });
+    assert.ok(s.protokoll.warnungen.some((w) => w.includes('unable to parse')));
+    assert.equal(s.lauf({ takt: true })[0].length, 0);
+    [, meldung] = s.lauf({ herzschlag: true });
+    assert.equal(JSON.parse(meldung[0].payload).verworfen, 1);
+
+    // Feldtyp-Konflikt (partial write): die übrigen Zeilen sind geschrieben,
+    // verworfen ist nur, was InfluxDB als „dropped" meldet
+    s.lauf({ zeilen: zeilen(9) });
+    [anfrage] = s.lauf({ takt: true });
+    s.lauf({
+        pmStapel: anfrage[0].pmStapel,
+        statusCode: 400,
+        payload: '{"error":"partial write: field type conflict: input field \\"motorzustand\\" on measurement \\"zustand\\" is type string, already exists as type float dropped=1"}',
+    });
+    [, meldung] = s.lauf({ herzschlag: true });
+    const nachKonflikt = JSON.parse(meldung[0].payload);
+    // im Stapel: der Herzschlag von eben und 9 Zeilen – eine abgelehnt
+    assert.deepEqual({ g: nachKonflikt.geschrieben, v: nachKonflikt.verworfen }, { g: 610 + 9, v: 2 });
+    uhr.jetzt -= 2000;
+});
+
+pruefe('Schreiber: höchstens 50 000 Zeilen, höchstens 5 Minuten; 1.8 mit Benutzer/Kennwort', () => {
+    const s = funktion('InfluxDB-Schreiber', { env: { INFLUX_URL: 'http://influx:8086', INFLUX_USER: 'pm', INFLUX_PASSWORD: 'a&b' } });
+    // Datenbank weg: der erste Stapel scheitert, danach sammelt sich alles
+    s.lauf({ zeilen: Array.from({ length: 10 }, (_, i) => 'alt w=' + i + ' 1') });
+    let [anfrage] = s.lauf({ takt: true });
+    assert.equal(anfrage[0].url, 'http://influx:8086/write?db=strom&precision=ms&u=pm&p=a%26b');
+    assert.equal(anfrage[0].headers.Authorization, undefined);
+    s.lauf({ pmStapel: anfrage[0].pmStapel, statusCode: 503, payload: 'unavailable' });
+
+    for (let i = 0; i < 60; i++) {
+        s.lauf({ zeilen: Array.from({ length: 1000 }, (_, j) => 'neu w=' + j + ' 1') });
+    }
+    let [, meldung] = s.lauf({ herzschlag: true });
+    let z = JSON.parse(meldung[0].payload);
+    assert.equal(z.puffer, 50000);
+    assert.equal(z.verworfen, 10 + 10000, 'die ältesten Zeilen müssen zuerst gehen');
+
+    // 5 Minuten später ist alles zu alt
+    uhr.jetzt += 5 * 60 * 1000 + 1;
+    s.lauf({ takt: true });
+    [, meldung] = s.lauf({ herzschlag: true });
+    z = JSON.parse(meldung[0].payload);
+    // Der erste Herzschlag hat eine Zeile über die Grenze geschoben (+1),
+    // danach ist alles älter als 5 Minuten.
+    assert.equal(z.puffer, 0);
+    assert.equal(z.verworfen, 10 + 10000 + 1 + 50000);
+    uhr.jetzt -= 5 * 60 * 1000 + 1;
+});
+
+// ------------------------------------------------------------ Ausführen
+
+let fehler = 0;
+for (const { titel, fn } of pruefungen) {
+    try {
+        fn();
+        console.log('  ok    ' + titel);
+    } catch (e) {
+        fehler++;
+        console.log('  FEHLER ' + titel);
+        console.log(String(e && e.stack ? e.stack : e).split('\n').map((z) => '         ' + z).join('\n'));
+    }
+}
+console.log('');
+if (fehler > 0) {
+    console.log(fehler + ' von ' + pruefungen.length + ' Prüfungen fehlgeschlagen');
+    process.exit(1);
+}
+console.log(pruefungen.length + ' Prüfungen bestanden');

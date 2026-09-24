@@ -1,0 +1,63 @@
+<?php
+use App\Messung\Messdaten;
+use App\Services\AnlagenService;
+use App\Support\View;
+
+$artInfo = AnlagenService::ARTEN[$filter['art']] ?? null;
+$title = $artInfo['mehrzahl'] ?? 'Anlagen';
+$subtitle = 'Stromanschlüsse, Generatoren, Wechselrichter und Verteilungen';
+?>
+<div class="toolbar-zeile">
+    <form method="get" action="/anlagen" class="inline-form">
+        <select name="art" onchange="this.form.submit()" aria-label="Art">
+            <option value="">Alle Arten</option>
+            <?php foreach (AnlagenService::ARTEN as $k => $a): ?>
+                <option value="<?= $k ?>"<?= $filter['art'] === $k ? ' selected' : '' ?>><?= View::e($a['mehrzahl']) ?></option>
+            <?php endforeach; ?>
+        </select>
+        <select name="standort" onchange="this.form.submit()" aria-label="Standort">
+            <option value="0">Alle Standorte</option>
+            <?php foreach ($standorte as $s): ?>
+                <option value="<?= (int) $s['id'] ?>"<?= (int) $filter['site_id'] === (int) $s['id'] ? ' selected' : '' ?>><?= View::e($s['name']) ?></option>
+            <?php endforeach; ?>
+        </select>
+        <input type="search" name="suche" value="<?= View::e($filter['suche']) ?>" placeholder="Name, Kennung, Modell …">
+        <button class="btn btn-sm" type="submit">Suchen</button>
+    </form>
+    <div class="spacer"></div>
+    <?php if (View::can('anlagen.manage')): ?>
+        <a class="btn btn-primary btn-sm" href="/anlagen/neu?art=<?= View::e($filter['art'] ?: 'verteilung') ?>">+ Neue <?= View::e($artInfo['name'] ?? 'Anlage') ?></a>
+    <?php endif; ?>
+    <span class="small muted" data-live-url="/dashboard/live<?= $filter['site_id'] ? '?standort=' . (int) $filter['site_id'] : '' ?>"></span>
+</div>
+
+<div class="card">
+    <div class="table-wrap">
+        <table class="tabelle-karten">
+            <thead>
+            <tr><th>Anlage</th><th>Standort</th><th>Anschlüsse</th><th>Status</th><th class="num">Leistung</th><th class="num">Auslastung</th></tr>
+            </thead>
+            <tbody>
+            <?php if ($objekte === []): ?>
+                <tr><td colspan="6" class="muted">Keine Anlagen gefunden.</td></tr>
+            <?php endif; ?>
+            <?php foreach ($objekte as $o): ?>
+                <?php $l = $live[(int) $o['id']] ?? []; $art = AnlagenService::ARTEN[$o['art']]; ?>
+                <tr data-objekt-id="<?= (int) $o['id'] ?>" class="live-zeile stufe-<?= View::e($l['stufe'] ?? 'keine') ?>">
+                    <td data-label="Anlage">
+                        <span class="art-zeichen" style="--art-farbe: <?= View::e($art['farbe']) ?>"><?= View::e($art['kuerzel']) ?></span>
+                        <a href="/anlagen/<?= (int) $o['id'] ?>"><strong><?= View::e($o['name']) ?></strong></a>
+                        <?php if ($o['kennung'] !== ''): ?><span class="small muted"><?= View::e($o['kennung']) ?></span><?php endif; ?>
+                        <div class="small muted"><?= View::e(trim($o['hersteller'] . ' ' . $o['modell'])) ?></div>
+                    </td>
+                    <td data-label="Standort"><?= View::e($o['site_name'] ?? '–') ?><?= $o['floor_name'] ? '<div class="small muted">' . View::e($o['floor_name']) . '</div>' : '' ?></td>
+                    <td data-label="Anschlüsse" class="small"><?= View::e($o['kurzform']) ?></td>
+                    <td data-label="Status"><span class="badge status-<?= View::e($o['status']) ?>"><?= View::e(AnlagenService::STATUS[$o['status']] ?? $o['status']) ?></span></td>
+                    <td data-label="Leistung" class="num" data-feld="p"><?= View::e(Messdaten::format($l['p'] ?? null, 'W')) ?></td>
+                    <td data-label="Auslastung" class="num" data-feld="auslastung"><?= ($l['auslastung'] ?? null) !== null ? (int) round((float) $l['auslastung']) . ' %' : '' ?></td>
+                </tr>
+            <?php endforeach; ?>
+            </tbody>
+        </table>
+    </div>
+</div>

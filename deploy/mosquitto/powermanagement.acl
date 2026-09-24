@@ -1,0 +1,26 @@
+# /etc/mosquitto/powermanagement.acl
+#
+# Rechte am Broker. Das Installationsskript kopiert diese Datei nach
+# /etc/mosquitto/ (Besitzer mosquitto, Rechte 600 – Mosquitto 2 liest sie
+# erst nach dem Wechsel auf seinen eigenen Benutzer und warnt bei anderen
+# Rechten).
+#
+# „deny" wirkt unabhängig von der Reihenfolge: Mosquitto prüft erst alle
+# Verbote, dann die Erlaubnisse.
+
+# Shelly-Geräte: alles – ihre eigenen Themen, RPC-Antworten an
+# pm-nodered/rpc, Gen1-announce –, nur nicht pm/#. Dort stehen die
+# normalisierten Messwerte und der Status der Pipeline; ein falsch
+# eingestelltes oder übernommenes Gerät soll dort nichts hineinschreiben
+# können, was die Oberfläche für echte Messwerte hält.
+user shelly
+topic readwrite #
+topic deny pm/#
+
+# Node-RED liest alle Geräte und schreibt RPC-Anfragen und seinen Status.
+user nodered
+topic readwrite #
+
+# Oberfläche und Sammler: Messwerte veröffentlichen, Geräte schalten.
+user powermanagement
+topic readwrite #

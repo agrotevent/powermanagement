@@ -1,0 +1,121 @@
+{
+    "format": 1,
+    "art": "location",
+    "schluessel": "lager",
+    "name": "Lager",
+    "adresse": "Musterweg 1",
+    "notizen": "",
+    "etagen": [
+        {
+            "schluessel": "grundriss",
+            "name": "Grundriss",
+            "ebene": 0,
+            "reihenfolge": 0,
+            "massstab": "",
+            "notizen": "",
+            "plan": {
+                "datei": "plaene/grundriss.svg",
+                "typ": "image",
+                "seite": 1,
+                "originalname": "lager.svg"
+            },
+            "referenz": {
+                "a": {
+                    "x": 5,
+                    "y": 90
+                },
+                "b": {
+                    "x": 95,
+                    "y": 90
+                },
+                "meter": 40,
+                "verhaeltnis": 0.5,
+                "von": "admin",
+                "am": "2026-09-23T20:21:39+00:00"
+            },
+            "dosen": [
+                {
+                    "schluessel": "a1",
+                    "gesperrt": false,
+                    "sperrnotiz": "",
+                    "label": "A1",
+                    "raum": "A",
+                    "x": 13.97,
+                    "y": 69.67,
+                    "art": "outlet",
+                    "notizen": "",
+                    "buchsen": [
+                        {
+                            "nr": 1,
+                            "label": "1",
+                            "medium": "copper",
+                            "fiber_mode": "",
+                            "connector": "",
+                            "laenge_cm": 0,
+                            "notiz": ""
+                        }
+                    ]
+                },
+                {
+                    "schluessel": "a2",
+                    "gesperrt": false,
+                    "sperrnotiz": "",
+                    "label": "A2",
+                    "raum": "A",
+                    "x": 14.14,
+                    "y": 70.85,
+                    "art": "outlet",
+                    "notizen": "",
+                    "buchsen": []
+                }
+            ],
+            "racks": [
+                {
+                    "schluessel": "it",
+                    "name": "IT",
+                    "raum": "B",
+                    "aufstellort": "",
+                    "hoehe_he": 12,
+                    "tiefe_mm": 0,
+                    "x": 8.65,
+                    "y": 56.98,
+                    "inventarnummer": "",
+                    "notizen": "",
+                    "gesperrt": false,
+                    "sperrnotiz": "",
+                    "einbauten": [
+                        {
+                            "position_he": 12,
+                            "hoehe_he": 1,
+                            "art": "switch",
+                            "label": "Core",
+                            "modell": "CRS",
+                            "serie": "",
+                            "seite": "front",
+                            "watt": 45,
+                            "notizen": ""
+                        },
+                        {
+                            "position_he": 2,
+                            "hoehe_he": 2,
+                            "art": "ups",
+                            "label": "USV",
+                            "modell": "",
+                            "serie": "",
+                            "seite": "front",
+                            "watt": 120,
+                            "notizen": ""
+                        }
+                    ]
+                }
+            ],
+            "aps": [
+                {
+                    "name": "AP197",
+                    "x": 14.15,
+                    "y": 70.41
+                }
+            ]
+        }
+    ]
+}

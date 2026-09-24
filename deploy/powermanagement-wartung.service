@@ -1,0 +1,18 @@
+# /etc/systemd/system/powermanagement-wartung.service
+# Einmaliger Lauf, gestartet von powermanagement-wartung.timer.
+# Platzhalter: __APP_USER__, __APP_DIR__
+
+[Unit]
+Description=PowerManagement Wartung (Protokolle aufräumen)
+
+[Service]
+Type=oneshot
+User=__APP_USER__
+Group=__APP_USER__
+WorkingDirectory=__APP_DIR__
+ExecStart=/usr/bin/php __APP_DIR__/bin/power wartung
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=__APP_DIR__/storage

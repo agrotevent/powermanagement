@@ -1,0 +1,622 @@
+[
+    {
+        "id": "pm_tab_start",
+        "type": "tab",
+        "label": "PowerManagement",
+        "disabled": false,
+        "info": "Messwerte aus MQTT nach InfluxDB.\n\nDer PHP-Sammler (Victron, ComAp, Cloud) veröffentlicht normalisierte\nMesswerte auf `pm/messwert/<gerät>/<kanal>`. Shelly-Geräte sprechen\nihr eigenes Format; die Tabs „Shelly Gen2+\" und „Shelly Gen1\"\nübersetzen es in dasselbe Schema. Alles läuft im Tab „Schreiben\"\nzusammen und geht gebündelt an die InfluxDB."
+    },
+    {
+        "id": "pm_tab_gen2",
+        "type": "tab",
+        "label": "Shelly Gen2+",
+        "disabled": false,
+        "info": "Shelly Plus/Pro/Gen3/Gen4 – Status über MQTT („Generic status update over MQTT\")."
+    },
+    {
+        "id": "pm_tab_gen1",
+        "type": "tab",
+        "label": "Shelly Gen1",
+        "disabled": false,
+        "info": "Shelly Gen1 – ein Thema je Wert unter shellies/<id>/…"
+    },
+    {
+        "id": "pm_tab_schreiben",
+        "type": "tab",
+        "label": "Schreiben",
+        "disabled": false,
+        "info": "Line Protocol erzeugen, puffern und an die InfluxDB schicken."
+    },
+    {
+        "id": "pm_broker",
+        "type": "mqtt-broker",
+        "name": "Mosquitto (PowerManagement)",
+        "broker": "${MQTT_HOST}",
+        "port": "${MQTT_PORT}",
+        "clientid": "",
+        "autoConnect": true,
+        "usetls": false,
+        "protocolVersion": "4",
+        "keepalive": "60",
+        "cleansession": true,
+        "autoUnsubscribe": true,
+        "birthTopic": "",
+        "birthQos": "0",
+        "birthRetain": "false",
+        "birthPayload": "",
+        "birthMsg": {},
+        "closeTopic": "",
+        "closeQos": "0",
+        "closeRetain": "false",
+        "closePayload": "",
+        "closeMsg": {},
+        "willTopic": "",
+        "willQos": "0",
+        "willRetain": "false",
+        "willPayload": "",
+        "willMsg": {},
+        "userProps": "",
+        "sessionExpiry": ""
+    },
+    {
+        "id": "pm_kommentar_start",
+        "type": "comment",
+        "z": "pm_tab_start",
+        "name": "So fließen die Daten",
+        "info": "```\nShelly ──MQTT──► Mosquitto ◄──MQTT── PHP-Sammler (Modbus, Cloud)\n                    │\n                    ▼\n                 Node-RED  ──►  InfluxDB (Datenbank „strom\")\n```\n\n* **pm/messwert/#** – normalisierte Messwerte des PHP-Sammlers, gehen\n  unverändert weiter nach „Schreiben\".\n* **Shelly Gen2+ / Gen1** – übersetzen die Shelly-Themen in dasselbe Schema.\n* **Schreiben** – erzeugt Line Protocol, puffert bei Ausfällen der\n  InfluxDB bis zu 5 Minuten und meldet alle 30 s den eigenen Zustand\n  auf `pm/status/nodered` und in die Messung `pipeline`.\n\nZugänge stehen nicht hier, sondern in `/etc/powermanagement/node-red.env`\n(InfluxDB, Broker-Adresse) und `flows_cred.json` (Broker-Anmeldung).\n\nEigene Änderungen an diesen Flows bleiben bei Updates erhalten. Eine\nneue Fassung legt das Update als `flows.powermanagement-neu.json` ab.",
+        "x": 190,
+        "y": 60,
+        "wires": []
+    },
+    {
+        "id": "pm_in_messwert",
+        "type": "mqtt in",
+        "z": "pm_tab_start",
+        "name": "pm/messwert/#",
+        "topic": "pm/messwert/#",
+        "qos": "1",
+        "datatype": "utf8",
+        "broker": "pm_broker",
+        "nl": false,
+        "rap": true,
+        "rh": 0,
+        "inputs": 0,
+        "x": 150,
+        "y": 140,
+        "wires": [
+            [
+                "pm_link_messwert"
+            ]
+        ]
+    },
+    {
+        "id": "pm_link_messwert",
+        "type": "link out",
+        "z": "pm_tab_start",
+        "name": "zu „Schreiben\"",
+        "mode": "link",
+        "links": [
+            "pm_link_umwandeln"
+        ],
+        "x": 355,
+        "y": 140,
+        "wires": []
+    },
+    {
+        "id": "pm_kommentar_gen2",
+        "type": "comment",
+        "z": "pm_tab_gen2",
+        "name": "Shelly Gen2+ (Plus, Pro, Gen3, Gen4)",
+        "info": "Im Gerät unter **Einstellungen → MQTT**: Server `<IP>:1883`, Benutzer `shelly`,\n„Generic status update over MQTT\" und „RPC status notifications\" einschalten.\n\nDas Präfix ist ab Werk die Geräte-ID (`shellypro3em-a0b1c2d3e4f5`);\n`shelly/<name>` geht ebenso. Der Gerätename in der Datenbank ist das\nletzte Segment des Präfixes.\n\nBeim ersten Sehen eines Geräts und danach alle 6 h fragt der Flow per\nRPC `Shelly.GetDeviceInfo` ab (Antwort auf `pm-nodered/rpc`) und trägt\nModell, Firmware und MAC in die Messung `geraet` ein.",
+        "x": 200,
+        "y": 40,
+        "wires": []
+    },
+    {
+        "id": "pm_gen2_in_status",
+        "type": "mqtt in",
+        "z": "pm_tab_gen2",
+        "name": "+/status/#",
+        "topic": "+/status/#",
+        "qos": "0",
+        "datatype": "utf8",
+        "broker": "pm_broker",
+        "nl": false,
+        "rap": true,
+        "rh": 0,
+        "inputs": 0,
+        "x": 130,
+        "y": 100,
+        "wires": [
+            [
+                "pm_gen2_uebersetzen"
+            ]
+        ]
+    },
+    {
+        "id": "pm_gen2_in_status_shelly",
+        "type": "mqtt in",
+        "z": "pm_tab_gen2",
+        "name": "shelly/+/status/#",
+        "topic": "shelly/+/status/#",
+        "qos": "0",
+        "datatype": "utf8",
+        "broker": "pm_broker",
+        "nl": false,
+        "rap": true,
+        "rh": 0,
+        "inputs": 0,
+        "x": 150,
+        "y": 140,
+        "wires": [
+            [
+                "pm_gen2_uebersetzen"
+            ]
+        ]
+    },
+    {
+        "id": "pm_gen2_in_online",
+        "type": "mqtt in",
+        "z": "pm_tab_gen2",
+        "name": "+/online",
+        "topic": "+/online",
+        "qos": "0",
+        "datatype": "utf8",
+        "broker": "pm_broker",
+        "nl": false,
+        "rap": true,
+        "rh": 0,
+        "inputs": 0,
+        "x": 120,
+        "y": 180,
+        "wires": [
+            [
+                "pm_gen2_uebersetzen"
+            ]
+        ]
+    },
+    {
+        "id": "pm_gen2_in_online_shelly",
+        "type": "mqtt in",
+        "z": "pm_tab_gen2",
+        "name": "shelly/+/online",
+        "topic": "shelly/+/online",
+        "qos": "0",
+        "datatype": "utf8",
+        "broker": "pm_broker",
+        "nl": false,
+        "rap": true,
+        "rh": 0,
+        "inputs": 0,
+        "x": 140,
+        "y": 220,
+        "wires": [
+            [
+                "pm_gen2_uebersetzen"
+            ]
+        ]
+    },
+    {
+        "id": "pm_gen2_uebersetzen",
+        "type": "function",
+        "z": "pm_tab_gen2",
+        "name": "Shelly Gen2+ übersetzen",
+        "func": "/*\n * Shelly Gen2+ übersetzen\n *\n * Shelly Plus/Pro/Gen3/Gen4 schicken mit „Generic status update over MQTT\"\n * den vollständigen Status jeder Komponente auf\n *     <präfix>/status/<komponente>      z. B. shellypro3em-a0b1c2d3e4f5/status/em:0\n * und ihren Verbindungszustand auf\n *     <präfix>/online                   \"true\" / \"false\"\n * Das Präfix ist ab Werk die Geräte-ID; unterstützt wird zusätzlich\n * shelly/<name>/…, wie es viele im Gerät von Hand eintragen.\n *\n * Ausgang 1: normalisierte Messwerte (dasselbe Format, das der PHP-Sammler\n *            auf pm/messwert/<gerät>/<kanal> schickt) und Punkte für die\n *            Geräteliste – beides geht weiter an „Messwert → Line Protocol\".\n * Ausgang 2: RPC-Anfrage Shelly.GetDeviceInfo an <präfix>/rpc. Die Antwort\n *            kommt auf pm-nodered/rpc und landet in „Shelly Gen2+ Geräteinfo\".\n *\n * Einheiten, wie sie der Shelly liefert und die Oberfläche erwartet:\n * u V, i A, p W, s VA, pf ohne Einheit, f Hz, e/e_rueck Wh (Zählerstand).\n */\n\nconst ABSENDER = 'pm-nodered';\nconst INFO_ALLE_MS = 6 * 3600 * 1000;    // Geräteinfo alle 6 h auffrischen\nconst ANFRAGE_VERFALL_MS = 10 * 60 * 1000;\n\n// Themen, die zwar auf +/status/# oder +/online passen, aber nicht von\n// einem Shelly kommen: die eigenen (pm/status/nodered!), Gen1 und die\n// RPC-Antworten.\nconst FREMDE_PRAEFIXE = ['pm', 'shellies', ABSENDER, '$SYS'];\n\n// Gerätename für Tags: letztes Segment des Präfixes, klein, nur\n// [a-z0-9_.-] – alles andere wird zu „-\". So bleibt der Name in Themen,\n// Adressen und InfluxQL ohne Anführungszeichen benutzbar.\nfunction geraeteName(praefix) {\n    const teile = String(praefix).split('/');\n    return teile[teile.length - 1].toLowerCase().replace(/[^a-z0-9_.-]/g, '-');\n}\n\nfunction zahl(wert) {\n    return typeof wert === 'number' && Number.isFinite(wert) ? wert : undefined;\n}\n\nfunction einsNull(wert) {\n    return typeof wert === 'boolean' ? (wert ? 1 : 0) : undefined;\n}\n\n// Entfernt leere Werte; liefert undefined, wenn nichts übrig bleibt – dann\n// entsteht für diese Phase gar kein Punkt.\nfunction bereinigt(werte) {\n    const aus = {};\n    for (const k of Object.keys(werte)) {\n        if (werte[k] !== undefined && werte[k] !== null) {\n            aus[k] = werte[k];\n        }\n    }\n    return Object.keys(aus).length > 0 ? aus : undefined;\n}\n\n// Thema zerlegen: shelly/<name>/status/… oder <präfix>/status/…\nconst thema = String(msg.topic || '');\nconst teile = thema.split('/');\nlet praefix;\nlet art;\nlet komponente;\nif (teile[0] === 'shelly' && teile.length >= 3 && (teile[2] === 'status' || teile[2] === 'online')) {\n    praefix = teile.slice(0, 2).join('/');\n    art = teile[2];\n    komponente = teile.slice(3).join('/');\n} else {\n    praefix = teile[0];\n    art = teile[1];\n    komponente = teile.slice(2).join('/');\n}\nif (!praefix || FREMDE_PRAEFIXE.includes(teile[0])) {\n    return null;\n}\n\nconst geraet = geraeteName(praefix);\nconst jetzt = Date.now();\nlet text = msg.payload;\nif (Buffer.isBuffer(text)) {\n    text = text.toString('utf8');\n}\ntext = typeof text === 'string' ? text : JSON.stringify(text);\n\nfunction messwert(kanal, phasen, zustand) {\n    const nutzlast = { ts: jetzt, typ: 'shelly' };\n    let leer = true;\n    const p = {};\n    for (const phase of Object.keys(phasen || {})) {\n        const werte = phasen[phase] ? bereinigt(phasen[phase]) : undefined;\n        if (werte) {\n            p[phase] = werte;\n            leer = false;\n        }\n    }\n    if (!leer) {\n        nutzlast.phasen = p;\n    }\n    const z = zustand ? bereinigt(zustand) : undefined;\n    if (z) {\n        nutzlast.zustand = z;\n        leer = false;\n    }\n    return leer ? null : { topic: 'pm/messwert/' + geraet + '/' + kanal, payload: nutzlast };\n}\n\n// ------------------------------------------------------------ online\nif (art === 'online' && komponente === '') {\n    const t = text.trim().toLowerCase();\n    if (t !== 'true' && t !== 'false') {\n        return null;\n    }\n    return [messwert('geraet', null, { online: t === 'true' ? 1 : 0 }), null];\n}\n\nif (art !== 'status' || !/^[a-z0-9_]+(:\\d+)?$/.test(komponente)) {\n    return null;\n}\n\nlet s;\ntry {\n    s = JSON.parse(text);\n} catch (e) {\n    return null;\n}\nif (s === null || typeof s !== 'object' || Array.isArray(s)) {\n    return null;\n}\n\nconst [typ, nummer] = komponente.split(':');\nconst nr = nummer === undefined ? '0' : nummer;\nconst ausgabe = [];\n\n// ------------------------------------------------------------ Komponenten\nif (typ === 'switch') {\n    ausgabe.push(messwert(komponente, {\n        sum: {\n            u: zahl(s.voltage),\n            i: zahl(s.current),\n            p: zahl(s.apower),\n            pf: zahl(s.pf),\n            f: zahl(s.freq),\n            e: s.aenergy ? zahl(s.aenergy.total) : undefined,\n            e_rueck: s.ret_aenergy ? zahl(s.ret_aenergy.total) : undefined,\n        },\n    }, {\n        schalter: einsNull(s.output),\n        temperatur: s.temperature ? zahl(s.temperature.tC) : undefined,\n    }));\n} else if (typ === 'em') {\n    // Pro 3EM im Drehstrom-Profil: a/b/c sind die Phasen L1/L2/L3.\n    const phase = (x) => ({\n        u: zahl(s[x + '_voltage']),\n        i: zahl(s[x + '_current']),\n        p: zahl(s[x + '_act_power']),\n        s: zahl(s[x + '_aprt_power']),\n        pf: zahl(s[x + '_pf']),\n        f: zahl(s[x + '_freq']),\n    });\n    ausgabe.push(messwert('em:' + nr, {\n        L1: phase('a'),\n        L2: phase('b'),\n        L3: phase('c'),\n        N: { i: zahl(s.n_current) },\n        sum: { i: zahl(s.total_current), p: zahl(s.total_act_power), s: zahl(s.total_aprt_power) },\n    }));\n} else if (typ === 'emdata') {\n    // Zählerstände – bewusst derselbe Kanal wie die Leistung (em:N), damit\n    // Leistung und Energie einer Messstelle zusammen abgefragt werden können.\n    const phase = (x) => ({\n        e: zahl(s[x + '_total_act_energy']),\n        e_rueck: zahl(s[x + '_total_act_ret_energy']),\n    });\n    ausgabe.push(messwert('em:' + nr, {\n        L1: phase('a'),\n        L2: phase('b'),\n        L3: phase('c'),\n        sum: { e: zahl(s.total_act), e_rueck: zahl(s.total_act_ret) },\n    }));\n} else if (typ === 'em1') {\n    ausgabe.push(messwert('em1:' + nr, {\n        sum: {\n            u: zahl(s.voltage),\n            i: zahl(s.current),\n            p: zahl(s.act_power),\n            s: zahl(s.aprt_power),\n            pf: zahl(s.pf),\n            f: zahl(s.freq),\n        },\n    }));\n} else if (typ === 'em1data') {\n    ausgabe.push(messwert('em1:' + nr, {\n        sum: { e: zahl(s.total_act_energy), e_rueck: zahl(s.total_act_ret_energy) },\n    }));\n} else if (typ === 'pm1') {\n    ausgabe.push(messwert(komponente, {\n        sum: {\n            u: zahl(s.voltage),\n            i: zahl(s.current),\n            p: zahl(s.apower),\n            pf: zahl(s.pf),\n            f: zahl(s.freq),\n            e: s.aenergy ? zahl(s.aenergy.total) : undefined,\n            e_rueck: s.ret_aenergy ? zahl(s.ret_aenergy.total) : undefined,\n        },\n    }));\n} else if (typ === 'temperature') {\n    ausgabe.push(messwert(komponente, null, { temperatur: zahl(s.tC) }));\n} else if (typ === 'input') {\n    // Digitaleingang: state true/false. Analogeingang: percent.\n    ausgabe.push(messwert(komponente, null, {\n        eingang: einsNull(s.state) !== undefined ? einsNull(s.state) : zahl(s.percent),\n    }));\n}\n\n// ------------------------------------------------------------ Geräteliste\n// Beim ersten Sehen eines Geräts (und danach alle 6 h) nach Modell und\n// Firmware fragen. Zusätzlich sofort einen Punkt mit Präfix und Generation\n// schreiben: dann steht das Gerät in der Liste, auch wenn es auf RPC über\n// MQTT nicht antwortet – und die Oberfläche kennt das Präfix, unter dem sie\n// ihm Befehle schicken kann.\nconst bekannte = flow.get('gen2_geraete') || {};\nconst eintrag = bekannte[geraet];\nlet anfrage = null;\nif (!eintrag || jetzt - eintrag.angefragt > INFO_ALLE_MS || eintrag.praefix !== praefix) {\n    bekannte[geraet] = { praefix, angefragt: jetzt };\n    flow.set('gen2_geraete', bekannte);\n\n    const offen = flow.get('gen2_rpc') || {};\n    for (const id of Object.keys(offen)) {\n        if (jetzt - offen[id].t > ANFRAGE_VERFALL_MS) {\n            delete offen[id];\n        }\n    }\n    const id = (flow.get('gen2_rpc_nr') || 0) + 1;\n    flow.set('gen2_rpc_nr', id);\n    // Die Antwort nennt als src nur die Geräte-ID. Mit eigenem Präfix\n    // (shelly/<name>) wäre daraus der Gerätename nicht abzuleiten – deshalb\n    // merken, welche Anfrage an welches Gerät ging.\n    offen[id] = { geraet, praefix, t: jetzt };\n    flow.set('gen2_rpc', offen);\n\n    anfrage = {\n        topic: praefix + '/rpc',\n        payload: JSON.stringify({ id, src: ABSENDER, method: 'Shelly.GetDeviceInfo' }),\n    };\n    ausgabe.push({\n        punkte: [{\n            messung: 'geraet',\n            tags: { geraet, typ: 'shelly' },\n            felder: { generation: 2, praefix },\n            ts: jetzt,\n        }],\n    });\n\n    node.status({ fill: 'green', shape: 'dot', text: Object.keys(bekannte).length + ' Geräte' });\n}\n\nconst messwerte = ausgabe.filter((m) => m !== null);\nreturn [messwerte.length > 0 ? messwerte : null, anfrage];\n",
+        "outputs": 2,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "info": "Übersetzt `<präfix>/status/<komponente>` und `<präfix>/online` in normalisierte Messwerte.\n\nAusgang 1: Messwerte → „Schreiben\". Ausgang 2: RPC-Anfrage an `<präfix>/rpc`.",
+        "x": 400,
+        "y": 160,
+        "wires": [
+            [
+                "pm_link_gen2"
+            ],
+            [
+                "pm_gen2_rpc_aus"
+            ]
+        ]
+    },
+    {
+        "id": "pm_link_gen2",
+        "type": "link out",
+        "z": "pm_tab_gen2",
+        "name": "zu „Schreiben\"",
+        "mode": "link",
+        "links": [
+            "pm_link_umwandeln"
+        ],
+        "x": 605,
+        "y": 140,
+        "wires": []
+    },
+    {
+        "id": "pm_gen2_rpc_aus",
+        "type": "mqtt out",
+        "z": "pm_tab_gen2",
+        "name": "RPC an das Gerät",
+        "topic": "",
+        "qos": "1",
+        "retain": "false",
+        "respTopic": "",
+        "contentType": "",
+        "userProps": "",
+        "correl": "",
+        "expiry": "",
+        "broker": "pm_broker",
+        "x": 660,
+        "y": 180,
+        "wires": []
+    },
+    {
+        "id": "pm_gen2_in_rpc",
+        "type": "mqtt in",
+        "z": "pm_tab_gen2",
+        "name": "pm-nodered/rpc",
+        "topic": "pm-nodered/rpc",
+        "qos": "1",
+        "datatype": "utf8",
+        "broker": "pm_broker",
+        "nl": false,
+        "rap": true,
+        "rh": 0,
+        "inputs": 0,
+        "x": 140,
+        "y": 300,
+        "wires": [
+            [
+                "pm_gen2_geraeteinfo"
+            ]
+        ]
+    },
+    {
+        "id": "pm_gen2_geraeteinfo",
+        "type": "function",
+        "z": "pm_tab_gen2",
+        "name": "Shelly Gen2+ Geräteinfo",
+        "func": "/*\n * Shelly Gen2+ Geräteinfo\n *\n * Antwort auf Shelly.GetDeviceInfo (gestellt von „Shelly Gen2+ übersetzen\"),\n * eingegangen auf pm-nodered/rpc:\n *   { \"id\": 7, \"src\": \"shellypro3em-a0b1c2d3e4f5\", \"dst\": \"pm-nodered\",\n *     \"result\": { \"id\": \"shellypro3em-a0b1c2d3e4f5\", \"mac\": \"A0B1C2D3E4F5\",\n *                 \"model\": \"SPEM-003CEBEU\", \"gen\": 2, \"ver\": \"1.4.4\",\n *                 \"app\": \"Pro3EM\", \"name\": \"Hauptverteilung\", … } }\n *\n * Daraus entsteht ein Punkt der Messung „geraet\" – aus ihr baut die\n * Oberfläche die Liste der Geräte:\n *   geraet,geraet=<g>,typ=shelly modell=\"…\",name=\"…\",firmware=\"…\",generation=2,mac=\"…\"\n */\n\nfunction geraeteName(text) {\n    const teile = String(text).split('/');\n    return teile[teile.length - 1].toLowerCase().replace(/[^a-z0-9_.-]/g, '-');\n}\n\nlet antwort = msg.payload;\nif (Buffer.isBuffer(antwort)) {\n    antwort = antwort.toString('utf8');\n}\nif (typeof antwort === 'string') {\n    try {\n        antwort = JSON.parse(antwort);\n    } catch (e) {\n        return null;\n    }\n}\nif (antwort === null || typeof antwort !== 'object') {\n    return null;\n}\n\n// Zu welcher Anfrage gehört die Antwort? Die Zuordnung steht im\n// Flow-Kontext; nur nach einem Neustart von Node-RED zwischen Anfrage und\n// Antwort fehlt sie – dann dient die Geräte-ID (src) als Name.\nconst offen = flow.get('gen2_rpc') || {};\nconst anfrage = offen[antwort.id];\nif (anfrage) {\n    delete offen[antwort.id];\n    flow.set('gen2_rpc', offen);\n}\n\nif (antwort.error || antwort.result === null || typeof antwort.result !== 'object') {\n    const grund = antwort.error ? (antwort.error.message || JSON.stringify(antwort.error)) : 'keine Nutzdaten';\n    node.warn('Geräteinfo von ' + String(antwort.src || '?') + ' nicht erhalten: ' + grund);\n    return null;\n}\n\nconst r = antwort.result;\nconst quelle = antwort.src || r.id;\nif (!anfrage && !quelle) {\n    return null;\n}\nconst geraet = anfrage ? anfrage.geraet : geraeteName(quelle);\n\nconst text = (wert) => (typeof wert === 'string' && wert !== '' ? wert : undefined);\n\nnode.status({ fill: 'green', shape: 'dot', text: geraet + ': ' + (text(r.app) || text(r.model) || '?') });\n\nreturn {\n    punkte: [{\n        messung: 'geraet',\n        tags: { geraet, typ: 'shelly' },\n        felder: {\n            modell: text(r.model),\n            // „app\" ist der lesbare Produktname (Pro3EM, PlusPlugS …) –\n            // das Modell ist nur die Bestellnummer.\n            produkt: text(r.app),\n            name: text(r.name),\n            firmware: text(r.ver) || text(r.fw_id),\n            // Gen3/Gen4 melden sich mit gen 3/4 – das geht so weiter.\n            generation: typeof r.gen === 'number' ? r.gen : 2,\n            mac: text(r.mac),\n            praefix: anfrage ? anfrage.praefix : undefined,\n        },\n        ts: Date.now(),\n    }],\n};\n",
+        "outputs": 1,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "info": "Antwort auf `Shelly.GetDeviceInfo` → Punkt der Messung `geraet` (Modell, Firmware, MAC).",
+        "x": 400,
+        "y": 300,
+        "wires": [
+            [
+                "pm_link_gen2_info"
+            ]
+        ]
+    },
+    {
+        "id": "pm_link_gen2_info",
+        "type": "link out",
+        "z": "pm_tab_gen2",
+        "name": "zu „Schreiben\"",
+        "mode": "link",
+        "links": [
+            "pm_link_umwandeln"
+        ],
+        "x": 605,
+        "y": 300,
+        "wires": []
+    },
+    {
+        "id": "pm_kommentar_gen1",
+        "type": "comment",
+        "z": "pm_tab_gen1",
+        "name": "Shelly Gen1",
+        "info": "Im Gerät unter **Internet & Security → Advanced Developer Settings**:\n„Enable action execution via MQTT\", Server `<IP>:1883`, Benutzer `shelly`.\n\n`relay/N/energy` liefert Gen1 in **Wattminuten** – der Flow rechnet in Wh um.\nDie Summe über die Phasen eines EM/3EM entsteht hier, sobald von allen\nPhasen ein frischer Wert (< 30 s) vorliegt.\n\nNach dem Start fragt der Flow einmal mit `announce` an `shellies/command`\nalle Gen1-Geräte nach Modell und Firmware.",
+        "x": 130,
+        "y": 40,
+        "wires": []
+    },
+    {
+        "id": "pm_gen1_in",
+        "type": "mqtt in",
+        "z": "pm_tab_gen1",
+        "name": "shellies/#",
+        "topic": "shellies/#",
+        "qos": "0",
+        "datatype": "utf8",
+        "broker": "pm_broker",
+        "nl": false,
+        "rap": true,
+        "rh": 0,
+        "inputs": 0,
+        "x": 120,
+        "y": 120,
+        "wires": [
+            [
+                "pm_gen1_uebersetzen"
+            ]
+        ]
+    },
+    {
+        "id": "pm_gen1_uebersetzen",
+        "type": "function",
+        "z": "pm_tab_gen1",
+        "name": "Shelly Gen1 übersetzen",
+        "func": "/*\n * Shelly Gen1 übersetzen\n *\n * Gen1-Geräte (Shelly 1PM, 2.5, Plug S, EM, 3EM …) veröffentlichen jeden\n * Wert auf einem eigenen Thema unter shellies/<id>/…:\n *   relay/N                 \"on\" / \"off\" / \"overpower\"\n *   relay/N/power           W\n *   relay/N/energy          Wattminuten (!) seit dem letzten Neustart\n *   emeter/N/power|voltage|current|pf|reactive_power|total|total_returned\n *                           total/total_returned in Wh\n *   input/N                 \"0\" / \"1\"\n *   online                  \"true\" / \"false\"\n *   temperature             °C\n *   announce                JSON mit id, model, mac, ip, fw_ver\n * und shellies/announce als Antwort auf „announce\" an shellies/command.\n *\n * Ausgang: normalisierte Messwerte und Punkte für die Geräteliste – weiter\n * an „Messwert → Line Protocol\".\n *\n * Die Summe über die Phasen eines EM/3EM (phase=sum) rechnet Gen1 nicht\n * selbst. Sie entsteht hier, sobald von allen bisher gesehenen Phasen ein\n * neuer Wert vorliegt, der jünger als 30 s ist. Ältere Werte zu addieren\n * ergäbe eine Summe, die es so nie gab.\n */\n\nconst INFO_ALLE_MS = 6 * 3600 * 1000;\nconst FRISCH_MS = 30 * 1000;\nconst EMETER_FELDER = {\n    power: 'p',\n    voltage: 'u',\n    current: 'i',\n    pf: 'pf',\n    reactive_power: 'q',\n    total: 'e',\n    total_returned: 'e_rueck',\n};\nconst SUMMEN_FELDER = ['p', 'e', 'e_rueck'];\n\nfunction geraeteName(id) {\n    return String(id).toLowerCase().replace(/[^a-z0-9_.-]/g, '-');\n}\n\nfunction alsZahl(text) {\n    const t = String(text).trim();\n    if (t === '') {\n        return undefined;\n    }\n    const n = Number(t);\n    return Number.isFinite(n) ? n : undefined;\n}\n\nconst teile = String(msg.topic || '').split('/');\nif (teile[0] !== 'shellies' || teile.length < 2) {\n    return null;\n}\nlet text = msg.payload;\nif (Buffer.isBuffer(text)) {\n    text = text.toString('utf8');\n}\ntext = typeof text === 'string' ? text : JSON.stringify(text);\nconst jetzt = Date.now();\n\nfunction geraetePunkt(id, felder) {\n    return {\n        punkte: [{\n            messung: 'geraet',\n            tags: { geraet: geraeteName(id), typ: 'shelly' },\n            felder: Object.assign({ generation: 1, praefix: 'shellies/' + id }, felder),\n            ts: jetzt,\n        }],\n    };\n}\n\n// ------------------------------------------------------------ announce\nif (teile[1] === 'announce' || (teile.length === 3 && teile[2] === 'announce')) {\n    let a;\n    try {\n        a = JSON.parse(text);\n    } catch (e) {\n        return null;\n    }\n    const id = teile[1] === 'announce' ? a && a.id : teile[1];\n    if (!a || typeof a !== 'object' || !id) {\n        return null;\n    }\n    const txt = (wert) => (typeof wert === 'string' && wert !== '' ? wert : undefined);\n    return geraetePunkt(id, {\n        modell: txt(a.model),\n        firmware: txt(a.fw_ver),\n        mac: txt(a.mac),\n        ip: txt(a.ip),\n    });\n}\n\n// shellies/command und Befehlsthemen (…/command) schickt Node-RED bzw. die\n// Oberfläche selbst – das sind keine Messwerte.\nif (teile[1] === 'command' || teile[teile.length - 1] === 'command') {\n    return null;\n}\n\nconst id = teile[1];\nconst geraet = geraeteName(id);\nconst rest = teile.slice(2);\nconst ausgabe = [];\n\nfunction messwert(kanal, phasen, zustand) {\n    const nutzlast = { ts: jetzt, typ: 'shelly' };\n    if (phasen) {\n        nutzlast.phasen = phasen;\n    }\n    if (zustand) {\n        nutzlast.zustand = zustand;\n    }\n    return { topic: 'pm/messwert/' + geraet + '/' + kanal, payload: nutzlast };\n}\n\n// Das Gerät in die Liste eintragen, sobald es sich überhaupt meldet –\n// announce kommt nur beim Verbinden und auf Nachfrage.\nconst bekannte = flow.get('gen1_geraete') || {};\nif (!bekannte[geraet] || jetzt - bekannte[geraet] > INFO_ALLE_MS) {\n    bekannte[geraet] = jetzt;\n    flow.set('gen1_geraete', bekannte);\n    ausgabe.push(geraetePunkt(id, {}));\n    node.status({ fill: 'green', shape: 'dot', text: Object.keys(bekannte).length + ' Geräte' });\n}\n\nif (rest.length === 1 && rest[0] === 'online') {\n    const t = text.trim().toLowerCase();\n    if (t === 'true' || t === 'false') {\n        ausgabe.push(messwert('geraet', null, { online: t === 'true' ? 1 : 0 }));\n    }\n} else if (rest.length === 1 && rest[0] === 'temperature') {\n    const wert = alsZahl(text);\n    if (wert !== undefined) {\n        ausgabe.push(messwert('geraet', null, { temperatur: wert }));\n    }\n} else if (rest[0] === 'relay' && /^\\d+$/.test(rest[1] || '')) {\n    const kanal = 'relay:' + rest[1];\n    if (rest.length === 2) {\n        const t = text.trim().toLowerCase();\n        if (t === 'on' || t === 'off' || t === 'overpower') {\n            // overpower: das Gerät hat wegen Überlast abgeschaltet\n            ausgabe.push(messwert(kanal, null, { schalter: t === 'on' ? 1 : 0 }));\n        }\n    } else if (rest.length === 3 && rest[2] === 'power') {\n        const wert = alsZahl(text);\n        if (wert !== undefined) {\n            ausgabe.push(messwert(kanal, { sum: { p: wert } }));\n        }\n    } else if (rest.length === 3 && rest[2] === 'energy') {\n        // Gen1 zählt hier in Wattminuten – durch 60 sind es Wh wie überall.\n        const wert = alsZahl(text);\n        if (wert !== undefined) {\n            ausgabe.push(messwert(kanal, { sum: { e: wert / 60 } }));\n        }\n    }\n} else if (rest[0] === 'input' && rest.length === 2 && /^\\d+$/.test(rest[1])) {\n    const wert = alsZahl(text);\n    if (wert !== undefined) {\n        ausgabe.push(messwert('input:' + rest[1], null, { eingang: wert }));\n    }\n} else if (rest[0] === 'emeter' && rest.length === 3 && /^\\d+$/.test(rest[1]) && EMETER_FELDER[rest[2]]) {\n    const feld = EMETER_FELDER[rest[2]];\n    const wert = alsZahl(text);\n    const nr = Number(rest[1]);\n    if (wert !== undefined && nr <= 2) {\n        const phase = 'L' + (nr + 1);\n        ausgabe.push(messwert('emeter', { [phase]: { [feld]: wert } }));\n\n        if (SUMMEN_FELDER.includes(feld)) {\n            // Je Gerät: letzter Wert je Phase und Feld mit laufender Nummer.\n            // Summiert wird, wenn jede bekannte Phase seit der letzten Summe\n            // dieses Feldes einen neuen und noch frischen Wert hat.\n            //\n            // Wie viele Phasen ein Gerät hat (EM: 2, 3EM: 3), sagt es nicht.\n            // Es veröffentlicht aber in jeder Runde alle – erst wenn eine\n            // Phase zum zweiten Mal kommt, ist eine Runde vorbei und die\n            // Liste vollständig. Vorher entstünde nach dem Start eine\n            // „Summe\" aus nur einer Phase.\n            //\n            // Die Runde läuft emeter/0, /1, /2 der Reihe nach. Summiert wird\n            // deshalb beim Wert der höchsten Phase: dann stammen alle\n            // Summanden aus derselben Runde.\n            const alle = flow.get('gen1_emeter') || {};\n            const g = alle[geraet] || { nr: 0, phasen: {}, summe: {}, runde: {} };\n            alle[geraet] = g;\n            g.nr++;\n            g.phasen[phase] = g.phasen[phase] || {};\n            if (g.phasen[phase][feld]) {\n                g.runde[feld] = true;\n            }\n            g.phasen[phase][feld] = { w: wert, t: jetzt, nr: g.nr };\n\n            const letzte = g.summe[feld] || 0;\n            const bekanntePhasen = Object.keys(g.phasen).sort();\n            const werte = bekanntePhasen.map((ph) => g.phasen[ph][feld]);\n            const vollstaendig = g.runde[feld]\n                && phase === bekanntePhasen[bekanntePhasen.length - 1]\n                && werte.every((x) => x && x.nr > letzte && jetzt - x.t <= FRISCH_MS);\n            if (vollstaendig) {\n                g.summe[feld] = g.nr;\n                const summe = werte.reduce((a, x) => a + x.w, 0);\n                ausgabe.push(messwert('emeter', { sum: { [feld]: summe } }));\n            }\n            flow.set('gen1_emeter', alle);\n        }\n    }\n}\n\nreturn ausgabe.length > 0 ? [ausgabe] : null;\n",
+        "outputs": 1,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "info": "Übersetzt die Gen1-Themen unter `shellies/<id>/…` in normalisierte Messwerte und Geräteeinträge.",
+        "x": 350,
+        "y": 120,
+        "wires": [
+            [
+                "pm_link_gen1"
+            ]
+        ]
+    },
+    {
+        "id": "pm_link_gen1",
+        "type": "link out",
+        "z": "pm_tab_gen1",
+        "name": "zu „Schreiben\"",
+        "mode": "link",
+        "links": [
+            "pm_link_umwandeln"
+        ],
+        "x": 535,
+        "y": 120,
+        "wires": []
+    },
+    {
+        "id": "pm_gen1_announce",
+        "type": "inject",
+        "z": "pm_tab_gen1",
+        "name": "announce nach dem Start",
+        "props": [
+            {
+                "p": "payload"
+            },
+            {
+                "p": "topic",
+                "vt": "str"
+            }
+        ],
+        "repeat": "",
+        "crontab": "",
+        "once": true,
+        "onceDelay": 10,
+        "topic": "shellies/command",
+        "x": 170,
+        "y": 200,
+        "wires": [
+            [
+                "pm_gen1_befehl_aus"
+            ]
+        ],
+        "payload": "announce",
+        "payloadType": "str"
+    },
+    {
+        "id": "pm_gen1_befehl_aus",
+        "type": "mqtt out",
+        "z": "pm_tab_gen1",
+        "name": "shellies/command",
+        "topic": "",
+        "qos": "0",
+        "retain": "false",
+        "respTopic": "",
+        "contentType": "",
+        "userProps": "",
+        "correl": "",
+        "expiry": "",
+        "broker": "pm_broker",
+        "x": 420,
+        "y": 200,
+        "wires": []
+    },
+    {
+        "id": "pm_kommentar_schreiben",
+        "type": "comment",
+        "z": "pm_tab_schreiben",
+        "name": "Line Protocol und InfluxDB",
+        "info": "Ziel und Zugang aus der Umgebung (`/etc/powermanagement/node-red.env`):\n\n* `INFLUX_URL` – z. B. `http://127.0.0.1:8086`\n* `INFLUX_DB` – Datenbank bzw. Bucket, Vorgabe `strom`\n* `INFLUX_TOKEN` – API-Token (2.x/3.x; bei 1.8 auch `benutzer:kennwort`)\n* sonst `INFLUX_USER` / `INFLUX_PASSWORD` für 1.8\n\nGeschrieben wird an `/write?db=…&precision=ms` – der Endpunkt, den\nInfluxDB 1.8, 2.x (über die DBRP-Zuordnung) und 3.x gleichermaßen kennen.\n\nAlle Zahlen gehen als Float hinaus, Wahrheitswerte als 1/0 – sonst gibt\nes in der InfluxDB Feldtyp-Konflikte.",
+        "x": 170,
+        "y": 40,
+        "wires": []
+    },
+    {
+        "id": "pm_link_umwandeln",
+        "type": "link in",
+        "z": "pm_tab_schreiben",
+        "name": "Messwerte",
+        "links": [
+            "pm_link_messwert",
+            "pm_link_gen2",
+            "pm_link_gen2_info",
+            "pm_link_gen1"
+        ],
+        "x": 95,
+        "y": 120,
+        "wires": [
+            [
+                "pm_line_protocol"
+            ]
+        ]
+    },
+    {
+        "id": "pm_line_protocol",
+        "type": "function",
+        "z": "pm_tab_schreiben",
+        "name": "Messwert → Line Protocol",
+        "func": "/*\n * Messwert → Line Protocol\n *\n * Die einzige Stelle, an der Line Protocol entsteht. Alle Wege – der\n * PHP-Sammler über MQTT, die Shelly-Übersetzer, die Geräteliste – laufen\n * hier durch. So gibt es genau eine Stelle, die Escaping und Feldtypen\n * richtig machen muss.\n *\n * Eingang, eines von beiden:\n *   a) normalisierter Messwert\n *        msg.topic   = \"pm/messwert/<geraet>/<kanal>\"\n *        msg.payload = JSON-Text oder Objekt:\n *          { ts, typ, modell, phasen: { L1: {u,i,p,…}, …, sum: {…} },\n *            zustand: { soc: 87, schalter: 1, motorzustand: \"Läuft\" } }\n *   b) fertige Punkte (Messungen außerhalb des Messwert-Schemas, etwa\n *      die Geräteliste)\n *        msg.punkte = [{ messung, tags: {…}, felder: {…}, ts }]\n *\n * Ausgang: msg.zeilen = [\"strom,geraet=…,kanal=…,phase=L1,typ=shelly u=230.1,… 1727200000000\", …]\n *\n * Warum so streng mit den Typen: InfluxDB legt den Typ eines Feldes mit dem\n * ersten geschriebenen Wert fest. Kommt einmal „p=5i\" (Ganzzahl) und später\n * „p=5.2\" (Float), weist die Datenbank jeden Wert des anderen Typs ab – für\n * den ganzen Shard, also bis zu einer Woche lang. Deshalb gilt:\n *   – jede Zahl geht als Float hinaus. Ohne „i\" am Ende ist eine Zahl in\n *     Line Protocol bereits ein Float, „1\" ist also richtig.\n *   – Wahrheitswerte werden 1/0, ebenfalls als Float.\n *   – nur echte Texte werden String-Felder.\n *   – null, NaN und ±Infinity fallen weg; ein Punkt ohne Felder wird gar\n *     nicht geschrieben (InfluxDB würde die ganze Zeile ablehnen).\n */\n\nconst ZAHL_ALS_TEXT = /^\\s*[-+]?(\\d+\\.?\\d*|\\.\\d+)([eE][-+]?\\d+)?\\s*$/;\n\n// Messungsname: Komma und Leerzeichen trennen in Line Protocol die Teile\n// einer Zeile und müssen deshalb maskiert werden.\nfunction maskiereMessung(text) {\n    return String(text)\n        .replace(/[\\r\\n]+/g, ' ')\n        .replace(/\\\\/g, '\\\\\\\\')\n        .replace(/([, ])/g, '\\\\$1');\n}\n\n// Tag-Schlüssel, Tag-Werte und Feldschlüssel: zusätzlich das\n// Gleichheitszeichen. Der Backslash selbst wird ebenfalls verdoppelt –\n// sonst würde ein Wert, der auf „\\\" endet, das folgende Komma maskieren\n// und die Zeile zerlegen. Zeilenumbrüche beenden in Line Protocol eine\n// Zeile und werden zu Leerzeichen.\nfunction maskiereSchluessel(text) {\n    return String(text)\n        .replace(/[\\r\\n]+/g, ' ')\n        .replace(/\\\\/g, '\\\\\\\\')\n        .replace(/([,= ])/g, '\\\\$1');\n}\n\n// „time\" ist in InfluxDB kein zulässiger Schlüssel, und Schlüssel mit „_\"\n// vorn sind in 2.x für interne Spalten reserviert (_measurement, _field …).\nfunction zulaessigerSchluessel(schluessel) {\n    return schluessel !== '' && schluessel !== 'time' && schluessel[0] !== '_';\n}\n\n// Liefert den Feldwert als Text für Line Protocol oder null, wenn der Wert\n// nicht geschrieben werden soll.\n//   zahlenAusText: Zahlen, die als Text ankommen (\"230.1\"), werden zu Floats.\n//   Das gilt nur für Messwerte (phasen) – dort ist jeder Wert eine Zahl. Im\n//   Zustand sind Texte erlaubt; dort bleibt ein Text ein Text, sonst hätte\n//   ein Feld je nach Inhalt mal den einen, mal den anderen Typ.\nfunction feldwert(wert, zahlenAusText) {\n    if (typeof wert === 'boolean') {\n        return wert ? '1' : '0';\n    }\n    if (typeof wert === 'string' && zahlenAusText && ZAHL_ALS_TEXT.test(wert)) {\n        wert = Number(wert);\n    }\n    if (typeof wert === 'number') {\n        // String(1) ergibt \"1\" – in Line Protocol ein Float, kein Integer.\n        return Number.isFinite(wert) ? String(wert) : null;\n    }\n    if (typeof wert === 'string') {\n        return '\"' + wert\n            .replace(/[\\r\\n]+/g, ' ')\n            .replace(/\\\\/g, '\\\\\\\\')\n            .replace(/\"/g, '\\\\\"') + '\"';\n    }\n    // null, undefined, Objekte, Listen: nicht darstellbar\n    return null;\n}\n\n// Zeitstempel in Millisekunden (die Schreibanfrage läuft mit precision=ms).\n// Sekunden, Mikro- und Nanosekunden werden erkannt und umgerechnet – ein\n// Sammler, der sich in der Einheit vertut, landet sonst im Jahr 1970 oder\n// weit in der Zukunft, und niemand findet die Werte wieder.\nfunction zeitstempel(ts) {\n    let t = ts;\n    if (typeof t === 'string' && t.trim() !== '') {\n        t = Number(t);\n    }\n    if (typeof t !== 'number' || !Number.isFinite(t) || t <= 0) {\n        return Date.now();\n    }\n    while (t > 1e14) {\n        t = t / 1000;          // µs → ms, ns → µs → ms\n    }\n    if (t < 1e11) {\n        t = t * 1000;          // Sekunden → ms\n    }\n    return Math.round(t);\n}\n\n// Baut eine Zeile oder liefert null, wenn kein einziges Feld übrig bleibt.\nfunction zeile(messung, tags, felder, ts, zahlenAusText) {\n    const teile = [];\n    for (const schluessel of Object.keys(felder || {})) {\n        if (!zulaessigerSchluessel(schluessel)) {\n            continue;\n        }\n        const wert = feldwert(felder[schluessel], zahlenAusText);\n        if (wert !== null) {\n            teile.push(maskiereSchluessel(schluessel) + '=' + wert);\n        }\n    }\n    if (teile.length === 0) {\n        return null;\n    }\n    // Tags ohne Wert sind in Line Protocol unzulässig und fallen weg. Die\n    // Sortierung nach Schlüssel empfiehlt InfluxDB – sie spart dort Arbeit.\n    const tagText = Object.keys(tags || {})\n        .filter((k) => zulaessigerSchluessel(k) && tags[k] !== undefined && tags[k] !== null && String(tags[k]) !== '')\n        .sort()\n        .map((k) => ',' + maskiereSchluessel(k) + '=' + maskiereSchluessel(tags[k]))\n        .join('');\n    return maskiereMessung(messung) + tagText + ' ' + teile.join(',') + ' ' + zeitstempel(ts);\n}\n\nfunction istObjekt(wert) {\n    return wert !== null && typeof wert === 'object' && !Array.isArray(wert);\n}\n\n// Zähler für die Statusanzeige – nur alle zwei Sekunden auffrischen, damit\n// ein offener Editor nicht mit Statusmeldungen überschwemmt wird.\nconst zaehler = context.get('zaehler') || { zeilen: 0, ungueltig: 0, angezeigt: 0 };\ncontext.set('zaehler', zaehler);\n\nfunction status() {\n    const jetzt = Date.now();\n    if (jetzt - zaehler.angezeigt < 2000) {\n        return;\n    }\n    zaehler.angezeigt = jetzt;\n    node.status({\n        fill: zaehler.ungueltig > 0 ? 'yellow' : 'green',\n        shape: 'dot',\n        text: zaehler.zeilen + ' Zeilen' + (zaehler.ungueltig > 0 ? ', ' + zaehler.ungueltig + ' ungültig' : ''),\n    });\n}\n\nfunction ungueltig(grund) {\n    zaehler.ungueltig++;\n    // Nicht jede kaputte Nachricht ins Protokoll – eine Meldung je Minute\n    // genügt, um den Fehler zu finden.\n    const jetzt = Date.now();\n    if (!zaehler.gewarnt || jetzt - zaehler.gewarnt > 60000) {\n        zaehler.gewarnt = jetzt;\n        node.warn('Messwert verworfen (' + grund + '): ' + String(msg.topic || '(ohne Thema)'));\n    }\n    status();\n    return null;\n}\n\nconst punkte = [];\n\nif (Array.isArray(msg.punkte)) {\n    for (const p of msg.punkte) {\n        if (istObjekt(p) && p.messung) {\n            punkte.push({ messung: p.messung, tags: p.tags || {}, felder: p.felder || {}, ts: p.ts, zahlen: false });\n        }\n    }\n} else {\n    // pm/messwert/<geraet>/<kanal> – das erste Segment (Präfix) wird nicht\n    // geprüft, damit ein anderes Präfix nur im mqtt-in-Node geändert werden\n    // muss. Ein Kanal darf weitere „/\" enthalten.\n    const teile = String(msg.topic || '').split('/');\n    if (teile.length < 3 || teile[1] !== 'messwert' || teile[2] === '') {\n        return ungueltig('Thema passt nicht zu <präfix>/messwert/<gerät>/<kanal>');\n    }\n    const geraet = teile[2];\n    const kanal = teile.slice(3).join('/') || 'geraet';\n\n    let daten = msg.payload;\n    if (Buffer.isBuffer(daten)) {\n        daten = daten.toString('utf8');\n    }\n    if (typeof daten === 'string') {\n        try {\n            daten = JSON.parse(daten);\n        } catch (e) {\n            return ungueltig('kein gültiges JSON');\n        }\n    }\n    if (!istObjekt(daten)) {\n        return ungueltig('Nutzlast ist kein JSON-Objekt');\n    }\n\n    const typ = daten.typ === undefined || daten.typ === null ? undefined : String(daten.typ);\n\n    if (istObjekt(daten.phasen)) {\n        for (const phase of Object.keys(daten.phasen)) {\n            const werte = daten.phasen[phase];\n            if (istObjekt(werte)) {\n                punkte.push({ messung: 'strom', tags: { geraet, kanal, phase, typ }, felder: werte, ts: daten.ts, zahlen: true });\n            }\n        }\n    }\n    if (istObjekt(daten.zustand)) {\n        punkte.push({ messung: 'zustand', tags: { geraet, kanal, typ }, felder: daten.zustand, ts: daten.ts, zahlen: false });\n    }\n}\n\nconst zeilen = [];\nfor (const p of punkte) {\n    const z = zeile(p.messung, p.tags, p.felder, p.ts, p.zahlen);\n    if (z !== null) {\n        zeilen.push(z);\n    }\n}\n\nif (zeilen.length === 0) {\n    // Leere Punkte werden gar nicht erst geschrieben – das ist kein Fehler,\n    // etwa wenn ein Shelly einen Status ohne Messwerte schickt.\n    return null;\n}\n\nzaehler.zeilen += zeilen.length;\nstatus();\nreturn { zeilen };\n",
+        "outputs": 1,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "info": "Normalisierte Messwerte (`pm/messwert/<gerät>/<kanal>`) und fertige Punkte (`msg.punkte`) → `msg.zeilen`.",
+        "x": 270,
+        "y": 120,
+        "wires": [
+            [
+                "pm_schreiber",
+                "pm_debug_zeilen"
+            ]
+        ]
+    },
+    {
+        "id": "pm_debug_zeilen",
+        "type": "debug",
+        "z": "pm_tab_schreiben",
+        "name": "Zeilen ansehen",
+        "active": false,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "zeilen",
+        "targetType": "msg",
+        "statusVal": "",
+        "statusType": "auto",
+        "x": 490,
+        "y": 60,
+        "wires": []
+    },
+    {
+        "id": "pm_takt",
+        "type": "inject",
+        "z": "pm_tab_schreiben",
+        "name": "Takt 1 s",
+        "props": [
+            {
+                "p": "takt",
+                "v": "true",
+                "vt": "bool"
+            }
+        ],
+        "repeat": "1",
+        "crontab": "",
+        "once": true,
+        "onceDelay": 1,
+        "topic": "",
+        "x": 290,
+        "y": 180,
+        "wires": [
+            [
+                "pm_schreiber"
+            ]
+        ]
+    },
+    {
+        "id": "pm_herzschlag",
+        "type": "inject",
+        "z": "pm_tab_schreiben",
+        "name": "Herzschlag 30 s",
+        "props": [
+            {
+                "p": "herzschlag",
+                "v": "true",
+                "vt": "bool"
+            }
+        ],
+        "repeat": "30",
+        "crontab": "",
+        "once": true,
+        "onceDelay": 5,
+        "topic": "",
+        "x": 280,
+        "y": 220,
+        "wires": [
+            [
+                "pm_schreiber"
+            ]
+        ]
+    },
+    {
+        "id": "pm_schreiber",
+        "type": "function",
+        "z": "pm_tab_schreiben",
+        "name": "InfluxDB-Schreiber",
+        "func": "/*\n * InfluxDB-Schreiber\n *\n * Sammelt Zeilen und schickt sie gebündelt an den v1-kompatiblen Endpunkt\n *     <INFLUX_URL>/write?db=<INFLUX_DB>&precision=ms\n * Den verstehen InfluxDB 1.8, 2.x (über die DBRP-Zuordnung) und 3.x\n * gleichermaßen – die Flows müssen nicht wissen, welche Fassung läuft.\n *\n * Eingänge (an der Eigenschaft erkennbar):\n *   msg.zeilen      neue Zeilen von „Messwert → Line Protocol\"\n *   msg.takt        jede Sekunde: fällige Zeilen abschicken\n *   msg.herzschlag  alle 30 s: eigene Zahlen schreiben und auf MQTT melden\n *   msg.pmStapel    Antwort des http-request-Nodes (oder dessen Fehler über\n *                   den Catch-Node) zu einem abgeschickten Stapel\n *\n * Ausgang 1: Anfrage an den http-request-Node\n * Ausgang 2: Status für pm/status/nodered (retained)\n *\n * Fällt die InfluxDB aus, bleiben die Zeilen bis zu 5 Minuten im Speicher\n * (höchstens 50 000, danach gehen die ältesten verloren und werden gezählt)\n * und werden mit wachsendem Abstand erneut geschickt. Ein Neustart von\n * Node-RED leert den Puffer – dafür ist er nicht gedacht; er überbrückt den\n * Neustart der Datenbank, ein Update oder eine kurze Netzstörung.\n */\n\nconst SOFORT_AB = 500;             // so viele Zeilen warten nicht auf den Takt\nconst STAPEL_MAX = 5000;           // Zeilen je Anfrage\nconst PUFFER_MAX = 50000;\nconst ALTER_MAX_MS = 5 * 60 * 1000;\nconst ANTWORT_FRIST_MS = 30 * 1000;\nconst WARTEN_MIN_MS = 2000;\nconst WARTEN_MAX_MS = 30 * 1000;\n\nconst z = context.get('schreiber') || {\n    bloecke: [],          // [{ t: Eingang in ms, zeilen: [...] }] – älteste vorn\n    anzahl: 0,            // Zeilen in allen Blöcken\n    unterwegs: null,      // { id, bloecke, n, t }\n    stapelNr: 0,\n    geschrieben: 0,\n    fehler: 0,\n    verworfen: 0,\n    warten: 0,\n    naechsterVersuch: 0,\n    letzterFehler: null,\n    letzterErfolg: null,\n    statusText: '',\n};\ncontext.set('schreiber', z);\nconst jetzt = Date.now();\n\nfunction verwerfen(n, grund) {\n    if (n <= 0) {\n        return;\n    }\n    z.verworfen += n;\n    node.warn(n + ' Zeilen verworfen: ' + grund);\n}\n\n// Zu alte und überzählige Zeilen entfernen – immer die ältesten zuerst.\nfunction aufraeumen() {\n    let zuAlt = 0;\n    while (z.bloecke.length > 0 && jetzt - z.bloecke[0].t > ALTER_MAX_MS) {\n        zuAlt += z.bloecke[0].zeilen.length;\n        z.anzahl -= z.bloecke[0].zeilen.length;\n        z.bloecke.shift();\n    }\n    verwerfen(zuAlt, 'älter als 5 Minuten, InfluxDB nicht erreichbar');\n\n    let zuViel = 0;\n    while (z.anzahl > PUFFER_MAX && z.bloecke.length > 0) {\n        const block = z.bloecke[0];\n        const weg = Math.min(block.zeilen.length, z.anzahl - PUFFER_MAX);\n        block.zeilen.splice(0, weg);\n        z.anzahl -= weg;\n        zuViel += weg;\n        if (block.zeilen.length === 0) {\n            z.bloecke.shift();\n        }\n    }\n    verwerfen(zuViel, 'Puffer voll (' + PUFFER_MAX + ' Zeilen)');\n}\n\nfunction adresse() {\n    const basis = String(env.get('INFLUX_URL') || 'http://127.0.0.1:8086').replace(/\\/+$/, '');\n    let url = basis + '/write?db=' + encodeURIComponent(env.get('INFLUX_DB') || 'strom') + '&precision=ms';\n    const kopf = { 'Content-Type': 'text/plain; charset=utf-8' };\n    const token = env.get('INFLUX_TOKEN');\n    if (token) {\n        // 2.x/3.x: API-Token. 1.8 versteht hier auch „benutzer:kennwort\".\n        kopf.Authorization = 'Token ' + token;\n    } else if (env.get('INFLUX_USER')) {\n        url += '&u=' + encodeURIComponent(env.get('INFLUX_USER')) + '&p=' + encodeURIComponent(env.get('INFLUX_PASSWORD') || '');\n    }\n    return { url, kopf };\n}\n\n// Nächsten Stapel abschicken, wenn nichts unterwegs ist und keine Pause läuft.\nfunction senden() {\n    if (z.unterwegs) {\n        if (jetzt - z.unterwegs.t < ANTWORT_FRIST_MS) {\n            return null;\n        }\n        // Keine Antwort in der Frist – als Fehler werten, Zeilen zurücklegen.\n        fehlschlag('keine Antwort nach ' + (ANTWORT_FRIST_MS / 1000) + ' s', true);\n    }\n    if (z.anzahl === 0 || jetzt < z.naechsterVersuch) {\n        return null;\n    }\n\n    const bloecke = [];\n    const zeilen = [];\n    while (z.bloecke.length > 0 && zeilen.length < STAPEL_MAX) {\n        const block = z.bloecke[0];\n        const platz = STAPEL_MAX - zeilen.length;\n        if (block.zeilen.length <= platz) {\n            z.bloecke.shift();\n            bloecke.push(block);\n            for (const zeile of block.zeilen) {\n                zeilen.push(zeile);\n            }\n        } else {\n            const teil = { t: block.t, zeilen: block.zeilen.splice(0, platz) };\n            bloecke.push(teil);\n            for (const zeile of teil.zeilen) {\n                zeilen.push(zeile);\n            }\n        }\n    }\n    z.anzahl -= zeilen.length;\n    z.stapelNr++;\n    z.unterwegs = { id: z.stapelNr, bloecke, n: zeilen.length, t: jetzt };\n\n    // Die Methode (POST) steht im http-request-Node selbst; msg.method\n    // brächte dort bei jeder Anfrage eine Warnung.\n    const ziel = adresse();\n    return {\n        url: ziel.url,\n        headers: ziel.kopf,\n        payload: zeilen.join('\\n'),\n        requestTimeout: 15000,\n        pmStapel: z.stapelNr,\n    };\n}\n\n// Stapel ist nicht angekommen: Zeilen wieder vorn einreihen (mit ihrem\n// ursprünglichen Eingangszeitpunkt, damit die 5-Minuten-Grenze gilt) und\n// mit wachsendem Abstand erneut versuchen.\nfunction fehlschlag(grund, zuruecklegen) {\n    const u = z.unterwegs;\n    z.unterwegs = null;\n    z.fehler++;\n    z.letzterFehler = grund;\n    if (u && zuruecklegen) {\n        z.bloecke = u.bloecke.concat(z.bloecke);\n        z.anzahl += u.n;\n        z.warten = Math.min(WARTEN_MAX_MS, Math.max(WARTEN_MIN_MS, z.warten * 2));\n        z.naechsterVersuch = jetzt + z.warten;\n        aufraeumen();\n    } else if (u) {\n        verwerfen(u.n, grund);\n    }\n}\n\nfunction statusZeigen() {\n    let text;\n    let farbe;\n    if (z.letzterFehler) {\n        farbe = 'red';\n        text = 'Fehler: ' + String(z.letzterFehler).slice(0, 60) + ' – Puffer ' + z.anzahl;\n    } else {\n        farbe = 'green';\n        text = z.geschrieben + ' geschrieben' + (z.verworfen > 0 ? ', ' + z.verworfen + ' verworfen' : '') + ', Puffer ' + z.anzahl;\n    }\n    if (text !== z.statusText) {\n        z.statusText = text;\n        node.status({ fill: farbe, shape: farbe === 'green' ? 'dot' : 'ring', text });\n    }\n}\n\nlet anfrage = null;\nlet meldung = null;\n\nif (msg.pmStapel !== undefined) {\n    // ------------------------------------------------ Antwort der InfluxDB\n    // Ein Verbindungsfehler kommt doppelt an (Ausgang und Catch) – es zählt\n    // nur die erste Antwort zu dem Stapel, der gerade unterwegs ist.\n    if (!z.unterwegs || msg.pmStapel !== z.unterwegs.id) {\n        return null;\n    }\n    const code = msg.statusCode;\n    const ok = !msg.error && typeof code === 'number' && code >= 200 && code < 300;\n    if (ok) {\n        z.geschrieben += z.unterwegs.n;\n        z.unterwegs = null;\n        z.letzterErfolg = jetzt;\n        z.letzterFehler = null;\n        z.warten = 0;\n        z.naechsterVersuch = 0;\n        if (z.anzahl >= SOFORT_AB) {\n            anfrage = senden();\n        }\n    } else {\n        const text = msg.error ? String(msg.error.message || msg.error) : String(msg.payload || '').slice(0, 300);\n        const grund = (typeof code === 'number' ? 'HTTP ' + code : String(code || 'Verbindungsfehler')) + (text ? ': ' + text : '');\n        if (code === 400 || code === 422) {\n            // Die Datenbank lehnt den Inhalt ab (Syntax, Feldtyp-Konflikt).\n            // Nochmals schicken ändert daran nichts und hielte nur alle\n            // anderen Zeilen fünf Minuten lang auf. Bei einem Feldtyp-\n            // Konflikt („partial write … dropped=1\") hat InfluxDB die übrigen\n            // Zeilen geschrieben – dann nur die abgelehnten als verworfen\n            // zählen.\n            node.warn('InfluxDB lehnt Zeilen ab – ' + grund);\n            const abgelehnt = /dropped=(\\d+)/.exec(text);\n            if (abgelehnt && Number(abgelehnt[1]) <= z.unterwegs.n) {\n                z.geschrieben += z.unterwegs.n - Number(abgelehnt[1]);\n                z.unterwegs.n = Number(abgelehnt[1]);\n            }\n            fehlschlag(grund, false);\n        } else {\n            // Nicht erreichbar, Anmeldung falsch, Datenbank fehlt, 5xx …\n            // – Zeilen behalten und später erneut versuchen.\n            fehlschlag(grund, true);\n        }\n    }\n    statusZeigen();\n} else if (Array.isArray(msg.zeilen)) {\n    // ------------------------------------------------ neue Zeilen\n    if (msg.zeilen.length > 0) {\n        z.bloecke.push({ t: jetzt, zeilen: msg.zeilen.slice() });\n        z.anzahl += msg.zeilen.length;\n        if (z.anzahl > PUFFER_MAX) {\n            aufraeumen();\n        }\n        if (z.anzahl >= SOFORT_AB) {\n            anfrage = senden();\n        }\n    }\n} else if (msg.herzschlag) {\n    // ------------------------------------------------ Herzschlag\n    // Kommt über denselben Weg in die Datenbank wie alles andere – bleibt\n    // er aus, stimmt etwas mit Node-RED oder dem Schreiben nicht.\n    // Die Zahlen gelten für den Moment vor dieser Zeile – in Datenbank und\n    // MQTT-Meldung dieselben.\n    const zahlen = { geschrieben: z.geschrieben, fehler: z.fehler, puffer: z.anzahl, verworfen: z.verworfen };\n    const werte = Object.keys(zahlen).map((k) => k + '=' + zahlen[k]).join(',');\n    z.bloecke.push({ t: jetzt, zeilen: ['pipeline,quelle=nodered ' + werte + ' ' + jetzt] });\n    z.anzahl += 1;\n    aufraeumen();\n    meldung = {\n        topic: 'pm/status/nodered',\n        retain: true,\n        qos: 1,\n        payload: JSON.stringify(Object.assign({ ts: jetzt }, zahlen, {\n            letzter_erfolg: z.letzterErfolg,\n            letzter_fehler: z.letzterFehler,\n        })),\n    };\n} else if (msg.takt) {\n    // ------------------------------------------------ Takt\n    aufraeumen();\n    anfrage = senden();\n    statusZeigen();\n}\n\nif (!anfrage && !meldung) {\n    return null;\n}\nreturn [anfrage, meldung];\n",
+        "outputs": 2,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "info": "Sammelt Zeilen, schickt sie jede Sekunde bzw. ab 500 Zeilen an die InfluxDB, puffert bei Fehlern bis zu 5 Minuten (höchstens 50 000 Zeilen).\n\nAusgang 1: Anfrage an die InfluxDB. Ausgang 2: Status auf `pm/status/nodered`.",
+        "x": 510,
+        "y": 160,
+        "wires": [
+            [
+                "pm_influx_write"
+            ],
+            [
+                "pm_status_aus"
+            ]
+        ]
+    },
+    {
+        "id": "pm_influx_write",
+        "type": "http request",
+        "z": "pm_tab_schreiben",
+        "name": "InfluxDB /write",
+        "method": "POST",
+        "ret": "txt",
+        "paytoqs": "ignore",
+        "url": "",
+        "tls": "",
+        "persist": true,
+        "proxy": "",
+        "insecureHTTPParser": false,
+        "authType": "",
+        "senderr": false,
+        "headers": [],
+        "x": 750,
+        "y": 120,
+        "wires": [
+            [
+                "pm_schreiber"
+            ]
+        ]
+    },
+    {
+        "id": "pm_catch_write",
+        "type": "catch",
+        "z": "pm_tab_schreiben",
+        "name": "Fehler beim Schreiben",
+        "scope": [
+            "pm_influx_write"
+        ],
+        "uncaught": false,
+        "x": 520,
+        "y": 260,
+        "wires": [
+            [
+                "pm_schreiber"
+            ]
+        ]
+    },
+    {
+        "id": "pm_status_aus",
+        "type": "mqtt out",
+        "z": "pm_tab_schreiben",
+        "name": "pm/status/nodered",
+        "topic": "pm/status/nodered",
+        "qos": "1",
+        "retain": "true",
+        "respTopic": "",
+        "contentType": "",
+        "userProps": "",
+        "correl": "",
+        "expiry": "",
+        "broker": "pm_broker",
+        "x": 770,
+        "y": 200,
+        "wires": []
+    }
+]
