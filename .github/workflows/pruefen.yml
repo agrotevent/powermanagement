@@ -1,0 +1,59 @@
+name: Prüfen
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  pruefen:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite, sqlite3, sockets, sodium, mbstring, gd, curl, pcntl
+          coverage: none
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      # Mosquitto und InfluxDB 1.x starten die Prüfskripte selbst auf freien
+      # Ports – die Pakete liefern nur die Programme.
+      - name: Pakete
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends mosquitto influxdb poppler-utils shellcheck
+
+      - name: Syntax
+        run: |
+          find . -name '*.php' -not -path './.git/*' -print0 | xargs -0 -n1 php -l > /dev/null
+          php -l bin/power > /dev/null
+          for f in public/assets/js/*.js; do node --check "$f"; done
+          for f in public/assets/js/module/*.js; do node --experimental-default-type=module --check "$f"; done
+          bash -n deploy/install-debian.sh deploy/update-debian.sh
+          shellcheck -S warning -e SC2016,SC1111 deploy/*.sh
+          node -e 'JSON.parse(require("fs").readFileSync("deploy/node-red/flows.json", "utf8"))'
+
+      - name: Einrichten (Demo-Modus)
+        run: |
+          php bin/power install admin 'PowerAdmin2026!' --ohne-wechsel --demo
+          php bin/power demo:seed
+          php bin/power pruefen
+
+      - name: Prüfskripte
+        run: |
+          set -e
+          for t in tests/*.php; do
+            echo "::group::$t"
+            php "$t"
+            echo "::endgroup::"
+          done
+          node tests/nodered-funktionen.mjs
