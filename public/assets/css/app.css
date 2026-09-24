@@ -1,0 +1,1736 @@
+/* MikroTik MasterAdmin – Oberfläche */
+:root {
+    --bg: #f5f7fa;
+    --surface: #ffffff;
+    --surface-alt: #f8fafc;
+    --border: #e2e8f0;
+    --text: #1e293b;
+    --text-muted: #64748b;
+    --primary: #1d4ed8;
+    --primary-dark: #1e3a8a;
+    --primary-light: #dbeafe;
+    --success: #15803d;
+    --success-light: #dcfce7;
+    --warning: #b45309;
+    --warning-light: #fef3c7;
+    --danger: #b91c1c;
+    --danger-light: #fee2e2;
+    --info: #0369a1;
+    --info-light: #e0f2fe;
+    --sidebar: #0f172a;
+    --sidebar-hover: #1e293b;
+    --radius: 10px;
+    --shadow: 0 1px 2px rgba(15, 23, 42, .06), 0 4px 12px rgba(15, 23, 42, .04);
+}
+
+* { box-sizing: border-box; }
+
+body {
+    margin: 0;
+    font-family: "Inter", "Segoe UI", system-ui, -apple-system, "Helvetica Neue", sans-serif;
+    font-size: 14px;
+    line-height: 1.5;
+    color: var(--text);
+    background: var(--bg);
+}
+
+a { color: var(--primary); text-decoration: none; }
+a:hover { text-decoration: underline; }
+h1, h2, h3, h4 { margin: 0 0 .5rem; line-height: 1.25; }
+h1 { font-size: 1.5rem; font-weight: 650; }
+h2 { font-size: 1.125rem; font-weight: 620; }
+h3 { font-size: .95rem; font-weight: 620; }
+p { margin: 0 0 .75rem; }
+code, pre, .mono { font-family: "JetBrains Mono", "SFMono-Regular", Consolas, monospace; }
+
+/* ------------------------------------------------------------- Grundgerüst */
+.layout { display: flex; min-height: 100vh; }
+
+.sidebar {
+    width: 250px;
+    flex: 0 0 250px;
+    background: var(--sidebar);
+    color: #cbd5e1;
+    display: flex;
+    flex-direction: column;
+    position: sticky;
+    top: 0;
+    height: 100vh;
+    overflow-y: auto;
+}
+.sidebar .brand {
+    display: flex; align-items: center; gap: .5rem;
+    padding: 1.1rem .8rem .9rem 1.1rem;
+    border-bottom: 1px solid rgba(148, 163, 184, .18);
+}
+.sidebar .brand .logo {
+    width: 32px; height: 32px; border-radius: 8px;
+    background: linear-gradient(135deg, #2563eb, #0ea5e9);
+    display: grid; place-items: center; color: #fff; font-weight: 700; font-size: .85rem;
+}
+.sidebar .brand strong { color: #f8fafc; font-size: .95rem; display: block; }
+.sidebar .brand span { font-size: .7rem; color: #94a3b8; }
+
+/* ------------------------------------------------- Gruppen im Menü
+ *
+ * Die Liste ist lang geworden. Die Überschrift ist deshalb ein Schalter:
+ * zugeklappt bleibt nur sie stehen. Offen ist, was zuletzt offen war –
+ * und immer die Gruppe der Seite, auf der man gerade steht.
+ */
+.nav-group { padding: .45rem 0 .1rem; }
+.nav-group-title {
+    display: flex; align-items: center; gap: .5rem;
+    width: 100%;
+    font-size: .66rem; text-transform: uppercase; letter-spacing: .09em;
+    color: #64748b; padding: .35rem 1.1rem; font-weight: 600;
+    background: none; border: 0; cursor: pointer; text-align: left;
+    font-family: inherit;
+}
+.nav-group-title:hover { color: #cbd5e1; }
+.nav-group-pfeil {
+    margin-left: auto;
+    width: 0; height: 0;
+    border-left: 4px solid transparent;
+    border-right: 4px solid transparent;
+    border-top: 5px solid currentColor;
+    /* Zugeklappt zeigt der Pfeil nach rechts, offen nach unten. */
+    transform: rotate(-90deg);
+    transition: transform .12s ease;
+}
+.nav-group.offen .nav-group-pfeil { transform: rotate(0deg); }
+
+/* Der Behälter, den die Überschrift auf- und zuklappt. */
+.nav-group-items { display: none; }
+.nav-group.offen .nav-group-items { display: block; }
+.nav-item {
+    display: flex; align-items: center; gap: .6rem;
+    padding: .5rem 1.1rem; color: #cbd5e1; font-size: .855rem; border-left: 3px solid transparent;
+}
+.nav-item:hover { background: var(--sidebar-hover); color: #fff; text-decoration: none; }
+.nav-item.active { background: var(--sidebar-hover); color: #fff; border-left-color: #3b82f6; font-weight: 550; }
+.nav-item .num {
+    width: 20px; height: 20px; border-radius: 5px; background: rgba(148,163,184,.15);
+    display: grid; place-items: center; font-size: .68rem; color: #94a3b8; flex: 0 0 20px;
+}
+.nav-item.active .num { background: #3b82f6; color: #fff; }
+.sidebar-footer { margin-top: auto; padding: .9rem 1.1rem; border-top: 1px solid rgba(148,163,184,.18); font-size: .75rem; color: #94a3b8; }
+
+/* --------------------------------------------- Menüleiste schmal stellen
+ *
+ * Auf dem Grundriss zählt jeder Pixel Breite. Das Menü lässt sich deshalb
+ * auf die Kästchen zusammenziehen; die Beschriftung wandert in den
+ * Tooltip. Der Zustand hängt an <html>, nicht an der Leiste selbst –
+ * so steht er schon vor dem ersten Zeichnen fest und die Seite springt
+ * beim Laden nicht.
+ */
+.sidebar .brand { position: relative; }
+
+.menue-schalter {
+    margin-left: auto;
+    /* Klein genug, dass der Untertitel daneben noch in eine Zeile passt. */
+    width: 24px; height: 24px;
+    flex: 0 0 24px;
+    display: grid; place-items: center;
+    border: 1px solid rgba(148,163,184,.25);
+    border-radius: 8px;
+    background: transparent;
+    color: #cbd5e1;
+    cursor: pointer;
+}
+.menue-schalter:hover { background: var(--sidebar-hover); color: #fff; }
+.menue-schalter span {
+    display: block; width: 0; height: 0;
+    border-top: 5px solid transparent;
+    border-bottom: 5px solid transparent;
+    border-right: 6px solid currentColor;
+}
+
+html.menue-schmal .sidebar {
+    width: 62px;
+    flex-basis: 62px;
+}
+html.menue-schmal .sidebar .brand { padding: 1.1rem .5rem .9rem; justify-content: center; }
+html.menue-schmal .brand-text,
+html.menue-schmal .nav-text,
+html.menue-schmal .nav-group-title { display: none; }
+/*
+ * Schmal gestellt gibt es keine Überschriften mehr – dann darf auch
+ * nichts zugeklappt bleiben, sonst stünde die Leiste leer da und
+ * niemand käme an die Einträge heran.
+ */
+html.menue-schmal .nav-group-items { display: block; }
+html.menue-schmal .nav-item { justify-content: center; padding: .5rem 0; border-left-width: 0; }
+html.menue-schmal .nav-item.active { box-shadow: inset 3px 0 0 #3b82f6; }
+html.menue-schmal .nav-group { padding: .5rem 0 .2rem; border-top: 1px solid rgba(148,163,184,.12); }
+html.menue-schmal .nav-group:first-of-type { border-top: 0; }
+html.menue-schmal .sidebar-footer { display: none; }
+
+/* Zugeklappt trägt das Kästchen das Kürzel – zwei Zeichen brauchen Platz. */
+.nav-kuerzel { display: none; }
+html.menue-schmal .nav-kuerzel { display: block; }
+html.menue-schmal .nav-item .num {
+    width: 30px; height: 26px; flex-basis: 30px;
+    font-size: .66rem; letter-spacing: .02em;
+}
+
+/* Der Schalter liegt zugeklappt unter dem Logo, nicht daneben. */
+html.menue-schmal .sidebar .brand { flex-wrap: wrap; gap: .4rem; }
+html.menue-schmal .menue-schalter { margin: 0 auto; }
+html.menue-schmal .menue-schalter span { transform: rotate(180deg); }
+
+.main { flex: 1; min-width: 0; max-width: 100%; display: flex; flex-direction: column; }
+
+.topbar {
+    background: var(--surface); border-bottom: 1px solid var(--border);
+    padding: .75rem 1.5rem; display: flex; align-items: center; gap: 1rem;
+    position: sticky; top: 0; z-index: 20;
+}
+.topbar > div:first-of-type { min-width: 0; flex: 0 1 auto; }
+.topbar .page-title {
+    font-size: 1.05rem; font-weight: 620; margin: 0;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.topbar .page-sub { font-size: .78rem; color: var(--text-muted); }
+.topbar .spacer { flex: 1; }
+.userbox { display: flex; align-items: center; gap: .6rem; font-size: .8rem; }
+.avatar {
+    width: 32px; height: 32px; border-radius: 50%; background: var(--primary-light);
+    color: var(--primary-dark); display: grid; place-items: center; font-weight: 650; font-size: .78rem;
+}
+.content { padding: 1.25rem 1.5rem 3rem; }
+
+/* ------------------------------------------ Start vom Home-Bildschirm
+ *
+ * In der Web-App gibt es keine Adressleiste mehr, die den Platz unter
+ * der Uhr und um die abgerundeten Ecken freihält – das muss die Seite
+ * selbst tun. `env(safe-area-inset-*)` liefert die Maße des Geräts und
+ * ist überall sonst schlicht 0, die Regeln stören also nirgends.
+ *
+ * Nur in der Web-App, nicht im Browsertab: dort sitzt die Seite unter
+ * einer Adressleiste, und ein zweiter Abstand wäre eine Lücke.
+ */
+@media (display-mode: standalone) {
+    .topbar {
+        padding-top: calc(.75rem + env(safe-area-inset-top));
+        padding-left: calc(1.5rem + env(safe-area-inset-left));
+        padding-right: calc(1.5rem + env(safe-area-inset-right));
+    }
+    .content {
+        padding-left: calc(1.5rem + env(safe-area-inset-left));
+        padding-right: calc(1.5rem + env(safe-area-inset-right));
+        /* Unten der Streifen für den Home-Indikator. */
+        padding-bottom: calc(3rem + env(safe-area-inset-bottom));
+    }
+    .sidebar { padding-top: env(safe-area-inset-top); }
+
+    /*
+     * Ohne Zurück-Knopf der Adressleiste führt eine versehentliche
+     * Wischgeste aus der App heraus. Das Menü auf dem Tablet bleibt
+     * damit der Weg zurück – es darf nicht unter der Uhr anfangen.
+     */
+    .sidebar .brand { padding-top: calc(1.1rem + env(safe-area-inset-top)); }
+}
+
+/*
+ * iOS blendet die Leisten nur aus, wenn das Manifest da ist. Kommt es
+ * nicht an – etwa weil ein Reverse-Proxy /manifest.webmanifest nicht
+ * durchlässt –, fällt das hier niemandem auf: dann gilt schlicht keine
+ * dieser Regeln, und die Seite sieht aus wie im Browser.
+ */
+
+/* ----------------------------------------------------------------- Karten */
+.card {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: var(--radius); box-shadow: var(--shadow); margin-bottom: 1.1rem;
+}
+.card-head {
+    padding: .8rem 1rem; border-bottom: 1px solid var(--border);
+    display: flex; align-items: center; gap: .75rem;
+}
+.card-head h2, .card-head h3 { margin: 0; }
+.card-head .spacer { flex: 1; min-width: 0; }
+.card-head > * { min-width: 0; }
+.card-head .hint { font-size: .75rem; color: var(--text-muted); }
+.card-body { padding: 1rem; min-width: 0; }
+/* Aktionen unter der Überschrift – für Karten, deren Knöpfe nicht neben
+   den Titel passen. Sie brechen um, statt sich zu überdecken. */
+.card-aktionen { display: flex; flex-wrap: wrap; gap: .4rem; align-items: center;
+    padding: .6rem 1rem; border-bottom: 1px solid var(--border); }
+.card-aktionen form { margin: 0; }
+.card-aktionen:empty { display: none; }
+.card-body.tight { padding: .6rem 1rem; }
+.card-footer { padding: .7rem 1rem; border-top: 1px solid var(--border); background: var(--surface-alt); border-radius: 0 0 var(--radius) var(--radius); }
+
+.grid { display: grid; gap: 1.1rem; }
+.grid > * { min-width: 0; }        /* verhindert, dass breite Tabellen das Raster sprengen */
+.grid-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.grid-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.grid-4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.grid-sidebar { grid-template-columns: minmax(0, 1fr) 340px; }
+
+/*
+ * Was gerade ein anderer bearbeitet.
+ *
+ * Ohne sichtbares Zeichen tippt man darauf, bekommt eine Absage und weiß
+ * nicht, warum. Gestreift statt bloß blass: blass sieht aus wie „aus",
+ * und ausgeschaltet ist hier nichts.
+ */
+.wird-bearbeitet {
+    opacity: .55;
+    cursor: not-allowed;
+}
+
+.plan-karte .device-marker.wird-bearbeitet .dot,
+.plan-karte .outlet-marker.wird-bearbeitet .dot {
+    box-shadow: 0 0 0 3px rgba(234, 179, 8, .85);
+}
+
+.plan-karte .plan-kabel.wird-bearbeitet {
+    stroke-dasharray: 4 4;
+}
+
+/* Im Entfernen-Modus ist der Zeiger ein anderer – und das Ziel klar. */
+.plan-karte.entfernen .device-marker,
+.plan-karte.entfernen .outlet-marker,
+.plan-karte.entfernen .plan-kabel {
+    cursor: crosshair;
+}
+
+/* ------------------------------------- Verstellbare Spalte im Grundriss
+ *
+ * Drei Spalten statt zwei: Plan, Griff, Liste. Die Breite steckt in
+ * --plan-spalte, damit das Verstellen eine einzige Zuweisung ist und
+ * nicht an jedem Kind hängt.
+ */
+.plan-spalten {
+    --plan-spalte: 340px;
+    grid-template-columns: minmax(0, 1fr) 10px var(--plan-spalte);
+    gap: .55rem;
+    align-items: start;
+}
+
+.plan-griff {
+    /* Voll über die Höhe: ein Griff, der nur oben sitzt, wird nicht gefunden. */
+    align-self: stretch;
+    min-height: 4rem;
+    cursor: col-resize;
+    border-radius: 999px;
+    background: transparent;
+    position: relative;
+    touch-action: none;   /* sonst scrollt das Tablet statt zu ziehen */
+}
+
+.plan-griff::before {
+    content: "";
+    position: absolute;
+    top: 0; bottom: 0; left: 50%;
+    width: 3px; margin-left: -1.5px;
+    border-radius: 999px;
+    background: var(--border);
+    transition: background .15s ease;
+}
+
+.plan-griff:hover::before,
+.plan-griff:focus-visible::before,
+.plan-griff.zieht::before { background: var(--primary, #2563eb); }
+
+.plan-griff:focus-visible { outline: none; }
+
+/* Beim Ziehen darf nichts anderes markiert werden. */
+body.spalte-zieht { user-select: none; cursor: col-resize; }
+
+@media (max-width: 1100px) {
+    /* Untereinander: dann gibt es keine zwei Spalten zum Verstellen. */
+    .plan-spalten { grid-template-columns: 1fr; }
+    .plan-griff { display: none; }
+}
+.grid-list { grid-template-columns: 300px minmax(0, 1fr); }
+@media (max-width: 1100px) { .grid-2, .grid-3, .grid-4, .grid-sidebar, .grid-list { grid-template-columns: 1fr; } }
+
+/* ------------------------------------------------------------------ Stats */
+.stat { display: flex; flex-direction: column; gap: .15rem; }
+.stat .value { font-size: 1.65rem; font-weight: 680; letter-spacing: -.02em; }
+.stat .label { font-size: .75rem; color: var(--text-muted); text-transform: uppercase; letter-spacing: .05em; }
+.stat .trend { font-size: .75rem; color: var(--text-muted); }
+.stat-card { padding: .9rem 1rem; border-left: 3px solid var(--primary); }
+.stat-card.ok { border-left-color: var(--success); }
+.stat-card.warn { border-left-color: var(--warning); }
+.stat-card.bad { border-left-color: var(--danger); }
+
+/* ---------------------------------------------------------------- Tabellen */
+table { width: 100%; border-collapse: collapse; font-size: .83rem; }
+th {
+    text-align: left; font-weight: 600; color: var(--text-muted);
+    font-size: .72rem; text-transform: uppercase; letter-spacing: .05em;
+    padding: .55rem .75rem; border-bottom: 1px solid var(--border); white-space: nowrap;
+}
+td { padding: .55rem .75rem; border-bottom: 1px solid var(--border); vertical-align: middle; }
+tbody tr:last-child td { border-bottom: none; }
+tbody tr:hover { background: var(--surface-alt); }
+
+/* Die gerade bearbeitete Zeile hervorheben. */
+tbody tr.marked { background: var(--surface-alt); box-shadow: inset 3px 0 0 var(--primary); }
+
+/* Eine stillgelegte Regel bleibt stehen, wirkt aber nicht – das muss man
+   sehen, ohne die Spalte zu lesen. */
+tbody tr.stillgelegt { opacity: .6; }
+tbody tr.stillgelegt td:first-child { position: relative; }
+tbody tr.stillgelegt td { text-decoration-line: line-through; text-decoration-color: color-mix(in srgb, currentColor 35%, transparent); }
+tbody tr.stillgelegt td .badge,
+tbody tr.stillgelegt td .btn,
+tbody tr.stillgelegt td form { text-decoration-line: none; }
+/* Eine Umbelegung, deren Zeitraum abgelaufen ist: sie steht noch, gehört
+   aber zurückgebaut. Der Streifen am Rand sagt das, ohne dass man die
+   Spalte „Stand" lesen muss. */
+tbody tr.row-warn { box-shadow: inset 3px 0 0 var(--warning); }
+
+td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+.table-wrap { overflow-x: auto; }
+
+/*
+ * `hidden` heißt versteckt – auch dann, wenn eine Klasse ein eigenes
+ * `display` mitbringt. Ohne diese Regel gewinnt die Klasse gegen die
+ * Vorgabe des Browsers, und ein Element, das laut DOM versteckt ist,
+ * steht trotzdem auf der Seite. Gemessen ist genau das passiert: das
+ * Abzeichen „abgeschlossen" blieb neben der Kurzmeldung stehen, obwohl
+ * es ausgeblendet war.
+ */
+[hidden] { display: none !important; }
+
+/* ------------------------------------------------------------------ Badges */
+.badge {
+    display: inline-flex; align-items: center; gap: .3rem;
+    padding: .12rem .5rem; border-radius: 999px; font-size: .72rem; font-weight: 600;
+    background: var(--surface-alt); color: var(--text-muted); border: 1px solid var(--border);
+    white-space: nowrap;
+}
+.badge.ok { background: var(--success-light); color: var(--success); border-color: transparent; }
+.badge.warn { background: var(--warning-light); color: var(--warning); border-color: transparent; }
+.badge.bad { background: var(--danger-light); color: var(--danger); border-color: transparent; }
+.badge.info { background: var(--info-light); color: var(--info); border-color: transparent; }
+.badge.primary { background: var(--primary-light); color: var(--primary-dark); border-color: transparent; }
+.badge.dot::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+
+.vlan-chip {
+    display: inline-block; padding: .1rem .45rem; border-radius: 6px;
+    font-size: .72rem; font-weight: 650; font-family: "JetBrains Mono", monospace;
+    background: var(--primary-light); color: var(--primary-dark); margin: 1px;
+}
+.vlan-chip.amber { background: #fef3c7; color: #92400e; }
+/* Viele VLANs an einem Port: in Spalten statt als lange Kette. */
+.vlan-raster { display: grid; grid-template-columns: repeat(var(--spalten, 3), max-content); gap: 3px 4px; }
+.vlan-raster .vlan-chip { margin: 0; text-align: center; }
+.vlan-chip.violet { background: #ede9fe; color: #5b21b6; }
+.vlan-chip.green { background: #dcfce7; color: #166534; }
+.vlan-chip.rose { background: #ffe4e6; color: #9f1239; }
+.vlan-chip.slate { background: #e2e8f0; color: #334155; }
+.vlan-chip.sky { background: #e0f2fe; color: #075985; }
+/* Farben der Optimierungsprofile – je Profil eine eigene. */
+.vlan-chip.teal { background: #ccfbf1; color: #115e59; }
+.vlan-chip.indigo { background: #e0e7ff; color: #3730a3; }
+.vlan-chip.orange { background: #ffedd5; color: #9a3412; }
+.vlan-chip.pink { background: #fce7f3; color: #9d174d; }
+.vlan-chip.lime { background: #ecfccb; color: #3f6212; }
+.vlan-chip.cyan { background: #cffafe; color: #155e75; }
+.vlan-chip.fuchsia { background: #fae8ff; color: #86198f; }
+
+/* Kennzeichnung eines Ports mit seinem Optimierungsprofil. */
+.profil-marke { font-family: inherit; font-size: .64rem; letter-spacing: .04em; text-transform: uppercase;
+    box-shadow: inset 0 0 0 1px currentColor; }
+.profil-marken { display: flex; flex-wrap: wrap; gap: 3px; margin-top: 3px; }
+.profil-kennung { display: flex; flex-wrap: wrap; align-items: center; gap: .4rem; }
+.profil-reiter { display: flex; flex-wrap: wrap; gap: .4rem 1.2rem; margin-bottom: 1rem; }
+.profil-gruppe { display: flex; flex-direction: column; gap: .25rem; }
+.profil-gruppe-name { font-size: .7rem; text-transform: uppercase; letter-spacing: .06em; color: var(--text-muted); }
+.profil-gruppe .tabs { margin-bottom: 0; flex-wrap: wrap; }
+.profil-gruppe .tab .profil-marke { margin-right: .3rem; }
+
+/* ----------------------------------------------------------------- Buttons */
+.btn {
+    display: inline-flex; align-items: center; gap: .4rem; justify-content: center;
+    padding: .45rem .85rem; border-radius: 8px; border: 1px solid var(--border);
+    background: var(--surface); color: var(--text); font-size: .82rem; font-weight: 550;
+    cursor: pointer; font-family: inherit; line-height: 1.3;
+}
+.btn:hover { background: var(--surface-alt); text-decoration: none; }
+.btn-primary { background: var(--primary); border-color: var(--primary); color: #fff; }
+.btn-primary:hover { background: var(--primary-dark); border-color: var(--primary-dark); }
+.btn-danger { background: var(--danger); border-color: var(--danger); color: #fff; }
+.btn-danger:hover { background: #991b1b; }
+.btn-ghost { background: transparent; border-color: transparent; color: var(--text-muted); }
+.btn-ghost:hover { background: var(--surface-alt); color: var(--text); }
+.btn-sm { padding: .25rem .6rem; font-size: .75rem; }
+.btn-block { width: 100%; }
+.btn[disabled] { opacity: .5; cursor: not-allowed; }
+.btn-row { display: flex; gap: .5rem; flex-wrap: wrap; align-items: center; }
+
+/* ---------------------------------------------------------------- Formulare */
+.field { margin-bottom: .8rem; }
+.field label, .form-label {
+    display: block; font-size: .76rem; font-weight: 600; color: var(--text-muted);
+    margin-bottom: .25rem; text-transform: uppercase; letter-spacing: .04em;
+}
+input[type=text], input[type=password], input[type=number], input[type=email], select, textarea {
+    width: 100%; padding: .45rem .6rem; border: 1px solid var(--border); border-radius: 8px;
+    font-family: inherit; font-size: .84rem; background: #fff; color: var(--text);
+}
+input:focus, select:focus, textarea:focus { outline: 2px solid var(--primary-light); border-color: var(--primary); }
+textarea { min-height: 90px; resize: vertical; font-family: "JetBrains Mono", monospace; font-size: .78rem; }
+select[multiple] { min-height: 120px; }
+.help { font-size: .73rem; color: var(--text-muted); margin-top: .2rem; }
+.check { display: flex; align-items: flex-start; gap: .45rem; font-size: .82rem; margin-bottom: .4rem; }
+.check input { margin-top: .2rem; }
+.check label { text-transform: none; letter-spacing: 0; font-size: .82rem; font-weight: 450; color: var(--text); margin: 0; }
+.field-row { display: flex; gap: .7rem; }
+.field-row > * { flex: 1; }
+fieldset { border: 1px solid var(--border); border-radius: 8px; padding: .7rem .9rem; margin: 0 0 .9rem; }
+legend { font-size: .75rem; font-weight: 650; color: var(--text-muted); padding: 0 .3rem; text-transform: uppercase; letter-spacing: .05em; }
+
+/* --------------------------------------------------------------- Port-Grid */
+.port-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(104px, 1fr)); gap: .45rem; }
+
+/* Portnamen sind kurz („ether5"), SSIDs und Gerätenamen nicht. Für die
+   breitere Variante dürfen die Kacheln mehr Platz nehmen und umbrechen. */
+.port-grid.breit { grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); }
+.port-grid.breit .pname { white-space: normal; overflow-wrap: anywhere; }
+.port-grid.breit .pmeta { white-space: normal; overflow-wrap: anywhere; }
+.port {
+    border: 1px solid var(--border); border-radius: 8px; padding: .45rem .5rem;
+    background: var(--surface); cursor: pointer; display: block; position: relative;
+}
+.port:hover { border-color: var(--primary); }
+.port input { position: absolute; opacity: 0; }
+.port .pname { font-weight: 650; font-size: .78rem; font-family: "JetBrains Mono", monospace; }
+.port .pmeta {
+    font-size: .68rem; color: var(--text-muted); margin-top: .12rem; min-height: 1em;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.port .pname { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* „liegt an" unter dem Namen – in der Zeile darüber würde es abgeschnitten. */
+.port .vlan-ist { display: block; font-size: .66rem; color: var(--primary-dark); white-space: nowrap; }
+.port .vlan-ist:empty { display: none; }
+.port .pstate { position: absolute; top: .45rem; right: .5rem; width: 7px; height: 7px; border-radius: 50%; background: #cbd5e1; }
+.port .pstate.up { background: #22c55e; }
+.port.selected { border-color: var(--primary); background: var(--primary-light); box-shadow: inset 0 0 0 1px var(--primary); }
+.port.selected .pmeta { color: var(--primary-dark); }
+
+/* ------------------------------------------------------------------ Flash */
+.flash-area { margin-bottom: 1rem; display: flex; flex-direction: column; gap: .5rem; scroll-margin-top: 5.5rem; }
+.flash {
+    padding: .6rem .85rem; border-radius: 8px; font-size: .84rem;
+    display: flex; gap: .5rem; align-items: flex-start; border: 1px solid transparent;
+}
+.flash.success { background: var(--success-light); color: #14532d; }
+.flash.error { background: var(--danger-light); color: #7f1d1d; }
+.flash.warning { background: var(--warning-light); color: #78350f; }
+.flash.info { background: var(--info-light); color: #075985; }
+
+.notice {
+    border-left: 3px solid var(--info); background: var(--info-light);
+    padding: .6rem .85rem; border-radius: 0 8px 8px 0; font-size: .8rem; color: #0c4a6e; margin-bottom: .9rem;
+}
+.notice.warn { border-left-color: var(--warning); background: var(--warning-light); color: #78350f; }
+.notice.danger { border-left-color: var(--danger); background: var(--danger-light); color: #7f1d1d; }
+
+/* ------------------------------------------------------------------ Listen */
+.list { list-style: none; margin: 0; padding: 0; }
+.list li { padding: .5rem .75rem; border-bottom: 1px solid var(--border); font-size: .82rem; }
+.list li:last-child { border-bottom: none; }
+.list-select li a { display: flex; align-items: center; gap: .5rem; color: var(--text); }
+.list-select li.active { background: var(--primary-light); }
+.list-select li.active a { color: var(--primary-dark); font-weight: 600; }
+
+.kv { display: grid; grid-template-columns: 145px 1fr; gap: .3rem .8rem; font-size: .82rem; }
+.kv dt { color: var(--text-muted); }
+.kv dd { margin: 0; font-weight: 500; }
+
+pre.cmd {
+    background: #0f172a; color: #e2e8f0; padding: .7rem .85rem; border-radius: 8px;
+    font-size: .74rem; overflow-x: auto; margin: 0; line-height: 1.55;
+}
+pre.cmd .c { color: #7dd3fc; }
+.muted { color: var(--text-muted); }
+.small { font-size: .76rem; }
+.nowrap { white-space: nowrap; }
+.right { text-align: right; }
+.mt { margin-top: .9rem; }
+.mb0 { margin-bottom: 0; }
+
+/* ------------------------------------------------------------------- Tabs */
+.tabs { display: flex; gap: .25rem; border-bottom: 1px solid var(--border); margin-bottom: 1rem; }
+.tab {
+    padding: .5rem .85rem; font-size: .84rem; color: var(--text-muted);
+    border-bottom: 2px solid transparent; cursor: pointer; font-weight: 550;
+}
+.tab:hover { color: var(--text); text-decoration: none; }
+.tab.active { color: var(--primary); border-bottom-color: var(--primary); }
+
+/* ---------------------------------------------------------------- Fortschritt */
+.progress { height: 6px; background: var(--border); border-radius: 999px; overflow: hidden; }
+.progress > span { display: block; height: 100%; background: var(--primary); border-radius: 999px; }
+.progress.ok > span { background: var(--success); }
+.progress.bad > span { background: var(--danger); }
+/* Beim Update ist der Balken die Hauptsache – dort darf er kräftiger sein. */
+.progress.gross { height: 12px; }
+.progress.gross > span { transition: width .4s ease; }
+
+/*
+ * Laufanzeige ohne Prozentzahl.
+ *
+ * Manches dauert, ohne dass sich sagen lässt, wie weit es ist: ein
+ * `git fetch` meldet keinen Fortschritt. Eine erfundene Prozentzahl wäre
+ * schlimmer als keine – sie behauptet Wissen, das niemand hat. Der
+ * Streifen sagt nur „es läuft", und genau das ist die Frage, die sich
+ * stellt, wenn ein Knopf nicht reagiert.
+ */
+.progress.unbestimmt > span {
+    width: 40%;
+    animation: laeuft 1.1s ease-in-out infinite;
+}
+
+@keyframes laeuft {
+    0%   { margin-left: -40%; }
+    100% { margin-left: 100%; }
+}
+
+/*
+ * Wer Bewegung im Bild nicht verträgt, bekommt einen ruhigen Balken. Die
+ * Auskunft „es läuft" geht dabei nicht verloren – sie steht auch als Text
+ * daneben.
+ */
+@media (prefers-reduced-motion: reduce) {
+    .progress.unbestimmt > span { animation: none; width: 100%; opacity: .5; }
+}
+
+.knopf-laeuft {
+    display: flex;
+    flex-direction: column;
+    gap: .5rem;
+    margin: .7rem 0 .2rem;
+}
+
+/* Die Laufanzeige braucht die kräftige Höhe – sie ist hier die Auskunft. */
+.knopf-laeuft .progress { overflow: hidden; }
+
+.update-fortschritt { margin-bottom: 1rem; }
+.update-fortschritt-kopf {
+    display: flex; justify-content: space-between; align-items: baseline;
+    gap: 1rem; margin-bottom: .4rem; font-size: .84rem;
+}
+.update-fortschritt-kopf .mono { font-variant-numeric: tabular-nums; font-weight: 650; }
+
+.phase-head {
+    display: flex; align-items: center; gap: .6rem; padding: .5rem .75rem;
+    background: var(--surface-alt); border-radius: 8px; margin: .8rem 0 .4rem; font-weight: 600; font-size: .82rem;
+}
+.phase-num {
+    width: 22px; height: 22px; border-radius: 50%; background: var(--primary); color: #fff;
+    display: grid; place-items: center; font-size: .72rem; font-weight: 700;
+}
+
+/* ------------------------------------------------------------------- Login */
+.login-wrap { min-height: 100vh; display: grid; place-items: center; background: linear-gradient(135deg, #0f172a, #1e3a8a); padding: 1rem; }
+.login-card { width: 100%; max-width: 380px; background: #fff; border-radius: 14px; padding: 1.75rem; box-shadow: 0 20px 45px rgba(15, 23, 42, .35); }
+.login-card .brand { display: flex; align-items: center; gap: .65rem; margin-bottom: 1.25rem; }
+.login-card .logo { width: 40px; height: 40px; border-radius: 10px; background: linear-gradient(135deg, #2563eb, #0ea5e9); color: #fff; display: grid; place-items: center; font-weight: 700; }
+
+.demo-flag {
+    background: #fef3c7; color: #92400e; padding: .15rem .5rem; border-radius: 6px;
+    font-size: .7rem; font-weight: 650; letter-spacing: .03em;
+}
+
+/* =========================================================== Dokumentation */
+
+/* ------------------------------------------------------------ Grundriss */
+.plan-toolbar {
+    display: flex; align-items: center; gap: .5rem; flex-wrap: wrap;
+    padding: .6rem .8rem; border-bottom: 1px solid var(--border); background: var(--surface-alt);
+}
+.plan-wrap { position: relative; background: #eef2f7; }
+
+/*
+ * Die Karte.
+ *
+ * Leaflet braucht eine feste Höhe – ohne sie bleibt der Rahmen flach.
+ * Vorher lag der Plan in einem Kasten, der sich über die Höhe streckte,
+ * während die Marker in Prozent dieses Kastens positioniert waren. Je
+ * nach Zoom passte das Verhältnis nicht mehr und jeder Marker wanderte
+ * nach oben. Jetzt rechnet Leaflet in Plankoordinaten, und ein Punkt
+ * bleibt ein Punkt – egal wie groß der Plan gerade gezeichnet ist.
+ */
+.plan-karte { height: 72vh; min-height: 380px; width: 100%; background: #eef2f7; z-index: 0; }
+.plan-karte.platzieren { cursor: crosshair; }
+/* Konnte der Plan nicht geladen werden, soll man das sehen. */
+.plan-karte.plan-fehler { background: repeating-linear-gradient(45deg, #fef2f2, #fef2f2 10px, #fee2e2 10px, #fee2e2 20px); }
+.plan-karte .leaflet-container { background: #eef2f7; font: inherit; }
+.plan-kachel { image-rendering: auto; }
+.plan-bild { background: #fff; box-shadow: var(--shadow); }
+
+/*
+ * Marker auf dem Grundriss.
+ *
+ * Der Anker ist ein *Punkt ohne Ausdehnung*. Der farbige Punkt sitzt genau
+ * darauf, die Beschriftung hängt daneben und wächst nur nach rechts – so
+ * verschiebt eine lange Bezeichnung die Stelle nicht.
+ */
+.plan-pin { width: 0 !important; height: 0 !important; overflow: visible; background: none; border: 0; }
+.plan-pin .dot {
+    position: absolute; left: 0; top: 0;
+    transform: translate(-50%, -50%);
+    width: 13px; height: 13px; border-radius: 50%;
+    background: var(--text-muted); border: 2px solid #fff;
+    box-shadow: 0 0 0 1px rgba(15,23,42,.45), 0 1px 3px rgba(15,23,42,.35);
+}
+.plan-pin .plabel {
+    position: absolute; left: 11px; top: 0; transform: translateY(-50%);
+    padding: .1rem .4rem; border-radius: 999px; white-space: nowrap;
+    background: #fff; border: 1.5px solid var(--text-muted); color: var(--text);
+    box-shadow: 0 1px 4px rgba(15,23,42,.25);
+}
+
+.outlet-marker { font-size: .7rem; font-weight: 650; cursor: pointer; }
+.outlet-marker.live   .plabel { border-color: #15803d; }
+.outlet-marker.live   .dot { background: #22c55e; }
+.outlet-marker.wired  .plabel { border-color: #b45309; }
+.outlet-marker.wired  .dot { background: #f59e0b; }
+.outlet-marker.empty  .plabel { border-color: #94a3b8; }
+.outlet-marker.empty  .dot { background: #cbd5e1; }
+.outlet-marker.active .plabel { outline: 3px solid rgba(37, 99, 235, .35); border-color: var(--primary); }
+.outlet-marker.active .dot { box-shadow: 0 0 0 1px var(--primary), 0 0 0 5px rgba(37,99,235,.28); }
+
+/* Racks: eckiger Punkt, damit sie sich im Plan von den Dosen unterscheiden. */
+.rack-marker { font-size: .68rem; font-weight: 650; cursor: pointer; }
+.rack-marker .dot { border-radius: 3px; background: #0f172a; width: 15px; height: 15px; }
+.rack-marker .plabel { left: 13px; background: #0f172a; color: #fff; border-color: #0f172a; }
+
+.plan-karte.verschieben .plan-pin { cursor: grab; }
+
+/* ------------------------------------------- Geräte und Kabel im Plan */
+
+.device-marker { font-size: .68rem; font-weight: 650; cursor: pointer; }
+.device-marker .dot { border-radius: 4px; width: 15px; height: 15px; background: #1d4ed8; }
+.device-marker .plabel { left: 13px; background: #1d4ed8; color: #fff; border-color: #1d4ed8; }
+.device-marker.ap     .dot { border-radius: 50%; background: #7c3aed; }
+.device-marker.ap     .plabel { background: #7c3aed; border-color: #7c3aed; }
+.device-marker.router .dot { background: #0f766e; }
+.device-marker.router .plabel { background: #0f766e; border-color: #0f766e; }
+/* Richtfunk: das Schild am Ende, dessen Gegenüber auf einer anderen Etage
+   steht. Es sitzt unter dem Gerät, damit es dessen Namen nicht verdeckt. */
+.plan-richtfunk-fern { font-size: .66rem; font-weight: 650; cursor: pointer; color: #7c3aed; }
+.plan-richtfunk-fern.band-60ghz { color: #0284c7; }
+.plan-richtfunk-fern.band-5ghz  { color: #d97706; }
+.plan-richtfunk-fern .fern-text {
+    position: absolute; left: 13px; top: 12px; white-space: nowrap;
+    background: #fff; border: 1px dashed currentColor; border-radius: 4px; padding: 0 .35rem;
+}
+.plan-karte .plan-richtfunk-treffer { cursor: pointer; }
+.device-marker.offline .dot { background: #b91c1c; }
+.device-marker.offline .plabel { background: #b91c1c; border-color: #b91c1c; }
+
+/* Ein Mobilkabel ist ein Linienzug; die Stützpunkte sind nur beim
+   Bearbeiten sichtbar, sonst stören sie die Übersicht. */
+.plan-kabel-punkt { width: 0 !important; height: 0 !important; }
+.plan-kabel-punkt .griff {
+    position: absolute; left: -7px; top: -7px; width: 14px; height: 14px;
+    border-radius: 50%; background: #fff; border: 2px solid var(--primary);
+    box-shadow: 0 1px 3px rgba(15, 23, 42, .35);
+}
+.plan-karte.kabel-zeichnen { cursor: crosshair; }
+
+/* Ein Endgriff sieht anders aus als ein Zwischenpunkt – dort sitzt der
+   Stecker, und der wird meist nicht mitverschoben. */
+.plan-kabel-punkt.ende .griff { background: var(--primary); border-color: #fff; }
+
+/* Maßstab: die Referenzstrecke in Magenta – sie gehört zu keinem Kabel und
+   soll mit keinem verwechselt werden. */
+.plan-massstab-punkt { width: 0 !important; height: 0 !important; }
+.plan-massstab-punkt span {
+    position: absolute; left: -6px; top: -6px; width: 12px; height: 12px;
+    border-radius: 50%; background: #db2777; border: 2px solid #fff;
+    box-shadow: 0 0 0 1px #db2777, 0 1px 3px rgba(15, 23, 42, .35);
+}
+.leaflet-tooltip.plan-massstab-schild {
+    background: #fdf2f8; color: #9d174d; border: 1px solid #f9a8d4;
+    font-weight: 600; padding: 1px 6px; box-shadow: none;
+}
+.plan-karte.massstab-setzen { cursor: crosshair; }
+/* Messen: orange, damit es weder wie ein Kabel noch wie der Maßstab aussieht. */
+.plan-mess-punkt { width: 0 !important; height: 0 !important; }
+.plan-mess-punkt span {
+    position: absolute; left: -5px; top: -5px; width: 10px; height: 10px;
+    border-radius: 50%; background: #ea580c; border: 2px solid #fff;
+    box-shadow: 0 0 0 1px #ea580c;
+}
+.leaflet-tooltip.plan-mess-schild {
+    background: #fff7ed; color: #9a3412; border: 1px solid #fdba74;
+    font-weight: 700; font-size: .85rem; padding: 2px 7px;
+}
+.plan-laengen { width: 100%; font-size: .8rem; border-collapse: collapse; }
+.plan-laengen th, .plan-laengen td { padding: .25rem .35rem; border-bottom: 1px solid var(--border); text-align: left; }
+.plan-laengen td.zahl, .plan-laengen th.zahl { text-align: right; white-space: nowrap; }
+.plan-laengen .zu-kurz { color: var(--danger); font-weight: 600; }
+.plan-laengen .knapp { color: var(--warning); }
+
+/* Während gezeichnet wird, gehört der eine Finger dem Werkzeug. Ohne
+   touch-action lässt der Browser ihn zusätzlich scrollen. */
+.plan-karte.zwei-finger { touch-action: pinch-zoom; }
+
+/* ------------------------------------------------------------ Vollbild */
+
+/*
+ * Zwei Wege: die Fullscreen-API, und – wo es sie für gewöhnliche Elemente
+ * nicht gibt, etwa in Safari auf dem iPad – diese Klasse. Beide sehen für
+ * den Benutzer gleich aus.
+ */
+.plan-karte.plan-vollbild {
+    position: fixed; inset: 0; z-index: 3000;
+    height: 100vh !important; height: 100dvh !important;
+    width: 100vw; max-width: none; border-radius: 0;
+}
+body.plan-vollbild-an { overflow: hidden; }
+
+/* Im echten Vollbild füllt das Element ohnehin den Schirm. */
+.plan-karte:fullscreen { height: 100vh !important; width: 100vw; }
+.plan-karte:-webkit-full-screen { height: 100vh !important; width: 100vw; }
+
+/*
+ * Die Bedienleiste schwimmt über der Karte, sobald sie den Schirm füllt –
+ * sonst wäre sie außerhalb und damit unerreichbar.
+ */
+.plan-werkzeuge {
+    position: absolute; left: 12px; top: 12px; z-index: 1200;
+    display: none; gap: 6px; flex-wrap: wrap; max-width: calc(100% - 24px);
+    padding: 8px; border-radius: 10px;
+    background: rgba(255, 255, 255, .94);
+    box-shadow: 0 6px 20px rgba(15, 23, 42, .18);
+}
+.plan-karte.plan-vollbild .plan-werkzeuge,
+.plan-karte:fullscreen .plan-werkzeuge,
+.plan-karte:-webkit-full-screen .plan-werkzeuge { display: flex; }
+
+/*
+ * Auf dem Tablet wird mit dem Finger gezielt, nicht mit der Maus. 44 px
+ * sind das Maß, das sich dafür durchgesetzt hat – darunter trifft man
+ * die Schaltfläche nicht zuverlässig.
+ */
+.plan-werkzeuge .btn { min-height: 44px; min-width: 44px; font-size: .9rem; }
+
+/* Die Auswahlfelder ziehen im Vollbild hier herein – außerhalb des
+   Kartenrahmens gibt es sie dort nicht. */
+.plan-werkzeug-feld {
+    display: flex; flex-direction: column; gap: 2px;
+    font-size: .72rem; font-weight: 650; color: #475569;
+}
+.plan-werkzeug-feld select { min-height: 44px; max-width: 220px; }
+
+.plan-werkzeuge-status {
+    position: absolute; left: 12px; right: 12px; bottom: 12px; z-index: 1200;
+    display: none; padding: 8px 12px; border-radius: 10px;
+    background: rgba(255, 255, 255, .94); font-size: .82rem; color: #334155;
+    box-shadow: 0 6px 20px rgba(15, 23, 42, .18);
+}
+.plan-karte.plan-vollbild .plan-werkzeuge-status,
+.plan-karte:fullscreen .plan-werkzeuge-status,
+.plan-karte:-webkit-full-screen .plan-werkzeuge-status { display: block; }
+.plan-vollbild .plan-pin .dot { width: 18px; height: 18px; }
+.plan-vollbild .plan-kabel-punkt .griff { left: -11px; top: -11px; width: 22px; height: 22px; }
+.plan-vollbild .leaflet-control-zoom a { width: 44px; height: 44px; line-height: 44px; font-size: 1.3rem; }
+
+.plan-karte.verschieben .leaflet-marker-draggable.leaflet-drag-target { cursor: grabbing; }
+
+/* Beim genauen Setzen stört die Beschriftung – dann bleibt nur der Punkt. */
+.plan-karte.nur-punkte .plan-pin .plabel { display: none; }
+
+/* Fadenkreuz beim Platzieren: zeigt die Stelle, die getroffen wird. */
+.plan-crosshair { position: absolute; inset: 0; pointer-events: none; display: none; z-index: 450; }
+.plan-karte.platzieren .plan-crosshair { display: block; }
+.plan-crosshair span { position: absolute; background: rgba(37,99,235,.55); }
+.plan-crosshair .hx { left: 0; right: 0; height: 1px; }
+.plan-crosshair .hy { top: 0; bottom: 0; width: 1px; }
+
+.plan-legend { display: flex; gap: .8rem; font-size: .74rem; color: var(--text-muted); align-items: center; }
+.plan-legend span { display: inline-flex; align-items: center; gap: .3rem; }
+.plan-legend i { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
+
+/* ------------------------------------------------------------- Rackansicht */
+.rack { display: flex; gap: .75rem; align-items: flex-start; flex-wrap: wrap; }
+.rack > * { min-width: 0; }
+.rack-frame {
+    border: 2px solid #334155; border-radius: 8px; background: #f1f5f9;
+    padding: .35rem; width: 340px; flex: 0 0 340px;
+}
+.rack-rows { display: flex; flex-direction: column; gap: 1px; }
+.rack-row { display: flex; align-items: stretch; gap: .3rem; height: 22px; }
+.rack-u {
+    width: 26px; flex: 0 0 26px; font-size: .62rem; color: var(--text-muted);
+    display: flex; align-items: center; justify-content: flex-end; padding-right: .2rem;
+    font-variant-numeric: tabular-nums;
+}
+.rack-slot {
+    flex: 1; border: 1px dashed #cbd5e1; border-radius: 3px; background: repeating-linear-gradient(
+        45deg, #f8fafc, #f8fafc 6px, #f1f5f9 6px, #f1f5f9 12px);
+}
+.rack-item {
+    flex: 1; border-radius: 4px; padding: .1rem .45rem; display: flex; align-items: center; gap: .4rem;
+    font-size: .72rem; font-weight: 600; overflow: hidden; border: 1px solid transparent; color: #0f172a;
+}
+.rack-item a { color: inherit; }
+.rack-item .meta { font-weight: 450; font-size: .66rem; opacity: .8; margin-left: auto; white-space: nowrap; }
+.rack-item.sky    { background: #dbeafe; border-color: #93c5fd; }
+.rack-item.violet { background: #ede9fe; border-color: #c4b5fd; }
+.rack-item.green  { background: #dcfce7; border-color: #86efac; }
+.rack-item.amber  { background: #fef3c7; border-color: #fcd34d; }
+.rack-item.rose   { background: #ffe4e6; border-color: #fda4af; }
+.rack-item.slate  { background: #e2e8f0; border-color: #cbd5e1; }
+.rack-item.continues { border-top-style: dashed; opacity: .92; }
+
+/* ---------------------------------------------------------- Patchfeld-Ports */
+.panel-ports { display: grid; grid-template-columns: repeat(auto-fill, minmax(96px, 1fr)); gap: .3rem; }
+.panel-port {
+    border: 1px solid var(--border); border-radius: 6px; padding: .3rem .4rem; background: #fff;
+    font-size: .7rem; position: relative; display: block; color: var(--text);
+}
+.panel-port:hover { border-color: var(--primary); text-decoration: none; }
+.panel-port .no { font-weight: 700; font-family: "JetBrains Mono", monospace; }
+.panel-port .lbl { color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.panel-port.patched { background: #dcfce7; border-color: #86efac; }
+.panel-port.wired { background: #fef3c7; border-color: #fcd34d; }
+.panel-port.defect { background: #fee2e2; border-color: #fca5a5; }
+.panel-port.selected { outline: 2px solid var(--primary); }
+
+.chain {
+    display: flex; align-items: center; gap: .4rem; flex-wrap: wrap;
+    font-size: .76rem; padding: .45rem .6rem; background: var(--surface-alt);
+    border-radius: 8px; border: 1px solid var(--border);
+}
+.chain .step { display: inline-flex; align-items: center; gap: .3rem; }
+.chain .arrow { color: var(--text-muted); }
+.chain .step strong { font-weight: 650; }
+
+/* ===================================================== Tablet & Smartphone */
+
+/* Touch-Geräte: größere Tap-Flächen, kein Zoom beim Fokussieren (iOS) */
+@media (pointer: coarse) {
+    .btn { min-height: 40px; padding: .5rem .9rem; }
+    .btn-sm { min-height: 34px; }
+    input[type=text], input[type=password], input[type=number], input[type=email], select, textarea {
+        font-size: 16px; padding: .55rem .65rem;
+    }
+    .check input[type=checkbox], .check input[type=radio] { width: 20px; height: 20px; }
+    td, th { padding: .7rem .75rem; }
+    .list li { padding: .7rem .75rem; }
+    .nav-item { padding: .7rem 1.1rem; }
+    .port { padding: .55rem .5rem; }
+    .panel-port { padding: .45rem .5rem; }
+    /* Auf dem Handy ist der Punkt das Ziel des Fingers, die Beschriftung
+       nur Beiwerk – sonst verdecken sich die Marker gegenseitig. */
+    .plan-pin .dot { width: 15px; height: 15px; }
+    .plan-pin .plabel { font-size: .65rem; padding: .05rem .3rem; left: 12px; }
+}
+
+/* Tabellen dürfen auf kleinen Geräten seitlich scrollen */
+.table-wrap { -webkit-overflow-scrolling: touch; }
+
+/* Navigation ein-/ausblenden (erscheint erst unter 1000 px) */
+.nav-toggle { display: none; }
+.nav-backdrop { display: none; }
+
+@media (max-width: 1400px) {
+    .grid-4 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
+@media (max-width: 1000px) {
+    .sidebar {
+        position: fixed; top: 0; left: 0; bottom: 0; z-index: 60;
+        transform: translateX(-100%); transition: transform .2s ease;
+        width: 260px; flex-basis: 260px; height: 100vh;
+    }
+    .sidebar.open { transform: translateX(0); box-shadow: 0 0 40px rgba(15, 23, 42, .45); }
+
+    /*
+     * Unter 1000 Pixeln schiebt sich das Menü ohnehin über die Seite und
+     * ist sonst gar nicht da. Schmalstellen bringt dort nichts und würde
+     * nur ein unbeschriftetes Menü hinterlassen.
+     */
+    .menue-schalter { display: none; }
+    html.menue-schmal .sidebar { width: 260px; flex-basis: 260px; }
+    html.menue-schmal .brand-text,
+    html.menue-schmal .nav-text,
+    html.menue-schmal .nav-group-title,
+    html.menue-schmal .sidebar-footer { display: revert; }
+    html.menue-schmal .nav-item { justify-content: flex-start; padding: .5rem 1.1rem; border-left-width: 3px; }
+    html.menue-schmal .nav-kuerzel { display: none; }
+    html.menue-schmal .nav-item .num { width: 20px; height: 20px; flex-basis: 20px; }
+    .nav-backdrop.show {
+        display: block; position: fixed; inset: 0; z-index: 55;
+        background: rgba(15, 23, 42, .45);
+    }
+    .nav-toggle {
+        display: inline-flex; align-items: center; justify-content: center;
+        width: 40px; height: 40px; border-radius: 8px; border: 1px solid var(--border);
+        background: var(--surface); cursor: pointer; flex: 0 0 40px;
+    }
+    .nav-toggle span { display: block; width: 18px; height: 2px; background: var(--text); position: relative; }
+    .nav-toggle span::before, .nav-toggle span::after {
+        content: ""; position: absolute; left: 0; width: 18px; height: 2px; background: var(--text);
+    }
+    .nav-toggle span::before { top: -6px; }
+    .nav-toggle span::after { top: 6px; }
+
+    .layout { display: block; }
+    .main { width: 100%; }
+    .topbar { padding: .6rem .9rem; gap: .6rem; }
+    .content { padding: .9rem .9rem 4rem; }
+    .grid-3 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
+@media (max-width: 720px) {
+    .topbar .page-title { font-size: .95rem; }
+    .topbar .page-sub { display: none; }
+    .userbox > div:not(.avatar) { display: none; }      /* Name ausblenden, Avatar bleibt */
+    .grid-2, .grid-3, .grid-4 { grid-template-columns: 1fr; }
+    .field-row { flex-direction: column; gap: 0; }
+    .card-head { flex-wrap: wrap; row-gap: .4rem; }
+    .card-head .spacer { flex-basis: 100%; height: 0; }
+    .btn-row { gap: .4rem; }
+    .kv { grid-template-columns: 120px 1fr; }
+    .port-grid { grid-template-columns: repeat(auto-fill, minmax(96px, 1fr)); }
+    .panel-ports { grid-template-columns: repeat(auto-fill, minmax(86px, 1fr)); }
+
+    /* Rackansicht untereinander statt nebeneinander */
+    .rack { display: block; }
+    .rack-frame { width: 100%; flex: 1 1 auto; margin-bottom: .9rem; }
+    .rack > div { min-width: 0; }
+
+    /* Grundriss: mehr Platz, Bedienleiste umbricht */
+    .plan-karte { height: 58vh; min-height: 300px; }
+    .plan-toolbar { gap: .35rem; }
+    .plan-legend { font-size: .7rem; width: 100%; }
+
+    .demo-flag { display: none; }
+    h1 { font-size: 1.15rem; }
+    .stat .value { font-size: 1.35rem; }
+}
+
+@media (max-width: 420px) {
+    .content { padding: .7rem .7rem 4rem; }
+    .card-body { padding: .8rem; }
+    .kv { grid-template-columns: 1fr; gap: 0 0; }
+    .kv dt { margin-top: .35rem; }
+}
+
+/* Drucken: Navigation und Bedienelemente weglassen */
+@media print {
+    .sidebar, .topbar, .btn, .nav-toggle, form { display: none !important; }
+    .layout { display: block; }
+    .card { break-inside: avoid; box-shadow: none; }
+}
+
+/* Gesperrte Ports (bereits belegt, keine Freigabe) */
+.port.locked {
+    background: repeating-linear-gradient(45deg, #f8fafc, #f8fafc 6px, #f1f5f9 6px, #f1f5f9 12px);
+    border-style: dashed; color: var(--text-muted); cursor: not-allowed; opacity: .85;
+}
+.port.locked:hover { border-color: var(--border); }
+.port.locked .pname { color: var(--text-muted); }
+
+/*
+ * Ports mit einem Auftrag in Arbeit. Anders als ein gesperrter Port
+ * (Rechte) ist das ein Zustand auf Zeit – deshalb ein ruhiger Streifen in
+ * der Hauptfarbe statt Grau, und kein Schloss.
+ */
+.port.in-arbeit {
+    background: repeating-linear-gradient(45deg, var(--primary-light), var(--primary-light) 6px, var(--surface) 6px, var(--surface) 12px);
+    border-color: var(--primary); cursor: progress; opacity: .8;
+}
+.port.in-arbeit .pname::after { content: " ⏳"; }
+
+/* Ein VLAN, das auf den gewählten Ports als Access anliegt: für den Trunk
+   nicht zu haben. Access geht vor Trunk. */
+.port.nicht-verfuegbar { opacity: .55; cursor: not-allowed; border-style: dashed; }
+.port.nicht-verfuegbar:hover { border-color: var(--border); }
+.port.nicht-verfuegbar .vlan-ist { color: var(--text-muted); }
+
+/* Aufträge im Hintergrund: je Auftrag Kopfzeile, Balken, Stand. */
+.auftraege-liste { display: flex; flex-direction: column; gap: .8rem; }
+.auftrag-kopf {
+    display: flex; align-items: baseline; gap: .6rem; flex-wrap: wrap;
+    font-size: .84rem; margin-bottom: .35rem;
+}
+.auftrag-kopf strong { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
+.auftrag-zahl { font-variant-numeric: tabular-nums; font-weight: 650; }
+.auftrag-schritt { margin-top: .3rem; overflow-wrap: anywhere; }
+
+/* ------------------------------------------------ Monitoring: Verlaufsbalken */
+.spark {
+    display: flex;
+    align-items: flex-end;
+    gap: 2px;
+    height: 34px;
+    min-width: 90px;
+}
+.spark-bar {
+    flex: 1 1 3px;
+    min-width: 3px;
+    border-radius: 2px 2px 0 0;
+    background: var(--success);
+    opacity: .85;
+}
+.spark-bar.warn { background: var(--warning); }
+.spark-bar.crit { background: var(--danger); }
+
+/* Messwert-Kacheln */
+.metric-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+    gap: .75rem;
+}
+.metric {
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: .6rem .75rem;
+    min-width: 0;
+}
+.metric .metric-label {
+    display: block;
+    font-size: .78rem;
+    color: var(--text-muted);
+    margin-bottom: .15rem;
+}
+.metric .metric-value {
+    font-size: 1.15rem;
+    font-weight: 600;
+    word-break: break-word;
+}
+.metric.ok    { border-left: 3px solid var(--success); }
+.metric.warn  { border-left: 3px solid var(--warning); }
+.metric.crit  { border-left: 3px solid var(--danger); }
+
+@media (max-width: 720px) {
+    .spark { height: 26px; min-width: 60px; }
+}
+
+/* ------------------------------------------- Warnanzeige für die Anbindungen */
+.alert-bar {
+    display: flex;
+    align-items: flex-start;
+    gap: .75rem;
+    padding: .75rem 1rem;
+    border-radius: var(--radius);
+    border: 1px solid var(--warning);
+    background: var(--warning-light);
+    color: var(--warning);
+    margin-bottom: 1rem;
+}
+.alert-bar.crit {
+    border-color: var(--danger);
+    background: var(--danger-light);
+    color: var(--danger);
+}
+.alert-bar-icon {
+    flex: 0 0 22px;
+    width: 22px;
+    height: 22px;
+    border-radius: 50%;
+    display: grid;
+    place-items: center;
+    font-weight: 700;
+    font-size: .8rem;
+    line-height: 1;
+    background: var(--warning);
+    color: var(--warning-light);
+}
+.alert-bar.crit .alert-bar-icon {
+    background: var(--danger);
+    color: var(--danger-light);
+}
+.alert-bar-text { min-width: 0; }
+.alert-bar .btn { align-self: center; }
+
+@media (max-width: 720px) {
+    .alert-bar { flex-wrap: wrap; }
+    .alert-bar .btn { width: 100%; }
+}
+
+/* ------------------------------------------------- Patchfeld wie im Rack */
+.panel-face {
+    display: flex;
+    flex-direction: column;
+    gap: .5rem;
+    padding: .6rem;
+    border-radius: 8px;
+    background: #1f2937;
+    overflow-x: auto;
+}
+.panel-row {
+    display: grid;
+    grid-template-columns: repeat(var(--ports), minmax(44px, 1fr));
+    gap: 4px;
+    align-items: stretch;
+    position: relative;
+    min-width: min-content;
+}
+.panel-row-no {
+    position: absolute;
+    left: -.55rem;
+    top: 50%;
+    transform: translate(-100%, -50%);
+    font-size: .7rem;
+    color: #94a3b8;
+    font-family: "JetBrains Mono", monospace;
+}
+.panel-face:has(.panel-row-no) { padding-left: 1.6rem; }
+
+.panel-jack {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 2px;
+    padding: .3rem .15rem .25rem;
+    border-radius: 4px;
+    background: #374151;
+    border: 1px solid #4b5563;
+    color: #e5e7eb;
+    text-decoration: none;
+    min-width: 0;
+}
+.panel-jack:hover { border-color: #93c5fd; text-decoration: none; }
+.panel-jack .jack-face {
+    display: flex;
+    gap: 2px;
+    align-items: center;
+    justify-content: center;
+    width: 100%;
+    min-height: 20px;
+}
+/* RJ45: rechteckige Buchse mit Nase */
+.panel-jack .rj45 {
+    width: 20px;
+    height: 17px;
+    background: #cbd5e1;
+    border-radius: 2px;
+    position: relative;
+    display: block;
+}
+.panel-jack .rj45::after {
+    content: "";
+    position: absolute;
+    left: 50%;
+    bottom: -3px;
+    transform: translateX(-50%);
+    width: 8px;
+    height: 4px;
+    background: #cbd5e1;
+    border-radius: 0 0 2px 2px;
+}
+/* LWL: runde Kupplung, bei Duplex zwei nebeneinander */
+.panel-jack:not(.duplex) .jack-face i:not(.rj45),
+.panel-jack.duplex .jack-face i {
+    width: 11px;
+    height: 15px;
+    border-radius: 3px;
+    background: #cbd5e1;
+    display: block;
+}
+.panel-jack .jack-no {
+    font-size: .64rem;
+    font-family: "JetBrains Mono", monospace;
+    line-height: 1;
+}
+.panel-jack .jack-sub {
+    font-size: .56rem;
+    color: #9ca3af;
+    line-height: 1;
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.panel-jack.patched            { background: #14532d; border-color: #22c55e; }
+.panel-jack.patched i          { background: #4ade80; }
+.panel-jack.wired              { background: #713f12; border-color: #f59e0b; }
+.panel-jack.wired i            { background: #fbbf24; }
+.panel-jack.reserved           { background: #1e3a8a; border-color: #60a5fa; }
+.panel-jack.reserved i         { background: #93c5fd; }
+.panel-jack.defect             { background: #7f1d1d; border-color: #ef4444; }
+.panel-jack.defect i           { background: #fca5a5; }
+/* Nicht bestückte Plätze bleiben sichtbar, aber deutlich zurückgenommen */
+.panel-jack.disabled           { background: #262f3d; border-color: #374151; opacity: .5; }
+.panel-jack.disabled i         { background: #6b7280; }
+.panel-jack.free               { background: #334155; border-color: #475569; }
+.panel-jack.free i             { background: #94a3b8; }
+.panel-jack.selected           { outline: 2px solid #60a5fa; outline-offset: 1px; }
+
+@media (max-width: 720px) {
+    .panel-row { grid-template-columns: repeat(var(--ports), 34px); }
+    .panel-jack .jack-sub { display: none; }
+}
+
+/* ------------------------------------------------------ Kamera-Scanner */
+.scan-box {
+    position: relative;
+    max-width: 480px;
+    margin: 0 auto;
+    border-radius: var(--radius);
+    overflow: hidden;
+    background: #0f172a;
+}
+.scan-box video {
+    width: 100%;
+    display: block;
+    aspect-ratio: 4 / 3;
+    object-fit: cover;
+}
+.scan-frame {
+    position: absolute;
+    inset: 18% 12%;
+    border: 2px solid rgba(255, 255, 255, .85);
+    border-radius: 10px;
+    box-shadow: 0 0 0 9999px rgba(15, 23, 42, .35);
+    pointer-events: none;
+}
+.device-qr {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: .35rem;
+}
+.device-qr img, .device-qr table {
+    width: 160px;
+    height: 160px;
+    image-rendering: pixelated;
+}
+
+.scan-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 50;
+    background: rgba(15, 23, 42, .85);
+    display: grid;
+    place-items: center;
+    padding: 1rem;
+}
+.scan-overlay-inner {
+    width: min(480px, 100%);
+    color: #f8fafc;
+    display: flex;
+    flex-direction: column;
+    gap: .6rem;
+}
+.scan-toast {
+    position: fixed;
+    left: 50%;
+    bottom: 1.25rem;
+    transform: translateX(-50%);
+    z-index: 60;
+    background: #0f172a;
+    color: #f8fafc;
+    padding: .55rem .9rem;
+    border-radius: var(--radius);
+    box-shadow: var(--shadow);
+    font-size: .85rem;
+    max-width: 90vw;
+}
+.scan-inline {
+    display: inline-flex;
+    align-items: center;
+    gap: .35rem;
+}
+
+/* ------------------------------------------------------------ Kabel-Trace */
+/* Der Weg eines Kabels als Kette: Stationen untereinander, verbunden durch
+   eine durchgehende Linie. Die Linie ist das Kabel. */
+.trace { list-style: none; margin: 0; padding: 0; }
+.trace-station { display: flex; gap: .75rem; align-items: flex-start; position: relative; padding: .35rem 0 .35rem 0; }
+.trace-station::before {
+    content: ''; position: absolute; left: 11px; top: 0; bottom: 0; width: 2px;
+    background: var(--border);
+}
+.trace-station:first-child::before { top: 50%; }
+.trace-station:last-child::before { bottom: 50%; }
+.trace-symbol {
+    position: relative; z-index: 1; width: 24px; text-align: center; flex: 0 0 24px;
+    background: var(--surface); color: var(--text-muted); line-height: 1.4;
+}
+.trace-titel { font-weight: 600; display: flex; gap: .4rem; align-items: center; flex-wrap: wrap; }
+.trace-text { min-width: 0; }
+/* Die Kabelstrecken selbst treten zurück – sie sind die Verbindung, nicht
+   das Ziel. */
+.trace-leitung .trace-titel,
+.trace-patchkabel .trace-titel { font-weight: 500; color: var(--text-muted); }
+.trace-offen .trace-symbol { color: var(--warning); }
+.trace-offen .trace-titel { color: var(--warning); }
+
+/* --------------------------------------------- Voucher-Etikettenbogen */
+
+/*
+ * Der Bogen zur Auswahl der belegten Plätze.
+ *
+ * Maßstäblich nachgebildet und nicht als gleichmäßiges Gitter: nur so
+ * sieht man vor dem Druck, ob die Aufteilung zu dem Bogen passt, den man
+ * in der Hand hält.
+ */
+.bogen-raster {
+    position: relative;
+    width: 100%;
+    max-width: 320px;
+    aspect-ratio: 210 / 297;
+    background: #fff;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    box-shadow: inset 0 0 0 1px rgba(15,23,42,.04);
+    margin: .6rem 0;
+}
+.bogen-platz {
+    position: absolute;
+    display: flex; align-items: center; justify-content: center;
+    box-sizing: border-box;
+    padding: 0; margin: 0;
+    border: 1px solid var(--border);
+    background: var(--surface);
+    color: var(--text-muted);
+    font: inherit; font-size: .6rem; line-height: 1;
+    cursor: pointer;
+}
+.bogen-platz:hover { border-color: var(--primary); color: var(--primary); z-index: 2; }
+.bogen-platz.belegt {
+    background: repeating-linear-gradient(45deg, #fee2e2, #fee2e2 3px, #fecaca 3px, #fecaca 6px);
+    border-color: #ef4444;
+    color: #b91c1c;
+}
+/* Der Streifen, den ein Laserdrucker nicht erreicht. */
+.bogen-druckbereich {
+    position: absolute;
+    border: 1px dashed #ef4444;
+    pointer-events: none;
+    z-index: 3;
+}
+.bogen-platz.am-rand { border-color: #f59e0b; }
+.bogen-platz.am-rand::after {
+    content: ''; position: absolute; inset: 0;
+    background: repeating-linear-gradient(-45deg, transparent, transparent 4px, rgba(245,158,11,.18) 4px, rgba(245,158,11,.18) 6px);
+    pointer-events: none;
+}
+.bogen-platz.belegt.am-rand::after { background: none; }
+
+/* --------------------------------------- Updates stehen bereit */
+
+/*
+ * Ein Zeichen neben „Abmelden", das nur erscheint, wenn wirklich etwas
+ * bereitsteht – und nur für den, der es auch einspielen darf.
+ */
+.update-zeichen {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 6px 10px; border-radius: 999px;
+    background: #fef3c7; color: #92400e; border: 1px solid #fcd34d;
+    font-size: .8rem; font-weight: 700; text-decoration: none;
+    line-height: 1;
+}
+.update-zeichen:hover { background: #fde68a; }
+.update-zeichen .zahl { font-variant-numeric: tabular-nums; }
+
+/* Für Vorleseprogramme sichtbar, für Augen nicht. */
+.sr-only {
+    position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+    overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0;
+}
+
+/*
+ * Ein abgeschlossenes Update: eine Zeile statt eines Fensters.
+ * Die Einzelheiten bleiben einen Klick entfernt, nicht dauerhaft im Weg.
+ */
+.update-erledigt {
+    display: flex;
+    align-items: center;
+    gap: .5rem;
+    flex-wrap: wrap;
+    margin: 0 0 .75rem;
+}
+
+.update-einzelheiten > summary {
+    cursor: pointer;
+    color: var(--text-muted);
+    font-size: .875rem;
+    /* Ein Ziel, das man auf dem Tablet auch trifft. */
+    min-height: 2.75rem;
+    display: flex;
+    align-items: center;
+    gap: .4rem;
+    /* `display: flex` nimmt dem summary sein Dreieck – also ein eigenes. */
+    list-style: none;
+}
+
+.update-einzelheiten > summary::-webkit-details-marker { display: none; }
+
+.update-einzelheiten > summary::before {
+    content: "▸";
+    font-size: .8em;
+    transition: transform .15s ease;
+}
+
+.update-einzelheiten[open] > summary::before {
+    transform: rotate(90deg);
+}
+
+.update-einzelheiten > summary:hover {
+    color: var(--text);
+}
+
+/* ---------------------------------------------------------- Wunschliste */
+
+/*
+ * Die Sternereihe ist der einzige Knopf, den auf dieser Seite jeder
+ * benutzt – und zwar am Tablet, im Stehen, mit dem Daumen. Deshalb
+ * fünf einzelne Schaltflächen statt eines Auswahlfeldes: ein Ziel von
+ * 2,75 rem trifft man, ein 14-Pixel-Eintrag in einer Liste nicht.
+ */
+.sterne {
+    display: inline-flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: .1rem;
+}
+
+.sterne .stern {
+    background: none;
+    border: 0;
+    padding: 0 .1rem;
+    /* 44 Pixel hoch: dasselbe Maß, das die Oberfläche sonst für
+       Ziele verlangt, die am Tablet getroffen werden müssen. In der
+       Breite reichen 40 – daneben liegt ein Stern, nicht das Nichts. */
+    min-width: 2.5rem;
+    min-height: 2.75rem;
+    font-size: 1.5rem;
+    line-height: 1;
+    cursor: pointer;
+    /* Nicht --border: in der Halle bei Tageslicht war der leere Stern
+       auf dem Tablet nicht mehr als Schaltfläche zu erkennen. */
+    color: #cbd5e1;
+    transition: color .1s ease, transform .1s ease;
+}
+
+.sterne .stern.gewaehlt { color: #d97706; }
+
+/*
+ * Beim Überfahren füllt sich die Reihe bis zum Finger: die Sterne vor
+ * dem angesteuerten leuchten mit. Das geht ohne Skript, weil die
+ * Reihe umgekehrt gestapelt ist (row-reverse) – ein Nachbar links
+ * lässt sich in CSS nicht ansprechen, ein Nachbar rechts schon.
+ */
+.sterne .stern-reihe {
+    display: inline-flex;
+    flex-direction: row-reverse;
+}
+
+.sterne .stern-reihe .stern:hover,
+.sterne .stern-reihe .stern:focus-visible,
+.sterne .stern-reihe .stern:hover ~ .stern,
+.sterne .stern-reihe .stern:focus-visible ~ .stern {
+    color: #f59e0b;
+    transform: scale(1.1);
+}
+
+/* Die Auswertung: große Sterne, daneben die Zahl. */
+.wunsch-wertung {
+    display: flex;
+    align-items: baseline;
+    gap: .5rem;
+    white-space: nowrap;
+}
+
+.wunsch-wertung .sternzeile {
+    font-size: 1.15rem;
+    color: #d97706;
+    letter-spacing: .05em;
+}
+
+.wunsch-rang {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 2rem;
+    height: 2rem;
+    border-radius: 50%;
+    background: var(--surface-alt);
+    border: 1px solid var(--border);
+    font-weight: 600;
+    color: var(--text-muted);
+}
+
+/*
+ * „Stand setzen" steht in der rechten Spalte, die nicht umbricht.
+ * Nebeneinander gestellt schoben Auswahl, Begründung und Knopf die
+ * Tabelle über ihren Rand hinaus, samt Querbalken – im Browser
+ * angesehen, nicht im Code vermutet. Also untereinander und auf feste
+ * Breite.
+ */
+.wunsch-stand-form {
+    display: grid;
+    gap: .35rem;
+    width: 13rem;
+    margin-left: auto;
+    text-align: left;
+    white-space: normal;
+}
+
+.wunsch-stand-form select,
+.wunsch-stand-form input,
+.wunsch-stand-form button {
+    width: 100%;
+}
+
+/* Der Freitext steht, wie er eingetippt wurde – Absätze inklusive. */
+.wunsch-text {
+    white-space: pre-wrap;
+    margin: .35rem 0 0;
+}
+
+/* ------------------------------------------------------------ Handbuch
+ *
+ * Die Dokumentation liegt als Markdown neben dem Programm und wird hier
+ * gesetzt. Sie ist Fließtext und soll sich wie Fließtext lesen – etwas
+ * breiter Zeilenabstand, Überschriften mit Luft davor, Tabellen wie
+ * überall sonst.
+ */
+.handbuch { line-height: 1.65; max-width: 62rem; }
+.handbuch h1 { font-size: 1.45rem; margin: 0 0 .8rem; }
+.handbuch h2 { font-size: 1.15rem; margin: 2rem 0 .6rem; padding-top: .4rem; border-top: 1px solid var(--border); }
+.handbuch h3 { font-size: 1rem; margin: 1.4rem 0 .4rem; }
+.handbuch h4 { font-size: .92rem; margin: 1.1rem 0 .3rem; }
+.handbuch p { margin: 0 0 .8rem; }
+.handbuch ul, .handbuch ol { margin: 0 0 .9rem 1.2rem; padding: 0; }
+.handbuch li { margin: 0 0 .3rem; }
+.handbuch code { font-size: .86em; }
+.handbuch pre.md-code {
+    background: #0f172a; color: #e2e8f0; padding: .8rem 1rem; border-radius: 8px;
+    overflow-x: auto; font-size: .8rem; line-height: 1.5; margin: 0 0 1rem;
+}
+.handbuch pre.md-code code { background: none; color: inherit; padding: 0; font-size: inherit; }
+.handbuch blockquote {
+    margin: 0 0 1rem; padding: .6rem .9rem;
+    border-left: 3px solid #3b82f6; background: rgba(59,130,246,.06); border-radius: 0 8px 8px 0;
+}
+.handbuch blockquote p:last-child { margin-bottom: 0; }
+.handbuch img { max-width: 100%; height: auto; border-radius: 8px; border: 1px solid var(--border); margin: .3rem 0 1rem; }
+.handbuch hr { border: 0; border-top: 1px solid var(--border); margin: 1.6rem 0; }
+.handbuch .table-wrap { margin: 0 0 1rem; }
+/* Überschriften bekommen Luft nach oben, damit der Sprung aus dem
+ * Inhaltsverzeichnis nicht direkt unter der Kopfzeile landet. */
+.handbuch [id] { scroll-margin-top: 4.5rem; }
+
+.handbuch-seite {
+    display: block; padding: .5rem .6rem; border-radius: 8px; color: inherit;
+}
+.handbuch-seite:hover { background: var(--surface-alt); text-decoration: none; }
+.handbuch-seite.aktiv { background: rgba(59,130,246,.1); }
+.handbuch-seite strong { display: block; font-size: .88rem; }
+.handbuch-seite span { display: block; }
+
+.handbuch-gliederung { max-height: 60vh; overflow-y: auto; }
+.handbuch-gliederung a { display: block; padding: .18rem 0; font-size: .82rem; color: var(--text-muted); }
+.handbuch-gliederung a:hover { color: var(--text); }
+.handbuch-gliederung a.stufe-3 { padding-left: .9rem; font-size: .78rem; }
+
+/* Schnellzugriff auf dem Dashboard: ein paar Wege, die man täglich geht. */
+.schnellzugriff {
+    display: grid; gap: .6rem;
+    grid-template-columns: repeat(auto-fit, minmax(13rem, 1fr));
+}
+.schnell-kachel {
+    display: block; padding: .7rem .85rem;
+    border: 1px solid var(--border); border-radius: var(--radius);
+    background: var(--surface-alt); color: inherit;
+}
+.schnell-kachel:hover {
+    text-decoration: none; border-color: #93c5fd; background: var(--primary-light);
+}
+.schnell-kachel strong { display: block; font-size: .9rem; margin-bottom: .1rem; }
+.schnell-kachel span { display: block; line-height: 1.35; }
+
+/* ------------------------------------------------------ Antenne ausrichten
+   Diese Seite wird auf einer Leiter gelesen. Der Pegel steht deshalb so
+   groß, dass man ihn aus Armlänge erkennt, und die Richtungstasten sind
+   so breit, dass man sie mit Handschuh trifft. */
+.rf-pegel { display: flex; align-items: baseline; gap: .6rem; margin-bottom: .6rem; }
+.rf-zahl { font-size: 3.4rem; line-height: 1; font-weight: 700; font-variant-numeric: tabular-nums; }
+.rf-zahl.rf-gut { color: var(--success); }
+.rf-zahl.rf-brauchbar { color: var(--warning); }
+.rf-zahl.rf-schwach { color: var(--danger); }
+.rf-zahl.rf-unbekannt { color: var(--text-muted); }
+.rf-einheit { color: var(--text-muted); font-size: .95rem; }
+.rf-trend { margin-left: .5rem; font-weight: 600; font-variant-numeric: tabular-nums; }
+.rf-trend.rf-steigt { color: var(--success); }
+.rf-trend.rf-faellt { color: var(--danger); }
+/* Bester Wert und Abstand: beim Schwenken die Zahl, auf die es ankommt. */
+.rf-ziel { display: grid; grid-template-columns: 1fr 1fr; gap: .5rem; margin-bottom: .6rem; }
+.rf-ziel > div { display: flex; flex-direction: column; background: var(--surface-alt);
+    border-radius: 8px; padding: .45rem .6rem; }
+.rf-ziel strong { font-size: 1.35rem; font-variant-numeric: tabular-nums; }
+
+.rf-empfehlung { border-left: 4px solid var(--border); background: var(--surface-alt);
+    padding: .7rem .9rem; border-radius: 6px; display: flex; flex-direction: column; gap: .2rem; }
+.rf-empfehlung strong { font-size: 1.15rem; }
+.rf-empfehlung .small { color: var(--text-muted); }
+.rf-stufe-ok { border-left-color: var(--success); }
+.rf-stufe-warn { border-left-color: var(--warning); }
+.rf-stufe-info { border-left-color: var(--primary); }
+.rf-hinweise:not(:empty) { margin-top: .6rem; }
+
+.rf-werte { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+    gap: .5rem; margin: .9rem 0 .4rem; }
+.rf-werte > div { display: flex; flex-direction: column; background: var(--surface-alt);
+    border-radius: 6px; padding: .45rem .6rem; }
+.rf-name { color: var(--text-muted); font-size: .78rem; text-transform: uppercase; letter-spacing: .03em; }
+.rf-werte .rf-gut { color: var(--success); }
+.rf-werte .rf-brauchbar { color: var(--warning); }
+.rf-werte .rf-schwach { color: var(--danger); }
+
+/* Eine auf den Geräten gefundene Strecke, bevor sie übernommen ist. */
+.rf-fund { border: 1px solid var(--border); border-radius: 8px; padding: .6rem .8rem; margin-bottom: .6rem; }
+.rf-fund dl { margin: .5rem 0 0; }
+.rf-verlauf { width: 100%; height: 60px; display: block; margin-top: .6rem; }
+.rf-balken { fill: color-mix(in srgb, var(--primary) 45%, transparent); }
+.rf-balken-best { fill: var(--success); }
+
+
+
+/* Voraussetzungen einer Funktion: was fehlt, und wohin es geht. */
+.voraussetzungen > summary { cursor: pointer; list-style: none; }
+.voraussetzungen > summary::-webkit-details-marker { display: none; }
+.voraussetzungen:not([open]) > summary { border-bottom: 0; }
+.voraussetzungen.fehlt { border-color: var(--danger); }
+.voraussetzungen-liste { list-style: none; margin: 0; padding: .4rem 1rem .8rem; }
+.voraussetzung { display: flex; align-items: flex-start; gap: .7rem; padding: .5rem 0;
+    border-bottom: 1px solid var(--border); }
+.voraussetzung:last-child { border-bottom: 0; }
+.voraussetzung > div { flex: 1; min-width: 0; }
+.voraussetzung > .badge { min-width: 1.6rem; justify-content: center; margin-top: .1rem; }
+.voraussetzung.offen { opacity: .6; }
+
+/* Hotspot-Seite: Einstellungen neben der Vorschau im Telefonformat. */
+/* Breiter als die übliche Seitenspalte: die Vorschau hat Telefonbreite. */
+.grid-sidebar.hotspot-raster { grid-template-columns: minmax(0, 1fr) 440px; }
+@media (max-width: 1100px) { .grid-sidebar.hotspot-raster { grid-template-columns: minmax(0, 1fr); } }
+.hotspot-vorschau { width: 100%; max-width: 390px; height: 700px; border: 1px solid var(--border);
+    border-radius: 18px; background: #fff; display: block; margin: 0 auto; }
+.hotspot-farben { display: flex; gap: .8rem; flex-wrap: wrap; }
+.hotspot-farben input[type=color] { width: 3rem; height: 2.2rem; padding: 0; border: 1px solid var(--border); }
+
+/* Ein Fund, der wahrscheinlich ein anderer ist – oder schon im Inventar steht. */
+.fund-hinweis { margin-top: .45rem; padding: .45rem .6rem; border-left: 3px solid var(--warning);
+    background: var(--warning-light); border-radius: 4px; font-size: .82rem; min-width: 260px; max-width: 420px; }
+.fund-hinweis .btn-row { gap: .35rem; }
+
+/* AP-Standorte: Knöpfe unter dem Standort – die Seitenspalte ist zu schmal
+   für eine eigene Spalte, dort wurden sie abgeschnitten. */
+.ap-standort-knoepfe { display: flex; flex-wrap: wrap; gap: .3rem; margin-top: .35rem; }
+.ap-standort-knoepfe form { display: inline; margin: 0; }
+.ap-standort-knoepfe .btn { white-space: nowrap; }
+/* Im Kartenkopf gibt eher die Etagenauswahl nach als dieser Knopf. */
+.card-head > .ap-zum-grundriss,
+.card-head > .ap-karten-titel { flex-shrink: 0; white-space: nowrap; }
+
+/* Einstellungen → Location herunterladen: in der schmalen Seitenspalte darf
+   der Status umbrechen – einzeilig wurde „eingespielt, aktuell“ abgeschnitten. */
+.inventar-status .badge { white-space: normal; text-align: left; }

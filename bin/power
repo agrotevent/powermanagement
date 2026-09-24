@@ -1,0 +1,295 @@
+#!/usr/bin/env php
+<?php
+declare(strict_types=1);
+
+/**
+ * PowerManagement – Kommandozeile.
+ *
+ *   bin/power install [benutzer] [passwort] [--name="Titel"] [--stdin] [--ohne-wechsel] [--demo]
+ *                                   Datenbank anlegen, Rollen, Steckertypen, Registerprofile
+ *                                   und Administrator erzeugen. Das Kennwort muss bei der
+ *                                   ersten Anmeldung geändert werden (außer --ohne-wechsel).
+ *                                   --stdin liest das Kennwort von der Standardeingabe –
+ *                                   dann steht es nicht in der Prozessliste. Fehlt
+ *                                   config/config.php, wird sie mit eigenem Schlüssel
+ *                                   angelegt (--demo: im Demo-Modus, ohne InfluxDB/MQTT).
+ *   bin/power migrate               Nur Migrationen ausführen (und Grundbestand ergänzen)
+ *   bin/power einstellung <schlüssel> <wert> | --stdin
+ *                                   Einstellung setzen; influx.token, influx.password,
+ *                                   mqtt.password und inventory.token werden verschlüsselt abgelegt
+ *   bin/power pruefen               Datenbank, InfluxDB, MQTT und Node-RED prüfen
+ *   bin/power sammler [--einmal] [--gespraechig]
+ *                                   Modbus-Geräte und Clouds abfragen (Dauerdienst)
+ *   bin/power user:add <name> <rolle> [passwort]
+ *   bin/power user:password <name> <passwort>
+ *   bin/power titel "Titel" [untertitel] [kürzel]
+ *   bin/power plan:kacheln [--neu]  Kacheln aller Grundrisse berechnen
+ *   bin/power location:liste        Locations im gemeinsamen Repository anzeigen
+ *   bin/power location:uebernehmen <schlüssel>
+ *   bin/power demo:seed [--reset]   Demo-Gelände mit Anlagen, Kabeln und Benutzern anlegen
+ *   bin/power wartung               Protokolle aufräumen (täglich per Timer)
+ */
+
+require dirname(__DIR__) . '/src/bootstrap.php';
+
+use App\Messung\Influx;
+use App\Messung\Messdaten;
+use App\Messung\Mqtt;
+use App\Messung\Profile;
+use App\Messung\Sammler;
+use App\Services\AnlagenService;
+use App\Services\BenutzerService;
+use App\Services\DemoSeed;
+use App\Services\LocationSync;
+use App\Services\PlanTileService;
+use App\Services\SiteService;
+use App\Support\Config;
+use App\Support\Crypto;
+use App\Support\Database;
+use App\Support\Settings;
+
+$argumente = array_slice($argv, 1);
+$befehl = array_shift($argumente) ?? 'hilfe';
+$optionen = [];
+$werte = [];
+foreach ($argumente as $a) {
+    if (str_starts_with($a, '--')) {
+        [$k, $v] = array_pad(explode('=', substr($a, 2), 2), 2, true);
+        $optionen[$k] = $v;
+    } else {
+        $werte[] = $a;
+    }
+}
+
+/** Eine Zeile von der Standardeingabe – für Kennwörter, die nicht in der Prozessliste stehen sollen. */
+$eingabe = static function (): string {
+    return rtrim((string) fgets(STDIN), "\r\n");
+};
+
+$aus = static function (string $text): void {
+    fwrite(STDOUT, $text . PHP_EOL);
+};
+$fehler = static function (string $text): never {
+    fwrite(STDERR, 'Fehler: ' . $text . PHP_EOL);
+    exit(1);
+};
+
+$grundbestand = static function () use ($aus): void {
+    $applied = Database::migrate(APP_ROOT . '/database/migrations');
+    foreach ($applied as $m) {
+        $aus('  Migration ' . $m);
+    }
+    $rollen = BenutzerService::standardRollenAnlegen();
+    $stecker = AnlagenService::grundbestand();
+    $profile = Profile::grundbestand();
+    if ($rollen + $stecker + $profile > 0) {
+        $aus(sprintf('  Grundbestand: %d Rollen, %d Steckertypen, %d Registerprofile', $rollen, $stecker, $profile));
+    }
+};
+
+switch ($befehl) {
+    case 'install':
+        $aus('PowerManagement wird eingerichtet …');
+        // Ohne config/config.php: aus der Vorlage anlegen, mit eigenem
+        // Schlüssel (verschlüsselt die Zugänge in der Datenbank).
+        $konfig = APP_ROOT . '/config/config.php';
+        if (!is_file($konfig)) {
+            $inhalt = (string) file_get_contents(APP_ROOT . '/config/config.example.php');
+            $inhalt = str_replace('base64:CHANGEME000000000000000000000000000000000000', 'base64:' . base64_encode(random_bytes(32)), $inhalt);
+            if (isset($optionen['demo'])) {
+                $inhalt = (string) preg_replace("/'demo'(\s*)=> false/", "'demo'$1=> true", $inhalt, 1);
+            }
+            file_put_contents($konfig, $inhalt);
+            chmod($konfig, 0640);
+            Config::load($konfig);
+            $aus('  config/config.php angelegt' . (isset($optionen['demo']) ? ' (Demo-Modus)' : ''));
+        }
+        $grundbestand();
+        if (isset($optionen['name']) && is_string($optionen['name']) && trim($optionen['name']) !== '') {
+            Settings::put('app.name', trim($optionen['name']));
+        }
+        $benutzer = $werte[0] ?? 'admin';
+        $vorhanden = Database::first('SELECT id FROM users WHERE username = ?', [$benutzer]);
+        if ($vorhanden !== null) {
+            $aus('Benutzer „' . $benutzer . '“ gibt es schon – unverändert.');
+            break;
+        }
+        $kennwort = isset($optionen['stdin']) ? $eingabe() : ($werte[1] ?? '');
+        $vorgegeben = $kennwort !== '';
+        if (!$vorgegeben) {
+            $kennwort = Crypto::randomPassword(16);
+        }
+        $wechsel = !isset($optionen['ohne-wechsel']);
+        BenutzerService::anlegen($benutzer, $kennwort, 'admin', $wechsel);
+        $aus('');
+        $aus('Administrator angelegt:');
+        $aus('  Benutzer: ' . $benutzer);
+        if (!$vorgegeben) {
+            $aus('  Passwort: ' . $kennwort);
+        }
+        if ($wechsel) {
+            $aus('  Das Passwort muss bei der ersten Anmeldung geändert werden.');
+        }
+        break;
+
+    case 'migrate':
+        $grundbestand();
+        $aus('Datenbank ist auf dem aktuellen Stand.');
+        break;
+
+    case 'einstellung':
+        [$schluessel, $wert] = array_pad($werte, 2, null);
+        if (isset($optionen['stdin'])) {
+            $wert = $eingabe();
+        }
+        if ($schluessel === null || $wert === null) {
+            $fehler('Aufruf: bin/power einstellung <schlüssel> <wert>   (oder --stdin)');
+        }
+        $geheim = [
+            'influx.token'    => Settings::GEHEIM_INFLUX_TOKEN,
+            'influx.password' => Settings::GEHEIM_INFLUX_KENNWORT,
+            'mqtt.password'   => Settings::GEHEIM_MQTT_KENNWORT,
+            'inventory.token' => Settings::GEHEIM_REPO_TOKEN,
+        ];
+        if (isset($geheim[$schluessel])) {
+            Settings::geheimnisSetzen($geheim[$schluessel], $wert);
+            $aus($schluessel . ' verschlüsselt abgelegt.');
+        } elseif (array_key_exists($schluessel, Settings::OVERRIDABLE)) {
+            Settings::put($schluessel, $wert);
+            $aus($schluessel . ' = ' . $wert);
+        } else {
+            $fehler('Unbekannter Schlüssel. Möglich: ' . implode(', ', array_merge(array_keys(Settings::OVERRIDABLE), array_keys($geheim))));
+        }
+        break;
+
+    case 'pruefen':
+        $ok = true;
+        $aus('Datenbank:  ' . Database::driver() . ', ' . (int) Database::scalar('SELECT COUNT(*) FROM users') . ' Benutzer, '
+            . (int) Database::scalar('SELECT COUNT(*) FROM objekte WHERE ist_vorlage = 0') . ' Anlagen');
+        if (Config::isDemo()) {
+            $aus('Demo-Modus: InfluxDB und MQTT werden nicht gebraucht.');
+            break;
+        }
+        $influx = Influx::pruefen();
+        $aus('InfluxDB:   ' . ($influx['ok'] ? 'OK – ' : 'FEHLER – ') . $influx['message']);
+        $ok = $ok && $influx['ok'];
+        try {
+            $mqtt = Mqtt::ausKonfiguration('pm-pruefen');
+            $mqtt->abonnieren([trim((string) Config::get('mqtt.prefix', 'pm'), '/') . '/status/nodered']);
+            $nachrichten = $mqtt->lauschen(2, static fn () => true);
+            $mqtt->trennen();
+            $aus('MQTT:       OK – ' . Config::get('mqtt.host') . ':' . Config::get('mqtt.port'));
+            if ($nachrichten !== []) {
+                $herz = json_decode($nachrichten[0]['nachricht'], true);
+                $aus('Node-RED:   ' . (is_array($herz) ? 'meldet sich (' . json_encode($herz) . ')' : 'meldet sich'));
+            } else {
+                $aus('Node-RED:   kein Herzschlag auf pm/status/nodered (läuft Node-RED mit den PowerManagement-Flows?)');
+            }
+        } catch (\Throwable $e) {
+            $aus('MQTT:       FEHLER – ' . $e->getMessage());
+            $ok = false;
+        }
+        if ($influx['ok']) {
+            $pipeline = Messdaten::pipeline();
+            $aus('Schreiben:  ' . ($pipeline === null ? 'in der letzten Stunde kein Herzschlag von Node-RED in der InfluxDB'
+                : 'zuletzt ' . date('d.m.Y H:i:s', intdiv($pipeline['zeit'], 1000)) . ', ' . (int) $pipeline['geschrieben'] . ' Zeilen, ' . (int) $pipeline['fehler'] . ' Fehler'));
+        }
+        exit($ok ? 0 : 1);
+
+    case 'sammler':
+        if (Config::isDemo()) {
+            $aus('Demo-Modus: der Sammler hat nichts zu tun (die Messwerte werden erzeugt).');
+            if (!isset($optionen['einmal'])) {
+                // Als Dienst nicht in einer Neustartschleife enden.
+                while (true) {
+                    sleep(3600);
+                }
+            }
+            break;
+        }
+        $sammler = new Sammler(isset($optionen['gespraechig']) || isset($optionen['einmal']));
+        if (isset($optionen['einmal'])) {
+            $anzahl = $sammler->runde(\App\Messung\Datenquellen::alle(), true);
+            $aus($anzahl . ' Datenquelle(n) abgefragt.');
+            break;
+        }
+        $sammler->schleife();
+        break;
+
+    case 'user:add':
+        [$name, $rolle, $kennwort] = array_pad($werte, 3, null);
+        if ($name === null || $rolle === null) {
+            $fehler('Aufruf: bin/power user:add <name> <rolle> [passwort]');
+        }
+        if (Database::first('SELECT id FROM roles WHERE role_key = ?', [$rolle]) === null) {
+            $fehler('Unbekannte Rolle. Vorhanden: ' . implode(', ', array_column(Database::select('SELECT role_key FROM roles'), 'role_key')));
+        }
+        $kennwort ??= Crypto::randomPassword(16);
+        BenutzerService::anlegen($name, $kennwort, $rolle);
+        $aus('Benutzer ' . $name . ' angelegt, Passwort: ' . $kennwort);
+        break;
+
+    case 'user:password':
+        [$name, $kennwort] = array_pad($werte, 2, null);
+        if ($name === null || $kennwort === null) {
+            $fehler('Aufruf: bin/power user:password <name> <passwort>');
+        }
+        $n = Database::execute('UPDATE users SET password_hash = ?, failed_logins = 0, locked_until = NULL WHERE username = ?', [password_hash($kennwort, PASSWORD_DEFAULT), $name]);
+        $n > 0 ? $aus('Passwort gesetzt.') : $fehler('Benutzer nicht gefunden.');
+        break;
+
+    case 'titel':
+        if (($werte[0] ?? '') === '') {
+            $fehler('Aufruf: bin/power titel "Titel" [untertitel] [kürzel]');
+        }
+        Settings::put('app.name', $werte[0]);
+        if (isset($werte[1])) {
+            Settings::put('app.subtitle', $werte[1]);
+        }
+        if (isset($werte[2])) {
+            Settings::put('app.short_name', $werte[2]);
+        }
+        $aus('Titel gesetzt.');
+        break;
+
+    case 'plan:kacheln':
+        foreach (SiteService::allFloors() as $etage) {
+            if ((string) $etage['plan_file'] === '') {
+                continue;
+            }
+            $ergebnis = PlanTileService::bauen($etage, isset($optionen['neu']));
+            $aus($etage['site_name'] . ' / ' . $etage['name'] . ': ' . $ergebnis['message']);
+        }
+        break;
+
+    case 'location:liste':
+        $liste = LocationSync::locationsImRepo();
+        if (!$liste['ok']) {
+            $fehler($liste['message']);
+        }
+        foreach ($liste['locations'] as $l) {
+            $aus(sprintf('%-30s %-10s %d Etage(n), %d Anlage(n)', $l['schluessel'], $l['status'], $l['etagen'], $l['anlagen']));
+        }
+        break;
+
+    case 'location:uebernehmen':
+        $ergebnis = LocationSync::uebernehmen((string) ($werte[0] ?? ''));
+        $ergebnis['ok'] ? $aus($ergebnis['message']) : $fehler($ergebnis['message']);
+        break;
+
+    case 'demo:seed':
+        $aus(DemoSeed::anlegen(isset($optionen['reset'])));
+        break;
+
+    case 'wartung':
+        $grenze = gmdate('c', time() - 400 * 86400);
+        $a = Database::execute('DELETE FROM audit_log WHERE created_at < ?', [$grenze]);
+        $s = Database::execute('DELETE FROM schaltvorgaenge WHERE created_at < ?', [$grenze]);
+        $aus("Aufgeräumt: {$a} Audit-Einträge, {$s} Schaltvorgänge (älter als 400 Tage).");
+        break;
+
+    default:
+        $kopf = file_get_contents(__FILE__);
+        preg_match('#/\*\*(.*?)\*/#s', (string) $kopf, $m);
+        $aus(trim(preg_replace('/^\s*\* ?/m', '', $m[1] ?? '')));
+}

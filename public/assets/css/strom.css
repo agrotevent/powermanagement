@@ -1,0 +1,324 @@
+/*
+ * PowerManagement – Ergänzungen zu app.css (aus MasterAdmin übernommen).
+ *
+ * app.css bleibt unverändert, damit beide Werkzeuge gleich aussehen und
+ * eine Verbesserung dort sich hierher übertragen lässt. Was es nur hier
+ * gibt – Livekacheln, Anlagenzeichen, Karte, Verteilerplan –, steht hier.
+ */
+:root {
+    --stufe-ok: #16a34a;
+    --stufe-warn: #d97706;
+    --stufe-bad: #dc2626;
+    --stufe-stumm: #94a3b8;
+    --stufe-keine: #e2e8f0;
+}
+
+.sidebar .brand .logo { background: linear-gradient(135deg, #b45309, #f59e0b); }
+
+/* ------------------------------------------------------------ Kleinteile */
+.toolbar-zeile { display: flex; align-items: center; gap: .6rem; flex-wrap: wrap; margin-bottom: 1rem; }
+.toolbar-zeile .spacer { flex: 1; }
+.inline-form { display: flex; gap: .4rem; align-items: center; flex-wrap: wrap; margin: 0; }
+.inline-form select, .inline-form input { width: auto; min-width: 10rem; }
+.abschnitt { font-size: .8rem; text-transform: uppercase; letter-spacing: .06em; color: var(--text-muted); margin: 1.4rem 0 .6rem; }
+.liste-schlicht { list-style: none; padding: 0; margin: .3rem 0; }
+.liste-schlicht li { padding: .3rem 0; border-bottom: 1px solid var(--border); }
+.liste-schlicht li:last-child { border-bottom: 0; }
+.chip { display: inline-block; padding: .05rem .5rem; border-radius: 999px; background: var(--surface-alt); border: 1px solid var(--border); font-size: .74rem; margin: .1rem .2rem .1rem 0; }
+.mono { font-family: "JetBrains Mono", Consolas, monospace; }
+.text-warn { color: var(--warning); }
+.zahl-feld { width: 5.5rem; text-align: right; }
+input.kurz { width: 6rem; }
+.inline-details { display: inline-block; text-align: left; }
+.inline-details[open] { display: block; background: var(--surface-alt); border: 1px solid var(--border); border-radius: var(--radius); padding: .6rem; margin-top: .4rem; }
+.inline-details summary { list-style: none; cursor: pointer; }
+.inline-details summary::-webkit-details-marker { display: none; }
+
+.status-geplant { background: var(--info-light); color: var(--info); border-color: transparent; }
+.status-aufgebaut { background: var(--warning-light); color: var(--warning); border-color: transparent; }
+.status-in_betrieb { background: var(--success-light); color: var(--success); border-color: transparent; }
+.status-defekt { background: var(--danger-light); color: var(--danger); border-color: transparent; }
+
+/* Das Zeichen einer Anlagenart: A, G, W, V */
+.art-zeichen {
+    display: inline-grid; place-items: center; width: 22px; height: 22px; border-radius: 6px;
+    background: var(--art-farbe, #64748b); color: #fff; font-weight: 700; font-size: .72rem; flex: 0 0 22px;
+    vertical-align: middle;
+}
+.art-zeichen.gross { width: 30px; height: 30px; font-size: .9rem; border-radius: 8px; }
+
+/* Ein Steckverbinder als farbiger Punkt (CEE rot, Schuko grau, Powerlock schwarz) */
+.stecker {
+    display: inline-block; width: .8rem; height: .8rem; border-radius: 50%;
+    background: var(--stecker-farbe, #64748b); border: 2px solid #fff; box-shadow: 0 0 0 1px rgba(15, 23, 42, .25);
+    vertical-align: -1px;
+}
+
+/* Meldung unten rechts (Schalten, Auswertung) */
+#pm-meldung {
+    position: fixed; right: 1rem; bottom: calc(1rem + env(safe-area-inset-bottom)); z-index: 3000;
+    max-width: min(28rem, calc(100vw - 2rem)); padding: .7rem 1rem; border-radius: var(--radius);
+    background: #0f172a; color: #fff; box-shadow: var(--shadow); font-size: .85rem;
+    opacity: 0; transform: translateY(8px); transition: opacity .15s ease, transform .15s ease; pointer-events: none;
+}
+#pm-meldung.sichtbar { opacity: 1; transform: none; }
+#pm-meldung.fehler { background: var(--danger); }
+
+.auswertung-zeichen {
+    display: inline-flex; align-items: center; gap: .3rem; padding: .2rem .6rem; border-radius: 999px;
+    background: var(--primary-light); color: var(--primary-dark); font-weight: 600; font-size: .8rem;
+}
+.auswertung-zeichen:hover { text-decoration: none; background: #bfdbfe; }
+
+/* ------------------------------------------------------------ Livekacheln */
+.live-raster { display: grid; gap: .8rem; grid-template-columns: repeat(auto-fill, minmax(245px, 1fr)); margin-bottom: 1rem; }
+.live-raster.einzeln { grid-template-columns: minmax(0, 1fr); }
+.live-kachel {
+    background: var(--surface); border: 1px solid var(--border); border-left: 5px solid var(--stufe-keine);
+    border-radius: var(--radius); box-shadow: var(--shadow); padding: .75rem .85rem; min-width: 0;
+}
+.live-kachel.stufe-ok { border-left-color: var(--stufe-ok); }
+.live-kachel.stufe-warn { border-left-color: var(--stufe-warn); }
+.live-kachel.stufe-bad { border-left-color: var(--stufe-bad); background: #fff7f7; }
+.live-kachel.stufe-stumm { border-left-color: var(--stufe-stumm); }
+.live-kachel.stufe-gesperrt { border-left-style: dashed; border-left-color: var(--stufe-stumm); }
+.live-kopf { display: flex; align-items: flex-start; gap: .5rem; min-width: 0; }
+.live-titel { display: flex; flex-direction: column; min-width: 0; }
+.live-name { font-weight: 650; line-height: 1.25; }
+.live-ort { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.live-leistung { display: flex; align-items: baseline; gap: .6rem; margin: .45rem 0 .3rem; }
+.live-leistung [data-feld="p"] { font-size: 1.55rem; font-weight: 700; letter-spacing: -.02em; font-variant-numeric: tabular-nums; }
+.live-auslastung { font-weight: 650; color: var(--text-muted); font-variant-numeric: tabular-nums; }
+.stufe-warn .live-auslastung { color: var(--stufe-warn); }
+.stufe-bad .live-auslastung { color: var(--stufe-bad); }
+.phase-zeile { display: grid; grid-template-columns: 1.6rem 1fr 4.2rem 3.4rem; align-items: center; gap: .4rem; font-size: .78rem; font-variant-numeric: tabular-nums; }
+.phase-name { color: var(--text-muted); font-weight: 600; }
+.phase-balken { height: 7px; background: var(--surface-alt); border-radius: 999px; overflow: hidden; border: 1px solid var(--border); }
+.phase-balken span { display: block; height: 100%; background: var(--stufe-ok); border-radius: 999px; transition: width .4s ease; }
+.stufe-warn .phase-balken span { background: var(--stufe-warn); }
+.stufe-bad .phase-balken span { background: var(--stufe-bad); }
+.phase-wert { text-align: right; }
+.live-zustand { margin-top: .35rem; }
+.live-hinweis:empty { display: none; }
+
+/* In Tabellen: nur ein Streifen links */
+tr.live-zeile td:first-child { box-shadow: inset 4px 0 0 var(--stufe-keine); }
+tr.live-zeile.stufe-ok td:first-child { box-shadow: inset 4px 0 0 var(--stufe-ok); }
+tr.live-zeile.stufe-warn td:first-child { box-shadow: inset 4px 0 0 var(--stufe-warn); }
+tr.live-zeile.stufe-bad td:first-child { box-shadow: inset 4px 0 0 var(--stufe-bad); }
+tr.live-zeile.stufe-stumm td:first-child { box-shadow: inset 4px 0 0 var(--stufe-stumm); }
+
+.kennzahlen .stat-card { margin-bottom: 0; }
+.grid.kennzahlen { margin-bottom: 1rem; }
+
+/* ------------------------------------------------------------ Schalten */
+.schalt-liste { display: grid; gap: .1rem; }
+.schalt-zeile { display: flex; align-items: center; gap: .6rem; flex-wrap: wrap; padding: .45rem 0; border-bottom: 1px solid var(--border); }
+.schalt-zeile:last-child { border-bottom: 0; }
+.schalt-titel { display: flex; flex-direction: column; min-width: 0; flex: 1 1 12rem; }
+.knopf-laeuft { opacity: .6; }
+
+/* ------------------------------------------------------------ Messgeräte */
+.messgeraet { display: inline-flex; align-items: center; gap: .35rem; flex-wrap: wrap; padding: .15rem .1rem; }
+.messgeraet-zeichen {
+    display: inline-grid; place-items: center; width: 18px; height: 18px; border-radius: 50%;
+    background: #0ea5e9; color: #fff; font-size: .62rem; font-weight: 800;
+}
+.messgeraet-name { font-weight: 550; }
+.messgeraet-wert { font-variant-numeric: tabular-nums; color: var(--text-muted); font-size: .8rem; }
+.auswahl-knopf.aktiv { background: var(--primary); border-color: var(--primary); color: #fff; }
+
+/* ------------------------------------------------------------ Verteilerplan */
+.verteilerplan { font-size: .84rem; }
+.vp-einspeisung { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; padding: .5rem .6rem; background: var(--surface-alt); border: 1px solid var(--border); border-radius: 8px; }
+.vp-eingang { display: inline-flex; align-items: center; gap: .3rem; }
+.vp-baum, .vp-baum ul { list-style: none; margin: 0; padding-left: 1.1rem; border-left: 2px solid var(--border); }
+.vp-baum { margin-left: 1rem; }
+.vp-baum li { position: relative; padding: .2rem 0 .2rem .6rem; }
+.vp-baum li::before { content: ""; position: absolute; left: -1.1rem; top: .95rem; width: 1.3rem; border-top: 2px solid var(--border); }
+.vp-zeile { display: flex; flex-wrap: wrap; align-items: center; gap: .3rem .45rem; }
+.vp-abgang { display: inline-flex; align-items: center; gap: .3rem; flex-wrap: wrap; padding: .05rem .45rem; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); }
+.schutz-art { display: inline-block; font-size: .66rem; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; padding: .05rem .4rem; border-radius: 4px; background: var(--surface-alt); border: 1px solid var(--border); color: var(--text-muted); }
+.schutz-rcd, .schutz-rcbo { background: #e0f2fe; color: #075985; border-color: #bae6fd; }
+.schutz-hauptschalter { background: #0f172a; color: #fff; border-color: #0f172a; }
+.schutz-ls { background: #f1f5f9; }
+.schutz-nh { background: #fef3c7; color: #92400e; border-color: #fde68a; }
+.baum-einzug { display: inline-block; width: calc(var(--tiefe, 0) * 1.1rem); }
+.schutz-form { margin-bottom: .6rem; }
+
+.anschluss-matrix td, .anschluss-matrix th { white-space: nowrap; }
+.speisekette { margin: 0; padding-left: 1.2rem; }
+.speisekette li { padding: .2rem 0; }
+
+/* ------------------------------------------------------------ Verteilbaum */
+.verteilbaum, .verteilbaum ul { list-style: none; margin: 0; padding-left: 1.4rem; border-left: 2px solid var(--border); }
+.verteilbaum { border-left: 0; padding-left: 0; }
+.verteilbaum > li > ul { margin-left: .8rem; }
+.baum-knoten { padding: .35rem 0; position: relative; }
+.verteilbaum ul .baum-knoten::before { content: ""; position: absolute; left: -1.4rem; top: 1.2rem; width: 1.2rem; border-top: 2px solid var(--border); }
+.baum-karte { display: inline-block; padding: .4rem .65rem; border: 1px solid var(--border); border-left: 4px solid var(--stufe-keine); border-radius: 8px; background: var(--surface); }
+.baum-karte.stufe-ok { border-left-color: var(--stufe-ok); }
+.baum-karte.stufe-warn { border-left-color: var(--stufe-warn); }
+.baum-karte.stufe-bad { border-left-color: var(--stufe-bad); }
+.baum-karte.stufe-stumm { border-left-color: var(--stufe-stumm); }
+.baum-wert { margin-left: .5rem; font-variant-numeric: tabular-nums; font-weight: 600; }
+.baum-knoten.verborgen > span { font-style: italic; }
+
+/* ------------------------------------------------------------ Katalog */
+.katalog-raster { display: grid; gap: .9rem; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); }
+.katalog-karte { color: inherit; margin: 0; }
+.katalog-karte:hover { text-decoration: none; border-color: var(--primary); }
+.katalog-kopf { display: flex; align-items: center; gap: .5rem; }
+
+/* ------------------------------------------------------------ Karte */
+.karte-kopf { display: flex; align-items: center; gap: .6rem; flex-wrap: wrap; margin-bottom: .7rem; }
+.karte-werkzeuge { display: flex; gap: .3rem; flex-wrap: wrap; }
+.karte-werkzeuge .btn.aktiv { background: var(--primary); border-color: var(--primary); color: #fff; }
+.karte-raster { display: grid; grid-template-columns: minmax(0, 1fr) 340px; gap: .9rem; align-items: start; }
+.karte-karte { margin-bottom: 0; overflow: hidden; }
+.karte-seite { position: sticky; top: 4.5rem; max-height: calc(100vh - 6rem); overflow-y: auto; margin-bottom: 0; }
+.karte-fuss { display: flex; flex-wrap: wrap; gap: .5rem 1.2rem; align-items: center; justify-content: space-between; padding: .5rem .8rem; border-top: 1px solid var(--border); }
+.karte-ebenen { display: flex; flex-wrap: wrap; gap: .1rem .9rem; }
+.karte-ebenen .check { margin: 0; }
+.karte-legende { display: flex; flex-wrap: wrap; align-items: center; gap: .3rem .5rem; }
+.legende-punkt { display: inline-block; width: 12px; height: 12px; border-radius: 4px; border: 3px solid var(--stufe-keine); background: #fff; }
+.legende-punkt.stufe-ok { border-color: var(--stufe-ok); }
+.legende-punkt.stufe-warn { border-color: var(--stufe-warn); }
+.legende-punkt.stufe-bad { border-color: var(--stufe-bad); }
+.legende-punkt.stufe-stumm { border-color: var(--stufe-stumm); }
+.karte-ohne-plan { margin: .6rem; }
+.karte-status {
+    position: absolute; left: .6rem; bottom: .6rem; z-index: 800; max-width: calc(100% - 1.2rem);
+    background: rgba(15, 23, 42, .85); color: #fff; font-size: .78rem; padding: .35rem .6rem; border-radius: 8px;
+    opacity: 0; transition: opacity .15s ease; pointer-events: none;
+}
+.karte-status.sichtbar { opacity: 1; }
+
+/* Anlagen im Plan: ein Zeichen, Rand in der Farbe der Auslastung */
+.pm-anlage { font-size: .7rem; font-weight: 650; cursor: pointer; }
+.pm-anlage .pm-symbol {
+    position: absolute; left: 0; top: 0; transform: translate(-50%, -50%);
+    width: 26px; height: 26px; border-radius: 7px; display: grid; place-items: center;
+    background: var(--art-farbe, #334155); color: #fff; font-size: .78rem; font-weight: 800;
+    border: 4px solid var(--stufe-keine); box-shadow: 0 1px 4px rgba(15, 23, 42, .45);
+}
+.pm-anlage.art-generator .pm-symbol, .pm-anlage.art-anschluss .pm-symbol { border-radius: 50%; }
+.pm-anlage.stufe-ok .pm-symbol { border-color: var(--stufe-ok); }
+.pm-anlage.stufe-warn .pm-symbol { border-color: var(--stufe-warn); }
+.pm-anlage.stufe-bad .pm-symbol { border-color: var(--stufe-bad); animation: pm-puls 1.2s ease-in-out infinite; }
+.pm-anlage.stufe-stumm .pm-symbol { border-color: var(--stufe-stumm); }
+@keyframes pm-puls { 50% { box-shadow: 0 0 0 7px rgba(220, 38, 38, .25); } }
+@media (prefers-reduced-motion: reduce) { .pm-anlage.stufe-bad .pm-symbol { animation: none; } }
+.pm-anlage .plabel {
+    position: absolute; left: 17px; top: -9px; padding: .05rem .4rem; border-radius: 999px; white-space: nowrap;
+    background: #fff; border: 1.5px solid var(--art-farbe, #64748b); color: var(--text); box-shadow: 0 1px 3px rgba(15,23,42,.2);
+}
+.pm-anlage .pm-wert {
+    position: absolute; left: 17px; top: 9px; white-space: nowrap; font-size: .66rem; font-weight: 700;
+    color: #0f172a; background: rgba(255, 255, 255, .85); padding: 0 .3rem; border-radius: 4px; font-variant-numeric: tabular-nums;
+}
+.pm-anlage .pm-wert:empty { display: none; }
+.pm-anlage .pm-mess {
+    position: absolute; left: 6px; top: -19px; width: 14px; height: 14px; border-radius: 50%;
+    background: #0ea5e9; color: #fff; font-size: .55rem; font-weight: 800; display: grid; place-items: center; border: 1.5px solid #fff;
+}
+.strom-karte.ohne-beschriftung .pm-anlage .plabel,
+.strom-karte.ohne-beschriftung .pm-fremd .plabel { display: none; }
+.strom-karte.ohne-werte .pm-anlage .pm-wert { display: none; }
+.strom-karte.verschieben .pm-anlage { cursor: grab; }
+
+.pm-fremd { font-size: .62rem; color: #475569; }
+.pm-fremd .dot { position: absolute; left: -4px; top: -4px; width: 8px; height: 8px; border-radius: 50%; background: #94a3b8; }
+.pm-fremd.rack .dot { border-radius: 2px; width: 11px; height: 11px; left: -5px; top: -5px; background: #334155; }
+.pm-fremd.ap .dot { background: #a78bfa; }
+.pm-fremd .plabel { position: absolute; left: 8px; top: -7px; white-space: nowrap; background: rgba(255,255,255,.8); padding: 0 .2rem; border-radius: 3px; }
+.pm-fremd.dose .plabel { display: none; }
+
+.pm-kabel.hinweis { stroke-dasharray: 14 5; filter: drop-shadow(0 0 3px rgba(245, 158, 11, .95)); }
+
+/* Seitenleiste der Karte */
+.seite-kopf { display: flex; align-items: center; gap: .6rem; }
+.seite-kopf h2 { margin: 0; }
+.seite-werte { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .4rem .8rem; margin: .7rem 0 .3rem; padding: .6rem; border-radius: 8px; background: var(--surface-alt); border-left: 4px solid var(--stufe-keine); }
+.seite-werte.stufe-ok { border-left-color: var(--stufe-ok); }
+.seite-werte.stufe-warn { border-left-color: var(--stufe-warn); }
+.seite-werte.stufe-bad { border-left-color: var(--stufe-bad); }
+.seite-werte.stufe-stumm { border-left-color: var(--stufe-stumm); }
+.seite-werte .label { display: block; font-size: .66rem; text-transform: uppercase; letter-spacing: .05em; color: var(--text-muted); }
+.seite-werte strong { font-variant-numeric: tabular-nums; }
+.anschluss-liste { list-style: none; padding: 0; margin: .2rem 0 .6rem; font-size: .8rem; }
+.anschluss-liste li { padding: .25rem 0; border-bottom: 1px dashed var(--border); }
+.messgeraete li { padding: .35rem 0; }
+
+@media (max-width: 1100px) {
+    .karte-raster { grid-template-columns: 1fr; }
+    .karte-seite { position: static; max-height: none; }
+    .plan-karte.strom-karte { height: 62vh; }
+}
+
+/* ------------------------------------------------------------ Statistik */
+.diagramm { width: 100%; min-height: 240px; }
+.diagramm-karte .card-body { padding: .6rem .6rem .4rem; }
+.diagramm-leer { padding: 2rem 1rem; text-align: center; color: var(--text-muted); }
+.zeitraum-knoepfe { display: flex; gap: .3rem; flex-wrap: wrap; }
+.zeitraum-knoepfe .btn.aktiv { background: var(--primary); border-color: var(--primary); color: #fff; }
+.messpunkt-wahl { display: grid; gap: .25rem; max-height: 22rem; overflow-y: auto; }
+.messpunkt-wahl label { display: flex; gap: .45rem; align-items: flex-start; font-size: .82rem; padding: .25rem .3rem; border-radius: 6px; }
+.messpunkt-wahl label:hover { background: var(--surface-alt); }
+.fenster-hinweis { font-size: .78rem; }
+.uplot, .uplot *, .uplot *::before, .uplot *::after { box-sizing: border-box; }
+.u-legend { font-size: .76rem !important; }
+
+/* ------------------------------------------------------------ Freigaben */
+.freigabe-zustand-aktiv { color: var(--success); font-weight: 600; }
+.freigabe-zustand-kommt { color: var(--info); font-weight: 600; }
+.freigabe-zustand-abgelaufen { color: var(--text-muted); text-decoration: line-through; }
+.rechte-gruppe { margin-bottom: .8rem; }
+.rechte-gruppe h3 { font-size: .78rem; text-transform: uppercase; letter-spacing: .05em; color: var(--text-muted); }
+
+/* ------------------------------------------------------------ Druck */
+.druckseite { background: #fff; }
+.druck-blatt { max-width: 190mm; margin: 0 auto; padding: 10mm 0; font-size: 10.5pt; }
+.druck-blatt h1 { font-size: 16pt; margin: 0; }
+.druck-blatt h2 { font-size: 11pt; margin: 6mm 0 2mm; border-bottom: 1.5px solid #0f172a; padding-bottom: 1mm; }
+.druck-kopf { display: flex; justify-content: space-between; gap: 1rem; border-bottom: 3px solid #b45309; padding-bottom: 3mm; }
+.druck-blatt table { font-size: 9.5pt; }
+.druck-blatt th, .druck-blatt td { padding: 1.2mm 2mm; }
+@media print { .druck-blatt { padding: 0; } }
+
+/* ------------------------------------------------------------ Handy
+ *
+ * Tabellen werden auf schmalen Bildschirmen zu Karten: jede Zeile ein
+ * Block, jede Zelle mit ihrer Beschriftung davor (data-label). Das ist die
+ * Ansicht, mit der man an der Verteilung steht.
+ */
+@media (max-width: 700px) {
+    .userbox-name { display: none; }
+    .content { padding: 1rem .8rem 3rem; }
+    .inline-form select, .inline-form input { min-width: 0; width: 100%; }
+    .inline-form { width: 100%; }
+    .tabelle-karten thead { display: none; }
+    .tabelle-karten, .tabelle-karten tbody, .tabelle-karten tr, .tabelle-karten td { display: block; width: 100%; }
+    .tabelle-karten tr { padding: .5rem .7rem; border-bottom: 1px solid var(--border); }
+    .tabelle-karten td { border: 0; padding: .15rem 0; text-align: left !important; }
+    .tabelle-karten td[data-label]::before { content: attr(data-label); display: block; font-size: .66rem; text-transform: uppercase; letter-spacing: .05em; color: var(--text-muted); }
+    .tabelle-karten td.right { text-align: left; }
+    tr.live-zeile td:first-child { box-shadow: none; }
+    tr.live-zeile { border-left: 4px solid var(--stufe-keine); }
+    tr.live-zeile.stufe-ok { border-left-color: var(--stufe-ok); }
+    tr.live-zeile.stufe-warn { border-left-color: var(--stufe-warn); }
+    tr.live-zeile.stufe-bad { border-left-color: var(--stufe-bad); }
+    .tabs { overflow-x: auto; white-space: nowrap; }
+    .karte-werkzeuge { width: 100%; }
+    .karte-werkzeuge .btn { flex: 1 1 auto; }
+    .live-raster { grid-template-columns: 1fr; }
+    .grid.kennzahlen { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .6rem; }
+    .kennzahlen .stat-card { padding: .6rem .7rem; }
+    .kennzahlen .stat .value { font-size: 1.25rem; }
+    .kennzahlen .stat .trend { font-size: .68rem; }
+    .seite-werte { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
+/* Energie je Tag */
+.energie-tabelle td { padding: .2rem .4rem; border: 0; }
+.energie-balken { height: 12px; border-radius: 4px; background: linear-gradient(90deg, #f59e0b, #b45309); }
