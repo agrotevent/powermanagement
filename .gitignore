@@ -1,0 +1,25 @@
+# Konfiguration mit Schlüssel und Zugangsdaten – je Installation
+/config/config.php
+
+# Laufzeitdaten: Datenbank, Grundrisse, Kacheln, Zwischenspeicher, Protokolle
+/storage/*
+!/storage/.gitkeep
+!/storage/cache/
+!/storage/logs/
+!/storage/plans/
+!/storage/inventar/
+!/storage/demo/
+/storage/cache/*
+/storage/logs/*
+/storage/plans/*
+/storage/inventar/*
+/storage/demo/*
+!/storage/*/.gitkeep
+
+# Werkzeuge
+node_modules/
+/vendor/
+.DS_Store
+*.swp
+.idea/
+.vscode/
