@@ -1,0 +1,13 @@
+# /etc/systemd/system/powermanagement-wartung.timer
+[Unit]
+Description=PowerManagement Wartung täglich
+
+[Timer]
+OnCalendar=*-*-* 03:17:00
+# Mehrere Container auf einem Host nicht alle in derselben Minute
+RandomizedDelaySec=20min
+# Verpassten Lauf (Container war aus) nach dem Start nachholen
+Persistent=true
+
+[Install]
+WantedBy=timers.target

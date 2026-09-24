@@ -1,0 +1,51 @@
+# /etc/systemd/system/powermanagement-nodered.service
+#
+# Node-RED für PowerManagement: übersetzt die Shelly-Themen, nimmt die
+# normalisierten Messwerte des Sammlers entgegen und schreibt alles gebündelt
+# in die InfluxDB.
+#
+# Node-RED liegt in /opt/node-red (root gehört der Code, npm installiert dort
+# eine feste Hauptversion), die Flows und Einstellungen im userDir
+# /var/lib/powermanagement/node-red (gehört nodered). Zugänge kommen aus
+# /etc/powermanagement/node-red.env.
+#
+# Platzhalter: __NODERED_APP__, __NODERED_DIR__
+
+[Unit]
+Description=PowerManagement Node-RED (MQTT → InfluxDB)
+After=network-online.target mosquitto.service influxdb.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=nodered
+Group=nodered
+WorkingDirectory=__NODERED_DIR__
+EnvironmentFile=/etc/powermanagement/node-red.env
+# Der Puffer für InfluxDB-Ausfälle hält bis zu 50 000 Zeilen – dafür reicht
+# das hier bequem; ohne Grenze wächst Node nach Belieben.
+Environment=NODE_OPTIONS=--max-old-space-size=384
+ExecStart=/usr/bin/node __NODERED_APP__/node_modules/node-red/red.js --userDir __NODERED_DIR__
+Restart=always
+RestartSec=5
+# Node-RED fährt auf SIGINT sauber herunter (Flows stoppen, Kontext sichern).
+KillSignal=SIGINT
+TimeoutStopSec=30
+SyslogIdentifier=node-red
+
+# Härtung: schreiben darf Node-RED nur in sein userDir. Paletten-Nodes, die
+# jemand im Editor nachinstalliert, landen ebenfalls dort (node_modules im
+# userDir, npm-Cache im Heimatverzeichnis = userDir).
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=__NODERED_DIR__
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+
+[Install]
+WantedBy=multi-user.target

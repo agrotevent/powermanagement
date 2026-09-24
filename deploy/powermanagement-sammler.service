@@ -1,0 +1,38 @@
+# /etc/systemd/system/powermanagement-sammler.service
+#
+# Fragt Victron GX und ComAp per Modbus TCP (auch über WireGuard) sowie
+# ComAp WebSupervisor und Victron VRM ab und veröffentlicht die Werte
+# normalisiert auf pm/messwert/<gerät>/<kanal>. Node-RED schreibt sie von
+# dort in die InfluxDB.
+#
+# Platzhalter: __APP_USER__, __APP_DIR__
+
+[Unit]
+Description=PowerManagement Sammler (Modbus/Cloud → MQTT)
+After=network-online.target mosquitto.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=__APP_USER__
+Group=__APP_USER__
+WorkingDirectory=__APP_DIR__
+ExecStart=/usr/bin/php __APP_DIR__/bin/power sammler
+Restart=always
+# Nach einem Abbruch (Broker weg, Datenbank gesperrt) nicht im Sekundentakt
+# neu starten, aber auch keine Minute Messlücke riskieren.
+RestartSec=5
+SyslogIdentifier=pm-sammler
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=__APP_DIR__/storage
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+
+[Install]
+WantedBy=multi-user.target

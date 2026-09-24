@@ -1,0 +1,16 @@
+# /etc/logrotate.d/powermanagement
+# Platzhalter: __APP_USER__, __APP_DIR__
+
+__APP_DIR__/storage/logs/*.log {
+    weekly
+    rotate 8
+    missingok
+    notifempty
+    compress
+    delaycompress
+    # copytruncate: PHP-FPM und der Sammler halten die Datei offen und
+    # wüssten von einer neuen Datei nichts.
+    copytruncate
+    su __APP_USER__ __APP_USER__
+    create 0640 __APP_USER__ __APP_USER__
+}

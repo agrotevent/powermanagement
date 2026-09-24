@@ -1,0 +1,772 @@
+# Installation auf Debian 13 im Proxmox-LXC
+
+Zielbild: ein eigener LXC-Container mit Debian 13 („Trixie“), in dem alles
+läuft, was PowerManagement braucht. Die Oberfläche ist danach **im lokalen
+Netz unter der IP des Containers** erreichbar.
+
+```
+ Shelly Gen1/Gen2+ ─────── MQTT 1883 ───────┐
+ (LAN oder hinter WireGuard)                │
+                                            ▼
+ ┌──────────────────── LXC: Debian 13 ───────────────────────────────┐
+ │                                                                   │
+ │  Mosquitto ◄──── pm/messwert/… ──── Sammler (bin/power sammler)   │
+ │     │                                 │  Modbus TCP ──► Victron GX, ComAp IG200
+ │     │                                 │  (im LAN oder über WireGuard)
+ │     ▼                                 └─ HTTPS ─────► ComAp WebSupervisor, Victron VRM
+ │  Node-RED ──────► InfluxDB 2 (Bucket „strom“)                     │
+ │                        ▲                                          │
+ │                        │ InfluxQL                                 │
+ │  nginx + PHP-FPM ──────┘  Oberfläche  http://<IP>/                │
+ │                           Node-RED    http://<IP>/node-red/       │
+ └───────────────────────────────────────────────────────────────────┘
+```
+
+* **Mosquitto** nimmt die Shelly-Geräte und den Sammler entgegen.
+* **Node-RED** übersetzt die Shelly-Themen in ein einheitliches Schema und
+  schreibt alles gebündelt in die InfluxDB. Fällt die Datenbank kurz aus,
+  puffert Node-RED bis zu fünf Minuten.
+* **Der Sammler** fragt Victron und ComAp ab (Modbus TCP, Cloud) und
+  veröffentlicht die Werte auf MQTT.
+* **Die InfluxDB** hält die Messwerte; die Oberfläche liest sie mit
+  InfluxQL. Ein vorhandenes Grafana kann parallel dieselbe Datenbank lesen.
+
+Soll die Oberfläche auch von außen erreichbar sein, übernimmt das ein
+Tunnel oder Reverse-Proxy (etwa Pangolin), der **getrennt davon** läuft –
+siehe [Abschnitt 9](#9--von-außen-erreichbar-machen-optional).
+
+---
+
+## 1 · Container anlegen
+
+Auf dem Proxmox-Host (oder in der Oberfläche: Vorlage
+*debian-13-standard*, „Unprivilegierter Container“ angehakt):
+
+```bash
+pveam update
+pveam available --section system | grep debian-13
+pveam download local debian-13-standard_13.1-2_amd64.tar.zst   # Name laut Liste
+
+pct create 150 local:vztmpl/debian-13-standard_13.1-2_amd64.tar.zst \
+  --hostname strom \
+  --cores 2 --memory 3072 --swap 512 \
+  --rootfs local-lvm:20 \
+  --net0 name=eth0,bridge=vmbr0,ip=10.10.0.60/24,gw=10.10.0.1 \
+  --unprivileged 1 --features nesting=1 \
+  --onboot 1 --start 1
+```
+
+Empfehlung: **2 Kerne, 2–4 GB RAM, 20 GB Platte.**
+
+| Ressource | Warum |
+|-----------|-------|
+| 2 Kerne | InfluxDB, Node-RED und PHP arbeiten gleichzeitig; mit einem Kern stockt die Oberfläche, wenn die Datenbank verdichtet. |
+| 2–4 GB RAM | InfluxDB hält Index und Cache im Speicher (etwa 0,5–1 GB), Node-RED rund 150 MB, der Rest ist Luft für Abfragen über lange Zeiträume. Ab einigen Dutzend Messstellen mit hoher Auflösung 4 GB. |
+| 20 GB Platte | Fast alles davon ist InfluxDB. Wie viel, hängt an der Meldefrequenz: Ein Pro 3EM schickt seinen Status etwa sekündlich (rund 20 Werte je Meldung) – das sind grob 1–2 GB im Jahr. Relais und Zwischenstecker, die nur bei Änderungen melden, fallen kaum ins Gewicht. Bei vielen sekündlich meldenden Geräten die Platte größer wählen oder mit `--aufbewahrung` begrenzen (Abschnitt 3). Nachmessen: `du -sh /var/lib/influxdb2/engine`. |
+
+Zu den Optionen:
+
+* **unprivilegiert** ist richtig. PowerManagement braucht keine besonderen
+  Rechte – auch WireGuard im Container geht unprivilegiert (Abschnitt 7).
+* **Nesting** braucht PowerManagement selbst nicht (kein Docker). Proxmox
+  setzt es für unprivilegierte Container in der Oberfläche aber ohnehin vor
+  und warnt bei Debian 13 (systemd 257), dass systemd ohne Nesting Probleme
+  haben kann. Die Dienste von PowerManagement sind gehärtet (`PrivateTmp`,
+  `ProtectSystem`) und brauchen dafür eigene Mount-Namensräume. **Also so
+  lassen.** Wer es abschaltet und Dienste mit `status=226/NAMESPACE`
+  scheitern sieht, schaltet es wieder ein
+  (`pct set 150 --features nesting=1`, Container neu starten).
+* Die **IP** gehört in das Netz, aus dem die Oberfläche aufgerufen wird und
+  in dem die Shellys sitzen – oder in ein Netz, das beide erreichen. Im
+  Beispiel `10.10.0.60`; diese Adresse gleich notieren, sie kommt in jeden
+  Shelly.
+* Eine **feste Adresse** ist Pflicht: Die Shellys haben sie als MQTT-Server
+  eingetragen. Wer DHCP nutzt, reserviert die Adresse im Router.
+
+Danach in den Container:
+
+```bash
+pct enter 150
+```
+
+## 2 · Grundsystem
+
+```bash
+apt update && apt full-upgrade -y
+apt install -y ca-certificates curl git locales tzdata
+
+timedatectl set-timezone Europe/Berlin   # im LXC ggf. vom Host vorgegeben
+sed -i 's/# de_DE.UTF-8/de_DE.UTF-8/' /etc/locale.gen && locale-gen
+
+apt install -y unattended-upgrades       # automatische Sicherheitsupdates
+dpkg-reconfigure -plow unattended-upgrades
+```
+
+Debian 13 bringt **PHP 8.4** und **Node.js 20** mit – es wird kein
+Fremdrepository für PHP oder Node gebraucht. Nur die InfluxDB kommt aus dem
+Repository von InfluxData; das richtet das Skript selbst ein.
+
+## 3 · Installation
+
+### Öffentliches Repository
+
+```bash
+git clone https://github.com/agrotevent/powermanagement.git /opt/powermanagement
+/opt/powermanagement/deploy/install-debian.sh --name="Stromversorgung Messe Nord"
+```
+
+Liegt der Checkout woanders, klont das Skript ihn nach `--ziel`
+(Vorgabe `/opt/powermanagement`). Ebenso geht es, nur das Skript zu holen
+und ihm das Repository zu nennen:
+
+```bash
+curl -fsSLO https://raw.githubusercontent.com/agrotevent/powermanagement/main/deploy/install-debian.sh
+bash install-debian.sh --repo=https://github.com/agrotevent/powermanagement.git
+```
+
+### Privates Repository
+
+Der Container braucht ein Zugangstoken. Es wird **einmal** in eine Textdatei
+geschrieben; Installation und alle späteren Updates finden sie von allein.
+
+Token erzeugen: GitHub → *Settings → Developer settings → Personal access
+tokens → Fine-grained tokens*, **Repository access: Only select repositories
+→ Contents: Read-only**. Ein klassisches Token mit dem Haken `repo` geht
+ebenso.
+
+```bash
+install -d -m 750 /etc/powermanagement
+cat > /etc/powermanagement/git.conf <<'EOF'
+GITHUB_TOKEN=github_pat_…
+GIT_REPO=https://github.com/agrotevent/powermanagement.git
+GIT_BRANCH=main
+EOF
+chmod 600 /etc/powermanagement/git.conf
+```
+
+Dann nur das Skript holen – das Token geht dabei über die Standardeingabe an
+curl, nicht über die Kommandozeile, wo es in der Prozessliste stünde:
+
+```bash
+sed -n 's/^GITHUB_TOKEN=/Authorization: Bearer /p' /etc/powermanagement/git.conf \
+  | curl -fsSL -H @- -H 'Accept: application/vnd.github.raw' \
+      -o /root/install-debian.sh \
+      'https://api.github.com/repos/agrotevent/powermanagement/contents/deploy/install-debian.sh?ref=main'
+
+bash /root/install-debian.sh --name="Stromversorgung Messe Nord"
+```
+
+Repository und Zweig nimmt das Skript aus `git.conf`. Es legt daraus
+`/etc/powermanagement/git-credentials` an und hängt es als
+`credential.helper` an das Arbeitsverzeichnis. Das Token steht damit **nie**
+in der Prozessliste, nie in `.git/config` und nie in der Adresse des Remotes:
+
+```bash
+git -C /opt/powermanagement remote get-url origin
+# → https://github.com/agrotevent/powermanagement.git  (ohne Token)
+```
+
+> **Token abgelaufen?** Neuen Wert in dieselbe Datei schreiben – der nächste
+> Lauf übernimmt ihn.
+
+### Optionen
+
+| Option | Wofür |
+|--------|-------|
+| `--name="Titel"` | Titel der Oberfläche (später unter System → Einstellungen änderbar) |
+| `--repo=<url>` / `--zweig=main` | woher installiert wird |
+| `--ziel=/opt/powermanagement` | Installationsverzeichnis |
+| `--port=80` | Port der Oberfläche, falls 80 belegt ist |
+| `--admin=admin` | Name des ersten Administrators |
+| `--aufbewahrung=0` | wie lange Messwerte bleiben: `0` = unbegrenzt, sonst Tage (`800`) oder `104w` |
+| `--ohne-influx --influx-url=… --influx-token=…` | eine **vorhandene** InfluxDB nutzen (1.8, 2.x oder 3.x) |
+| `--influx-db=strom` | Name der Datenbank bzw. des Buckets |
+| `--ohne-mosquitto --mqtt-host=… --mqtt-benutzer=… --mqtt-kennwort=…` | einen vorhandenen Broker nutzen |
+| `--ohne-nodered` | kein Node-RED (dann muss etwas anderes Shelly-Werte übersetzen und in die InfluxDB schreiben) |
+| `--flows-ersetzen` | vorhandene Node-RED-Flows durch die mitgelieferten ersetzen |
+| `--git-zugang=<datei>` | Token-Datei an anderer Stelle |
+
+Bei einer vorhandenen **InfluxDB 1.8** mit Anmeldung ist das „Token“
+`benutzer:kennwort` – so versteht es 1.8 im `Authorization`-Kopf.
+
+### Was das Skript tut
+
+1. **Pakete:** nginx, PHP 8.4 (FPM, SQLite, GD, cURL, mbstring, XML),
+   poppler-utils (Grundrisse), git, Mosquitto, Node.js/npm,
+   wireguard-tools. InfluxDB 2 aus dem Repository von InfluxData – der
+   Paketschlüssel wird über seinen Fingerabdruck geprüft.
+2. **Quellcode** nach `/opt/powermanagement`. Der Code gehört root, nur
+   `storage/` gehört `www-data` – die Anwendung kann ihren eigenen Code nicht
+   verändern.
+3. **`config/config.php`** aus der Vorlage, darin nur ein neuer `app.key`.
+   Er verschlüsselt die hinterlegten Zugänge – mitsichern!
+4. **Mosquitto:** `/etc/mosquitto/conf.d/powermanagement.conf` (Port 1883
+   auf allen Schnittstellen, keine anonyme Anmeldung), drei Benutzer mit
+   zufälligen Kennwörtern:
+
+   | Benutzer | darf | wer |
+   |----------|------|-----|
+   | `shelly` | alles außer `pm/#` | alle Shelly-Geräte |
+   | `nodered` | alles | Node-RED |
+   | `powermanagement` | alles | Oberfläche und Sammler |
+
+   `shelly` kann so keine Messwerte unter `pm/` einschleusen – ein falsch
+   eingestelltes oder übernommenes Gerät verfälscht die Auswertung nicht.
+5. **InfluxDB 2:** Ersteinrichtung mit Organisation `powermanagement`,
+   Bucket `strom`, Benutzer `admin` (zufälliges Kennwort), eine DBRP-Zuordnung
+   `strom/autogen → strom` für InfluxQL, und zwei Tokens: eines zum Lesen und
+   Schreiben für Oberfläche und Sammler, eines nur zum Schreiben für
+   Node-RED.
+6. **Node-RED 4** in `/opt/node-red` (eigene `package.json`, gehört root),
+   Flows und Einstellungen im userDir `/var/lib/powermanagement/node-red`
+   (gehört dem Systembenutzer `nodered`). Editor nur über nginx unter
+   `/node-red/`, Anmeldung `admin` mit zufälligem Kennwort.
+7. **Oberfläche:** PHP-FPM-Pool, nginx-Site, Datenbank, Administrator,
+   InfluxDB- und MQTT-Zugang (verschlüsselt in der Datenbank).
+8. **Dienste:** `powermanagement-nodered`, `powermanagement-sammler`,
+   `powermanagement-wartung.timer` (täglich), Logrotate.
+9. **Prüfung** mit `bin/power pruefen` und eine Zusammenfassung mit allen
+   Zugängen.
+
+Alle erzeugten Kennwörter und Tokens stehen zusätzlich in
+**`/etc/powermanagement/zugaenge.txt`** (nur root). Das Skript ist
+wiederholbar: Ein zweiter Lauf verwendet die Kennwörter aus dieser Datei
+weiter, ändert nichts an Datenbank und `config.php` und überschreibt keine
+eigenen Änderungen an Flows, Node-RED-Einstellungen, nginx-Site oder
+Mosquitto-ACL – neue Fassungen solcher Dateien legt es mit
+`powermanagement-neu` im Namen daneben.
+
+| Datei | Inhalt |
+|-------|--------|
+| `/etc/powermanagement/zugaenge.txt` | alle Zugänge (600, root) |
+| `/etc/powermanagement/node-red.env` | Umgebung für Node-RED: Broker, InfluxDB-Adresse und Token (640, root:nodered) |
+| `/etc/powermanagement/installation.conf` | was installiert wurde – liest das Update-Skript |
+| `/var/lib/powermanagement/node-red/` | Flows, `flows_cred.json` (Broker-Anmeldung, 600), `settings.js`, `admin-kennwort.bcrypt` |
+| `/etc/mosquitto/powermanagement.{passwd,acl}` | Broker-Benutzer und -Rechte |
+
+## 4 · Erste Anmeldung
+
+| Was | Adresse | Anmeldung |
+|-----|---------|-----------|
+| Oberfläche | `http://10.10.0.60/` | `admin` + Erstkennwort aus der Zusammenfassung – bei der ersten Anmeldung ein eigenes vergeben |
+| Node-RED-Editor | `http://10.10.0.60/node-red/` | `admin` + Kennwort aus `zugaenge.txt` |
+| InfluxDB | `http://10.10.0.60:8086/` | `admin` + Kennwort aus `zugaenge.txt` |
+
+Danach in der Oberfläche unter **System → Einstellungen** Titel und
+Grenzwerte prüfen.
+
+Im Node-RED-Editor gibt es vier Tabs: **PowerManagement** (Überblick,
+Eingang `pm/messwert/#`), **Shelly Gen2+**, **Shelly Gen1** und
+**Schreiben**. Am Node *InfluxDB-Schreiber* steht, wie viele Zeilen
+geschrieben wurden oder welcher Fehler zuletzt auftrat. Eigene Flows
+dürfen dazukommen – Updates überschreiben nichts.
+
+Das Kennwort des Node-RED-Editors ändern:
+
+```bash
+KW='NeuesKennwort'   # nur Buchstaben/Ziffern vermeidet Ärger mit der Shell
+PM_KENNWORT="$KW" php -r '$h = password_hash(getenv("PM_KENNWORT"), PASSWORD_BCRYPT); echo "\$2b\$", substr($h, 4), "\n";' \
+  > /var/lib/powermanagement/node-red/admin-kennwort.bcrypt
+systemctl restart powermanagement-nodered
+```
+
+(PHP schreibt bcrypt als `$2y$`, Node-RED erwartet `$2b$` – das Verfahren
+ist dasselbe.) Danach den Wert in `zugaenge.txt` nachtragen.
+
+## 5 · Shelly-Geräte anbinden
+
+Alle Shellys verwenden denselben Zugang: Server `10.10.0.60:1883`,
+Benutzer **`shelly`**, Kennwort `MQTT_SHELLY_KENNWORT` aus `zugaenge.txt`.
+Ohne TLS – der Broker ist nur im LAN bzw. über WireGuard erreichbar
+(Abschnitt 8).
+
+### Gen2+ (Plus, Pro, Gen3, Gen4 – etwa Pro 3EM, Plus 1PM, Plug S)
+
+In der Weboberfläche des Geräts unter **Einstellungen → MQTT** (je nach
+Firmware *Settings → Connectivity → MQTT*):
+
+1. **Enable MQTT** einschalten
+2. **Server:** `10.10.0.60:1883`
+3. **Username / Password:** `shelly` / Kennwort
+4. **MQTT prefix:** Vorgabe (die Geräte-ID) lassen – oder `shelly/<name>`,
+   etwa `shelly/hauptverteilung`. Der Gerätename in PowerManagement ist das
+   letzte Segment, also `shellypro3em-a0b1c2d3e4f5` bzw. `hauptverteilung`.
+5. **„Generic status update over MQTT“** einschalten – darüber kommen die
+   Messwerte.
+6. **„RPC status notifications over MQTT“** einschalten.
+7. **„RPC over MQTT“ bzw. „Enable MQTT Control“** eingeschaltet lassen
+   (Vorgabe): Darüber fragt Node-RED Modell und Firmware ab, und die
+   Oberfläche schaltet Relais.
+8. Speichern – das Gerät startet neu.
+
+Die Shelly-Cloud darf bei Gen2+ eingeschaltet bleiben.
+
+### Gen1 (Shelly 1PM, 2.5, Plug S, EM, 3EM …)
+
+In der Weboberfläche des Geräts unter **Internet & Security → Advanced –
+Developer Settings**:
+
+1. **Enable action execution via MQTT** anhaken
+2. **Username / Password:** `shelly` / Kennwort
+3. **Server:** `10.10.0.60:1883`
+4. **Max. times reconnect / Clean session / Retain** auf Vorgabe lassen
+5. Speichern – das Gerät startet neu.
+
+**Achtung:** Bei Gen1 schaltet MQTT die Shelly-Cloud ab – beides zugleich
+geht dort nicht.
+
+Energie von Relais meldet Gen1 in *Wattminuten*; Node-RED rechnet in Wh
+um. Die Summe über die Phasen eines EM/3EM bildet Node-RED selbst, sobald
+von allen Phasen ein frischer Wert vorliegt.
+
+### Prüfen
+
+```bash
+KW="$(sed -n 's/^MQTT_POWERMANAGEMENT_KENNWORT=//p' /etc/powermanagement/zugaenge.txt)"
+
+# Rohdaten der Shellys
+mosquitto_sub -h 127.0.0.1 -u powermanagement -P "$KW" -t '+/status/#' -t 'shelly/#' -t 'shellies/#' -v
+
+# Was Node-RED und der Sammler daraus machen
+mosquitto_sub -h 127.0.0.1 -u powermanagement -P "$KW" -t 'pm/#' -v
+```
+
+Ein neues Gerät erscheint nach wenigen Sekunden in der Messung `geraet`
+und damit in der Geräteliste der Oberfläche.
+
+## 6 · Victron und ComAp
+
+Beide fragt der **Sammler** ab (`powermanagement-sammler.service`); die
+Datenquellen werden in der Oberfläche angelegt. Der Sammler veröffentlicht
+die Werte auf `pm/messwert/<gerät>/<kanal>`, Node-RED schreibt sie in die
+InfluxDB.
+
+### Victron GX (Cerbo GX, Ekrano, Venus GX)
+
+* **Modbus TCP einschalten:** am GX bzw. in der Remote Console unter
+  **Einstellungen → Dienste → Modbus TCP → Aktivieren** (neuere
+  Venus-OS-Fassungen: *Einstellungen → Integrationen → Modbus-TCP-Server*).
+  Unter
+  *Verfügbare Dienste* stehen die Unit-IDs der angeschlossenen Geräte
+  (System meist `100`, VE.Bus z. B. `227`, Batteriemonitor je nach Anschluss).
+* Port **502**. Der GX muss vom Container aus erreichbar sein – im LAN direkt,
+  an entfernten Standorten über WireGuard (Abschnitt 7).
+* Modbus TCP hat **keine Anmeldung**. Der Port gehört deshalb nie ins
+  Internet; am Standort-Router nur aus dem Tunnel bzw. von der Adresse des
+  Containers zulassen.
+* Zusätzlich oder statt Modbus: **VRM-API**. Im VRM-Portal unter
+  *Einstellungen → Integrationen → Zugriffstoken* ein Token anlegen; dazu die
+  Installations-ID (`idSite`, steht in der Adresse der Installation im VRM).
+  Werte über VRM sind grob (Minutenraster) und hängen an der
+  Internetverbindung des Standorts – Modbus über WireGuard ist direkter.
+
+### ComAp (InteliGen 200 u. a.)
+
+* **Modbus TCP am Controller:** in InteliConfig bzw. am Display den
+  Modbus-TCP-Server einschalten (Kommunikationseinstellungen, Port 502) und
+  eine feste IP vergeben. Welche Register der Controller liefert, zeigt
+  InteliConfig (*Modbus-Registerliste erzeugen*); PowerManagement bringt
+  Registerprofile mit.
+* **WebSupervisor-API** (Cloud), wenn die Anlage ohnehin in WebSupervisor
+  hängt: Im Entwicklerportal **portal.websupervisor.net** anmelden, das API-
+  Produkt abonnieren – daraus kommt der **ComAp-Key** (Subscription-Key) –
+  und eine Anwendung anlegen, die **clientId** und **secret** liefert. Alle
+  drei Werte gehören in die Datenquelle in der Oberfläche; sie werden
+  verschlüsselt abgelegt.
+
+## 7 · WireGuard zu entfernten Standorten
+
+Victron- und ComAp-Anlagen an anderen Standorten erreicht der Sammler über
+einen WireGuard-Tunnel. Das Installationsskript installiert nur die
+Werkzeuge (`wireguard-tools`) und richtet **keinen** Tunnel ein – wie der
+Tunnel aussieht, hängt am Netz.
+
+### a) Empfohlen: Tunnel auf dem MikroTik
+
+RouterOS 7 kann WireGuard. Der Tunnel endet auf dem Router in der Zentrale
+und auf dem Router am Standort; der Container merkt davon nichts und braucht
+höchstens eine Route.
+
+```
+ LXC 10.10.0.60 ── MikroTik Zentrale ══ WireGuard ══ MikroTik Standort ── GX 192.168.50.10
+                    10.99.0.1                         10.99.0.2
+```
+
+**Zentrale** (feste IP oder DynDNS, UDP-Port offen):
+
+```routeros
+/interface wireguard add name=wg-standorte listen-port=13231
+/ip address add address=10.99.0.1/24 interface=wg-standorte
+/interface wireguard peers add interface=wg-standorte comment="Messe Nord" \
+    public-key="<öffentlicher Schlüssel Standort>" \
+    allowed-address=10.99.0.2/32,192.168.50.0/24
+/ip route add dst-address=192.168.50.0/24 gateway=wg-standorte
+/ip firewall filter add chain=input protocol=udp dst-port=13231 action=accept \
+    comment="WireGuard Standorte" place-before=0
+```
+
+**Standort** (wählt sich ein – so geht es auch hinter NAT und mit
+wechselnder IP):
+
+```routeros
+/interface wireguard add name=wg-zentrale listen-port=13231
+/ip address add address=10.99.0.2/24 interface=wg-zentrale
+/interface wireguard peers add interface=wg-zentrale \
+    public-key="<öffentlicher Schlüssel Zentrale>" \
+    endpoint-address=zentrale.example.de endpoint-port=13231 \
+    allowed-address=10.99.0.0/24,10.10.0.0/24 persistent-keepalive=25s
+/ip route add dst-address=10.10.0.0/24 gateway=wg-zentrale
+# Modbus nur vom Container aus
+/ip firewall filter add chain=forward src-address=10.10.0.60 dst-address=192.168.50.10 \
+    protocol=tcp dst-port=502 action=accept place-before=0
+```
+
+Den öffentlichen Schlüssel jeder Seite zeigt
+`/interface wireguard print` (Spalte *public-key*).
+
+**Im Container:** Ist der MikroTik der Zentrale das Standard-Gateway des
+Containers, ist nichts zu tun. Sonst eine Route über ihn eintragen (hier
+liegt er auf `10.10.0.2`) – am einfachsten als kleiner Dienst, weil Proxmox
+`/etc/network/interfaces` im Container verwaltet:
+
+```bash
+cat > /etc/systemd/system/route-standorte.service <<'EOF'
+[Unit]
+Description=Routen zu den Standorten über den MikroTik
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/sbin/ip route replace 192.168.50.0/24 via 10.10.0.2
+
+[Install]
+WantedBy=multi-user.target
+EOF
+systemctl enable --now route-standorte.service
+```
+
+Prüfen: `nc -vz 192.168.50.10 502` aus dem Container.
+
+### b) Tunnel im Container selbst
+
+Wenn es keinen passenden Router gibt, endet der Tunnel im LXC. WireGuard
+ist Teil des Kernels – der Container teilt ihn mit dem Proxmox-Host und kann
+das Modul nicht selbst laden.
+
+**Auf dem Proxmox-Host** (im PVE-Kernel enthalten):
+
+```bash
+modprobe wireguard
+echo wireguard > /etc/modules-load.d/wireguard.conf   # auch nach dem Neustart
+```
+
+**Im Container:**
+
+```bash
+umask 077
+wg genkey | tee /etc/wireguard/privat.key | wg pubkey > /etc/wireguard/oeffentlich.key
+cat /etc/wireguard/oeffentlich.key     # kommt auf die Gegenseite
+
+cat > /etc/wireguard/wg0.conf <<'EOF'
+[Interface]
+Address = 10.99.0.10/32
+PrivateKey = <Inhalt von /etc/wireguard/privat.key>
+# Kein DNS= – dafür bräuchte wg-quick resolvconf, das im LXC fehlt.
+
+[Peer]
+# Standort Messe Nord (Router oder GX-Netz)
+PublicKey = <öffentlicher Schlüssel der Gegenseite>
+Endpoint = standort-nord.example.de:13231
+AllowedIPs = 10.99.0.0/24, 192.168.50.0/24
+PersistentKeepalive = 25
+EOF
+chmod 600 /etc/wireguard/wg0.conf
+
+systemctl enable --now wg-quick@wg0
+wg show
+```
+
+Hinweise für **unprivilegierte** Container:
+
+* Das Interface anlegen geht: root im Container darf in seinem eigenen
+  Netz-Namensraum Interfaces erzeugen – nur das Modul muss auf dem Host
+  geladen sein. Fehlt es, meldet `wg-quick` *„RTNETLINK answers: Not
+  supported“*.
+* **Nur die Standort-Netze** in `AllowedIPs` eintragen, nicht `0.0.0.0/0`.
+  Für einen vollen Tunnel will `wg-quick` Kernel-Einstellungen setzen
+  (`src_valid_mark`), die ein unprivilegierter Container nicht setzen darf.
+* Auf der Gegenseite muss die Adresse des Containers (`10.99.0.10`) den
+  Weg zurück finden.
+
+## 8 · Firewall
+
+Welche Ports offen sein müssen – und für wen:
+
+| Port | Dienst | erreichbar für |
+|------|--------|----------------|
+| 80 (bzw. `--port`), 443 bei TLS | Oberfläche, Node-RED-Editor | LAN, Proxy |
+| 1883 | MQTT | nur Shellys: LAN und Tunnel-Netze |
+| 8086 | InfluxDB | nur lokal – bzw. zusätzlich ein Grafana-Server |
+| 1880 | Node-RED direkt | nur lokal (lauscht ohnehin nur auf 127.0.0.1) |
+| 22 | SSH | Verwaltungsnetz |
+
+Beispiel mit nftables im Container (Netze anpassen: `10.10.0.0/24` LAN,
+`10.99.0.0/24` Tunnel):
+
+```bash
+apt install -y nftables
+cat > /etc/nftables.conf <<'NFT'
+#!/usr/sbin/nft -f
+flush ruleset
+table inet filter {
+    chain input {
+        type filter hook input priority 0; policy drop;
+        ct state established,related accept
+        iif lo accept
+        ip protocol icmp accept
+        ip saddr 10.10.0.0/24 tcp dport { 22, 80, 443 } accept
+        ip saddr { 10.10.0.0/24, 10.99.0.0/24 } tcp dport 1883 accept   # Shellys
+        # ip saddr 10.10.0.20 tcp dport 8086 accept                     # Grafana
+        udp dport 13231 accept                                           # nur bei WireGuard im Container
+    }
+    chain forward { type filter hook forward priority 0; policy drop; }
+    chain output  { type filter hook output priority 0; policy accept; }
+}
+NFT
+systemctl enable --now nftables
+```
+
+> **Achtung:** Die Regel für Port 80 muss bleiben – sonst ist die Oberfläche
+> nach dem Neustart nicht mehr erreichbar. Wer lieber die Proxmox-Firewall
+> nutzt, setzt dieselben Regeln dort für den Container.
+
+## 9 · Von außen erreichbar machen (optional)
+
+Wie bei MasterAdmin übernimmt das ein Tunnel oder Reverse-Proxy (Pangolin,
+nginx auf einem anderen Host), der **getrennt** läuft und auf
+`http://10.10.0.60` zeigt. Dabei:
+
+1. **Echte Client-IP:** in `/etc/nginx/sites-available/powermanagement`
+   die Zeilen `set_real_ip_from <Adresse des Proxys>;` und
+   `real_ip_header X-Forwarded-For;` aktivieren, dieselbe Adresse in
+   `config/config.php` unter `security.trusted_proxies` eintragen,
+   `systemctl reload nginx`.
+2. **TLS** endet am Proxy; er reicht `X-Forwarded-Proto: https` durch, und
+   PowerManagement setzt das Sitzungscookie dann auf `secure`.
+3. **Zusätzliche Anmeldung** am Proxy (SSO, PIN) ist empfehlenswert.
+   `/node-red/` von außen am besten gar nicht freigeben – der Editor kann
+   alles, was Node-RED kann.
+4. **MQTT nicht über den Proxy ins Internet** stellen. Entfernte Shellys
+   kommen über WireGuard (Abschnitt 7).
+
+Die nginx-Site passt das Update-Skript nie ungefragt an; eigene Zeilen
+bleiben also erhalten.
+
+## 10 · Update
+
+```bash
+# Erst ansehen, was sich ändern würde – dabei wird nichts angefasst
+/opt/powermanagement/deploy/update-debian.sh --pruefen
+
+# Dann aktualisieren
+/opt/powermanagement/deploy/update-debian.sh
+```
+
+Das Skript
+
+1. sichert `config/config.php` und die Datenbank nach
+   `storage/backups/vor-update-<zeit>.tar.gz` (die letzten fünf bleiben;
+   die Datenbank als stimmige Kopie per `VACUUM INTO`, auch im laufenden
+   Betrieb),
+2. holt die Änderungen (Token aus `/etc/powermanagement/git.conf`),
+3. führt die Migrationen aus (`bin/power migrate`),
+4. zieht fehlende Pakete nach,
+5. gleicht systemd-Einheiten, PHP-FPM-Pool und Logrotate ab,
+6. startet die Dienste neu, kachelt die Grundrisse und prüft mit
+   `bin/power pruefen`.
+
+**Geht dabei etwas schief, kommt der alte Stand zurück** – Quellcode und
+Datenbank. Die Befehle zum Zurückrollen von Hand stehen am Ende jedes Laufs.
+
+**Node-RED-Flows:** Hat niemand die Flows im Editor verändert, werden sie
+durch die neue Fassung ersetzt. Wurden sie verändert, bleiben sie, wie sie
+sind; die neue Fassung liegt dann unter
+`/var/lib/powermanagement/node-red/flows.powermanagement-neu.json` und kann
+im Editor über *Menü → Importieren* übernommen werden – oder mit
+`--flows-ersetzen` (die alten werden als `flows.json.vor-<zeit>` gesichert).
+Dasselbe gilt für `settings.js`, die nginx-Site und die Mosquitto-Dateien.
+
+| Option | Wofür |
+|--------|-------|
+| `--pruefen` | nur anzeigen, was sich ändern würde |
+| `--flows-ersetzen` | Flows auch dann ersetzen, wenn sie verändert wurden |
+| `--erzwingen` | lokale Änderungen am Quellcode verwerfen statt abzubrechen |
+| `--zweig=<name>` | von einem anderen Zweig aktualisieren |
+| `--behalten=<n>` | wie viele Sicherungen liegen bleiben (Vorgabe 5) |
+
+**Node-RED** selbst (innerhalb der Hauptversion 4) und **InfluxDB**
+aktualisieren sich nicht mit – Node-RED von Hand, InfluxDB über apt bzw.
+unattended-upgrades:
+
+```bash
+npm install --prefix /opt/node-red --omit=dev node-red@4 && systemctl restart powermanagement-nodered
+apt update && apt install --only-upgrade influxdb2 influxdb2-cli
+```
+
+## 11 · Sicherung
+
+| Was | Wo | Warum |
+|-----|----|-------|
+| `config/config.php` | `/opt/powermanagement/config/` | enthält `app.key` – **ohne ihn sind alle hinterlegten Zugänge (Modbus, Cloud, InfluxDB-Token) verloren** |
+| Datenbank | `/opt/powermanagement/storage/database.sqlite` | Anlagen, Standorte, Benutzer, Einstellungen |
+| Grundrisse | `/opt/powermanagement/storage/plans/` | hochgeladene Pläne |
+| Zugänge | `/etc/powermanagement/` | Kennwörter, Tokens, Node-RED-Umgebung |
+| Node-RED | `/var/lib/powermanagement/node-red/` | Flows, `flows_cred.json`, eigene Paletten-Nodes |
+| Messwerte | InfluxDB | per `influx backup` |
+
+Ein nächtlicher Lauf, der alles in `/var/backups/powermanagement` legt:
+
+```bash
+install -d -m 700 /var/backups/powermanagement
+cat > /usr/local/sbin/powermanagement-sicherung <<'EOF'
+#!/bin/bash
+set -euo pipefail
+ZIEL=/var/backups/powermanagement/$(date +%F)
+install -d -m 700 "$ZIEL"
+# SQLite im laufenden Betrieb stimmig kopieren – in ein Verzeichnis, das nur
+# www-data lesen kann (die Datenbank enthält verschlüsselte Zugänge)
+KOPIE=/opt/powermanagement/storage/backups/.nacht.sqlite
+rm -f "$KOPIE"
+runuser -u www-data -- php -r '$p = new PDO("sqlite:/opt/powermanagement/storage/database.sqlite");
+    $p->exec("VACUUM INTO " . $p->quote($argv[1]));' "$KOPIE"
+mv "$KOPIE" "$ZIEL/database.sqlite"
+tar czf "$ZIEL/dateien.tar.gz" /opt/powermanagement/config/config.php \
+    /opt/powermanagement/storage/plans /etc/powermanagement /var/lib/powermanagement/node-red \
+    --exclude=/var/lib/powermanagement/node-red/node_modules
+# InfluxDB: Token über die Umgebung, nicht über die Kommandozeile
+INFLUX_TOKEN="$(sed -n 's/^INFLUX_OPERATOR_TOKEN=//p' /etc/powermanagement/zugaenge.txt)" \
+    influx backup --host http://127.0.0.1:8086 "$ZIEL/influx"
+find /var/backups/powermanagement -mindepth 1 -maxdepth 1 -type d -mtime +14 -exec rm -rf {} +
+EOF
+chmod 700 /usr/local/sbin/powermanagement-sicherung
+
+cat > /etc/systemd/system/powermanagement-sicherung.service <<'EOF'
+[Unit]
+Description=PowerManagement Sicherung
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/powermanagement-sicherung
+EOF
+cat > /etc/systemd/system/powermanagement-sicherung.timer <<'EOF'
+[Unit]
+Description=PowerManagement Sicherung täglich
+[Timer]
+OnCalendar=*-*-* 02:15:00
+Persistent=true
+[Install]
+WantedBy=timers.target
+EOF
+systemctl daemon-reload && systemctl enable --now powermanagement-sicherung.timer
+```
+
+Die Sicherungen gehören zusätzlich auf einen anderen Rechner – eine Kopie auf
+derselben Platte hilft beim Plattenausfall nicht. Vor jedem Update lohnt ein
+Proxmox-Snapshot des Containers (`pct snapshot 150 vor-update`).
+
+**Zurückspielen** der InfluxDB auf einer frisch eingerichteten Datenbank:
+
+```bash
+INFLUX_TOKEN="<Operator-Token>" influx restore --host http://127.0.0.1:8086 --full /var/backups/powermanagement/<datum>/influx
+```
+
+`--full` ersetzt auch Benutzer und Tokens durch die gesicherten – danach
+gelten wieder die Tokens aus der alten `zugaenge.txt`.
+
+## 12 · Fehlersuche
+
+Der erste Blick:
+
+```bash
+cd /opt/powermanagement && runuser -u www-data -- php bin/power pruefen
+
+systemctl status powermanagement-nodered powermanagement-sammler mosquitto influxdb nginx php8.4-fpm
+journalctl -u powermanagement-nodered -f      # Node-RED: Verbindung, Warnungen der Flows
+journalctl -u powermanagement-sammler -f      # Modbus, Cloud
+tail -f /opt/powermanagement/storage/logs/app.log
+tail -f /var/log/mosquitto/mosquitto.log
+
+KW="$(sed -n 's/^MQTT_POWERMANAGEMENT_KENNWORT=//p' /etc/powermanagement/zugaenge.txt)"
+mosquitto_sub -h 127.0.0.1 -u powermanagement -P "$KW" -t 'pm/#' -v
+mosquitto_sub -h 127.0.0.1 -u powermanagement -P "$KW" -t 'pm/status/nodered' -C 1   # letzter Herzschlag
+```
+
+In **Node-RED** zeigt der Node *InfluxDB-Schreiber* den Zustand
+(grün: geschrieben, rot: letzter Fehler). Der Debug-Node *Zeilen ansehen*
+im Tab „Schreiben“ ist ausgeschaltet – einschalten (Knopf rechts am Node),
+dann erscheint in der Debug-Seitenleiste jede erzeugte Zeile Line Protocol.
+
+In die InfluxDB schauen:
+
+```bash
+T="$(sed -n 's/^INFLUX_TOKEN_OBERFLAECHE=//p' /etc/powermanagement/zugaenge.txt)"
+printf 'Authorization: Token %s\n' "$T" | curl -sG -H @- http://127.0.0.1:8086/query \
+  --data-urlencode db=strom --data-urlencode "q=SELECT * FROM geraet ORDER BY time DESC LIMIT 5"
+```
+
+| Symptom | Ursache / Abhilfe |
+|---------|-------------------|
+| Shelly verbindet sich nicht (`Not authorized` im Mosquitto-Log) | Benutzer/Kennwort im Gerät falsch – `shelly` und `MQTT_SHELLY_KENNWORT` aus `zugaenge.txt`. Kennwort ohne Leerzeichen abtippen. |
+| Shelly Gen2 verbunden, aber keine Messwerte | „Generic status update over MQTT“ ist aus. Prüfen mit `mosquitto_sub … -t '+/status/#' -v`. |
+| Gen2-Gerät fehlt in der Geräteliste mit Modell/Firmware | „RPC over MQTT“ bzw. „MQTT Control“ im Gerät ausgeschaltet – ohne das antwortet es nicht auf `Shelly.GetDeviceInfo`. Messwerte kommen trotzdem. |
+| Gen1 meldet sich, EM/3EM ohne Summe | Die Summe entsteht erst, wenn alle Phasen innerhalb von 30 s geliefert haben – nach dem Start ab der zweiten Runde. Update-Periode im Gerät prüfen. |
+| Node *InfluxDB-Schreiber* rot: `HTTP 401` | Token in `/etc/powermanagement/node-red.env` falsch oder gelöscht. Neues Token: `influx auth create --write-bucket <id>` (Token über `INFLUX_TOKEN=` in der Umgebung), eintragen, `systemctl restart powermanagement-nodered`. |
+| … `HTTP 404` (database not found) | DBRP-Zuordnung fehlt: `influx v1 dbrp list`; anlegen mit `influx v1 dbrp create --db strom --rp autogen --bucket-id <id> --default`. |
+| … `ECONNREFUSED` | InfluxDB läuft nicht: `systemctl status influxdb`. Node-RED puffert bis zu 5 Minuten und schreibt danach nach. |
+| Warnung „field type conflict“ im Node-RED-Log | Ein Feld kam einmal als Zahl, einmal als Text. Die abgelehnte Zeile wird verworfen, alle anderen geschrieben. Die Quelle (meist ein Sammler-Kanal) korrigieren. |
+| Herzschlag fehlt (`pruefen`: „kein Herzschlag“) | Node-RED läuft nicht oder ist nicht mit dem Broker verbunden: `journalctl -u powermanagement-nodered`; Zugang in `flows_cred.json` (Benutzer `nodered`). |
+| Node-RED-Editor: „Verbindung verloren“ | WebSocket wird nicht durchgereicht – die nginx-Vorlage aus `deploy/` verwenden (`location ^~ /node-red/` mit `Upgrade`). Ein vorgeschalteter Proxy muss WebSockets ebenfalls durchlassen. |
+| Node-RED-Editor lässt niemanden hinein | `admin-kennwort.bcrypt` fehlt oder ist kaputt – dann sperrt `settings.js` bewusst. Neues Kennwort setzen (Abschnitt 4). |
+| Dienst scheitert mit `status=226/NAMESPACE` | Nesting ist am Container aus – `pct set <id> --features nesting=1` (Abschnitt 1). |
+| Sammler erreicht GX/ComAp nicht | Route bzw. Tunnel: `ip route get 192.168.50.10`, `wg show`, `nc -vz 192.168.50.10 502`. Modbus TCP am GX eingeschaltet? |
+| `502 Bad Gateway` | PHP-FPM läuft nicht: `systemctl status php8.4-fpm`, Socket `/run/php/powermanagement.sock`. |
+| „Welcome to nginx“ statt Anmeldung | `rm -f /etc/nginx/sites-enabled/default && systemctl reload nginx` |
+| Update bricht mit „could not read Username“ ab | Privates Repository ohne Token – `/etc/powermanagement/git.conf` anlegen (Abschnitt 3). |
+| Update meldet „lokale Änderungen“ | Jemand hat Dateien in `/opt/powermanagement` geändert. Sichern, dann `--erzwingen`. |
+
+## 13 · Grafana daneben
+
+Ein vorhandenes Grafana kann weiterlaufen und dieselbe InfluxDB lesen.
+
+1. Eigenes Token nur zum Lesen:
+   ```bash
+   export INFLUX_TOKEN="$(sed -n 's/^INFLUX_OPERATOR_TOKEN=//p' /etc/powermanagement/zugaenge.txt)"
+   influx auth create --host http://127.0.0.1:8086 --org powermanagement \
+       --read-bucket "$(sed -n 's/^INFLUX_BUCKET_ID=//p' /etc/powermanagement/zugaenge.txt)" \
+       --description "Grafana (nur lesen)"
+   unset INFLUX_TOKEN
+   ```
+2. In Grafana eine Datenquelle *InfluxDB* anlegen: URL
+   `http://10.10.0.60:8086`, Abfragesprache **InfluxQL**, Datenbank
+   `strom`, HTTP-Header `Authorization: Token <token>` – oder **Flux** mit
+   Organisation `powermanagement` und dem Token.
+3. In der Firewall Port 8086 für den Grafana-Server öffnen (Abschnitt 8).
+
+Das Schema der Messwerte:
+
+| Messung | Tags | Felder |
+|---------|------|--------|
+| `strom` | `geraet`, `kanal`, `phase` (L1, L2, L3, N, sum), `typ` | `u` V, `i` A, `p` W, `q` var, `s` VA, `pf`, `f` Hz, `e`/`e_rueck` Wh (Zählerstand) |
+| `zustand` | `geraet`, `kanal`, `typ` | z. B. `soc` %, `schalter` 1/0, `online` 1/0, `temperatur` °C, `motorzustand` (Text) |
+| `geraet` | `geraet`, `typ` | `modell`, `produkt`, `name`, `firmware`, `generation`, `mac`, `ip`, `praefix` |
+| `pipeline` | `quelle` | `geschrieben`, `fehler`, `puffer`, `verworfen` (Herzschlag von Node-RED alle 30 s) |
+
+Alle Zahlen sind Floats. Beispiel für ein Grafana-Panel (Leistung je Phase
+eines Pro 3EM):
+
+```sql
+SELECT mean("p") FROM "strom"
+WHERE "geraet" = 'shellypro3em-a0b1c2d3e4f5' AND "phase" =~ /^L[123]$/ AND $timeFilter
+GROUP BY time($__interval), "phase" fill(null)
+```
