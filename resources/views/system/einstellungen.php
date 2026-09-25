@@ -28,7 +28,9 @@ $feld = static function (string $schluessel, string $typ = 'text', string $platz
             <div class="card-head"><h2>Grenzwerte</h2></div>
             <div class="card-body">
                 <?= $feld('grenzen.warnung', 'number', '80') ?><?= $feld('grenzen.alarm', 'number', '95') ?><?= $feld('grenzen.spannungsfall', 'text', '3') ?>
-                <p class="help">Auslastung = höchster Phasenstrom durch Nennstrom der Anlage. Der Spannungsfall gilt für die Planungshinweise an Kabeln.</p>
+                <?= $feld('material.reserve', 'number', '10') ?>
+                <p class="help">Auslastung = höchster Phasenstrom durch Nennstrom der Anlage. Der Spannungsfall gilt für die Planungshinweise an Kabeln.
+                    Die Kabelreserve kommt in der Materialliste auf die Länge im Plan (Durchhang, Weg zur Dose), bevor in Stücke geteilt wird.</p>
             </div>
         </div>
         <div class="card">

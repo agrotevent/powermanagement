@@ -22,16 +22,17 @@
     ];
     var VERGLEICH = ['#b45309', '#2563eb', '#16a34a', '#7c3aed', '#dc2626', '#0891b2', '#ca8a04', '#db2777'];
 
-    function adresse(mp, feld, messung, phasen, agg) {
+    // quelle: eigener Endpunkt im selben Format (etwa die Summe eines Bereichs).
+    function adresse(mp, feld, messung, phasen, agg, quelle) {
         var p = new URLSearchParams();
-        p.set('mp', mp);
+        if (!quelle) { p.set('mp', mp); }
         p.set('feld', feld);
         p.set('messung', messung || 'strom');
         p.set('zeitraum', einstellung.zeitraum);
         if (einstellung.zeitraum === 'frei') { p.set('von', einstellung.von); p.set('bis', einstellung.bis); }
         (phasen || []).forEach(function (ph) { p.append('phase[]', ph); });
         if (agg) { p.set('agg', agg); }
-        return '/statistik/daten?' + p.toString();
+        return (quelle || '/statistik/daten') + '?' + p.toString();
     }
 
     function breite(el) { return Math.max(280, el.clientWidth); }
@@ -40,7 +41,7 @@
         return function (u, v) { return v === null || v === undefined ? '–' : (window.PM ? window.PM.format(v, einheit, einheit === '%' || einheit === 'Hz' ? 1 : 1) : v); };
     }
 
-    function zeichnen(el, zeiten, serien, einheit, namen, farben) {
+    function zeichnen(el, zeiten, serien, einheit, namen, farben, grenze) {
         el.innerHTML = '';
         if (!zeiten.length) {
             el.innerHTML = '<div class="diagramm-leer">Keine Messwerte im gewählten Zeitraum.</div>';
@@ -58,6 +59,11 @@
                 value: formatWert(einheit),
             });
         });
+        // Grenzwert als gestrichelte Linie (Anschlussleistung eines Bereichs).
+        if (grenze) {
+            daten.push(zeiten.map(function () { return grenze; }));
+            reihen.push({ label: 'Grenze', stroke: '#dc2626', width: 1.4, dash: [6, 6], value: formatWert(einheit) });
+        }
         var plot = new uPlot({
             width: breite(el),
             height: 240,
@@ -78,7 +84,7 @@
     document.querySelectorAll('[data-mp]').forEach(function (el) {
         var phasen = (el.dataset.phasen || '').split(',').filter(Boolean);
         el.innerHTML = '<div class="diagramm-leer">Lade …</div>';
-        fetch(adresse(el.dataset.mp, el.dataset.feld, el.dataset.messung, phasen), { credentials: 'same-origin', headers: { Accept: 'application/json' } })
+        fetch(adresse(el.dataset.mp, el.dataset.feld, el.dataset.messung, phasen, null, el.dataset.quelle), { credentials: 'same-origin', headers: { Accept: 'application/json' } })
             .then(function (a) { return a.json(); })
             .then(function (d) {
                 if (d.ok === false && d.message) { el.innerHTML = '<div class="diagramm-leer">' + d.message + '</div>'; return; }
@@ -88,7 +94,7 @@
                     serien.push(d.serien[name]);
                     farben.push(FARBEN[name] || '#b45309');
                 });
-                zeichnen(el, d.zeiten, serien, d.einheit, namen, farben);
+                zeichnen(el, d.zeiten, serien, d.einheit, namen, farben, el.dataset.grenze ? Number(el.dataset.grenze) : null);
             })
             .catch(function () { el.innerHTML = '<div class="diagramm-leer">Die Messwerte ließen sich nicht laden.</div>'; });
     });

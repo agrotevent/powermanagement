@@ -14,6 +14,7 @@ declare(strict_types=1);
 require __DIR__ . '/hilfen/pruefung.php';
 
 use App\Services\BenutzerService;
+use App\Services\BereichService;
 use App\Support\Database;
 
 $port = freierPort();
@@ -130,6 +131,16 @@ try {
     if ($profil > 0) {
         $seiten[] = '/datenquellen/profile/' . $profil;
     }
+    // Bereiche: Übersicht, Formular, jede Seite eines Bereichs, Materialliste
+    array_push($seiten, '/bereiche', '/bereiche/live', '/bereiche/neu');
+    if ($etage > 0) {
+        $seiten[] = '/karte/' . $etage . '/material';
+    }
+    foreach (array_map('intval', array_column(Database::select('SELECT id FROM bereiche ORDER BY id LIMIT 5'), 'id')) as $id) {
+        foreach (['', '?reiter=material', '?zeitraum=7d', '/bearbeiten', '/material', '/daten?feld=p', '/daten?feld=i', '/bereiche/live?id=' . $id] as $zusatz) {
+            $seiten[] = str_starts_with($zusatz, '/bereiche') ? $zusatz : '/bereiche/' . $id . $zusatz;
+        }
+    }
     foreach ($seiten as $pfad) {
         $r = aufruf($basis, $admin['dose'], 'GET', $pfad);
         pruefe($r['status'] === 200, 'Admin ' . $pfad . ' → ' . $r['status']);
@@ -187,6 +198,30 @@ try {
         Database::execute('DELETE FROM leitungen WHERE name LIKE ?', [$kennung . '%']);
     }
 
+    // Bereich anlegen, ansehen, exportieren, löschen
+    $site = (int) Database::scalar('SELECT site_id FROM floors WHERE id = ?', [$etage]);
+    $mitglied = (int) Database::scalar('SELECT id FROM objekte WHERE site_id = ? AND ist_vorlage = 0 ORDER BY id LIMIT 1', [$site]);
+    if ($site > 0 && $mitglied > 0) {
+        $r = aufruf($basis, $admin['dose'], 'POST', '/bereiche/speichern', ['id' => '', 'site_id' => $site, 'name' => $kennung . '-bereich',
+            'farbe' => '#123456', 'grenze_kw' => '50', 'grenze_a' => '', 'notizen' => '', 'mitglieder[]' => 'o:' . $mitglied, '_token' => $admin['token']]);
+        $bereichId = (int) Database::scalar('SELECT id FROM bereiche WHERE name = ?', [$kennung . '-bereich']);
+        pruefe($r['status'] === 302 && $r['ziel'] === '/bereiche/' . $bereichId, 'Bereich per Formular angelegt → ' . $r['status'] . ' ' . $r['ziel']);
+        gleich(BereichService::mitgliedSchluessel($bereichId), ['o:' . $mitglied], 'Mitglied aus dem Formular gespeichert');
+        $seite = aufruf($basis, $admin['dose'], 'GET', '/bereiche/' . $bereichId);
+        pruefe($seite['status'] === 200 && str_contains($seite['text'], 'data-mitglied="o:' . $mitglied . '"') && phpMeldung($seite['text']) === null, 'Bereichsseite zeigt das Mitglied');
+        $live = json_decode(aufruf($basis, $admin['dose'], 'GET', '/bereiche/live?id=' . $bereichId)['text'], true);
+        pruefe(isset($live['bereiche'][$bereichId]['mitglieder']['o:' . $mitglied]) && count($live['bereiche']) === 1, 'Livewerte nur des gefragten Bereichs');
+        $daten = json_decode(aufruf($basis, $admin['dose'], 'GET', '/bereiche/' . $bereichId . '/daten?feld=p&zeitraum=6h')['text'], true);
+        pruefe(is_array($daten) && ($daten['feld'] ?? '') === 'p' && isset($daten['zeiten'], $daten['serien']), 'Summenverlauf als JSON');
+        $csv = aufruf($basis, $admin['dose'], 'GET', '/bereiche/' . $bereichId . '/csv?zeitraum=6h');
+        pruefe($csv['status'] === 200 && str_contains($csv['kopf'], 'text/csv') && str_contains($csv['text'], 'zeit'), 'Bereich als CSV');
+        $druck = aufruf($basis, $admin['dose'], 'GET', '/bereiche/' . $bereichId . '/material');
+        pruefe($druck['status'] === 200 && str_contains($druck['text'], 'Material') && phpMeldung($druck['text']) === null, 'Materialliste zum Drucken');
+        $r = aufruf($basis, $admin['dose'], 'POST', '/bereiche/' . $bereichId . '/loeschen', ['_token' => $admin['token']]);
+        pruefe($r['status'] === 302 && BereichService::find($bereichId) === null, 'Bereich gelöscht');
+        gleich(aufruf($basis, $admin['dose'], 'GET', '/bereiche/' . $bereichId)['status'], 404, 'gelöschter Bereich → 404');
+    }
+
     // POST ohne gültiges Token wird nicht ausgeführt
     $vorher = (int) Database::scalar('SELECT COUNT(*) FROM steckertypen');
     $r = aufruf($basis, $admin['dose'], 'POST', '/stecker/speichern', ['name' => $kennung, '_token' => 'falsch']);
@@ -196,8 +231,20 @@ try {
     // ---------------------------------------------------- Kunde ohne Freigabe
     $kunde = anmelden($basis, $kennung . '-kunde', $kennwort);
     $dosen[] = $kunde['dose'];
-    foreach (['/datenquellen', '/system/benutzer', '/system/einstellungen', '/audit', '/stecker', '/standorte', '/anlagen/neu', '/steuerung/protokoll'] as $pfad) {
+    foreach (['/datenquellen', '/system/benutzer', '/system/einstellungen', '/audit', '/stecker', '/standorte', '/anlagen/neu', '/steuerung/protokoll', '/bereiche/neu'] as $pfad) {
         gleich(aufruf($basis, $kunde['dose'], 'GET', $pfad)['status'], 403, 'Kunde ' . $pfad);
+    }
+    // Bereiche eines fremden Standorts: nicht in der Liste, nicht aufrufbar
+    $fremderBereich = (int) Database::scalar('SELECT id FROM bereiche ORDER BY id LIMIT 1');
+    if ($fremderBereich > 0) {
+        $r = aufruf($basis, $kunde['dose'], 'GET', '/bereiche');
+        pruefe($r['status'] === 200 && !str_contains($r['text'], 'data-bereich-id="' . $fremderBereich . '"'), 'Kunde sieht fremden Bereich nicht in der Liste');
+        foreach (['', '/material', '/daten?feld=p'] as $zusatz) {
+            $r = aufruf($basis, $kunde['dose'], 'GET', '/bereiche/' . $fremderBereich . $zusatz);
+            pruefe(in_array($r['status'], [403, 404], true), 'Kunde /bereiche/…' . $zusatz . ' → ' . $r['status']);
+        }
+        $live = json_decode(aufruf($basis, $kunde['dose'], 'GET', '/bereiche/live')['text'], true);
+        gleich($live['bereiche'] ?? null, [], 'Kunde bekommt keine Livewerte fremder Bereiche');
     }
     foreach (['/dashboard', '/anlagen', '/karte', '/statistik'] as $pfad) {
         $r = aufruf($basis, $kunde['dose'], 'GET', $pfad);
@@ -227,6 +274,9 @@ try {
     }
 } finally {
     Database::execute('DELETE FROM leitungen WHERE name LIKE ?', [$kennung . '%']);
+    foreach (Database::select('SELECT id FROM bereiche WHERE name LIKE ?', [$kennung . '%']) as $b) {
+        BereichService::loeschen((int) $b['id']);
+    }
     foreach (Database::select('SELECT id FROM objekte WHERE name LIKE ?', [$kennung . '%']) as $o) {
         \App\Services\AnlagenService::loeschen((int) $o['id']);
     }

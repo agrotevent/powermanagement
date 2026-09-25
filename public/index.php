@@ -6,6 +6,7 @@ require dirname(__DIR__) . '/src/bootstrap.php';
 use App\Controllers\AnlagenController;
 use App\Controllers\AuditController;
 use App\Controllers\AuthController;
+use App\Controllers\BereichController;
 use App\Controllers\BenutzerController;
 use App\Controllers\DashboardController;
 use App\Controllers\DatenquellenController;
@@ -48,6 +49,7 @@ $router->get('/dashboard/live', [DashboardController::class, 'live'], 'dashboard
 $router->get('/karte', [KarteController::class, 'index'], 'karte.view');
 $router->get('/karte/{id}/stand', [KarteController::class, 'stand'], 'karte.view');
 $router->get('/karte/{id}/live', [KarteController::class, 'live'], 'karte.view');
+$router->get('/karte/{id}/material', [KarteController::class, 'material'], 'karte.view');
 $router->get('/karte/objekt/{id}', [KarteController::class, 'objekt'], 'karte.view');
 $router->get('/karte/leitung/{id}', [KarteController::class, 'leitung'], 'karte.view');
 $router->post('/karte/objekt/setzen', [KarteController::class, 'objektSetzen'], 'anlagen.manage');
@@ -103,6 +105,18 @@ $router->get('/statistik/daten', [StatistikController::class, 'daten'], 'statist
 $router->get('/statistik/csv', [StatistikController::class, 'csv'], 'statistik.export');
 $router->post('/auswertung/umschalten', [StatistikController::class, 'umschalten'], 'statistik.view');
 $router->post('/auswertung/leeren', [StatistikController::class, 'leeren'], 'statistik.view');
+
+// Bereiche: Last mehrerer Anlagen und Abgänge zusammen, Materialliste.
+$router->get('/bereiche', [BereichController::class, 'index'], 'anlagen.view');
+$router->get('/bereiche/live', [BereichController::class, 'live'], 'anlagen.view');
+$router->get('/bereiche/neu', [BereichController::class, 'neu'], 'anlagen.manage');
+$router->post('/bereiche/speichern', [BereichController::class, 'speichern'], 'anlagen.manage');
+$router->get('/bereiche/{id}', [BereichController::class, 'show'], 'anlagen.view');
+$router->get('/bereiche/{id}/bearbeiten', [BereichController::class, 'bearbeiten'], 'anlagen.manage');
+$router->post('/bereiche/{id}/loeschen', [BereichController::class, 'loeschen'], 'anlagen.manage');
+$router->get('/bereiche/{id}/daten', [BereichController::class, 'daten'], 'statistik.view');
+$router->get('/bereiche/{id}/csv', [BereichController::class, 'csv'], 'statistik.export');
+$router->get('/bereiche/{id}/material', [BereichController::class, 'material'], 'anlagen.view');
 
 // ---------------------------------------------------------------- Messtechnik
 $router->get('/datenquellen', [DatenquellenController::class, 'index'], 'datenquellen.view');

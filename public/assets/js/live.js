@@ -182,6 +182,24 @@
                             kachelSetzen(kachel, daten.objekte[id]);
                         });
                     });
+                    // Bereiche: Kachel wie bei einer Anlage, dazu die Mitglieder.
+                    Object.keys(daten.bereiche || {}).forEach(function (id) {
+                        var b = daten.bereiche[id];
+                        document.querySelectorAll('[data-bereich-id="' + id + '"]').forEach(function (kachel) {
+                            kachelSetzen(kachel, b);
+                        });
+                        Object.keys(b.mitglieder || {}).forEach(function (schluessel) {
+                            var m = b.mitglieder[schluessel];
+                            document.querySelectorAll('[data-mitglied="' + schluessel + '"]').forEach(function (zeile) {
+                                var p = zeile.querySelector('[data-feld="p"]');
+                                if (p) { p.textContent = PM.format(m.p, 'W'); }
+                                var a = zeile.querySelector('[data-feld="anteil"]');
+                                if (a) { a.textContent = m.anteil !== null && m.anteil !== undefined ? Math.round(m.anteil) + ' %' : ''; }
+                                var st = zeile.querySelector('[data-feld="status"]');
+                                if (st) { st.textContent = m.status === 'ok' ? '' : m.status; }
+                            });
+                        });
+                    });
                     var uhr = new Date((daten.ts || Date.now() / 1000) * 1000);
                     liveQuelle.textContent = 'Stand ' + uhr.toLocaleTimeString('de-DE') + ' – aktualisiert alle 5 Sekunden.';
                 })

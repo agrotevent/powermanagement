@@ -45,6 +45,7 @@ $darfSetzen = $darfAnlegen;
         <?php if ($darfMassstab): ?>
             <button type="button" class="btn btn-sm" data-modus="massstab" title="Zwei Punkte mit bekanntem Abstand setzen">Maßstab</button>
         <?php endif; ?>
+        <a class="btn btn-sm" href="/karte/<?= (int) $etage['id'] ?>/material" target="_blank" rel="noopener" title="Material für den Aufbau dieser Etage: Anlagen, Kabelstücke, Kabelbrücken">Material</a>
         <button type="button" class="btn btn-sm" data-aktion="vollbild" title="Karte über die ganze Fläche">Vollbild</button>
     </div>
 </div>

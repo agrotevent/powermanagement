@@ -23,6 +23,9 @@ final class Demo
         'shellypro3em-einspeisung' => ['shelly', 'SPEM-003CEBEU', 'Einspeisung Hauptverteiler', ['em:0' => ['drehstrom', 9000, 52000, 'gesamt']]],
         'shellypro3em-buehne'      => ['shelly', 'SPEM-003CEBEU', 'Bühne', ['em:0' => ['drehstrom', 1500, 30000, 'abend']]],
         'shellypro3em-catering'    => ['shelly', 'SPEM-003CEBEU', 'Catering', ['em:0' => ['drehstrom', 2500, 16000, 'essen']]],
+        'shellypro3em-foodtruck'   => ['shelly', 'SPEM-003CEBEU', 'Foodtruck-Verteiler', ['em:0' => ['drehstrom', 3000, 36000, 'essen']]],
+        'shellypro3em-grilltruck'  => ['shelly', 'SPEM-003CEBEU', 'Grill-Truck am Aggregat', ['em:0' => ['drehstrom', 2000, 18000, 'essen']]],
+        'shellypro1pm-kaffee'      => ['shelly', 'SPSW-201PE16EU', 'Kaffeemobil', ['switch:0' => ['einphasig', 300, 3200, 'essen']]],
         'shellypro4pm-licht'       => ['shelly', 'SPSW-104PE16EU', 'Beleuchtung Gelände', [
             'switch:0' => ['einphasig', 150, 1800, 'nacht'],
             'switch:1' => ['einphasig', 150, 1600, 'nacht'],

@@ -26,6 +26,7 @@ $groups = [
     ],
     'Auswertung' => [
         ['/statistik',            'Statistik',           null, 'statistik.view'],
+        ['/bereiche',             'Bereiche',            null, 'anlagen.view'],
         ['/steuerung/protokoll',  'Schaltprotokoll',     null, 'steuern.protokoll'],
     ],
     'Messtechnik' => [
