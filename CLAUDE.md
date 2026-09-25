@@ -86,5 +86,12 @@ php -S 127.0.0.1:8080 -t public &
 NPM_ROOT=$(npm root -g) node docs/bilder/aufnehmen.mjs http://127.0.0.1:8080
 ```
 
+Für den Verteiler-Abgleich legt das Skript sich ein eigenes Repository im
+Temp-Ordner an (kein Token, nichts auf GitHub) und stellt Einstellungen und
+Abgleich-Vermerke danach wieder her – der Server muss dafür diese
+Arbeitskopie ausliefern (`php` und `git` im PATH). Nur Bilder mit geänderter
+Oberfläche einchecken; die übrigen unterscheiden sich nur in Zeiten und
+Messwerten.
+
 Andere Bildschirmfotos (Prüfen, Fehlersuche) und Wegwerfdateien gehören
 nicht ins Repository.

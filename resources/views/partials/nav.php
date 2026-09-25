@@ -48,6 +48,17 @@ $groups = [
     ],
 ];
 $query = (string) (parse_url((string) ($activePath ?? '/'), PHP_URL_QUERY) ?? '');
+// Der längste passende Pfad gewinnt: auf /anlagen/katalog ist es
+// „Standard-Verteiler“, nicht zugleich „Alle Anlagen“ (/anlagen).
+$genauester = '';
+foreach ($groups as $items) {
+    foreach ($items as $item) {
+        $pfad = explode('?', $item[0], 2)[0];
+        if ($is($pfad) !== '' && strlen($pfad) > strlen($genauester)) {
+            $genauester = $pfad;
+        }
+    }
+}
 ?>
 <nav class="sidebar">
     <div class="brand">
@@ -67,12 +78,13 @@ $query = (string) (parse_url((string) ($activePath ?? '/'), PHP_URL_QUERY) ?? ''
         if ($visible === []) {
             continue;
         }
-        $aktivIn = static function (string $href) use ($path, $query, $is): bool {
+        $aktivIn = static function (string $href) use ($path, $query, $is, $genauester): bool {
             $teile = explode('?', $href, 2);
             if (isset($teile[1])) {
                 return $path === $teile[0] && str_contains('&' . $query . '&', '&' . $teile[1] . '&');
             }
-            return $is($teile[0]) !== '' && ($query === '' || $teile[0] !== '/anlagen' || (!str_contains($query, 'art=') && !str_contains($query, 'fest=1')));
+            return $is($teile[0]) !== '' && $teile[0] === $genauester
+                && ($query === '' || $teile[0] !== '/anlagen' || (!str_contains($query, 'art=') && !str_contains($query, 'fest=1')));
         };
         $offen = false;
         foreach ($visible as $item) {

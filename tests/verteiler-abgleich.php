@@ -316,6 +316,22 @@ try {
     gleich(VerteilerSync::pfad('location', 'x'), null, 'nur bekannte Bereiche');
     pruefe(!VerteilerSync::entfernen('inventar', '../README', 'pruefung')['ok'], 'Entfernen mit Pfad abgelehnt');
 
+    // ------------------------------------------------ Anderes Repository eingetragen
+    $zweites = $tmp . '/zweites.git';
+    $sh('git init -q --bare -b main ' . escapeshellarg($zweites));
+    Settings::put('inventory.repo_url', 'file://' . $zweites);
+    Config::set('inventory.repo_url', 'file://' . $zweites);
+    $holen = LocationSync::holen();
+    pruefe($holen['ok'], 'neues Repository geholt: ' . $holen['message']);
+    gleich(trim($sh('git -C ' . escapeshellarg($kopie) . ' remote get-url origin')), 'file://' . $zweites, 'Arbeitskopie zeigt auf das neue Repository');
+    $hoch = VerteilerSync::hochladen([['inventar', $vKey]], 'pruefung');
+    pruefe($hoch['ok'], 'ins neue Repository hochgeladen: ' . $hoch['message']);
+    gleich((int) trim($sh('git --git-dir=' . escapeshellarg($zweites) . ' rev-list --count main')), 1, 'das neue Repository bekommt nicht die Geschichte des alten');
+    pruefe(trim($sh('git --git-dir=' . escapeshellarg($zweites) . ' ls-tree -r --name-only main -- verteiler/inventar')) === 'verteiler/inventar/' . $vKey . '.json',
+        'im neuen Repository nur das hochgeladene Stück');
+    Settings::put('inventory.repo_url', 'file://' . $fern);
+    Config::set('inventory.repo_url', 'file://' . $fern);
+
     // ------------------------------------------------ Location-Abgleich lässt Katalog-Typen in Ruhe
     $strom = LocationBundle::stromAnwenden($siteId, ['format' => 2, 'art' => 'strom', 'anlagen' => [[
         'schluessel' => $typSchluessel, 'art' => 'anschluss', 'fest' => true, 'name' => $k . ' Säule', 'etage' => null,
