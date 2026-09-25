@@ -93,21 +93,34 @@ final class BereichController extends Controller
     {
         $siteId = (int) $bereich['site_id'];
         $objekte = $siteId > 0 ? Zugriff::filtern(AnlagenService::liste(['site_id' => $siteId])) : [];
-        // Messgeräte an Abgängen – einzeln wählbar (der Shelly am Abgang eines Foodtrucks).
+        // Messgeräte an Abgängen – einzeln wählbar (der Shelly am Abgang eines
+        // Foodtrucks). Je Abgang eine Zeile, auch wenn dort nacheinander
+        // verschiedene Geräte steckten (Inventar-Einsätze): gezählt wird die Stelle.
         $abgaenge = [];
+        $gewaehlt = array_flip($gewaehlt);
         if ($objekte !== []) {
             $ids = implode(',', array_map(static fn ($o) => (int) $o['id'], $objekte));
+            $jeStelle = [];
             foreach (Database::select(
                 "SELECT m.*, a.bezeichnung AS anschluss_name, a.phase AS anschluss_phase, t.name AS typ_name
                  FROM messpunkte m JOIN anschluesse a ON a.id = m.anschluss_id JOIN steckertypen t ON t.id = a.steckertyp_id
-                 WHERE m.objekt_id IN ($ids) ORDER BY a.nr"
+                 WHERE m.objekt_id IN ($ids) ORDER BY a.nr, m.gueltig_bis IS NULL, m.id"
             ) as $m) {
-                $abgaenge[(int) $m['objekt_id']][] = $m;
+                $jeStelle[(int) $m['anschluss_id']][] = $m;
+            }
+            foreach ($jeStelle as $stelle) {
+                $zeile = $stelle[count($stelle) - 1];   // das jetzige (sonst das letzte) Gerät
+                foreach ($stelle as $m) {
+                    if (isset($gewaehlt['m:' . (int) $m['id']])) {
+                        $gewaehlt['m:' . (int) $zeile['id']] = true;
+                    }
+                }
+                $abgaenge[(int) $zeile['objekt_id']][] = $zeile;
             }
         }
         $this->view('bereiche/form', [
             'bereich'   => $bereich,
-            'gewaehlt'  => array_flip($gewaehlt),
+            'gewaehlt'  => $gewaehlt,
             'standorte' => $standorte,
             'objekte'   => $objekte,
             'abgaenge'  => $abgaenge,

@@ -7,6 +7,7 @@ use App\Auth\Auth;
 use App\Auth\Zugriff;
 use App\Messung\Messdaten;
 use App\Services\AnlagenService;
+use App\Services\InventarService;
 use App\Services\LeitungService;
 use App\Services\LiveService;
 use App\Services\MesspunktService;
@@ -171,7 +172,7 @@ final class AnlagenController extends Controller
         $kennzahlen = null;
         $haupt = MesspunktService::haupt($messpunkte);
         if ($haupt !== null && Auth::can('statistik.view') && (int) $objekt['ist_vorlage'] === 0) {
-            $kennzahlen = Messdaten::kennzahlen((string) $haupt['geraet'], (string) $haupt['kanal'], time() - 86400, time(), $fenster);
+            $kennzahlen = Messdaten::kennzahlen((string) $haupt['geraet'], (string) $haupt['kanal'], time() - 86400, time(), MesspunktService::fenster($haupt, $objekt));
         }
         $this->view('anlagen/show', [
             'objekt'       => $objekt,
@@ -188,6 +189,10 @@ final class AnlagenController extends Controller
             'darfAendern'  => (int) $objekt['ist_vorlage'] === 1 ? (Auth::can('stecker.manage') || Zugriff::alles()) : Zugriff::darfBearbeiten($objekt),
             'fenster'      => $fenster,
             'kennzahlen'   => $kennzahlen,
+            'einsaetze'    => (int) $objekt['ist_vorlage'] === 1 ? [] : InventarService::einsaetzeAnObjekt($id, true),
+            'inventar'     => (int) $objekt['ist_vorlage'] === 0 && Zugriff::darfBearbeiten($objekt) && Auth::can('datenquellen.view')
+                ? array_values(array_filter(InventarService::liste(), static fn ($i) => $i['zustand'] !== 'defekt' && (int) ($i['einsatz']['objekt_id'] ?? 0) !== $id))
+                : [],
             'auswertung'   => MesspunktService::auswertung(),
             'reiter'       => $request->str('reiter', 'uebersicht'),
             'scripts'      => ['/assets/js/live.js'],

@@ -127,5 +127,6 @@ $darfSetzen = $darfAnlegen;
     'kabeltypen' => LeitungService::KABELTYPEN,
     'querschnitte' => LeitungService::QUERSCHNITTE,
     'bruecken'   => LeitungService::BRUECKEN,
-    'darf'       => ['setzen' => $darfSetzen, 'leitung' => $darfLeitung, 'massstab' => $darfMassstab, 'statistik' => View::can('statistik.view')],
+    'darf'       => ['setzen' => $darfSetzen, 'leitung' => $darfLeitung, 'massstab' => $darfMassstab, 'statistik' => View::can('statistik.view'),
+        'inventar' => View::can('datenquellen.view')],
 ], JSON_UNESCAPED_UNICODE | JSON_HEX_TAG | JSON_HEX_AMP) ?></script>

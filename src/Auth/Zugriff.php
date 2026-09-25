@@ -420,6 +420,29 @@ final class Zugriff
         return $teile;
     }
 
+    /**
+     * Ein Datenfenster auf einen Zeitraum ab–bis zuschneiden (offen = null) –
+     * etwa auf die Dauer, in der ein Messgerät an einer Anlage steckte.
+     *
+     * @param list<array{0:?int,1:?int}>|null $fenster
+     * @return list<array{0:?int,1:?int}>|null
+     */
+    public static function schneiden(?array $fenster, ?int $ab, ?int $bis): ?array
+    {
+        if ($ab === null && $bis === null) {
+            return $fenster;
+        }
+        $out = [];
+        foreach ($fenster ?? [[null, null]] as [$a, $b]) {
+            $lo = $a === null ? $ab : ($ab === null ? $a : max($a, $ab));
+            $hi = $b === null ? $bis : ($bis === null ? $b : min($b, $bis));
+            if ($lo === null || $hi === null || $lo < $hi) {
+                $out[] = [$lo, $hi];
+            }
+        }
+        return $out;
+    }
+
     /** Darf der Benutzer Live-Werte sehen – liegt „jetzt“ im Datenzeitraum? */
     public static function liveErlaubt(?array $fenster, ?int $jetzt = null): bool
     {
@@ -459,8 +482,10 @@ final class Zugriff
     {
         if (self::$geraeteObjekte === null) {
             self::$geraeteObjekte = [];
+            // Nur, wo das Gerät jetzt misst – ein Shelly, der mit seinem
+            // Verteiler weitergezogen ist, gehört nicht mehr zur alten Anlage.
             $rows = Database::select(
-                'SELECT m.geraet, o.* FROM messpunkte m JOIN objekte o ON o.id = m.objekt_id'
+                'SELECT m.geraet, o.* FROM messpunkte m JOIN objekte o ON o.id = m.objekt_id WHERE m.gueltig_bis IS NULL'
             );
             foreach ($rows as $row) {
                 $kennung = (string) $row['geraet'];

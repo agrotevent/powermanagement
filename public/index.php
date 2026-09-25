@@ -10,6 +10,7 @@ use App\Controllers\BereichController;
 use App\Controllers\BenutzerController;
 use App\Controllers\DashboardController;
 use App\Controllers\DatenquellenController;
+use App\Controllers\InventarController;
 use App\Controllers\EinstellungenController;
 use App\Controllers\KarteController;
 use App\Controllers\LocationController;
@@ -82,6 +83,15 @@ $router->post('/anlagen/{id}/anschluesse/details', [AnlagenController::class, 'a
 $router->post('/anlagen/{id}/schutz', [AnlagenController::class, 'schutzSpeichern'], 'anlagen.manage');
 $router->post('/anlagen/{id}/schutz/loeschen', [AnlagenController::class, 'schutzLoeschen'], 'anlagen.manage');
 $router->post('/anlagen/{id}/schutz/vorschlag', [AnlagenController::class, 'schutzVorschlag'], 'anlagen.manage');
+// Inventar: Verteiler und Zwischenstecker mit Shellys, Einsatz beim Aufbau.
+$router->get('/inventar', [InventarController::class, 'index'], 'datenquellen.view');
+$router->get('/inventar/neu', [InventarController::class, 'neu'], 'inventar.manage');
+$router->post('/inventar/speichern', [InventarController::class, 'speichern'], 'inventar.manage');
+$router->get('/inventar/{id}', [InventarController::class, 'show'], 'datenquellen.view');
+$router->get('/inventar/{id}/bearbeiten', [InventarController::class, 'bearbeiten'], 'inventar.manage');
+$router->post('/inventar/{id}/loeschen', [InventarController::class, 'loeschen'], 'inventar.manage');
+$router->post('/anlagen/{id}/einsetzen', [InventarController::class, 'einsetzen'], 'anlagen.manage');
+$router->post('/einsatz/{id}/beenden', [InventarController::class, 'beenden'], 'anlagen.manage');
 $router->post('/anlagen/{id}/messpunkt', [AnlagenController::class, 'messpunktSpeichern'], 'anlagen.manage');
 $router->post('/anlagen/{id}/messpunkt/loeschen', [AnlagenController::class, 'messpunktLoeschen'], 'anlagen.manage');
 

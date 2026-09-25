@@ -22,6 +22,7 @@ final class Permissions
             'anlagen.manage'     => 'Anlagen anlegen, ändern, löschen und ihre Anschlüsse dokumentieren (nur freigegebene mit „bearbeiten“)',
             'anlagen.scope.all'  => 'Alle Standorte, Anlagen und Messdaten ohne Freigabe und ohne Zeitgrenze',
             'stecker.manage'     => 'Steckverbinder-Katalog pflegen (Powerlock, CEE, Schuko …)',
+            'inventar.manage'    => 'Inventar pflegen: Verteiler und Zwischenstecker mit ihren Shellys (ansehen: „Datenquellen ansehen“)',
         ],
         'Karte & Standorte' => [
             'karte.view'         => 'Karte mit Grundriss ansehen',
@@ -99,7 +100,7 @@ final class Permissions
                 'permissions' => [
                     'dashboard.view', 'anlagen.view', 'anlagen.manage', 'anlagen.scope.all', 'stecker.manage',
                     'karte.view', 'plans.manage', 'leitungen.manage', 'statistik.view', 'statistik.export',
-                    'datenquellen.view', 'inventory.pull',
+                    'datenquellen.view', 'inventory.pull', 'inventar.manage',
                 ],
             ],
             'technik' => [

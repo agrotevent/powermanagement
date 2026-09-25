@@ -171,6 +171,19 @@
     }
 
     var liveQuelle = document.querySelector('[data-live-url]');
+    // Der Stand steht in einem eigenen Feld – trägt ein ganzer Kopf die
+    // Adresse (Anlagenseite), darf er nicht vom Text überschrieben werden.
+    var liveStand = liveQuelle ? liveQuelle.querySelector('[data-live-stand]') : null;
+    if (liveQuelle && !liveStand) {
+        if (liveQuelle.children.length) {
+            liveStand = document.createElement('span');
+            liveStand.className = 'small muted';
+            liveStand.setAttribute('data-live-stand', '');
+            liveQuelle.appendChild(liveStand);
+        } else {
+            liveStand = liveQuelle;
+        }
+    }
     if (liveQuelle) {
         PM.liveNeu = function () {
             if (document.hidden) { return; }
@@ -201,10 +214,10 @@
                         });
                     });
                     var uhr = new Date((daten.ts || Date.now() / 1000) * 1000);
-                    liveQuelle.textContent = 'Stand ' + uhr.toLocaleTimeString('de-DE') + ' – aktualisiert alle 5 Sekunden.';
+                    liveStand.textContent = 'Stand ' + uhr.toLocaleTimeString('de-DE') + ' – aktualisiert alle 5 Sekunden.';
                 })
                 .catch(function () {
-                    liveQuelle.textContent = 'Livewerte gerade nicht erreichbar – neuer Versuch in 5 Sekunden.';
+                    liveStand.textContent = 'Livewerte gerade nicht erreichbar – neuer Versuch in 5 Sekunden.';
                 });
         };
         setInterval(PM.liveNeu, 5000);

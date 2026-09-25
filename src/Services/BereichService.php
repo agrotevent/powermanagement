@@ -7,6 +7,7 @@ use App\Auth\Zugriff;
 use App\Messung\Messdaten;
 use App\Support\Audit;
 use App\Support\Database;
+use App\Support\Zeit;
 
 /**
  * Bereiche: Last mehrerer Anlagen und Abgänge zusammengerechnet.
@@ -200,6 +201,15 @@ final class BereichService
             $nachId[(int) $m['id']] = $m;
         }
 
+        // Was eine ganze Anlage misst: ihr Hauptmessgerät – oder, wenn das an
+        // einem Abgang sitzt, alle gemessenen Abgänge.
+        $ganzeAnlage = static function (array $aktive): array {
+            $haupt = MesspunktService::haupt($aktive);
+            if ($haupt === null) {
+                return [];
+            }
+            return $haupt['anschluss_id'] !== null ? array_values(array_filter($aktive, static fn ($m) => $m['anschluss_id'] !== null)) : [$haupt];
+        };
         $eintraege = [];
         foreach (self::mitglieder((int) $bereich['id']) as $mg) {
             if ($mg['objekt_id'] !== null) {
@@ -208,13 +218,14 @@ final class BereichService
                     continue;
                 }
                 $eigene = $jeObjekt[(int) $o['id']] ?? [];
-                $haupt = MesspunktService::haupt($eigene);
-                $nurAbgaenge = $haupt !== null && $haupt['anschluss_id'] !== null;
+                $aktive = array_values(array_filter($eigene, static fn ($m) => MesspunktService::aktiv($m)));
+                $quellen = $ganzeAnlage($aktive);
                 $eintraege[] = [
                     'schluessel' => 'o:' . (int) $o['id'], 'typ' => 'objekt', 'titel' => $o['name'], 'untertitel' => $o['art_anzeige'],
                     'objekt' => $o, 'messpunkt' => null, 'wurzel' => (int) $o['id'], 'ganz' => true, 'zweig' => null,
-                    'quellen' => $haupt === null ? [] : ($nurAbgaenge ? array_values(array_filter($eigene, static fn ($m) => $m['anschluss_id'] !== null)) : [$haupt]),
-                    'hinweis' => $nurAbgaenge ? 'Summe der gemessenen Abgänge' : '',
+                    'quellen' => $quellen,
+                    'zeitquellen' => self::zeitquellen($eigene, $ganzeAnlage),
+                    'hinweis' => $quellen !== [] && $quellen[0]['anschluss_id'] !== null ? 'Summe der gemessenen Abgänge' : '',
                 ];
                 continue;
             }
@@ -223,14 +234,22 @@ final class BereichService
             if ($o === null) {
                 continue;
             }
+            // Ein Mitglied „Abgang“ meint die Stelle, nicht das eine Gerät: Was
+            // dort zu welcher Zeit gesteckt hat (Inventar-Einsätze), zählt.
+            $stelle = array_values(array_filter($jeObjekt[(int) $o['id']] ?? [], static fn ($x) => $x['anschluss_id'] === $m['anschluss_id']
+                && ($m['anschluss_id'] !== null || $x['rolle'] === $m['rolle'])));
+            $aktive = array_values(array_filter($stelle, static fn ($x) => MesspunktService::aktiv($x)));
+            $jetzt = $aktive !== [] ? $aktive[count($aktive) - 1] : $m;
             $eintraege[] = [
                 'schluessel' => 'm:' . (int) $m['id'], 'typ' => 'messpunkt',
-                'titel' => MesspunktService::titel($m + ['objekt_name' => $o['name']]), 'untertitel' => $o['name'],
-                'objekt' => $o, 'messpunkt' => $m, 'wurzel' => (int) $o['id'],
+                'titel' => MesspunktService::titel(['gueltig_bis' => null] + $jetzt + ['objekt_name' => $o['name']]), 'untertitel' => $o['name'],
+                'objekt' => $o, 'messpunkt' => $jetzt, 'wurzel' => (int) $o['id'],
                 // Ein Messgerät an der Einspeisung steht für die ganze Anlage.
                 'ganz' => $m['anschluss_id'] === null,
                 'zweig' => $m['anschluss_id'] !== null ? ($hinterAbgang[(int) $m['anschluss_id']] ?? null) : null,
-                'quellen' => [$m], 'hinweis' => '',
+                'quellen' => $aktive,
+                'zeitquellen' => self::zeitquellen($stelle, static fn (array $a): array => $a),
+                'hinweis' => '',
             ];
         }
 
@@ -432,9 +451,9 @@ final class BereichService
         $aufbau ??= self::aufbau($bereich);
         $schritt = Messdaten::schritt($von, min($bis, time()));
         $summen = [];
-        foreach (self::zaehlendeQuellen($aufbau) as [$m, $objekt]) {
+        foreach (self::zaehlendeQuellen($aufbau) as [$m, , $fenster]) {
             $r = Messdaten::reihe('strom', (string) $m['geraet'], (string) $m['kanal'], $feld, ['L1', 'L2', 'L3', 'sum'], $von, $bis,
-                Zugriff::datenFenster($objekt), $schritt, 'mean', $fehler);
+                $fenster, $schritt, 'mean', $fehler);
             $phase = in_array((string) ($m['anschluss_phase'] ?? ''), ['L1', 'L2', 'L3'], true) ? (string) $m['anschluss_phase'] : null;
             $hatPhasen = false;
             foreach (['L1', 'L2', 'L3'] as $l) {
@@ -490,8 +509,8 @@ final class BereichService
     {
         $aufbau ??= self::aufbau($bereich);
         $tage = [];
-        foreach (self::zaehlendeQuellen($aufbau) as [$m, $objekt]) {
-            foreach (Messdaten::energieTage((string) $m['geraet'], (string) $m['kanal'], $von, $bis, Zugriff::datenFenster($objekt)) as $tag => $wh) {
+        foreach (self::zaehlendeQuellen($aufbau) as [$m, , $fenster]) {
+            foreach (Messdaten::energieTage((string) $m['geraet'], (string) $m['kanal'], $von, $bis, $fenster) as $tag => $wh) {
                 $tage[$tag] = ($tage[$tag] ?? 0.0) + $wh;
             }
         }
@@ -529,7 +548,60 @@ final class BereichService
         ];
     }
 
-    /** @return list<array{0:array<string,mixed>,1:array<string,mixed>}> [Messpunkt, Anlage] der zählenden, sichtbaren Mitglieder */
+    /**
+     * Messpunkte über die Zeit: Welches Gerät zählte wann? Die Gültigkeiten
+     * (Inventar-Einsätze) teilen die Zeit in Abschnitte; in jedem wählt
+     * $auswahl aus den dann steckenden Geräten.
+     *
+     * @param list<array<string,mixed>> $messpunkte
+     * @param callable(list<array<string,mixed>>):list<array<string,mixed>> $auswahl
+     * @return list<array{m:array<string,mixed>,teile:list<array{0:?int,1:?int}>}>
+     */
+    private static function zeitquellen(array $messpunkte, callable $auswahl): array
+    {
+        $punkte = [];
+        foreach ($messpunkte as $m) {
+            foreach (['gueltig_ab', 'gueltig_bis'] as $f) {
+                $t = Zeit::ts($m[$f] ?? null);
+                if ($t !== null) {
+                    $punkte[$t] = true;
+                }
+            }
+        }
+        ksort($punkte);
+        $grenzen = array_keys($punkte);
+        // Abschnitte: (−∞, t1), [t1, t2) … [tn, +∞) – ohne Grenzen einer.
+        $abschnitte = [];
+        $vorher = null;
+        foreach ($grenzen as $t) {
+            $abschnitte[] = [$vorher, $t];
+            $vorher = $t;
+        }
+        $abschnitte[] = [$vorher, null];
+        $out = [];
+        foreach ($abschnitte as [$lo, $hi]) {
+            $stichtag = $lo ?? ($hi !== null ? $hi - 1 : time());
+            $aktive = array_values(array_filter($messpunkte, static fn ($m) => MesspunktService::aktiv($m, $stichtag)));
+            foreach ($auswahl($aktive) as $m) {
+                $id = (int) $m['id'];
+                $out[$id] ??= ['m' => $m, 'teile' => []];
+                $n = count($out[$id]['teile']);
+                if ($n > 0 && $out[$id]['teile'][$n - 1][1] === $lo) {
+                    $out[$id]['teile'][$n - 1][1] = $hi;   // schließt an
+                } else {
+                    $out[$id]['teile'][] = [$lo, $hi];
+                }
+            }
+        }
+        return array_values($out);
+    }
+
+    /**
+     * Die zählenden Messpunkte über die Zeit, je mit dem Datenfenster, in dem
+     * sie zählen (Freigabe des Benutzers ∩ Zeit, in der sie zählten).
+     *
+     * @return list<array{0:array<string,mixed>,1:array<string,mixed>,2:?array}> [Messpunkt, Anlage, Fenster]
+     */
     private static function zaehlendeQuellen(array $aufbau): array
     {
         $out = [];
@@ -537,8 +609,18 @@ final class BereichService
             if ($e['enthalten_in'] !== null || !$e['sichtbar']) {
                 continue;
             }
-            foreach ($e['quellen'] as $m) {
-                $out[(int) $m['id']] = [$m, $e['objekt']];
+            $basis = Zugriff::datenFenster($e['objekt']);
+            foreach ($e['zeitquellen'] as ['m' => $m, 'teile' => $teile]) {
+                $fenster = [];
+                foreach ($teile as [$ab, $bis]) {
+                    $teil = Zugriff::schneiden($basis, $ab, $bis);
+                    if ($teil === null) {
+                        $fenster = null;
+                        break;
+                    }
+                    array_push($fenster, ...$teil);
+                }
+                $out[(int) $m['id']] = [$m, $e['objekt'], $fenster];
             }
         }
         return array_values($out);

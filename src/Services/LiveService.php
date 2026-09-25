@@ -50,7 +50,7 @@ final class LiveService
         $ids = array_keys($nachId);
         $messpunkte = Database::select(
             'SELECT m.*, a.phase AS anschluss_phase FROM messpunkte m LEFT JOIN anschluesse a ON a.id = m.anschluss_id
-             WHERE m.objekt_id IN (' . implode(',', array_fill(0, count($ids), '?')) . ') ORDER BY m.id',
+             WHERE m.objekt_id IN (' . implode(',', array_fill(0, count($ids), '?')) . ') AND m.gueltig_bis IS NULL ORDER BY m.id',
             $ids
         );
         $live = MesspunktService::live($messpunkte, $nachId);
@@ -319,7 +319,7 @@ final class LiveService
         $ids = array_keys($nachId);
         $rows = Database::select(
             'SELECT m.*, d.id AS quelle_id FROM messpunkte m JOIN datenquellen d ON d.geraet = m.geraet
-             WHERE m.objekt_id IN (' . implode(',', array_fill(0, count($ids), '?')) . ') ORDER BY m.objekt_id, m.id',
+             WHERE m.objekt_id IN (' . implode(',', array_fill(0, count($ids), '?')) . ') AND m.gueltig_bis IS NULL ORDER BY m.objekt_id, m.id',
             $ids
         );
         $out = [];

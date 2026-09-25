@@ -24,7 +24,7 @@ final class DatenquellenController extends Controller
         $geraete = Messdaten::geraete($fehler);
         // Welche Geräte sind schon einer Anlage zugeordnet?
         $zugeordnet = [];
-        foreach (Database::select('SELECT m.geraet, m.kanal, o.id, o.name FROM messpunkte m JOIN objekte o ON o.id = m.objekt_id') as $z) {
+        foreach (Database::select('SELECT m.geraet, m.kanal, o.id, o.name FROM messpunkte m JOIN objekte o ON o.id = m.objekt_id WHERE m.gueltig_bis IS NULL') as $z) {
             $zugeordnet[$z['geraet'] . '|' . $z['kanal']][] = ['id' => (int) $z['id'], 'name' => $z['name']];
         }
         $this->view('datenquellen/index', [

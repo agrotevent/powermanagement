@@ -328,6 +328,15 @@ final class AnlagenService
             // Eine Vorlage steht nirgends – sie ist ein Bauplan.
             $felder['site_id'] = $felder['floor_id'] = null;
         }
+        // Eine neue Anlage aus einem Katalog-Typ trägt dessen Typ, wenn nichts
+        // anderes gesagt ist – daran erkennt der Aufbau, ob ein Verteiler passt.
+        if (!$id && (int) ($daten['vorlage_id'] ?? 0) > 0 && $felder['modell'] === '') {
+            $typ = Database::first('SELECT hersteller, modell FROM objekte WHERE id = ? AND ist_vorlage = 1', [(int) $daten['vorlage_id']]);
+            if ($typ !== null) {
+                $felder['modell'] = (string) $typ['modell'];
+                $felder['hersteller'] = $felder['hersteller'] !== '' ? $felder['hersteller'] : (string) $typ['hersteller'];
+            }
+        }
         // Fest oder mobil: was gesagt wird, gilt. Sonst bleibt es beim
         // Bearbeiten, wie es war, und eine neue Anlage übernimmt es von
         // ihrer Vorlage bzw. der Vorgabe ihrer Art.
@@ -399,6 +408,7 @@ final class AnlagenService
         Database::execute('UPDATE leitungen SET von_objekt_id = NULL, von_anschluss_id = NULL WHERE von_objekt_id = ?', [$id]);
         Database::execute('UPDATE leitungen SET zu_objekt_id = NULL, zu_anschluss_id = NULL WHERE zu_objekt_id = ?', [$id]);
         BereichService::objektEntfernt($id);
+        InventarService::objektEntfernt($id);
         Database::execute('DELETE FROM anschluesse WHERE objekt_id = ?', [$id]);
         Database::execute('DELETE FROM schutzorgane WHERE objekt_id = ?', [$id]);
         Database::execute('DELETE FROM messpunkte WHERE objekt_id = ?', [$id]);
@@ -678,6 +688,55 @@ final class AnlagenService
                 'created_at'    => gmdate('c'),
             ]);
         }
+    }
+
+    /**
+     * Eine Anlage auf einen anderen Katalog-Typ umstellen – etwa wenn beim
+     * Aufbau statt des geplanten PD 32 ein PD 63 steht. Anschlüsse und
+     * Schutzorgane kommen aus dem Katalog; Kabel und Messgeräte bleiben an
+     * „ihrem“ Anschluss (gleiche Richtung und Nummer), sonst an der Anlage.
+     */
+    public static function typUebernehmen(int $objektId, int $vorlageId): array
+    {
+        $objekt = self::find($objektId);
+        $vorlage = self::find($vorlageId);
+        if ($objekt === null || $vorlage === null || (int) $vorlage['ist_vorlage'] !== 1) {
+            return ['ok' => false, 'message' => 'Anlage oder Katalog-Typ nicht gefunden.'];
+        }
+        $stelle = [];
+        foreach (Database::select('SELECT id, richtung, nr FROM anschluesse WHERE objekt_id = ?', [$objektId]) as $a) {
+            $stelle[(int) $a['id']] = $a['richtung'] . ':' . (int) $a['nr'];
+        }
+        $kabel = [];
+        foreach (['von', 'zu'] as $ende) {
+            foreach (Database::select("SELECT id, {$ende}_anschluss_id AS a FROM leitungen WHERE {$ende}_objekt_id = ? AND {$ende}_anschluss_id IS NOT NULL", [$objektId]) as $l) {
+                $kabel[] = [(int) $l['id'], $ende, $stelle[(int) $l['a']] ?? null];
+            }
+        }
+        $messgeraete = [];
+        foreach (Database::select('SELECT id, anschluss_id FROM messpunkte WHERE objekt_id = ? AND anschluss_id IS NOT NULL', [$objektId]) as $m) {
+            $messgeraete[(int) $m['id']] = $stelle[(int) $m['anschluss_id']] ?? null;
+        }
+        Database::execute('UPDATE messpunkte SET schutzorgan_id = NULL WHERE objekt_id = ?', [$objektId]);
+        Database::execute('DELETE FROM anschluesse WHERE objekt_id = ?', [$objektId]);
+        Database::execute('DELETE FROM schutzorgane WHERE objekt_id = ?', [$objektId]);
+        self::anschluesseKopieren($vorlageId, $objektId);
+        $neu = [];
+        foreach (Database::select('SELECT id, richtung, nr FROM anschluesse WHERE objekt_id = ?', [$objektId]) as $a) {
+            $neu[$a['richtung'] . ':' . (int) $a['nr']] = (int) $a['id'];
+        }
+        foreach ($kabel as [$id, $ende, $alt]) {
+            Database::update('leitungen', $id, [$ende . '_anschluss_id' => $alt !== null ? ($neu[$alt] ?? null) : null]);
+        }
+        foreach ($messgeraete as $id => $alt) {
+            Database::update('messpunkte', $id, ['anschluss_id' => $alt !== null ? ($neu[$alt] ?? null) : null]);
+        }
+        Database::update('objekte', $objektId, [
+            'modell' => $vorlage['modell'], 'hersteller' => $vorlage['hersteller'],
+            'nennstrom_a' => $vorlage['nennstrom_a'], 'nennleistung_kva' => $vorlage['nennleistung_kva'], 'updated_at' => gmdate('c'),
+        ]);
+        Audit::log('anlage.typ', 'objekt', (string) $objektId, ['von' => $objekt['modell'], 'nach' => $vorlage['modell']]);
+        return ['ok' => true, 'message' => '„' . $objekt['name'] . '“ ist jetzt ' . ($vorlage['modell'] ?: $vorlage['name']) . '.'];
     }
 
     /**

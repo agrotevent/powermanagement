@@ -32,7 +32,7 @@ final class StatistikController extends Controller
         }
         $out = [];
         foreach ($objekte as $o) {
-            foreach (MesspunktService::fuerObjekt((int) $o['id']) as $m) {
+            foreach (MesspunktService::fuerObjekt((int) $o['id'], true) as $m) {
                 $m['objekt_name'] = $o['name'];
                 $m['objekt'] = $o;
                 $m['titel'] = MesspunktService::titel($m);
@@ -65,7 +65,7 @@ final class StatistikController extends Controller
         $auswahl = [];
         foreach ($gewaehlt as $id) {
             $m = $alle[$id];
-            $fenster = Zugriff::datenFenster($m['objekt']);
+            $fenster = MesspunktService::fenster($m, $m['objekt']);
             $auswahl[] = [
                 'id'       => $id,
                 'titel'    => $m['titel'],
@@ -110,7 +110,7 @@ final class StatistikController extends Controller
             : [];
         $fehler = null;
         $reihe = Messdaten::reihe($messung, (string) $m['geraet'], (string) $m['kanal'], $feld, $phasen, $von, $bis,
-            Zugriff::datenFenster($m['objekt']), null, $request->str('agg', 'mean'), $fehler);
+            MesspunktService::fenster($m, $m['objekt']), null, $request->str('agg', 'mean'), $fehler);
         $this->json([
             'ok'      => $fehler === null,
             'message' => $fehler,
@@ -137,7 +137,7 @@ final class StatistikController extends Controller
             if ($m === null) {
                 continue;
             }
-            $fenster = Zugriff::datenFenster($m['objekt']);
+            $fenster = MesspunktService::fenster($m, $m['objekt']);
             foreach (['p' => ['L1', 'L2', 'L3', 'sum'], 'i' => ['L1', 'L2', 'L3'], 'u' => ['L1', 'L2', 'L3']] as $feld => $phasen) {
                 $reihe = Messdaten::reihe('strom', (string) $m['geraet'], (string) $m['kanal'], $feld, $phasen, $von, $bis, $fenster);
                 foreach ($reihe['serien'] as $phase => $werte) {
