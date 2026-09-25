@@ -346,3 +346,20 @@ tr.live-zeile.stufe-stumm td:first-child { box-shadow: inset 4px 0 0 var(--stufe
 /* Angetippte Linien bekommen sonst den Fokusrahmen des Browsers – ein
    Rechteck um die ganze Linie, das wie ein eingezeichnetes Objekt aussieht. */
 .strom-karte path.leaflet-interactive:focus { outline: none; }
+
+/* Werte je Phase: der Wert neben der Anlage ist antippbar, das
+   Detailfenster steht im Plan an der Anlage. */
+.pm-anlage .pm-wert { cursor: pointer; text-decoration: underline dotted rgba(15, 23, 42, .45); text-underline-offset: 2px; }
+.pm-detail-popup .leaflet-popup-content { margin: .7rem .8rem; font-size: .8rem; }
+.pm-detail-kopf { display: flex; flex-direction: column; margin-bottom: .35rem; }
+.pm-phasen { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; margin: .35rem 0; }
+.pm-phasen th, .pm-phasen td { padding: .18rem .35rem; text-align: right; white-space: nowrap; border-bottom: 1px solid var(--border, #e2e8f0); }
+.pm-phasen th:first-child { text-align: left; color: var(--muted, #64748b); font-weight: 600; }
+.pm-phasen thead th { color: var(--muted, #64748b); font-size: .72rem; }
+.pm-phasen td:last-child { font-weight: 700; }
+.pm-phasen-fuss { display: flex; flex-wrap: wrap; gap: .3rem .9rem; }
+.strom-karte.detail-offen .leaflet-control-zoom { display: none; }
+.pm-phasen-wrap { overflow-x: auto; }
+.karte-seite .pm-phasen { font-size: .74rem; }
+.karte-seite .pm-phasen th, .karte-seite .pm-phasen td { padding: .15rem .25rem; }
+.pm-phasen th { text-transform: none; letter-spacing: normal; }
