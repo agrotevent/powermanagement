@@ -81,6 +81,8 @@ Rechte → Freigaben** (gilt für alle mit dieser Rolle, solange die Zuweisung g
 | *gültig ab/bis* | wann die Freigabe wirkt |
 | *Daten ab/bis* | welche Messdaten sichtbar sind (siehe oben) |
 
+![Freigabe des Demo-Kontos „veranstalter“: nur das Festivalgelände, nur die Festivalwoche](bilder/freigaben.png)
+
 ## Schalten – je Gerät einzeln
 
 Ein Schaltbefehl (Shelly ein/aus, Victron Modus, ComAp Start/Stopp …) wird

@@ -9,7 +9,11 @@
     'use strict';
     if (typeof uPlot === 'undefined') { return; }
 
-    var einstellung = JSON.parse(document.getElementById('statistik-daten').textContent);
+    // Ohne Diagramme auf der Seite (etwa der Reiter „Material“ eines Bereichs
+    // oder ohne Statistik-Recht) gibt es nichts zu tun.
+    var datenQuelle = document.getElementById('statistik-daten');
+    if (!datenQuelle) { return; }
+    var einstellung = JSON.parse(datenQuelle.textContent);
     var FARBEN = { L1: '#8b5a2b', L2: '#111827', L3: '#6b7280', N: '#2563eb', sum: '#b45309' };
     // Zeitachse auf Deutsch, 24 Stunden (uPlot-Tabelle: Abstand, Format, …).
     var ZEITACHSE = [

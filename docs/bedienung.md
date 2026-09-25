@@ -5,6 +5,10 @@ funktioniert sie genauso. Sie lässt sich als Web-App auf den Startbildschirm
 legen (Browser-Menü → *Zum Startbildschirm*). Livewerte aktualisieren sich
 alle 5 Sekunden, solange die Seite offen ist.
 
+Die Bilder zeigen das Demo-Gelände (`php bin/power demo:seed`): ein
+Festivalgelände mit Netzanschluss, Energiesäulen, Aggregat, Speicher,
+Verteilern, einer Foodtruck-Meile und einem laufenden Aufbau.
+
 ## Übersicht
 
 Kacheln für jede sichtbare Anlage: Leistung, Ströme je Phase, Auslastung
@@ -23,11 +27,15 @@ berechnet, also nur aus den Einspeisungen (Netz, Aggregate, Speicher) ohne
 Doppelzählung der nachgelagerten Verteilungen. Schwellen:
 **System → Einstellungen → Grenzwerte**.
 
+![Übersicht: Einspeisung gesamt, Zähler nach Zustand und Livekacheln je Anlage](bilder/uebersicht.png)
+
 ## Karte
 
 Die Karte ist der Grundriss aus MasterAdmin: dieselben Pläne (PDF, Bild oder
 SVG), dieselben Kacheln, derselbe Maßstab. Darauf liegen Anlagen, Kabel,
 Kabelwege und Kabelbrücken. Ebenen lassen sich einzeln ein- und ausblenden.
+
+![Karte des Demo-Geländes: Feststromanschlüsse eckig mit dunklem Rahmen, mobile Verteiler rund, Kabel nach Querschnitt, Kabelbrücken gelb-schwarz, an jeder Anlage Leistung und Auslastung](bilder/karte.png)
 
 Es gibt zwei Sorten von Anlagen:
 
@@ -69,6 +77,12 @@ vorhanden ist.
 | **Georeferenz** | zwei gut erkennbare Punkte weit auseinander antippen (Gebäudeecke, Tor, Mast, eine Energiesäule) und zu jedem Breite und Länge eintragen – siehe [Georeferenz](#georeferenz-und-gps). |
 | **Hier bin ich** | (nur mit Georeferenz) zeigt die eigene GPS-Position als blauen Punkt im Plan, mit Genauigkeitskreis. Noch einmal tippen schaltet sie ab. |
 
+![Wert neben dem Hauptverteiler angetippt: Spannung, Strom, Leistung, Scheinleistung und cos φ je Phase, Frequenz und Auslastung – direkt im Plan](bilder/karte-phasen.png)
+
+![Anlage in der Karte angetippt: Livewerte je Phase, Lage, Inventar-Stück und Messgeräte im Seitenfenster](bilder/karte-anlage.png)
+
+<img src="bilder/karte-handy.png" alt="Die Karte auf dem Handy" width="300">
+
 **Material** (oben in der Werkzeugleiste) öffnet die Materialliste der
 ganzen Etage zum Drucken – siehe [Materialliste](#materialliste).
 
@@ -107,6 +121,10 @@ Was damit geht:
 - **GeoJSON**: unter der Karte (*georeferenziert · GeoJSON*) alle
   sichtbaren Anlagen als Punkte und Kabel, Kabelwege und Kabelbrücken als
   Linien – für QGIS, Google Earth oder die Geländeplanung.
+
+![Georeferenz: zwei Passpunkte, Koordinaten aus OpenStreetMap oder vor Ort per GPS](bilder/georeferenz.png)
+
+<img src="bilder/gps-handy.png" alt="„Hier bin ich“: die eigene GPS-Position als blauer Punkt im Plan" width="300">
 
 Die Georeferenz gehört zur Location und geht mit dem Location-Abgleich mit
 (in `strom.json`, damit `location.json` das Format von MasterAdmin behält).
@@ -150,6 +168,8 @@ Je Anlage gibt es diese Reiter:
 | **Messgeräte** | welches Gerät (Shelly-Kanal, Victron-Kanal, ComAp …) was misst: die **Einspeisung**, einen **Abgang** oder **einen bestimmten Anschluss**. |
 | **Kabel** | alle Kabel an dieser Anlage mit Hinweisen |
 
+![Anlagenseite des Hauptverteilers: Livekachel, Kennzahlen der letzten 24 Stunden, Gespeist von](bilder/anlage.png)
+
 **Anschlüsse** lassen sich nicht wegnehmen, solange ein Kabel daran
 steckt. Die Anzahl sinkt dann nur bis zum belegten Anschluss.
 
@@ -165,6 +185,8 @@ Eingezeichnete **Messgeräte sind anklickbar** und zeigen Livewerte. Mit
 **„zur Auswertung“** kommt das Messgerät in die Auswertung (Zähler oben in
 der Navigation, höchstens 12 gleichzeitig).
 
+![Verteilerplan: Einspeisung, Hauptschalter, RCDs und Sicherungen, darunter die Abgänge mit Stecker und Messgeräten](bilder/verteilerplan.png)
+
 ### Standard-Verteiler
 
 **Anlagen → Standard-Verteiler** ist der Katalog: Verteiler und Aggregate
@@ -179,6 +201,8 @@ Katalog.
 Im Katalog stehen auch **Feststromanschluss-Typen** (*„+
 Feststromanschluss-Typ“*), etwa die Energiesäulen eines Geländes, die
 überall gleich bestückt sind. Was daraus entsteht, ist fest installiert.
+
+![Katalog der Standard-Verteiler mit Anschlüssen und Bestückung](bilder/katalog.png)
 
 ### Verteilbaum und Steckverbinder
 
@@ -214,6 +238,10 @@ Der **Aufbau-Modus** ist der Übergang von der Planung zum echten Aufbau:
 4. **Veranstaltung beenden**, auf Wunsch mit Abbau aller Inventar-Stücke
    des Standorts – ihre Shellys messen dann nicht mehr dort.
 
+![Liste eines Aufbaus: Fortschritt, Filter und je Position „wie geplant“, „entfällt“ oder „geändert …“](bilder/aufbau.png)
+
+<img src="bilder/aufbau-handy.png" alt="Aufbau-Modus auf dem Handy: Anlage antippen und bestätigen" width="300">
+
 Der **Abgleich** (jederzeit, auch zum Drucken) zeigt, was anders kam, und
 was das für die nächste Planung heißt:
 
@@ -227,6 +255,8 @@ was das für die nächste Planung heißt:
   gegen den Nennstrom, mit Hinweis: *überlastet*, *am Limit*, *passt* oder
   *überdimensioniert* (bei Verteilern mit dem kleineren Katalog-Typ, der
   gereicht hätte). Dazu die Bereiche mit ihrer höchsten gleichzeitigen Last
+![Abgleich: Kennzahlen, Last im Betrieb mit Hinweisen für die nächste Planung, Bereiche und Anlagen](bilder/abgleich.png)
+
   gegen ihre Grenze.
 
 ## Inventar
@@ -241,10 +271,14 @@ denen Shellys eingebaut sind – jedes mit seinem Aufkleber:
   Shelly im **Durchgang**. Er misst, wo er gesteckt wird – an einem Abgang
   oder an der Einspeisung einer Anlage.
 
+![Inventar: Verteiler und Zwischenstecker mit Zustand und Einsatzort](bilder/inventar.png)
+
 Angelegt wird im Vorfeld: *+ Verteiler* bzw. *+ Zwischenstecker*,
 Inventarnummer, Typ bzw. Steckverbinder, dann je Shelly Gerät, Kanal und wo
 er sitzt. Gerät und Kanal schlägt das Formular aus den Geräten vor, die schon
 gesendet haben.
+
+![Ein Inventarstück mit seinen Shellys und seinen Einsätzen](bilder/inventar-stueck.png)
 
 **Beim Aufbau** wird ausgewählt, welches Stück wo steht: an der geplanten
 Anlage im Reiter *Messgeräte* unter *Aus dem Inventar* das Stück wählen
@@ -260,6 +294,8 @@ dem Inventar dort steckt.
   derselben Stelle steckte, ist damit ersetzt.
 - *Abbauen* beendet den Einsatz. Die Shellys messen dann nicht mehr dort;
   das Stück ist wieder im Lager.
+
+![Messgeräte einer Anlage: Shellys aus dem eingesetzten Verteiler, Einsetzen und Abbauen](bilder/einsetzen.png)
 
 Die Zuordnung hat eine Zeit: Ein Messgerät aus dem Inventar zählt für die
 Anlage **nur, solange es dort steckt**. Die Statistik der Anlage zeigt es
@@ -285,6 +321,8 @@ darf, wer die Anlage bearbeiten darf.
 - **Vergleich**: die Wirkleistung aller ausgewählten Geräte in einem
   Diagramm.
 - **CSV-Export** (Semikolon, UTF-8 mit BOM, öffnet sich direkt in Excel).
+
+![Statistik: Kennzahlen, Wirkleistung, Strom und Spannung je Phase, Energie je Tag](bilder/statistik.png)
 
 Alles davon ist auf die Datenfenster der Freigaben beschnitten. Ein Kunde
 sieht nur den freigegebenen Zeitraum ([rechte.md](rechte.md)).
@@ -315,6 +353,10 @@ hinter einem gemessenen Aggregat-Abgang. Das ergibt sich aus den Kabeln im
 Plan. Solche Mitglieder stehen grau in der Liste („steckt in …“) und zählen
 nicht mit. Mitglieder ohne Messgerät, ohne aktuelle Werte oder ohne
 Freigabe werden als Hinweis genannt.
+
+![Bereich „Foodtruck-Meile“: Summe, Mitglieder mit Anteil (das Kaffeemobil steckt im Foodtruck-Verteiler und zählt nicht doppelt), Verlauf mit Grenze](bilder/bereich.png)
+
+<img src="bilder/bereiche-handy.png" alt="Bereiche auf dem Handy" width="300">
 
 Die Bereichsseite zeigt:
 
@@ -357,6 +399,8 @@ Materialliste, was zum Aufbau mitgebracht werden muss:
 - **vor Ort vorhanden**: Feststromanschlüsse und fest verlegte Kabel –
   die werden nicht mitgebracht.
 
+![Materialliste eines Bereichs: Anlagen nach Typ, Kabel in Stücken, Kabelbrücken](bilder/material.png)
+
 Zu einem Bereich gehören seine Anlagen, alle Kabel an ihnen (auch die
 Zuleitung vom Aggregat), die Kabel an seinen gemessenen Abgängen und die
 Kabelbrücken über diesen Kabeln. Kabel ohne Länge (kein Maßstab, nichts
@@ -398,6 +442,8 @@ PDF (wird serverseitig gerastert und gekachelt), PNG/JPG oder SVG.
   Abgang.
 - Eine zweite PowerManagement-Installation bekommt so die feste
   Infrastruktur einer Location und plant ihre Veranstaltung darauf.
+
+![Location-Abgleich mit dem gemeinsamen Repository](bilder/location.png)
 
 Adresse und Token des Repositorys stehen unter **System → Einstellungen →
 Location-Abgleich**.

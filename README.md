@@ -9,6 +9,12 @@ Gebaut wie [MasterAdmin](https://github.com/agrotevent/mikrotik-masteradmin):
 PHP ohne Framework, SQLite, Leaflet-Grundrisse und derselbe
 Location-Abgleich über Git. Für Smartphone und Tablet ausgelegt.
 
+![Karte des Demo-Geländes mit Feststromanschlüssen, mobilen Verteilern, Kabeln und Livewerten](docs/bilder/karte.png)
+
+<img src="docs/bilder/aufbau-handy.png" alt="Aufbau-Modus auf dem Handy" width="220"> <img src="docs/bilder/gps-handy.png" alt="Eigene GPS-Position im Plan" width="220"> <img src="docs/bilder/bereiche-handy.png" alt="Bereiche auf dem Handy" width="220">
+
+Mehr Bilder in der [Bedienungsanleitung](docs/bedienung.md).
+
 ## Was es kann
 
 - **Anlagen**: Netzanschlüsse, Aggregate, Speicher/Wechselrichter,
