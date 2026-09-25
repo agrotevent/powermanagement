@@ -8,7 +8,8 @@ $neu = (int) $objekt['id'] === 0;
 $art = (string) $objekt['art'];
 $artInfo = AnlagenService::ARTEN[$art];
 $vorlage = (int) $objekt['ist_vorlage'] === 1;
-$title = $neu ? ($vorlage ? 'Neuer Standard-Verteiler' : 'Neue ' . $artInfo['name']) : $objekt['name'] . ' bearbeiten';
+$fest = (int) ($objekt['fest'] ?? 0) === 1;
+$title = $neu ? ($vorlage ? 'Neuer Standard-Verteiler' : ($fest && $art === 'anschluss' ? 'Neuer Feststromanschluss' : 'Neue ' . $artInfo['name'])) : $objekt['name'] . ' bearbeiten';
 $subtitle = $vorlage ? 'Katalog: wird mit Anschlüssen und Sicherungen auf der Karte platziert' : $artInfo['name'];
 $zahl = static fn ($v) => $v === null ? '' : rtrim(rtrim(number_format((float) $v, 2, ',', ''), '0'), ',');
 ?>
@@ -38,6 +39,13 @@ $zahl = static fn ($v) => $v === null ? '' : rtrim(rtrim(number_format((float) $
                             <?php endforeach; ?>
                         </select>
                     </div>
+                </div>
+                <input type="hidden" name="fest" value="0">
+                <div class="check fest-wahl">
+                    <input type="checkbox" id="fest" name="fest" value="1"<?= $fest ? ' checked' : '' ?>>
+                    <label for="fest"><strong>Fest installiert</strong> – <?= $vorlage
+                        ? 'Anlagen aus dieser Vorlage sind Feststromanschlüsse der Location.'
+                        : 'Feststromanschluss der Location (Hausanschluss, Energiesäule, Wandverteiler …). Wird beim Location-Abgleich übertragen; mobile Anlagen bleiben in dieser Installation.' ?></label>
                 </div>
                 <div class="field">
                     <label for="name">Name</label>
@@ -124,10 +132,10 @@ $zahl = static fn ($v) => $v === null ? '' : rtrim(rtrim(number_format((float) $
                 <?php if ($neu && !$vorlage && $vorlagen !== []): ?>
                     <div class="field">
                         <label for="vorlage_id">Anschlüsse und Sicherungen übernehmen von</label>
-                        <select id="vorlage_id" name="vorlage_id">
-                            <option value="0">Vorschlag für <?= View::e($artInfo['name']) ?></option>
+                        <select id="vorlage_id" name="vorlage_id" onchange="const o = this.selectedOptions[0]; if (o.dataset.fest !== undefined) { this.form.querySelector('#fest').checked = o.dataset.fest === '1'; }">
+                            <option value="0" data-fest="<?= $fest ? 1 : 0 ?>">Vorschlag für <?= View::e($artInfo['name']) ?></option>
                             <?php foreach ($vorlagen as $v): ?>
-                                <option value="<?= (int) $v['id'] ?>"><?= View::e($v['name']) ?> (<?= View::e(AnlagenService::kurzform((int) $v['id'])) ?>)</option>
+                                <option value="<?= (int) $v['id'] ?>" data-fest="<?= (int) $v['fest'] ?>"><?= View::e($v['name']) ?> (<?= View::e(AnlagenService::kurzform((int) $v['id'])) ?>)<?= (int) $v['fest'] === 1 ? ' – fest' : '' ?></option>
                             <?php endforeach; ?>
                         </select>
                     </div>

@@ -16,10 +16,10 @@ $groups = [
     ],
     'Anlagen' => [
         ['/anlagen',              'Alle Anlagen',        null, 'anlagen.view'],
+        ['/anlagen?fest=1',        'Feststromanschlüsse', 'F', 'anlagen.view'],
         ['/anlagen?art=verteilung','Verteilungen',        'V', 'anlagen.view'],
         ['/anlagen?art=generator', 'Generatoren',         'G', 'anlagen.view'],
         ['/anlagen?art=wechselrichter', 'Wechselrichter', 'W', 'anlagen.view'],
-        ['/anlagen?art=anschluss', 'Stromanschlüsse',     'A', 'anlagen.view'],
         ['/anlagen/baum',         'Verteilbaum',         null, 'anlagen.view'],
         ['/anlagen/katalog',      'Standard-Verteiler',  null, 'anlagen.view'],
         ['/stecker',              'Steckverbinder',      null, 'stecker.manage'],
@@ -68,7 +68,7 @@ $query = (string) (parse_url((string) ($activePath ?? '/'), PHP_URL_QUERY) ?? ''
             if (isset($teile[1])) {
                 return $path === $teile[0] && str_contains('&' . $query . '&', '&' . $teile[1] . '&');
             }
-            return $is($teile[0]) !== '' && ($query === '' || !str_contains($query, 'art=') || $teile[0] !== '/anlagen');
+            return $is($teile[0]) !== '' && ($query === '' || $teile[0] !== '/anlagen' || (!str_contains($query, 'art=') && !str_contains($query, 'fest=1')));
         };
         $offen = false;
         foreach ($visible as $item) {

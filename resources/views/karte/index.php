@@ -35,7 +35,7 @@ $darfSetzen = $darfAnlegen;
             <button type="button" class="btn btn-sm" data-modus="verschieben" title="Anlagen und Kabelverläufe verschieben">Verschieben</button>
         <?php endif; ?>
         <?php if ($darfSetzen): ?>
-            <button type="button" class="btn btn-sm" data-modus="setzen" title="Neue Anlage oder Standard-Verteiler in den Plan setzen">+ Anlage</button>
+            <button type="button" class="btn btn-sm" data-modus="setzen" title="Feststromanschluss, Standard-Verteiler oder neue Anlage in den Plan setzen">+ Anlage</button>
         <?php endif; ?>
         <?php if ($darfLeitung): ?>
             <button type="button" class="btn btn-sm" data-modus="kabel" title="Kabel von Anlage zu Anlage ziehen">Kabel</button>
@@ -72,6 +72,8 @@ $darfSetzen = $darfAnlegen;
         </div>
         <div class="karte-fuss">
             <div class="karte-ebenen">
+                <label class="check"><input type="checkbox" data-ebene="fest" checked> Feststromanschlüsse</label>
+                <label class="check"><input type="checkbox" data-ebene="mobil" checked> Mobile Anlagen</label>
                 <label class="check"><input type="checkbox" data-ebene="kabel" checked> Kabel</label>
                 <label class="check"><input type="checkbox" data-ebene="kabelweg" checked> Kabelwege</label>
                 <label class="check"><input type="checkbox" data-ebene="kabelbruecke" checked> Kabelbrücken</label>
@@ -85,6 +87,8 @@ $darfSetzen = $darfAnlegen;
                 <span class="legende-punkt stufe-bad"></span> ab <?= (int) \App\Services\LiveService::grenzeAlarm() ?> %
                 <span class="legende-punkt stufe-stumm"></span> stumm
                 <span class="legende-punkt stufe-keine"></span> ohne Messung
+                <span class="legende-form fest" aria-hidden="true"></span> fest
+                <span class="legende-form mobil" aria-hidden="true"></span> mobil
                 <?php if ($massstab !== null): ?><span class="muted">· Maßstab gesetzt (<?= View::e(number_format((float) $massstab['meter'], 0, ',', '.')) ?> m)</span><?php endif; ?>
             </div>
         </div>
@@ -99,7 +103,7 @@ $darfSetzen = $darfAnlegen;
                 <h3 class="mt">Noch nicht im Plan</h3>
                 <ul class="liste-schlicht">
                     <?php foreach ($ungesetzt as $o): ?>
-                        <li><button type="button" class="btn btn-sm btn-ghost" data-setzen-vorhanden="<?= (int) $o['id'] ?>"><?= View::e(AnlagenService::ARTEN[$o['art']]['kuerzel'] . ' · ' . $o['name']) ?></button></li>
+                        <li><button type="button" class="btn btn-sm btn-ghost" data-setzen-vorhanden="<?= (int) $o['id'] ?>"><?= View::e(AnlagenService::ARTEN[$o['art']]['kuerzel'] . ' · ' . $o['name'] . ((int) $o['fest'] === 1 ? ' (fest)' : '')) ?></button></li>
                     <?php endforeach; ?>
                 </ul>
             <?php endif; ?>
@@ -110,7 +114,8 @@ $darfSetzen = $darfAnlegen;
 <?php /* Vorlagen für die Werkzeuge – als JSON, damit karte.js keine zweite Quelle braucht. */ ?>
 <script type="application/json" id="karte-daten"><?= json_encode([
     'arten'      => array_map(static fn ($a) => ['name' => $a['name'], 'kuerzel' => $a['kuerzel'], 'farbe' => $a['farbe']], AnlagenService::ARTEN),
-    'vorlagen'   => array_map(static fn ($v) => ['id' => (int) $v['id'], 'name' => $v['name'], 'art' => $v['art'], 'kurz' => AnlagenService::kurzform((int) $v['id'])], $vorlagen),
+    'vorlagen'   => array_map(static fn ($v) => ['id' => (int) $v['id'], 'name' => $v['name'], 'art' => $v['art'], 'fest' => (int) $v['fest'] === 1,
+        'kurz' => AnlagenService::kurzform((int) $v['id'])], $vorlagen),
     'kabeltypen' => LeitungService::KABELTYPEN,
     'querschnitte' => LeitungService::QUERSCHNITTE,
     'bruecken'   => LeitungService::BRUECKEN,

@@ -7,6 +7,7 @@ use App\Auth\Auth;
 use App\Auth\Zugriff;
 use App\Services\LocationSync;
 use App\Services\SiteService;
+use App\Support\Database;
 use App\Support\Flash;
 use App\Support\Request;
 
@@ -22,9 +23,15 @@ final class LocationController extends Controller
                 Flash::error($liste['message']);
             }
         }
+        // Je Standort: wie viel beim Hochladen übertragen wird und wie viel hier bleibt.
+        $anzahl = [];
+        foreach (Database::select('SELECT site_id, fest, COUNT(*) AS n FROM objekte WHERE ist_vorlage = 0 AND site_id IS NOT NULL GROUP BY site_id, fest') as $z) {
+            $anzahl[(int) $z['site_id']][(int) $z['fest'] === 1 ? 'fest' : 'mobil'] = (int) $z['n'];
+        }
         $this->view('location/index', [
             'hindernis' => LocationSync::hindernis(),
             'liste'     => $liste,
+            'anzahl'    => $anzahl,
             'standorte' => Zugriff::standorteFiltern(SiteService::all()),
             'darfHoch'  => Auth::can('inventory.push'),
             'repo'      => LocationSync::repoUrl(),

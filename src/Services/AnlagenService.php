@@ -16,6 +16,13 @@ use App\Support\Database;
  * nur so lässt sich ein Kabel von einem Generator an eine Verteilung und
  * von dort an die nächste ziehen, ohne je Kombination eigene Wege.
  *
+ * Quer dazu steht, ob eine Anlage **fest installiert** ist (`fest`):
+ * Feststromanschlüsse – Hausanschluss, Energiesäule, Wandverteiler, fest
+ * eingebaute Hallenverteilung – gehören zur Location und gehen beim
+ * Location-Abgleich ins gemeinsame Repository. Mobile Anlagen gehören zur
+ * Veranstaltung und bleiben hier. Stromanschlüsse sind von Haus aus fest,
+ * alles andere mobil; umstellen lässt sich das je Anlage.
+ *
  * Anschlüsse werden einzeln geführt, eine Zeile je Buchse bzw. Stecker.
  * Die Oberfläche arbeitet trotzdem mit Stückzahlen je Steckertyp
  * („4 × CEE 16 A, 6 × Schuko“) – anzahlSetzen() übersetzt das und nimmt
@@ -44,7 +51,8 @@ final class AnlagenService
      */
     public const FELDER = [
         'anschluss' => [
-            'anschlussart'  => ['Art des Anschlusses', 'auswahl', ['Hausanschluss', 'Baustromverteiler', 'Unterverteilung Gebäude', 'Landstrom', 'Sonstiges']],
+            'anschlussart'  => ['Art des Anschlusses', 'auswahl', ['Hausanschluss', 'Energiesäule', 'Wandverteiler', 'Wanddose', 'Unterflur / Bodentank',
+                'Unterverteilung Gebäude', 'Baustromverteiler', 'Landstrom', 'Sonstiges']],
             'absicherung_a' => ['Vorsicherung', 'zahl', 'A'],
             'zaehlernummer' => ['Zählernummer', 'text', ''],
             'netzbetreiber' => ['Netzbetreiber / Ansprechpartner', 'text', ''],
@@ -82,6 +90,22 @@ final class AnlagenService
         'wechselrichter' => ['eingang' => ['cee32' => 1], 'abgang' => ['cee32' => 1, 'cee16' => 2, 'schuko' => 2]],
         'verteilung'     => ['eingang' => ['cee63' => 1], 'abgang' => ['cee32' => 2, 'cee16' => 4, 'schuko' => 6]],
     ];
+
+    /** Ist eine neue Anlage dieser Art fest installiert, solange niemand etwas anderes sagt? */
+    public static function festVorgabe(string $art): bool
+    {
+        return $art === 'anschluss';
+    }
+
+    /** „Feststromanschluss“, „Verteilung (fest)“ oder schlicht die Art. */
+    public static function artAnzeige(array $objekt): string
+    {
+        $name = self::ARTEN[$objekt['art']]['name'] ?? (string) $objekt['art'];
+        if ((int) ($objekt['fest'] ?? 0) !== 1) {
+            return $name;
+        }
+        return $objekt['art'] === 'anschluss' ? 'Feststromanschluss' : $name . ' (fest)';
+    }
 
     // ------------------------------------------------------------ Steckertypen
 
@@ -195,7 +219,7 @@ final class AnlagenService
     }
 
     /**
-     * @param array{art?:string,site_id?:int,floor_id?:int,vorlagen?:bool,suche?:string} $filter
+     * @param array{art?:string,site_id?:int,floor_id?:int,vorlagen?:bool,suche?:string,fest?:?bool} $filter
      * @return list<array<string,mixed>>
      */
     public static function liste(array $filter = []): array
@@ -207,6 +231,10 @@ final class AnlagenService
         if (!empty($filter['art']) && isset(self::ARTEN[$filter['art']])) {
             $sql .= ' AND o.art = ?';
             $params[] = $filter['art'];
+        }
+        if (isset($filter['fest'])) {
+            $sql .= ' AND o.fest = ?';
+            $params[] = $filter['fest'] ? 1 : 0;
         }
         if (!empty($filter['site_id'])) {
             $sql .= ' AND o.site_id = ?';
@@ -228,7 +256,9 @@ final class AnlagenService
     private static function aufbereiten(array $objekt): array
     {
         $objekt['eigenschaften'] = json_decode((string) ($objekt['eigenschaften'] ?? ''), true) ?: [];
+        $objekt['fest'] = (int) ($objekt['fest'] ?? 0);
         $objekt['art_name'] = self::ARTEN[$objekt['art']]['name'] ?? $objekt['art'];
+        $objekt['art_anzeige'] = self::artAnzeige($objekt);
         return $objekt;
     }
 
@@ -298,6 +328,17 @@ final class AnlagenService
             // Eine Vorlage steht nirgends – sie ist ein Bauplan.
             $felder['site_id'] = $felder['floor_id'] = null;
         }
+        // Fest oder mobil: was gesagt wird, gilt. Sonst bleibt es beim
+        // Bearbeiten, wie es war, und eine neue Anlage übernimmt es von
+        // ihrer Vorlage bzw. der Vorgabe ihrer Art.
+        $fest = $daten['fest'] ?? null;
+        if ($fest !== null && $fest !== '') {
+            $felder['fest'] = !empty($fest) ? 1 : 0;
+        } elseif (!$id) {
+            $vorlageFest = (int) ($daten['vorlage_id'] ?? 0) > 0
+                ? Database::scalar('SELECT fest FROM objekte WHERE id = ? AND ist_vorlage = 1', [(int) $daten['vorlage_id']]) : null;
+            $felder['fest'] = $vorlageFest !== null && $vorlageFest !== false ? (int) $vorlageFest : (self::festVorgabe($art) ? 1 : 0);
+        }
 
         if ($id) {
             $alt = self::find($id);
@@ -312,7 +353,7 @@ final class AnlagenService
             }
             Database::update('objekte', $id, $felder);
             Audit::log('anlage.update', 'objekt', (string) $id, ['name' => $name]);
-            return ['ok' => true, 'message' => self::ARTEN[$art]['name'] . ' gespeichert.', 'id' => $id];
+            return ['ok' => true, 'message' => self::artAnzeige($felder + ['fest' => $alt['fest']]) . ' gespeichert.', 'id' => $id];
         }
 
         $felder['created_at'] = gmdate('c');
@@ -331,7 +372,7 @@ final class AnlagenService
             self::vorschlagAnlegen($id, $art);
         }
 
-        return ['ok' => true, 'message' => self::ARTEN[$art]['name'] . ' angelegt.', 'id' => $id];
+        return ['ok' => true, 'message' => self::artAnzeige($felder) . ' angelegt.', 'id' => $id];
     }
 
     public static function loeschen(int $id): array

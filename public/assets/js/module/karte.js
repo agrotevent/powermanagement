@@ -38,7 +38,10 @@ const ebenen = {
     kabelbruecke: L.layerGroup().addTo(map),
     kabel: L.layerGroup().addTo(map),
     fremd: L.layerGroup(),
-    objekte: L.layerGroup().addTo(map),
+    // Feststromanschlüsse (gehören zur Location) und mobile Anlagen lassen
+    // sich getrennt ausblenden – etwa um nur zu sehen, was vor Ort fest ist.
+    fest: L.layerGroup().addTo(map),
+    mobil: L.layerGroup().addTo(map),
     entwurf: L.layerGroup().addTo(map),
     griffe: L.layerGroup().addTo(map),
 };
@@ -50,7 +53,7 @@ let live = {};
 let modus = 'ansehen';
 let auswahl = null;           // { art: 'objekt'|'leitung', id }
 let entwurf = null;           // { art, punkte: [{x,y}], von, zu }
-let setzenWahl = null;        // { art, vorlage_id, name } oder { objekt_id }
+let setzenWahl = null;        // { art, fest, vorlage_id, name } oder { objekt_id }
 
 // ------------------------------------------------------------------ Hilfen
 
@@ -108,10 +111,11 @@ function markerZeichnen(o) {
         + `<span class="plabel">${esc(o.name)}</span>`
         + `<span class="pm-wert" data-wert></span>`
         + (o.messgeraete.length ? '<span class="pm-mess" title="Messgerät eingebaut">M</span>' : '');
-    const m = karte.punkt(o.x, o.y, `pm-anlage art-${o.art} stufe-keine`, html, { draggable: false, title: o.name });
+    const m = karte.punkt(o.x, o.y, `pm-anlage art-${o.art}${o.fest ? ' fest' : ''} stufe-keine`, html,
+        { draggable: false, title: o.name + (o.fest ? ' (fest installiert)' : '') });
     m.on('click', (e) => { L.DomEvent.stopPropagation(e); objektKlick(o); });
     m.on('dragend', () => objektVerschoben(o, m));
-    m.addTo(ebenen.objekte);
+    m.addTo(o.fest ? ebenen.fest : ebenen.mobil);
     marker.set(o.id, m);
     if (modus === 'verschieben' && o.darf) { m.dragging.enable(); }
 }
@@ -338,24 +342,35 @@ async function objektVerschoben(o, m) {
 }
 
 function setzenPanel() {
-    const arten = Object.entries(daten.arten).map(([k, a]) => `<option value="art:${k}">${esc(a.name)} (leer)</option>`).join('');
-    const vorlagen = daten.vorlagen.map((v) => `<option value="vorlage:${v.id}">${esc(v.name)} – ${esc(v.kurz)}</option>`).join('');
+    const vorlage = (v) => `<option value="vorlage:${v.id}">${esc(v.name)} – ${esc(v.kurz)}</option>`;
+    const festVorlagen = daten.vorlagen.filter((v) => v.fest).map(vorlage).join('');
+    const mobilVorlagen = daten.vorlagen.filter((v) => !v.fest).map(vorlage).join('');
+    const mobilArten = Object.entries(daten.arten).filter(([k]) => k !== 'anschluss')
+        .map(([k, a]) => `<option value="mobil:${k}">${esc(a.name)} (leer)</option>`).join('');
     seite.innerHTML = `
         <h2>Anlage setzen</h2>
         <div class="field"><label for="setzen-wahl">Was</label>
             <select id="setzen-wahl">
-                ${vorlagen ? `<optgroup label="Standard-Verteiler (Katalog)">${vorlagen}</optgroup>` : ''}
-                <optgroup label="Neue Anlage">${arten}</optgroup>
+                <optgroup label="Feststromanschluss – gehört zur Location">
+                    <option value="fest:anschluss">Feststromanschluss (leer)</option>
+                    ${festVorlagen}
+                    <option value="fest:verteilung">Verteilung, fest eingebaut (leer)</option>
+                </optgroup>
+                ${mobilVorlagen ? `<optgroup label="Standard-Verteiler (mobil)">${mobilVorlagen}</optgroup>` : ''}
+                <optgroup label="Neue mobile Anlage">${mobilArten}</optgroup>
             </select></div>
         <div class="field"><label for="setzen-name">Name</label>
             <input id="setzen-name" placeholder="leer: Name aus dem Katalog"></div>
-        <p class="help">Danach in den Plan tippen. Anschlüsse, Sicherungen und RCDs kommen bei einem Standard-Verteiler mit
-            und lassen sich an der neuen Anlage einzeln ändern.</p>`;
+        <p class="help">Danach in den Plan tippen. Feststromanschlüsse (Hausanschluss, Energiesäule, Wandverteiler …) gehören zur
+            Location und werden beim Location-Abgleich übertragen, mobile Anlagen bleiben hier. Anschlüsse, Sicherungen und RCDs
+            kommen bei einem Katalog-Eintrag mit und lassen sich an der neuen Anlage einzeln ändern.</p>`;
     const wahl = seite.querySelector('#setzen-wahl');
     const name = seite.querySelector('#setzen-name');
     const merken = () => {
         const [art, wert] = wahl.value.split(':');
-        setzenWahl = art === 'vorlage' ? { vorlage_id: wert, name: name.value } : { art: wert, name: name.value };
+        setzenWahl = art === 'vorlage'
+            ? { vorlage_id: wert, name: name.value }
+            : { art: wert, fest: art === 'fest' ? 1 : 0, name: name.value };
     };
     wahl.addEventListener('change', merken);
     name.addEventListener('input', merken);
@@ -372,7 +387,9 @@ async function setzenKlick(p) {
         anfrage.name = setzenWahl.name || '';
     } else {
         anfrage.art = setzenWahl.art;
-        anfrage.name = setzenWahl.name || (daten.arten[setzenWahl.art].name + ' ' + (stand.objekte.length + 1));
+        anfrage.fest = setzenWahl.fest;
+        const grundname = setzenWahl.fest && setzenWahl.art === 'anschluss' ? 'Feststromanschluss' : daten.arten[setzenWahl.art].name;
+        anfrage.name = setzenWahl.name || (grundname + ' ' + (stand.objekte.length + 1));
     }
     const erg = await PM.post('/karte/objekt/setzen', anfrage);
     PM.melden(erg.message || (erg.ok ? 'Gesetzt.' : 'Nicht möglich.'), !!erg.ok);

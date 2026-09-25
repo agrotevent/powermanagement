@@ -135,6 +135,31 @@ try {
     gleich($stueck['bruecken']['5-Kanal'] ?? 0, 3, 'Stückliste zählt Kabelbrücken');
     $keinWeg = LeitungService::speichern(null, ['art' => 'kabelweg', 'floor_id' => $floorId, 'punkte' => [[1, 1]]]);
     pruefe(!$keinWeg['ok'], 'Kabelweg braucht zwei Punkte');
+
+    // Fest installiert oder mobil
+    $fest = static fn (int $id): int => (int) AnlagenService::find($id)['fest'];
+    $ha = (int) AnlagenService::speichern(null, ['art' => 'anschluss', 'name' => 'Prüf-Hausanschluss', 'floor_id' => $floorId])['id'];
+    $mob = (int) AnlagenService::speichern(null, ['art' => 'verteilung', 'name' => 'Prüf-Mobil', 'floor_id' => $floorId])['id'];
+    $bau = (int) AnlagenService::speichern(null, ['art' => 'anschluss', 'name' => 'Prüf-Baustrom', 'fest' => '0', 'floor_id' => $floorId])['id'];
+    array_push($angelegt, $ha, $mob, $bau);
+    gleich([$fest($ha), $fest($mob), $fest($bau)], [1, 0, 0], 'Vorgabe: Stromanschluss fest, Verteilung mobil, ausdrücklich mobil bleibt mobil');
+    gleich(AnlagenService::find($ha)['art_anzeige'], 'Feststromanschluss', 'Anzeige „Feststromanschluss“');
+    AnlagenService::speichern($ha, ['art' => 'anschluss', 'name' => 'Prüf-Hausanschluss 2', 'floor_id' => $floorId]);
+    gleich($fest($ha), 1, 'Bearbeiten ohne Angabe lässt „fest“ stehen');
+    AnlagenService::speichern($mob, ['art' => 'verteilung', 'name' => 'Prüf-Hallenverteiler', 'fest' => '1', 'floor_id' => $floorId]);
+    gleich([$fest($mob), AnlagenService::find($mob)['art_anzeige']], [1, 'Verteilung (fest)'], 'Verteilung lässt sich als fest einbauen');
+    $festTyp = (int) AnlagenService::speichern(null, ['art' => 'anschluss', 'name' => 'Prüf-Energiesäule', 'ist_vorlage' => 1, 'fest' => 1])['id'];
+    $mobilTyp = (int) AnlagenService::speichern(null, ['art' => 'anschluss', 'name' => 'Prüf-Baustromkasten', 'ist_vorlage' => 1, 'fest' => 0])['id'];
+    $ausFest = (int) AnlagenService::speichern(null, ['art' => 'anschluss', 'name' => 'Säule 1', 'vorlage_id' => $festTyp, 'floor_id' => $floorId])['id'];
+    $ausMobil = (int) AnlagenService::speichern(null, ['art' => 'anschluss', 'name' => 'Kasten 1', 'vorlage_id' => $mobilTyp, 'floor_id' => $floorId])['id'];
+    array_push($angelegt, $festTyp, $mobilTyp, $ausFest, $ausMobil);
+    gleich([$fest($ausFest), $fest($ausMobil)], [1, 0], 'aus dem Katalog: „fest“ kommt von der Vorlage');
+    $kopie = (int) AnlagenService::kopieren($ausFest)['id'];
+    $angelegt[] = $kopie;
+    gleich($fest($kopie), 1, 'Kopie bleibt fest');
+    $festeHier = array_column(AnlagenService::liste(['site_id' => $siteId, 'fest' => true]), 'name');
+    $mobileHier = array_column(AnlagenService::liste(['site_id' => $siteId, 'fest' => false]), 'name');
+    pruefe(in_array('Säule 1', $festeHier, true) && !in_array('Kasten 1', $festeHier, true) && in_array('Kasten 1', $mobileHier, true), 'Liste filtert nach fest und mobil');
 } finally {
     foreach ($angelegt as $id) {
         AnlagenService::loeschen((int) $id);
