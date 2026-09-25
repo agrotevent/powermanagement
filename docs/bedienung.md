@@ -44,7 +44,13 @@ Leerrohr) gehören zur Location und sind mit dunklem Rand gezeichnet.
 **Mobile Kabel** werden für jede Veranstaltung neu gelegt. Kabelbrücken sind
 immer mobil. Ein fest verlegtes Kabel endet nur an Feststromanschlüssen. Ein
 neues Kabel zwischen zwei Feststromanschlüssen ist von Haus aus fest; im
-Kabelfenster lässt sich das umstellen (*Fest verlegt*).
+Kabelfenster lässt sich das umstellen (*Fest verlegt*). Wird eine Anlage auf
+mobil gestellt oder ein festes Kabel an eine mobile Anlage umgesteckt, wird
+das Kabel mobil.
+
+Feste und mobile Anlagen und Leitungen lassen sich gleichermaßen
+verschieben und ändern. Im Anlagenfenster der Karte führt *Bearbeiten* zum
+Formular.
 
 Die Ebene *Feststromanschlüsse & feste Kabel* lässt sich getrennt von
 *Mobile Anlagen*, *Mobile Kabel*, *Kabelwege* und *Kabelbrücken*
@@ -54,7 +60,7 @@ vorhanden ist.
 | Modus | Was man tut |
 |-------|-------------|
 | **Ansehen** | Anlage oder Kabel antippen: Livewerte, Anschlüsse, Kabeldaten, Link zur Anlage |
-| **Verschieben** | Anlagen ziehen. Angeschlossene Kabel folgen. Bei Kabeln die Stützpunkte ziehen. |
+| **Verschieben** | Anlagen ziehen – feste wie mobile, angeschlossene Kabel folgen. Ein Kabel, einen Kabelweg oder eine Kabelbrücke antippen: Punkte ziehen, mit **⊕** zwischen zwei Punkten einen neuen herausziehen, mit Doppeltipp (oder langem Drücken) einen Punkt entfernen, mit **✥** die ganze Linie verschieben. Ein **Kabelende auf eine andere Anlage ziehen** steckt es dort an (den Anschluss danach im Kabelfenster wählen); ins Leere gezogen wird es gelöst. |
 | **+ Anlage** | auswählen, was gesetzt wird, dann in den Plan tippen. Zur Wahl stehen ein **Feststromanschluss**, ein fester Katalog-Typ (z. B. *Energiesäule*), eine fest eingebaute Verteilung, ein **mobiler Standard-Verteiler** aus dem Katalog (mit Anschlüssen und Sicherungen) oder eine leere mobile Anlage. Eine vorhandene, noch nicht platzierte Anlage lässt sich ebenfalls setzen. |
 | **Kabel** | Anlage A antippen (Abgang wählen), Zwischenpunkte setzen, Anlage B antippen (Eingang wählen). Kabeltyp, Querschnitt, Adern, Länge. Die Länge wird mit Maßstab aus dem Verlauf vorgeschlagen. |
 | **Kabelweg** | Trasse ohne feste Enden (Kabelkanal, Traverse, Erdverlegung). Doppeltippen beendet. |
@@ -85,7 +91,9 @@ Ob eine Anlage fest installiert ist, steht an der Anlage
 (*Bearbeiten → Fest installiert*). Stromanschlüsse sind von Haus aus fest,
 alle anderen Arten mobil. Eine fest eingebaute Hallenverteilung oder ein
 Baustromkasten, der nur für eine Veranstaltung steht, lässt sich
-entsprechend umstellen.
+entsprechend umstellen. Auch die **Art** lässt sich nachträglich ändern
+(etwa Verteilung → Generator). Anschlüsse, Sicherungen, Kabel und
+Messgeräte bleiben dabei, nur die Angaben der alten Art fallen weg.
 
 Je Anlage gibt es diese Reiter:
 

@@ -175,10 +175,42 @@ try {
     $weg = LeitungService::speichern(null, ['art' => 'kabelweg', 'fest' => '1', 'floor_id' => $floorId, 'punkte' => [[1, 1], [2, 2]]]);
     $bruecke = LeitungService::speichern(null, ['art' => 'kabelbruecke', 'fest' => '1', 'floor_id' => $floorId, 'punkte' => [[3, 3], [4, 4]]]);
     gleich([$lFest((int) $weg['id']), $lFest((int) $bruecke['id'])], [1, 0], 'Kabelweg kann fest sein, Kabelbrücke bleibt mobil');
+
+    // Alles bleibt veränderbar: Kabelenden umstecken und lösen
+    $saeule2 = (int) AnlagenService::speichern(null, ['art' => 'anschluss', 'name' => 'Säule 2', 'floor_id' => $floorId])['id'];
+    $angelegt[] = $saeule2;
+    $erd2 = (int) LeitungService::speichern(null, ['art' => 'kabel', 'floor_id' => $floorId, 'name' => 'Erdkabel 2', 'kabeltyp' => 'NYY-J',
+        'von_objekt_id' => $ha, 'zu_objekt_id' => $saeule2, 'punkte' => [[1, 1], [5, 5], [30, 30]]])['id'];
+    gleich($lFest($erd2), 1, 'zweites Erdkabel fest');
+    $um = LeitungService::endeSetzen($erd2, 'zu', $ausMobil, [[1, 1], [5, 5], [40, 40]]);
+    $nach = LeitungService::find($erd2);
+    pruefe($um['ok'] && (int) $nach['zu_objekt_id'] === $ausMobil && $nach['zu_anschluss_id'] === null && str_contains($um['message'], 'angeschlossen'),
+        'Kabelende auf eine andere Anlage umgesteckt: ' . $um['message']);
+    pruefe($nach['fest'] === 0 && str_contains($um['message'], 'mobil'), 'festes Kabel an mobiler Anlage wird mobil statt abgelehnt');
+    gleich([$nach['kabeltyp'], $nach['name'], count($nach['punkte'])], ['NYY-J', 'Erdkabel 2', 3], 'Umstecken lässt Kabeltyp, Name und Verlauf stehen');
+    $los = LeitungService::endeSetzen($erd2, 'zu', null, [[1, 1], [5, 5], [50, 50]]);
+    pruefe($los['ok'] && LeitungService::find($erd2)['zu_objekt_id'] === null, 'Kabelende gelöst: ' . $los['message']);
+    $einKasten = (int) Database::scalar("SELECT id FROM anschluesse WHERE objekt_id = ? AND richtung = 'eingang' ORDER BY nr LIMIT 1", [$ausMobil]);
+    if ($einKasten > 0) {
+        LeitungService::endeSetzen($erd2, 'zu', $ausMobil, [[1, 1], [40, 40]]);
+        LeitungService::speichern($erd2, ['zu_anschluss_id' => $einKasten] + LeitungService::find($erd2) + ['punkte' => [[1, 1], [40, 40]]]);
+        LeitungService::endeSetzen($erd2, 'zu', $ausMobil, [[1, 1], [41, 41]]);
+        gleich((int) LeitungService::find($erd2)['zu_anschluss_id'], $einKasten, 'an derselben Anlage bleibt der Anschluss stecken');
+    }
+    pruefe(!LeitungService::endeSetzen((int) $weg['id'], 'von', $ha, [[1, 1], [2, 2]])['ok'], 'ein Kabelweg hat keine Enden zum Umstecken');
+
+    // Eine Anlage mit festem Kabel auf mobil stellen: geht, das Kabel wird mit mobil
     $mobil = AnlagenService::speichern($ausFest, ['art' => 'anschluss', 'name' => 'Säule 1', 'fest' => '0', 'floor_id' => $floorId]);
-    pruefe(!$mobil['ok'] && $fest($ausFest) === 1, 'Anlage mit festem Kabel lässt sich nicht auf mobil stellen');
-    LeitungService::speichern((int) $erd['id'], ['art' => 'kabel', 'fest' => '0', 'floor_id' => $floorId, 'von_objekt_id' => $ha, 'zu_objekt_id' => $ausFest, 'punkte' => [[1, 1], [9, 9]]]);
-    pruefe(AnlagenService::speichern($ausFest, ['art' => 'anschluss', 'name' => 'Säule 1', 'fest' => '0', 'floor_id' => $floorId])['ok'], '… nachdem das Kabel mobil ist, schon');
+    pruefe($mobil['ok'] && $fest($ausFest) === 0 && str_contains($mobil['message'], 'jetzt mobil'), 'Anlage mit festem Kabel auf mobil gestellt: ' . $mobil['message']);
+    gleich($lFest((int) $erd['id']), 0, '… das feste Kabel daran ist jetzt mobil');
+
+    // Art ändern: Anschlüsse bleiben, Angaben der alten Art fallen weg
+    $vorher = AnlagenService::anzahlen($ausMobil);
+    Database::update('objekte', $ausMobil, ['eigenschaften' => json_encode(['anschlussart' => 'Baustromverteiler'])]);
+    $art = AnlagenService::speichern($ausMobil, ['art' => 'verteilung', 'name' => 'Kasten 1', 'floor_id' => $floorId, 'eigenschaften' => ['schutzart' => 'IP54']]);
+    $k1 = AnlagenService::find($ausMobil);
+    pruefe($art['ok'] && $k1['art'] === 'verteilung' && str_contains($art['message'], 'Verteilung'), 'Art geändert: ' . $art['message']);
+    gleich([AnlagenService::anzahlen($ausMobil), $k1['eigenschaften']], [$vorher, ['schutzart' => 'IP54']], 'Anschlüsse bleiben, Angaben passen zur neuen Art');
 } finally {
     foreach ($angelegt as $id) {
         AnlagenService::loeschen((int) $id);

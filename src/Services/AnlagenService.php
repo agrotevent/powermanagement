@@ -345,12 +345,7 @@ final class AnlagenService
             if ($alt === null) {
                 return ['ok' => false, 'message' => 'Diese Anlage gibt es nicht.'];
             }
-            // Ein fest verlegtes Kabel endet nur an Feststromanschlüssen.
-            if ($alt['fest'] === 1 && ($felder['fest'] ?? 1) === 0 && (int) Database::scalar(
-                'SELECT COUNT(*) FROM leitungen WHERE fest = 1 AND (von_objekt_id = ? OR zu_objekt_id = ?)', [$id, $id]
-            ) > 0) {
-                return ['ok' => false, 'message' => 'An „' . $alt['name'] . '“ hängen fest verlegte Kabel – erst diese als mobil kennzeichnen.'];
-            }
+
             // Wandert die Anlage auf eine andere Etage, gilt ihr Punkt auf
             // dem alten Plan dort nichts mehr.
             if ((int) ($alt['floor_id'] ?? 0) !== (int) ($felder['floor_id'] ?? 0)) {
@@ -359,7 +354,19 @@ final class AnlagenService
             }
             Database::update('objekte', $id, $felder);
             Audit::log('anlage.update', 'objekt', (string) $id, ['name' => $name]);
-            return ['ok' => true, 'message' => self::artAnzeige($felder + ['fest' => $alt['fest']]) . ' gespeichert.', 'id' => $id];
+            $meldung = self::artAnzeige($felder + ['fest' => $alt['fest']]) . ' gespeichert.';
+            // Wird eine Anlage mobil, werden es die fest verlegten Kabel an
+            // ihr auch – ein festes Kabel endet nur an Feststromanschlüssen.
+            if ($alt['fest'] === 1 && ($felder['fest'] ?? 1) === 0) {
+                $mobil = Database::execute('UPDATE leitungen SET fest = 0, updated_at = ? WHERE fest = 1 AND (von_objekt_id = ? OR zu_objekt_id = ?)', [gmdate('c'), $id, $id]);
+                if ($mobil > 0) {
+                    $meldung .= ' ' . ($mobil === 1 ? 'Das fest verlegte Kabel daran ist' : $mobil . ' fest verlegte Kabel daran sind') . ' jetzt mobil.';
+                }
+            }
+            if ($alt['art'] !== $art) {
+                $meldung .= ' Die Art ist jetzt „' . self::ARTEN[$art]['name'] . '“.';
+            }
+            return ['ok' => true, 'message' => $meldung, 'id' => $id];
         }
 
         $felder['created_at'] = gmdate('c');

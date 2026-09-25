@@ -354,6 +354,25 @@ final class KarteController extends Controller
         $this->json(LeitungService::punkteSetzen((int) $l['id'], json_decode((string) $request->input('punkte', '[]'), true)));
     }
 
+    /** Ein Kabelende auf eine andere Anlage umstecken oder lösen (Endpunkt gezogen). */
+    public function leitungEnde(Request $request): void
+    {
+        $l = LeitungService::find($request->int('id'));
+        if ($l === null || $l['floor_id'] === null || !Zugriff::siehtStandort((int) Database::scalar('SELECT site_id FROM floors WHERE id = ?', [(int) $l['floor_id']]))) {
+            $this->json(['ok' => false, 'message' => 'Diese Leitung ist nicht sichtbar.'], 403);
+            return;
+        }
+        $objektId = $request->int('objekt_id') ?: null;
+        if ($objektId !== null) {
+            $objekt = AnlagenService::find($objektId);
+            if ($objekt === null || !Zugriff::siehtObjekt($objekt) || (int) $objekt['floor_id'] !== (int) $l['floor_id']) {
+                $this->json(['ok' => false, 'message' => 'An diese Anlage lässt sich das Kabel nicht anschließen.'], 403);
+                return;
+            }
+        }
+        $this->json(LeitungService::endeSetzen((int) $l['id'], $request->str('ende'), $objektId, json_decode((string) $request->input('punkte', '[]'), true)));
+    }
+
     public function leitungLoeschen(Request $request): void
     {
         $l = LeitungService::find($request->int('id'));
