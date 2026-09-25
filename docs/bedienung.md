@@ -478,6 +478,8 @@ verglichen mit dem Stand beim letzten Abgleich:
 | hier und dort geändert | beide Seiten haben geändert | Übernehmen *oder* Hochladen – der gewählte Stand gilt |
 | dort entfernt | wurde aus dem Repository genommen | Hochladen (wieder hinein) |
 
+![Verteiler-Abgleich: hier und dort geändert, dort neuer, nur im Repository, hier geändert](bilder/verteiler-abgleich.png)
+
 **Alle übernehmen** und **Alle hochladen** nehmen nur die eindeutigen Fälle
 und überschreiben nie eine Änderung der anderen Seite. Ein Stück, dessen Typ
 es hier noch nicht gibt, bringt ihn beim Übernehmen mit; beim Hochladen geht

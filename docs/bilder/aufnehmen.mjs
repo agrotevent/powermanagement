@@ -10,9 +10,19 @@
  *
  * Die Bilder landen neben diesem Skript und werden von docs/*.md und der
  * README eingebunden. Nach Änderungen an der Oberfläche einfach neu aufnehmen.
+ *
+ * Für den Verteiler-Abgleich braucht es ein Repository. Das Skript legt sich
+ * dafür ein eigenes an (git init --bare im Temp-Ordner) – kein Token, kein
+ * Netz, auf GitHub landet nichts. Deshalb muss der Server diese Arbeitskopie
+ * ausliefern (php und git im PATH). Die Einstellungen und Abgleich-Vermerke
+ * der Installation stehen danach wieder wie vorher; zwei Notizen im Inventar
+ * bleiben geändert (der Teil läuft zuletzt).
  */
+import { execFileSync } from 'child_process';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs';
 import { createRequire } from 'module';
-import { dirname } from 'path';
+import { tmpdir } from 'os';
+import { dirname, join, resolve } from 'path';
 import { fileURLToPath } from 'url';
 
 const require = createRequire(import.meta.url);
@@ -176,6 +186,73 @@ async function link(page, text) {
     await oeffnen(auf.page, '/bereiche', 800);
     await foto(auf.page, 'bereiche-handy');
     await auf.ctx.close();
+}
+
+// ------------------------------------------------------------ Verteiler-Abgleich
+{
+    const wurzel = resolve(ziel, '../..');
+    const php = (code, ...argumente) => execFileSync('php', ['-r', `require 'src/bootstrap.php'; ${code}`, ...argumente], { cwd: wurzel, encoding: 'utf8' });
+    const tmp = mkdtempSync(join(tmpdir(), 'pm-bilder-'));
+    const repo = 'file://' + join(tmp, 'repo.git');
+    const git = (...a) => execFileSync('git', ['-c', 'user.name=Lager', '-c', 'user.email=lager@local', ...a], { cwd: tmp, encoding: 'utf8' });
+    const sicherung = join(tmp, 'vorher.json');
+    // Einstellungen und Abgleich-Vermerke der Installation festhalten
+    php(`use App\\Support\\Database as D; use App\\Support\\Settings as S;
+        file_put_contents($argv[1], json_encode(['url' => S::get('inventory.repo_url'), 'zweig' => S::get('inventory.branch'),
+            'typen' => D::select('SELECT id, sync_key, synced_hash, synced_at FROM objekte WHERE ist_vorlage = 1'),
+            'inventar' => D::select('SELECT id, sync_key, synced_hash, synced_at FROM inventar')]));
+        S::put('inventory.repo_url', $argv[2]); S::put('inventory.branch', 'main');`, sicherung, repo);
+    try {
+        git('init', '-q', '--bare', '-b', 'main', 'repo.git');
+        const { ctx, page } = await sitzung(DESKTOP);
+        page.on('dialog', (d) => d.accept());
+        await oeffnen(page, '/verteiler-abgleich?holen=1');
+        await Promise.all([page.waitForNavigation(), page.locator('button', { hasText: 'Alle hochladen' }).click()]);
+
+        // Eine zweite Installation (das Lager) ändert im Repository: Shelly
+        // getauscht, ein neuer Verteiler, eine Seriennummer nachgetragen.
+        git('clone', '-q', 'repo.git', 'lager');
+        const datei = (k) => join(tmp, 'lager/verteiler/inventar', k + '.json');
+        const lesen = (k) => JSON.parse(readFileSync(datei(k), 'utf8'));
+        const schreiben = (k, d) => writeFileSync(datei(k), JSON.stringify({ ...d, stand: new Date().toISOString(), von: 'PowerManagement Lager' }, null, 2));
+        const pd63 = lesen('pd63-07');
+        pd63.stueck.messgeraete[0].geraet += '-tausch';
+        schreiben('pd63-07', pd63);
+        const neu = structuredClone(pd63);
+        Object.assign(neu, { schluessel: 'pd63-11' });
+        Object.assign(neu.stueck, { kennung: 'PD63-11', name: '', seriennummer: '', notizen: '',
+            messgeraete: [{ geraet: 'shellypro3em-pd63-11', kanal: 'em:0', stelle: 'einspeisung', bezeichnung: '' }] });
+        schreiben('pd63-11', neu);
+        const pd32 = lesen('pd32-15');
+        pd32.stueck.seriennummer = 'SN-2026-0415';
+        schreiben('pd32-15', pd32);
+        git('-C', 'lager', 'add', '-A');
+        git('-C', 'lager', 'commit', '-q', '-m', 'Lager: Shelly getauscht, PD63-11 neu, Seriennummer');
+        git('-C', 'lager', 'push', '-q', 'origin', 'main');
+
+        // Hier: eine Notiz am PD32-15 (damit auf beiden Seiten geändert) und am ZS-32-05
+        for (const [kennung, notiz] of [['PD32-15', 'Deckel ersetzt'], ['ZS-32-05', 'Zuleitung erneuert']]) {
+            await oeffnen(page, '/inventar');
+            await oeffnen(page, (await link(page, kennung)) + '/bearbeiten');
+            await page.fill('textarea[name=notizen]', notiz);
+            await Promise.all([page.waitForNavigation(), page.locator('button[type=submit]', { hasText: 'Speichern' }).click()]);
+        }
+        await oeffnen(page, '/verteiler-abgleich?holen=1', 600);
+        await foto(page, 'verteiler-abgleich', { fullPage: true });
+        await ctx.close();
+    } finally {
+        php(`use App\\Support\\Database as D; use App\\Support\\Settings as S; $v = json_decode(file_get_contents($argv[1]), true);
+            $v['url'] === null ? S::forget('inventory.repo_url') : S::put('inventory.repo_url', $v['url']);
+            $v['zweig'] === null ? S::forget('inventory.branch') : S::put('inventory.branch', $v['zweig']);
+            foreach (['objekte' => $v['typen'], 'inventar' => $v['inventar']] as $t => $zeilen) { foreach ($zeilen as $z) {
+                D::execute("UPDATE $t SET sync_key = ?, synced_hash = ?, synced_at = ? WHERE id = ?", [$z['sync_key'], $z['synced_hash'], $z['synced_at'], $z['id']]); } }
+            // Die Arbeitskopie gehört zum Aufnahme-Repository – weg damit.
+            $k = App\\Services\\LocationSync::arbeitsKopie();
+            if (is_dir($k) && trim((string) shell_exec('git -C ' . escapeshellarg($k) . ' remote get-url origin 2>/dev/null')) === $argv[2]) {
+                exec('rm -rf ' . escapeshellarg($k));
+            }`, sicherung, repo);
+        rmSync(tmp, { recursive: true, force: true });
+    }
 }
 
 await browser.close();

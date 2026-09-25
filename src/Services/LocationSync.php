@@ -203,6 +203,21 @@ final class LocationSync
             return ['ok' => false, 'message' => 'Der Ordner für die Arbeitskopie ließ sich nicht anlegen.', 'commit' => ''];
         }
 
+        if (is_dir($kopie . '/.git')) {
+            /*
+             * Steht in den Einstellungen inzwischen ein anderes Repository,
+             * gehört die Arbeitskopie zum alten. Sie ist ein Spiegel, also
+             * wird sie neu geholt. Sonst liefen Abfragen und Hochladen still
+             * weiter gegen die alte Adresse – und ein noch leeres neues
+             * Repository bekäme beim ersten Hochladen die Geschichte des
+             * alten mit.
+             */
+            $herkunft = self::git(['remote', 'get-url', 'origin'], $kopie);
+            if (!$herkunft['ok'] || trim($herkunft['ausgabe']) !== self::repoUrl()) {
+                self::verzeichnisWeg($kopie);
+            }
+        }
+
         if (!is_dir($kopie . '/.git')) {
             /*
              * Reste eines abgebrochenen Klonens wegräumen. Git legt das
