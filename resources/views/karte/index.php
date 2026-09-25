@@ -44,6 +44,10 @@ $darfSetzen = $darfAnlegen;
         <?php endif; ?>
         <?php if ($darfMassstab): ?>
             <button type="button" class="btn btn-sm" data-modus="massstab" title="Zwei Punkte mit bekanntem Abstand setzen">Maßstab</button>
+            <button type="button" class="btn btn-sm" data-modus="geo" title="Plan mit Breite/Länge verbinden: zwei Passpunkte">Georeferenz</button>
+        <?php endif; ?>
+        <?php if ($geo !== null): ?>
+            <button type="button" class="btn btn-sm" data-aktion="position" aria-pressed="false" title="Eigene GPS-Position im Plan zeigen">Hier bin ich</button>
         <?php endif; ?>
         <a class="btn btn-sm" href="/karte/<?= (int) $etage['id'] ?>/material" target="_blank" rel="noopener" title="Material für den Aufbau dieser Etage: Anlagen, Kabelstücke, Kabelbrücken">Material</a>
         <button type="button" class="btn btn-sm" data-aktion="vollbild" title="Karte über die ganze Fläche">Vollbild</button>
@@ -91,7 +95,9 @@ $darfSetzen = $darfAnlegen;
                 <span class="legende-form fest" aria-hidden="true"></span> fest
                 <span class="legende-form mobil" aria-hidden="true"></span> mobil
                 <span class="legende-linie fest" aria-hidden="true"></span> fest verlegt
-                <?php if ($massstab !== null): ?><span class="muted">· Maßstab gesetzt (<?= View::e(number_format((float) $massstab['meter'], 0, ',', '.')) ?> m)</span><?php endif; ?>
+                <?php if ($massstab !== null && ($massstab['quelle'] ?? '') !== 'georeferenz'): ?><span class="muted">· Maßstab gesetzt (<?= View::e(number_format((float) $massstab['meter'], 0, ',', '.')) ?> m)</span><?php endif; ?>
+                <?php if ($geo !== null): ?><span class="muted">· georeferenziert<?= ($massstab['quelle'] ?? '') === 'georeferenz' ? ' (Längen daraus)' : '' ?> ·
+                    <a href="/karte/<?= (int) $etage['id'] ?>/geojson">GeoJSON</a></span><?php endif; ?>
             </div>
         </div>
     </div>

@@ -4,6 +4,7 @@ use App\Messung\Messdaten;
 use App\Services\AnlagenService;
 use App\Services\LeitungService;
 use App\Services\MesspunktService;
+use App\Services\PlanGeoService;
 use App\Services\SchutzService;
 use App\Support\Csrf;
 use App\Support\View;
@@ -75,6 +76,9 @@ $messgeraet = static function (array $m) use ($objekt, $auswertung, $live): stri
     <div class="spacer"></div>
     <div class="btn-row">
         <?php if (!$vorlage && $objekt['floor_id'] !== null): ?><a class="btn btn-sm" href="/karte?etage=<?= (int) $objekt['floor_id'] ?>&amp;anlage=<?= $id ?>">Auf der Karte</a><?php endif; ?>
+        <?php $lage = $vorlage ? null : PlanGeoService::fuerObjekt($objekt); ?>
+        <?php if ($lage !== null): ?><a class="btn btn-sm" href="<?= View::e(PlanGeoService::kartenLink($lage['lat'], $lage['lon'])) ?>" target="_blank" rel="noopener"
+            title="<?= View::e(number_format($lage['lat'], 6, '.', '') . ', ' . number_format($lage['lon'], 6, '.', '')) ?>">Lage (OSM)</a><?php endif; ?>
         <?php if (!$vorlage && View::can('statistik.view') && $messpunkte !== []): ?><a class="btn btn-sm" href="/statistik?anlage=<?= $id ?>">Statistik</a><?php endif; ?>
         <a class="btn btn-sm" href="/anlagen/<?= $id ?>/druck" target="_blank" rel="noopener">Dokumentation drucken</a>
         <?php if ($darfAendern): ?>

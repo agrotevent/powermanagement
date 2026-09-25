@@ -10,6 +10,7 @@ use App\Services\MaterialService;
 use App\Services\LeitungService;
 use App\Services\LiveService;
 use App\Services\MesspunktService;
+use App\Services\PlanGeoService;
 use App\Services\PlanMassstabService;
 use App\Services\PlanTileService;
 use App\Services\SiteService;
@@ -69,7 +70,8 @@ final class KarteController extends Controller
             'standorte'    => $standorte,
             'etage'        => $etage,
             'plan'         => $quelle,
-            'massstab'     => $etage !== null ? PlanMassstabService::lesen($etage) : null,
+            'massstab'     => $etage !== null ? PlanMassstabService::wirksam($etage) : null,
+            'geo'          => $etage !== null ? PlanGeoService::lesen($etage) : null,
             'vorlagen'     => AnlagenService::liste(['vorlagen' => true]),
             'ungesetzt'    => $siteId !== null ? array_values(array_filter(
                 Zugriff::filtern(AnlagenService::liste(['site_id' => $siteId])),
@@ -159,8 +161,59 @@ final class KarteController extends Controller
             'objekte'   => $liste,
             'leitungen' => $leitungen,
             'fremd'     => $fremd,
-            'massstab'  => PlanMassstabService::lesen($etage),
+            'massstab'  => PlanMassstabService::wirksam($etage),
+            'geo'       => PlanGeoService::lesen($etage),
         ]);
+    }
+
+    /**
+     * Anlagen und Leitungen der Etage als GeoJSON (WGS84) – für QGIS, Google
+     * Earth oder die Geländeplanung. Nur mit Georeferenz, nur Sichtbares.
+     */
+    public function geojson(Request $request, array $params): void
+    {
+        $etage = $this->etage((int) $params['id']);
+        if ($etage === null) {
+            return;
+        }
+        $geo = PlanGeoService::lesen($etage);
+        if ($geo === null) {
+            $this->json(['ok' => false, 'message' => 'Diese Etage hat keine Georeferenz.'], 404);
+            return;
+        }
+        $punkt = static function (float $x, float $y) use ($geo): array {
+            $g = PlanGeoService::zuGeo($geo, $x, $y);
+            return [$g['lon'], $g['lat']];
+        };
+        $features = [];
+        $sichtbar = [];
+        foreach (Zugriff::filtern(AnlagenService::liste(['floor_id' => (int) $etage['id']])) as $o) {
+            $sichtbar[(int) $o['id']] = $o['name'];
+            if ($o['plan_x'] === null) {
+                continue;
+            }
+            $features[] = ['type' => 'Feature', 'geometry' => ['type' => 'Point', 'coordinates' => $punkt((float) $o['plan_x'], (float) $o['plan_y'])],
+                'properties' => ['typ' => 'anlage', 'id' => (int) $o['id'], 'name' => $o['name'], 'art' => $o['art_anzeige'], 'fest' => $o['fest'] === 1,
+                    'kennung' => $o['kennung'], 'modell' => trim($o['hersteller'] . ' ' . $o['modell'])]];
+        }
+        foreach (LeitungService::fuerEtage((int) $etage['id']) as $l) {
+            if (count($l['punkte']) < 2) {
+                continue;
+            }
+            $ende = static fn (?int $id): ?string => $id === null ? null : ($sichtbar[$id] ?? 'nicht freigegeben');
+            $features[] = ['type' => 'Feature', 'geometry' => ['type' => 'LineString',
+                    'coordinates' => array_map(static fn ($p) => $punkt((float) $p['x'], (float) $p['y']), $l['punkte'])],
+                'properties' => ['typ' => $l['art'], 'id' => (int) $l['id'], 'name' => $l['name'], 'fest' => $l['fest'] === 1,
+                    'von' => $ende($l['von_objekt_id'] !== null ? (int) $l['von_objekt_id'] : null),
+                    'zu' => $ende($l['zu_objekt_id'] !== null ? (int) $l['zu_objekt_id'] : null),
+                    'kabeltyp' => $l['kabeltyp'], 'querschnitt_mm2' => $l['querschnitt_mm2'] !== null ? (float) $l['querschnitt_mm2'] : null,
+                    'laenge_m' => $l['laenge'] !== null ? round((float) $l['laenge'], 1) : null, 'anzahl' => (int) $l['anzahl'], 'modell' => $l['modell']]];
+        }
+        $name = preg_replace('/[^a-z0-9]+/', '-', strtolower($etage['site_name'] . '-' . $etage['name'])) ?: 'etage';
+        header('Content-Type: application/geo+json; charset=utf-8');
+        header('Content-Disposition: attachment; filename="' . trim($name, '-') . '.geojson"');
+        echo json_encode(['type' => 'FeatureCollection', 'name' => $etage['site_name'] . ' / ' . $etage['name'], 'features' => $features],
+            JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_PRETTY_PRINT);
     }
 
     public function live(Request $request, array $params): void
@@ -224,6 +277,7 @@ final class KarteController extends Controller
             'schaltbar'   => LiveService::schaltbar([$objekt]),
             'darf'        => Zugriff::darfBearbeiten($objekt),
             'darf_statistik' => Auth::can('statistik.view'),
+            'geo'         => ($lage = PlanGeoService::fuerObjekt($objekt)) !== null ? $lage + ['link' => PlanGeoService::kartenLink($lage['lat'], $lage['lon'])] : null,
         ]);
     }
 
@@ -417,6 +471,30 @@ final class KarteController extends Controller
             (float) ($meter ?? 0),
             (float) $request->input('verhaeltnis')
         ));
+    }
+
+    /** Georeferenz setzen oder entfernen: zwei Planpunkte mit Breite/Länge. */
+    public function georeferenz(Request $request): void
+    {
+        $etage = $this->etage($request->int('floor_id'));
+        if ($etage === null) {
+            return;
+        }
+        if ($request->bool('entfernen')) {
+            PlanGeoService::entfernen((int) $etage['id']);
+            $this->json(['ok' => true, 'message' => 'Georeferenz entfernt.']);
+            return;
+        }
+        $punkte = [];
+        foreach (['a' => 'Punkt 1', 'b' => 'Punkt 2'] as $k => $name) {
+            $lage = PlanGeoService::koordinatenAusText($request->str($k . '_geo'));
+            if ($lage === null) {
+                $this->json(['ok' => false, 'message' => $name . ': Koordinaten nicht lesbar. Beispiel: 51.23456, 7.12345']);
+                return;
+            }
+            $punkte[$k] = ['x' => (float) $request->input($k . 'x'), 'y' => (float) $request->input($k . 'y')] + $lage;
+        }
+        $this->json(PlanGeoService::speichern((int) $etage['id'], $punkte['a'], $punkte['b'], (float) $request->input('verhaeltnis')));
     }
 
     // ------------------------------------------------------------ Plandatei

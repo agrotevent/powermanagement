@@ -47,6 +47,7 @@ bash -n deploy/*.sh && shellcheck -S warning -e SC2016,SC1111 deploy/*.sh
 | `tests/anschluesse.php` | Anschlüsse, Standard-Verteiler, Schutzorgane, Kabel, Spannungsfall, fest/mobil (Anlagen und Kabel) |
 | `tests/location-abgleich.php` | Git-Location-Abgleich mit MasterAdmin-Format; nur Feststromanschlüsse und feste Kabel, mobile Planung bleibt |
 | `tests/bereiche.php` | Bereiche: Summe ohne Doppelzählung, Live/Verlauf, Aufräumen; Materialliste und Kabelstückelung |
+| `tests/georeferenz.php` | Plan ↔ Breite/Länge, Koordinaten lesen, Längen aus der Georeferenz, strom.json |
 | `tests/modbus.php` | Modbus TCP, Victron-Profil, Line Protocol |
 | `tests/mqtt.php` | MQTT-Client, Shelly schalten (Gen1/Gen2), Sammler → MQTT (eigener Mosquitto) |
 | `tests/influx.php` | InfluxQL: Livewerte, Verläufe, Datenfenster, Energie je Tag (eigene InfluxDB 1.x) |

@@ -25,13 +25,16 @@ use App\Support\Database;
  *                schutzorgane: [{ref, art, bezeichnung, …, vor}],
  *                anschluesse: [{richtung, stecker, nr, bezeichnung, schutz, phase, notizen}],
  *                messpunkte: [{geraet, kanal, rolle, bezeichnung, anschluss, schutz}]}],
- *     leitungen: [{schluessel, art, fest: true, etage, von, von_anschluss, zu, zu_anschluss, …, punkte}] }
+ *     leitungen: [{schluessel, art, fest: true, etage, von, von_anschluss, zu, zu_anschluss, …, punkte}],
+ *     georeferenz: {etage: {a: {x, y, lat, lon}, b: {…}, verhaeltnis, von, am}} }
  *
  * Dazu kommen die **fest verlegten** Kabel und Kabelwege zwischen diesen
  * Feststromanschlüssen (Erdkabel, Trassen). Mobile Anlagen, mobile Kabel und
  * Kabelbrücken gehören zur Veranstaltung und bleiben in der Installation,
  * die sie plant. Format 1 (bis September 2026) enthielt noch alles; davon
  * werden beim Übernehmen nur die Stromanschlüsse gelesen, keine Leitungen.
+ * `georeferenz` (Passpunkte je Etage) gehört zur Location wie der Maßstab,
+ * steht aber hier, damit location.json das Format von MasterAdmin behält.
  * `leitungen` ist in Format 2 ein Zusatz – eine ältere Fassung, die ihn
  * nicht kennt, übernimmt die Anlagen und übergeht ihn.
  *
@@ -295,8 +298,13 @@ final class LocationBundle
         $site = SiteService::find($siteId);
         $siteKey = self::schluesselSichern('sites', $siteId, (string) $site['name'], 'standort-' . $siteId);
         $etagenKeys = [];
+        $georeferenz = [];
         foreach (SiteService::floors($siteId) as $etage) {
             $etagenKeys[(int) $etage['id']] = self::schluesselSichern('floors', (int) $etage['id'], (string) $etage['name'], 'etage-' . $etage['id']);
+            $geo = PlanGeoService::alsDaten(PlanGeoService::lesen($etage));
+            if ($geo !== null) {
+                $georeferenz[$etagenKeys[(int) $etage['id']]] = $geo;
+            }
         }
         $stecker = AnlagenService::steckertypenNachId();
         $benutzteStecker = [];
@@ -432,6 +440,7 @@ final class LocationBundle
             ], $benutzteStecker)),
             'anlagen'      => $anlagen,
             'leitungen'    => $leitungen,
+            'georeferenz'  => (object) $georeferenz,
         ];
     }
 
@@ -513,6 +522,17 @@ final class LocationBundle
         $etagen = [];
         foreach (Database::select('SELECT id, sync_key FROM floors WHERE site_id = ?', [$siteId]) as $e) {
             $etagen[(string) $e['sync_key']] = (int) $e['id'];
+        }
+
+        // Georeferenz je Etage – nur, wenn die Datei sie kennt (ältere Fassungen
+        // schreiben den Schlüssel nicht; dann bleibt die hiesige).
+        if (is_array($daten['georeferenz'] ?? null)) {
+            foreach ($etagen as $etageKey => $etageId) {
+                // Etagen ohne Schlüssel kennt die Datei nicht – ihre bleibt.
+                if ($etageKey !== '') {
+                    PlanGeoService::uebernehmen($etageId, $daten['georeferenz'][$etageKey] ?? null);
+                }
+            }
         }
 
         $objektIds = [];

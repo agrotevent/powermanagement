@@ -44,6 +44,11 @@ final class DemoSeed
             // 100 m zwischen den beiden Maßstabspunkten unten links.
             'massstab_ax' => 3.75, 'massstab_ay' => 95.0, 'massstab_bx' => 28.75, 'massstab_by' => 95.0,
             'massstab_m' => 100.0, 'massstab_verhaeltnis' => 0.625, 'massstab_von' => 'demo', 'massstab_am' => gmdate('c'),
+            // Georeferenz an denselben Punkten: Der Plan ist um 12° gedreht
+            // (Plan-oben zeigt nach Nordnordost).
+            'geo_ax' => 3.75, 'geo_ay' => 95.0, 'geo_a_lat' => 51.44, 'geo_a_lon' => 7.56,
+            'geo_bx' => 28.75, 'geo_by' => 95.0, 'geo_b_lat' => 51.439813, 'geo_b_lon' => 7.5614112,
+            'geo_verhaeltnis' => 0.625, 'geo_von' => 'demo', 'geo_am' => gmdate('c'),
         ]);
 
         $typ = [];

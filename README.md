@@ -26,6 +26,8 @@ Location-Abgleich über Git. Für Smartphone und Tablet ausgelegt.
 - **Karte**: Grundrisse (PDF/Bild/SVG) mit Feststromanschlüssen, mobilen
   Verteilern, **Kabeln, Kabelwegen und Kabelbrücken**. Anlagen per Kabel verbinden, mit Prüfung von
   Belastbarkeit, Steckern und **Spannungsfall**, dazu Maßstab und Livewerte.
+  **Georeferenz** über zwei Passpunkte: Koordinaten jeder Anlage, eigene
+  GPS-Position im Plan beim Aufbau, GeoJSON-Export.
 - **Messung**: Shelly (Gen1/Gen2+) über MQTT → Node-RED → InfluxDB.
   **Victron** (GX über Modbus TCP oder VRM-Portal) und **ComAp IG200**
   (Modbus TCP über WireGuard oder WebSupervisor-Cloud) über den Sammler.

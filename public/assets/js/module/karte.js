@@ -44,9 +44,10 @@ const ebenen = {
     mobil: L.layerGroup().addTo(map),
     entwurf: L.layerGroup().addTo(map),
     griffe: L.layerGroup().addTo(map),
+    position: L.layerGroup().addTo(map),
 };
 
-let stand = { objekte: [], leitungen: [], fremd: {}, massstab: null };
+let stand = { objekte: [], leitungen: [], fremd: {}, massstab: null, geo: null };
 const marker = new Map();
 const linien = new Map();
 let live = {};
@@ -54,6 +55,8 @@ let modus = 'ansehen';
 let auswahl = null;           // { art: 'objekt'|'leitung', id }
 let entwurf = null;           // { art, punkte: [{x,y}], von, zu }
 let setzenWahl = null;        // { art, fest, vorlage_id, name } oder { objekt_id }
+// Modi, in denen ein Tipp in den Plan einen Punkt setzt.
+const ZEICHNEN = ['setzen', 'kabel', 'kabelweg', 'bruecke', 'massstab', 'geo'];
 
 // ------------------------------------------------------------------ Hilfen
 
@@ -77,6 +80,36 @@ function laengeImPlan(punkte) {
     let summe = 0;
     for (let i = 1; i < punkte.length; i++) { summe += ab(punkte[i - 1], punkte[i]); }
     return summe / referenz * m.meter;
+}
+
+// Georeferenz – dieselbe Rechnung wie PlanGeoService: Ebene um Passpunkt A,
+// Plan in Breiten-Einheiten, Drehstreckung aus den beiden Passpunkten.
+const ERDRADIUS = 6371008.8;
+
+function geoAbbildung(g) {
+    const k = ERDRADIUS * Math.PI / 180;
+    const kx = k * Math.cos(g.a.lat * Math.PI / 180);
+    const px = g.b.x - g.a.x;
+    const py = -(g.b.y - g.a.y) * g.verhaeltnis;
+    const ost = (g.b.lon - g.a.lon) * kx;
+    const nord = (g.b.lat - g.a.lat) * k;
+    const betrag = px * px + py * py;
+    return { sr: (ost * px + nord * py) / betrag, si: (nord * px - ost * py) / betrag, k, kx };
+}
+
+/** Breite/Länge → Prozent des Plans (auch außerhalb 0–100). */
+function geoZuPlan(g, lat, lon) {
+    const { sr, si, k, kx } = geoAbbildung(g);
+    const ost = (lon - g.a.lon) * kx;
+    const nord = (lat - g.a.lat) * k;
+    const betrag = sr * sr + si * si;
+    const qx = (ost * sr + nord * si) / betrag;
+    const qy = (nord * sr - ost * si) / betrag;
+    return { x: g.a.x + qx, y: g.a.y - qy / g.verhaeltnis, meterJeEinheit: Math.sqrt(betrag) };
+}
+
+function koordinate(wert) {
+    return Number(wert).toFixed(6);
 }
 
 function meter(wert) {
@@ -149,7 +182,13 @@ function linieZeichnen(l) {
             ? `Kabelbrücke${l.modell ? ' ' + esc(l.modell) : ''} × ${l.anzahl}${l.name ? ' · ' + esc(l.name) : ''}`
             : `Kabelweg${l.name ? ' ' + esc(l.name) : ''}${l.laenge !== null ? ' · ' + meter(l.laenge) : ''}`);
     lage.eachLayer ? lage.eachLayer((x) => x.bindTooltip(text, { sticky: true })) : lage.bindTooltip(text, { sticky: true });
-    const klick = (e) => { L.DomEvent.stopPropagation(e); leitungKlick(l); };
+    const klick = (e) => {
+        L.DomEvent.stopPropagation(e);
+        // Beim Zeichnen ist eine Linie im Weg kein Ziel, sondern ein Punkt –
+        // etwa ein neues Kabel entlang eines Kabelwegs.
+        if (ZEICHNEN.includes(modus)) { map.fire('click', { latlng: e.latlng }); return; }
+        leitungKlick(l);
+    };
     lage.eachLayer ? lage.eachLayer((x) => x.on('click', klick)) : lage.on('click', klick);
     // Fest verlegtes gehört zur Ebene der Feststromanschlüsse – blendet man
     // das Mobile aus, bleibt die Infrastruktur der Location stehen.
@@ -204,7 +243,7 @@ function setModus(neu) {
     modus = neu;
     entwurfVerwerfen();
     document.querySelectorAll('[data-modus]').forEach((b) => b.classList.toggle('aktiv', b.dataset.modus === neu));
-    el.classList.toggle('platzieren', ['setzen', 'kabel', 'kabelweg', 'bruecke', 'massstab'].includes(neu));
+    el.classList.toggle('platzieren', ZEICHNEN.includes(neu));
     marker.forEach((m, id) => {
         const o = objektNachId(id);
         if (neu === 'verschieben' && o && o.darf) { m.dragging.enable(); } else { m.dragging.disable(); }
@@ -218,9 +257,11 @@ function setModus(neu) {
         kabelweg: 'Kabelweg: Punkte setzen, mit „Fertig“ oder Doppeltipp abschließen.',
         bruecke: 'Kabelbrücke: Anfang und Ende quer über den Weg tippen.',
         massstab: 'Maßstab: zwei Punkte mit bekanntem Abstand tippen (z. B. Maßstabsleiste des Plans).',
+        geo: 'Georeferenz: zwei gut erkennbare Punkte weit auseinander antippen (Gebäudeecken, Tor, Mast), dann ihre Koordinaten eintragen.',
     };
     status(hilfe[neu] || '');
     if (neu === 'setzen') { setzenPanel(); }
+    if (neu === 'geo') { geoPanel(); }
     if (neu === 'kabelweg') { entwurfPanel('kabelweg'); }
 }
 
@@ -264,12 +305,13 @@ map.on('click', (e) => {
         entwurfZeichnen();
         return;
     }
-    if (modus === 'kabelweg' || modus === 'bruecke' || modus === 'massstab') {
-        if (!entwurf) { entwurf = { art: modus, punkte: [] }; }
+    if (modus === 'kabelweg' || modus === 'bruecke' || modus === 'massstab' || modus === 'geo') {
+        if (!entwurf || (modus === 'geo' && entwurf.punkte.length >= 2)) { entwurf = { art: modus, punkte: [] }; }
         entwurf.punkte.push(p);
         entwurfZeichnen();
         if (modus === 'bruecke' && entwurf.punkte.length === 2) { entwurfPanel('bruecke'); }
         if (modus === 'massstab' && entwurf.punkte.length === 2) { massstabPanel(); }
+        if (modus === 'geo') { geoPanel(); }
         return;
     }
     if (modus === 'ansehen') { auswahl = null; }
@@ -290,15 +332,16 @@ map.on('dblclick', () => {
 function entwurfZeichnen() {
     ebenen.entwurf.clearLayers();
     if (!entwurf) { return; }
-    const farbe = { kabel: '#2563eb', kabelweg: '#64748b', bruecke: '#ca8a04', massstab: '#db2777' }[entwurf.art] || '#2563eb';
+    const farbe = { kabel: '#2563eb', kabelweg: '#64748b', bruecke: '#ca8a04', massstab: '#db2777', geo: '#0d9488' }[entwurf.art] || '#2563eb';
     if (entwurf.punkte.length >= 2) {
         karte.linie(entwurf.punkte, { color: farbe, weight: 4, dashArray: '6 6' }).addTo(ebenen.entwurf);
     }
     entwurf.punkte.forEach((p, i) => {
-        karte.punkt(p.x, p.y, 'plan-kabel-punkt' + (i === 0 ? ' ende' : ''), '<span class="griff"></span>', { interactive: false }).addTo(ebenen.entwurf);
+        const nr = entwurf.art === 'geo' ? `<span class="geo-nr">${i + 1}</span>` : '';
+        karte.punkt(p.x, p.y, 'plan-kabel-punkt' + (i === 0 ? ' ende' : ''), '<span class="griff"></span>' + nr, { interactive: false }).addTo(ebenen.entwurf);
     });
     const l = laengeImPlan(entwurf.punkte);
-    if (entwurf.art !== 'massstab') {
+    if (entwurf.art !== 'massstab' && entwurf.art !== 'geo') {
         status((entwurf.art === 'kabel' ? 'Kabel' : entwurf.art === 'bruecke' ? 'Kabelbrücke' : 'Kabelweg')
             + ': ' + entwurf.punkte.length + ' Punkt(e)' + (l !== null ? ', ' + meter(l) : ''));
     }
@@ -332,7 +375,10 @@ function objektKlick(o, e = null) {
         kabelPanel(null);
         return;
     }
-    if (modus === 'setzen' || modus === 'kabelweg' || modus === 'bruecke' || modus === 'massstab') { return; }
+    // Eine Anlage ist beim Zeichnen ein genauer Punkt – eine Energiesäule
+    // etwa ein guter Passpunkt für die Georeferenz.
+    if (['kabelweg', 'bruecke', 'massstab', 'geo'].includes(modus)) { map.fire('click', { latlng: karte.zuLatLng(o.x, o.y) }); return; }
+    if (modus === 'setzen') { return; }
     objektPanel(o.id);
 }
 
@@ -435,6 +481,8 @@ async function objektPanel(id) {
             <div><h2>${esc(o.name)}</h2><div class="small muted">${esc(o.art_name)}${o.kennung ? ' · ' + esc(o.kennung) : ''} · ${esc(o.status)}</div></div>
         </div>
         <div class="small muted">${esc(o.modell)}</div>
+        ${o.geo ? `<div class="small anlage-lage">Lage ${koordinate(o.geo.lat)}, ${koordinate(o.geo.lon)} ·
+            <a href="${esc(o.geo.link)}" target="_blank" rel="noopener">in der Karte öffnen</a></div>` : ''}
         <div class="seite-live" data-seite-live></div>
         ${o.messgeraete.length ? `<h3 class="mt">Messgeräte</h3><ul class="liste-schlicht messgeraete">${o.messgeraete.map((m) => `
             <li><span class="messgeraet"><span class="messgeraet-zeichen">M</span>
@@ -585,7 +633,7 @@ el.addEventListener('click', (e) => {
 // ------------------------------------------------------------------ Leitungen
 
 async function leitungKlick(l) {
-    if (modus === 'kabel' || modus === 'setzen' || modus === 'kabelweg' || modus === 'bruecke' || modus === 'massstab') { return; }
+    if (ZEICHNEN.includes(modus)) { return; }
     auswahl = { art: 'leitung', id: l.id };
     if (modus === 'verschieben') { griffeZeigen(l.id); }
     const antwort = await fetch(`/karte/leitung/${l.id}`, { headers: { Accept: 'application/json' }, credentials: 'same-origin' });
@@ -849,7 +897,8 @@ function massstabPanel() {
         <form id="massstab-form">
             <div class="field"><label for="massstab-meter">Abstand</label><input id="massstab-meter" name="meter" placeholder="z. B. 100 m" required></div>
             <div class="btn-row"><button class="btn btn-primary btn-sm" type="submit">Übernehmen</button>
-            ${stand.massstab ? '<button class="btn btn-sm btn-ghost" type="button" data-entfernen>Maßstab entfernen</button>' : ''}</div>
+            ${stand.massstab && stand.massstab.quelle !== 'georeferenz' ? '<button class="btn btn-sm btn-ghost" type="button" data-entfernen>Maßstab entfernen</button>' : ''}</div>
+            ${stand.geo ? '<p class="help">Der Plan ist georeferenziert. Ein gesetzter Maßstab hat für Längen Vorrang.</p>' : ''}
         </form>`;
     const form = seite.querySelector('#massstab-form');
     form.addEventListener('submit', async (e) => {
@@ -873,9 +922,127 @@ function massstabPanel() {
     }
 }
 
+function geoPanel() {
+    const g = stand.geo;
+    const punkte = entwurf && entwurf.art === 'geo' ? entwurf.punkte : [];
+    const vorhanden = g ? `
+        <div class="notice small">Georeferenziert: ${meter(g.meter)} zwischen den Passpunkten
+            (${koordinate(g.a.lat)}, ${koordinate(g.a.lon)} und ${koordinate(g.b.lat)}, ${koordinate(g.b.lon)}).
+            Zum Ändern zwei neue Punkte tippen.</div>` : '';
+    if (punkte.length < 2) {
+        seite.innerHTML = `<h2>Georeferenz</h2>${vorhanden}
+            <p class="small">${punkte.length === 0 ? 'Punkt 1 im Plan antippen.' : 'Jetzt Punkt 2 antippen – möglichst weit weg von Punkt 1.'}</p>
+            <p class="help">Gut sind Punkte, die man im Plan und in der Wirklichkeit eindeutig findet: Gebäudeecken, Tore, Masten,
+                Einmündungen. Die Koordinaten kommen aus OpenStreetMap oder Google Maps (Rechtsklick auf die Stelle) – oder vor Ort
+                mit „Meine Position“.</p>
+            ${g && daten.darf.massstab ? '<div class="btn-row"><button class="btn btn-sm btn-ghost" type="button" data-geo-entfernen>Georeferenz entfernen</button></div>' : ''}`;
+        entfernenKnopf();
+        return;
+    }
+    const feld = (k, nr) => `
+        <div class="field"><label for="geo-${k}">Punkt ${nr} – Breite, Länge</label>
+            <input id="geo-${k}" name="${k}_geo" placeholder="51.23456, 7.12345" autocomplete="off" required>
+            <div class="btn-row"><button class="btn btn-sm" type="button" data-gps="${k}">Meine Position</button>
+                <span class="small muted" data-gps-info="${k}"></span></div></div>`;
+    seite.innerHTML = `<h2>Georeferenz</h2>
+        <form id="geo-form">
+            ${feld('a', 1)}${feld('b', 2)}
+            <p class="help">Auch „51,23456; 7,12345“, Grad/Minuten/Sekunden oder ein Link aus OpenStreetMap bzw. Google Maps.</p>
+            <div class="btn-row"><button class="btn btn-primary btn-sm" type="submit">Übernehmen</button>
+                ${g ? '<button class="btn btn-sm btn-ghost" type="button" data-geo-entfernen>Georeferenz entfernen</button>' : ''}</div>
+        </form>`;
+    const form = seite.querySelector('#geo-form');
+    seite.querySelectorAll('[data-gps]').forEach((knopf) => knopf.addEventListener('click', () => {
+        const k = knopf.dataset.gps;
+        const info = seite.querySelector(`[data-gps-info="${k}"]`);
+        if (!navigator.geolocation) { info.textContent = 'Kein GPS im Browser (nur über HTTPS verfügbar).'; return; }
+        info.textContent = 'Position wird bestimmt …';
+        navigator.geolocation.getCurrentPosition((pos) => {
+            form[k + '_geo'].value = koordinate(pos.coords.latitude) + ', ' + koordinate(pos.coords.longitude);
+            info.textContent = '± ' + Math.round(pos.coords.accuracy) + ' m';
+        }, (fehler) => {
+            info.textContent = fehler.code === 1 ? 'Standortfreigabe verweigert.' : 'Keine Position bekommen.';
+        }, { enableHighAccuracy: true, timeout: 20000, maximumAge: 0 });
+    }));
+    form.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const [a, b] = entwurf.punkte;
+        const erg = await PM.post('/karte/georeferenz', {
+            floor_id: etage, ax: a.x, ay: a.y, bx: b.x, by: b.y, a_geo: form.a_geo.value, b_geo: form.b_geo.value,
+            verhaeltnis: karte.quelle.hoehe / karte.quelle.breite,
+        });
+        PM.melden(erg.message, !!erg.ok);
+        if (erg.ok) { entwurfVerwerfen(); await laden(); setModus('ansehen'); positionKnopf(); }
+    });
+    entfernenKnopf();
+
+    function entfernenKnopf() {
+        const knopf = seite.querySelector('[data-geo-entfernen]');
+        if (!knopf) { return; }
+        knopf.addEventListener('click', async () => {
+            if (!window.confirm('Georeferenz dieser Etage entfernen?')) { return; }
+            const erg = await PM.post('/karte/georeferenz', { floor_id: etage, entfernen: 1 });
+            PM.melden(erg.message, !!erg.ok);
+            entwurfVerwerfen();
+            await laden();
+            geoPanel();
+        });
+    }
+}
+
+// Die eigene GPS-Position im Plan – beim Aufbau: Wo stehe ich, wo muss der Verteiler hin?
+let positionWache = null;
+let positionErste = true;
+
+function positionZeigen(pos) {
+    ebenen.position.clearLayers();
+    if (!stand.geo) { status('Diese Etage ist nicht georeferenziert.'); return; }
+    const p = geoZuPlan(stand.geo, pos.coords.latitude, pos.coords.longitude);
+    const genau = Math.round(pos.coords.accuracy);
+    // Genauigkeit als Kreis (in Breiten-Einheiten, y mit dem Seitenverhältnis).
+    const r = pos.coords.accuracy / p.meterJeEinheit;
+    const kreis = [];
+    for (let i = 0; i < 36; i++) {
+        const w = i / 36 * 2 * Math.PI;
+        kreis.push(karte.zuLatLng(p.x + r * Math.cos(w), p.y + r * Math.sin(w) / stand.geo.verhaeltnis));
+    }
+    L.polygon(kreis, { color: '#2563eb', weight: 1, fillColor: '#3b82f6', fillOpacity: 0.12, interactive: false }).addTo(ebenen.position);
+    karte.punkt(p.x, p.y, 'pm-position', '<span class="pm-position-punkt"></span>', { interactive: false }).addTo(ebenen.position);
+    const draussen = p.x < 0 || p.x > 100 || p.y < 0 || p.y > 100;
+    status('Deine Position ± ' + genau + ' m' + (draussen ? ' – außerhalb des Plans.' : '.'));
+    if (positionErste && !draussen) { map.setView(karte.zuLatLng(p.x, p.y), Math.max(map.getZoom(), karte.quelle.maxZoom - 1)); }
+    positionErste = false;
+}
+
+function positionKnopf() {
+    const knopf = document.querySelector('[data-aktion="position"]');
+    if (!knopf || knopf.dataset.bereit) { return; }
+    knopf.dataset.bereit = '1';
+    knopf.addEventListener('click', () => {
+        if (positionWache !== null) {
+            navigator.geolocation.clearWatch(positionWache);
+            positionWache = null;
+            ebenen.position.clearLayers();
+            knopf.classList.remove('aktiv');
+            knopf.setAttribute('aria-pressed', 'false');
+            status('');
+            return;
+        }
+        if (!navigator.geolocation) { status('Kein GPS im Browser (nur über HTTPS verfügbar).'); return; }
+        status('Position wird bestimmt …');
+        positionErste = true;
+        knopf.classList.add('aktiv');
+        knopf.setAttribute('aria-pressed', 'true');
+        positionWache = navigator.geolocation.watchPosition(positionZeigen, (fehler) => {
+            status(fehler.code === 1 ? 'Standortfreigabe verweigert.' : 'Keine Position bekommen.');
+        }, { enableHighAccuracy: true, maximumAge: 5000, timeout: 30000 });
+    });
+}
+
 // ------------------------------------------------------------------ Start
 
 await laden();
+positionKnopf();
 await liveLaden();
 setInterval(liveLaden, 5000);
 document.addEventListener('visibilitychange', () => { if (!document.hidden) { liveLaden(); } });
