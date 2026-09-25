@@ -46,6 +46,9 @@ $darfSetzen = $darfAnlegen;
             <button type="button" class="btn btn-sm" data-modus="massstab" title="Zwei Punkte mit bekanntem Abstand setzen">Maßstab</button>
             <button type="button" class="btn btn-sm" data-modus="geo" title="Plan mit Breite/Länge verbinden: zwei Passpunkte">Georeferenz</button>
         <?php endif; ?>
+        <?php if ($aufbau !== null && ($darfSetzen || $darfLeitung)): ?>
+            <button type="button" class="btn btn-sm" data-modus="aufbau" title="Aufbau „<?= View::e($aufbau['name']) ?>“: Anlagen und Kabel bestätigen">Aufbau ✓</button>
+        <?php endif; ?>
         <?php if ($geo !== null): ?>
             <button type="button" class="btn btn-sm" data-aktion="position" aria-pressed="false" title="Eigene GPS-Position im Plan zeigen">Hier bin ich</button>
         <?php endif; ?>
@@ -63,6 +66,7 @@ $darfSetzen = $darfAnlegen;
             <?php endif; ?>
             <div id="karte" class="plan-karte strom-karte"
                  data-etage="<?= (int) $etage['id'] ?>"
+                 data-start-modus="<?= View::e($modus) ?>"
                  data-fokus="<?= (int) $fokus ?>"
                  data-plan-art="<?= View::e((string) ($plan['art'] ?? 'leer')) ?>"
                  data-plan-url="<?= View::e((string) ($plan['url'] ?? '')) ?>"

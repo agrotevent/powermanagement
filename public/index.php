@@ -5,6 +5,7 @@ require dirname(__DIR__) . '/src/bootstrap.php';
 
 use App\Controllers\AnlagenController;
 use App\Controllers\AuditController;
+use App\Controllers\AufbauController;
 use App\Controllers\AuthController;
 use App\Controllers\BereichController;
 use App\Controllers\BenutzerController;
@@ -83,6 +84,17 @@ $router->post('/anlagen/{id}/anschluesse/details', [AnlagenController::class, 'a
 $router->post('/anlagen/{id}/schutz', [AnlagenController::class, 'schutzSpeichern'], 'anlagen.manage');
 $router->post('/anlagen/{id}/schutz/loeschen', [AnlagenController::class, 'schutzLoeschen'], 'anlagen.manage');
 $router->post('/anlagen/{id}/schutz/vorschlag', [AnlagenController::class, 'schutzVorschlag'], 'anlagen.manage');
+// Aufbau-Modus: Plan festhalten, vor Ort bestätigen, danach abgleichen.
+$router->get('/aufbau', [AufbauController::class, 'index'], 'anlagen.view');
+$router->post('/aufbau/starten', [AufbauController::class, 'starten'], 'anlagen.manage');
+$router->get('/aufbau/{id}', [AufbauController::class, 'show'], 'anlagen.view');
+$router->post('/aufbau/{id}/posten', [AufbauController::class, 'posten'], 'anlagen.manage');
+$router->post('/aufbau/{id}/fertig', [AufbauController::class, 'fertig'], 'anlagen.manage');
+$router->post('/aufbau/{id}/beenden', [AufbauController::class, 'beenden'], 'anlagen.manage');
+$router->post('/aufbau/{id}/loeschen', [AufbauController::class, 'loeschen'], 'anlagen.manage');
+$router->get('/aufbau/{id}/abgleich', [AufbauController::class, 'abgleich'], 'anlagen.view');
+$router->get('/aufbau/{id}/druck', [AufbauController::class, 'druck'], 'anlagen.view');
+
 // Inventar: Verteiler und Zwischenstecker mit Shellys, Einsatz beim Aufbau.
 $router->get('/inventar', [InventarController::class, 'index'], 'datenquellen.view');
 $router->get('/inventar/neu', [InventarController::class, 'neu'], 'inventar.manage');

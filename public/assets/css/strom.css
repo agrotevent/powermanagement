@@ -304,6 +304,44 @@ tr.live-zeile.stufe-stumm td:first-child { box-shadow: inset 4px 0 0 var(--stufe
 .einsatz-liste li:last-child { border-bottom: 0; }
 .einsatz-liste form { margin-top: .3rem; }
 
+/* ------------------------------------------------------------ Aufbau
+ *
+ * Im Aufbau-Modus zeigt die Karte den Stand jeder Position: grau gestrichelt
+ * offen, grün wie geplant, orange geändert, rot entfallen, blau zusätzlich.
+ */
+.strom-karte.aufbau-modus .pm-anlage.aufbau-offen .pm-symbol { opacity: .6; outline: 3px dashed #94a3b8; outline-offset: 2px; }
+.strom-karte.aufbau-modus .pm-anlage.aufbau-bestaetigt .pm-symbol { box-shadow: 0 0 0 3px #fff, 0 0 0 6px #16a34a; }
+.strom-karte.aufbau-modus .pm-anlage.aufbau-geaendert .pm-symbol { box-shadow: 0 0 0 3px #fff, 0 0 0 6px #d97706; }
+.strom-karte.aufbau-modus .pm-anlage.aufbau-entfallen { opacity: .45; }
+.strom-karte.aufbau-modus .pm-anlage.aufbau-entfallen .pm-symbol { box-shadow: 0 0 0 3px #fff, 0 0 0 6px #dc2626; }
+.strom-karte.aufbau-modus .pm-anlage.aufbau-entfallen .plabel { text-decoration: line-through; }
+.strom-karte.aufbau-modus .pm-anlage.aufbau-zusaetzlich .pm-symbol { box-shadow: 0 0 0 3px #fff, 0 0 0 6px #2563eb; }
+.strom-karte.aufbau-modus path.aufbau-offen { stroke: #94a3b8; stroke-dasharray: 8 7; }
+.strom-karte.aufbau-modus path.aufbau-bestaetigt { stroke: #16a34a; }
+.strom-karte.aufbau-modus path.aufbau-geaendert { stroke: #d97706; }
+.strom-karte.aufbau-modus path.aufbau-entfallen { stroke: #dc2626; stroke-opacity: .45; stroke-dasharray: 3 9; }
+.strom-karte.aufbau-modus path.aufbau-zusaetzlich { stroke: #2563eb; }
+.aufbau-wahl { display: grid; gap: .5rem; margin: .6rem 0; }
+.aufbau-wahl .btn { min-height: 48px; font-size: .95rem; justify-content: center; }
+.aufbau-wahl .btn-sm { min-height: 36px; font-size: .8rem; }
+.aufbau-wahl .btn[aria-pressed="true"] { box-shadow: inset 0 0 0 3px rgba(15, 23, 42, .35); }
+.aufbau-wahl .btn[aria-pressed="true"]::after { content: ' – jetzt'; font-weight: 500; opacity: .8; }
+.aufbau-aenderung { margin-top: .4rem; }
+.aufbau-zaehler { display: flex; flex-wrap: wrap; gap: .4rem .9rem; }
+.aufbau-fortschritt { display: flex; height: 12px; border-radius: 999px; overflow: hidden; background: var(--surface-alt); border: 1px solid var(--border); margin-bottom: .5rem; }
+.aufbau-fortschritt .teil.bestaetigt { background: #16a34a; }
+.aufbau-fortschritt .teil.geaendert { background: #d97706; }
+.aufbau-fortschritt .teil.entfallen { background: #dc2626; }
+.aufbau-knoepfe { display: flex; flex-wrap: wrap; gap: .3rem; justify-content: flex-end; align-items: flex-start; }
+.aufbau-knoepfe form { margin: 0; }
+.aufbau-aendern > summary { list-style: none; cursor: pointer; }
+.aufbau-aendern > summary::-webkit-details-marker { display: none; }
+.aufbau-aendern[open] { flex-basis: 100%; }
+.aufbau-aendern form { text-align: left; margin-top: .4rem; }
+tr.aufbau-entfallen td:first-child strong { text-decoration: line-through; }
+td.abweichung { color: var(--warning); font-weight: 600; }
+tr.abweichung-zeile td { background: var(--warning-light); }
+
 /* ------------------------------------------------------------ Materialliste */
 .stueckliste { display: flex; flex-wrap: wrap; gap: .3rem; }
 .stueck {

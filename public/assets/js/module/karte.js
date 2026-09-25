@@ -47,7 +47,7 @@ const ebenen = {
     position: L.layerGroup().addTo(map),
 };
 
-let stand = { objekte: [], leitungen: [], fremd: {}, massstab: null, geo: null };
+let stand = { objekte: [], leitungen: [], fremd: {}, massstab: null, geo: null, aufbau: null };
 const marker = new Map();
 const linien = new Map();
 let live = {};
@@ -108,6 +108,11 @@ function geoZuPlan(g, lat, lon) {
     return { x: g.a.x + qx, y: g.a.y - qy / g.verhaeltnis, meterJeEinheit: Math.sqrt(betrag) };
 }
 
+/** Stand einer Position im laufenden Aufbau („o:12“, „l:34“) – oder null. */
+function aufbauStand(schluessel) {
+    return stand.aufbau && stand.aufbau.posten ? (stand.aufbau.posten[schluessel] || null) : null;
+}
+
 function koordinate(wert) {
     return Number(wert).toFixed(6);
 }
@@ -144,7 +149,8 @@ function markerZeichnen(o) {
         + `<span class="plabel">${esc(o.name)}</span>`
         + `<span class="pm-wert" data-wert title="Antippen: Werte je Phase"></span>`
         + (o.messgeraete.length ? '<span class="pm-mess" title="Messgerät eingebaut">M</span>' : '');
-    const m = karte.punkt(o.x, o.y, `pm-anlage art-${o.art}${o.fest ? ' fest' : ''} stufe-keine`, html,
+    const aufbau = aufbauStand('o:' + o.id);
+    const m = karte.punkt(o.x, o.y, `pm-anlage art-${o.art}${o.fest ? ' fest' : ''}${aufbau ? ' aufbau-' + aufbau : ''} stufe-keine`, html,
         { draggable: false, title: o.name + (o.fest ? ' (fest installiert)' : '') });
     m.on('click', (e) => { L.DomEvent.stopPropagation(e); objektKlick(o, e); });
     m.on('dragend', () => objektVerschoben(o, m));
@@ -160,7 +166,7 @@ function linieZeichnen(l) {
     if (l.art === 'kabelbruecke') {
         lage = L.layerGroup([
             karte.linie(punkte, { color: '#facc15', weight: 13, opacity: 1, lineCap: 'butt' }),
-            karte.linie(punkte, { color: '#111827', weight: 13, opacity: 1, dashArray: '5 7', lineCap: 'butt', className: 'pm-bruecke' }),
+            karte.linie(punkte, { color: '#111827', weight: 13, opacity: 1, dashArray: '5 7', lineCap: 'butt', className: 'pm-bruecke' + (aufbauStand('l:' + l.id) ? ' aufbau-' + aufbauStand('l:' + l.id) : '') }),
         ]);
     } else if (l.art === 'kabelweg') {
         const weg = karte.linie(punkte, { color: '#64748b', weight: 5, opacity: 0.8, dashArray: l.fest ? null : '10 8', className: 'pm-kabelweg' });
@@ -172,7 +178,7 @@ function linieZeichnen(l) {
         const kabel = karte.linie(punkte, {
             color: l.fest ? (l.farbe || '#e2e8f0') : (l.farbe || '#1e293b'),
             weight: staerke,
-            className: 'pm-kabel' + (l.fest ? ' fest' : '') + (l.hinweise.length ? ' hinweis' : ''),
+            className: 'pm-kabel' + (l.fest ? ' fest' : '') + (l.hinweise.length ? ' hinweis' : '') + (aufbauStand('l:' + l.id) ? ' aufbau-' + aufbauStand('l:' + l.id) : ''),
         });
         lage = l.fest ? L.layerGroup([karte.linie(punkte, { color: '#0f172a', weight: staerke + 4, opacity: 1 }), kabel]) : kabel;
     }
@@ -244,6 +250,7 @@ function setModus(neu) {
     entwurfVerwerfen();
     document.querySelectorAll('[data-modus]').forEach((b) => b.classList.toggle('aktiv', b.dataset.modus === neu));
     el.classList.toggle('platzieren', ZEICHNEN.includes(neu));
+    el.classList.toggle('aufbau-modus', neu === 'aufbau');
     marker.forEach((m, id) => {
         const o = objektNachId(id);
         if (neu === 'verschieben' && o && o.darf) { m.dragging.enable(); } else { m.dragging.disable(); }
@@ -258,10 +265,12 @@ function setModus(neu) {
         bruecke: 'Kabelbrücke: Anfang und Ende quer über den Weg tippen.',
         massstab: 'Maßstab: zwei Punkte mit bekanntem Abstand tippen (z. B. Maßstabsleiste des Plans).',
         geo: 'Georeferenz: zwei gut erkennbare Punkte weit auseinander antippen (Gebäudeecken, Tor, Mast), dann ihre Koordinaten eintragen.',
+        aufbau: aufbauText(),
     };
     status(hilfe[neu] || '');
     if (neu === 'setzen') { setzenPanel(); }
     if (neu === 'geo') { geoPanel(); }
+    if (neu === 'aufbau') { aufbauUebersicht(); }
     if (neu === 'kabelweg') { entwurfPanel('kabelweg'); }
 }
 
@@ -379,6 +388,7 @@ function objektKlick(o, e = null) {
     // etwa ein guter Passpunkt für die Georeferenz.
     if (['kabelweg', 'bruecke', 'massstab', 'geo'].includes(modus)) { map.fire('click', { latlng: karte.zuLatLng(o.x, o.y) }); return; }
     if (modus === 'setzen') { return; }
+    if (modus === 'aufbau') { aufbauPanel('objekt', o.id); return; }
     objektPanel(o.id);
 }
 
@@ -636,6 +646,7 @@ el.addEventListener('click', (e) => {
 
 async function leitungKlick(l) {
     if (ZEICHNEN.includes(modus)) { return; }
+    if (modus === 'aufbau') { aufbauPanel('leitung', l.id); return; }
     auswahl = { art: 'leitung', id: l.id };
     if (modus === 'verschieben') { griffeZeigen(l.id); }
     const antwort = await fetch(`/karte/leitung/${l.id}`, { headers: { Accept: 'application/json' }, credentials: 'same-origin' });
@@ -992,6 +1003,120 @@ function geoPanel() {
     }
 }
 
+// ------------------------------------------------------------------ Aufbau
+
+const AUFBAU_TEXT = { offen: 'offen', bestaetigt: 'wie geplant', geaendert: 'geändert', entfallen: 'entfallen', zusaetzlich: 'zusätzlich' };
+const AUFBAU_KLASSE = { offen: '', bestaetigt: 'ok', geaendert: 'warn', entfallen: 'bad', zusaetzlich: 'info' };
+
+function aufbauText() {
+    const a = stand.aufbau;
+    if (!a) { return 'Auf diesem Standort läuft kein Aufbau.'; }
+    const z = a.zaehler;
+    const gesamt = Object.values(z).reduce((x, y) => x + y, 0) - z.zusaetzlich;
+    return `Aufbau „${a.name}“: ${gesamt - z.offen} von ${gesamt} erledigt – Anlage oder Kabel antippen und bestätigen.`;
+}
+
+function aufbauUebersicht() {
+    const a = stand.aufbau;
+    if (!a) { seite.innerHTML = '<h2>Aufbau</h2><p class="small muted">Auf diesem Standort läuft kein Aufbau. Gestartet wird unter „Aufbau &amp; Abgleich“.</p>'; return; }
+    const z = a.zaehler;
+    seite.innerHTML = `<h2>Aufbau: ${esc(a.name)}</h2>
+        <p class="small">Jede Anlage und jedes Kabel antippen: <strong>wie geplant</strong>, <strong>geändert</strong> (was anders ist, beim Kabel die echte
+            Länge) oder <strong>entfällt</strong>. Grau gestrichelt ist noch offen.</p>
+        <ul class="liste-schlicht small aufbau-zaehler">
+            ${Object.keys(AUFBAU_TEXT).map((k) => `<li><span class="badge ${AUFBAU_KLASSE[k]}">${AUFBAU_TEXT[k]}</span> ${z[k]}</li>`).join('')}
+        </ul>
+        <div class="btn-row mt"><a class="btn btn-sm" href="/aufbau/${a.id}">Liste</a><a class="btn btn-sm" href="/aufbau/${a.id}/abgleich">Abgleich</a></div>`;
+}
+
+async function aufbauPanel(art, id) {
+    const a = stand.aufbau;
+    if (!a) { aufbauUebersicht(); return; }
+    const schluessel = (art === 'objekt' ? 'o:' : 'l:') + id;
+    const st = aufbauStand(schluessel);
+    const o = art === 'objekt' ? objektNachId(id) : null;
+    const l = art === 'leitung' ? stand.leitungen.find((x) => x.id === id) : null;
+    if (!st) {
+        seite.innerHTML = `<h2>${esc(o ? o.name : (l && l.name) || 'Kabel')}</h2><p class="small muted">Gehört nicht zum Aufbau (fest installiert oder Kabelweg).</p>`;
+        return;
+    }
+    const name = o ? o.name : (l.name || (l.art === 'kabelbruecke' ? 'Kabelbrücke' : `${l.von_name || '?'} → ${l.zu_name || 'offenes Ende'}`));
+    const notiz = (a.notizen && a.notizen[schluessel]) || '';
+    const laengeIst = a.laengen && a.laengen[schluessel] !== undefined ? a.laengen[schluessel] : null;
+    const darf = art === 'objekt' ? !!(o && o.darf) : !!daten.darf.leitung;
+    seite.innerHTML = `
+        <h2>${esc(name)}</h2>
+        <p class="small">${art === 'objekt' ? esc(o.art_name) : (l.art === 'kabelbruecke' ? 'Kabelbrücke' : 'Kabel' + (l.laenge !== null ? ' · Plan ' + meter(l.laenge) : ''))}
+            · <span class="badge ${AUFBAU_KLASSE[st]}">${AUFBAU_TEXT[st]}</span></p>
+        ${notiz ? `<p class="small muted">${esc(notiz)}</p>` : ''}
+        ${st === 'zusaetzlich' ? '<p class="small muted">Beim Aufbau dazugekommen – nicht im Plan.</p>' : darf ? `
+        <div class="aufbau-wahl">
+            <button type="button" class="btn btn-primary${st === 'bestaetigt' ? ' aktiv' : ''}" data-aufbau="bestaetigt" aria-pressed="${st === 'bestaetigt'}">✓ Wie geplant</button>
+            <button type="button" class="btn${st === 'geaendert' ? ' aktiv' : ''}" data-aufbau-aendern aria-pressed="${st === 'geaendert'}">Geändert …</button>
+            <button type="button" class="btn btn-ghost${st === 'entfallen' ? ' aktiv' : ''}" data-aufbau="entfallen" aria-pressed="${st === 'entfallen'}">Entfällt</button>
+            ${st !== 'offen' ? '<button type="button" class="btn btn-ghost btn-sm" data-aufbau="offen">↺ zurücknehmen</button>' : ''}
+        </div>
+        <form class="aufbau-aenderung" hidden>
+            ${art === 'leitung' && l.art === 'kabel' ? `<div class="field"><label for="aufbau-laenge">Echte Länge (m)</label>
+                <input id="aufbau-laenge" name="laenge_ist" inputmode="decimal" value="${laengeIst !== null ? String(laengeIst).replace('.', ',') : ''}" placeholder="${l.laenge !== null ? 'Plan: ' + meter(l.laenge) : ''}"></div>` : ''}
+            <div class="field"><label for="aufbau-notiz">Was ist anders?</label>
+                <input id="aufbau-notiz" name="notiz" value="${esc(notiz)}" placeholder="${art === 'objekt' ? 'z. B. 10 m weiter links, PD 63 statt PD 32' : 'z. B. um die Bühne herum'}"></div>
+            <button class="btn btn-primary btn-sm" type="submit">Speichern</button>
+            ${art === 'objekt' ? '<p class="help">Steht die Anlage woanders, im Modus „Verschieben“ an die echte Stelle ziehen – der Abgleich misst den Versatz.</p>' : ''}
+        </form>
+        ${art === 'objekt' && daten.darf.inventar ? '<div data-aufbau-inventar class="mt"></div>' : ''}` : '<p class="small muted">Das darfst du nicht bestätigen.</p>'}`;
+    const senden = async (neuerStand, extra = {}) => {
+        const erg = await PM.post(`/aufbau/${a.id}/posten`, { art, ref_id: id, status: neuerStand, ...extra });
+        PM.melden(erg.message, !!erg.ok);
+        if (erg.ok && erg.aufbau) {
+            stand.aufbau = erg.aufbau;
+            zeichnen();
+            status(aufbauText());
+            aufbauPanel(art, id);
+        }
+    };
+    seite.querySelectorAll('[data-aufbau]').forEach((b) => b.addEventListener('click', () => senden(b.dataset.aufbau)));
+    const aendern = seite.querySelector('[data-aufbau-aendern]');
+    const form = seite.querySelector('.aufbau-aenderung');
+    if (aendern && form) {
+        aendern.addEventListener('click', () => { form.hidden = false; (form.querySelector('input') || form).focus(); });
+        form.addEventListener('submit', (e) => {
+            e.preventDefault();
+            senden('geaendert', { notiz: form.notiz.value, laenge_ist: form.laenge_ist ? form.laenge_ist.value : '' });
+        });
+    }
+    // Welcher Verteiler aus dem Inventar steht hier?
+    const inv = seite.querySelector('[data-aufbau-inventar]');
+    if (inv) {
+        const antwort = await fetch(`/karte/objekt/${id}`, { headers: { Accept: 'application/json' }, credentials: 'same-origin' });
+        const d = await antwort.json();
+        if (!d.ok) { return; }
+        const drin = (d.inventar || []).map((i) => `<strong>${esc(i.kennung)}</strong>${i.anschluss ? ' (' + esc(i.anschluss) + ')' : ''}`).join(', ');
+        const frei = d.inventar_frei || [];
+        inv.innerHTML = `<h3>Aus dem Inventar</h3>
+            <p class="small">${drin ? 'Steckt hier: ' + drin : 'Noch nichts aus dem Inventar.'}</p>
+            ${frei.length ? `<div class="field"><label for="aufbau-stueck">Welches Stück steht hier?</label>
+                <select id="aufbau-stueck"><option value="">– wählen –</option>${frei.map((i) => `<option value="${i.id}" data-art="${esc(i.art)}">${esc(i.kennung)} – ${esc(i.typ)}${i.passend ? ' ✓' : ''}${i.woanders ? ' (jetzt: ' + esc(i.woanders) + ')' : ''}</option>`).join('')}</select></div>
+                <div class="field" data-stecker-ort hidden><label for="aufbau-ort">Zwischenstecker steckt an</label>
+                <select id="aufbau-ort"><option value="0">der Einspeisung</option>${d.anschluesse.filter((x) => x.richtung === 'abgang').map((x) => `<option value="${x.id}">Abgang ${esc(x.bezeichnung)} · ${esc(x.typ)}</option>`).join('')}</select></div>
+                <button type="button" class="btn btn-sm" data-einsetzen>Einsetzen</button>` : '<p class="small muted">Nichts Freies im Inventar.</p>'}`;
+        const wahl = inv.querySelector('#aufbau-stueck');
+        const ort = inv.querySelector('[data-stecker-ort]');
+        if (wahl) {
+            wahl.addEventListener('change', () => {
+                const opt = wahl.selectedOptions[0];
+                ort.hidden = !(opt && opt.dataset.art === 'zwischenstecker');
+            });
+            inv.querySelector('[data-einsetzen]').addEventListener('click', async () => {
+                if (!wahl.value) { return; }
+                const erg = await PM.post(`/anlagen/${id}/einsetzen`, { inventar_id: wahl.value, anschluss_id: ort.hidden ? 0 : inv.querySelector('#aufbau-ort').value, typ_uebernehmen: 1 });
+                PM.melden(erg.message, !!erg.ok);
+                if (erg.ok) { await laden(); aufbauPanel(art, id); }
+            });
+        }
+    }
+}
+
 // Die eigene GPS-Position im Plan – beim Aufbau: Wo stehe ich, wo muss der Verteiler hin?
 let positionWache = null;
 let positionErste = true;
@@ -1050,9 +1175,10 @@ setInterval(liveLaden, 5000);
 document.addEventListener('visibilitychange', () => { if (!document.hidden) { liveLaden(); } });
 PM.liveNeu = liveLaden;
 
+if (el.dataset.startModus === 'aufbau' && stand.aufbau && document.querySelector('[data-modus="aufbau"]')) { setModus('aufbau'); }
 const fokus = Number(el.dataset.fokus || 0);
 if (fokus && marker.has(fokus)) {
     map.setView(marker.get(fokus).getLatLng(), Math.max(map.getZoom(), karte.quelle.maxZoom - 1));
     objektPanel(fokus);
 }
-status('');
+if (modus !== 'aufbau') { status(''); }
