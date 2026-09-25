@@ -38,7 +38,16 @@ Es gibt zwei Sorten von Anlagen:
 - **Mobile Anlagen** gehören zur Veranstaltung: mobile Stromverteiler,
   Aggregate, Speicher. Sie sind rund bzw. abgerundet.
 
-Die Ebenen *Feststromanschlüsse* und *Mobile Anlagen* lassen sich getrennt
+Ebenso bei den Leitungen: **Fest verlegte Kabel** (Erdkabel vom
+Hausanschluss zur Energiesäule) und fest verlegte Kabelwege (Kabelkanal,
+Leerrohr) gehören zur Location und sind mit dunklem Rand gezeichnet.
+**Mobile Kabel** werden für jede Veranstaltung neu gelegt. Kabelbrücken sind
+immer mobil. Ein fest verlegtes Kabel endet nur an Feststromanschlüssen. Ein
+neues Kabel zwischen zwei Feststromanschlüssen ist von Haus aus fest; im
+Kabelfenster lässt sich das umstellen (*Fest verlegt*).
+
+Die Ebene *Feststromanschlüsse & feste Kabel* lässt sich getrennt von
+*Mobile Anlagen*, *Mobile Kabel*, *Kabelwege* und *Kabelbrücken*
 ausblenden. So sieht man vor der Planung, was auf dem Gelände fest
 vorhanden ist.
 
@@ -169,13 +178,14 @@ PDF (wird serverseitig gerastert und gekachelt), PNG/JPG oder SVG.
   auf der Karte. Dazu kommen die Feststromanschlüsse aus `strom.json`.
 - **Hochladen**: PowerManagement legt daneben `strom.json` ab. Darin stehen
   **nur die Feststromanschlüsse** der Location mit ihren Anschlüssen,
-  Sicherungen und Messgeräten. An `location.json` ergänzt es nur, was dort
-  fehlt (neue Etagen, Grundriss), und überschreibt nichts, was MasterAdmin
-  gehört.
-- **Nicht übertragen** werden mobile Anlagen, Kabel, Kabelwege und
-  Kabelbrücken. Sie gehören zur Veranstaltung. Beim Übernehmen bleiben sie
-  unangetastet, und ein Kabel, das hier an einem Abgang eines
-  Feststromanschlusses steckt, steckt danach am selben Abgang.
+  Sicherungen und Messgeräten und die **fest verlegten Kabel und
+  Kabelwege** dazwischen. An `location.json` ergänzt es nur, was dort fehlt
+  (neue Etagen, Grundriss), und überschreibt nichts, was MasterAdmin gehört.
+- **Nicht übertragen** werden mobile Anlagen, mobile Kabel, mobile
+  Kabelwege und Kabelbrücken. Sie gehören zur Veranstaltung. Beim
+  Übernehmen bleiben sie unangetastet, und ein mobiles Kabel, das hier an
+  einem Abgang eines Feststromanschlusses steckt, steckt danach am selben
+  Abgang.
 - Eine zweite PowerManagement-Installation bekommt so die feste
   Infrastruktur einer Location und plant ihre Veranstaltung darauf.
 

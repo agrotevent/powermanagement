@@ -28,6 +28,9 @@ final class LocationController extends Controller
         foreach (Database::select('SELECT site_id, fest, COUNT(*) AS n FROM objekte WHERE ist_vorlage = 0 AND site_id IS NOT NULL GROUP BY site_id, fest') as $z) {
             $anzahl[(int) $z['site_id']][(int) $z['fest'] === 1 ? 'fest' : 'mobil'] = (int) $z['n'];
         }
+        foreach (Database::select('SELECT f.site_id, l.fest, COUNT(*) AS n FROM leitungen l JOIN floors f ON f.id = l.floor_id GROUP BY f.site_id, l.fest') as $z) {
+            $anzahl[(int) $z['site_id']][(int) $z['fest'] === 1 ? 'fest_leitungen' : 'mobil_leitungen'] = (int) $z['n'];
+        }
         $this->view('location/index', [
             'hindernis' => LocationSync::hindernis(),
             'liste'     => $liste,

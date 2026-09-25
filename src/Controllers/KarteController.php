@@ -136,6 +136,7 @@ final class KarteController extends Controller
             $leitungen[] = [
                 'id'        => (int) $l['id'],
                 'art'       => $l['art'],
+                'fest'      => $l['fest'] === 1,
                 'name'      => $l['name'],
                 'von'       => $l['von_objekt_id'] !== null ? (int) $l['von_objekt_id'] : null,
                 'zu'        => $l['zu_objekt_id'] !== null ? (int) $l['zu_objekt_id'] : null,
@@ -228,7 +229,7 @@ final class KarteController extends Controller
             ], array_filter(AnlagenService::anschluesse((int) $objektId), static fn ($a) => $a['richtung'] === $richtung)));
         }
         $this->json(['ok' => true, 'leitung' => [
-            'id' => (int) $l['id'], 'art' => $l['art'], 'name' => $l['name'],
+            'id' => (int) $l['id'], 'art' => $l['art'], 'fest' => $l['fest'] === 1, 'name' => $l['name'],
             'von' => $l['von_objekt_id'], 'zu' => $l['zu_objekt_id'], 'von_name' => $l['von_name'], 'zu_name' => $l['zu_name'],
             'von_anschluss_id' => $l['von_anschluss_id'], 'zu_anschluss_id' => $l['zu_anschluss_id'],
             'von_anschluss' => $l['von_anschluss'], 'zu_anschluss' => $l['zu_anschluss'],

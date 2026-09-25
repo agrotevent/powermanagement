@@ -91,7 +91,7 @@ final class DemoSeed
             'ohne_anschluesse' => true], 7.5, 12.0);
         $saeuleDaten = ['art' => 'anschluss', 'vorlage_id' => $saeule, 'nennstrom_a' => 63, 'hersteller' => 'Stadtwerke Musterstadt', 'modell' => 'ES 32/16',
             'eigenschaften' => ['anschlussart' => 'Energiesäule', 'absicherung_a' => 63]];
-        $setzen(['name' => 'Energiesäule 1', 'kennung' => 'ES-01'] + $saeuleDaten, 32.0, 46.0);
+        $saeule1 = $setzen(['name' => 'Energiesäule 1', 'kennung' => 'ES-01'] + $saeuleDaten, 32.0, 46.0);
         $saeule2 = $setzen(['name' => 'Energiesäule 2', 'kennung' => 'ES-02'] + $saeuleDaten, 52.0, 88.0);
 
         // ---- Mobile Anlagen: gehören zur Veranstaltung
@@ -137,6 +137,11 @@ final class DemoSeed
             [[22.0, 30.0], [45.0, 38.0], [45.0, 76.0], [72.0, 76.0]], 'HV → Speicher');
         $kabel($gen, $anschluss($gen, 'abgang', 'cee32'), $licht, $anschluss($licht, 'eingang', 'cee32'), 'H07RN-F', 16,
             [[88.0, 18.0], [88.0, 50.0], [62.0, 50.0]], 'Aggregat → Licht');
+        // Fest verlegt: Erdkabel vom Netzanschluss zu den Energiesäulen – ein
+        // Kabel zwischen zwei Feststromanschlüssen ist von Haus aus fest und
+        // geht mit dem Location-Abgleich mit.
+        $kabel($netz, null, $saeule1, null, 'NYY-J', 35, [[7.5, 12.0], [7.5, 46.0], [32.0, 46.0]], 'Erdkabel Säule 1');
+        $kabel($saeule1, null, $saeule2, null, 'NYY-J', 35, [[32.0, 46.0], [45.0, 46.0], [45.0, 88.0], [52.0, 88.0]], 'Erdkabel Säule 2');
         // Ein mobiler Verteiler am Feststromanschluss des Geländes.
         $kabel($saeule2, $anschluss($saeule2, 'abgang', 'cee16'), $kasse, $anschluss($kasse, 'eingang', 'cee16'), 'H07RN-F', 2.5,
             [[52.0, 88.0], [60.0, 93.0]], 'Energiesäule 2 → Kasse');

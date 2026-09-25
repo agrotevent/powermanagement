@@ -24,12 +24,16 @@ use App\Support\Database;
  *     anlagen: [{schluessel, art, fest: true, name, …, etage, x, y,
  *                schutzorgane: [{ref, art, bezeichnung, …, vor}],
  *                anschluesse: [{richtung, stecker, nr, bezeichnung, schutz, phase, notizen}],
- *                messpunkte: [{geraet, kanal, rolle, bezeichnung, anschluss, schutz}]}] }
+ *                messpunkte: [{geraet, kanal, rolle, bezeichnung, anschluss, schutz}]}],
+ *     leitungen: [{schluessel, art, fest: true, etage, von, von_anschluss, zu, zu_anschluss, …, punkte}] }
  *
- * Mobile Anlagen, Kabel, Kabelwege und Kabelbrücken gehören zur
- * Veranstaltung und bleiben in der Installation, die sie plant. Format 1
- * (bis September 2026) enthielt noch alles; davon werden beim Übernehmen nur
- * die Stromanschlüsse gelesen.
+ * Dazu kommen die **fest verlegten** Kabel und Kabelwege zwischen diesen
+ * Feststromanschlüssen (Erdkabel, Trassen). Mobile Anlagen, mobile Kabel und
+ * Kabelbrücken gehören zur Veranstaltung und bleiben in der Installation,
+ * die sie plant. Format 1 (bis September 2026) enthielt noch alles; davon
+ * werden beim Übernehmen nur die Stromanschlüsse gelesen, keine Leitungen.
+ * `leitungen` ist in Format 2 ein Zusatz – eine ältere Fassung, die ihn
+ * nicht kennt, übernimmt die Anlagen und übergeht ihn.
  *
  * Anschlüsse werden über „richtung:nr“ angesprochen (abgang:3), Schutzorgane
  * über eine Referenz innerhalb der Anlage – so bleiben die Verweise über
@@ -40,7 +44,7 @@ final class LocationBundle
     /** Das Format von location.json, das MasterAdmin schreibt und liest. */
     public const FORMAT_LOCATION = 1;
 
-    /** Das Format von strom.json – 2: nur Feststromanschlüsse, keine Leitungen. */
+    /** Das Format von strom.json – 2: nur Feststromanschlüsse und fest verlegte Leitungen. */
     public const FORMAT_STROM = 2;
 
     // ------------------------------------------------------------ Schlüssel
@@ -282,8 +286,9 @@ final class LocationBundle
     /**
      * Die Feststromanschlüsse eines Standorts als strom.json.
      *
-     * Nur fest installierte Anlagen mit ihren Anschlüssen, Schutzorganen und
-     * Messgeräten. Mobile Anlagen und Leitungen bleiben hier.
+     * Fest installierte Anlagen mit ihren Anschlüssen, Schutzorganen und
+     * Messgeräten, dazu die fest verlegten Kabel und Kabelwege. Mobile
+     * Anlagen, mobile Kabel und Kabelbrücken bleiben hier.
      */
     public static function stromLesen(int $siteId): array
     {
@@ -297,10 +302,12 @@ final class LocationBundle
         $benutzteStecker = [];
 
         $anlagen = [];
+        $objektKeys = [];
         $anschlussRef = [];
         foreach (AnlagenService::liste(['site_id' => $siteId, 'fest' => true]) as $o) {
             $id = (int) $o['id'];
             $key = self::schluesselSichern('objekte', $id, (string) $o['name'], $o['art'] . '-' . $id);
+            $objektKeys[$id] = $key;
 
             $schutzRef = [];
             $schutzorgane = [];
@@ -376,6 +383,43 @@ final class LocationBundle
             ];
         }
 
+        // Fest verlegte Kabel und Kabelwege. Ein Ende an einer Anlage, die
+        // nicht (mehr) fest ist, geht als offenes Ende hinaus.
+        $leitungen = [];
+        foreach (array_keys($etagenKeys) as $floorId) {
+            foreach (LeitungService::fuerEtage($floorId) as $l) {
+                if ($l['fest'] !== 1 || $l['art'] === 'kabelbruecke') {
+                    continue;
+                }
+                $key = self::schluesselSichern('leitungen', (int) $l['id'], (string) ($l['name'] ?: $l['art']), $l['art'] . '-' . $l['id']);
+                $ende = static fn (?int $objekt, ?int $anschluss): array => $objekt !== null && isset($objektKeys[$objekt])
+                    ? [$objektKeys[$objekt], $anschluss !== null ? ($anschlussRef[$anschluss] ?? null) : null]
+                    : [null, null];
+                [$von, $vonAnschluss] = $ende($l['von_objekt_id'] !== null ? (int) $l['von_objekt_id'] : null, $l['von_anschluss_id'] !== null ? (int) $l['von_anschluss_id'] : null);
+                [$zu, $zuAnschluss] = $ende($l['zu_objekt_id'] !== null ? (int) $l['zu_objekt_id'] : null, $l['zu_anschluss_id'] !== null ? (int) $l['zu_anschluss_id'] : null);
+                $leitungen[] = [
+                    'schluessel'      => $key,
+                    'art'             => $l['art'],
+                    'fest'            => true,
+                    'etage'           => $etagenKeys[$floorId],
+                    'name'            => $l['name'],
+                    'von'             => $von,
+                    'von_anschluss'   => $vonAnschluss,
+                    'zu'              => $zu,
+                    'zu_anschluss'    => $zuAnschluss,
+                    'kabeltyp'        => $l['kabeltyp'],
+                    'adern'           => $l['adern'] !== null ? (int) $l['adern'] : null,
+                    'querschnitt_mm2' => $l['querschnitt_mm2'] !== null ? (float) $l['querschnitt_mm2'] : null,
+                    'laenge_m'        => $l['laenge_m'] !== null ? (float) $l['laenge_m'] : null,
+                    'anzahl'          => (int) $l['anzahl'],
+                    'modell'          => $l['modell'],
+                    'punkte'          => array_map(static fn ($p) => [$p['x'], $p['y']], $l['punkte']),
+                    'farbe'           => $l['farbe'],
+                    'notizen'         => (string) ($l['notizen'] ?? ''),
+                ];
+            }
+        }
+
         return [
             'format'       => self::FORMAT_STROM,
             'art'          => 'strom',
@@ -387,6 +431,7 @@ final class LocationBundle
                 'phasen' => (int) $t['phasen'], 'spannung_v' => (int) $t['spannung_v'], 'farbe' => $t['farbe'],
             ], $benutzteStecker)),
             'anlagen'      => $anlagen,
+            'leitungen'    => $leitungen,
         ];
     }
 
@@ -409,6 +454,25 @@ final class LocationBundle
     }
 
     /**
+     * Die fest verlegten Kabel und Kabelwege einer strom.json.
+     *
+     * Erst ab Format 2 und nur, was als fest gekennzeichnet ist – Format 1
+     * enthielt auch die mobilen Kabel einer Veranstaltung.
+     *
+     * @return list<array<string,mixed>>
+     */
+    public static function festeLeitungen(array $daten): array
+    {
+        if ((int) ($daten['format'] ?? 0) < 2) {
+            return [];
+        }
+        return array_values(array_filter(
+            (array) ($daten['leitungen'] ?? []),
+            static fn ($l) => is_array($l) && !empty($l['fest']) && in_array($l['art'] ?? '', ['kabel', 'kabelweg'], true)
+        ));
+    }
+
+    /**
      * Die Feststromanschlüsse aus strom.json auf einen Standort anwenden.
      *
      * Wie in MasterAdmin wird beim Übernehmen nichts gelöscht, was hier
@@ -416,6 +480,7 @@ final class LocationBundle
      * laufenden Planung. Ein Feststromanschluss aus der Datei bekommt seine
      * Anschlüsse und Schutzorgane so, wie sie dort stehen; Kabel, die hier
      * an einem seiner Abgänge hängen, bleiben über „richtung:nr“ daran.
+     * Danach kommen die fest verlegten Kabel und Kabelwege dazwischen.
      *
      * @return array{ok:bool,message:string}
      */
@@ -450,6 +515,8 @@ final class LocationBundle
             $etagen[(string) $e['sync_key']] = (int) $e['id'];
         }
 
+        $objektIds = [];
+        $anschlussIds = [];
         $anlagenZahl = 0;
         foreach (self::festeAnlagen($daten) as $a) {
             $key = (string) ($a['schluessel'] ?? '');
@@ -480,11 +547,58 @@ final class LocationBundle
                 'plan_x' => $floorId !== null && isset($a['x']) ? (float) $a['x'] : null,
                 'plan_y' => $floorId !== null && isset($a['y']) ? (float) $a['y'] : null,
             ]);
-            self::belegungErsetzen($id, $a, $stecker);
+            $objektIds[$key] = $id;
+            $anschlussIds[$key] = self::belegungErsetzen($id, $a, $stecker);
             $anlagenZahl++;
         }
+
+        $leitungenZahl = 0;
+        foreach (self::festeLeitungen($daten) as $l) {
+            $key = (string) ($l['schluessel'] ?? '');
+            $floorId = $etagen[(string) ($l['etage'] ?? '')] ?? null;
+            if ($key === '' || $floorId === null) {
+                continue;
+            }
+            $ende = static function (?string $objekt, ?string $anschluss) use ($objektIds, $anschlussIds): array {
+                if ($objekt === null || !isset($objektIds[$objekt])) {
+                    return [null, null];
+                }
+                return [$objektIds[$objekt], $anschluss !== null ? ($anschlussIds[$objekt][$anschluss] ?? null) : null];
+            };
+            [$vonO, $vonA] = $ende($l['von'] ?? null, $l['von_anschluss'] ?? null);
+            [$zuO, $zuA] = $ende($l['zu'] ?? null, $l['zu_anschluss'] ?? null);
+            $vorhanden = Database::first('SELECT id FROM leitungen WHERE sync_key = ?', [$key]);
+            $vorhandenId = $vorhanden !== null ? (int) $vorhanden['id'] : null;
+            // Vorher von den Anschlüssen lösen, damit die Prüfung „Anschluss
+            // schon belegt“ nicht am eigenen alten Stand scheitert.
+            if ($vorhandenId !== null) {
+                Database::update('leitungen', $vorhandenId, ['von_anschluss_id' => null, 'zu_anschluss_id' => null]);
+            }
+            $felder = [
+                'art' => (string) $l['art'], 'fest' => 1, 'floor_id' => $floorId, 'name' => (string) ($l['name'] ?? ''),
+                'von_objekt_id' => $vonO, 'von_anschluss_id' => $vonA, 'zu_objekt_id' => $zuO, 'zu_anschluss_id' => $zuA,
+                'kabeltyp' => (string) ($l['kabeltyp'] ?? ''), 'adern' => $l['adern'] ?? '',
+                'querschnitt_mm2' => $l['querschnitt_mm2'] ?? '', 'laenge_m' => $l['laenge_m'] ?? '',
+                'anzahl' => $l['anzahl'] ?? 1, 'modell' => (string) ($l['modell'] ?? ''),
+                'punkte' => (array) ($l['punkte'] ?? []), 'farbe' => (string) ($l['farbe'] ?? ''), 'notizen' => (string) ($l['notizen'] ?? ''),
+            ];
+            $ergebnis = LeitungService::speichern($vorhandenId, $felder);
+            if (!$ergebnis['ok'] && ($vonA !== null || $zuA !== null)) {
+                // Steckt hier schon ein mobiles Kabel im Anschluss, kommt das
+                // feste trotzdem an – es endet dann an der Anlage selbst.
+                $ergebnis = LeitungService::speichern($vorhandenId, ['von_anschluss_id' => null, 'zu_anschluss_id' => null] + $felder);
+            }
+            if ($ergebnis['ok']) {
+                Database::update('leitungen', (int) $ergebnis['id'], ['sync_key' => $key]);
+                $leitungenZahl++;
+            }
+        }
         \App\Auth\Zugriff::vergessen();
-        return ['ok' => true, 'message' => $anlagenZahl === 1 ? '1 Feststromanschluss übernommen.' : $anlagenZahl . ' Feststromanschlüsse übernommen.'];
+        $meldung = $anlagenZahl === 1 ? '1 Feststromanschluss' : $anlagenZahl . ' Feststromanschlüsse';
+        if ($leitungenZahl > 0) {
+            $meldung .= ' und ' . ($leitungenZahl === 1 ? '1 fest verlegte Leitung' : $leitungenZahl . ' fest verlegte Leitungen');
+        }
+        return ['ok' => true, 'message' => $meldung . ' übernommen.'];
     }
 
     /**

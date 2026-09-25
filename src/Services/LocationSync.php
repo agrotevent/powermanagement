@@ -25,9 +25,10 @@ use App\Support\Settings;
  *   locations/<schlüssel>/strom.json      gehört PowerManagement: die
  *                                          Feststromanschlüsse der Location
  *                                          mit Anschlüssen, Schutzorganen
- *                                          und Messgeräten. Mobile Anlagen
- *                                          und Kabel bleiben in der
- *                                          Installation, die sie plant.
+ *                                          und Messgeräten, dazu die fest
+ *                                          verlegten Kabel und Kabelwege.
+ *                                          Mobile Anlagen und Kabel bleiben
+ *                                          in der Installation, die sie plant.
  *
  * So pflegt jedes Werkzeug seinen Teil, und beide sehen denselben Grundriss.
  *
@@ -383,6 +384,7 @@ final class LocationSync
                 'etagen'     => count((array) ($daten['etagen'] ?? [])),
                 'plaene'     => count(array_filter((array) ($daten['etagen'] ?? []), static fn ($e) => !empty($e['plan']['datei']))),
                 'fest'       => $strom !== null ? count(LocationBundle::festeAnlagen($strom)) : 0,
+                'fest_leitungen' => $strom !== null ? count(LocationBundle::festeLeitungen($strom)) : 0,
                 'hat_strom'  => $strom !== null,
                 'status'     => $site === null ? 'neu' : self::aktualitaet('locations/' . $schluessel, (string) ($site['synced_commit'] ?? '')),
                 'site_id'    => $site !== null ? (int) $site['id'] : 0,
@@ -487,7 +489,8 @@ final class LocationSync
      * Eine Location hochladen.
      *
      * strom.json wird immer ganz geschrieben – sie gehört uns und enthält
-     * nur die Feststromanschlüsse; mobile Anlagen und Kabel bleiben hier.
+     * nur die Feststromanschlüsse und fest verlegten Leitungen; mobile
+     * Anlagen und Kabel bleiben hier.
      * location.json
      * wird nur angelegt, wenn es sie noch nicht gibt, und sonst höchstens
      * ergänzt (neue Etagen, ein Plan oder Maßstab, der dort fehlt). Dosen,
@@ -776,8 +779,8 @@ final class LocationSync
             'Je Location gibt es einen Unterordner mit ihrem Schlüssel: `location.json`',
             '(Etagen, Grundrisse unter `plaene/`, Dosen, Racks) und `strom.json`',
             '(die Feststromanschlüsse der Location – Hausanschluss, Energiesäulen,',
-            'Wandverteiler – mit Anschlüssen und Sicherungen; mobile Verteiler und Kabel',
-            'gehören zur Veranstaltung und stehen nicht hier).',
+            'Wandverteiler – mit Anschlüssen und Sicherungen, dazu fest verlegte Kabel;',
+            'mobile Verteiler und Kabel gehören zur Veranstaltung und stehen nicht hier).',
             '',
             '**Jeder Stand ist ein Commit.** Wer hier umschreibt (rebase, force-push),',
             'nimmt allen Installationen die Historie.',

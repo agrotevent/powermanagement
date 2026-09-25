@@ -17,6 +17,12 @@ use App\Support\Database;
  *   kabelbruecke  Ein Überfahrschutz, gezeichnet als kurze Strecke quer zum
  *                 Weg, mit Modell und Anzahl der Elemente.
  *
+ * Kabel und Kabelwege sind entweder **fest verlegt** (`fest`: Erdkabel vom
+ * Hausanschluss zur Energiesäule, Trasse in der Halle – gehören zur Location
+ * und gehen beim Location-Abgleich mit) oder mobil (für jede Veranstaltung
+ * neu gelegt). Ein festes Kabel endet nur an Feststromanschlüssen;
+ * Kabelbrücken sind immer mobil.
+ *
  * Punkte stehen wie überall im Plan in Prozent (x, y); die Länge rechnet
  * PlanMassstabService aus dem Maßstab der Etage, solange niemand eine
  * gemessene Länge einträgt.
@@ -101,6 +107,7 @@ final class LeitungService
     private static function aufbereiten(array $l, ?array $massstab = null): array
     {
         $l['punkte'] = self::punkteLesen((string) ($l['punkte'] ?? ''));
+        $l['fest'] = (int) ($l['fest'] ?? 0);
         if ($massstab === null && $l['floor_id'] !== null) {
             $massstab = PlanMassstabService::fuerEtage((int) $l['floor_id']);
         }
@@ -222,10 +229,34 @@ final class LeitungService
             }
         }
 
-        if ($id !== null) {
-            if (Database::first('SELECT id FROM leitungen WHERE id = ?', [$id]) === null) {
-                return ['ok' => false, 'message' => 'Diese Leitung gibt es nicht.'];
+        $alt = $id !== null ? Database::first('SELECT id, fest FROM leitungen WHERE id = ?', [$id]) : null;
+        if ($id !== null && $alt === null) {
+            return ['ok' => false, 'message' => 'Diese Leitung gibt es nicht.'];
+        }
+        // Fest oder mobil: was gesagt wird, gilt; beim Bearbeiten ohne Angabe
+        // bleibt es, wie es war. Ein neues Kabel zwischen zwei
+        // Feststromanschlüssen ist fest verlegt, alles andere mobil.
+        $festAngabe = $daten['fest'] ?? null;
+        if ($art === 'kabelbruecke') {
+            $felder['fest'] = 0;
+        } elseif ($festAngabe !== null && $festAngabe !== '') {
+            $felder['fest'] = !empty($festAngabe) ? 1 : 0;
+        } elseif ($alt !== null) {
+            $felder['fest'] = (int) $alt['fest'];
+        } else {
+            $felder['fest'] = $art === 'kabel' && $felder['von_objekt_id'] !== null && $felder['zu_objekt_id'] !== null
+                && self::endeFest($felder['von_objekt_id']) && self::endeFest($felder['zu_objekt_id']) ? 1 : 0;
+        }
+        if ($felder['fest'] === 1 && $art === 'kabel') {
+            foreach ([$felder['von_objekt_id'], $felder['zu_objekt_id']] as $objektId) {
+                if ($objektId !== null && !self::endeFest($objektId)) {
+                    $name = (string) Database::scalar('SELECT name FROM objekte WHERE id = ?', [$objektId]);
+                    return ['ok' => false, 'message' => 'Ein fest verlegtes Kabel endet nur an Feststromanschlüssen – „' . $name . '“ ist mobil.'];
+                }
             }
+        }
+
+        if ($id !== null) {
             Database::update('leitungen', $id, $felder);
             Audit::log('leitung.update', 'leitung', (string) $id, ['art' => $art]);
             return ['ok' => true, 'message' => self::ARTEN[$art] . ' gespeichert.', 'id' => $id];
@@ -234,6 +265,12 @@ final class LeitungService
         $id = Database::insert('leitungen', $felder);
         Audit::log('leitung.create', 'leitung', (string) $id, ['art' => $art]);
         return ['ok' => true, 'message' => self::ARTEN[$art] . ' eingezeichnet.', 'id' => $id];
+    }
+
+    /** Ist die Anlage an diesem Kabelende fest installiert? */
+    private static function endeFest(int $objektId): bool
+    {
+        return (int) Database::scalar('SELECT fest FROM objekte WHERE id = ?', [$objektId]) === 1;
     }
 
     /**

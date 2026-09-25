@@ -345,6 +345,12 @@ final class AnlagenService
             if ($alt === null) {
                 return ['ok' => false, 'message' => 'Diese Anlage gibt es nicht.'];
             }
+            // Ein fest verlegtes Kabel endet nur an Feststromanschlüssen.
+            if ($alt['fest'] === 1 && ($felder['fest'] ?? 1) === 0 && (int) Database::scalar(
+                'SELECT COUNT(*) FROM leitungen WHERE fest = 1 AND (von_objekt_id = ? OR zu_objekt_id = ?)', [$id, $id]
+            ) > 0) {
+                return ['ok' => false, 'message' => 'An „' . $alt['name'] . '“ hängen fest verlegte Kabel – erst diese als mobil kennzeichnen.'];
+            }
             // Wandert die Anlage auf eine andere Etage, gilt ihr Punkt auf
             // dem alten Plan dort nichts mehr.
             if ((int) ($alt['floor_id'] ?? 0) !== (int) ($felder['floor_id'] ?? 0)) {
