@@ -21,7 +21,7 @@ final class DemoSeed
     public static function anlegen(bool $zuruecksetzen): string
     {
         if ($zuruecksetzen) {
-            foreach (['einsaetze', 'inventar_messgeraete', 'inventar', 'bereich_mitglieder', 'bereiche', 'leitungen', 'messpunkte', 'anschluesse', 'schutzorgane', 'objekte', 'datenquellen', 'freigaben', 'floors', 'sites', 'schaltvorgaenge'] as $tabelle) {
+            foreach (['aufbau_posten', 'aufbauten', 'einsaetze', 'inventar_messgeraete', 'inventar', 'bereich_mitglieder', 'bereiche', 'leitungen', 'messpunkte', 'anschluesse', 'schutzorgane', 'objekte', 'datenquellen', 'freigaben', 'floors', 'sites', 'schaltvorgaenge'] as $tabelle) {
                 Database::execute('DELETE FROM ' . $tabelle);
             }
             Database::execute("DELETE FROM user_roles WHERE user_id IN (SELECT id FROM users WHERE username IN ('veranstalter', 'technik'))");
@@ -234,6 +234,30 @@ final class DemoSeed
             'mitglieder' => ['o:' . $truckV, 'o:' . $catering, 'm:' . $messpunkt('shellypro3em-grilltruck'), 'm:' . $messpunkt('shellypro1pm-kaffee')],
         ]);
 
+        // ---- Aufbau: vor 3½ Tagen gestartet, seit 2½ Tagen in Betrieb. Fast
+        // alles wie geplant; die Kasse steht 8 m weiter, das Kabel zum
+        // Grill-Truck wurde länger, Foodtruck 3 hat abgesagt, und für die Bar
+        // kam eine Verlängerung dazu.
+        $aufbau = (int) AufbauService::starten($siteId, 'Sommerfestival 2026')['id'];
+        $plan = AufbauService::find($aufbau)['plan'];
+        foreach ($plan['objekte'] as $o) {
+            $o['id'] === $kasse
+                ? AufbauService::postenSetzen($aufbau, 'objekt', $kasse, 'geaendert', null, 'an die Zufahrt versetzt – 8 m weiter rechts')
+                : AufbauService::postenSetzen($aufbau, 'objekt', (int) $o['id'], 'bestaetigt');
+        }
+        AnlagenService::position($kasse, $floorId, 62.0, 93.0);
+        foreach ($plan['leitungen'] as $l) {
+            match ($l['name']) {
+                'Grill-Truck'  => AufbauService::postenSetzen($aufbau, 'leitung', (int) $l['id'], 'geaendert', 125.0, 'um den Technikbereich herum verlegt'),
+                'Foodtruck 3'  => AufbauService::postenSetzen($aufbau, 'leitung', (int) $l['id'], 'entfallen', null, 'Truck hat abgesagt'),
+                default        => AufbauService::postenSetzen($aufbau, 'leitung', (int) $l['id'], 'bestaetigt'),
+            };
+        }
+        $offen($catering, $anschluss($catering, 'abgang', 'schuko'), 2.5, [[30.0, 70.0], [36.0, 64.0]], 'Verlängerung Bar');
+        AufbauService::fertig($aufbau);
+        Database::update('aufbauten', $aufbau, ['gestartet_am' => gmdate('c', time() - 84 * 3600), 'betrieb_ab' => gmdate('c', time() - 60 * 3600)]);
+        Database::execute('UPDATE aufbau_posten SET am = ?', [gmdate('c', time() - 70 * 3600)]);
+
         // ---- Benutzer mit Zeitfenstern
         $jetzt = time();
         $veranstalter = BenutzerService::anlegen('veranstalter', 'Veranstalter2026!', 'kunde', false);
@@ -265,6 +289,7 @@ final class DemoSeed
             . (int) Database::scalar('SELECT COUNT(*) FROM leitungen') . ' Leitungen, '
             . (int) Database::scalar('SELECT COUNT(*) FROM bereiche') . ' Bereich, '
             . (int) Database::scalar('SELECT COUNT(*) FROM inventar') . ' Inventarstücke, '
+            . (int) Database::scalar('SELECT COUNT(*) FROM aufbauten') . ' Aufbau, '
             . (int) Database::scalar('SELECT COUNT(*) FROM objekte WHERE ist_vorlage = 1') . ' Katalog-Einträge. '
             . 'Zugänge: veranstalter / Veranstalter2026! (nur Festivalwoche), technik / Technik2026!! (schaltet nur das Licht).'
             . (Config::isDemo() ? '' : ' Hinweis: app.demo ist aus – ohne InfluxDB bleiben die Messwerte leer.');

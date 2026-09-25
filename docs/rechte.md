@@ -105,6 +105,14 @@ ebenfalls protokolliert. Schaltknöpfe erscheinen in der Oberfläche nur, wo
 alle Bedingungen erfüllt sind. Die Prüfung läuft trotzdem serverseitig bei
 jedem Befehl (`Steuerung::ausfuehren()` → `Zugriff::darfSteuern()`).
 
+## Aufbau
+
+Einen Aufbau und seinen Abgleich sieht, wer den Standort sieht; die Last
+im Abgleich ist auf die Freigaben beschnitten wie überall. Starten, fertig
+melden und beenden darf, wer auf dem Standort Anlagen anlegen darf. Eine
+Anlage bestätigen darf, wer sie bearbeiten darf; ein Kabel, wer Kabel
+zeichnen darf.
+
 ## Inventar
 
 Das Inventar (Verteiler und Zwischenstecker mit Shellys) gehört keinem

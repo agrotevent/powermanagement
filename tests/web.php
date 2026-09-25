@@ -131,6 +131,16 @@ try {
     if ($profil > 0) {
         $seiten[] = '/datenquellen/profile/' . $profil;
     }
+    // Aufbau: Übersicht, jeder Aufbau mit Filtern, Abgleich, Druck, Karte im Aufbau-Modus
+    $seiten[] = '/aufbau';
+    foreach (array_map('intval', array_column(Database::select('SELECT id FROM aufbauten ORDER BY id LIMIT 3'), 'id')) as $id) {
+        foreach (['', '?zeigen=offen', '?zeigen=geaendert', '?zeigen=zusaetzlich', '/abgleich', '/druck'] as $zusatz) {
+            $seiten[] = '/aufbau/' . $id . $zusatz;
+        }
+    }
+    if ($etage > 0) {
+        $seiten[] = '/karte?etage=' . $etage . '&modus=aufbau';
+    }
     // Inventar: Liste, Formulare, jedes Stück
     array_push($seiten, '/inventar', '/inventar?art=zwischenstecker', '/inventar?suche=PD', '/inventar/neu?art=verteilung', '/inventar/neu?art=zwischenstecker');
     foreach (array_map('intval', array_column(Database::select('SELECT id FROM inventar ORDER BY id LIMIT 10'), 'id')) as $id) {
@@ -247,6 +257,27 @@ try {
         pruefe($r['status'] === 302 && Database::scalar('SELECT id FROM inventar WHERE id = ?', [$stueck]) === false, 'Stück gelöscht');
     }
 
+    // Aufbau: Position über die Karte bestätigen (JSON) und zurücknehmen
+    $aufbau = Database::first("SELECT * FROM aufbauten WHERE status <> 'beendet' ORDER BY id LIMIT 1");
+    if ($aufbau !== null) {
+        $stand = json_decode(aufruf($basis, $admin['dose'], 'GET', '/karte/' . (int) Database::scalar('SELECT id FROM floors WHERE site_id = ? ORDER BY id LIMIT 1', [(int) $aufbau['site_id']]) . '/stand')['text'], true);
+        pruefe(isset($stand['aufbau']['posten'], $stand['aufbau']['zaehler']), 'Stand der Karte enthält den laufenden Aufbau');
+        $posten = Database::first("SELECT * FROM aufbau_posten WHERE aufbau_id = ? AND art = 'objekt' ORDER BY id LIMIT 1", [(int) $aufbau['id']]);
+        if ($posten !== null) {
+            $r = json_decode(aufruf($basis, $admin['dose'], 'POST', '/aufbau/' . (int) $aufbau['id'] . '/posten', ['art' => 'objekt', 'ref_id' => (int) $posten['ref_id'],
+                'status' => 'geaendert', 'notiz' => $kennung, '_token' => $admin['token']], ['Accept: application/json'])['text'], true);
+            pruefe(($r['ok'] ?? false) && ($r['aufbau']['posten']['o:' . (int) $posten['ref_id']] ?? '') === 'geaendert', 'Position per Karte geändert');
+            $r = aufruf($basis, $admin['dose'], 'POST', '/aufbau/' . (int) $aufbau['id'] . '/posten', ['art' => 'objekt', 'ref_id' => (int) $posten['ref_id'],
+                'status' => $posten['status'], 'notiz' => $posten['notiz'], 'laenge_ist' => '', 'zeigen' => 'offen', '_token' => $admin['token']]);
+            pruefe($r['status'] === 302 && $r['ziel'] === '/aufbau/' . (int) $aufbau['id'] . '?zeigen=offen', 'Formular: zurück zur Liste mit Filter');
+            gleich(Database::scalar('SELECT status FROM aufbau_posten WHERE aufbau_id = ? AND art = ? AND ref_id = ?', [(int) $aufbau['id'], 'objekt', (int) $posten['ref_id']]),
+                $posten['status'], 'Stand wiederhergestellt');
+        }
+        $r = aufruf($basis, $admin['dose'], 'POST', '/aufbau/starten', ['site_id' => (int) $aufbau['site_id'], 'name' => $kennung, '_token' => $admin['token']]);
+        pruefe($r['status'] === 302 && $r['ziel'] === '/aufbau' && Database::scalar('SELECT id FROM aufbauten WHERE name = ?', [$kennung]) === false,
+            'zweiter Aufbau auf demselben Standort abgelehnt');
+    }
+
     // Bereich anlegen, ansehen, exportieren, löschen
     $site = (int) Database::scalar('SELECT site_id FROM floors WHERE id = ?', [$etage]);
     $mitglied = (int) Database::scalar('SELECT id FROM objekte WHERE site_id = ? AND ist_vorlage = 0 ORDER BY id LIMIT 1', [$site]);
@@ -298,6 +329,18 @@ try {
         if ($einsatz > 0) {
             $r = aufruf($basis, $kunde['dose'], 'POST', '/einsatz/' . $einsatz . '/beenden', ['_token' => $kunde['token']], ['Accept: application/json']);
             pruefe($r['status'] === 403 && Database::scalar('SELECT bis FROM einsaetze WHERE id = ?', [$einsatz]) === null, 'Kunde darf nichts abbauen');
+        }
+    }
+    $aufbauId = (int) Database::scalar('SELECT id FROM aufbauten ORDER BY id LIMIT 1');
+    if ($aufbauId > 0) {
+        $r = aufruf($basis, $kunde['dose'], 'GET', '/aufbau');
+        pruefe($r['status'] === 200 && !str_contains($r['text'], '/aufbau/' . $aufbauId . '"'), 'Kunde sieht fremden Aufbau nicht in der Liste');
+        foreach (['', '/abgleich', '/druck'] as $zusatz) {
+            gleich(aufruf($basis, $kunde['dose'], 'GET', '/aufbau/' . $aufbauId . $zusatz)['status'], 404, 'Kunde /aufbau/…' . $zusatz);
+        }
+        foreach (['/posten', '/fertig', '/beenden', '/loeschen'] as $zusatz) {
+            $r = aufruf($basis, $kunde['dose'], 'POST', '/aufbau/' . $aufbauId . $zusatz, ['art' => 'objekt', 'ref_id' => 1, 'status' => 'entfallen', '_token' => $kunde['token']]);
+            gleich($r['status'], 403, 'Kunde darf nicht ' . $zusatz);
         }
     }
     // Bereiche eines fremden Standorts: nicht in der Liste, nicht aufrufbar

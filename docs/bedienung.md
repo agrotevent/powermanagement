@@ -189,6 +189,46 @@ Feststromanschluss-Typ“*), etwa die Energiesäulen eines Geländes, die
   (z. B. CEE 16 A 1~ blau, Harting). Nennstrom und Polzahl zählen für die
   Kabelprüfung.
 
+## Aufbau und Abgleich
+
+Der **Aufbau-Modus** ist der Übergang von der Planung zum echten Aufbau:
+
+1. **Starten** (*Übersicht → Aufbau & Abgleich*): Standort wählen, die
+   Veranstaltung benennen. Der Plan wird festgehalten – alle mobilen
+   Anlagen, mobilen Kabel und Kabelbrücken samt Materialliste.
+2. **Vor Ort bestätigen**: In der Karte *Aufbau ✓* (oder über *In der Karte
+   bestätigen*). Offenes ist grau gestrichelt. Anlage oder Kabel antippen:
+   - **✓ Wie geplant** – grün;
+   - **Geändert …** – orange; kurz notieren, was anders ist, beim Kabel die
+     echte Länge. Steht eine Anlage woanders, im Modus *Verschieben* an die
+     echte Stelle ziehen;
+   - **Entfällt** – rot, durchgestrichen;
+   - **↺ zurücknehmen** macht die Position wieder offen.
+
+   Im selben Fenster wird gewählt, welcher Verteiler oder Zwischenstecker
+   aus dem [Inventar](#inventar) dort steht. Was beim Aufbau neu gezeichnet
+   wird, zählt als **zusätzlich** (blau). Dieselben Knöpfe gibt es auch in
+   der Liste des Aufbaus, mit Filtern nach offen, geändert, entfallen und
+   zusätzlich.
+3. **Aufbau fertig** hält den Ist-Stand fest; ab jetzt läuft der Betrieb.
+4. **Veranstaltung beenden**, auf Wunsch mit Abbau aller Inventar-Stücke
+   des Standorts – ihre Shellys messen dann nicht mehr dort.
+
+Der **Abgleich** (jederzeit, auch zum Drucken) zeigt, was anders kam, und
+was das für die nächste Planung heißt:
+
+- **Anlagen**: wie geplant, geändert (mit Versatz in Metern aus Maßstab oder
+  Georeferenz und Typwechsel, etwa PD 32 → PD 63), entfallen, zusätzlich.
+- **Kabel**: Länge im Plan gegen die echte, mit Differenz. Waren die Kabel
+  insgesamt länger als die eingestellte Reserve, steht dort eine
+  Empfehlung für die Kabelreserve.
+- **Material**: Stücke je Kabelsorte – geplant gegen gebraucht.
+- **Last im Betrieb**: je Anlage die Spitze und der höchste Phasenstrom
+  gegen den Nennstrom, mit Hinweis: *überlastet*, *am Limit*, *passt* oder
+  *überdimensioniert* (bei Verteilern mit dem kleineren Katalog-Typ, der
+  gereicht hätte). Dazu die Bereiche mit ihrer höchsten gleichzeitigen Last
+  gegen ihre Grenze.
+
 ## Inventar
 
 Im **Inventar** (*Anlagen → Inventar*) stehen die Geräte aus dem Lager, in

@@ -13,6 +13,7 @@ $groups = [
     'Übersicht' => [
         ['/dashboard', 'Übersicht & Live', null, 'dashboard.view'],
         ['/karte',     'Karte',            null, 'karte.view'],
+        ['/aufbau',    'Aufbau & Abgleich', null, 'anlagen.view'],
     ],
     'Anlagen' => [
         ['/anlagen',              'Alle Anlagen',        null, 'anlagen.view'],

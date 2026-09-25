@@ -6,6 +6,7 @@ namespace App\Controllers;
 use App\Auth\Auth;
 use App\Auth\Zugriff;
 use App\Services\AnlagenService;
+use App\Services\AufbauService;
 use App\Services\MaterialService;
 use App\Services\InventarService;
 use App\Services\LeitungService;
@@ -73,6 +74,8 @@ final class KarteController extends Controller
             'plan'         => $quelle,
             'massstab'     => $etage !== null ? PlanMassstabService::wirksam($etage) : null,
             'geo'          => $etage !== null ? PlanGeoService::lesen($etage) : null,
+            'aufbau'       => $siteId !== null ? AufbauService::aktiv($siteId) : null,
+            'modus'        => $request->str('modus'),
             'vorlagen'     => AnlagenService::liste(['vorlagen' => true]),
             'ungesetzt'    => $siteId !== null ? array_values(array_filter(
                 Zugriff::filtern(AnlagenService::liste(['site_id' => $siteId])),
@@ -164,6 +167,7 @@ final class KarteController extends Controller
             'fremd'     => $fremd,
             'massstab'  => PlanMassstabService::wirksam($etage),
             'geo'       => PlanGeoService::lesen($etage),
+            'aufbau'    => AufbauService::kurz(AufbauService::aktiv((int) $etage['site_id'])),
         ]);
     }
 
@@ -281,6 +285,13 @@ final class KarteController extends Controller
             'geo'         => ($lage = PlanGeoService::fuerObjekt($objekt)) !== null ? $lage + ['link' => PlanGeoService::kartenLink($lage['lat'], $lage['lon'])] : null,
             'inventar'    => array_map(static fn ($e) => ['kennung' => $e['kennung'], 'art' => $e['inventar_art'], 'anschluss' => $e['anschluss_name']],
                 InventarService::einsaetzeAnObjekt($id)),
+            // Was sich hier einsetzen ließe – für den Aufbau-Modus.
+            'inventar_frei' => Zugriff::darfBearbeiten($objekt) && Auth::can('datenquellen.view') ? array_values(array_map(static fn ($i) => [
+                'id' => (int) $i['id'], 'kennung' => $i['kennung'], 'typ' => $i['typ'], 'art' => $i['art'],
+                'passend' => $i['art'] === 'verteilung' && trim((string) $i['vorlage_modell']) === trim((string) $objekt['modell']),
+                'woanders' => $i['einsatz'] !== null ? (string) ($i['einsatz']['anlage_name'] ?? $i['einsatz']['objekt_name']) : null,
+            ], array_filter(InventarService::liste(), static fn ($i) => $i['zustand'] !== 'defekt' && (int) ($i['einsatz']['objekt_id'] ?? 0) !== $id
+                && ($i['art'] === 'zwischenstecker' || $objekt['art'] === 'verteilung')))) : [],
         ]);
     }
 
