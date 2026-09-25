@@ -109,11 +109,11 @@ function zeichnen() {
 function markerZeichnen(o) {
     const html = `<span class="pm-symbol" style="--art-farbe:${esc(o.farbe)}">${esc(o.kuerzel)}</span>`
         + `<span class="plabel">${esc(o.name)}</span>`
-        + `<span class="pm-wert" data-wert></span>`
+        + `<span class="pm-wert" data-wert title="Antippen: Werte je Phase"></span>`
         + (o.messgeraete.length ? '<span class="pm-mess" title="Messgerät eingebaut">M</span>' : '');
     const m = karte.punkt(o.x, o.y, `pm-anlage art-${o.art}${o.fest ? ' fest' : ''} stufe-keine`, html,
         { draggable: false, title: o.name + (o.fest ? ' (fest installiert)' : '') });
-    m.on('click', (e) => { L.DomEvent.stopPropagation(e); objektKlick(o); });
+    m.on('click', (e) => { L.DomEvent.stopPropagation(e); objektKlick(o, e); });
     m.on('dragend', () => objektVerschoben(o, m));
     m.addTo(o.fest ? ebenen.fest : ebenen.mobil);
     marker.set(o.id, m);
@@ -183,6 +183,7 @@ async function liveLaden() {
 }
 
 function liveAnwenden() {
+    if (detail && detail.popup.isOpen()) { detail.popup.setContent(detailHtml(detail.objekt)); }
     marker.forEach((m, id) => {
         const l = live[id];
         const knoten = m.getElement();
@@ -310,7 +311,13 @@ function entwurfVerwerfen() {
 
 // ------------------------------------------------------------------ Anlagen
 
-function objektKlick(o) {
+function objektKlick(o, e = null) {
+    // Tipp auf den Wert neben der Anlage: die Werte je Phase direkt im Plan.
+    const ziel = e && e.originalEvent && e.originalEvent.target;
+    if ((modus === 'ansehen' || modus === 'verschieben') && ziel && ziel.closest && ziel.closest('[data-wert]')) {
+        detailZeigen(o);
+        return;
+    }
     if (modus === 'kabel') {
         if (!entwurf) {
             entwurf = { art: 'kabel', punkte: [{ x: o.x, y: o.y }], von: o.id };
@@ -478,12 +485,13 @@ function panelLiveSetzen(id, vorgabe) {
         <div class="seite-werte stufe-${esc(l.stufe)}">
             <div><span class="label">Leistung</span><strong>${PM.format(l.p, 'W')}</strong></div>
             <div><span class="label">Auslastung</span><strong>${l.auslastung !== null && l.auslastung !== undefined ? Math.round(l.auslastung) + ' %' : '–'}</strong></div>
-            ${phasen.map((p) => `<div><span class="label">${p}</span><strong>${PM.format(l.i[p], 'A')}</strong><span class="small muted">${l.u && l.u[p] !== undefined ? PM.format(l.u[p], 'V', 0) : ''}</span></div>`).join('')}
+            ${!(l.phasen && (l.phasen.L1 || l.phasen.sum)) ? phasen.map((p) => `<div><span class="label">${p}</span><strong>${PM.format(l.i[p], 'A')}</strong></div>`).join('') : ''}
             ${z.soc !== undefined ? `<div><span class="label">SOC</span><strong>${Math.round(z.soc)} %</strong></div>` : ''}
             ${z.tank_prozent !== undefined ? `<div><span class="label">Tank</span><strong>${Math.round(z.tank_prozent)} %</strong></div>` : ''}
             ${z.motorzustand !== undefined ? `<div><span class="label">Motor</span><strong>${esc(z.motorzustand)}</strong></div>` : ''}
         </div>
-        ${l.hinweis ? `<div class="small muted">${esc(l.hinweis)}</div>` : ''}`;
+        ${l.hinweis ? `<div class="small muted">${esc(l.hinweis)}</div>` : ''}
+        ${detailTabelle(l, true)}`;
     Object.keys(l.messpunkte || {}).forEach((mid) => {
         const m = l.messpunkte[mid];
         seite.querySelectorAll(`[data-mp-wert="${mid}"]`).forEach((w) => {
@@ -491,6 +499,88 @@ function panelLiveSetzen(id, vorgabe) {
         });
     });
 }
+
+// ------------------------------------------------------------------ Werte je Phase
+
+let detail = null;            // { objekt, popup } – das offene Detailfenster im Plan
+
+function zahl(wert, einheit, stellen = 1) {
+    return wert === null || wert === undefined ? '–' : PM.format(wert, einheit, stellen);
+}
+
+/**
+ * Tabelle Spannung, Strom, Leistung, cos φ je Phase – im Plan mit Einheit
+ * an jeder Zahl, in der schmalen Seitenleiste kompakt (Einheit in der Zeile).
+ */
+function detailTabelle(l, kompakt = false) {
+    const ph = l.phasen || {};
+    const spalten = ['L1', 'L2', 'L3'].filter((p) => ph[p]);
+    const summe = ph.sum || {};
+    if (!spalten.length && !Object.keys(summe).length) { return ''; }
+    const zeile = (titel, feld, einheit, stellen = 1) => {
+        const werte = spalten.map((p) => ph[p][feld]);
+        const gesamt = summe[feld];
+        if (werte.every((w) => w === undefined) && gesamt === undefined) { return ''; }
+        // Kompakt: Leistungen in k…, Zahl ohne Einheit.
+        const kilo = kompakt && ['W', 'var', 'VA'].includes(einheit);
+        const zeigen = (w) => (w === undefined ? '–' : (kompakt ? PM.format(kilo ? w / 1000 : w, '', kilo ? 1 : stellen) : PM.format(w, einheit, stellen)));
+        const kopf = kompakt ? `${titel} <span class="muted">${kilo ? 'k' + einheit : einheit}</span>` : titel;
+        return `<tr><th>${kopf}</th>${spalten.map((p) => `<td>${zeigen(ph[p][feld])}</td>`).join('')}
+            <td>${gesamt !== undefined ? zeigen(gesamt) : ''}</td></tr>`;
+    };
+    const pf = (w) => (w === undefined ? '–' : w.toLocaleString('de-DE', { minimumFractionDigits: 2, maximumFractionDigits: 2 }));
+    return `<div class="pm-phasen-wrap"><table class="pm-phasen">
+        <thead><tr><th></th>${spalten.map((p) => `<th>${p}</th>`).join('')}<th>${spalten.length ? 'Σ' : 'gesamt'}</th></tr></thead>
+        <tbody>
+            ${zeile('Spannung', 'u', 'V', 1)}
+            ${zeile('Strom', 'i', 'A', 1)}
+            ${zeile('Leistung', 'p', 'W', 1)}
+            ${zeile('Blindl.', 'q', 'var', 1)}
+            ${zeile('Scheinl.', 's', 'VA', 1)}
+            ${spalten.some((p) => ph[p].pf !== undefined) || summe.pf !== undefined
+                ? `<tr><th>cos φ</th>${spalten.map((p) => `<td>${pf(ph[p].pf)}</td>`).join('')}<td>${summe.pf !== undefined ? pf(summe.pf) : ''}</td></tr>` : ''}
+        </tbody></table></div>
+        <div class="pm-phasen-fuss small">
+            ${ph.N && ph.N.i !== undefined ? `<span>N: ${zahl(ph.N.i, 'A')}</span>` : ''}
+            ${l.f !== null && l.f !== undefined ? `<span>Frequenz: <strong>${l.f.toLocaleString('de-DE', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} Hz</strong></span>` : ''}
+            ${l.auslastung !== null && l.auslastung !== undefined ? `<span>Auslastung: <strong>${Math.round(l.auslastung)} %</strong></span>` : ''}
+            ${l.alter_s !== null && l.alter_s !== undefined ? `<span class="muted">vor ${l.alter_s} s</span>` : ''}
+        </div>`;
+}
+
+function detailHtml(o) {
+    const l = live[o.id];
+    const kopf = `<div class="pm-detail-kopf"><strong>${esc(o.name)}</strong><span class="small muted">${esc(o.art_name || '')}</span></div>`;
+    if (!l) { return kopf + '<p class="small muted">Noch keine Livewerte.</p>'; }
+    const tabelle = detailTabelle(l);
+    return `<div class="pm-detail stufe-${esc(l.stufe)}">${kopf}
+        ${tabelle || `<p class="small muted">${esc(l.hinweis || 'Keine Messwerte je Phase.')}</p>`}
+        ${tabelle && l.hinweis ? `<div class="small muted">${esc(l.hinweis)}</div>` : ''}
+        <div class="btn-row mt"><button type="button" class="btn btn-sm" data-detail-anlage="${o.id}">Anlage im Seitenfenster</button></div></div>`;
+}
+
+function detailZeigen(o) {
+    const m = marker.get(o.id);
+    if (!m) { return; }
+    if (detail) { detail.popup.remove(); }
+    const popup = L.popup({ maxWidth: 380, minWidth: 240, className: 'pm-detail-popup', autoPanPadding: [16, 16] })
+        .setLatLng(m.getLatLng())
+        .setContent(detailHtml(o))
+        .openOn(map);
+    detail = { objekt: o, popup };
+    // Solange das Fenster offen ist, weichen die Zoomknöpfe – sonst liegen
+    // sie auf dem Handy über dem Schließen-Kreuz.
+    el.classList.add('detail-offen');
+    popup.on('remove', () => {
+        if (detail && detail.popup === popup) { detail = null; }
+        el.classList.remove('detail-offen');
+    });
+}
+
+el.addEventListener('click', (e) => {
+    const knopf = e.target.closest('[data-detail-anlage]');
+    if (knopf) { objektPanel(Number(knopf.dataset.detailAnlage)); }
+});
 
 // ------------------------------------------------------------------ Leitungen
 

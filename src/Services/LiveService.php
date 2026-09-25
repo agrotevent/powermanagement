@@ -81,7 +81,7 @@ final class LiveService
     {
         $erg = [
             'stufe' => 'keine', 'p' => null, 'i' => [], 'u' => [], 'f' => null, 'auslastung' => null,
-            'zustand' => [], 'alter_s' => null, 'messpunkte' => [], 'hinweis' => '',
+            'zustand' => [], 'alter_s' => null, 'messpunkte' => [], 'hinweis' => '', 'phasen' => [],
         ];
         if ($mps === []) {
             $erg['hinweis'] = 'kein Messgerät zugeordnet';
@@ -147,6 +147,7 @@ final class LiveService
             $erg['u']['sum'] = round((float) $w['phasen']['sum']['u'], 1);
         }
         $erg['f'] = isset($w['phasen']['sum']['f']) ? round((float) $w['phasen']['sum']['f'], 2) : null;
+        $erg['phasen'] = self::phasenDetail($w, $erg['p']);
         $erg['auslastung'] = MesspunktService::auslastung($w, MesspunktService::nennstrom($objekt, $anschluesse));
         $erg['stufe'] = match (true) {
             $erg['alter_s'] !== null && $erg['alter_s'] > self::STUMM_NACH => 'stumm',
@@ -159,6 +160,30 @@ final class LiveService
             $erg['hinweis'] = 'letzter Messwert vor ' . self::dauer((int) $erg['alter_s']);
         }
         return $erg;
+    }
+
+    /**
+     * Die Werte je Phase für die Detailansicht: Spannung, Strom, Wirk-,
+     * Blind- und Scheinleistung, cos φ, Frequenz – was das Messgerät liefert.
+     *
+     * @return array<string,array<string,float>> 'L1'|'L2'|'L3'|'N'|'sum' => Feld => Wert
+     */
+    public static function phasenDetail(array $w, ?float $pGesamt = null): array
+    {
+        $stellen = ['u' => 1, 'i' => 2, 'p' => 1, 'q' => 1, 's' => 1, 'pf' => 2, 'f' => 2];
+        $out = [];
+        foreach (['L1', 'L2', 'L3', 'N', 'sum'] as $phase) {
+            foreach ($stellen as $feld => $n) {
+                $wert = $w['phasen'][$phase][$feld] ?? null;
+                if (is_numeric($wert)) {
+                    $out[$phase][$feld] = round((float) $wert, $n);
+                }
+            }
+        }
+        if ($pGesamt !== null && !isset($out['sum']['p'])) {
+            $out['sum']['p'] = $pGesamt;
+        }
+        return $out;
     }
 
     /**
