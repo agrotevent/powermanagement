@@ -12,7 +12,7 @@ $id = (int) $objekt['id'];
 $art = AnlagenService::ARTEN[$objekt['art']];
 $vorlage = (int) $objekt['ist_vorlage'] === 1;
 $title = $objekt['name'];
-$subtitle = ($vorlage ? 'Standard-Verteiler' : $art['name']) . ($objekt['site_name'] ? ' · ' . $objekt['site_name'] : '') . ($objekt['floor_name'] ? ' / ' . $objekt['floor_name'] : '');
+$subtitle = ($vorlage ? 'Standard-Verteiler' . ((int) $objekt['fest'] === 1 ? ' (fest)' : '') : $objekt['art_anzeige']) . ($objekt['site_name'] ? ' · ' . $objekt['site_name'] : '') . ($objekt['floor_name'] ? ' / ' . $objekt['floor_name'] : '');
 $reiterListe = [
     'uebersicht'  => 'Übersicht',
     'anschluesse' => 'Anschlüsse',

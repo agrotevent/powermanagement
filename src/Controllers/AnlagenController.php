@@ -41,10 +41,12 @@ final class AnlagenController extends Controller
 
     public function index(Request $request): void
     {
+        $fest = $request->str('fest');
         $filter = [
             'art'     => $request->str('art'),
             'site_id' => $request->int('standort'),
             'suche'   => $request->str('suche'),
+            'fest'    => $fest === '1' ? true : ($fest === '0' ? false : null),
         ];
         $objekte = Zugriff::filtern(AnlagenService::liste($filter));
         foreach ($objekte as &$o) {
@@ -93,10 +95,13 @@ final class AnlagenController extends Controller
     public function neu(Request $request): void
     {
         $art = $request->str('art', 'verteilung');
+        $art = isset(AnlagenService::ARTEN[$art]) ? $art : 'verteilung';
         $vorlage = $request->bool('vorlage');
+        $fest = $request->str('fest');
         $this->view('anlagen/form', [
             'objekt' => [
-                'id' => 0, 'art' => isset(AnlagenService::ARTEN[$art]) ? $art : 'verteilung', 'name' => '', 'kennung' => '',
+                'id' => 0, 'art' => $art, 'name' => '', 'kennung' => '',
+                'fest' => $fest !== '' ? (int) ($fest === '1') : (int) AnlagenService::festVorgabe($art),
                 'site_id' => $request->int('standort') ?: null, 'floor_id' => null, 'hersteller' => '', 'modell' => '',
                 'seriennummer' => '', 'nennleistung_kva' => null, 'nennstrom_a' => null, 'spannung_v' => 400, 'phasen' => 3,
                 'status' => 'geplant', 'eigenschaften' => [], 'steuerung_gesperrt' => 0, 'ist_vorlage' => $vorlage ? 1 : 0, 'notizen' => '',

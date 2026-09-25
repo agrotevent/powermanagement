@@ -29,11 +29,24 @@ Die Karte ist der Grundriss aus MasterAdmin: dieselben Pläne (PDF, Bild oder
 SVG), dieselben Kacheln, derselbe Maßstab. Darauf liegen Anlagen, Kabel,
 Kabelwege und Kabelbrücken. Ebenen lassen sich einzeln ein- und ausblenden.
 
+Es gibt zwei Sorten von Anlagen:
+
+- **Feststromanschlüsse** gehören zur Location und stehen bei jeder
+  Veranstaltung an derselben Stelle: Hausanschluss, Energiesäulen,
+  Wandverteiler, Wanddosen, Unterflurkästen, fest eingebaute
+  Hallenverteilungen. Auf der Karte sind sie **eckig mit dunklem Rahmen**.
+- **Mobile Anlagen** gehören zur Veranstaltung: mobile Stromverteiler,
+  Aggregate, Speicher. Sie sind rund bzw. abgerundet.
+
+Die Ebenen *Feststromanschlüsse* und *Mobile Anlagen* lassen sich getrennt
+ausblenden. So sieht man vor der Planung, was auf dem Gelände fest
+vorhanden ist.
+
 | Modus | Was man tut |
 |-------|-------------|
 | **Ansehen** | Anlage oder Kabel antippen: Livewerte, Anschlüsse, Kabeldaten, Link zur Anlage |
 | **Verschieben** | Anlagen ziehen. Angeschlossene Kabel folgen. Bei Kabeln die Stützpunkte ziehen. |
-| **+ Anlage** | in den Plan tippen, dann neue Anlage anlegen **oder einen Standard-Verteiler** aus dem Katalog wählen (mit Anschlüssen und Sicherungen). Eine vorhandene, noch nicht platzierte Anlage lässt sich ebenfalls setzen. |
+| **+ Anlage** | auswählen, was gesetzt wird, dann in den Plan tippen. Zur Wahl stehen ein **Feststromanschluss**, ein fester Katalog-Typ (z. B. *Energiesäule*), eine fest eingebaute Verteilung, ein **mobiler Standard-Verteiler** aus dem Katalog (mit Anschlüssen und Sicherungen) oder eine leere mobile Anlage. Eine vorhandene, noch nicht platzierte Anlage lässt sich ebenfalls setzen. |
 | **Kabel** | Anlage A antippen (Abgang wählen), Zwischenpunkte setzen, Anlage B antippen (Eingang wählen). Kabeltyp, Querschnitt, Adern, Länge. Die Länge wird mit Maßstab aus dem Verlauf vorgeschlagen. |
 | **Kabelweg** | Trasse ohne feste Enden (Kabelkanal, Traverse, Erdverlegung). Doppeltippen beendet. |
 | **Kabelbrücke** | zwei Punkte über einen Weg. Modell und Anzahl der Elemente. |
@@ -55,8 +68,17 @@ steht im Kabelfenster.
 ## Anlagen
 
 **Anlagen** listet Netzanschlüsse, Aggregate, Speicher/Wechselrichter,
-Verteilungen, Unterverteilungen und Verbraucher. Filter nach Art, Standort
-und Suchbegriff. Je Anlage gibt es diese Reiter:
+Verteilungen, Unterverteilungen und Verbraucher. Filter nach Art, *fest
+oder mobil*, Standort und Suchbegriff. **Anlagen → Feststromanschlüsse**
+zeigt nur die fest installierten.
+
+Ob eine Anlage fest installiert ist, steht an der Anlage
+(*Bearbeiten → Fest installiert*). Stromanschlüsse sind von Haus aus fest,
+alle anderen Arten mobil. Eine fest eingebaute Hallenverteilung oder ein
+Baustromkasten, der nur für eine Veranstaltung steht, lässt sich
+entsprechend umstellen.
+
+Je Anlage gibt es diese Reiter:
 
 | Reiter | Inhalt |
 |--------|--------|
@@ -91,6 +113,10 @@ Standard-Verteiler wird wie eine Anlage gepflegt. Auf der Karte
 (*„Anschlüsse und Sicherungen übernehmen von“*) entsteht eine Kopie mit
 allen Anschlüssen und Schutzorganen. Die Kopie ist danach unabhängig vom
 Katalog.
+
+Im Katalog stehen auch **Feststromanschluss-Typen** (*„+
+Feststromanschluss-Typ“*), etwa die Energiesäulen eines Geländes, die
+überall gleich bestückt sind. Was daraus entsteht, ist fest installiert.
 
 ### Verteilbaum und Steckverbinder
 
@@ -140,13 +166,18 @@ PDF (wird serverseitig gerastert und gekachelt), PNG/JPG oder SVG.
 
 - **Holen**: Locations aus MasterAdmin übernehmen, mit Etagen, Grundrissen,
   Maßstab und den Dosen und Racks aus MasterAdmin als graue Orientierung
-  auf der Karte.
-- **Hochladen**: PowerManagement legt daneben `strom.json` ab (Anlagen,
-  Anschlüsse, Sicherungen, Kabel, Kabelwege, Kabelbrücken). An
-  `location.json` ergänzt es nur, was dort fehlt (neue Etagen, Grundriss),
-  und überschreibt nichts, was MasterAdmin gehört.
-- Eine zweite PowerManagement-Installation übernimmt so die komplette
-  Stromplanung einer Location.
+  auf der Karte. Dazu kommen die Feststromanschlüsse aus `strom.json`.
+- **Hochladen**: PowerManagement legt daneben `strom.json` ab. Darin stehen
+  **nur die Feststromanschlüsse** der Location mit ihren Anschlüssen,
+  Sicherungen und Messgeräten. An `location.json` ergänzt es nur, was dort
+  fehlt (neue Etagen, Grundriss), und überschreibt nichts, was MasterAdmin
+  gehört.
+- **Nicht übertragen** werden mobile Anlagen, Kabel, Kabelwege und
+  Kabelbrücken. Sie gehören zur Veranstaltung. Beim Übernehmen bleiben sie
+  unangetastet, und ein Kabel, das hier an einem Abgang eines
+  Feststromanschlusses steckt, steckt danach am selben Abgang.
+- Eine zweite PowerManagement-Installation bekommt so die feste
+  Infrastruktur einer Location und plant ihre Veranstaltung darauf.
 
 Adresse und Token des Repositorys stehen unter **System → Einstellungen →
 Location-Abgleich**.

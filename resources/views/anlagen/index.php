@@ -4,8 +4,14 @@ use App\Services\AnlagenService;
 use App\Support\View;
 
 $artInfo = AnlagenService::ARTEN[$filter['art']] ?? null;
-$title = $artInfo['mehrzahl'] ?? 'Anlagen';
-$subtitle = 'Stromanschlüsse, Generatoren, Wechselrichter und Verteilungen';
+$fest = $filter['fest'];
+$title = $fest === true ? 'Feststromanschlüsse' : ($artInfo['mehrzahl'] ?? ($fest === false ? 'Mobile Anlagen' : 'Anlagen'));
+$subtitle = $fest === true
+    ? 'Fest installiert, gehören zur Location – werden beim Location-Abgleich übertragen'
+    : 'Stromanschlüsse, Generatoren, Wechselrichter und Verteilungen';
+$neuArt = $artInfo !== null ? $filter['art'] : ($fest === true ? 'anschluss' : 'verteilung');
+$neuLink = '/anlagen/neu?art=' . $neuArt . ($fest === true ? '&amp;fest=1' : '');
+$neuText = $fest === true && ($filter['art'] === '' || $filter['art'] === 'anschluss') ? 'Neuer Feststromanschluss' : 'Neue ' . ($artInfo['name'] ?? 'Anlage');
 ?>
 <div class="toolbar-zeile">
     <form method="get" action="/anlagen" class="inline-form">
@@ -14,6 +20,11 @@ $subtitle = 'Stromanschlüsse, Generatoren, Wechselrichter und Verteilungen';
             <?php foreach (AnlagenService::ARTEN as $k => $a): ?>
                 <option value="<?= $k ?>"<?= $filter['art'] === $k ? ' selected' : '' ?>><?= View::e($a['mehrzahl']) ?></option>
             <?php endforeach; ?>
+        </select>
+        <select name="fest" onchange="this.form.submit()" aria-label="Fest oder mobil">
+            <option value="">Fest und mobil</option>
+            <option value="1"<?= $fest === true ? ' selected' : '' ?>>Feststromanschlüsse</option>
+            <option value="0"<?= $fest === false ? ' selected' : '' ?>>Mobile Anlagen</option>
         </select>
         <select name="standort" onchange="this.form.submit()" aria-label="Standort">
             <option value="0">Alle Standorte</option>
@@ -26,7 +37,7 @@ $subtitle = 'Stromanschlüsse, Generatoren, Wechselrichter und Verteilungen';
     </form>
     <div class="spacer"></div>
     <?php if (View::can('anlagen.manage')): ?>
-        <a class="btn btn-primary btn-sm" href="/anlagen/neu?art=<?= View::e($filter['art'] ?: 'verteilung') ?>">+ Neue <?= View::e($artInfo['name'] ?? 'Anlage') ?></a>
+        <a class="btn btn-primary btn-sm" href="<?= $neuLink ?>">+ <?= View::e($neuText) ?></a>
     <?php endif; ?>
     <span class="small muted" data-live-url="/dashboard/live<?= $filter['site_id'] ? '?standort=' . (int) $filter['site_id'] : '' ?>"></span>
 </div>
@@ -48,6 +59,7 @@ $subtitle = 'Stromanschlüsse, Generatoren, Wechselrichter und Verteilungen';
                         <span class="art-zeichen" style="--art-farbe: <?= View::e($art['farbe']) ?>"><?= View::e($art['kuerzel']) ?></span>
                         <a href="/anlagen/<?= (int) $o['id'] ?>"><strong><?= View::e($o['name']) ?></strong></a>
                         <?php if ($o['kennung'] !== ''): ?><span class="small muted"><?= View::e($o['kennung']) ?></span><?php endif; ?>
+                        <?php if ($o['fest'] === 1): ?><span class="badge info" title="fest installiert – gehört zur Location">fest</span><?php endif; ?>
                         <div class="small muted"><?= View::e(trim($o['hersteller'] . ' ' . $o['modell'])) ?></div>
                     </td>
                     <td data-label="Standort"><?= View::e($o['site_name'] ?? '–') ?><?= $o['floor_name'] ? '<div class="small muted">' . View::e($o['floor_name']) . '</div>' : '' ?></td>

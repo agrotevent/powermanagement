@@ -3,14 +3,16 @@ use App\Services\AnlagenService;
 use App\Support\View;
 
 $title = 'Standard-Verteiler';
-$subtitle = 'Katalog: Verteiler und Aggregate mit fester Bestückung, die auf der Karte platziert werden';
+$subtitle = 'Katalog: Verteiler, Aggregate und Feststromanschlüsse mit fester Bestückung, die auf der Karte platziert werden';
 $darf = View::can('stecker.manage') || View::can('anlagen.scope.all');
 ?>
 <div class="toolbar-zeile">
     <p class="muted small mb0">Ein Standard-Verteiler bringt Anschlüsse, Sicherungen und RCDs mit. Auf der Karte unter
-        „Aus Katalog platzieren“ gewählt, entsteht daraus eine eigene Verteilung mit genau dieser Bestückung – die sich danach einzeln anpassen lässt.</p>
+        „+ Anlage“ gewählt, entsteht daraus eine eigene Anlage mit genau dieser Bestückung – die sich danach einzeln anpassen lässt.
+        Typen mit „fest“ (etwa die Energiesäulen eines Geländes) ergeben Feststromanschlüsse.</p>
     <div class="spacer"></div>
     <?php if ($darf): ?>
+        <a class="btn btn-sm" href="/anlagen/neu?art=anschluss&amp;vorlage=1&amp;fest=1">+ Feststromanschluss-Typ</a>
         <a class="btn btn-primary btn-sm" href="/anlagen/neu?art=verteilung&amp;vorlage=1">+ Neuer Standard-Verteiler</a>
     <?php endif; ?>
 </div>
@@ -25,6 +27,7 @@ $darf = View::can('stecker.manage') || View::can('anlagen.scope.all');
                 <div class="katalog-kopf">
                     <span class="art-zeichen" style="--art-farbe: <?= View::e($art['farbe']) ?>"><?= View::e($art['kuerzel']) ?></span>
                     <strong><?= View::e($v['name']) ?></strong>
+                    <?php if ((int) $v['fest'] === 1): ?><span class="badge info" title="Anlagen daraus sind fest installiert">fest</span><?php endif; ?>
                 </div>
                 <div class="small muted"><?= View::e(trim($v['hersteller'] . ' ' . $v['modell'])) ?></div>
                 <p class="small mt"><?= View::e($v['kurzform']) ?></p>

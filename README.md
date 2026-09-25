@@ -13,7 +13,9 @@ Location-Abgleich über Git. Für Smartphone und Tablet ausgelegt.
 
 - **Anlagen**: Netzanschlüsse, Aggregate, Speicher/Wechselrichter,
   Verteilungen, Unterverteilungen, Verbraucher, jeweils mit Nennleistung,
-  Nennstrom, Seriennummer usw.
+  Nennstrom, Seriennummer usw. Jede Anlage ist entweder
+  **Feststromanschluss** (gehört zur Location: Hausanschluss, Energiesäule,
+  Wandverteiler …) oder **mobil** (gehört zur Veranstaltung).
 - **Anschlüsse** je Anlage: Powerlock, CEE 125/63/32/16 A und Schuko ab
   Werk, eigene Steckertypen dazu. Anzahl und Kombination je Verteilung frei.
 - **Sicherungen und RCDs** (HS, RCD, RCBO, LS, NH) als Baum, jedem Abgang
@@ -21,8 +23,8 @@ Location-Abgleich über Git. Für Smartphone und Tablet ausgelegt.
   Schaltbild.
 - **Standard-Verteiler**: Katalog fertig bestückter Verteiler, die sich auf
   der Karte platzieren lassen.
-- **Karte**: Grundrisse (PDF/Bild/SVG) mit Anlagen, **Kabeln, Kabelwegen und
-  Kabelbrücken**. Anlagen per Kabel verbinden, mit Prüfung von
+- **Karte**: Grundrisse (PDF/Bild/SVG) mit Feststromanschlüssen, mobilen
+  Verteilern, **Kabeln, Kabelwegen und Kabelbrücken**. Anlagen per Kabel verbinden, mit Prüfung von
   Belastbarkeit, Steckern und **Spannungsfall**, dazu Maßstab und Livewerte.
 - **Messung**: Shelly (Gen1/Gen2+) über MQTT → Node-RED → InfluxDB.
   **Victron** (GX über Modbus TCP oder VRM-Portal) und **ComAp IG200**
@@ -37,7 +39,8 @@ Location-Abgleich über Git. Für Smartphone und Tablet ausgelegt.
   Gerät mit *gültig ab/bis* und eigenem *Datenzeitraum*. Beispiel: „Kunde A
   sieht die Statistik vom 1. bis 7. Juli, danach nichts mehr.“
 - **Location-Abgleich** mit MasterAdmin über ein gemeinsames Git-Repository.
-  Die Stromplanung liegt als `strom.json` neben der `location.json`.
+  Die **Feststromanschlüsse** der Location liegen als `strom.json` neben der
+  `location.json`. Mobile Anlagen und Kabel bleiben in der Installation.
 
 ## Schnell ausprobieren (Demo-Modus)
 

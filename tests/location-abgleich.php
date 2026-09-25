@@ -3,8 +3,9 @@ declare(strict_types=1);
 
 /**
  * Location-Abgleich gegen ein echtes Git-Repository im Format von
- * MasterAdmin: übernehmen, Stromplanung hochladen, location.json
- * unangetastet lassen, Änderungen aus MasterAdmin wieder holen.
+ * MasterAdmin: übernehmen, Feststromanschlüsse hochladen (mobile Anlagen
+ * und Kabel bleiben hier), location.json unangetastet lassen, Änderungen
+ * aus MasterAdmin wieder holen, ältere strom.json (Format 1) lesen.
  */
 
 require __DIR__ . '/hilfen/pruefung.php';
@@ -78,28 +79,40 @@ try {
     gleich(count($fremd['dosen']), 2, 'Dosen als Fremdbestand');
     gleich($fremd['racks'][0]['watt'] ?? 0, 165, 'Rack mit Leistungsaufnahme der Einbauten');
 
-    // Stromplanung anlegen
+    // Planung anlegen: zwei Feststromanschlüsse (gehören zur Location), ein
+    // mobiler Verteiler mit Kabel am Hausanschluss (gehört zur Veranstaltung)
     $floorId = (int) $etage['id'];
+    $an = (int) AnlagenService::speichern(null, ['art' => 'anschluss', 'name' => 'Hausanschluss Lager', 'floor_id' => $floorId, 'plan_x' => 5, 'plan_y' => 5])['id'];
+    $wv = (int) AnlagenService::speichern(null, ['art' => 'verteilung', 'name' => 'Wandverteiler Halle', 'fest' => 1, 'floor_id' => $floorId, 'plan_x' => 60, 'plan_y' => 10])['id'];
+    SchutzService::vorschlagen($wv);
+    \App\Services\MesspunktService::speichern($wv, null, ['geraet' => 'shellypro3em-lager', 'kanal' => 'em:0', 'rolle' => 'einspeisung']);
     $vt = (int) AnlagenService::speichern(null, ['art' => 'verteilung', 'name' => 'Lagerverteiler', 'floor_id' => $floorId, 'plan_x' => 20, 'plan_y' => 30])['id'];
     SchutzService::vorschlagen($vt);
-    $an = (int) AnlagenService::speichern(null, ['art' => 'anschluss', 'name' => 'Hausanschluss Lager', 'floor_id' => $floorId, 'plan_x' => 5, 'plan_y' => 5])['id'];
-    $ab = Database::first("SELECT id FROM anschluesse WHERE objekt_id = ? AND richtung = 'abgang' LIMIT 1", [$an]);
+    gleich([(int) AnlagenService::find($an)['fest'], (int) AnlagenService::find($wv)['fest'], (int) AnlagenService::find($vt)['fest']], [1, 1, 0], 'fest/mobil wie angelegt');
+    $ab = Database::first("SELECT id, nr FROM anschluesse WHERE objekt_id = ? AND richtung = 'abgang' ORDER BY nr LIMIT 1", [$an]);
     $ein = Database::first("SELECT id FROM anschluesse WHERE objekt_id = ? AND richtung = 'eingang' LIMIT 1", [$vt]);
     $k = LeitungService::speichern(null, ['art' => 'kabel', 'floor_id' => $floorId, 'von_objekt_id' => $an, 'von_anschluss_id' => (int) $ab['id'],
         'zu_objekt_id' => $vt, 'zu_anschluss_id' => (int) $ein['id'], 'kabeltyp' => 'H07RN-F', 'querschnitt_mm2' => 16, 'punkte' => [[5, 5], [20, 30]]]);
-    pruefe($k['ok'], 'Kabel angelegt');
-    \App\Services\MesspunktService::speichern($vt, null, ['geraet' => 'shellypro3em-lager', 'kanal' => 'em:0', 'rolle' => 'einspeisung']);
+    pruefe($k['ok'], 'Kabel vom Feststromanschluss zum mobilen Verteiler angelegt');
+    LeitungService::speichern(null, ['art' => 'kabelbruecke', 'floor_id' => $floorId, 'name' => 'Brücke Tor', 'anzahl' => 2, 'punkte' => [[10, 50], [14, 50]]]);
 
     $hoch = LocationSync::locationHochladen($siteId, 'pruefung');
     pruefe($hoch['ok'], 'hochgeladen: ' . $hoch['message']);
     $strom = json_decode($sh('git --git-dir=' . escapeshellarg($fern) . ' show main:locations/lager/strom.json'), true);
-    gleich(count($strom['anlagen'] ?? []), 2, 'strom.json enthält die Anlagen');
-    gleich(count($strom['leitungen'] ?? []), 1, 'strom.json enthält das Kabel');
-    $vtJson = array_values(array_filter($strom['anlagen'], static fn ($a) => $a['name'] === 'Lagerverteiler'))[0];
-    pruefe(count($vtJson['schutzorgane']) > 2 && count($vtJson['messpunkte']) === 1, 'Schutzorgane und Messgeräte in strom.json');
+    gleich($strom['format'] ?? null, 2, 'strom.json im Format 2');
+    $namen = array_column($strom['anlagen'] ?? [], 'name');
+    sort($namen);
+    gleich($namen, ['Hausanschluss Lager', 'Wandverteiler Halle'], 'strom.json enthält nur die Feststromanschlüsse');
+    pruefe(!array_key_exists('leitungen', $strom), 'keine Kabel, Kabelwege oder Kabelbrücken in strom.json');
+    pruefe(array_filter($strom['anlagen'], static fn ($a) => ($a['fest'] ?? false) !== true) === [], 'jede Anlage als fest gekennzeichnet');
+    $wvJson = array_values(array_filter($strom['anlagen'], static fn ($a) => $a['name'] === 'Wandverteiler Halle'))[0];
+    pruefe(count($wvJson['schutzorgane']) > 2 && count($wvJson['messpunkte']) === 1, 'Schutzorgane und Messgeräte des Feststromanschlusses in strom.json');
     $loc = json_decode($sh('git --git-dir=' . escapeshellarg($fern) . ' show main:locations/lager/location.json'), true);
     gleich(count($loc['etagen'][0]['dosen']), 2, 'location.json: Dosen von MasterAdmin unangetastet');
     gleich($loc['etagen'][0]['racks'][0]['einbauten'][1]['label'] ?? '', 'USV', 'location.json: Racks unangetastet');
+    $liste = LocationSync::locationsImRepo();
+    $lager = array_values(array_filter($liste['locations'], static fn ($l) => $l['schluessel'] === 'lager'))[0] ?? null;
+    gleich($lager['fest'] ?? null, 2, 'Liste zählt die Feststromanschlüsse');
 
     // Neue Etage hier → wird in location.json ergänzt
     SiteService::saveFloor(null, ['site_id' => $siteId, 'name' => 'Außenfläche', 'level_no' => 1]);
@@ -119,27 +132,60 @@ try {
     $lager = array_values(array_filter($liste['locations'], static fn ($l) => $l['schluessel'] === 'lager'))[0] ?? null;
     gleich($lager['status'] ?? '', 'neuer', 'Änderung aus MasterAdmin wird als „neuer“ erkannt');
 
-    // Stromplanung hier verlieren und aus dem Repository zurückholen
-    AnlagenService::loeschen($vt);
-    AnlagenService::loeschen($an);
-    Database::execute('DELETE FROM leitungen WHERE floor_id = ?', [$floorId]);
+    // Hier geht etwas verloren bzw. wird verändert – Übernehmen stellt die
+    // Feststromanschlüsse wieder her und lässt die mobile Planung stehen.
+    AnlagenService::loeschen($wv);
+    Database::update('objekte', $an, ['name' => 'Hausanschluss (versehentlich umbenannt)']);
+    Database::execute('DELETE FROM schutzorgane WHERE objekt_id = ?', [$an]);
+    $vtVorher = AnlagenService::find($vt);
     $erg = LocationSync::uebernehmen('lager');
-    pruefe($erg['ok'], 'erneut übernommen: ' . $erg['message']);
-    $vt2 = Database::first("SELECT * FROM objekte WHERE name = 'Lagerverteiler' AND site_id = ?", [$siteId]);
-    pruefe($vt2 !== null && (float) $vt2['plan_x'] === 20.0, 'Anlage mit Position zurück');
-    gleich(count(SchutzService::liste((int) $vt2['id'])), count($vtJson['schutzorgane']), 'Schutzorgane zurück');
-    $ohne = (int) Database::scalar("SELECT COUNT(*) FROM anschluesse WHERE objekt_id = ? AND richtung = 'abgang' AND schutzorgan_id IS NULL", [(int) $vt2['id']]);
+    pruefe($erg['ok'] && str_contains($erg['message'], '2 Feststromanschlüsse'), 'erneut übernommen: ' . $erg['message']);
+    $wv2 = Database::first("SELECT * FROM objekte WHERE name = 'Wandverteiler Halle' AND site_id = ?", [$siteId]);
+    pruefe($wv2 !== null && (float) $wv2['plan_x'] === 60.0 && (int) $wv2['fest'] === 1, 'gelöschter Feststromanschluss mit Position zurück');
+    gleich(count(SchutzService::liste((int) $wv2['id'])), count($wvJson['schutzorgane']), 'Schutzorgane zurück');
+    $ohne = (int) Database::scalar("SELECT COUNT(*) FROM anschluesse WHERE objekt_id = ? AND richtung = 'abgang' AND schutzorgan_id IS NULL", [(int) $wv2['id']]);
     gleich($ohne, 0, 'Zuordnung Abgang → Sicherung zurück');
+    gleich((int) Database::scalar('SELECT COUNT(*) FROM messpunkte WHERE objekt_id = ?', [(int) $wv2['id']]), 1, 'Messgerät zurück');
+    gleich((string) Database::scalar('SELECT name FROM objekte WHERE id = ?', [$an]), 'Hausanschluss Lager', 'Feststromanschluss auf den Stand des Repositorys gebracht');
+    $vtNachher = AnlagenService::find($vt);
+    pruefe($vtNachher !== null && $vtNachher['name'] === $vtVorher['name'] && (int) $vtNachher['fest'] === 0, 'mobiler Verteiler bleibt unverändert');
     $kabel = Database::first("SELECT * FROM leitungen WHERE floor_id = ? AND art = 'kabel'", [$floorId]);
-    pruefe($kabel !== null && $kabel['zu_anschluss_id'] !== null && $kabel['von_anschluss_id'] !== null, 'Kabel mit beiden Anschlüssen zurück');
+    $kabelAb = $kabel !== null && $kabel['von_anschluss_id'] !== null ? Database::first('SELECT objekt_id, richtung, nr FROM anschluesse WHERE id = ?', [(int) $kabel['von_anschluss_id']]) : null;
+    pruefe($kabelAb !== null && (int) $kabelAb['objekt_id'] === $an && $kabelAb['richtung'] === 'abgang' && (int) $kabelAb['nr'] === (int) $ab['nr'],
+        'Kabel hängt nach dem Übernehmen weiter am selben Abgang des Feststromanschlusses');
+    pruefe($kabel !== null && (int) $kabel['zu_objekt_id'] === $vt && $kabel['zu_anschluss_id'] !== null, 'Kabel hängt weiter am mobilen Verteiler');
+    gleich((int) Database::scalar("SELECT COUNT(*) FROM leitungen WHERE floor_id = ? AND art = 'kabelbruecke'", [$floorId]), 1, 'Kabelbrücke bleibt');
     $etage = Database::first('SELECT * FROM floors WHERE id = ?', [$floorId]);
     gleich(count(json_decode((string) $etage['fremdbestand'], true)['dosen']), 3, 'neue Dose aus MasterAdmin angekommen');
-    gleich((int) Database::scalar('SELECT COUNT(*) FROM messpunkte WHERE objekt_id = ?', [(int) $vt2['id']]), 1, 'Messgerät zurück');
 
     // Zweimal übernehmen verdoppelt nichts
     LocationSync::uebernehmen('lager');
-    gleich((int) Database::scalar('SELECT COUNT(*) FROM objekte WHERE site_id = ?', [$siteId]), 2, 'erneutes Übernehmen legt nichts doppelt an');
-    gleich((int) Database::scalar('SELECT COUNT(*) FROM leitungen WHERE floor_id = ?', [$floorId]), 1, 'Kabel nicht doppelt');
+    gleich((int) Database::scalar('SELECT COUNT(*) FROM objekte WHERE site_id = ? AND fest = 1', [$siteId]), 2, 'erneutes Übernehmen legt nichts doppelt an');
+    gleich((int) Database::scalar('SELECT COUNT(*) FROM objekte WHERE site_id = ? AND fest = 0', [$siteId]), 1, 'mobile Anlagen unverändert');
+    gleich((int) Database::scalar('SELECT COUNT(*) FROM leitungen WHERE floor_id = ?', [$floorId]), 2, 'Leitungen unverändert');
+
+    // Eine strom.json im alten Format 1 (mit ganzer Planung) liefert nur
+    // ihre Stromanschlüsse – mobile Anlagen und Kabel daraus kommen nicht an.
+    $git($mo, 'pull -q origin main');
+    $alt = json_decode((string) file_get_contents($mo . '/locations/lager/strom.json'), true);
+    $alt['format'] = 1;
+    foreach ($alt['anlagen'] as &$a) {
+        unset($a['fest']);
+    }
+    unset($a);
+    $alt['anlagen'][] = ['schluessel' => 'fremder-verteiler', 'art' => 'verteilung', 'name' => 'Verteiler aus fremder Planung', 'etage' => 'grundriss', 'x' => 70, 'y' => 70,
+        'schutzorgane' => [], 'anschluesse' => [], 'messpunkte' => []];
+    $alt['anlagen'][] = ['schluessel' => 'zweiter-anschluss', 'art' => 'anschluss', 'name' => 'Baustrom Tor 2', 'etage' => 'grundriss', 'x' => 90, 'y' => 90,
+        'schutzorgane' => [], 'anschluesse' => [['richtung' => 'abgang', 'stecker' => 'cee63', 'nr' => 1]], 'messpunkte' => []];
+    $alt['leitungen'] = [['schluessel' => 'fremdes-kabel', 'art' => 'kabel', 'etage' => 'grundriss', 'punkte' => [[1, 1], [2, 2]]]];
+    file_put_contents($mo . '/locations/lager/strom.json', json_encode($alt, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE));
+    $git($mo, 'commit -q -am "strom.json im Format 1"');
+    $git($mo, 'push -q origin main');
+    $erg = LocationSync::uebernehmen('lager');
+    pruefe($erg['ok'], 'Format 1 übernommen: ' . $erg['message']);
+    pruefe(Database::first("SELECT id FROM objekte WHERE name = 'Baustrom Tor 2' AND site_id = ? AND fest = 1", [$siteId]) !== null, 'Format 1: Stromanschluss kommt als Feststromanschluss an');
+    pruefe(Database::first("SELECT id FROM objekte WHERE name = 'Verteiler aus fremder Planung'") === null, 'Format 1: mobiler Verteiler kommt nicht an');
+    pruefe(Database::first("SELECT id FROM leitungen WHERE sync_key = 'fremdes-kabel'") === null, 'Format 1: Kabel kommen nicht an');
 } finally {
     if ($siteId !== null) {
         foreach (Database::select('SELECT id FROM objekte WHERE site_id = ?', [$siteId]) as $o) {

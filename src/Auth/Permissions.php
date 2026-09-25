@@ -44,7 +44,7 @@ final class Permissions
         ],
         'Location-Abgleich' => [
             'inventory.pull'     => 'Locations aus dem gemeinsamen Repository übernehmen',
-            'inventory.push'     => 'Locations und Stromplanung ins Repository hochladen',
+            'inventory.push'     => 'Locations und Feststromanschlüsse ins Repository hochladen',
         ],
         'System' => [
             'system.users.manage'=> 'Benutzer, Rollen und Freigaben verwalten',

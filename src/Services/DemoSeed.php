@@ -68,16 +68,33 @@ final class DemoSeed
         $pd125 = $vorlage('PD 125 – Hauptverteiler', 'PD 125/63/32', ['powerlock' => 1], ['cee63' => 2, 'cee32' => 2, 'cee16' => 2], 125);
         $pd63 = $vorlage('PD 63 – Bühnenverteiler', 'PD 63/32/16', ['cee63' => 1], ['cee32' => 3, 'cee16' => 3, 'schuko' => 6], 63);
         $pd32 = $vorlage('PD 32 – Unterverteiler', 'PD 32/16', ['cee32' => 1], ['cee16' => 4, 'schuko' => 6], 32);
-        $vorlage('SV 16 – Schukoverteiler', 'SV 16', ['cee16' => 1], ['schuko' => 6], 16);
+        $sv16 = $vorlage('SV 16 – Schukoverteiler', 'SV 16', ['cee16' => 1], ['schuko' => 6], 16);
+
+        // Ein Feststromanschluss-Typ: die Energiesäulen, die fest auf dem
+        // Gelände stehen. Aus diesem Katalog-Eintrag entstehen fest
+        // installierte Anlagen – sie gehen beim Location-Abgleich mit.
+        $saeule = (int) AnlagenService::speichern(null, [
+            'art' => 'anschluss', 'name' => 'Energiesäule ES 32', 'modell' => 'ES 32/16', 'hersteller' => 'Stadtwerke Musterstadt',
+            'nennstrom_a' => 63, 'ist_vorlage' => 1, 'fest' => 1, 'ohne_anschluesse' => true,
+            'eigenschaften' => ['anschlussart' => 'Energiesäule', 'absicherung_a' => 63],
+        ])['id'];
+        AnlagenService::anzahlSetzen($saeule, ['abgang' => [$typ['cee32'] => 2, $typ['cee16'] => 2, $typ['schuko'] => 2]]);
+        SchutzService::vorschlagen($saeule);
 
         $setzen = static function (array $daten, float $x, float $y) use ($siteId, $floorId): int {
             return (int) AnlagenService::speichern(null, $daten + ['site_id' => $siteId, 'floor_id' => $floorId, 'plan_x' => $x, 'plan_y' => $y, 'status' => 'in_betrieb'])['id'];
         };
 
-        // ---- Anlagen
-        $netz = $setzen(['art' => 'anschluss', 'name' => 'Baustromanschluss Netz', 'kennung' => 'BA-01', 'nennstrom_a' => 250,
-            'eigenschaften' => ['anschlussart' => 'Baustromverteiler', 'absicherung_a' => 250, 'netzbetreiber' => 'Stadtwerke Musterstadt'],
+        // ---- Feststromanschlüsse: gehören zum Gelände
+        $netz = $setzen(['art' => 'anschluss', 'name' => 'Netzanschluss Nordwiese', 'kennung' => 'HA-01', 'nennstrom_a' => 250,
+            'eigenschaften' => ['anschlussart' => 'Hausanschluss', 'absicherung_a' => 250, 'netzbetreiber' => 'Stadtwerke Musterstadt'],
             'ohne_anschluesse' => true], 7.5, 12.0);
+        $saeuleDaten = ['art' => 'anschluss', 'vorlage_id' => $saeule, 'nennstrom_a' => 63, 'hersteller' => 'Stadtwerke Musterstadt', 'modell' => 'ES 32/16',
+            'eigenschaften' => ['anschlussart' => 'Energiesäule', 'absicherung_a' => 63]];
+        $setzen(['name' => 'Energiesäule 1', 'kennung' => 'ES-01'] + $saeuleDaten, 32.0, 46.0);
+        $saeule2 = $setzen(['name' => 'Energiesäule 2', 'kennung' => 'ES-02'] + $saeuleDaten, 52.0, 88.0);
+
+        // ---- Mobile Anlagen: gehören zur Veranstaltung
         AnlagenService::anzahlSetzen($netz, ['abgang' => [$typ['powerlock'] => 1, $typ['cee125'] => 1]]);
 
         $gen = $setzen(['art' => 'generator', 'name' => 'Aggregat 1', 'kennung' => 'G-100-07', 'hersteller' => 'Musteraggregate',
@@ -96,6 +113,7 @@ final class DemoSeed
         $buehne = $setzen(['art' => 'verteilung', 'name' => 'Bühne', 'kennung' => 'PD63-04', 'vorlage_id' => $pd63, 'nennstrom_a' => 63, 'modell' => 'PD 63/32/16'], 50.0, 20.0);
         $catering = $setzen(['art' => 'verteilung', 'name' => 'Catering', 'kennung' => 'PD32-11', 'vorlage_id' => $pd32, 'nennstrom_a' => 32, 'modell' => 'PD 32/16'], 30.0, 70.0);
         $licht = $setzen(['art' => 'verteilung', 'name' => 'Licht Gelände', 'kennung' => 'PD32-12', 'vorlage_id' => $pd32, 'nennstrom_a' => 32, 'modell' => 'PD 32/16'], 62.0, 50.0);
+        $kasse = $setzen(['art' => 'verteilung', 'name' => 'Kasse Einlass', 'kennung' => 'SV16-03', 'vorlage_id' => $sv16, 'nennstrom_a' => 16, 'modell' => 'SV 16'], 60.0, 93.0);
 
         // ---- Kabel
         $anschluss = static function (int $objekt, string $richtung, string $stecker, int $n = 0) use ($typ): ?int {
@@ -119,6 +137,9 @@ final class DemoSeed
             [[22.0, 30.0], [45.0, 38.0], [45.0, 76.0], [72.0, 76.0]], 'HV → Speicher');
         $kabel($gen, $anschluss($gen, 'abgang', 'cee32'), $licht, $anschluss($licht, 'eingang', 'cee32'), 'H07RN-F', 16,
             [[88.0, 18.0], [88.0, 50.0], [62.0, 50.0]], 'Aggregat → Licht');
+        // Ein mobiler Verteiler am Feststromanschluss des Geländes.
+        $kabel($saeule2, $anschluss($saeule2, 'abgang', 'cee16'), $kasse, $anschluss($kasse, 'eingang', 'cee16'), 'H07RN-F', 2.5,
+            [[52.0, 88.0], [60.0, 93.0]], 'Energiesäule 2 → Kasse');
         LeitungService::speichern(null, ['art' => 'kabelweg', 'floor_id' => $floorId, 'name' => 'Trasse Ost (Reserve)', 'punkte' => [[45.0, 38.0], [80.0, 38.0], [88.0, 30.0]]]);
         LeitungService::speichern(null, ['art' => 'kabelbruecke', 'floor_id' => $floorId, 'name' => 'Überfahrt Hauptweg', 'modell' => '5-Kanal', 'anzahl' => 4, 'punkte' => [[20.5, 50.0], [23.5, 50.0]]]);
         LeitungService::speichern(null, ['art' => 'kabelbruecke', 'floor_id' => $floorId, 'name' => 'Rettungsweg', 'modell' => 'Defender Midi', 'anzahl' => 3, 'punkte' => [[43.5, 60.0], [46.5, 60.0]]]);
@@ -176,9 +197,10 @@ final class DemoSeed
         ]);
         unset($gx);
 
-        return 'Demo-Gelände angelegt: ' . (int) Database::scalar('SELECT COUNT(*) FROM objekte WHERE ist_vorlage = 0') . ' Anlagen, '
+        return 'Demo-Gelände angelegt: ' . (int) Database::scalar('SELECT COUNT(*) FROM objekte WHERE ist_vorlage = 0') . ' Anlagen (davon '
+            . (int) Database::scalar('SELECT COUNT(*) FROM objekte WHERE ist_vorlage = 0 AND fest = 1') . ' Feststromanschlüsse), '
             . (int) Database::scalar('SELECT COUNT(*) FROM leitungen') . ' Leitungen, '
-            . (int) Database::scalar('SELECT COUNT(*) FROM objekte WHERE ist_vorlage = 1') . ' Standard-Verteiler. '
+            . (int) Database::scalar('SELECT COUNT(*) FROM objekte WHERE ist_vorlage = 1') . ' Katalog-Einträge. '
             . 'Zugänge: veranstalter / Veranstalter2026! (nur Festivalwoche), technik / Technik2026!! (schaltet nur das Licht).'
             . (Config::isDemo() ? '' : ' Hinweis: app.demo ist aus – ohne InfluxDB bleiben die Messwerte leer.');
     }

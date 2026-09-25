@@ -182,6 +182,8 @@ tr.live-zeile.stufe-stumm td:first-child { box-shadow: inset 4px 0 0 var(--stufe
 .karte-ebenen .check { margin: 0; }
 .karte-legende { display: flex; flex-wrap: wrap; align-items: center; gap: .3rem .5rem; }
 .legende-punkt { display: inline-block; width: 12px; height: 12px; border-radius: 4px; border: 3px solid var(--stufe-keine); background: #fff; }
+.legende-form { display: inline-block; width: 11px; height: 11px; margin-left: .45rem; vertical-align: -1px; background: #64748b; border-radius: 4px; }
+.legende-form.fest { border-radius: 1px; box-shadow: 0 0 0 1.5px #fff, 0 0 0 3px #0f172a; }
 .legende-punkt.stufe-ok { border-color: var(--stufe-ok); }
 .legende-punkt.stufe-warn { border-color: var(--stufe-warn); }
 .legende-punkt.stufe-bad { border-color: var(--stufe-bad); }
@@ -203,6 +205,9 @@ tr.live-zeile.stufe-stumm td:first-child { box-shadow: inset 4px 0 0 var(--stufe
     border: 4px solid var(--stufe-keine); box-shadow: 0 1px 4px rgba(15, 23, 42, .45);
 }
 .pm-anlage.art-generator .pm-symbol, .pm-anlage.art-anschluss .pm-symbol { border-radius: 50%; }
+/* Feststromanschlüsse: eckig mit dunklem Außenrahmen – sie gehören zum
+   Gelände. Mobile Anlagen bleiben rund bzw. abgerundet. */
+.pm-anlage.fest .pm-symbol { border-radius: 3px; box-shadow: 0 0 0 2px #fff, 0 0 0 4px #0f172a, 0 1px 5px rgba(15, 23, 42, .5); }
 .pm-anlage.stufe-ok .pm-symbol { border-color: var(--stufe-ok); }
 .pm-anlage.stufe-warn .pm-symbol { border-color: var(--stufe-warn); }
 .pm-anlage.stufe-bad .pm-symbol { border-color: var(--stufe-bad); animation: pm-puls 1.2s ease-in-out infinite; }

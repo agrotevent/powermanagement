@@ -113,6 +113,8 @@ final class KarteController extends Controller
                 'art'       => $o['art'],
                 'kuerzel'   => $art['kuerzel'],
                 'farbe'     => $art['farbe'],
+                'fest'      => $o['fest'] === 1,
+                'art_name'  => $o['art_anzeige'],
                 'name'      => $o['name'],
                 'kennung'   => $o['kennung'],
                 'status'    => $o['status'],
@@ -189,7 +191,8 @@ final class KarteController extends Controller
             'id'          => $id,
             'name'        => $objekt['name'],
             'art'         => $objekt['art'],
-            'art_name'    => $objekt['art_name'],
+            'art_name'    => $objekt['art_anzeige'],
+            'fest'        => $objekt['fest'] === 1,
             'kennung'     => $objekt['kennung'],
             'modell'      => trim($objekt['hersteller'] . ' ' . $objekt['modell']),
             'status'      => AnlagenService::STATUS[$objekt['status']] ?? $objekt['status'],
@@ -259,6 +262,9 @@ final class KarteController extends Controller
         $vorlageId = $request->int('vorlage_id');
         $daten = [
             'art'      => $request->str('art', 'verteilung'),
+            // Fest (Feststromanschluss der Location) oder mobil; ohne Angabe
+            // entscheidet die Art.
+            'fest'     => $request->str('fest'),
             'name'     => $request->str('name'),
             'floor_id' => (int) $etage['id'],
             'plan_x'   => (float) $request->input('x'),
