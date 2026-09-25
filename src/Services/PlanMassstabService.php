@@ -52,10 +52,20 @@ final class PlanMassstabService
         ];
     }
 
+    /**
+     * Der Maßstab, mit dem gerechnet wird: der gesetzte – oder, wenn es keinen
+     * gibt, der aus der Georeferenz (dann mit 'quelle' => 'georeferenz').
+     */
+    public static function wirksam(array $floor): ?array
+    {
+        return self::lesen($floor) ?? PlanGeoService::massstab(PlanGeoService::lesen($floor));
+    }
+
+    /** Der wirksame Maßstab einer Etage (siehe wirksam()). */
     public static function fuerEtage(int $floorId): ?array
     {
         $floor = Database::first('SELECT * FROM floors WHERE id = ?', [$floorId]);
-        return $floor === null ? null : self::lesen($floor);
+        return $floor === null ? null : self::wirksam($floor);
     }
 
     /**
@@ -135,7 +145,8 @@ final class PlanMassstabService
     public static function uebernehmen(int $floorId, ?array $referenz): void
     {
         if ($referenz === null) {
-            if (self::fuerEtage($floorId) !== null) {
+            $floor = Database::first('SELECT * FROM floors WHERE id = ?', [$floorId]);
+            if ($floor !== null && self::lesen($floor) !== null) {
                 self::entfernen($floorId);
             }
             return;

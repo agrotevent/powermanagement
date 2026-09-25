@@ -66,9 +66,51 @@ vorhanden ist.
 | **Kabelweg** | Trasse ohne feste Enden (Kabelkanal, Traverse, Erdverlegung). Doppeltippen beendet. |
 | **Kabelbrücke** | zwei Punkte über einen Weg. Modell und Anzahl der Elemente. |
 | **Maßstab** | zwei Punkte mit bekanntem Abstand setzen. Danach stimmen Längen und Spannungsfall. |
+| **Georeferenz** | zwei gut erkennbare Punkte weit auseinander antippen (Gebäudeecke, Tor, Mast, eine Energiesäule) und zu jedem Breite und Länge eintragen – siehe [Georeferenz](#georeferenz-und-gps). |
+| **Hier bin ich** | (nur mit Georeferenz) zeigt die eigene GPS-Position als blauen Punkt im Plan, mit Genauigkeitskreis. Noch einmal tippen schaltet sie ab. |
 
 **Material** (oben in der Werkzeugleiste) öffnet die Materialliste der
 ganzen Etage zum Drucken – siehe [Materialliste](#materialliste).
+
+Beim Zeichnen (Kabel, Kabelweg, Kabelbrücke, Maßstab, Georeferenz) setzt
+ein Tipp auf eine vorhandene Linie einen Punkt – so lässt sich ein Kabel
+entlang eines Kabelwegs legen. Ein Tipp auf eine Anlage setzt den Punkt
+genau auf sie.
+
+### Georeferenz und GPS
+
+Ein **referenzierter** Plan hat einen Maßstab; ein **georeferenzierter**
+Plan weiß zusätzlich, wo er auf der Erde liegt und wie er gedreht ist. Dazu
+braucht es zwei Passpunkte: je ein Punkt im Plan und seine Koordinaten.
+
+1. *Georeferenz* in der Werkzeugleiste, Punkt 1 im Plan antippen, dann
+   Punkt 2 – möglichst weit auseinander.
+2. Zu jedem Punkt Breite und Länge eintragen. Die Koordinaten kommen aus
+   OpenStreetMap oder Google Maps (Rechtsklick auf die Stelle → Koordinaten
+   kopieren) oder vor Ort: an der Stelle stehen und **Meine Position**
+   tippen. Lesbar sind „51.23456, 7.12345“, „51,23456; 7,12345“,
+   Grad/Minuten/Sekunden (51°14'04.2"N 7°07'24.2"E) und Links aus
+   OpenStreetMap oder Google Maps.
+3. *Übernehmen*. Hat der Plan schon einen Maßstab und passt er nicht zur
+   Georeferenz (über 3 % Abweichung), kommt ein Hinweis – dann stimmt ein
+   Passpunkt oder der Maßstab nicht.
+
+Was damit geht:
+
+- **Längen ohne Maßstab**: Fehlt ein Maßstab, rechnen Kabellängen,
+  Spannungsfall und Materialliste mit der Georeferenz. Ein gesetzter
+  Maßstab hat Vorrang.
+- **Lage jeder Anlage**: Das Anlagenfenster zeigt ihre Koordinaten und
+  öffnet die Stelle in OpenStreetMap – zum Hinfinden beim Aufbau.
+- **Hier bin ich**: die eigene GPS-Position im Plan. Das Handy braucht dafür
+  eine HTTPS-Verbindung und die Standortfreigabe.
+- **GeoJSON**: unter der Karte (*georeferenziert · GeoJSON*) alle
+  sichtbaren Anlagen als Punkte und Kabel, Kabelwege und Kabelbrücken als
+  Linien – für QGIS, Google Earth oder die Geländeplanung.
+
+Die Georeferenz gehört zur Location und geht mit dem Location-Abgleich mit
+(in `strom.json`, damit `location.json` das Format von MasterAdmin behält).
+Setzen darf sie, wer Grundrisse verwalten darf.
 
 Zu jedem Kabel prüft PowerManagement:
 
@@ -217,7 +259,7 @@ Materialliste, was zum Aufbau mitgebracht werden muss:
   Namen aus dem Plan;
 - **Kabel** nach Stecker, Typ und Querschnitt, in **Stücken üblicher
   Länge**: 5, 10, 20, 25 und 50 m. Grundlage ist die eingetragene Länge oder
-  die Länge im Plan (mit Maßstab), plus Reserve für Durchhang und den Weg
+  die Länge im Plan (mit Maßstab oder Georeferenz), plus Reserve für Durchhang und den Weg
   zur Dose (*System → Einstellungen*, Vorgabe 10 %). Gewählt wird die
   Kombination mit möglichst wenigen Stücken – jede Kupplung ist eine
   Fehlerquelle – ohne viel Überlänge (15 m Überlänge wiegen ein Stück auf);

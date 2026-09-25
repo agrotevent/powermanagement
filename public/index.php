@@ -50,6 +50,7 @@ $router->get('/karte', [KarteController::class, 'index'], 'karte.view');
 $router->get('/karte/{id}/stand', [KarteController::class, 'stand'], 'karte.view');
 $router->get('/karte/{id}/live', [KarteController::class, 'live'], 'karte.view');
 $router->get('/karte/{id}/material', [KarteController::class, 'material'], 'karte.view');
+$router->get('/karte/{id}/geojson', [KarteController::class, 'geojson'], 'karte.view');
 $router->get('/karte/objekt/{id}', [KarteController::class, 'objekt'], 'karte.view');
 $router->get('/karte/leitung/{id}', [KarteController::class, 'leitung'], 'karte.view');
 $router->post('/karte/objekt/setzen', [KarteController::class, 'objektSetzen'], 'anlagen.manage');
@@ -60,6 +61,7 @@ $router->post('/karte/leitung/verlauf', [KarteController::class, 'leitungVerlauf
 $router->post('/karte/leitung/ende', [KarteController::class, 'leitungEnde'], 'leitungen.manage');
 $router->post('/karte/leitung/loeschen', [KarteController::class, 'leitungLoeschen'], 'leitungen.manage');
 $router->post('/karte/massstab', [KarteController::class, 'massstab'], 'plans.manage');
+$router->post('/karte/georeferenz', [KarteController::class, 'georeferenz'], 'plans.manage');
 $router->get('/grundriss/{id}/datei', [KarteController::class, 'planDatei'], 'karte.view');
 $router->get('/grundriss/{id}/kachel/{z}/{x}/{y}', [KarteController::class, 'planKachel'], 'karte.view');
 
