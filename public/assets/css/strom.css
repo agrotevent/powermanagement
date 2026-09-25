@@ -329,3 +329,20 @@ tr.live-zeile.stufe-stumm td:first-child { box-shadow: inset 4px 0 0 var(--stufe
 /* Energie je Tag */
 .energie-tabelle td { padding: .2rem .4rem; border: 0; }
 .energie-balken { height: 12px; border-radius: 4px; background: linear-gradient(90deg, #f59e0b, #b45309); }
+
+/* Griffe beim Verschieben einer Linie: ⊕ zieht zwischen zwei Punkten einen
+   neuen heraus, ✥ (über der Linie) verschiebt sie ganz. Groß genug für den
+   Finger. */
+.plan-kabel-punkt.zwischen .griff {
+    left: -9px; top: -9px; width: 18px; height: 18px; display: grid; place-items: center;
+    background: rgba(255, 255, 255, .85); border: 2px dashed var(--primary); color: var(--primary);
+    font-size: 13px; font-weight: 800; line-height: 1;
+}
+.plan-kabel-punkt.ganz .griff {
+    left: -14px; top: -44px; width: 28px; height: 28px; border-radius: 7px; display: grid; place-items: center;
+    background: var(--primary); border: 2px solid #fff; color: #fff; font-size: 17px; line-height: 1; cursor: move;
+}
+.plan-kabel-punkt .griff { cursor: grab; }
+/* Angetippte Linien bekommen sonst den Fokusrahmen des Browsers – ein
+   Rechteck um die ganze Linie, das wie ein eingezeichnetes Objekt aussieht. */
+.strom-karte path.leaflet-interactive:focus { outline: none; }

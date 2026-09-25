@@ -55,6 +55,7 @@ $router->post('/karte/objekt/verschieben', [KarteController::class, 'objektVersc
 $router->post('/karte/objekt/entfernen', [KarteController::class, 'objektEntfernen'], 'anlagen.manage');
 $router->post('/karte/leitung/speichern', [KarteController::class, 'leitungSpeichern'], 'leitungen.manage');
 $router->post('/karte/leitung/verlauf', [KarteController::class, 'leitungVerlauf'], 'leitungen.manage');
+$router->post('/karte/leitung/ende', [KarteController::class, 'leitungEnde'], 'leitungen.manage');
 $router->post('/karte/leitung/loeschen', [KarteController::class, 'leitungLoeschen'], 'leitungen.manage');
 $router->post('/karte/massstab', [KarteController::class, 'massstab'], 'plans.manage');
 $router->get('/grundriss/{id}/datei', [KarteController::class, 'planDatei'], 'karte.view');

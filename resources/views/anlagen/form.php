@@ -24,12 +24,12 @@ $zahl = static fn ($v) => $v === null ? '' : rtrim(rtrim(number_format((float) $
                 <div class="field-row">
                     <div class="field">
                         <label for="art">Art</label>
-                        <select id="art" name="art" <?= $neu ? '' : 'disabled' ?> onchange="if (this.form.dataset.neu) { location.search = '?art=' + this.value + '<?= $vorlage ? '&vorlage=1' : '' ?>'; }">
+                        <select id="art" name="art" onchange="location.search = '?art=' + this.value + '<?= $neu && $vorlage ? '&vorlage=1' : '' ?>';">
                             <?php foreach (AnlagenService::ARTEN as $k => $a): ?>
                                 <option value="<?= $k ?>"<?= $art === $k ? ' selected' : '' ?>><?= View::e($a['name']) ?></option>
                             <?php endforeach; ?>
                         </select>
-                        <?php if (!$neu): ?><input type="hidden" name="art" value="<?= View::e($art) ?>"><?php endif; ?>
+                        <?php if (!empty($artNeu)): ?><div class="help text-warn">Wird beim Speichern zu „<?= View::e($artInfo['name']) ?>“. Anschlüsse, Sicherungen, Kabel und Messgeräte bleiben.</div><?php endif; ?>
                     </div>
                     <div class="field">
                         <label for="status">Status</label>
@@ -156,4 +156,3 @@ $zahl = static fn ($v) => $v === null ? '' : rtrim(rtrim(number_format((float) $
         <a class="btn btn-ghost" href="<?= $neu ? ($vorlage ? '/anlagen/katalog' : '/anlagen') : '/anlagen/' . (int) $objekt['id'] ?>">Abbrechen</a>
     </div>
 </form>
-<?php if ($neu): ?><script>document.querySelector('form.card').dataset.neu = '1';</script><?php endif; ?>

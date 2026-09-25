@@ -117,8 +117,15 @@ final class AnlagenController extends Controller
         if ($objekt === null) {
             return;
         }
+        // Art umstellen: das Formular lädt mit ?art= neu, gespeichert wird erst mit „Speichern“.
+        $art = $request->str('art');
+        $artNeu = isset(AnlagenService::ARTEN[$art]) && $art !== $objekt['art'] ? $art : null;
+        if ($artNeu !== null) {
+            $objekt['art'] = $artNeu;
+        }
         $this->view('anlagen/form', [
             'objekt'    => $objekt,
+            'artNeu'    => $artNeu,
             'standorte' => Zugriff::standorteFiltern(SiteService::all()),
             'vorlagen'  => [],
         ]);

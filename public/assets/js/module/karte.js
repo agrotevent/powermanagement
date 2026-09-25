@@ -211,7 +211,7 @@ function setModus(neu) {
     ebenen.griffe.clearLayers();
     const hilfe = {
         ansehen: '',
-        verschieben: 'Anlagen ziehen. Ein Kabel antippen, um seinen Verlauf an den Punkten zu verschieben.',
+        verschieben: 'Anlagen ziehen – feste wie mobile, angeschlossene Kabel folgen. Ein Kabel, einen Kabelweg oder eine Kabelbrücke antippen, um sie zu verschieben.',
         setzen: 'Art oder Standard-Verteiler wählen, dann in den Plan tippen.',
         kabel: 'Kabel: zuerst die speisende Anlage antippen, dann den Weg, dann die Anlage am Ende. Esc bricht ab, ⌫ nimmt den letzten Punkt.',
         kabelweg: 'Kabelweg: Punkte setzen, mit „Fertig“ oder Doppeltipp abschließen.',
@@ -447,6 +447,7 @@ async function objektPanel(id) {
         ${abgaenge.length ? `<div class="small muted">Abgänge</div><ul class="anschluss-liste">${abgaenge.map(anschlussZeile).join('')}</ul>` : ''}
         <div class="btn-row mt">
             <a class="btn btn-sm btn-primary" href="/anlagen/${o.id}">Details & Dokumentation</a>
+            ${o.darf ? `<a class="btn btn-sm" href="/anlagen/${o.id}/bearbeiten">Bearbeiten</a>` : ''}
             ${o.darf_statistik && o.messgeraete.length ? `<a class="btn btn-sm" href="/statistik?anlage=${o.id}">Statistik</a>` : ''}
             ${o.darf ? `<button type="button" class="btn btn-sm btn-ghost" data-aus-plan="${o.id}">Aus dem Plan nehmen</button>` : ''}
         </div>`;
@@ -503,27 +504,113 @@ async function leitungKlick(l) {
     if (d.leitung.art === 'kabel') { kabelPanel(d); } else { entwurfPanel(d.leitung.art === 'kabelbruecke' ? 'bruecke' : 'kabelweg', false, d); }
 }
 
+/**
+ * Griffe zum Ändern einer Linie – für feste und mobile gleichermaßen:
+ *   Punkt ziehen            verschiebt ihn
+ *   ⊕ zwischen zwei Punkten zieht einen neuen Punkt heraus
+ *   Doppeltipp / langes Drücken auf einen Zwischenpunkt entfernt ihn
+ *   ✥ in der Mitte           verschiebt die ganze Linie (angeschlossene Kabelenden bleiben an ihrer Anlage)
+ *   Kabelende auf eine Anlage ziehen steckt es dort an; ins Leere gezogen wird es gelöst.
+ */
 function griffeZeigen(id) {
     ebenen.griffe.clearLayers();
     const l = stand.leitungen.find((x) => x.id === id);
     if (!l || !daten.darf.leitung) { return; }
     const punkte = l.punkte.map((p) => ({ x: p[0], y: p[1] }));
     const lage = linien.get(id);
+    const vorschau = () => {
+        const ll = punkte.map((q) => karte.zuLatLng(q.x, q.y));
+        if (lage && lage.eachLayer) { lage.eachLayer((x) => { if (x.setLatLngs) { x.setLatLngs(ll); } }); } else if (lage && lage.setLatLngs) { lage.setLatLngs(ll); }
+    };
+    const verlaufSpeichern = async (text) => {
+        const erg = await PM.post('/karte/leitung/verlauf', { id, punkte: JSON.stringify(punkte) });
+        PM.melden(erg.ok ? text : erg.message, !!erg.ok);
+        await laden();
+    };
+    const istEnde = (i) => l.art === 'kabel' && (i === 0 || i === punkte.length - 1);
+
     punkte.forEach((p, i) => {
         const g = karte.punkt(p.x, p.y, 'plan-kabel-punkt' + (i === 0 || i === punkte.length - 1 ? ' ende' : ''), '<span class="griff"></span>', { draggable: true });
-        g.on('drag', () => {
-            punkte[i] = karte.zuProzent(g.getLatLng());
-            const ll = punkte.map((q) => karte.zuLatLng(q.x, q.y));
-            if (lage && lage.eachLayer) { lage.eachLayer((x) => { if (x.setLatLngs) { x.setLatLngs(ll); } }); } else if (lage && lage.setLatLngs) { lage.setLatLngs(ll); }
-        });
+        g.on('drag', () => { punkte[i] = karte.zuProzent(g.getLatLng()); vorschau(); });
         g.on('dragend', async () => {
-            const erg = await PM.post('/karte/leitung/verlauf', { id, punkte: JSON.stringify(punkte) });
-            PM.melden(erg.ok ? 'Verlauf gespeichert.' : erg.message, !!erg.ok);
+            if (!istEnde(i)) { await verlaufSpeichern('Verlauf gespeichert.'); return; }
+            // Kabelende: an der Anlage darunter anstecken, sonst lösen.
+            const ende = i === 0 ? 'von' : 'zu';
+            const ziel = anlageBei(g.getLatLng());
+            if (ziel) { punkte[i] = { x: ziel.x, y: ziel.y }; }
+            const bisher = l[ende] || null;
+            const neu = ziel ? ziel.id : null;
+            if (neu === bisher) { await verlaufSpeichern(ziel ? 'Verlauf gespeichert.' : 'Verlauf gespeichert (offenes Ende).'); return; }
+            const erg = await PM.post('/karte/leitung/ende', { id, ende, objekt_id: neu || 0, punkte: JSON.stringify(punkte) });
+            PM.melden(erg.message, !!erg.ok);
             await laden();
+            if (erg.ok && neu) { leitungKlick(stand.leitungen.find((x) => x.id === id) || l); }
         });
+        // Zwischenpunkt entfernen: Doppeltipp, Rechtsklick oder langes Drücken.
+        const entfernen = async (e) => {
+            if (e && e.originalEvent) { L.DomEvent.preventDefault(e.originalEvent); }
+            if (i === 0 || i === punkte.length - 1 || punkte.length <= 2) { return; }
+            punkte.splice(i, 1);
+            await verlaufSpeichern('Punkt entfernt.');
+        };
+        g.on('dblclick', entfernen);
+        g.on('contextmenu', entfernen);
         g.addTo(ebenen.griffe);
     });
-    status('Punkte ziehen, um den Verlauf zu ändern.');
+
+    // ⊕ zwischen zwei Punkten: beim Ziehen entsteht dort ein neuer Punkt.
+    for (let k = 0; k < punkte.length - 1; k++) {
+        const a = punkte[k];
+        const b = punkte[k + 1];
+        const h = karte.punkt((a.x + b.x) / 2, (a.y + b.y) / 2, 'plan-kabel-punkt zwischen', '<span class="griff">+</span>', { draggable: true, title: 'Ziehen: neuer Punkt' });
+        let eingefuegt = false;
+        h.on('drag', () => {
+            const q = karte.zuProzent(h.getLatLng());
+            if (!eingefuegt) { punkte.splice(k + 1, 0, q); eingefuegt = true; } else { punkte[k + 1] = q; }
+            vorschau();
+        });
+        h.on('dragend', () => verlaufSpeichern('Punkt eingefügt.'));
+        h.addTo(ebenen.griffe);
+    }
+
+    // ✥ die ganze Linie: Kabelenden an einer Anlage bleiben dort.
+    const angeschlossen = (i) => l.art === 'kabel' && ((i === 0 && l.von) || (i === punkte.length - 1 && l.zu));
+    const beweglich = punkte.map((_, i) => !angeschlossen(i));
+    if (beweglich.some(Boolean)) {
+        const m = Math.floor((punkte.length - 1) / 2);
+        const mitte = { x: (punkte[m].x + punkte[m + 1].x) / 2, y: (punkte[m].y + punkte[m + 1].y) / 2 };
+        const start = punkte.map((q) => ({ ...q }));
+        // Der Griff sitzt per CSS ein Stück über der Linie, neben dem ⊕.
+        const h = karte.punkt(mitte.x, mitte.y, 'plan-kabel-punkt ganz', '<span class="griff">✥</span>', { draggable: true, title: 'Ganze Linie verschieben' });
+        h.on('drag', () => {
+            const q = karte.zuProzent(h.getLatLng());
+            const dx = q.x - mitte.x;
+            const dy = q.y - mitte.y;
+            start.forEach((s0, i) => {
+                if (beweglich[i]) { punkte[i] = { x: Math.max(0, Math.min(100, s0.x + dx)), y: Math.max(0, Math.min(100, s0.y + dy)) }; }
+            });
+            vorschau();
+        });
+        h.on('dragend', () => verlaufSpeichern(l.art === 'kabel' ? 'Kabel verschoben.' : (l.art === 'kabelbruecke' ? 'Kabelbrücke verschoben.' : 'Kabelweg verschoben.')));
+        h.addTo(ebenen.griffe);
+    }
+    status(l.art === 'kabel'
+        ? 'Punkte ziehen · ⊕ zieht einen neuen Punkt heraus · Doppeltipp entfernt einen Punkt · ✥ verschiebt das Kabel · ein Ende auf eine Anlage ziehen steckt es dort an.'
+        : 'Punkte ziehen · ⊕ zieht einen neuen Punkt heraus · Doppeltipp entfernt einen Punkt · ✥ verschiebt die ganze Linie.');
+}
+
+/** Die Anlage unter einem Punkt der Karte (bis gut 20 Pixel daneben) – oder null. */
+function anlageBei(latlng) {
+    const ziel = map.latLngToContainerPoint(latlng);
+    let beste = null;
+    let abstand = 22;
+    stand.objekte.forEach((o) => {
+        const m = marker.get(o.id);
+        if (!m || !map.hasLayer(m)) { return; }
+        const d = map.latLngToContainerPoint(m.getLatLng()).distanceTo(ziel);
+        if (d < abstand) { abstand = d; beste = o; }
+    });
+    return beste;
 }
 
 async function anschluesseVon(objektId, richtung) {

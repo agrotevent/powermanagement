@@ -237,9 +237,10 @@ final class LeitungService
         // bleibt es, wie es war. Ein neues Kabel zwischen zwei
         // Feststromanschlüssen ist fest verlegt, alles andere mobil.
         $festAngabe = $daten['fest'] ?? null;
+        $ausdruecklich = $festAngabe !== null && $festAngabe !== '';
         if ($art === 'kabelbruecke') {
             $felder['fest'] = 0;
-        } elseif ($festAngabe !== null && $festAngabe !== '') {
+        } elseif ($ausdruecklich) {
             $felder['fest'] = !empty($festAngabe) ? 1 : 0;
         } elseif ($alt !== null) {
             $felder['fest'] = (int) $alt['fest'];
@@ -247,11 +248,19 @@ final class LeitungService
             $felder['fest'] = $art === 'kabel' && $felder['von_objekt_id'] !== null && $felder['zu_objekt_id'] !== null
                 && self::endeFest($felder['von_objekt_id']) && self::endeFest($felder['zu_objekt_id']) ? 1 : 0;
         }
+        // Ein festes Kabel endet nur an Feststromanschlüssen. Wer es
+        // ausdrücklich fest haben will, bekommt den Grund gesagt; wird ein
+        // festes Kabel an eine mobile Anlage umgesteckt, wird es mobil.
+        $hinweis = '';
         if ($felder['fest'] === 1 && $art === 'kabel') {
             foreach ([$felder['von_objekt_id'], $felder['zu_objekt_id']] as $objektId) {
                 if ($objektId !== null && !self::endeFest($objektId)) {
                     $name = (string) Database::scalar('SELECT name FROM objekte WHERE id = ?', [$objektId]);
-                    return ['ok' => false, 'message' => 'Ein fest verlegtes Kabel endet nur an Feststromanschlüssen – „' . $name . '“ ist mobil.'];
+                    if ($ausdruecklich) {
+                        return ['ok' => false, 'message' => 'Ein fest verlegtes Kabel endet nur an Feststromanschlüssen – „' . $name . '“ ist mobil.'];
+                    }
+                    $felder['fest'] = 0;
+                    $hinweis = ' Es ist jetzt mobil, weil „' . $name . '“ mobil ist.';
                 }
             }
         }
@@ -259,12 +268,60 @@ final class LeitungService
         if ($id !== null) {
             Database::update('leitungen', $id, $felder);
             Audit::log('leitung.update', 'leitung', (string) $id, ['art' => $art]);
-            return ['ok' => true, 'message' => self::ARTEN[$art] . ' gespeichert.', 'id' => $id];
+            return ['ok' => true, 'message' => self::ARTEN[$art] . ' gespeichert.' . $hinweis, 'id' => $id];
         }
         $felder['created_at'] = gmdate('c');
         $id = Database::insert('leitungen', $felder);
         Audit::log('leitung.create', 'leitung', (string) $id, ['art' => $art]);
         return ['ok' => true, 'message' => self::ARTEN[$art] . ' eingezeichnet.', 'id' => $id];
+    }
+
+    /**
+     * Ein Kabelende umstecken oder lösen – beim Ziehen des Endpunkts auf der
+     * Karte. An einer anderen Anlage ist der Anschluss erst offen und wird im
+     * Kabelfenster gewählt; bleibt die Anlage dieselbe, bleibt er stecken.
+     *
+     * @param ?int $objektId neue Anlage am Ende, null = offenes Ende
+     */
+    public static function endeSetzen(int $id, string $ende, ?int $objektId, mixed $punkte): array
+    {
+        $l = self::find($id);
+        if ($l === null || $l['art'] !== 'kabel') {
+            return ['ok' => false, 'message' => 'Nur ein Kabel hat Enden zum Umstecken.'];
+        }
+        if (!in_array($ende, ['von', 'zu'], true)) {
+            return ['ok' => false, 'message' => 'Unbekanntes Kabelende.'];
+        }
+        $daten = self::alsDaten($l);
+        $daten['punkte'] = $punkte;
+        $bisher = $l[$ende . '_objekt_id'] !== null ? (int) $l[$ende . '_objekt_id'] : null;
+        if ($objektId !== $bisher) {
+            $daten[$ende . '_objekt_id'] = $objektId;
+            $daten[$ende . '_anschluss_id'] = null;
+        }
+        $ergebnis = self::speichern($id, $daten);
+        if (!$ergebnis['ok'] || $objektId === $bisher) {
+            return $ergebnis;
+        }
+        if ($objektId === null) {
+            return ['ok' => true, 'id' => $id, 'message' => 'Kabelende gelöst – zum Anschließen auf eine Anlage ziehen.'];
+        }
+        $hinweis = str_contains($ergebnis['message'], 'jetzt mobil') ? ' Es ist jetzt mobil.' : '';
+        $name = (string) Database::scalar('SELECT name FROM objekte WHERE id = ?', [$objektId]);
+        return ['ok' => true, 'id' => $id, 'message' => 'Kabel an „' . $name . '“ angeschlossen – den '
+            . ($ende === 'von' ? 'Abgang' : 'Eingang') . ' im Kabelfenster wählen.' . $hinweis];
+    }
+
+    /** Eine gespeicherte Leitung als Eingabe für speichern() – ohne „fest“, das bleibt, wie es ist. */
+    private static function alsDaten(array $l): array
+    {
+        return [
+            'art' => $l['art'], 'floor_id' => $l['floor_id'], 'name' => $l['name'], 'kabeltyp' => $l['kabeltyp'],
+            'adern' => $l['adern'] ?? '', 'querschnitt_mm2' => $l['querschnitt_mm2'] ?? '', 'laenge_m' => $l['laenge_m'] ?? '',
+            'anzahl' => $l['anzahl'], 'modell' => $l['modell'], 'punkte' => $l['punkte'], 'farbe' => $l['farbe'], 'notizen' => $l['notizen'],
+            'von_objekt_id' => $l['von_objekt_id'], 'von_anschluss_id' => $l['von_anschluss_id'],
+            'zu_objekt_id' => $l['zu_objekt_id'], 'zu_anschluss_id' => $l['zu_anschluss_id'],
+        ];
     }
 
     /** Ist die Anlage an diesem Kabelende fest installiert? */
