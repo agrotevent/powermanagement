@@ -103,7 +103,20 @@ try {
     Database::update('objekte', $objekt, ['steuerung_gesperrt' => 1]);
     Zugriff::vergessen();
     pruefe(!Zugriff::darfSteuern($q, 'switch:1', AnlagenService::find($objekt)), 'gesperrte Anlage: kein Schalten');
+    // Die Anlage aus der Anfrage zählt nur, wenn das Gerät dort misst – sonst
+    // ließe sich die Sperre mit einer anderen Anlage umgehen …
+    pruefe(!Zugriff::darfSteuern($q, 'switch:1', $of), 'Sperre nicht über eine fremde Anlage zu umgehen');
     Database::update('objekte', $objekt, ['steuerung_gesperrt' => 0]);
+    Zugriff::vergessen();
+    // … und eine Schalt-Freigabe für irgendeine Anlage schaltete jedes Gerät.
+    Database::delete('freigaben', $f3);
+    $f4 = $freigabe(['ziel_art' => 'objekt', 'ziel_id' => $fremd, 'darf_steuern' => 1]);
+    Zugriff::vergessen();
+    pruefe(!Zugriff::darfSteuern($q, 'switch:0', $of), 'Freigabe für eine Anlage schaltet kein Gerät, das dort nicht misst');
+    pruefe(!Zugriff::darfSteuern($q, 'switch:0'), 'ohne Anlage: Gerät misst nicht an der freigegebenen');
+    Database::delete('freigaben', $f4);
+    $f3 = $freigabe(['ziel_art' => 'geraet', 'ziel_id' => $quelle, 'ziel_kanal' => 'switch:1', 'darf_steuern' => 1]);
+    Zugriff::vergessen();
 
     // Rolle abgelaufen → Recht weg
     Database::execute('UPDATE user_roles SET gueltig_bis = ? WHERE user_id = ? AND role_id = ?', [Zeit::iso($jetzt - 60), $userId, $technik]);
