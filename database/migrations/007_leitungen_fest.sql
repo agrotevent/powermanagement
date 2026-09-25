@@ -1,0 +1,11 @@
+-- Fest verlegte Kabel und Kabelwege.
+--
+-- Wie bei den Anlagen (006): Ein Erdkabel vom Hausanschluss zur
+-- Energiesäule oder eine Kabeltrasse in der Halle gehört zur Location und
+-- wird beim Location-Abgleich übertragen. Mobile Kabel werden für jede
+-- Veranstaltung neu gelegt und bleiben in der Installation, die sie plant.
+-- Kabelbrücken sind immer mobil.
+--
+-- Vorhandene Leitungen gelten als mobil – so gerät nichts ungefragt ins
+-- gemeinsame Repository.
+ALTER TABLE leitungen ADD COLUMN fest {{BOOL}} NOT NULL DEFAULT 0;

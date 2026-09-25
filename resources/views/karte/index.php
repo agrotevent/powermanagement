@@ -72,9 +72,9 @@ $darfSetzen = $darfAnlegen;
         </div>
         <div class="karte-fuss">
             <div class="karte-ebenen">
-                <label class="check"><input type="checkbox" data-ebene="fest" checked> Feststromanschlüsse</label>
+                <label class="check"><input type="checkbox" data-ebene="fest" checked> Feststromanschlüsse &amp; feste Kabel</label>
                 <label class="check"><input type="checkbox" data-ebene="mobil" checked> Mobile Anlagen</label>
-                <label class="check"><input type="checkbox" data-ebene="kabel" checked> Kabel</label>
+                <label class="check"><input type="checkbox" data-ebene="kabel" checked> Mobile Kabel</label>
                 <label class="check"><input type="checkbox" data-ebene="kabelweg" checked> Kabelwege</label>
                 <label class="check"><input type="checkbox" data-ebene="kabelbruecke" checked> Kabelbrücken</label>
                 <label class="check"><input type="checkbox" data-ebene="beschriftung" checked> Namen</label>
@@ -89,6 +89,7 @@ $darfSetzen = $darfAnlegen;
                 <span class="legende-punkt stufe-keine"></span> ohne Messung
                 <span class="legende-form fest" aria-hidden="true"></span> fest
                 <span class="legende-form mobil" aria-hidden="true"></span> mobil
+                <span class="legende-linie fest" aria-hidden="true"></span> fest verlegt
                 <?php if ($massstab !== null): ?><span class="muted">· Maßstab gesetzt (<?= View::e(number_format((float) $massstab['meter'], 0, ',', '.')) ?> m)</span><?php endif; ?>
             </div>
         </div>

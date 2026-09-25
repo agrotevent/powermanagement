@@ -130,25 +130,30 @@ function linieZeichnen(l) {
             karte.linie(punkte, { color: '#111827', weight: 13, opacity: 1, dashArray: '5 7', lineCap: 'butt', className: 'pm-bruecke' }),
         ]);
     } else if (l.art === 'kabelweg') {
-        lage = karte.linie(punkte, { color: '#64748b', weight: 5, opacity: 0.8, dashArray: '10 8', className: 'pm-kabelweg' });
+        const weg = karte.linie(punkte, { color: '#64748b', weight: 5, opacity: 0.8, dashArray: l.fest ? null : '10 8', className: 'pm-kabelweg' });
+        // Fest verlegt: mit dunklem Rand, wie die Feststromanschlüsse.
+        lage = l.fest ? L.layerGroup([karte.linie(punkte, { color: '#0f172a', weight: 9, opacity: 0.9, interactive: true }), weg]) : weg;
     } else {
         const q = l.querschnitt || 2.5;
         const staerke = Math.max(3, Math.min(9, 2 + Math.log2(q)));
-        lage = karte.linie(punkte, {
-            color: l.farbe || '#1e293b',
+        const kabel = karte.linie(punkte, {
+            color: l.fest ? (l.farbe || '#e2e8f0') : (l.farbe || '#1e293b'),
             weight: staerke,
-            className: 'pm-kabel' + (l.hinweise.length ? ' hinweis' : ''),
+            className: 'pm-kabel' + (l.fest ? ' fest' : '') + (l.hinweise.length ? ' hinweis' : ''),
         });
+        lage = l.fest ? L.layerGroup([karte.linie(punkte, { color: '#0f172a', weight: staerke + 4, opacity: 1 }), kabel]) : kabel;
     }
-    const text = l.art === 'kabel'
+    const text = (l.fest ? 'fest verlegt · ' : '') + (l.art === 'kabel'
         ? `${esc(l.name || 'Kabel')}: ${esc(l.von_name || '?')} → ${esc(l.zu_name || '?')}${l.laenge !== null ? ' · ' + meter(l.laenge) : ''}`
         : l.art === 'kabelbruecke'
             ? `Kabelbrücke${l.modell ? ' ' + esc(l.modell) : ''} × ${l.anzahl}${l.name ? ' · ' + esc(l.name) : ''}`
-            : `Kabelweg${l.name ? ' ' + esc(l.name) : ''}${l.laenge !== null ? ' · ' + meter(l.laenge) : ''}`;
+            : `Kabelweg${l.name ? ' ' + esc(l.name) : ''}${l.laenge !== null ? ' · ' + meter(l.laenge) : ''}`);
     lage.eachLayer ? lage.eachLayer((x) => x.bindTooltip(text, { sticky: true })) : lage.bindTooltip(text, { sticky: true });
     const klick = (e) => { L.DomEvent.stopPropagation(e); leitungKlick(l); };
     lage.eachLayer ? lage.eachLayer((x) => x.on('click', klick)) : lage.on('click', klick);
-    lage.addTo(ebenen[l.art] || ebenen.kabel);
+    // Fest verlegtes gehört zur Ebene der Feststromanschlüsse – blendet man
+    // das Mobile aus, bleibt die Infrastruktur der Location stehen.
+    lage.addTo(l.fest ? ebenen.fest : (ebenen[l.art] || ebenen.kabel));
     linien.set(l.id, lage);
 }
 
@@ -508,7 +513,8 @@ function griffeZeigen(id) {
         const g = karte.punkt(p.x, p.y, 'plan-kabel-punkt' + (i === 0 || i === punkte.length - 1 ? ' ende' : ''), '<span class="griff"></span>', { draggable: true });
         g.on('drag', () => {
             punkte[i] = karte.zuProzent(g.getLatLng());
-            if (lage && lage.setLatLngs) { lage.setLatLngs(punkte.map((q) => karte.zuLatLng(q.x, q.y))); }
+            const ll = punkte.map((q) => karte.zuLatLng(q.x, q.y));
+            if (lage && lage.eachLayer) { lage.eachLayer((x) => { if (x.setLatLngs) { x.setLatLngs(ll); } }); } else if (lage && lage.setLatLngs) { lage.setLatLngs(ll); }
         });
         g.on('dragend', async () => {
             const erg = await PM.post('/karte/leitung/verlauf', { id, punkte: JSON.stringify(punkte) });
@@ -541,9 +547,16 @@ async function kabelPanel(d) {
     const planLaenge = neu ? laengeImPlan(entwurf.punkte) : l.laenge_plan;
     const optionen = (liste, gewaehlt) => '<option value="0">– ohne Anschluss –</option>' + liste.map((a) =>
         `<option value="${a.id}"${Number(gewaehlt) === a.id ? ' selected' : ''}${!a.frei && Number(gewaehlt) !== a.id ? ' disabled' : ''}>${esc(a.text)}</option>`).join('');
-    // Vorschlag: der erste freie Anschluss.
-    const vonWahl = l.von_anschluss_id || (vonListe.find((a) => a.frei) || {}).id;
-    const zuWahl = l.zu_anschluss_id || (zuListe.find((a) => a.frei) || {}).id;
+    // Vorschlag bei einem neuen Kabel: der erste freie Anschluss. Ein
+    // vorhandenes Kabel ohne Anschluss bleibt so – sonst steckte Speichern
+    // ein Erdkabel unbemerkt an die nächste freie Dose.
+    const vonWahl = l.von_anschluss_id || (neu ? (vonListe.find((a) => a.frei) || {}).id : 0);
+    const zuWahl = l.zu_anschluss_id || (neu ? (zuListe.find((a) => a.frei) || {}).id : 0);
+    // Fest verlegt geht nur zwischen Feststromanschlüssen; neu ist ein Kabel
+    // zwischen zwei Feststromanschlüssen von Haus aus fest.
+    const endeFest = (id) => !id || !!(objektNachId(id) || {}).fest;
+    const festMoeglich = endeFest(l.von) && endeFest(l.zu);
+    const fest = neu ? (festMoeglich && !!l.von && !!l.zu) : !!l.fest;
     seite.innerHTML = `
         <h2>${neu ? 'Neues Kabel' : esc(l.name || 'Kabel')}</h2>
         <p class="small"><strong>${esc(l.von_name || '?')}</strong> → <strong>${esc(l.zu_name || 'offenes Ende')}</strong></p>
@@ -562,6 +575,10 @@ async function kabelPanel(d) {
             </div>
             ${!neu && l.belastbarkeit ? `<p class="help">Belastbarkeit rund ${l.belastbarkeit} A (Richtwert, frei in Luft).</p>` : ''}
             <div class="field"><label>Name</label><input name="name" value="${esc(l.name)}" placeholder="z. B. HV → Bühne"${darf ? '' : ' disabled'}></div>
+            <input type="hidden" name="fest" value="0">
+            <div class="check"><input type="checkbox" id="kabel-fest" name="fest" value="1"${fest ? ' checked' : ''}${darf && (festMoeglich || fest) ? '' : ' disabled'}>
+                <label for="kabel-fest"><strong>Fest verlegt</strong> – gehört zur Location (z. B. Erdkabel) und wird beim Location-Abgleich übertragen.
+                ${festMoeglich ? '' : '<span class="muted">Nur zwischen Feststromanschlüssen möglich.</span>'}</label></div>
             <div class="field"><label>Notiz</label><input name="notizen" value="${esc(l.notizen || '')}"${darf ? '' : ' disabled'}></div>
             <datalist id="kabeltypen">${daten.kabeltypen.map((k) => `<option value="${esc(k)}">`).join('')}</datalist>
             ${darf ? `<div class="btn-row"><button class="btn btn-primary btn-sm" type="submit">Speichern</button>
@@ -613,6 +630,9 @@ function entwurfPanel(art, fertig = false, d = null) {
             </div>
             <datalist id="bruecken">${daten.bruecken.map((b) => `<option value="${esc(b)}">`).join('')}</datalist>` : ''}
             <div class="field"><label>Name</label><input name="name" value="${esc(l.name)}" placeholder="${art === 'bruecke' ? 'z. B. Überfahrt Hauptweg' : 'z. B. Trasse Ost'}"${darf ? '' : ' disabled'}></div>
+            ${art === 'bruecke' ? '' : `<input type="hidden" name="fest" value="0">
+            <div class="check"><input type="checkbox" id="weg-fest" name="fest" value="1"${l.fest ? ' checked' : ''}${darf ? '' : ' disabled'}>
+                <label for="weg-fest"><strong>Fest verlegt</strong> – Trasse der Location (Kabelkanal, Leerrohr), wird beim Location-Abgleich übertragen.</label></div>`}
             <div class="field"><label>Notiz</label><input name="notizen" value="${esc(l.notizen || '')}"${darf ? '' : ' disabled'}></div>
             ${darf ? `<div class="btn-row"><button class="btn btn-primary btn-sm" type="submit">Speichern</button>
                 ${neu ? '<button class="btn btn-sm btn-ghost" type="button" data-verwerfen>Verwerfen</button>' : '<button class="btn btn-sm btn-danger" type="button" data-loeschen>Löschen</button>'}</div>` : ''}

@@ -430,6 +430,7 @@ $messgeraet = static function (array $m) use ($objekt, $auswertung, $live): stri
                     <td data-label="Richtung"><?= $eingehend ? '← Einspeisung' : '→ Abgang' ?> <span class="small muted"><?= View::e((string) ($eingehend ? $k['zu_anschluss'] : $k['von_anschluss'])) ?></span></td>
                     <td data-label="Gegenstelle"><a href="/anlagen/<?= (int) ($eingehend ? $k['von_objekt_id'] : $k['zu_objekt_id']) ?>"><?= View::e((string) ($eingehend ? $k['von_name'] : $k['zu_name'])) ?></a></td>
                     <td data-label="Kabel"><?= View::e(trim($k['kabeltyp'] . ' ' . ($k['adern'] ? $k['adern'] . 'G' : '') . ($k['querschnitt_mm2'] !== null ? str_replace('.', ',', (string) (float) $k['querschnitt_mm2']) . ' mm²' : ''))) ?: '–' ?>
+                        <?= $k['fest'] === 1 ? '<span class="badge info" title="gehört zur Location">fest verlegt</span>' : '' ?>
                         <?= $k['belastbarkeit_a'] !== null ? '<div class="small muted">trägt rund ' . (int) $k['belastbarkeit_a'] . ' A</div>' : '' ?></td>
                     <td data-label="Länge" class="num"><?= $k['laenge'] !== null ? View::e($zahl($k['laenge'])) . ' m' . ($k['laenge_m'] === null ? ' <span class="small muted">(Plan)</span>' : '') : '–' ?></td>
                     <td data-label="Spannungsfall" class="num"><?= $du !== null ? View::e($zahl($du, 2)) . ' %<div class="small muted">bei ' . View::e($zahl($strom)) . ' A jetzt</div>' : '–' ?></td>

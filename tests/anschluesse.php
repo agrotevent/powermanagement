@@ -160,6 +160,25 @@ try {
     $festeHier = array_column(AnlagenService::liste(['site_id' => $siteId, 'fest' => true]), 'name');
     $mobileHier = array_column(AnlagenService::liste(['site_id' => $siteId, 'fest' => false]), 'name');
     pruefe(in_array('Säule 1', $festeHier, true) && !in_array('Kasten 1', $festeHier, true) && in_array('Kasten 1', $mobileHier, true), 'Liste filtert nach fest und mobil');
+
+    // Fest verlegte Kabel: nur zwischen Feststromanschlüssen
+    $lFest = static fn (int $id): int => (int) Database::scalar('SELECT fest FROM leitungen WHERE id = ?', [$id]);
+    $erd = LeitungService::speichern(null, ['art' => 'kabel', 'floor_id' => $floorId, 'von_objekt_id' => $ha, 'zu_objekt_id' => $ausFest,
+        'kabeltyp' => 'NYY-J', 'querschnitt_mm2' => 35, 'punkte' => [[1, 1], [9, 9]]]);
+    $mobKabel = LeitungService::speichern(null, ['art' => 'kabel', 'floor_id' => $floorId, 'von_objekt_id' => $ausFest, 'zu_objekt_id' => $ausMobil, 'punkte' => [[9, 9], [20, 20]]]);
+    pruefe($erd['ok'] && $mobKabel['ok'], 'Kabel angelegt');
+    gleich([$lFest((int) $erd['id']), $lFest((int) $mobKabel['id'])], [1, 0], 'Vorgabe: zwischen Feststromanschlüssen fest, zu einer mobilen Anlage mobil');
+    $falsch = LeitungService::speichern((int) $mobKabel['id'], ['art' => 'kabel', 'fest' => '1', 'floor_id' => $floorId, 'von_objekt_id' => $ausFest, 'zu_objekt_id' => $ausMobil]);
+    pruefe(!$falsch['ok'] && str_contains($falsch['message'], 'Kasten 1'), 'festes Kabel an mobiler Anlage wird abgelehnt: ' . $falsch['message']);
+    LeitungService::speichern((int) $erd['id'], ['art' => 'kabel', 'floor_id' => $floorId, 'von_objekt_id' => $ha, 'zu_objekt_id' => $ausFest, 'name' => 'Erdkabel', 'punkte' => [[1, 1], [9, 9]]]);
+    gleich($lFest((int) $erd['id']), 1, 'Bearbeiten ohne Angabe lässt „fest“ stehen');
+    $weg = LeitungService::speichern(null, ['art' => 'kabelweg', 'fest' => '1', 'floor_id' => $floorId, 'punkte' => [[1, 1], [2, 2]]]);
+    $bruecke = LeitungService::speichern(null, ['art' => 'kabelbruecke', 'fest' => '1', 'floor_id' => $floorId, 'punkte' => [[3, 3], [4, 4]]]);
+    gleich([$lFest((int) $weg['id']), $lFest((int) $bruecke['id'])], [1, 0], 'Kabelweg kann fest sein, Kabelbrücke bleibt mobil');
+    $mobil = AnlagenService::speichern($ausFest, ['art' => 'anschluss', 'name' => 'Säule 1', 'fest' => '0', 'floor_id' => $floorId]);
+    pruefe(!$mobil['ok'] && $fest($ausFest) === 1, 'Anlage mit festem Kabel lässt sich nicht auf mobil stellen');
+    LeitungService::speichern((int) $erd['id'], ['art' => 'kabel', 'fest' => '0', 'floor_id' => $floorId, 'von_objekt_id' => $ha, 'zu_objekt_id' => $ausFest, 'punkte' => [[1, 1], [9, 9]]]);
+    pruefe(AnlagenService::speichern($ausFest, ['art' => 'anschluss', 'name' => 'Säule 1', 'fest' => '0', 'floor_id' => $floorId])['ok'], '… nachdem das Kabel mobil ist, schon');
 } finally {
     foreach ($angelegt as $id) {
         AnlagenService::loeschen((int) $id);

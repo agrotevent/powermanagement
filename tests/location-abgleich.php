@@ -95,6 +95,11 @@ try {
         'zu_objekt_id' => $vt, 'zu_anschluss_id' => (int) $ein['id'], 'kabeltyp' => 'H07RN-F', 'querschnitt_mm2' => 16, 'punkte' => [[5, 5], [20, 30]]]);
     pruefe($k['ok'], 'Kabel vom Feststromanschluss zum mobilen Verteiler angelegt');
     LeitungService::speichern(null, ['art' => 'kabelbruecke', 'floor_id' => $floorId, 'name' => 'Brücke Tor', 'anzahl' => 2, 'punkte' => [[10, 50], [14, 50]]]);
+    // Fest verlegt: Erdkabel vom Hausanschluss zum Wandverteiler (dessen Eingang)
+    $wvEin = Database::first("SELECT id FROM anschluesse WHERE objekt_id = ? AND richtung = 'eingang' ORDER BY nr LIMIT 1", [$wv]);
+    $erd = LeitungService::speichern(null, ['art' => 'kabel', 'floor_id' => $floorId, 'name' => 'Erdkabel Halle', 'von_objekt_id' => $an,
+        'zu_objekt_id' => $wv, 'zu_anschluss_id' => (int) $wvEin['id'], 'kabeltyp' => 'NYY-J', 'querschnitt_mm2' => 25, 'punkte' => [[5, 5], [60, 5], [60, 10]]]);
+    pruefe($erd['ok'] && (int) Database::scalar('SELECT fest FROM leitungen WHERE id = ?', [(int) $erd['id']]) === 1, 'Erdkabel zwischen Feststromanschlüssen ist fest verlegt');
 
     $hoch = LocationSync::locationHochladen($siteId, 'pruefung');
     pruefe($hoch['ok'], 'hochgeladen: ' . $hoch['message']);
@@ -103,7 +108,10 @@ try {
     $namen = array_column($strom['anlagen'] ?? [], 'name');
     sort($namen);
     gleich($namen, ['Hausanschluss Lager', 'Wandverteiler Halle'], 'strom.json enthält nur die Feststromanschlüsse');
-    pruefe(!array_key_exists('leitungen', $strom), 'keine Kabel, Kabelwege oder Kabelbrücken in strom.json');
+    gleich(array_column($strom['leitungen'] ?? [], 'name'), ['Erdkabel Halle'], 'strom.json enthält nur das fest verlegte Kabel – kein mobiles, keine Kabelbrücke');
+    $erdJson = $strom['leitungen'][0] ?? [];
+    pruefe(($erdJson['fest'] ?? false) === true && $erdJson['von'] !== null && $erdJson['zu'] !== null && ($erdJson['zu_anschluss'] ?? '') === 'eingang:1',
+        'festes Kabel mit beiden Enden und Anschluss');
     pruefe(array_filter($strom['anlagen'], static fn ($a) => ($a['fest'] ?? false) !== true) === [], 'jede Anlage als fest gekennzeichnet');
     $wvJson = array_values(array_filter($strom['anlagen'], static fn ($a) => $a['name'] === 'Wandverteiler Halle'))[0];
     pruefe(count($wvJson['schutzorgane']) > 2 && count($wvJson['messpunkte']) === 1, 'Schutzorgane und Messgeräte des Feststromanschlusses in strom.json');
@@ -112,7 +120,7 @@ try {
     gleich($loc['etagen'][0]['racks'][0]['einbauten'][1]['label'] ?? '', 'USV', 'location.json: Racks unangetastet');
     $liste = LocationSync::locationsImRepo();
     $lager = array_values(array_filter($liste['locations'], static fn ($l) => $l['schluessel'] === 'lager'))[0] ?? null;
-    gleich($lager['fest'] ?? null, 2, 'Liste zählt die Feststromanschlüsse');
+    gleich([$lager['fest'] ?? null, $lager['fest_leitungen'] ?? null], [2, 1], 'Liste zählt Feststromanschlüsse und feste Leitungen');
 
     // Neue Etage hier → wird in location.json ergänzt
     SiteService::saveFloor(null, ['site_id' => $siteId, 'name' => 'Außenfläche', 'level_no' => 1]);
@@ -139,7 +147,7 @@ try {
     Database::execute('DELETE FROM schutzorgane WHERE objekt_id = ?', [$an]);
     $vtVorher = AnlagenService::find($vt);
     $erg = LocationSync::uebernehmen('lager');
-    pruefe($erg['ok'] && str_contains($erg['message'], '2 Feststromanschlüsse'), 'erneut übernommen: ' . $erg['message']);
+    pruefe($erg['ok'] && str_contains($erg['message'], '2 Feststromanschlüsse und 1 fest verlegte Leitung'), 'erneut übernommen: ' . $erg['message']);
     $wv2 = Database::first("SELECT * FROM objekte WHERE name = 'Wandverteiler Halle' AND site_id = ?", [$siteId]);
     pruefe($wv2 !== null && (float) $wv2['plan_x'] === 60.0 && (int) $wv2['fest'] === 1, 'gelöschter Feststromanschluss mit Position zurück');
     gleich(count(SchutzService::liste((int) $wv2['id'])), count($wvJson['schutzorgane']), 'Schutzorgane zurück');
@@ -155,14 +163,21 @@ try {
         'Kabel hängt nach dem Übernehmen weiter am selben Abgang des Feststromanschlusses');
     pruefe($kabel !== null && (int) $kabel['zu_objekt_id'] === $vt && $kabel['zu_anschluss_id'] !== null, 'Kabel hängt weiter am mobilen Verteiler');
     gleich((int) Database::scalar("SELECT COUNT(*) FROM leitungen WHERE floor_id = ? AND art = 'kabelbruecke'", [$floorId]), 1, 'Kabelbrücke bleibt');
+    $erd2 = Database::first("SELECT * FROM leitungen WHERE floor_id = ? AND name = 'Erdkabel Halle'", [$floorId]);
+    $erdEin = $erd2 !== null && $erd2['zu_anschluss_id'] !== null ? Database::first('SELECT objekt_id, richtung, nr FROM anschluesse WHERE id = ?', [(int) $erd2['zu_anschluss_id']]) : null;
+    pruefe($erd2 !== null && (int) $erd2['fest'] === 1 && (int) $erd2['von_objekt_id'] === $an && (int) $erd2['zu_objekt_id'] === (int) $wv2['id']
+        && $erdEin !== null && $erdEin['richtung'] === 'eingang' && (int) $erdEin['nr'] === 1, 'festes Kabel hängt wieder an beiden Feststromanschlüssen');
     $etage = Database::first('SELECT * FROM floors WHERE id = ?', [$floorId]);
     gleich(count(json_decode((string) $etage['fremdbestand'], true)['dosen']), 3, 'neue Dose aus MasterAdmin angekommen');
 
-    // Zweimal übernehmen verdoppelt nichts
+    // Festes Kabel hier gelöscht → kommt zurück; zweimal übernehmen verdoppelt nichts
+    LeitungService::loeschen((int) $erd2['id']);
     LocationSync::uebernehmen('lager');
+    LocationSync::uebernehmen('lager');
+    gleich((int) Database::scalar("SELECT COUNT(*) FROM leitungen WHERE floor_id = ? AND name = 'Erdkabel Halle' AND fest = 1", [$floorId]), 1, 'gelöschtes festes Kabel zurück, nicht doppelt');
     gleich((int) Database::scalar('SELECT COUNT(*) FROM objekte WHERE site_id = ? AND fest = 1', [$siteId]), 2, 'erneutes Übernehmen legt nichts doppelt an');
     gleich((int) Database::scalar('SELECT COUNT(*) FROM objekte WHERE site_id = ? AND fest = 0', [$siteId]), 1, 'mobile Anlagen unverändert');
-    gleich((int) Database::scalar('SELECT COUNT(*) FROM leitungen WHERE floor_id = ?', [$floorId]), 2, 'Leitungen unverändert');
+    gleich((int) Database::scalar('SELECT COUNT(*) FROM leitungen WHERE floor_id = ? AND fest = 0', [$floorId]), 2, 'mobile Leitungen unverändert');
 
     // Eine strom.json im alten Format 1 (mit ganzer Planung) liefert nur
     // ihre Stromanschlüsse – mobile Anlagen und Kabel daraus kommen nicht an.

@@ -39,8 +39,9 @@ Location-Abgleich über Git. Für Smartphone und Tablet ausgelegt.
   Gerät mit *gültig ab/bis* und eigenem *Datenzeitraum*. Beispiel: „Kunde A
   sieht die Statistik vom 1. bis 7. Juli, danach nichts mehr.“
 - **Location-Abgleich** mit MasterAdmin über ein gemeinsames Git-Repository.
-  Die **Feststromanschlüsse** der Location liegen als `strom.json` neben der
-  `location.json`. Mobile Anlagen und Kabel bleiben in der Installation.
+  Die **Feststromanschlüsse** der Location und die **fest verlegten Kabel**
+  dazwischen liegen als `strom.json` neben der `location.json`. Mobile
+  Anlagen und Kabel bleiben in der Installation.
 
 ## Schnell ausprobieren (Demo-Modus)
 
