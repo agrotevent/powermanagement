@@ -20,6 +20,7 @@ use App\Controllers\StandortController;
 use App\Controllers\StatistikController;
 use App\Controllers\SteckerController;
 use App\Controllers\SteuerungController;
+use App\Controllers\VerteilerAbgleichController;
 use App\Support\Request;
 use App\Support\Router;
 use App\Support\Session;
@@ -122,6 +123,10 @@ $router->post('/standorte/grundriss', [StandortController::class, 'grundriss'], 
 $router->get('/location', [LocationController::class, 'index'], 'inventory.pull');
 $router->post('/location/uebernehmen', [LocationController::class, 'uebernehmen'], 'inventory.pull');
 $router->post('/location/hochladen', [LocationController::class, 'hochladen'], 'inventory.push');
+$router->get('/verteiler-abgleich', [VerteilerAbgleichController::class, 'index'], 'inventory.pull');
+$router->post('/verteiler-abgleich/uebernehmen', [VerteilerAbgleichController::class, 'uebernehmen'], 'inventory.pull');
+$router->post('/verteiler-abgleich/hochladen', [VerteilerAbgleichController::class, 'hochladen'], 'inventory.push');
+$router->post('/verteiler-abgleich/entfernen', [VerteilerAbgleichController::class, 'entfernen'], 'inventory.push');
 
 // ---------------------------------------------------------------- Auswertung
 $router->get('/statistik', [StatistikController::class, 'index'], 'statistik.view');

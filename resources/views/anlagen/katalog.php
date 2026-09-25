@@ -11,6 +11,7 @@ $darf = View::can('stecker.manage') || View::can('anlagen.scope.all');
         „+ Anlage“ gewählt, entsteht daraus eine eigene Anlage mit genau dieser Bestückung – die sich danach einzeln anpassen lässt.
         Typen mit „fest“ (etwa die Energiesäulen eines Geländes) ergeben Feststromanschlüsse.</p>
     <div class="spacer"></div>
+    <?php if (View::can('inventory.pull')): ?><a class="btn btn-sm btn-ghost" href="/verteiler-abgleich" title="Standard-Verteiler mit anderen Installationen abgleichen">Abgleich</a><?php endif; ?>
     <?php if ($darf): ?>
         <a class="btn btn-sm" href="/anlagen/neu?art=anschluss&amp;vorlage=1&amp;fest=1">+ Feststromanschluss-Typ</a>
         <a class="btn btn-primary btn-sm" href="/anlagen/neu?art=verteilung&amp;vorlage=1">+ Neuer Standard-Verteiler</a>

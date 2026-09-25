@@ -157,7 +157,7 @@ final class LocationSync
              * auch gar nicht mehr gelesen wird.
              */
             return 'Es ist kein Location-Repository eingetragen. Die Adresse steht unter '
-                . 'System → Einstellungen → Location-Abgleich (dasselbe Repository wie in MasterAdmin).';
+                . 'System → Einstellungen → Location- und Verteiler-Abgleich (dasselbe Repository wie in MasterAdmin).';
         }
         /*
          * Ein Token braucht nur, wer über das Netz geht. Ein Repository
@@ -167,7 +167,7 @@ final class LocationSync
          */
         if (self::token() === '' && str_starts_with(self::repoUrl(), 'http')) {
             return 'Es ist kein Zugangstoken hinterlegt. Unter System → Einstellungen → '
-                . 'Location-Abgleich eintragen (es wird verschlüsselt abgelegt und nie wieder '
+                . 'Location- und Verteiler-Abgleich eintragen (es wird verschlüsselt abgelegt und nie wieder '
                 . 'angezeigt) – oder die Umgebungsvariable ' . self::TOKEN_VARIABLE . ' im '
                 . 'PHP-FPM-Pool setzen (/etc/php/<Version>/fpm/pool.d/powermanagement.conf, Zeile '
                 . 'env[' . self::TOKEN_VARIABLE . '] = …, danach php-fpm neu laden).';
@@ -550,7 +550,8 @@ final class LocationSync
             . self::zweigHinweis()];
     }
 
-    private static function json(array $daten): string
+    /** JSON so, wie es im Repository steht – lesbar und mit Zeilenende. */
+    public static function json(array $daten): string
     {
         return json_encode($daten, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) . "\n";
     }
@@ -569,11 +570,15 @@ final class LocationSync
      * im Repository nicht auf dem lokalen Commit steht, und danach wird
      * nachgesehen, ob er es tut.
      *
+     * Auch für den Verteiler-Abgleich: der schreibt seine Dateien in
+     * dieselbe Arbeitskopie. Entfernte Dateien werden mit eingecheckt
+     * (git add nimmt auch das Löschen auf); dann gibt es keinen Beleg.
+     *
      * @param list<string> $pfade was eingecheckt wird
-     * @param string $beleg eine Datei, die danach im Repository stehen muss
+     * @param string|null $beleg eine Datei, die danach im Repository stehen muss
      * @return array{ok:bool,message:string,hochgeladen:bool,wo:string}
      */
-    private static function abschliessen(array $pfade, string $beleg, string $nachricht, string $zusatz = ''): array
+    public static function abschliessen(array $pfade, ?string $beleg, string $nachricht, string $zusatz = ''): array
     {
         $kopie = self::arbeitsKopie();
         $zweig = self::zweig();
@@ -604,7 +609,7 @@ final class LocationSync
         if ($hier === '') {
             return $fehler('In der Arbeitskopie gibt es keinen Commit – es gibt nichts hochzuladen.');
         }
-        if (!self::git(['cat-file', '-e', 'HEAD:' . $beleg], $kopie)['ok']) {
+        if ($beleg !== null && !self::git(['cat-file', '-e', 'HEAD:' . $beleg], $kopie)['ok']) {
             return $fehler($beleg . ' ist nicht im Commit gelandet. Schließt eine .gitignore im Repository den Ordner aus?');
         }
 
@@ -630,7 +635,7 @@ final class LocationSync
             'ok'          => true,
             'message'     => '',
             'hochgeladen' => $hochgeladen,
-            'wo'          => 'Im Repository unter ' . $beleg . ', Zweig „' . $zweig . '“, Commit ' . substr($hier, 0, 8) . '.',
+            'wo'          => 'Im Repository' . ($beleg !== null ? ' unter ' . $beleg : '') . ', Zweig „' . $zweig . '“, Commit ' . substr($hier, 0, 8) . '.',
         ];
     }
 
@@ -688,6 +693,7 @@ final class LocationSync
     /** Was ein Repository für den Abgleich braucht – ein Ordner je Bestandsart. */
     public const GERUEST_ORDNER = [
         'locations'   => 'Gebäude und Gelände mit Etagen, Grundrissen (MasterAdmin: location.json) und Feststromanschlüssen (PowerManagement: strom.json)',
+        'verteiler'   => 'Standard-Verteiler aus dem Katalog (typen/) und Verteiler und Zwischenstecker aus dem Inventar mit ihren Shellys (inventar/) – PowerManagement',
     ];
 
     /** Was beim Anlegen des Gerüsts gemeldet wird – mit der Datei, die es wirklich wurde. */
@@ -764,8 +770,8 @@ final class LocationSync
             '# Locations für ' . $name,
             '',
             'Dieses Repository gleicht Locations zwischen MasterAdmin- und PowerManagement-',
-            'Installationen ab. Gepflegt wird es über die Oberflächen (**Location-Abgleich**),',
-            'nicht von Hand.',
+            'Installationen ab, dazu die Verteiler von PowerManagement. Gepflegt wird es über',
+            'die Oberflächen (**Location-Abgleich**, **Verteiler-Abgleich**), nicht von Hand.',
             '',
             '| Ordner | Inhalt |',
             '|--------|--------|',
@@ -781,6 +787,11 @@ final class LocationSync
             '(die Feststromanschlüsse der Location – Hausanschluss, Energiesäulen,',
             'Wandverteiler – mit Anschlüssen und Sicherungen, dazu fest verlegte Kabel;',
             'mobile Verteiler und Kabel gehören zur Veranstaltung und stehen nicht hier).',
+            '',
+            'Unter `verteiler/` liegt je Verteiler eine Datei: `typen/<schlüssel>.json`',
+            '(Standard-Verteiler mit Anschlüssen und Sicherungen) und',
+            '`inventar/<schlüssel>.json` (ein Verteiler oder Zwischenstecker aus dem Lager',
+            'mit seinen Shellys). Wo ein Stück gerade eingesetzt ist, steht nicht hier.',
             '',
             '**Jeder Stand ist ein Commit.** Wer hier umschreibt (rebase, force-push),',
             'nimmt allen Installationen die Historie.',

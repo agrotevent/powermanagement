@@ -125,6 +125,16 @@ Technik), pflegen, wer „Inventar pflegen“ hat. Ein Stück **einsetzen** oder
 einem Einsatz zählen für Datenfenster und Schalt-Freigaben nur, solange sie
 dort stecken.
 
+## Verteiler-Abgleich
+
+Den Verteiler-Abgleich sieht, wer „Locations und Verteiler übernehmen“ hat.
+Übernehmen ändert den Katalog bzw. das Inventar hier – dafür braucht es
+zusätzlich dasselbe Recht wie beim Bearbeiten von Hand: für Standard-Verteiler
+„Steckverbinder-Katalog pflegen“ (oder „Anlagen ändern“ mit allen
+Standorten), für das Inventar „Inventar pflegen“. Was jemand nicht pflegen
+darf, wird übergangen und in der Meldung genannt. Hochladen und aus dem
+Repository entfernen braucht „… ins Repository hochladen“.
+
 ## Bereiche
 
 Einen Bereich sieht, wer seinen Standort sieht. In die Summe kommen aber nur

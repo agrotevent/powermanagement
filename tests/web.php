@@ -109,7 +109,7 @@ try {
     $profil = (int) Database::scalar('SELECT id FROM registerprofile ORDER BY id LIMIT 1');
 
     $seiten = ['/dashboard', '/dashboard/live', '/profil', '/karte', '/anlagen', '/anlagen/baum', '/anlagen/katalog', '/anlagen/neu',
-        '/stecker', '/standorte', '/location', '/statistik', '/statistik?zeitraum=7d', '/statistik?zeitraum=frei&von=2026-01-01&bis=2026-01-02',
+        '/stecker', '/standorte', '/location', '/verteiler-abgleich', '/statistik', '/statistik?zeitraum=7d', '/statistik?zeitraum=frei&von=2026-01-01&bis=2026-01-02',
         '/datenquellen', '/datenquellen/profile', '/steuerung/protokoll', '/system/benutzer', '/system/freigaben?art=user&id=' . $benutzer['kunde'],
         '/system/freigaben?art=role&id=' . (int) Database::scalar("SELECT id FROM roles WHERE role_key = 'kunde'"), '/system/rollen',
         '/system/einstellungen', '/audit', '/anlagen?fest=1', '/anlagen?fest=0', '/anlagen/neu?art=anschluss&fest=1',
@@ -312,7 +312,7 @@ try {
     $kunde = anmelden($basis, $kennung . '-kunde', $kennwort);
     $dosen[] = $kunde['dose'];
     foreach (['/datenquellen', '/system/benutzer', '/system/einstellungen', '/audit', '/stecker', '/standorte', '/anlagen/neu', '/steuerung/protokoll', '/bereiche/neu',
-        '/inventar', '/inventar/neu'] as $pfad) {
+        '/inventar', '/inventar/neu', '/verteiler-abgleich', '/location'] as $pfad) {
         gleich(aufruf($basis, $kunde['dose'], 'GET', $pfad)['status'], 403, 'Kunde ' . $pfad);
     }
     if ($etage > 0) {
@@ -380,6 +380,12 @@ try {
         $json = json_decode($r['text'], true);
         pruefe($r['status'] === 422 && ($json['ok'] ?? true) === false, 'Recht „steuern“ ohne Schalt-Freigabe für das Gerät → abgelehnt');
         gleich((int) Database::scalar("SELECT COUNT(*) FROM schaltvorgaenge WHERE ergebnis = 'ok'"), $vorher, 'nichts geschaltet');
+    }
+    // Verteiler-Abgleich: ohne „inventory.pull“/„inventory.push“ weder ansehen noch übernehmen, hochladen, entfernen
+    gleich(aufruf($basis, $technik['dose'], 'GET', '/verteiler-abgleich')['status'], 403, 'Technik sieht den Verteiler-Abgleich nicht');
+    foreach (['uebernehmen', 'hochladen', 'entfernen'] as $aktion) {
+        $r = aufruf($basis, $technik['dose'], 'POST', '/verteiler-abgleich/' . $aktion, ['alle' => 1, 'bereich' => 'inventar', 'schluessel' => 'x', '_token' => $technik['token']]);
+        gleich($r['status'], 403, 'Technik darf im Verteiler-Abgleich nicht ' . $aktion);
     }
 } finally {
     Database::execute('DELETE FROM leitungen WHERE name LIKE ?', [$kennung . '%']);

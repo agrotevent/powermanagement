@@ -23,6 +23,7 @@ $statusText = ['neu' => 'noch nicht hier', 'aktuell' => 'aktuell', 'neuer' => 'd
     <div class="card-footer btn-row">
         <a class="btn btn-primary btn-sm<?= $hindernis !== null ? ' disabled' : '' ?>" href="/location?holen=1">Repository abfragen</a>
         <?php if (View::can('settings.manage') || View::can('inventory.push')): ?><a class="btn btn-sm" href="/system/einstellungen">Einstellungen</a><?php endif; ?>
+        <a class="btn btn-sm btn-ghost" href="/verteiler-abgleich">Verteiler-Abgleich</a>
     </div>
 </div>
 

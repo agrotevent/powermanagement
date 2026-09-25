@@ -23,6 +23,7 @@ $zustand = [
         <button class="btn btn-sm" type="submit">Suchen</button>
     </form>
     <div class="spacer"></div>
+    <?php if (View::can('inventory.pull')): ?><a class="btn btn-sm btn-ghost" href="/verteiler-abgleich" title="Inventar mit anderen Installationen abgleichen">Abgleich</a><?php endif; ?>
     <?php if ($darf): ?>
         <a class="btn btn-primary btn-sm" href="/inventar/neu?art=verteilung">+ Verteiler</a>
         <a class="btn btn-sm" href="/inventar/neu?art=zwischenstecker">+ Zwischenstecker</a>
