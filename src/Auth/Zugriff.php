@@ -268,6 +268,11 @@ final class Zugriff
      * `anlagen.scope.all` ersetzt nur die dritte Bedingung, nicht die
      * anderen: auch wer alles sieht, schaltet nur mit dem Recht dazu.
      *
+     * Die Anlage aus der Anfrage zählt nur, wenn das Gerät an ihr misst. Sonst
+     * schaltete eine Freigabe für irgendeine Anlage jedes Gerät, und die
+     * Sperre ließe sich mit einer anderen Anlage umgehen. Gesperrt ist ein
+     * Gerät, sobald eine seiner Anlagen gesperrt ist.
+     *
      * @param array<string,mixed>|null $objekt  die Anlage, an der das Gerät hängt (falls bekannt)
      */
     public static function darfSteuern(array $datenquelle, string $kanal = '', ?array $objekt = null): bool
@@ -275,9 +280,15 @@ final class Zugriff
         if (!Auth::can('steuern')) {
             return false;
         }
-        $objekte = $objekt !== null ? [$objekt] : self::objekteZuGeraet((string) $datenquelle['geraet']);
+        $objekte = self::objekteZuGeraet((string) $datenquelle['geraet']);
         foreach ($objekte as $o) {
             if ((int) ($o['steuerung_gesperrt'] ?? 0) === 1) {
+                return false;
+            }
+        }
+        if ($objekt !== null) {
+            $objekte = array_values(array_filter($objekte, static fn (array $o): bool => (int) $o['id'] === (int) ($objekt['id'] ?? 0)));
+            if ($objekte === []) {
                 return false;
             }
         }
