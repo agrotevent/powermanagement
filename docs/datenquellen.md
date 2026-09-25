@@ -20,6 +20,8 @@ selbst: Livewerte in Übersicht, Karte und Verteilerplan, Verläufe je Phase,
 Energie je Tag, Spitzenwerte und CSV-Export. Überall gelten die
 Datenfenster der Freigaben ([rechte.md](rechte.md)).
 
+![Datenquellen: Modbus- und Cloud-Zugänge, Geräte aus der InfluxDB mit ihrer Zuordnung, Zustand der Pipeline](bilder/datenquellen.png)
+
 ## Ein Format für alle
 
 Was auch immer misst: Am Ende steht ein **normalisierter Messwert** auf dem

@@ -74,4 +74,16 @@ Funktionscode in `deploy/node-red/funktionen/*.js` bearbeiten, dann
 php -S 127.0.0.1:8080 -t public
 ```
 
-Bildschirmfotos und andere Wegwerfdateien gehören nicht ins Repository.
+## Bildschirmfotos der Doku
+
+Die Bilder in `docs/bilder` stammen aus dem Demo-Gelände und werden mit
+einem Skript aufgenommen – nach Änderungen an der Oberfläche neu aufnehmen:
+
+```bash
+php bin/power demo:seed --reset
+php -S 127.0.0.1:8080 -t public &
+NPM_ROOT=$(npm root -g) node docs/bilder/aufnehmen.mjs http://127.0.0.1:8080
+```
+
+Andere Bildschirmfotos (Prüfen, Fehlersuche) und Wegwerfdateien gehören
+nicht ins Repository.

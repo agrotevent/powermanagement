@@ -32,6 +32,10 @@ const PM = window.PM;
 
 const karte = await planKarte(el, { melden: (t) => status(t) });
 const map = karte.map;
+// Mehr Rand um den Plan als beim reinen Ansehen: Die Werte je Phase und die
+// Fenster an Anlagen am Planrand brauchen Platz, sonst schneidet die Karte
+// sie ab, weil sie nicht weit genug nachschieben darf.
+map.setMaxBounds(karte.grenzen.pad(0.9));
 
 const ebenen = {
     kabelweg: L.layerGroup().addTo(map),
