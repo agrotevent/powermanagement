@@ -118,7 +118,9 @@ final class MesspunktService
 
     public static function loeschen(int $objektId, int $id): array
     {
-        Database::execute('DELETE FROM messpunkte WHERE id = ? AND objekt_id = ?', [$id, $objektId]);
+        if (Database::execute('DELETE FROM messpunkte WHERE id = ? AND objekt_id = ?', [$id, $objektId]) > 0) {
+            BereichService::messpunktEntfernt($id);
+        }
         self::ausAuswertung($id);
         Zugriff::vergessen();
         Audit::log('messpunkt.loeschen', 'objekt', (string) $objektId, ['messpunkt' => $id]);

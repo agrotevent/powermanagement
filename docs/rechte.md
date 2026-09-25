@@ -105,6 +105,16 @@ ebenfalls protokolliert. Schaltknöpfe erscheinen in der Oberfläche nur, wo
 alle Bedingungen erfüllt sind. Die Prüfung läuft trotzdem serverseitig bei
 jedem Befehl (`Steuerung::ausfuehren()` → `Zugriff::darfSteuern()`).
 
+## Bereiche
+
+Einen Bereich sieht, wer seinen Standort sieht. In die Summe kommen aber nur
+Mitglieder, deren Anlage er sehen darf, und nur Messwerte aus dem
+Datenfenster seiner Freigabe; fehlt etwas, steht das als Hinweis an der
+Kachel („… nicht freigegeben – die Summe ist unvollständig“). Anlegen,
+ändern und löschen darf, wer das Recht „Anlagen ändern“ hat und auf dem
+Standort Anlagen anlegen darf. Verlauf und CSV brauchen wie sonst
+„Statistik“ bzw. „Export“.
+
 ## Demo-Zugänge
 
 Im Demo-Modus legt `bin/power demo:seed` zwei Beispielkonten an:

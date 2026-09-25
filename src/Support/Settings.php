@@ -34,6 +34,7 @@ final class Settings
         'grenzen.warnung'   => 'Auslastung, ab der eine Anlage gelb wird (%)',
         'grenzen.alarm'     => 'Auslastung, ab der eine Anlage rot wird (%)',
         'grenzen.spannungsfall' => 'Zulässiger Spannungsfall auf einem Kabel (%)',
+        'material.reserve'  => 'Kabelreserve in der Materialliste (%)',
     ];
 
     /** Verschlüsselt abgelegte Zugangsdaten – nie in OVERRIDABLE. */

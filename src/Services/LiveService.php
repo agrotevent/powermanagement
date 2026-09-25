@@ -194,13 +194,28 @@ final class LiveService
      */
     private static function summeDerAbgaenge(array $mps, array $live): ?array
     {
+        $paare = [];
+        foreach ($mps as $m) {
+            if ($m['anschluss_id'] !== null && isset($live[(int) $m['id']])) {
+                $paare[] = [$m, $live[(int) $m['id']]];
+            }
+        }
+        return self::summe($paare);
+    }
+
+    /**
+     * Livewerte mehrerer Messgeräte addieren – für die Abgänge einer
+     * Verteilung ebenso wie für einen Bereich. Dreiphasige Geräte zählen je
+     * Phase, einphasige auf der Phase ihres Abgangs (anschluss_phase), sonst
+     * nur in der Summe.
+     *
+     * @param list<array{0:array<string,mixed>,1:array<string,mixed>}> $paare [Messpunkt, Livewert]
+     */
+    public static function summe(array $paare): ?array
+    {
         $summe = ['zeit' => null, 'phasen' => [], 'zustand' => []];
         $gefunden = false;
-        foreach ($mps as $m) {
-            if ($m['anschluss_id'] === null || !isset($live[(int) $m['id']])) {
-                continue;
-            }
-            $w = $live[(int) $m['id']];
+        foreach ($paare as [$m, $w]) {
             $gefunden = true;
             $summe['zeit'] = max((int) ($summe['zeit'] ?? 0), (int) ($w['zeit'] ?? 0));
             $dreiphasig = isset($w['phasen']['L1']) || isset($w['phasen']['L2']) || isset($w['phasen']['L3']);

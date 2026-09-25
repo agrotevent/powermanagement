@@ -67,6 +67,9 @@ vorhanden ist.
 | **Kabelbrücke** | zwei Punkte über einen Weg. Modell und Anzahl der Elemente. |
 | **Maßstab** | zwei Punkte mit bekanntem Abstand setzen. Danach stimmen Längen und Spannungsfall. |
 
+**Material** (oben in der Werkzeugleiste) öffnet die Materialliste der
+ganzen Etage zum Drucken – siehe [Materialliste](#materialliste).
+
 Zu jedem Kabel prüft PowerManagement:
 
 - **Belastbarkeit** des Querschnitts gegen den Stecker bzw. die Absicherung
@@ -160,6 +163,80 @@ Feststromanschluss-Typ“*), etwa die Energiesäulen eines Geländes, die
 
 Alles davon ist auf die Datenfenster der Freigaben beschnitten. Ein Kunde
 sieht nur den freigegebenen Zeitraum ([rechte.md](rechte.md)).
+
+## Bereiche
+
+Ein Bereich rechnet zusammen, was in einem Teil des Geländes verbraucht
+wird – etwa eine **Foodtruck-Meile**, die an drei Aggregaten und mehreren
+Verteilungen hängt. Die Aggregate einfach zu addieren wäre falsch, wenn an
+ihnen auch Bühne oder Licht hängen. Deshalb besteht ein Bereich aus
+Mitgliedern:
+
+- **ganze Anlagen** – eine Verteilung zählt mit ihrem Messgerät an der
+  Einspeisung (oder, wenn es keines gibt, mit der Summe ihrer gemessenen
+  Abgänge);
+- **einzelne gemessene Abgänge** – der Shelly am CEE-Abgang eines
+  Aggregats, an dem nur ein Truck hängt.
+
+*Auswertung → Bereiche → + Neuer Bereich*: Standort, Name, optional eine
+**Grenze** in kW und/oder A je Phase (etwa die zugesagte Anschlussleistung)
+und eine Farbe. Rechts die Anlagen des Standorts zum Ankreuzen, darunter
+jeweils ihre gemessenen Abgänge.
+
+**Nichts zählt doppelt.** Was hinter einem anderen Mitglied hängt, steckt in
+dessen Messwert schon drin: eine Unterverteilung hinter einer
+Mitglieds-Verteilung, ein Abgang einer Mitglieds-Verteilung, die Verteilung
+hinter einem gemessenen Aggregat-Abgang. Das ergibt sich aus den Kabeln im
+Plan. Solche Mitglieder stehen grau in der Liste („steckt in …“) und zählen
+nicht mit. Mitglieder ohne Messgerät, ohne aktuelle Werte oder ohne
+Freigabe werden als Hinweis genannt.
+
+Die Bereichsseite zeigt:
+
+- die **Kachel** mit Summe, Strom je Phase und Auslastung gegen die Grenze,
+  alle 5 Sekunden aktualisiert;
+- die **Mitglieder** mit Leistung und Anteil an der Summe;
+- den **Verlauf** von Leistung und Strom je Phase als zeitgleiche Summe,
+  mit der Grenze als rote gestrichelte Linie. Die Kennzahl *höchste
+  gleichzeitige Last* ist die Spitze dieser Summe – nicht die Summe der
+  einzelnen Spitzen, die viel höher läge;
+- **Energie je Tag** und **CSV-Export**;
+- den Reiter **Material**.
+
+Einphasige Messgeräte an einem Abgang zählen auf der Phase, die beim
+Anschluss eingetragen ist. Sehen darf einen Bereich, wer den Standort sieht;
+in die Summe kommt nur, was er sehen darf, und nur im Datenfenster seiner
+Freigabe.
+
+## Materialliste
+
+Wenn ein Bereich (oder eine ganze Etage) fertig geplant ist, zeigt die
+Materialliste, was zum Aufbau mitgebracht werden muss:
+
+- **Anlagen** nach Typ gezählt (2 × PD 63/32/16, 1 × SG 100 …) mit den
+  Namen aus dem Plan;
+- **Kabel** nach Stecker, Typ und Querschnitt, in **Stücken üblicher
+  Länge**: 5, 10, 20, 25 und 50 m. Grundlage ist die eingetragene Länge oder
+  die Länge im Plan (mit Maßstab), plus Reserve für Durchhang und den Weg
+  zur Dose (*System → Einstellungen*, Vorgabe 10 %). Gewählt wird die
+  Kombination mit möglichst wenigen Stücken – jede Kupplung ist eine
+  Fehlerquelle – ohne viel Überlänge (15 m Überlänge wiegen ein Stück auf);
+- **75 und 100 m** nur bei **63 A, 125 A und Powerlock** und nur, wo sie
+  mindestens zwei Stücke sparen – praktisch erst ab rund 175 m. Sie sind in
+  der Liste gelb markiert;
+- **Powerlock-Einleiter** zählen je Leiter (fünf Stücke je Strang),
+  parallel gelegte Kabel mehrfach;
+- **Kupplungen** je Kabelsorte und die **Stückelung je Kabel** zum
+  Aufklappen;
+- **Kabelbrücken** nach Modell;
+- **vor Ort vorhanden**: Feststromanschlüsse und fest verlegte Kabel –
+  die werden nicht mitgebracht.
+
+Zu einem Bereich gehören seine Anlagen, alle Kabel an ihnen (auch die
+Zuleitung vom Aggregat), die Kabel an seinen gemessenen Abgängen und die
+Kabelbrücken über diesen Kabeln. Kabel ohne Länge (kein Maßstab, nichts
+eingetragen) stehen als Warnung darunter. *Drucken* öffnet die Liste als
+Blatt für die Kiste.
 
 ## Schalten
 

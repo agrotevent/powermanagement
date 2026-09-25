@@ -398,6 +398,7 @@ final class AnlagenService
         // eingezeichnet – sie liegen ja noch dort.
         Database::execute('UPDATE leitungen SET von_objekt_id = NULL, von_anschluss_id = NULL WHERE von_objekt_id = ?', [$id]);
         Database::execute('UPDATE leitungen SET zu_objekt_id = NULL, zu_anschluss_id = NULL WHERE zu_objekt_id = ?', [$id]);
+        BereichService::objektEntfernt($id);
         Database::execute('DELETE FROM anschluesse WHERE objekt_id = ?', [$id]);
         Database::execute('DELETE FROM schutzorgane WHERE objekt_id = ?', [$id]);
         Database::execute('DELETE FROM messpunkte WHERE objekt_id = ?', [$id]);

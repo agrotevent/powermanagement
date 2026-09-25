@@ -32,6 +32,13 @@ Location-Abgleich über Git. Für Smartphone und Tablet ausgelegt.
 - **Auswertung** statt Grafana: Livewerte, Verläufe je Phase, Energie je
   Tag, Kennzahlen, Vergleich, CSV. Messgeräte lassen sich im Verteilerplan
   anklicken und in die Auswertung übernehmen.
+- **Bereiche**: Last mehrerer Anlagen und einzelner Abgänge zusammen (etwa
+  eine Foodtruck-Meile an mehreren Aggregaten), zeitgleich summiert und
+  **ohne Doppelzählung** – was hinter einem anderen Mitglied hängt, zählt
+  nicht noch einmal. Mit Grenze, Verlauf, Energie und CSV.
+- **Materialliste** je Bereich oder Etage: Verteiler nach Typ, Kabel in
+  üblichen Stücklängen (5–50 m, 75/100 m nur bei 63 A/125 A/Powerlock),
+  Kupplungen, Kabelbrücken – zum Drucken für den Aufbau.
 - **Schalten**: Shelly ein/aus, Victron Modus/Relais, ComAp Start/Stopp/
   Betriebsart. Das Schaltrecht lässt sich **je Gerät und Kanal** vergeben,
   jeder Versuch wird protokolliert, und an der Anlage gibt es eine Sperre.
@@ -82,7 +89,7 @@ Update: **[docs/installation-debian-lxc.md](docs/installation-debian-lxc.md)**.
 | Datei | Inhalt |
 |-------|--------|
 | [docs/installation-debian-lxc.md](docs/installation-debian-lxc.md) | Installation, Update, Sicherung, Fehlersuche |
-| [docs/bedienung.md](docs/bedienung.md) | Übersicht, Karte, Anlagen, Verteilerplan, Auswertung, Schalten |
+| [docs/bedienung.md](docs/bedienung.md) | Übersicht, Karte, Anlagen, Verteilerplan, Auswertung, Bereiche, Materialliste, Schalten |
 | [docs/rechte.md](docs/rechte.md) | Rollen, Freigaben, Zeitfenster, Schaltrechte je Gerät |
 | [docs/datenquellen.md](docs/datenquellen.md) | MQTT-Format, InfluxDB-Schema, Shelly, Victron, ComAp, WireGuard, Sammler, Node-RED |
 
@@ -128,7 +135,7 @@ resources/views/          Vorlagen (PHP)
 src/Auth/                 Anmeldung, Rechte, Freigaben/Zeitfenster (Zugriff)
 src/Controllers/          Seiten
 src/Messung/              InfluxDB, MQTT, Modbus TCP, ComAp, VRM, Sammler, Steuerung, Demo
-src/Services/             Anlagen, Schutzorgane, Leitungen, Messpunkte, Live, Standorte, Location-Abgleich
+src/Services/             Anlagen, Schutzorgane, Leitungen, Messpunkte, Live, Bereiche, Material, Standorte, Location-Abgleich
 src/Support/              Router, Datenbank, Sitzung, CSRF, Verschlüsselung …
 storage/                  Datenbank, Grundrisse, Kacheln, Zwischenspeicher, Protokolle
 tests/                    Prüfskripte

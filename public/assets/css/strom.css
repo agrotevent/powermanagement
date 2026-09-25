@@ -283,6 +283,30 @@ tr.live-zeile.stufe-stumm td:first-child { box-shadow: inset 4px 0 0 var(--stufe
 .rechte-gruppe { margin-bottom: .8rem; }
 .rechte-gruppe h3 { font-size: .78rem; text-transform: uppercase; letter-spacing: .05em; color: var(--text-muted); }
 
+/* ------------------------------------------------------------ Bereiche */
+.bereich-kachel { border-top: 3px solid var(--bereich-farbe, #0ea5e9); }
+.bereich-zeichen {
+    display: inline-block; width: 22px; height: 22px; border-radius: 50%; flex: 0 0 22px;
+    background: var(--bereich-farbe, #0ea5e9); box-shadow: inset 0 0 0 3px rgba(255, 255, 255, .55);
+}
+.bereich-wahl { display: grid; gap: .35rem; }
+.bereich-wahl-anlage { border: 1px solid var(--border); border-radius: var(--radius); padding: .45rem .6rem; }
+.bereich-wahl-anlage .check { margin-bottom: 0; align-items: center; }
+.bereich-wahl-anlage .check + .check { margin-top: .35rem; }
+.check.eingerueckt { padding-left: 1.9rem; }
+.art-zeichen.klein { width: 18px; height: 18px; font-size: .62rem; border-radius: 5px; flex-basis: 18px; margin-right: .2rem; }
+
+/* ------------------------------------------------------------ Materialliste */
+.stueckliste { display: flex; flex-wrap: wrap; gap: .3rem; }
+.stueck {
+    display: inline-block; padding: .1rem .45rem; border-radius: 999px; white-space: nowrap;
+    background: var(--surface-alt); border: 1px solid var(--border); font-size: .82rem;
+}
+.stueck.selten { background: var(--warning-light); border-color: #fcd34d; }
+.material-tabelle td { vertical-align: top; }
+.druck-blatt .stueck { border-radius: 3px; }
+.druck-blatt h3 { font-size: 10.5pt; margin: 5mm 0 2mm; }
+
 /* ------------------------------------------------------------ Druck */
 .druckseite { background: #fff; }
 .druck-blatt { max-width: 190mm; margin: 0 auto; padding: 10mm 0; font-size: 10.5pt; }

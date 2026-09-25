@@ -21,7 +21,7 @@ final class DemoSeed
     public static function anlegen(bool $zuruecksetzen): string
     {
         if ($zuruecksetzen) {
-            foreach (['leitungen', 'messpunkte', 'anschluesse', 'schutzorgane', 'objekte', 'datenquellen', 'freigaben', 'floors', 'sites', 'schaltvorgaenge'] as $tabelle) {
+            foreach (['bereich_mitglieder', 'bereiche', 'leitungen', 'messpunkte', 'anschluesse', 'schutzorgane', 'objekte', 'datenquellen', 'freigaben', 'floors', 'sites', 'schaltvorgaenge'] as $tabelle) {
                 Database::execute('DELETE FROM ' . $tabelle);
             }
             Database::execute("DELETE FROM user_roles WHERE user_id IN (SELECT id FROM users WHERE username IN ('veranstalter', 'technik'))");
@@ -114,6 +114,7 @@ final class DemoSeed
         $catering = $setzen(['art' => 'verteilung', 'name' => 'Catering', 'kennung' => 'PD32-11', 'vorlage_id' => $pd32, 'nennstrom_a' => 32, 'modell' => 'PD 32/16'], 30.0, 70.0);
         $licht = $setzen(['art' => 'verteilung', 'name' => 'Licht Gelände', 'kennung' => 'PD32-12', 'vorlage_id' => $pd32, 'nennstrom_a' => 32, 'modell' => 'PD 32/16'], 62.0, 50.0);
         $kasse = $setzen(['art' => 'verteilung', 'name' => 'Kasse Einlass', 'kennung' => 'SV16-03', 'vorlage_id' => $sv16, 'nennstrom_a' => 16, 'modell' => 'SV 16'], 60.0, 93.0);
+        $truckV = $setzen(['art' => 'verteilung', 'name' => 'Foodtruck-Verteiler', 'kennung' => 'PD63-07', 'vorlage_id' => $pd63, 'nennstrom_a' => 63, 'modell' => 'PD 63/32/16'], 75.0, 42.0);
 
         // ---- Kabel
         $anschluss = static function (int $objekt, string $richtung, string $stecker, int $n = 0) use ($typ): ?int {
@@ -145,6 +146,21 @@ final class DemoSeed
         // Ein mobiler Verteiler am Feststromanschluss des Geländes.
         $kabel($saeule2, $anschluss($saeule2, 'abgang', 'cee16'), $kasse, $anschluss($kasse, 'eingang', 'cee16'), 'H07RN-F', 2.5,
             [[52.0, 88.0], [60.0, 93.0]], 'Energiesäule 2 → Kasse');
+        // Foodtruck-Meile: ein Verteiler am Aggregat, ein Truck direkt am
+        // Aggregat. Die Trucks selbst sind keine Anlagen – ihre Kabel enden offen.
+        $kabel($gen, $anschluss($gen, 'abgang', 'cee63'), $truckV, $anschluss($truckV, 'eingang', 'cee63'), 'H07RN-F', 16,
+            [[88.0, 18.0], [91.0, 22.0], [91.0, 42.0], [75.0, 42.0]], 'Aggregat → Foodtrucks');
+        $offen = static function (int $von, ?int $vonA, float $q, array $punkte, string $name) use ($floorId): void {
+            LeitungService::speichern(null, [
+                'art' => 'kabel', 'floor_id' => $floorId, 'name' => $name, 'von_objekt_id' => $von, 'von_anschluss_id' => $vonA,
+                'kabeltyp' => 'H07RN-F', 'adern' => $q >= 4 ? 5 : 3, 'querschnitt_mm2' => $q, 'punkte' => $punkte,
+            ]);
+        };
+        $offen($truckV, $anschluss($truckV, 'abgang', 'cee32'), 6, [[75.0, 42.0], [70.0, 42.0]], 'Foodtruck 1');
+        $offen($truckV, $anschluss($truckV, 'abgang', 'cee32', 1), 6, [[75.0, 42.0], [80.0, 42.0]], 'Foodtruck 2');
+        $offen($truckV, $anschluss($truckV, 'abgang', 'cee32', 2), 6, [[75.0, 42.0], [75.0, 38.0], [85.0, 38.0]], 'Foodtruck 3');
+        $offen($truckV, $anschluss($truckV, 'abgang', 'schuko'), 2.5, [[75.0, 42.0], [66.0, 42.0], [66.0, 40.0]], 'Kaffeemobil');
+        $offen($gen, $anschluss($gen, 'abgang', 'cee63', 1), 16, [[88.0, 18.0], [95.0, 18.0], [95.0, 42.0], [90.0, 44.0]], 'Grill-Truck');
         LeitungService::speichern(null, ['art' => 'kabelweg', 'floor_id' => $floorId, 'name' => 'Trasse Ost (Reserve)', 'punkte' => [[45.0, 38.0], [80.0, 38.0], [88.0, 30.0]]]);
         LeitungService::speichern(null, ['art' => 'kabelbruecke', 'floor_id' => $floorId, 'name' => 'Überfahrt Hauptweg', 'modell' => '5-Kanal', 'anzahl' => 4, 'punkte' => [[20.5, 50.0], [23.5, 50.0]]]);
         LeitungService::speichern(null, ['art' => 'kabelbruecke', 'floor_id' => $floorId, 'name' => 'Rettungsweg', 'modell' => 'Defender Midi', 'anzahl' => 3, 'punkte' => [[43.5, 60.0], [46.5, 60.0]]]);
@@ -175,6 +191,22 @@ final class DemoSeed
         $mp($wr, 'gx-backstage', 'batterie', 'batterie', 'Batterie');
         $mp($gen, 'ig200-aggregat1', 'generator', 'erzeugung', 'Generator');
         $mp($gen, 'ig200-aggregat1', 'motor', 'erzeugung', 'Motor');
+        $mp($truckV, 'shellypro3em-foodtruck', 'em:0', 'einspeisung', 'Einspeisung (Pro 3EM)');
+        $kaffee = $anschluss($truckV, 'abgang', 'schuko');
+        Database::update('anschluesse', (int) $kaffee, ['phase' => 'L2', 'notizen' => 'Kaffeemobil']);
+        $mp($truckV, 'shellypro1pm-kaffee', 'switch:0', 'abgang', 'Kaffeemobil', $kaffee);
+        // Der Grill-Truck hängt direkt am Aggregat – gemessen am Abgang.
+        $mp($gen, 'shellypro3em-grilltruck', 'em:0', 'abgang', 'Grill-Truck', $anschluss($gen, 'abgang', 'cee63', 1));
+
+        // ---- Bereich: die Foodtruck-Meile. Das Aggregat versorgt auch das
+        // Licht, zählt also nicht als Ganzes – nur sein Abgang zum Grill-Truck.
+        // Das Kaffeemobil steckt im Foodtruck-Verteiler und zählt nicht doppelt.
+        $messpunkt = static fn (string $geraet): int => (int) Database::scalar('SELECT id FROM messpunkte WHERE geraet = ? ORDER BY id LIMIT 1', [$geraet]);
+        BereichService::speichern(null, [
+            'site_id' => $siteId, 'name' => 'Foodtruck-Meile', 'farbe' => '#db2777', 'grenze_kw' => '90', 'grenze_a' => '130',
+            'notizen' => 'Trucks am Hauptweg Ost und das Catering. Zugesagt: 90 kW.',
+            'mitglieder' => ['o:' . $truckV, 'o:' . $catering, 'm:' . $messpunkt('shellypro3em-grilltruck'), 'm:' . $messpunkt('shellypro1pm-kaffee')],
+        ]);
 
         // ---- Benutzer mit Zeitfenstern
         $jetzt = time();
@@ -205,6 +237,7 @@ final class DemoSeed
         return 'Demo-Gelände angelegt: ' . (int) Database::scalar('SELECT COUNT(*) FROM objekte WHERE ist_vorlage = 0') . ' Anlagen (davon '
             . (int) Database::scalar('SELECT COUNT(*) FROM objekte WHERE ist_vorlage = 0 AND fest = 1') . ' Feststromanschlüsse), '
             . (int) Database::scalar('SELECT COUNT(*) FROM leitungen') . ' Leitungen, '
+            . (int) Database::scalar('SELECT COUNT(*) FROM bereiche') . ' Bereich, '
             . (int) Database::scalar('SELECT COUNT(*) FROM objekte WHERE ist_vorlage = 1') . ' Katalog-Einträge. '
             . 'Zugänge: veranstalter / Veranstalter2026! (nur Festivalwoche), technik / Technik2026!! (schaltet nur das Licht).'
             . (Config::isDemo() ? '' : ' Hinweis: app.demo ist aus – ohne InfluxDB bleiben die Messwerte leer.');
@@ -235,6 +268,12 @@ final class DemoSeed
     <rect x="60" y="60" width="200" height="140" fill="#bae6fd" stroke="#0369a1" stroke-width="3"/>
     <text x="160" y="138" text-anchor="middle">Netzanschluss</text>
     <text x="80" y="540" font-size="22">Hauptweg / Feuerwehrzufahrt</text>
+    <g fill="#fecdd3" stroke="#be123c" stroke-width="2">
+      <rect x="1030" y="386" width="52" height="28" rx="4"/><rect x="1094" y="428" width="52" height="28" rx="4"/>
+      <rect x="1254" y="428" width="52" height="28" rx="4"/><rect x="1334" y="340" width="52" height="28" rx="4"/>
+      <rect x="1410" y="446" width="60" height="28" rx="4"/>
+    </g>
+    <text x="1250" y="552" text-anchor="middle" font-size="20" fill="#be123c">Foodtruck-Meile</text>
     <g stroke="#1e293b" stroke-width="4"><line x1="60" y1="950" x2="460" y2="950"/><line x1="60" y1="935" x2="60" y2="965"/><line x1="460" y1="935" x2="460" y2="965"/></g>
     <text x="260" y="935" text-anchor="middle" font-size="22" fill="#1e293b">100 m</text>
   </g>

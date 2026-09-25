@@ -6,6 +6,7 @@ namespace App\Controllers;
 use App\Auth\Auth;
 use App\Auth\Zugriff;
 use App\Services\AnlagenService;
+use App\Services\MaterialService;
 use App\Services\LeitungService;
 use App\Services\LiveService;
 use App\Services\MesspunktService;
@@ -170,6 +171,20 @@ final class KarteController extends Controller
         }
         $objekte = Zugriff::filtern(AnlagenService::liste(['floor_id' => (int) $etage['id']]));
         $this->json(['ts' => time(), 'objekte' => LiveService::fuerObjekte($objekte)]);
+    }
+
+    /** Materialliste der ganzen Etage zum Drucken. */
+    public function material(Request $request, array $params): void
+    {
+        $etage = $this->etage((int) $params['id']);
+        if ($etage === null) {
+            return;
+        }
+        $this->view('material/druck', [
+            'titel'      => 'Material · ' . $etage['site_name'] . ' / ' . $etage['name'],
+            'untertitel' => 'ganze Etage',
+            'material'   => MaterialService::fuerEtage((int) $etage['id']),
+        ], 'layout/druck');
     }
 
     /** Die Seitenleiste zu einer Anlage. */
