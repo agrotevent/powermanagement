@@ -7,6 +7,7 @@ use App\Auth\Auth;
 use App\Auth\Zugriff;
 use App\Services\AnlagenService;
 use App\Services\MaterialService;
+use App\Services\InventarService;
 use App\Services\LeitungService;
 use App\Services\LiveService;
 use App\Services\MesspunktService;
@@ -99,7 +100,7 @@ final class KarteController extends Controller
         $mpJe = [];
         if ($objekte !== []) {
             $ids = array_map(static fn ($o) => (int) $o['id'], $objekte);
-            foreach (Database::select('SELECT * FROM messpunkte WHERE objekt_id IN (' . implode(',', $ids) . ') ORDER BY id') as $m) {
+            foreach (Database::select('SELECT * FROM messpunkte WHERE objekt_id IN (' . implode(',', $ids) . ') AND gueltig_bis IS NULL ORDER BY id') as $m) {
                 $mpJe[(int) $m['objekt_id']][] = $m;
             }
         }
@@ -278,6 +279,8 @@ final class KarteController extends Controller
             'darf'        => Zugriff::darfBearbeiten($objekt),
             'darf_statistik' => Auth::can('statistik.view'),
             'geo'         => ($lage = PlanGeoService::fuerObjekt($objekt)) !== null ? $lage + ['link' => PlanGeoService::kartenLink($lage['lat'], $lage['lon'])] : null,
+            'inventar'    => array_map(static fn ($e) => ['kennung' => $e['kennung'], 'art' => $e['inventar_art'], 'anschluss' => $e['anschluss_name']],
+                InventarService::einsaetzeAnObjekt($id)),
         ]);
     }
 

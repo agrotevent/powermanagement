@@ -6,6 +6,9 @@ keine Build-Schritte. JS-Bibliotheken liegen fertig unter `public/assets/vendor`
 
 ## Grundregeln
 
+- **Messpunkte haben eine Zeit** (`gueltig_ab`/`gueltig_bis`, Inventar-Einsätze).
+  Live, Schalten und Zuordnung nur mit jetzigen (`gueltig_bis IS NULL`),
+  Verläufe über `MesspunktService::fenster()`.
 - **Rechte immer serverseitig.** Die Route prüft das Recht
   (`public/index.php`, drittes Argument). *Worauf* jemand zugreift, prüft
   `App\Auth\Zugriff` (Freigaben, Zeitfenster). Wer Messdaten liest, geht
@@ -45,6 +48,7 @@ bash -n deploy/*.sh && shellcheck -S warning -e SC2016,SC1111 deploy/*.sh
 |------------|-------|
 | `tests/zeitfenster.php` | Freigaben, Gültigkeit, Datenfenster, Schalt-Freigaben |
 | `tests/anschluesse.php` | Anschlüsse, Standard-Verteiler, Schutzorgane, Kabel, Spannungsfall, fest/mobil (Anlagen und Kabel) |
+| `tests/inventar.php` | Inventar, Einsatz/Abbau, Gültigkeit der Messpunkte, Bereiche über wechselnde Geräte, Schalten nach Abbau |
 | `tests/location-abgleich.php` | Git-Location-Abgleich mit MasterAdmin-Format; nur Feststromanschlüsse und feste Kabel, mobile Planung bleibt |
 | `tests/bereiche.php` | Bereiche: Summe ohne Doppelzählung, Live/Verlauf, Aufräumen; Materialliste und Kabelstückelung |
 | `tests/georeferenz.php` | Plan ↔ Breite/Länge, Koordinaten lesen, Längen aus der Georeferenz, strom.json |

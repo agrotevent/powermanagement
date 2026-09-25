@@ -355,7 +355,8 @@ final class LocationBundle
                 ];
             }
             $messpunkte = [];
-            foreach (Database::select('SELECT * FROM messpunkte WHERE objekt_id = ? ORDER BY id', [$id]) as $m) {
+            // Nur fest eingebaute Messgeräte – ein Inventar-Verteiler gehört nicht zur Location.
+            foreach (Database::select('SELECT * FROM messpunkte WHERE objekt_id = ? AND einsatz_id IS NULL AND gueltig_bis IS NULL ORDER BY id', [$id]) as $m) {
                 $messpunkte[] = [
                     'geraet'      => $m['geraet'],
                     'kanal'       => $m['kanal'],
@@ -682,7 +683,7 @@ final class LocationBundle
         }
 
         if (array_key_exists('messpunkte', $a)) {
-            Database::execute('DELETE FROM messpunkte WHERE objekt_id = ?', [$objektId]);
+            Database::execute('DELETE FROM messpunkte WHERE objekt_id = ? AND einsatz_id IS NULL', [$objektId]);
             foreach ((array) $a['messpunkte'] as $m) {
                 if (trim((string) ($m['geraet'] ?? '')) === '') {
                     continue;

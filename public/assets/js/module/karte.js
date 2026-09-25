@@ -483,6 +483,8 @@ async function objektPanel(id) {
         <div class="small muted">${esc(o.modell)}</div>
         ${o.geo ? `<div class="small anlage-lage">Lage ${koordinate(o.geo.lat)}, ${koordinate(o.geo.lon)} ·
             <a href="${esc(o.geo.link)}" target="_blank" rel="noopener">in der Karte öffnen</a></div>` : ''}
+        ${o.inventar && o.inventar.length ? `<div class="small anlage-lage">Aus dem Inventar: ${o.inventar.map((i) => `<strong>${esc(i.kennung)}</strong>${i.anschluss ? ' (' + esc(i.anschluss) + ')' : ''}`).join(', ')}</div>` : ''}
+        ${o.darf && o.art !== 'anschluss' && daten.darf.inventar ? `<div class="small"><a href="/anlagen/${o.id}?reiter=messung">Verteiler oder Zwischenstecker aus dem Inventar einsetzen …</a></div>` : ''}
         <div class="seite-live" data-seite-live></div>
         ${o.messgeraete.length ? `<h3 class="mt">Messgeräte</h3><ul class="liste-schlicht messgeraete">${o.messgeraete.map((m) => `
             <li><span class="messgeraet"><span class="messgeraet-zeichen">M</span>

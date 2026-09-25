@@ -22,6 +22,7 @@ $groups = [
         ['/anlagen?art=wechselrichter', 'Wechselrichter', 'W', 'anlagen.view'],
         ['/anlagen/baum',         'Verteilbaum',         null, 'anlagen.view'],
         ['/anlagen/katalog',      'Standard-Verteiler',  null, 'anlagen.view'],
+        ['/inventar',             'Inventar',            null, 'datenquellen.view'],
         ['/stecker',              'Steckverbinder',      null, 'stecker.manage'],
     ],
     'Auswertung' => [

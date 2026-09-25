@@ -21,7 +21,7 @@ final class DemoSeed
     public static function anlegen(bool $zuruecksetzen): string
     {
         if ($zuruecksetzen) {
-            foreach (['bereich_mitglieder', 'bereiche', 'leitungen', 'messpunkte', 'anschluesse', 'schutzorgane', 'objekte', 'datenquellen', 'freigaben', 'floors', 'sites', 'schaltvorgaenge'] as $tabelle) {
+            foreach (['einsaetze', 'inventar_messgeraete', 'inventar', 'bereich_mitglieder', 'bereiche', 'leitungen', 'messpunkte', 'anschluesse', 'schutzorgane', 'objekte', 'datenquellen', 'freigaben', 'floors', 'sites', 'schaltvorgaenge'] as $tabelle) {
                 Database::execute('DELETE FROM ' . $tabelle);
             }
             Database::execute("DELETE FROM user_roles WHERE user_id IN (SELECT id FROM users WHERE username IN ('veranstalter', 'technik'))");
@@ -196,12 +196,33 @@ final class DemoSeed
         $mp($wr, 'gx-backstage', 'batterie', 'batterie', 'Batterie');
         $mp($gen, 'ig200-aggregat1', 'generator', 'erzeugung', 'Generator');
         $mp($gen, 'ig200-aggregat1', 'motor', 'erzeugung', 'Motor');
-        $mp($truckV, 'shellypro3em-foodtruck', 'em:0', 'einspeisung', 'Einspeisung (Pro 3EM)');
+        // ---- Inventar: Verteiler und Zwischenstecker mit ihren Shellys. Der
+        // PD63-07 steht seit drei Tagen als Foodtruck-Verteiler, der
+        // Zwischenstecker ZS-63-02 steckt am Aggregat-Abgang des Grill-Trucks.
         $kaffee = $anschluss($truckV, 'abgang', 'schuko');
         Database::update('anschluesse', (int) $kaffee, ['phase' => 'L2', 'notizen' => 'Kaffeemobil']);
-        $mp($truckV, 'shellypro1pm-kaffee', 'switch:0', 'abgang', 'Kaffeemobil', $kaffee);
-        // Der Grill-Truck hängt direkt am Aggregat – gemessen am Abgang.
-        $mp($gen, 'shellypro3em-grilltruck', 'em:0', 'abgang', 'Grill-Truck', $anschluss($gen, 'abgang', 'cee63', 1));
+        $schukoNr = (int) Database::scalar('SELECT nr FROM anschluesse WHERE objekt_id = ? AND richtung = ? AND steckertyp_id = ? ORDER BY nr LIMIT 1', [$pd63, 'abgang', $typ['schuko']]);
+        $inventar = static function (array $daten): int {
+            return (int) InventarService::speichern(null, $daten)['id'];
+        };
+        $pd6307 = $inventar(['art' => 'verteilung', 'kennung' => 'PD63-07', 'name' => 'PD 63 mit Pro 3EM', 'vorlage_id' => $pd63, 'seriennummer' => 'MV-2023-0417',
+            'messgeraete' => [
+                ['geraet' => 'shellypro3em-foodtruck', 'kanal' => 'em:0', 'stelle' => 'einspeisung', 'bezeichnung' => 'Einspeisung (Pro 3EM)'],
+                ['geraet' => 'shellypro1pm-kaffee', 'kanal' => 'switch:0', 'stelle' => 'abgang:' . $schukoNr, 'bezeichnung' => 'Schuko-Abgang (Pro 1PM)'],
+            ]]);
+        $zs6302 = $inventar(['art' => 'zwischenstecker', 'kennung' => 'ZS-63-02', 'name' => 'Messadapter CEE 63', 'steckertyp_id' => $typ['cee63'],
+            'messgeraete' => [['geraet' => 'shellypro3em-grilltruck', 'kanal' => 'em:0', 'stelle' => 'durchgang']]]);
+        $inventar(['art' => 'verteilung', 'kennung' => 'PD32-15', 'vorlage_id' => $pd32,
+            'messgeraete' => [['geraet' => 'shellypro3em-pd3215', 'kanal' => 'em:0', 'stelle' => 'einspeisung']]]);
+        $inventar(['art' => 'zwischenstecker', 'kennung' => 'ZS-32-05', 'steckertyp_id' => $typ['cee32'],
+            'messgeraete' => [['geraet' => 'shellypro3em-zs3205', 'kanal' => 'em:0', 'stelle' => 'durchgang']]]);
+        $inventar(['art' => 'zwischenstecker', 'kennung' => 'ZS-125-01', 'steckertyp_id' => $typ['cee125'], 'defekt' => 1,
+            'notizen' => 'Stromwandler L2 gebrochen – zur Reparatur.']);
+        InventarService::einsetzen($pd6307, $truckV);
+        InventarService::einsetzen($zs6302, $gen, $anschluss($gen, 'abgang', 'cee63', 1));
+        $seit = gmdate('c', time() - 3 * 86400);
+        Database::execute('UPDATE einsaetze SET ab = ?', [$seit]);
+        Database::execute('UPDATE messpunkte SET gueltig_ab = ? WHERE einsatz_id IS NOT NULL', [$seit]);
 
         // ---- Bereich: die Foodtruck-Meile. Das Aggregat versorgt auch das
         // Licht, zählt also nicht als Ganzes – nur sein Abgang zum Grill-Truck.
@@ -243,6 +264,7 @@ final class DemoSeed
             . (int) Database::scalar('SELECT COUNT(*) FROM objekte WHERE ist_vorlage = 0 AND fest = 1') . ' Feststromanschlüsse), '
             . (int) Database::scalar('SELECT COUNT(*) FROM leitungen') . ' Leitungen, '
             . (int) Database::scalar('SELECT COUNT(*) FROM bereiche') . ' Bereich, '
+            . (int) Database::scalar('SELECT COUNT(*) FROM inventar') . ' Inventarstücke, '
             . (int) Database::scalar('SELECT COUNT(*) FROM objekte WHERE ist_vorlage = 1') . ' Katalog-Einträge. '
             . 'Zugänge: veranstalter / Veranstalter2026! (nur Festivalwoche), technik / Technik2026!! (schaltet nur das Licht).'
             . (Config::isDemo() ? '' : ' Hinweis: app.demo ist aus – ohne InfluxDB bleiben die Messwerte leer.');

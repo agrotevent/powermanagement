@@ -189,6 +189,49 @@ Feststromanschluss-Typ“*), etwa die Energiesäulen eines Geländes, die
   (z. B. CEE 16 A 1~ blau, Harting). Nennstrom und Polzahl zählen für die
   Kabelprüfung.
 
+## Inventar
+
+Im **Inventar** (*Anlagen → Inventar*) stehen die Geräte aus dem Lager, in
+denen Shellys eingebaut sind – jedes mit seinem Aufkleber:
+
+- **Verteiler** (PD63-07): ein Standard-Verteiler aus dem Katalog als Typ,
+  dazu seine Shellys – an der **Einspeisung** (misst den ganzen Verteiler),
+  an einzelnen **Abgängen** (misst, was dort hängt) oder beides.
+- **Zwischenstecker** (ZS-63-02): ein Messadapter bis 125 A mit einem
+  Shelly im **Durchgang**. Er misst, wo er gesteckt wird – an einem Abgang
+  oder an der Einspeisung einer Anlage.
+
+Angelegt wird im Vorfeld: *+ Verteiler* bzw. *+ Zwischenstecker*,
+Inventarnummer, Typ bzw. Steckverbinder, dann je Shelly Gerät, Kanal und wo
+er sitzt. Gerät und Kanal schlägt das Formular aus den Geräten vor, die schon
+gesendet haben.
+
+**Beim Aufbau** wird ausgewählt, welches Stück wo steht: an der geplanten
+Anlage im Reiter *Messgeräte* unter *Aus dem Inventar* das Stück wählen
+(beim Zwischenstecker auch, woran er steckt) und *Einsetzen*. Ab diesem
+Moment messen seine Shellys dort – die Werte gehören zur Anlage, ihren
+Bereichen und ihrer Statistik. Das Kartenfenster der Anlage zeigt, was aus
+dem Inventar dort steckt.
+
+- Passt der Typ nicht (geplant war ein PD 32, aufgebaut ist ein PD 63),
+  wird die Anlage umgestellt: Anschlüsse und Sicherungen kommen aus dem
+  Katalog, Kabel und Messgeräte bleiben an ihrem Anschluss.
+- Steckt das Stück noch woanders, wird es dort abgezogen. Was vorher an
+  derselben Stelle steckte, ist damit ersetzt.
+- *Abbauen* beendet den Einsatz. Die Shellys messen dann nicht mehr dort;
+  das Stück ist wieder im Lager.
+
+Die Zuordnung hat eine Zeit: Ein Messgerät aus dem Inventar zählt für die
+Anlage **nur, solange es dort steckt**. Die Statistik der Anlage zeigt es
+danach als früheres Messgerät („bis 14.07.2026 18:00“) mit genau den Werten
+aus dieser Zeit – auch wenn der Verteiler längst woanders steht. Ein Bereich
+mit einem gemessenen Abgang rechnet über die Zeit mit dem Gerät, das jeweils
+dort steckte. Schalten lässt sich ein Shelly nur dort, wo er jetzt steckt.
+
+Pflegen darf das Inventar, wer das Recht *Inventar pflegen* hat (Rolle
+Stromplanung); ansehen, wer Datenquellen sehen darf. Einsetzen und Abbauen
+darf, wer die Anlage bearbeiten darf.
+
 ## Auswertung (Statistik)
 
 - **Zeitraum**: 1 h, 6 h, heute, 24 h, 7 Tage, 30 Tage oder frei.

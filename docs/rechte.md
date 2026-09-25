@@ -18,7 +18,7 @@ und Stromplanung haben es.
 | Rolle | gedacht für | Rechte (Auszug) |
 |-------|-------------|-----------------|
 | **Administration** | Betreiber | alles (`*`) |
-| **Stromplanung** | Planer im Büro | Anlagen, Stecker, Karte, Grundrisse, Kabel, Statistik und Export, Datenquellen ansehen, Locations holen. Sieht alle Standorte, **schaltet nicht**. |
+| **Stromplanung** | Planer im Büro | Anlagen, Stecker, Karte, Grundrisse, Kabel, Statistik und Export, Datenquellen ansehen, Inventar pflegen, Locations holen. Sieht alle Standorte, **schaltet nicht**. |
 | **Elektrotechnik vor Ort** | Elektriker auf dem Gelände | Anlagen und Kabel dokumentieren, Statistik, Datenquellen ansehen, **schalten** und Schaltprotokoll – nur auf freigegebenen Standorten |
 | **Kunde / Veranstalter** | Auftraggeber | Übersicht, Anlagen, Karte, Statistik und CSV-Export – nur Freigegebenes im freigegebenen Zeitraum |
 
@@ -104,6 +104,16 @@ Benutzer, Gerät, Kanal, Befehl, Ergebnis. Abgelehnte Versuche werden
 ebenfalls protokolliert. Schaltknöpfe erscheinen in der Oberfläche nur, wo
 alle Bedingungen erfüllt sind. Die Prüfung läuft trotzdem serverseitig bei
 jedem Befehl (`Steuerung::ausfuehren()` → `Zugriff::darfSteuern()`).
+
+## Inventar
+
+Das Inventar (Verteiler und Zwischenstecker mit Shellys) gehört keinem
+Standort. Ansehen darf es, wer „Datenquellen ansehen“ hat (Planung,
+Technik), pflegen, wer „Inventar pflegen“ hat. Ein Stück **einsetzen** oder
+**abbauen** ist eine Änderung an der Anlage: dafür braucht es „Anlagen
+ändern“ und eine Freigabe mit „bearbeiten“ für diese Anlage. Messgeräte aus
+einem Einsatz zählen für Datenfenster und Schalt-Freigaben nur, solange sie
+dort stecken.
 
 ## Bereiche
 

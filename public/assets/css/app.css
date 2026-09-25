@@ -470,7 +470,8 @@ td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
     display: block; font-size: .76rem; font-weight: 600; color: var(--text-muted);
     margin-bottom: .25rem; text-transform: uppercase; letter-spacing: .04em;
 }
-input[type=text], input[type=password], input[type=number], input[type=email], select, textarea {
+input:not([type]), input[type=text], input[type=search], input[type=url], input[type=tel], input[type=date], input[type=datetime-local],
+input[type=password], input[type=number], input[type=email], select, textarea {
     width: 100%; padding: .45rem .6rem; border: 1px solid var(--border); border-radius: 8px;
     font-family: inherit; font-size: .84rem; background: #fff; color: var(--text);
 }
@@ -482,7 +483,7 @@ select[multiple] { min-height: 120px; }
 .check input { margin-top: .2rem; }
 .check label { text-transform: none; letter-spacing: 0; font-size: .82rem; font-weight: 450; color: var(--text); margin: 0; }
 .field-row { display: flex; gap: .7rem; }
-.field-row > * { flex: 1; }
+.field-row > * { flex: 1; min-width: 0; }
 fieldset { border: 1px solid var(--border); border-radius: 8px; padding: .7rem .9rem; margin: 0 0 .9rem; }
 legend { font-size: .75rem; font-weight: 650; color: var(--text-muted); padding: 0 .3rem; text-transform: uppercase; letter-spacing: .05em; }
 
@@ -913,7 +914,8 @@ body.plan-vollbild-an { overflow: hidden; }
 @media (pointer: coarse) {
     .btn { min-height: 40px; padding: .5rem .9rem; }
     .btn-sm { min-height: 34px; }
-    input[type=text], input[type=password], input[type=number], input[type=email], select, textarea {
+    input:not([type]), input[type=text], input[type=search], input[type=url], input[type=tel], input[type=date], input[type=datetime-local],
+input[type=password], input[type=number], input[type=email], select, textarea {
         font-size: 16px; padding: .55rem .65rem;
     }
     .check input[type=checkbox], .check input[type=radio] { width: 20px; height: 20px; }

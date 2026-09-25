@@ -38,6 +38,10 @@ Location-Abgleich über Git. Für Smartphone und Tablet ausgelegt.
   eine Foodtruck-Meile an mehreren Aggregaten), zeitgleich summiert und
   **ohne Doppelzählung** – was hinter einem anderen Mitglied hängt, zählt
   nicht noch einmal. Mit Grenze, Verlauf, Energie und CSV.
+- **Inventar**: Verteiler und Zwischenstecker (bis 125 A) mit ihren
+  Shellys – an der Einspeisung, je Abgang oder im Durchgang. Beim Aufbau
+  wird ausgewählt, welches Stück wo steht; die Werte gehören dann zur
+  Anlage, genau für die Dauer des Einsatzes.
 - **Materialliste** je Bereich oder Etage: Verteiler nach Typ, Kabel in
   üblichen Stücklängen (5–50 m, 75/100 m nur bei 63 A/125 A/Powerlock),
   Kupplungen, Kabelbrücken – zum Drucken für den Aufbau.
@@ -91,7 +95,7 @@ Update: **[docs/installation-debian-lxc.md](docs/installation-debian-lxc.md)**.
 | Datei | Inhalt |
 |-------|--------|
 | [docs/installation-debian-lxc.md](docs/installation-debian-lxc.md) | Installation, Update, Sicherung, Fehlersuche |
-| [docs/bedienung.md](docs/bedienung.md) | Übersicht, Karte, Anlagen, Verteilerplan, Auswertung, Bereiche, Materialliste, Schalten |
+| [docs/bedienung.md](docs/bedienung.md) | Übersicht, Karte, Anlagen, Verteilerplan, Inventar, Auswertung, Bereiche, Materialliste, Schalten |
 | [docs/rechte.md](docs/rechte.md) | Rollen, Freigaben, Zeitfenster, Schaltrechte je Gerät |
 | [docs/datenquellen.md](docs/datenquellen.md) | MQTT-Format, InfluxDB-Schema, Shelly, Victron, ComAp, WireGuard, Sammler, Node-RED |
 
@@ -137,7 +141,7 @@ resources/views/          Vorlagen (PHP)
 src/Auth/                 Anmeldung, Rechte, Freigaben/Zeitfenster (Zugriff)
 src/Controllers/          Seiten
 src/Messung/              InfluxDB, MQTT, Modbus TCP, ComAp, VRM, Sammler, Steuerung, Demo
-src/Services/             Anlagen, Schutzorgane, Leitungen, Messpunkte, Live, Bereiche, Material, Standorte, Location-Abgleich
+src/Services/             Anlagen, Schutzorgane, Leitungen, Messpunkte, Inventar, Live, Bereiche, Material, Standorte, Location-Abgleich
 src/Support/              Router, Datenbank, Sitzung, CSRF, Verschlüsselung …
 storage/                  Datenbank, Grundrisse, Kacheln, Zwischenspeicher, Protokolle
 tests/                    Prüfskripte

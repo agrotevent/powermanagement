@@ -8,6 +8,7 @@ use App\Messung\Messdaten;
 use App\Support\Audit;
 use App\Support\Database;
 use App\Support\Session;
+use App\Support\Zeit;
 
 /**
  * Messgeräte in Anlagen.
@@ -34,18 +35,46 @@ final class MesspunktService
 
     public const SITZUNG = 'auswertung';
 
-    /** @return list<array<string,mixed>> */
-    public static function fuerObjekt(int $objektId): array
+    /**
+     * Die Messgeräte einer Anlage – die jetzt eingebauten, auf Wunsch auch
+     * die früheren (aus beendeten Einsätzen von Inventar-Verteilern).
+     *
+     * @return list<array<string,mixed>>
+     */
+    public static function fuerObjekt(int $objektId, bool $mitFrueheren = false): array
     {
         return Database::select(
-            'SELECT m.*, a.bezeichnung AS anschluss_name, s.bezeichnung AS schutz_name, d.id AS datenquelle_id, d.name AS datenquelle_name
+            'SELECT m.*, a.bezeichnung AS anschluss_name, s.bezeichnung AS schutz_name, d.id AS datenquelle_id, d.name AS datenquelle_name,
+                    i.kennung AS inventar_kennung
              FROM messpunkte m
              LEFT JOIN anschluesse a ON a.id = m.anschluss_id
              LEFT JOIN schutzorgane s ON s.id = m.schutzorgan_id
              LEFT JOIN datenquellen d ON d.geraet = m.geraet
-             WHERE m.objekt_id = ? ORDER BY m.rolle, m.id',
+             LEFT JOIN einsaetze e ON e.id = m.einsatz_id
+             LEFT JOIN inventar i ON i.id = e.inventar_id
+             WHERE m.objekt_id = ?' . ($mitFrueheren ? '' : ' AND m.gueltig_bis IS NULL') . ' ORDER BY m.gueltig_bis IS NOT NULL, m.rolle, m.id',
             [$objektId]
         );
+    }
+
+    /** Steckt das Messgerät jetzt (noch) an der Anlage? */
+    public static function aktiv(array $m, ?int $jetzt = null): bool
+    {
+        $jetzt ??= time();
+        $ab = Zeit::ts($m['gueltig_ab'] ?? null);
+        $bis = Zeit::ts($m['gueltig_bis'] ?? null);
+        return ($ab === null || $ab <= $jetzt) && ($bis === null || $bis > $jetzt);
+    }
+
+    /**
+     * Welche Messdaten dieses Messpunkts sichtbar sind: das Datenfenster der
+     * Anlage, zugeschnitten auf die Zeit, in der das Gerät dort steckte.
+     *
+     * @return list<array{0:?int,1:?int}>|null
+     */
+    public static function fenster(array $m, array $objekt): ?array
+    {
+        return Zugriff::schneiden(Zugriff::datenFenster($objekt), Zeit::ts($m['gueltig_ab'] ?? null), Zeit::ts($m['gueltig_bis'] ?? null));
     }
 
     public static function find(int $id): ?array
@@ -74,7 +103,12 @@ final class MesspunktService
         } else {
             $teile[] = self::ROLLEN[$m['rolle']] ?? $m['rolle'];
         }
-        return implode(' · ', array_filter($teile));
+        $titel = implode(' · ', array_filter($teile));
+        // Ein früheres Messgerät (Einsatz beendet) sagt, bis wann es dort war.
+        if (!empty($m['gueltig_bis'])) {
+            $titel .= ' (bis ' . Zeit::anzeige((string) $m['gueltig_bis'], 'd.m.Y H:i') . ')';
+        }
+        return $titel;
     }
 
     public static function speichern(int $objektId, ?int $id, array $daten): array

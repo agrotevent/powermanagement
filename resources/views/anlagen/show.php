@@ -2,12 +2,14 @@
 use App\Auth\Zugriff;
 use App\Messung\Messdaten;
 use App\Services\AnlagenService;
+use App\Services\InventarService;
 use App\Services\LeitungService;
 use App\Services\MesspunktService;
 use App\Services\PlanGeoService;
 use App\Services\SchutzService;
 use App\Support\Csrf;
 use App\Support\View;
+use App\Support\Zeit;
 
 $id = (int) $objekt['id'];
 $art = AnlagenService::ARTEN[$objekt['art']];
@@ -348,7 +350,8 @@ $messgeraet = static function (array $m) use ($objekt, $auswertung, $live): stri
                         <td data-label="Messgerät"><?= $messgeraet($m) ?></td>
                         <td data-label="Misst"><?= View::e(MesspunktService::ROLLEN[$m['rolle']] ?? $m['rolle']) ?>
                             <?= $m['anschluss_name'] ? '<div class="small muted">Abgang ' . View::e($m['anschluss_name']) . '</div>' : '' ?>
-                            <?= $m['schutz_name'] ? '<div class="small muted">hinter ' . View::e($m['schutz_name']) . '</div>' : '' ?></td>
+                            <?= $m['schutz_name'] ? '<div class="small muted">hinter ' . View::e($m['schutz_name']) . '</div>' : '' ?>
+                            <?= !empty($m['inventar_kennung']) ? '<div class="small muted">aus ' . View::e($m['inventar_kennung']) . '</div>' : '' ?></td>
                         <td data-label="Gerät" class="small mono"><?= View::e($m['geraet']) ?> · <?= View::e($m['kanal']) ?></td>
                         <td class="right">
                             <?php if ($darfAendern): ?>
@@ -364,6 +367,69 @@ $messgeraet = static function (array $m) use ($objekt, $auswertung, $live): stri
             </table>
         </div>
     </div>
+    <div>
+    <?php if (!$vorlage && ($einsaetze !== [] || $inventar !== [])): ?>
+    <?php $laufend = array_values(array_filter($einsaetze, static fn ($e) => $e['bis'] === null)); $frueher = array_values(array_filter($einsaetze, static fn ($e) => $e['bis'] !== null)); ?>
+    <div class="card">
+        <div class="card-head"><h2>Aus dem Inventar</h2><span class="hint">Verteiler und Zwischenstecker mit ihren Shellys</span></div>
+        <div class="card-body">
+            <?php if ($laufend === []): ?><p class="small muted">Hier steckt nichts aus dem Inventar.</p><?php endif; ?>
+            <ul class="liste-schlicht einsatz-liste">
+                <?php foreach ($laufend as $e): ?>
+                    <li><strong><?= View::can('datenquellen.view') ? '<a href="/inventar/' . (int) $e['inventar_id'] . '">' . View::e($e['kennung']) . '</a>' : View::e($e['kennung']) ?></strong>
+                        <span class="small"><?= View::e(InventarService::ARTEN[$e['inventar_art']] ?? '') ?><?= $e['anschluss_name'] ? ' · ' . View::e($e['anschluss_name']) : ($e['inventar_art'] === 'zwischenstecker' ? ' · Einspeisung' : '') ?></span>
+                        <div class="small muted">seit <?= View::e(Zeit::anzeige((string) $e['ab'], 'd.m.Y H:i')) ?></div>
+                        <?php if ($darfAendern): ?>
+                            <form method="post" action="/einsatz/<?= (int) $e['id'] ?>/beenden" data-confirm="<?= View::e($e['kennung']) ?> abbauen? Die Shellys messen dann nicht mehr hier.">
+                                <?= Csrf::field() ?><button class="btn btn-sm" type="submit">Abbauen</button></form>
+                        <?php endif; ?>
+                    </li>
+                <?php endforeach; ?>
+            </ul>
+            <?php if ($darfAendern && $inventar !== []): ?>
+                <?php
+                $passend = []; $andere = []; $stecker = [];
+                foreach ($inventar as $i) {
+                    if ($i['art'] === 'zwischenstecker') { $stecker[] = $i; }
+                    elseif ($objekt['art'] === 'verteilung' && trim((string) $i['vorlage_modell']) === trim((string) $objekt['modell'])) { $passend[] = $i; }
+                    elseif ($objekt['art'] === 'verteilung') { $andere[] = $i; }
+                }
+                $option = static fn ($i) => '<option value="' . (int) $i['id'] . '">' . View::e($i['kennung'] . ' – ' . $i['typ']
+                    . ($i['einsatz'] !== null ? ' (jetzt: ' . ($i['einsatz']['anlage_name'] ?? $i['einsatz']['objekt_name']) . ')' : '')) . '</option>';
+                ?>
+                <form method="post" action="/anlagen/<?= $id ?>/einsetzen" class="mt">
+                    <?= Csrf::field() ?>
+                    <div class="field"><label for="inventar_id">Einsetzen</label>
+                        <select id="inventar_id" name="inventar_id" required>
+                            <option value="">– Stück wählen –</option>
+                            <?php if ($passend !== []): ?><optgroup label="Verteiler, gleicher Typ"><?= implode('', array_map($option, $passend)) ?></optgroup><?php endif; ?>
+                            <?php if ($andere !== []): ?><optgroup label="andere Verteiler (Typ wird umgestellt)"><?= implode('', array_map($option, $andere)) ?></optgroup><?php endif; ?>
+                            <?php if ($stecker !== []): ?><optgroup label="Zwischenstecker"><?= implode('', array_map($option, $stecker)) ?></optgroup><?php endif; ?>
+                        </select></div>
+                    <?php if ($stecker !== []): ?>
+                        <div class="field"><label for="einsatz_anschluss">Zwischenstecker steckt an</label>
+                            <select id="einsatz_anschluss" name="anschluss_id">
+                                <option value="0">der Einspeisung</option>
+                                <?php foreach ($anschluesse as $a): ?>
+                                    <?php if ($a['richtung'] === 'abgang'): ?><option value="<?= (int) $a['id'] ?>">Abgang <?= View::e($a['bezeichnung'] . ' (' . $a['typ_name'] . ')') ?></option><?php endif; ?>
+                                <?php endforeach; ?>
+                            </select></div>
+                    <?php endif; ?>
+                    <input type="hidden" name="typ_uebernehmen" value="0">
+                    <?php if ($andere !== []): ?><label class="check"><input type="checkbox" name="typ_uebernehmen" value="1" checked> <span>Typ der Anlage an den Verteiler anpassen, wenn er abweicht</span></label><?php else: ?><input type="hidden" name="typ_uebernehmen" value="1"><?php endif; ?>
+                    <button class="btn btn-primary btn-sm" type="submit">Einsetzen</button>
+                    <p class="help">Ab jetzt messen die Shellys des Stücks hier. Steckt es noch woanders, wird es dort abgezogen.</p>
+                </form>
+            <?php endif; ?>
+            <?php if ($frueher !== []): ?>
+                <h3 class="mt">Früher hier</h3>
+                <ul class="liste-schlicht small">
+                    <?php foreach ($frueher as $e): ?><li><?= View::e($e['kennung']) ?> · <?= View::e(InventarService::zeitraum($e)) ?></li><?php endforeach; ?>
+                </ul>
+            <?php endif; ?>
+        </div>
+    </div>
+    <?php endif; ?>
     <?php if ($darfAendern): ?>
     <div class="card">
         <div class="card-head"><h2>Messgerät einzeichnen</h2></div>
@@ -412,6 +478,7 @@ $messgeraet = static function (array $m) use ($objekt, $auswertung, $live): stri
         </form>
     </div>
     <?php endif; ?>
+    </div>
 </div>
 
 <?php elseif ($reiter === 'kabel'): ?>
