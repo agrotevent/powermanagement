@@ -26,6 +26,11 @@ declare(strict_types=1);
  *   bin/power plan:kacheln [--neu]  Kacheln aller Grundrisse berechnen
  *   bin/power location:liste        Locations im gemeinsamen Repository anzeigen
  *   bin/power location:uebernehmen <schlüssel>
+ *   bin/power verteiler:liste       Verteiler hier und im Repository mit ihrem Stand
+ *   bin/power verteiler:uebernehmen --alle | <typ|inventar> <schlüssel>
+ *                                   --alle: was im Repository neu oder neuer ist
+ *   bin/power verteiler:hochladen --alle | <typ|inventar> <schlüssel>
+ *                                   --alle: was nur hier steht oder hier geändert wurde
  *   bin/power demo:seed [--reset]   Demo-Gelände mit Anlagen, Kabeln und Benutzern anlegen
  *   bin/power wartung               Protokolle aufräumen (täglich per Timer)
  */
@@ -43,6 +48,7 @@ use App\Services\DemoSeed;
 use App\Services\LocationSync;
 use App\Services\PlanTileService;
 use App\Services\SiteService;
+use App\Services\VerteilerSync;
 use App\Support\Config;
 use App\Support\Crypto;
 use App\Support\Database;
@@ -268,12 +274,42 @@ switch ($befehl) {
             $fehler($liste['message']);
         }
         foreach ($liste['locations'] as $l) {
-            $aus(sprintf('%-30s %-10s %d Etage(n), %d Anlage(n)', $l['schluessel'], $l['status'], $l['etagen'], $l['anlagen']));
+            $aus(sprintf('%-30s %-10s %d Etage(n), %d Feststromanschlüsse, %d feste Leitung(en)', $l['schluessel'], $l['status'], $l['etagen'], $l['fest'], $l['fest_leitungen']));
         }
         break;
 
     case 'location:uebernehmen':
         $ergebnis = LocationSync::uebernehmen((string) ($werte[0] ?? ''));
+        $ergebnis['ok'] ? $aus($ergebnis['message']) : $fehler($ergebnis['message']);
+        break;
+
+    case 'verteiler:liste':
+        $holen = LocationSync::holen();
+        if (!$holen['ok']) {
+            $fehler($holen['message']);
+        }
+        $liste = VerteilerSync::liste(VerteilerSync::dort());
+        foreach (['typ' => 'Standard-Verteiler', 'inventar' => 'Inventar'] as $bereich => $name) {
+            $aus($name . ':');
+            foreach ($liste[$bereich] as $e) {
+                $aus(sprintf('  %-30s %-14s %s', $e['schluessel'], $e['status'], $e['titel']));
+            }
+        }
+        $aus(sprintf('Zu übernehmen: %d, hochzuladen: %d (Stand %s)', $liste['uebernehmen'], $liste['hochladen'], $holen['commit']));
+        break;
+
+    case 'verteiler:uebernehmen':
+    case 'verteiler:hochladen':
+        if (!isset($optionen['alle']) && count($werte) < 2) {
+            $fehler('Bitte --alle oder Bereich (typ|inventar) und Schlüssel angeben.');
+        }
+        $auswahl = isset($optionen['alle']) ? null : [[(string) $werte[0], (string) $werte[1]]];
+        if ($auswahl !== null && VerteilerSync::pfad($auswahl[0][0], $auswahl[0][1]) === null) {
+            $fehler('Unbekannter Bereich oder Schlüssel.');
+        }
+        $ergebnis = $befehl === 'verteiler:uebernehmen'
+            ? VerteilerSync::uebernehmen($auswahl, ['typ' => true, 'inventar' => true])
+            : VerteilerSync::hochladen($auswahl, 'Kommandozeile');
         $ergebnis['ok'] ? $aus($ergebnis['message']) : $fehler($ergebnis['message']);
         break;
 

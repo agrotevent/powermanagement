@@ -317,43 +317,11 @@ final class LocationBundle
             $key = self::schluesselSichern('objekte', $id, (string) $o['name'], $o['art'] . '-' . $id);
             $objektKeys[$id] = $key;
 
-            $schutzRef = [];
-            $schutzorgane = [];
-            foreach (SchutzService::liste($id) as $n => $s) {
-                $schutzRef[(int) $s['id']] = 's' . ($n + 1);
-            }
-            foreach (SchutzService::liste($id) as $s) {
-                $schutzorgane[] = [
-                    'ref'            => $schutzRef[(int) $s['id']],
-                    'art'            => $s['art'],
-                    'bezeichnung'    => $s['bezeichnung'],
-                    'nennstrom_a'    => $s['nennstrom_a'] !== null ? (float) $s['nennstrom_a'] : null,
-                    'charakteristik' => $s['charakteristik'],
-                    'fehlerstrom_ma' => $s['fehlerstrom_ma'] !== null ? (int) $s['fehlerstrom_ma'] : null,
-                    'rcd_typ'        => $s['rcd_typ'],
-                    'pole'           => (int) $s['pole'],
-                    'vor'            => $s['vorgeschaltet_id'] !== null ? ($schutzRef[(int) $s['vorgeschaltet_id']] ?? null) : null,
-                    'notizen'        => (string) ($s['notizen'] ?? ''),
-                ];
-            }
-            $anschluesse = [];
-            foreach (Database::select('SELECT * FROM anschluesse WHERE objekt_id = ? ORDER BY richtung, nr', [$id]) as $a) {
-                $typ = $stecker[(int) $a['steckertyp_id']] ?? null;
-                if ($typ === null) {
-                    continue;
-                }
-                $benutzteStecker[(int) $typ['id']] = $typ;
-                $anschlussRef[(int) $a['id']] = $a['richtung'] . ':' . (int) $a['nr'];
-                $anschluesse[] = [
-                    'richtung'    => $a['richtung'],
-                    'stecker'     => $typ['schluessel'],
-                    'nr'          => (int) $a['nr'],
-                    'bezeichnung' => $a['bezeichnung'],
-                    'schutz'      => $a['schutzorgan_id'] !== null ? ($schutzRef[(int) $a['schutzorgan_id']] ?? null) : null,
-                    'phase'       => $a['phase'],
-                    'notizen'     => (string) ($a['notizen'] ?? ''),
-                ];
-            }
+            $belegung = self::belegungLesen($id, $stecker, $benutzteStecker);
+            $schutzRef = $belegung['schutz_ref'];
+            $anschlussRef += $belegung['anschluss_ref'];
+            $schutzorgane = $belegung['schutzorgane'];
+            $anschluesse = $belegung['anschluesse'];
             $messpunkte = [];
             // Nur fest eingebaute Messgeräte – ein Inventar-Verteiler gehört nicht zur Location.
             foreach (Database::select('SELECT * FROM messpunkte WHERE objekt_id = ? AND einsatz_id IS NULL AND gueltig_bis IS NULL ORDER BY id', [$id]) as $m) {
@@ -435,14 +403,117 @@ final class LocationBundle
             'schluessel'   => $siteKey,
             'stand'        => gmdate('c'),
             'von'          => (string) Config::get('app.name', 'PowerManagement'),
-            'steckertypen' => array_values(array_map(static fn ($t) => [
-                'schluessel' => $t['schluessel'], 'name' => $t['name'], 'strom_a' => (float) $t['strom_a'],
-                'phasen' => (int) $t['phasen'], 'spannung_v' => (int) $t['spannung_v'], 'farbe' => $t['farbe'],
-            ], $benutzteStecker)),
+            'steckertypen' => self::steckertypenFuerDatei($benutzteStecker),
             'anlagen'      => $anlagen,
             'leitungen'    => $leitungen,
             'georeferenz'  => (object) $georeferenz,
         ];
+    }
+
+    /**
+     * Schutzorgane und Anschlüsse einer Anlage für eine Datei.
+     *
+     * Verweise gehen nicht über Datenbank-IDs, sondern über s1, s2 … (in der
+     * Reihenfolge des Schutzorgan-Baums) und „richtung:nr“ – so bleiben sie
+     * in jeder Installation gültig. Dieselbe Form für strom.json und für die
+     * Standard-Verteiler im Verteiler-Abgleich.
+     *
+     * @param array<int,array<string,mixed>> $stecker steckertyp_id => Steckertyp
+     * @param array<int,array<string,mixed>> $benutzt sammelt die vorkommenden Steckertypen
+     * @return array{schutzorgane:list<array<string,mixed>>,anschluesse:list<array<string,mixed>>,schutz_ref:array<int,string>,anschluss_ref:array<int,string>}
+     */
+    public static function belegungLesen(int $objektId, array $stecker, array &$benutzt): array
+    {
+        $schutzRef = [];
+        $schutzorgane = [];
+        $liste = SchutzService::liste($objektId);
+        foreach ($liste as $n => $s) {
+            $schutzRef[(int) $s['id']] = 's' . ($n + 1);
+        }
+        foreach ($liste as $s) {
+            $schutzorgane[] = [
+                'ref'            => $schutzRef[(int) $s['id']],
+                'art'            => $s['art'],
+                'bezeichnung'    => $s['bezeichnung'],
+                'nennstrom_a'    => $s['nennstrom_a'] !== null ? (float) $s['nennstrom_a'] : null,
+                'charakteristik' => $s['charakteristik'],
+                'fehlerstrom_ma' => $s['fehlerstrom_ma'] !== null ? (int) $s['fehlerstrom_ma'] : null,
+                'rcd_typ'        => $s['rcd_typ'],
+                'pole'           => (int) $s['pole'],
+                'vor'            => $s['vorgeschaltet_id'] !== null ? ($schutzRef[(int) $s['vorgeschaltet_id']] ?? null) : null,
+                'notizen'        => (string) ($s['notizen'] ?? ''),
+            ];
+        }
+        $anschlussRef = [];
+        $anschluesse = [];
+        foreach (Database::select('SELECT * FROM anschluesse WHERE objekt_id = ? ORDER BY richtung, nr', [$objektId]) as $a) {
+            $typ = $stecker[(int) $a['steckertyp_id']] ?? null;
+            if ($typ === null) {
+                continue;
+            }
+            $benutzt[(int) $typ['id']] = $typ;
+            $anschlussRef[(int) $a['id']] = $a['richtung'] . ':' . (int) $a['nr'];
+            $anschluesse[] = [
+                'richtung'    => $a['richtung'],
+                'stecker'     => $typ['schluessel'],
+                'nr'          => (int) $a['nr'],
+                'bezeichnung' => $a['bezeichnung'],
+                'schutz'      => $a['schutzorgan_id'] !== null ? ($schutzRef[(int) $a['schutzorgan_id']] ?? null) : null,
+                'phase'       => $a['phase'],
+                'notizen'     => (string) ($a['notizen'] ?? ''),
+            ];
+        }
+        return ['schutzorgane' => $schutzorgane, 'anschluesse' => $anschluesse, 'schutz_ref' => $schutzRef, 'anschluss_ref' => $anschlussRef];
+    }
+
+    /**
+     * Die Steckertypen, die in einer Datei vorkommen – damit die andere
+     * Seite fehlende anlegen kann.
+     *
+     * @param array<int,array<string,mixed>> $benutzt
+     * @return list<array<string,mixed>>
+     */
+    public static function steckertypenFuerDatei(array $benutzt): array
+    {
+        return array_values(array_map(static fn ($t) => [
+            'schluessel' => $t['schluessel'], 'name' => $t['name'], 'strom_a' => (float) $t['strom_a'],
+            'phasen' => (int) $t['phasen'], 'spannung_v' => (int) $t['spannung_v'], 'farbe' => $t['farbe'],
+        ], $benutzt));
+    }
+
+    /**
+     * Steckertypen aus einer Datei: vorhandene über ihren Schlüssel finden,
+     * fehlende anlegen.
+     *
+     * @param list<array<string,mixed>> $liste
+     * @return array<string,int> schluessel => steckertyp_id
+     */
+    public static function steckertypenSichern(array $liste): array
+    {
+        $stecker = [];
+        foreach (AnlagenService::steckertypen() as $t) {
+            $stecker[(string) $t['schluessel']] = (int) $t['id'];
+        }
+        foreach ($liste as $t) {
+            $k = (string) ($t['schluessel'] ?? '');
+            if ($k === '' || isset($stecker[$k])) {
+                continue;
+            }
+            // „CEE63“ aus einer von Hand geschriebenen Datei ist hier „cee63“ –
+            // ein zweites Anlegen scheiterte am eindeutigen Schlüssel.
+            $sauber = self::schluessel($k, 'stecker');
+            if (isset($stecker[$sauber])) {
+                $stecker[$k] = $stecker[$sauber];
+                continue;
+            }
+            $stecker[$k] = $stecker[$sauber] = Database::insert('steckertypen', [
+                'schluessel' => $sauber, 'name' => (string) ($t['name'] ?? $k),
+                'strom_a' => (float) ($t['strom_a'] ?? 16), 'phasen' => (int) ($t['phasen'] ?? 3) === 1 ? 1 : 3,
+                'spannung_v' => (int) ($t['spannung_v'] ?? 400), 'farbe' => (string) ($t['farbe'] ?? '#64748b'),
+                'reihenfolge' => 500, 'ist_standard' => 0, 'created_at' => gmdate('c'),
+            ]);
+        }
+        return $stecker;
     }
 
     /**
@@ -502,23 +573,7 @@ final class LocationBundle
         if ((int) ($daten['format'] ?? 0) > self::FORMAT_STROM) {
             return ['ok' => false, 'message' => 'Die Feststromanschlüsse stammen aus einer neueren PowerManagement-Fassung.'];
         }
-        // Steckertypen, die hier fehlen, anlegen.
-        $stecker = [];
-        foreach (AnlagenService::steckertypen() as $t) {
-            $stecker[(string) $t['schluessel']] = (int) $t['id'];
-        }
-        foreach ((array) ($daten['steckertypen'] ?? []) as $t) {
-            $k = (string) ($t['schluessel'] ?? '');
-            if ($k === '' || isset($stecker[$k])) {
-                continue;
-            }
-            $stecker[$k] = Database::insert('steckertypen', [
-                'schluessel' => self::schluessel($k, 'stecker'), 'name' => (string) ($t['name'] ?? $k),
-                'strom_a' => (float) ($t['strom_a'] ?? 16), 'phasen' => (int) ($t['phasen'] ?? 3) === 1 ? 1 : 3,
-                'spannung_v' => (int) ($t['spannung_v'] ?? 400), 'farbe' => (string) ($t['farbe'] ?? '#64748b'),
-                'reihenfolge' => 500, 'ist_standard' => 0, 'created_at' => gmdate('c'),
-            ]);
-        }
+        $stecker = self::steckertypenSichern((array) ($daten['steckertypen'] ?? []));
 
         $etagen = [];
         foreach (Database::select('SELECT id, sync_key FROM floors WHERE site_id = ?', [$siteId]) as $e) {
@@ -545,7 +600,9 @@ final class LocationBundle
                 continue;
             }
             $floorId = isset($a['etage']) && $a['etage'] !== null ? ($etagen[(string) $a['etage']] ?? null) : null;
-            $vorhanden = Database::first('SELECT id FROM objekte WHERE sync_key = ?', [$key]);
+            // Katalog-Typen führen ihre Schlüssel für den Verteiler-Abgleich –
+            // ein Feststromanschluss mit demselben Schlüssel ist etwas anderes.
+            $vorhanden = Database::first('SELECT id FROM objekte WHERE sync_key = ? AND ist_vorlage = 0', [$key]);
             $ergebnis = AnlagenService::speichern($vorhanden !== null ? (int) $vorhanden['id'] : null, [
                 'art' => $a['art'], 'name' => (string) ($a['name'] ?? $key), 'kennung' => (string) ($a['kennung'] ?? ''),
                 'site_id' => $siteId, 'floor_id' => $floorId,
@@ -630,7 +687,7 @@ final class LocationBundle
      * @param array<string,int> $stecker schluessel => id
      * @return array<string,int> „richtung:nr“ => neue anschluss_id
      */
-    private static function belegungErsetzen(int $objektId, array $a, array $stecker): array
+    public static function belegungErsetzen(int $objektId, array $a, array $stecker): array
     {
         $alt = [];
         foreach (Database::select('SELECT id, richtung, nr FROM anschluesse WHERE objekt_id = ?', [$objektId]) as $r) {

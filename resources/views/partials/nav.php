@@ -24,6 +24,7 @@ $groups = [
         ['/anlagen/baum',         'Verteilbaum',         null, 'anlagen.view'],
         ['/anlagen/katalog',      'Standard-Verteiler',  null, 'anlagen.view'],
         ['/inventar',             'Inventar',            null, 'datenquellen.view'],
+        ['/verteiler-abgleich',   'Verteiler-Abgleich',  null, 'inventory.pull'],
         ['/stecker',              'Steckverbinder',      null, 'stecker.manage'],
     ],
     'Auswertung' => [

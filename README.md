@@ -65,6 +65,11 @@ Mehr Bilder in der [Bedienungsanleitung](docs/bedienung.md).
   Die **Feststromanschlüsse** der Location und die **fest verlegten Kabel**
   dazwischen liegen als `strom.json` neben der `location.json`. Mobile
   Anlagen und Kabel bleiben in der Installation.
+- **Verteiler-Abgleich** über dasselbe Repository: Standard-Verteiler und
+  Inventar (Verteiler und Zwischenstecker mit ihren Shellys), eine Datei je
+  Verteiler. Je Verteiler steht, ob er hier, dort oder auf beiden Seiten
+  geändert wurde; „Alle übernehmen/hochladen“ überschreibt nie eine
+  Änderung der anderen Seite.
 
 ## Schnell ausprobieren (Demo-Modus)
 
@@ -121,6 +126,7 @@ bin/power user:add <name> <rolle> [passwort]   ·   bin/power user:password <nam
 bin/power titel "Titel" [untertitel] [kürzel]
 bin/power plan:kacheln [--neu]
 bin/power location:liste   ·   bin/power location:uebernehmen <schlüssel>
+bin/power verteiler:liste   ·   bin/power verteiler:uebernehmen|verteiler:hochladen --alle | <typ|inventar> <schlüssel>
 bin/power demo:seed [--reset]
 bin/power wartung
 ```
@@ -151,7 +157,7 @@ resources/views/          Vorlagen (PHP)
 src/Auth/                 Anmeldung, Rechte, Freigaben/Zeitfenster (Zugriff)
 src/Controllers/          Seiten
 src/Messung/              InfluxDB, MQTT, Modbus TCP, ComAp, VRM, Sammler, Steuerung, Demo
-src/Services/             Anlagen, Schutzorgane, Leitungen, Messpunkte, Inventar, Aufbau, Live, Bereiche, Material, Standorte, Location-Abgleich
+src/Services/             Anlagen, Schutzorgane, Leitungen, Messpunkte, Inventar, Aufbau, Live, Bereiche, Material, Standorte, Location- und Verteiler-Abgleich
 src/Support/              Router, Datenbank, Sitzung, CSRF, Verschlüsselung …
 storage/                  Datenbank, Grundrisse, Kacheln, Zwischenspeicher, Protokolle
 tests/                    Prüfskripte

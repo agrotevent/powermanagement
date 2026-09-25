@@ -446,7 +446,56 @@ PDF (wird serverseitig gerastert und gekachelt), PNG/JPG oder SVG.
 ![Location-Abgleich mit dem gemeinsamen Repository](bilder/location.png)
 
 Adresse und Token des Repositorys stehen unter **System → Einstellungen →
-Location-Abgleich**.
+Location- und Verteiler-Abgleich**.
+
+## Verteiler-Abgleich
+
+Was an Verteilern angelegt ist, gleicht **Verteiler-Abgleich** (*Anlagen →
+Verteiler-Abgleich*) über dasselbe Repository ab wie die Locations. So
+kennen alle Installationen dieselben Typen und dasselbe Lager:
+
+- **Standard-Verteiler** aus dem Katalog mit Nennwerten, Anschlüssen und
+  Sicherungen – je Typ eine Datei `verteiler/typen/<schlüssel>.json`.
+- **Inventar**: Verteiler und Zwischenstecker mit ihren Shellys – je Stück
+  eine Datei `verteiler/inventar/<schlüssel>.json`. Der Schlüssel kommt aus
+  der Inventarnummer (PD63-07 → `pd63-07`), ein Stück verweist über den
+  Schlüssel auf seinen Typ.
+
+**Nicht übertragen** wird, wo ein Stück gerade eingesetzt ist, und welche
+Anlagen aus einem Typ entstanden sind. Das gehört zur Veranstaltung und
+bleibt in der Installation, die den Aufbau führt.
+
+*Repository abfragen* zeigt je Verteiler, wie er hier und dort steht –
+verglichen mit dem Stand beim letzten Abgleich:
+
+| Stand | heißt | Knopf |
+|-------|-------|-------|
+| aktuell | hier und dort gleich | – |
+| nur im Repository | eine andere Installation hat ihn angelegt | Übernehmen |
+| nur hier | noch nie hochgeladen | Hochladen |
+| dort neuer | dort geändert, hier nicht (dazu: was anders ist, wann, von wem) | Übernehmen |
+| hier geändert | hier geändert, dort nicht | Hochladen |
+| hier und dort geändert | beide Seiten haben geändert | Übernehmen *oder* Hochladen – der gewählte Stand gilt |
+| dort entfernt | wurde aus dem Repository genommen | Hochladen (wieder hinein) |
+
+**Alle übernehmen** und **Alle hochladen** nehmen nur die eindeutigen Fälle
+und überschreiben nie eine Änderung der anderen Seite. Ein Stück, dessen Typ
+es hier noch nicht gibt, bringt ihn beim Übernehmen mit; beim Hochladen geht
+der Typ mit, wenn er dort noch fehlt. Tauscht das Lager einen Shelly an
+einem Stück, das hier gerade eingesetzt ist, misst nach dem Übernehmen der
+neue Shelly an der Anlage; der alte bleibt als früheres Messgerät in der
+Statistik. Steckt ein Shelly aus der Datei hier schon in einem anderen
+Stück, wird das Stück nicht übernommen und die Meldung sagt, wo.
+
+Beim Übernehmen wird hier nichts gelöscht. Ein ausgemustertes Stück nimmt
+**Entfernen** aus dem Repository; hier bleibt es stehen, bis es jemand
+löscht. Die anderen Installationen sehen es danach als „dort entfernt“.
+
+Übernehmen darf, wer *Locations und Verteiler übernehmen* hat **und** den
+Katalog bzw. das Inventar pflegen darf. Hochladen und Entfernen braucht
+*… ins Repository hochladen*. Von der Kommandozeile:
+`bin/power verteiler:liste`, `bin/power verteiler:uebernehmen --alle`,
+`bin/power verteiler:hochladen --alle`.
 
 ## Benutzer
 

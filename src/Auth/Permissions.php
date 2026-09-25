@@ -43,9 +43,9 @@ final class Permissions
             'steuern'            => 'Geräte schalten (Ein/Aus, Start/Stopp) – nur mit Schalt-Freigabe',
             'steuern.protokoll'  => 'Protokoll aller Schaltvorgänge ansehen',
         ],
-        'Location-Abgleich' => [
-            'inventory.pull'     => 'Locations aus dem gemeinsamen Repository übernehmen',
-            'inventory.push'     => 'Locations und Feststromanschlüsse ins Repository hochladen',
+        'Location- und Verteiler-Abgleich' => [
+            'inventory.pull'     => 'Locations und Verteiler aus dem gemeinsamen Repository übernehmen (Verteiler: nur mit dem Recht, Katalog bzw. Inventar zu pflegen)',
+            'inventory.push'     => 'Locations, Feststromanschlüsse und Verteiler ins Repository hochladen und dort entfernen',
         ],
         'System' => [
             'system.users.manage'=> 'Benutzer, Rollen und Freigaben verwalten',

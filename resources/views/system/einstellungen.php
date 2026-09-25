@@ -65,7 +65,7 @@ $feld = static function (string $schluessel, string $typ = 'text', string $platz
 <?php if (View::can('inventory.push')): ?>
 <form method="post" action="/system/einstellungen/location" class="card mt">
     <?= Csrf::field() ?>
-    <div class="card-head"><h2>Location-Abgleich</h2><span class="hint">dasselbe Repository wie in MasterAdmin</span></div>
+    <div class="card-head"><h2>Location- und Verteiler-Abgleich</h2><span class="hint">dasselbe Repository wie in MasterAdmin</span></div>
     <div class="card-body grid grid-2">
         <div>
             <div class="field"><label for="repo_url">Adresse des Repositories</label><input id="repo_url" name="repo_url" value="<?= View::e((string) ($werte['inventory.repo_url'] ?? Config::get('inventory.repo_url', ''))) ?>" placeholder="https://github.com/…/masteradmin-locations.git"></div>
