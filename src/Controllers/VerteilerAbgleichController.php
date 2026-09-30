@@ -27,7 +27,9 @@ final class VerteilerAbgleichController extends Controller
         return [
             // wie beim Bearbeiten eines Standard-Verteilers (AnlagenController)
             'typ'      => Auth::can('stecker.manage') || (Auth::can('anlagen.manage') && Zugriff::alles()),
-            'inventar' => Auth::can('inventar.manage'),
+            // Übernommene Stücke bringen ihre Shellys mit – das darf nur, wer
+            // Geräte ohne Einschränkung zuordnen darf.
+            'inventar' => Auth::can('inventar.manage') && Zugriff::geraetMitGeschichte(),
         ];
     }
 

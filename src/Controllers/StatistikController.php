@@ -3,12 +3,14 @@ declare(strict_types=1);
 
 namespace App\Controllers;
 
+use App\Auth\Auth;
 use App\Auth\Zugriff;
 use App\Messung\Messdaten;
 use App\Services\AnlagenService;
 use App\Services\MesspunktService;
 use App\Support\Audit;
 use App\Support\Config;
+use App\Support\Logger;
 use App\Support\Request;
 use App\Support\Zeit;
 use App\Support\Zeitraum;
@@ -111,6 +113,12 @@ final class StatistikController extends Controller
         $fehler = null;
         $reihe = Messdaten::reihe($messung, (string) $m['geraet'], (string) $m['kanal'], $feld, $phasen, $von, $bis,
             MesspunktService::fenster($m, $m['objekt']), null, $request->str('agg', 'mean'), $fehler);
+        if ($fehler !== null && !Auth::can('datenquellen.manage')) {
+            // Die Fehlermeldung der InfluxDB zeigt Aufbau und Inhalt der
+            // Abfrage – das gehört ins Protokoll, nicht zu jedem Betrachter.
+            Logger::info('Statistik: ' . $fehler);
+            $fehler = 'Die Messdaten ließen sich gerade nicht abfragen.';
+        }
         $this->json([
             'ok'      => $fehler === null,
             'message' => $fehler,
@@ -168,8 +176,17 @@ final class StatistikController extends Controller
         echo "\xEF\xBB\xBF" . implode("\r\n", $zeilen) . "\r\n";
     }
 
-    private static function csvFeld(string $wert): string
+    /**
+     * Ein Textfeld für CSV. Beginnt es mit = + - @ (oder Tab/CR), liest eine
+     * Tabellenkalkulation es als Formel – ein Anlagen- oder Gerätename wie
+     * „=HYPERLINK(…)“ würde beim Öffnen ausgeführt. Ein vorangestelltes '
+     * macht es wieder zu Text.
+     */
+    public static function csvFeld(string $wert): string
     {
+        if ($wert !== '' && str_contains("=+-@\t\r", $wert[0]) && !is_numeric($wert)) {
+            $wert = "'" . $wert;
+        }
         return '"' . str_replace('"', '""', $wert) . '"';
     }
 

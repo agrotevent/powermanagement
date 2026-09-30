@@ -33,6 +33,12 @@ use App\Support\Programm;
  */
 final class PdfRasterService
 {
+    /** Wie lange poppler für einen Aufruf höchstens brauchen darf (Sekunden). */
+    private const ZEITGRENZE = 120;
+
+    /** Wie viel von stdout höchstens gelesen wird. */
+    private const HOECHSTENS = 1_048_576;
+
     /**
      * Lange Kante des gerasterten Plans in Pixeln.
      *
@@ -279,11 +285,57 @@ final class PdfRasterService
             return ['ok' => false, 'ausgabe' => '', 'message' => 'Programm ließ sich nicht starten: ' . $argumente[0]];
         }
 
-        $ausgabe = (string) stream_get_contents($rohre[1]);
-        $fehler  = (string) stream_get_contents($rohre[2]);
+        /*
+         * Beide Ausgaben gleichzeitig leeren, mit Zeitgrenze. Vorher wurde
+         * erst stdout ganz gelesen, dann stderr: schreibt poppler bei einem
+         * kaputten PDF Megabytes an Warnungen nach stderr, ist dessen Puffer
+         * voll, poppler wartet – und PHP wartet auf stdout. Der Prozess hing
+         * für immer, und mit ihm ein PHP-Arbeiter (max_execution_time zählt
+         * Rechenzeit, Warten zählt nicht). Zehn solche Uploads, und die
+         * Oberfläche stand.
+         */
+        stream_set_blocking($rohre[1], false);
+        stream_set_blocking($rohre[2], false);
+        $ausgabe = '';
+        $fehler  = '';
+        $ende    = microtime(true) + self::ZEITGRENZE;
+        $anhaengen = static function ($rohr, string &$ziel, int $hoechstens): void {
+            $teil = stream_get_contents($rohr);
+            if (is_string($teil) && $teil !== '' && strlen($ziel) < $hoechstens) {
+                $ziel .= substr($teil, 0, $hoechstens - strlen($ziel));
+            }
+        };
+        while (true) {
+            $lesen = array_values(array_filter([$rohre[1], $rohre[2]], static fn ($r): bool => !feof($r)));
+            if ($lesen !== []) {
+                $schreiben = $ausnahmen = null;
+                @stream_select($lesen, $schreiben, $ausnahmen, 0, 200_000);
+            }
+            $anhaengen($rohre[1], $ausgabe, self::HOECHSTENS);
+            $anhaengen($rohre[2], $fehler, 65_536);
+            $stand = proc_get_status($prozess);
+            if (!$stand['running']) {
+                // Nur hier steht der Rückgabewert sicher (proc_close liefert
+                // danach bis PHP 8.2 nur noch -1).
+                $rc = (int) $stand['exitcode'];
+                break;
+            }
+            if (microtime(true) > $ende) {
+                proc_terminate($prozess, 9);
+                fclose($rohre[1]);
+                fclose($rohre[2]);
+                proc_close($prozess);
+                Logger::info('PDF-Rastern abgebrochen: ' . basename((string) $argumente[0]) . ' brauchte länger als ' . self::ZEITGRENZE . ' s.');
+                return ['ok' => false, 'ausgabe' => '', 'message' => 'Das PDF ließ sich nicht in ' . self::ZEITGRENZE . ' Sekunden verarbeiten.'];
+            }
+        }
+        stream_set_blocking($rohre[1], true);
+        stream_set_blocking($rohre[2], true);
+        $anhaengen($rohre[1], $ausgabe, self::HOECHSTENS);
+        $anhaengen($rohre[2], $fehler, 65_536);
         fclose($rohre[1]);
         fclose($rohre[2]);
-        $rc = proc_close($prozess);
+        proc_close($prozess);
 
         if ($rc !== 0) {
             Logger::info('PDF-Rastern fehlgeschlagen (rc=' . $rc . '): ' . trim($fehler));

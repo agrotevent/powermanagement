@@ -65,6 +65,12 @@ final class LocationBundle
         return $wert !== '' ? substr($wert, 0, 64) : $ersatz;
     }
 
+    /** Sieht der Text aus wie ein Schlüssel – nur a–z, 0–9 und Bindestriche? */
+    public static function schluesselGueltig(string $schluessel): bool
+    {
+        return $schluessel !== '' && self::schluessel($schluessel, '') === $schluessel;
+    }
+
     /** Schlüssel einer Zeile holen oder einmalig vergeben und festschreiben. */
     public static function schluesselSichern(string $tabelle, int $id, string $name, string $ersatz = ''): string
     {
@@ -73,7 +79,9 @@ final class LocationBundle
         }
         $zeile = Database::first('SELECT sync_key FROM ' . $tabelle . ' WHERE id = ?', [$id]);
         $vorhanden = (string) ($zeile['sync_key'] ?? '');
-        if ($vorhanden !== '') {
+        // Ein Schlüssel wird zum Ordner- oder Dateinamen im Repository: was
+        // nicht wie ein Schlüssel aussieht („../..“), wird neu vergeben.
+        if ($vorhanden !== '' && self::schluesselGueltig($vorhanden)) {
             return $vorhanden;
         }
         $basis = self::schluessel($name, $ersatz !== '' ? $ersatz : 'eintrag-' . $id);
@@ -104,6 +112,17 @@ final class LocationBundle
         $schluessel = (string) ($daten['schluessel'] ?? '');
         if ($schluessel === '') {
             return ['ok' => false, 'message' => 'Der Location fehlt der Schlüssel.', 'site_id' => 0];
+        }
+        // Die Schlüssel werden später Ordner- und Dateinamen beim Hochladen –
+        // was von außen kommt, muss wie ein Schlüssel aussehen.
+        if (!self::schluesselGueltig($schluessel)) {
+            return ['ok' => false, 'message' => 'Der Schlüssel der Location ist ungültig.', 'site_id' => 0];
+        }
+        foreach ((array) ($daten['etagen'] ?? []) as $etage) {
+            $etageKey = (string) ($etage['schluessel'] ?? '');
+            if ($etageKey !== '' && !self::schluesselGueltig($etageKey)) {
+                return ['ok' => false, 'message' => 'Der Schlüssel einer Etage ist ungültig: ' . mb_substr($etageKey, 0, 40), 'site_id' => 0];
+            }
         }
 
         $vorhanden = Database::first('SELECT id FROM sites WHERE sync_key = ?', [$schluessel]);
@@ -509,7 +528,10 @@ final class LocationBundle
             $stecker[$k] = $stecker[$sauber] = Database::insert('steckertypen', [
                 'schluessel' => $sauber, 'name' => (string) ($t['name'] ?? $k),
                 'strom_a' => (float) ($t['strom_a'] ?? 16), 'phasen' => (int) ($t['phasen'] ?? 3) === 1 ? 1 : 3,
-                'spannung_v' => (int) ($t['spannung_v'] ?? 400), 'farbe' => (string) ($t['farbe'] ?? '#64748b'),
+                'spannung_v' => (int) ($t['spannung_v'] ?? 400),
+                // Die Farbe landet in style-Attributen – nur #rrggbb, sonst
+                // könnte eine Datei dort CSS unterbringen (etwa url(…)).
+                'farbe' => preg_match('/^#[0-9a-fA-F]{6}$/', (string) ($t['farbe'] ?? '')) === 1 ? (string) $t['farbe'] : '#64748b',
                 'reihenfolge' => 500, 'ist_standard' => 0, 'created_at' => gmdate('c'),
             ]);
         }

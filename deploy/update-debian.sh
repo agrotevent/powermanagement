@@ -124,6 +124,14 @@ fi
 schritt() { printf '\n\033[1;34m==> %s\033[0m\n' "$1"; }
 hinweis() { printf '\033[1;33m    %s\033[0m\n' "$1" >&2; }
 
+# Ein Verzeichnis in storage/ anlegen – als Anwendungsbenutzer, nicht als
+# root (siehe install-debian.sh: ein Verweis in storage/ soll root nicht dazu
+# bringen, dessen Ziel der Anwendung zu übereignen).
+app_verzeichnis() {
+    as_app mkdir -p -- "$1"
+    as_app chmod "${2:-750}" -- "$1"
+}
+
 as_app() {
     (cd "$ZIEL" && runuser -u "$APP_USER" -- "$@")
 }
@@ -358,7 +366,7 @@ if [[ "$CODE_NEU" == "ja" ]]; then
     schritt "Sicherung anlegen"
     BACKUP_DIR="$ZIEL/storage/backups"
     STEMPEL="$(date +%Y%m%d-%H%M%S)"
-    install -d -o "$APP_USER" -g "$APP_USER" -m 750 "$BACKUP_DIR"
+    app_verzeichnis "$BACKUP_DIR"
     TREIBER="$(as_app php -r '$c = require $argv[1]; echo $c["database"]["driver"] ?? "sqlite";' "$ZIEL/config/config.php" 2>/dev/null || echo sqlite)"
 
     ZUM_SICHERN=()
@@ -368,7 +376,7 @@ if [[ "$CODE_NEU" == "ja" ]]; then
         # ein einfaches cp könnte eine halb geschriebene Seite erwischen.
         SCHNAPPSCHUSS_DIR="$BACKUP_DIR/.schnappschuss-$STEMPEL"
         SCHNAPPSCHUSS="$SCHNAPPSCHUSS_DIR/database.sqlite"
-        install -d -o "$APP_USER" -g "$APP_USER" -m 700 "$SCHNAPPSCHUSS_DIR"
+        app_verzeichnis "$SCHNAPPSCHUSS_DIR" 700
         as_app php -r '
             $pdo = new PDO("sqlite:" . $argv[1]);
             $pdo->exec("VACUUM INTO " . $pdo->quote($argv[2]));
@@ -379,7 +387,7 @@ if [[ "$CODE_NEU" == "ja" ]]; then
     fi
     SICHERUNG="$BACKUP_DIR/vor-update-$STEMPEL.tar.gz"
     as_app tar czf "$SICHERUNG" -C "$ZIEL" config/config.php ${ZUM_SICHERN[@]+"${ZUM_SICHERN[@]}"}
-    chmod 600 "$SICHERUNG"
+    as_app chmod 600 -- "$SICHERUNG"
     echo "    $SICHERUNG ($(du -h "$SICHERUNG" | cut -f1))"
 
     # Ältere Sicherungen aufräumen
@@ -452,9 +460,9 @@ if [[ "$CODE_NEU" == "ja" ]]; then
     find "$ZIEL" -path "$ZIEL/storage" -prune -o ! -path "$ZIEL/config/config.php" \
         -exec chown root:root {} + -exec chmod go+rX,go-w {} +
     for d in logs plans demo cache sessions backups; do
-        install -d -o "$APP_USER" -g "$APP_USER" -m 750 "$ZIEL/storage/$d"
+        app_verzeichnis "$ZIEL/storage/$d"
     done
-    chown -R "$APP_USER:$APP_USER" "$ZIEL/storage"
+    chown -R -P "$APP_USER:$APP_USER" "$ZIEL/storage"
     chown "root:$APP_USER" "$ZIEL/config/config.php"
     chmod 640 "$ZIEL/config/config.php"
 

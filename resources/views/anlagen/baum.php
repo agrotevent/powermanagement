@@ -36,7 +36,7 @@ $knoten = static function (array $k) use (&$knoten, $live, $sichtbar): string {
 ?>
 <div class="toolbar-zeile">
     <form method="get" action="/anlagen/baum" class="inline-form">
-        <select name="standort" onchange="this.form.submit()" aria-label="Standort">
+        <select name="standort" data-absenden aria-label="Standort">
             <?php foreach ($standorte as $s): ?>
                 <option value="<?= (int) $s['id'] ?>"<?= (int) $siteId === (int) $s['id'] ? ' selected' : '' ?>><?= View::e($s['name']) ?></option>
             <?php endforeach; ?>

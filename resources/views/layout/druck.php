@@ -8,6 +8,6 @@
 </head>
 <body class="druckseite">
 <?= $content ?>
-<script>window.addEventListener('load', function () { if (location.hash !== '#ohne-druck') { window.print(); } });</script>
+<script nonce="<?= \App\Support\View::e(\App\Support\View::nonce()) ?>">window.addEventListener('load', function () { if (location.hash !== '#ohne-druck') { window.print(); } });</script>
 </body>
 </html>

@@ -182,10 +182,16 @@ final class Influx
         return sprintf('time >= %dms AND time < %dms', $vonSek * 1000, $bisSek * 1000);
     }
 
-    /** Tag/Feldschlüssel für Line Protocol escapen. */
+    /**
+     * Tag/Feldschlüssel für Line Protocol escapen.
+     *
+     * Ein Zeilenumbruch beendet im Line Protocol den Punkt – ein Name mit
+     * Umbruch schriebe sonst beliebige weitere Punkte (etwa Messwerte eines
+     * fremden Geräts). Umbrüche werden wie in Node-RED zu Leerzeichen.
+     */
     public static function lpSchluessel(string $wert): string
     {
-        return str_replace([',', ' ', '='], ['\\,', '\\ ', '\\='], $wert);
+        return str_replace([',', ' ', '='], ['\\,', '\\ ', '\\='], str_replace(["\r", "\n"], ' ', $wert));
     }
 
     /**
@@ -234,7 +240,7 @@ final class Influx
                 }
                 $teile[] = self::lpSchluessel((string) $schluessel) . '=' . $text;
             } elseif (is_string($wert) && $wert !== '') {
-                $teile[] = self::lpSchluessel((string) $schluessel) . '="' . str_replace(['\\', '"'], ['\\\\', '\\"'], $wert) . '"';
+                $teile[] = self::lpSchluessel((string) $schluessel) . '="' . str_replace(['\\', '"', "\r", "\n"], ['\\\\', '\\"', ' ', ' '], $wert) . '"';
             }
         }
         return implode(',', $teile);

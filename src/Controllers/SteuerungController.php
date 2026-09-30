@@ -21,7 +21,7 @@ final class SteuerungController extends Controller
             $request->str('kanal'),
             $request->int('objekt') ?: null
         );
-        $this->antwort($request, $ergebnis, $_SERVER['HTTP_REFERER'] ?? '/dashboard');
+        $this->antwort($request, $ergebnis, \App\Support\Response::zurueckZiel('/dashboard'));
     }
 
     public function protokoll(Request $request): void

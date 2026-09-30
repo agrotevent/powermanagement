@@ -15,7 +15,22 @@ keine Build-Schritte. JS-Bibliotheken liegen fertig unter `public/assets/vendor`
   über `Messdaten` (schneidet mit `Zugriff::begrenzen()` zu). Wer schaltet,
   geht über `Steuerung::ausfuehren()`. Eine zweite Tür daran vorbei gibt es
   nicht.
-- **POST nur mit CSRF-Token** (`Csrf::field()`). Der Router prüft es.
+- **POST nur mit CSRF-Token** (`Csrf::field()`). Der Router prüft es – nur
+  aus dem Formular (`$_POST`), nie aus der Adresse.
+- **Sehen ist nicht ändern.** Wer etwas an einem Standort ändert (Anlagen,
+  Kabel, Etagen, Plan, Maßstab), braucht eine Freigabe mit *bearbeiten*:
+  `Zugriff::darfAufStandortAnlegen()`, `darfStandortAendern()`,
+  `darfBearbeiten()`. `siehtStandort()` genügt nur zum Lesen. IDs aus der
+  Anfrage (auch indirekte: Etage → Standort, Anschluss → Anlage) einzeln
+  prüfen. Rechte und Freigaben vergibt nur, wer sie selbst hat
+  (`BenutzerService::darfVergeben()`).
+- **Kein Inline-JavaScript.** Die Content-Security-Policy
+  (`Response::sicherheitsRichtlinie()`) lässt nur Skripte aus Dateien zu –
+  kein `onclick="…"`, kein `javascript:`. Verhalten über `data-`-Attribute
+  in `app.js`; ein unvermeidbares `<script>` bekommt `nonce="<?= View::e(View::nonce()) ?>"`.
+  Texte aus Antworten per `textContent`, nie per `innerHTML`.
+- **Weiterleitungen** nur auf eigene Pfade: `Response::sichererPfad()`,
+  `Response::zurueckZiel()` statt `$_SERVER['HTTP_REFERER']` oder `next`.
 - **Zeiten** werden in UTC gespeichert (ISO 8601) und in der Zeitzone der
   Installation angezeigt (`App\Support\Zeit`).
 - **Messwerte** kommen im normalisierten Format (`docs/datenquellen.md`).
@@ -58,7 +73,8 @@ bash -n deploy/*.sh && shellcheck -S warning -e SC2016,SC1111 deploy/*.sh
 | `tests/mqtt.php` | MQTT-Client, Shelly schalten (Gen1/Gen2), Sammler → MQTT (eigener Mosquitto) |
 | `tests/influx.php` | InfluxQL: Livewerte, Verläufe, Datenfenster, Energie je Tag (eigene InfluxDB 1.x) |
 | `tests/cloud.php` | ComAp WebSupervisor, Victron VRM (Http-Attrappe) |
-| `tests/web.php` | alle Seiten ohne PHP-Meldung, 403/404, CSRF, Schalt-Ablehnung (eigener PHP-Server) |
+| `tests/web.php` | alle Seiten ohne PHP-Meldung, 403/404, CSRF, Schalt-Ablehnung, Weiterleitungen, Sitzung nach Kennwortwechsel, Benutzerverwaltung ohne Administration, Ändern nur mit „bearbeiten“ (eigener PHP-Server) |
+| `tests/sicherheit.php` | Rechte vergeben, Anmelde-Bremse ohne Kontoerkennung, Geräte zuordnen, Kanal-Freigaben beim Schalten, Schlüssel aus dem Repository, Line Protocol, CSV, Adressen, app.key, PDF-Werkzeuge |
 | `tests/nodered-funktionen.mjs` | Node-RED-Funktionen, `flows.json` passt zu den Quellen |
 
 Prüfskripte legen eigene Daten mit eindeutiger Kennung an und löschen sie am

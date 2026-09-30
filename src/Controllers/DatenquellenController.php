@@ -46,7 +46,7 @@ final class DatenquellenController extends Controller
     {
         $ergebnis = Datenquellen::speichern($request->int('id') ?: null, $_POST);
         $ergebnis['ok'] ? Flash::success($ergebnis['message']) : Flash::error($ergebnis['message']);
-        $this->redirect($ergebnis['ok'] ? '/datenquellen' : ($_SERVER['HTTP_REFERER'] ?? '/datenquellen'));
+        $this->redirect($ergebnis['ok'] ? '/datenquellen' : \App\Support\Response::zurueckZiel('/datenquellen'));
     }
 
     public function loeschen(Request $request): void
@@ -131,7 +131,7 @@ final class DatenquellenController extends Controller
     {
         $ergebnis = Profile::speichern($request->int('id') ?: null, $_POST);
         $ergebnis['ok'] ? Flash::success($ergebnis['message']) : Flash::error($ergebnis['message']);
-        $this->redirect($ergebnis['ok'] ? '/datenquellen/profile/' . (int) $ergebnis['id'] : ($_SERVER['HTTP_REFERER'] ?? '/datenquellen/profile'));
+        $this->redirect($ergebnis['ok'] ? '/datenquellen/profile/' . (int) $ergebnis['id'] : \App\Support\Response::zurueckZiel('/datenquellen/profile'));
     }
 
     public function profilLoeschen(Request $request): void

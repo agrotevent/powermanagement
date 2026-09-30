@@ -20,7 +20,7 @@ usort($objekte, static fn ($a, $b) => [$rang[$a['art']] ?? 9, $a['name']] <=> [$
                 <div class="field">
                     <label for="site_id">Standort</label>
                     <?php if ($neu): ?>
-                        <select id="site_id" name="site_id" onchange="location.search = '?standort=' + this.value;">
+                        <select id="site_id" name="site_id" data-neu-laden="standort">
                             <?php foreach ($standorte as $s): ?>
                                 <option value="<?= (int) $s['id'] ?>"<?= (int) $s['id'] === (int) $bereich['site_id'] ? ' selected' : '' ?>><?= View::e($s['name']) ?></option>
                             <?php endforeach; ?>

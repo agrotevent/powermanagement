@@ -45,6 +45,38 @@ final class KarteController extends Controller
         return $etage;
     }
 
+    /**
+     * Darf der Benutzer eine Leitung auf diesem Standort anlegen, ändern oder
+     * löschen? Das Recht „Kabel zeichnen“ prüft die Route; dazu braucht es
+     * eine Freigabe mit „bearbeiten“ – für den Standort oder für eine Anlage
+     * an einem der Kabelenden. Den Standort nur zu sehen genügt nicht.
+     *
+     * @param list<mixed> $enden Anlagen-IDs an den Enden
+     */
+    private function darfLeitung(int $siteId, array $enden): bool
+    {
+        if (Zugriff::darfStandortAendern($siteId)) {
+            return true;
+        }
+        foreach ($enden as $id) {
+            if ($id !== null && (int) $id > 0 && ($o = AnlagenService::find((int) $id)) !== null && Zugriff::bearbeitetObjekt($o)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** Die Leitung und ihr Standort – oder null, wenn sie nicht sichtbar ist. */
+    private function leitungMitStandort(int $id): ?array
+    {
+        $l = LeitungService::find($id);
+        if ($l === null || $l['floor_id'] === null) {
+            return null;
+        }
+        $siteId = (int) Database::scalar('SELECT site_id FROM floors WHERE id = ?', [(int) $l['floor_id']]);
+        return Zugriff::siehtStandort($siteId) ? $l + ['site_id' => $siteId] : null;
+    }
+
     public function index(Request $request): void
     {
         $standorte = Zugriff::standorteFiltern(SiteService::all());
@@ -82,8 +114,9 @@ final class KarteController extends Controller
                 static fn ($o) => $o['plan_x'] === null
             )) : [],
             'darfAnlegen'  => $siteId !== null && Zugriff::darfAufStandortAnlegen($siteId),
-            'darfLeitung'  => Auth::can('leitungen.manage'),
-            'darfMassstab' => Auth::can('plans.manage'),
+            'darfLeitung'  => Auth::can('leitungen.manage') && $siteId !== null && (Zugriff::darfStandortAendern($siteId)
+                || array_filter(AnlagenService::liste(['site_id' => $siteId]), static fn ($o) => Zugriff::bearbeitetObjekt($o)) !== []),
+            'darfMassstab' => Auth::can('plans.manage') && $siteId !== null && Zugriff::darfStandortAendern($siteId),
             'fokus'        => $request->int('anlage'),
             'stylesheets'  => ['/assets/vendor/leaflet/leaflet.css'],
             'scripts'      => ['/assets/vendor/leaflet/leaflet.js', '/assets/js/live.js', '/assets/js/module/karte.js'],
@@ -290,7 +323,7 @@ final class KarteController extends Controller
                 'id' => (int) $i['id'], 'kennung' => $i['kennung'], 'typ' => $i['typ'], 'art' => $i['art'],
                 'passend' => $i['art'] === 'verteilung' && trim((string) $i['vorlage_modell']) === trim((string) $objekt['modell']),
                 'woanders' => $i['einsatz'] !== null ? (string) ($i['einsatz']['anlage_name'] ?? $i['einsatz']['objekt_name']) : null,
-            ], array_filter(InventarService::liste(), static fn ($i) => $i['zustand'] !== 'defekt' && (int) ($i['einsatz']['objekt_id'] ?? 0) !== $id
+            ], array_filter(InventarService::fuerBetrachter(InventarService::liste()), static fn ($i) => $i['zustand'] !== 'defekt' && (int) ($i['einsatz']['objekt_id'] ?? 0) !== $id
                 && ($i['art'] === 'zwischenstecker' || $objekt['art'] === 'verteilung')))) : [],
         ]);
     }
@@ -302,11 +335,20 @@ final class KarteController extends Controller
             $this->json(['ok' => false, 'message' => 'Diese Leitung ist nicht sichtbar.'], 404);
             return;
         }
-        // Anschlüsse der Enden für die Auswahl beim Bearbeiten.
+        // Anschlüsse der Enden für die Auswahl beim Bearbeiten – nur an
+        // Anlagen, die der Betrachter sieht (wie auf der Karte selbst).
         $enden = [];
+        $sieht = [];
         foreach (['von' => 'abgang', 'zu' => 'eingang'] as $ende => $richtung) {
             $objektId = $l[$ende . '_objekt_id'];
-            $enden[$ende] = $objektId === null ? [] : array_values(array_map(static fn ($a) => [
+            $endObjekt = $objektId !== null ? AnlagenService::find((int) $objektId) : null;
+            $sieht[$ende] = $objektId === null || ($endObjekt !== null && Zugriff::siehtObjekt($endObjekt));
+            if (!$sieht[$ende]) {
+                $l[$ende . '_name'] = 'nicht freigegeben';
+                $l[$ende . '_anschluss'] = null;
+                $l[$ende . '_anschluss_id'] = null;
+            }
+            $enden[$ende] = $objektId === null || !$sieht[$ende] ? [] : array_values(array_map(static fn ($a) => [
                 'id' => (int) $a['id'], 'text' => $a['bezeichnung'] . ' · ' . $a['typ_name'] . ($a['leitung'] !== null ? ' (belegt)' : ''),
                 'frei' => $a['leitung'] === null,
             ], array_filter(AnlagenService::anschluesse((int) $objektId), static fn ($a) => $a['richtung'] === $richtung)));
@@ -320,7 +362,8 @@ final class KarteController extends Controller
             'laenge_m' => $l['laenge_m'], 'laenge_plan' => $l['laenge_plan_m'] !== null ? round((float) $l['laenge_plan_m'], 1) : null,
             'belastbarkeit' => $l['belastbarkeit_a'], 'anzahl' => (int) $l['anzahl'], 'modell' => $l['modell'],
             'notizen' => (string) ($l['notizen'] ?? ''), 'hinweise' => $l['hinweise'],
-        ], 'enden' => $enden, 'darf' => Auth::can('leitungen.manage')]);
+        ], 'enden' => $enden, 'darf' => Auth::can('leitungen.manage')
+            && $this->darfLeitung((int) Database::scalar('SELECT site_id FROM floors WHERE id = ?', [(int) $l['floor_id']]), [$l['von_objekt_id'], $l['zu_objekt_id']])]);
     }
 
     // ------------------------------------------------------------ Schreiben
@@ -375,8 +418,11 @@ final class KarteController extends Controller
         }
         $floorId = $request->int('floor_id') ?: (int) $objekt['floor_id'];
         $etage = SiteService::floor($floorId);
-        if ($etage === null || !Zugriff::siehtStandort((int) $etage['site_id'])) {
-            $this->json(['ok' => false, 'message' => 'Diese Etage ist nicht freigegeben.'], 403);
+        // Auf einen anderen Standort nur, wo man auch Anlagen anlegen darf –
+        // sonst ließe sich eine Anlage in einen fremden Plan schieben.
+        if ($etage === null || !Zugriff::siehtStandort((int) $etage['site_id'])
+            || ((int) $etage['site_id'] !== (int) ($objekt['site_id'] ?? 0) && !Zugriff::darfAufStandortAnlegen((int) $etage['site_id']))) {
+            $this->json(['ok' => false, 'message' => 'Auf diese Etage darfst du die Anlage nicht verschieben.'], 403);
             return;
         }
         $this->json(AnlagenService::position((int) $objekt['id'], $floorId, (float) $request->input('x'), (float) $request->input('y')));
@@ -401,12 +447,20 @@ final class KarteController extends Controller
             return;
         }
         $id = $request->int('id') ?: null;
+        $alt = null;
         if ($id !== null) {
             $alt = LeitungService::find($id);
             if ($alt === null || (int) $alt['floor_id'] !== (int) $etage['id']) {
                 $this->json(['ok' => false, 'message' => 'Diese Leitung gibt es auf der Etage nicht.'], 404);
                 return;
             }
+        }
+        // Eine vorhandene Leitung ändert, wer an ihren bisherigen Enden
+        // bearbeiten darf; eine neue, wer es an einem ihrer neuen Enden darf.
+        $enden = $alt !== null ? [$alt['von_objekt_id'], $alt['zu_objekt_id']] : [$request->int('von_objekt_id'), $request->int('zu_objekt_id')];
+        if (!$this->darfLeitung((int) $etage['site_id'], $enden)) {
+            $this->json(['ok' => false, 'message' => 'Hier darfst du keine Kabel zeichnen oder ändern.'], 403);
+            return;
         }
         foreach (['von_objekt_id', 'zu_objekt_id'] as $feld) {
             $objektId = $request->int($feld);
@@ -429,9 +483,9 @@ final class KarteController extends Controller
 
     public function leitungVerlauf(Request $request): void
     {
-        $l = LeitungService::find($request->int('id'));
-        if ($l === null || $l['floor_id'] === null || !Zugriff::siehtStandort((int) Database::scalar('SELECT site_id FROM floors WHERE id = ?', [(int) $l['floor_id']]))) {
-            $this->json(['ok' => false, 'message' => 'Diese Leitung ist nicht sichtbar.'], 403);
+        $l = $this->leitungMitStandort($request->int('id'));
+        if ($l === null || !$this->darfLeitung((int) $l['site_id'], [$l['von_objekt_id'], $l['zu_objekt_id']])) {
+            $this->json(['ok' => false, 'message' => 'Diese Leitung darfst du nicht ändern.'], 403);
             return;
         }
         $this->json(LeitungService::punkteSetzen((int) $l['id'], json_decode((string) $request->input('punkte', '[]'), true)));
@@ -440,9 +494,9 @@ final class KarteController extends Controller
     /** Ein Kabelende auf eine andere Anlage umstecken oder lösen (Endpunkt gezogen). */
     public function leitungEnde(Request $request): void
     {
-        $l = LeitungService::find($request->int('id'));
-        if ($l === null || $l['floor_id'] === null || !Zugriff::siehtStandort((int) Database::scalar('SELECT site_id FROM floors WHERE id = ?', [(int) $l['floor_id']]))) {
-            $this->json(['ok' => false, 'message' => 'Diese Leitung ist nicht sichtbar.'], 403);
+        $l = $this->leitungMitStandort($request->int('id'));
+        if ($l === null || !$this->darfLeitung((int) $l['site_id'], [$l['von_objekt_id'], $l['zu_objekt_id']])) {
+            $this->json(['ok' => false, 'message' => 'Diese Leitung darfst du nicht ändern.'], 403);
             return;
         }
         $objektId = $request->int('objekt_id') ?: null;
@@ -458,9 +512,9 @@ final class KarteController extends Controller
 
     public function leitungLoeschen(Request $request): void
     {
-        $l = LeitungService::find($request->int('id'));
-        if ($l === null || $l['floor_id'] === null || !Zugriff::siehtStandort((int) Database::scalar('SELECT site_id FROM floors WHERE id = ?', [(int) $l['floor_id']]))) {
-            $this->json(['ok' => false, 'message' => 'Diese Leitung ist nicht sichtbar.'], 403);
+        $l = $this->leitungMitStandort($request->int('id'));
+        if ($l === null || !$this->darfLeitung((int) $l['site_id'], [$l['von_objekt_id'], $l['zu_objekt_id']])) {
+            $this->json(['ok' => false, 'message' => 'Diese Leitung darfst du nicht löschen.'], 403);
             return;
         }
         $this->json(LeitungService::loeschen((int) $l['id']));
@@ -470,6 +524,10 @@ final class KarteController extends Controller
     {
         $etage = $this->etage($request->int('floor_id'));
         if ($etage === null) {
+            return;
+        }
+        if (!Zugriff::darfStandortAendern((int) $etage['site_id'])) {
+            $this->json(['ok' => false, 'message' => 'Den Maßstab dieses Standorts darfst du nicht ändern.'], 403);
             return;
         }
         if ($request->bool('entfernen')) {
@@ -492,6 +550,10 @@ final class KarteController extends Controller
     {
         $etage = $this->etage($request->int('floor_id'));
         if ($etage === null) {
+            return;
+        }
+        if (!Zugriff::darfStandortAendern((int) $etage['site_id'])) {
+            $this->json(['ok' => false, 'message' => 'Die Georeferenz dieses Standorts darfst du nicht ändern.'], 403);
             return;
         }
         if ($request->bool('entfernen')) {

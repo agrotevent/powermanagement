@@ -18,7 +18,7 @@ $initials = $user ? strtoupper(substr((string) ($user['full_name'] ?: $user['use
 <link rel="stylesheet" href="<?= View::asset($css) ?>">
 <?php endforeach; ?>
 <?php /* Der Menüzustand muss vor dem ersten Zeichnen stehen, sonst springt die Seite. */ ?>
-<script>
+<script nonce="<?= \App\Support\View::e(\App\Support\View::nonce()) ?>">
 try {
     if (localStorage.getItem('menue') === 'schmal') {
         document.documentElement.classList.add('menue-schmal');
@@ -31,7 +31,7 @@ try {
 <div class="layout">
     <div class="nav-backdrop" id="nav-backdrop"></div>
     <?= View::partial('partials/nav', ['activePath' => $_SERVER['REQUEST_URI'] ?? '/']) ?>
-    <script>
+    <script nonce="<?= \App\Support\View::e(\App\Support\View::nonce()) ?>">
     try {
         var offen = JSON.parse(localStorage.getItem('menue-gruppen') || 'null');
         if (offen !== null) {
@@ -81,7 +81,7 @@ try {
         </main>
     </div>
 </div>
-<script>window.PM_TOKEN = <?= json_encode(\App\Support\Csrf::token()) ?>;</script>
+<script nonce="<?= \App\Support\View::e(\App\Support\View::nonce()) ?>">window.PM_TOKEN = <?= json_encode(\App\Support\Csrf::token()) ?>;</script>
 <script src="<?= View::asset('/assets/js/app.js') ?>"></script>
 <?php foreach (($scripts ?? []) as $js): ?>
 <script src="<?= View::asset($js) ?>"<?= str_ends_with($js, '.mjs') || str_contains($js, '/module/') ? ' type="module"' : '' ?>></script>

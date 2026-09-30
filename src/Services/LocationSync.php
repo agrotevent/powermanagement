@@ -64,6 +64,59 @@ final class LocationSync
         return trim((string) Config::get('inventory.repo_url', ''));
     }
 
+    /** Die Übertragungswege, die git hier benutzen darf. */
+    private const PROTOKOLLE = 'https:ssh:file';
+
+    /**
+     * Taugt die Adresse als Repository? null = ja, sonst der Grund.
+     *
+     * Erlaubt sind https://, SSH (ssh://… oder git@host:pfad) und file:// für
+     * ein Repository auf derselben Maschine. Nicht erlaubt: http:// (das Token
+     * ginge im Klartext über das Netz), Zugangsdaten in der Adresse (sie
+     * stünden in der Oberfläche, im Audit-Log und in .git/config), und alles,
+     * was git als Option lesen könnte.
+     */
+    public static function adresseFehler(string $adresse): ?string
+    {
+        if ($adresse === '') {
+            return null;
+        }
+        if (preg_match('/[\x00-\x20\x7f]/', $adresse) === 1 || str_starts_with($adresse, '-')) {
+            return 'Die Adresse darf keine Leer- oder Steuerzeichen enthalten und nicht mit „-“ beginnen.';
+        }
+        if (preg_match('#^[A-Za-z0-9._-]+@[A-Za-z0-9.-]+:[^/][^\s]*$#', $adresse) === 1) {
+            return null; // git@github.com:firma/locations.git
+        }
+        $teile = parse_url($adresse);
+        $schema = strtolower((string) ($teile['scheme'] ?? ''));
+        if (!in_array($schema, ['https', 'ssh', 'file'], true)) {
+            return 'Erlaubt sind https://, ssh:// (oder git@server:pfad) und file://.';
+        }
+        if (isset($teile['pass']) || ($schema === 'https' && isset($teile['user']))) {
+            return 'Zugangsdaten gehören nicht in die Adresse – das Token hat ein eigenes Feld.';
+        }
+        if ($schema !== 'file' && (string) ($teile['host'] ?? '') === '') {
+            return 'In der Adresse fehlt der Server.';
+        }
+        return null;
+    }
+
+    /** Ein Zweigname, den git nicht als Option liest. */
+    public static function zweigGueltig(string $zweig): bool
+    {
+        return preg_match('#^(?!-)(?!.*\.\.)[A-Za-z0-9._/-]{1,100}$#', $zweig) === 1 && !str_ends_with($zweig, '/') && !str_ends_with($zweig, '.lock');
+    }
+
+    /** Der Server einer Adresse (klein geschrieben) – für „ist das noch derselbe?“. */
+    public static function server(string $adresse): string
+    {
+        if (preg_match('#^[A-Za-z0-9._-]+@([A-Za-z0-9.-]+):#', $adresse, $treffer) === 1) {
+            return strtolower($treffer[1]);
+        }
+        $teile = parse_url($adresse);
+        return strtolower((string) ($teile['host'] ?? ($teile['scheme'] ?? '')));
+    }
+
     /**
      * Das Zugangstoken.
      *
@@ -147,6 +200,13 @@ final class LocationSync
                 . 'abgleichen. Nachinstallieren mit: apt-get install -y git. '
                 . 'Das Update-Skript (deploy/update-debian.sh) zieht es beim nächsten Lauf '
                 . 'ebenfalls nach.';
+        }
+        if (self::repoUrl() !== '' && self::adresseFehler(self::repoUrl()) !== null) {
+            return 'Die eingetragene Repository-Adresse wird nicht benutzt: ' . self::adresseFehler(self::repoUrl())
+                . ' Bitte unter System → Einstellungen → Location- und Verteiler-Abgleich korrigieren.';
+        }
+        if (!self::zweigGueltig(self::zweig())) {
+            return 'Der eingetragene Zweig „' . self::zweig() . '“ ist kein gültiger Zweigname.';
         }
         if (self::repoUrl() === '') {
             /*
@@ -235,7 +295,7 @@ final class LocationSync
              * noch nicht, und `clone --branch main` scheitert daran – das
              * ist aber kein Fehler, sondern der erste Tag.
              */
-            $ergebnis = self::git(['clone', '--depth', '50', self::repoUrl(), $kopie], dirname($kopie));
+            $ergebnis = self::git(['clone', '--depth', '50', '--', self::repoUrl(), $kopie], dirname($kopie));
             if (!$ergebnis['ok']) {
                 return ['ok' => false, 'message' => 'Das Repository ließ sich nicht holen: ' . $ergebnis['message'], 'commit' => ''];
             }
@@ -472,12 +532,17 @@ final class LocationSync
             return ['ok' => false, 'message' => 'Diese Location gibt es im Repository nicht.'];
         }
         $ordner = dirname((string) self::bestandPfad($schluessel, 'location.json'));
-        $datei = static function (string $imRepo) use ($ordner): ?string {
+        // Der Ordner selbst darf kein Verweis sein – sonst läge die Grenze
+        // unten, wo der Verweis hinzeigt.
+        $basis = realpath($ordner);
+        if ($basis === false || $basis !== realpath(self::arbeitsKopie()) . '/locations/' . $schluessel) {
+            return ['ok' => false, 'message' => 'Der Ordner dieser Location im Repository ist kein gewöhnlicher Ordner.'];
+        }
+        $datei = static function (string $imRepo) use ($basis): ?string {
             // Kein Ausbruch aus dem Ordner der Location: was im Repository
             // steht, kommt von außen.
-            $ziel = realpath($ordner . '/' . $imRepo);
-            $basis = realpath($ordner);
-            return ($ziel !== false && $basis !== false && str_starts_with($ziel, $basis . '/')) ? $ziel : null;
+            $ziel = realpath($basis . '/' . $imRepo);
+            return ($ziel !== false && str_starts_with($ziel, $basis . '/') && is_file($ziel)) ? $ziel : null;
         };
 
         $ergebnis = LocationBundle::locationAnwenden($daten, $datei);
@@ -524,6 +589,9 @@ final class LocationSync
             return ['ok' => false, 'message' => $holen['message']];
         }
         $schluessel = LocationBundle::schluesselSichern('sites', $siteId, (string) $site['name'], 'standort-' . $siteId);
+        if (!LocationBundle::schluesselGueltig($schluessel)) {
+            return ['ok' => false, 'message' => 'Der Schlüssel dieses Standorts ist ungültig.'];
+        }
         $ordnerImRepo = 'locations/' . $schluessel;
         $ziel = self::arbeitsKopie() . '/' . $ordnerImRepo;
         if (!is_dir($ziel) && !mkdir($ziel, 0775, true) && !is_dir($ziel)) {
@@ -893,6 +961,8 @@ final class LocationSync
             'PATH'                 => (string) (getenv('PATH') ?: '/usr/bin:/bin'),
             'HOME'                 => dirname(self::arbeitsKopie()),
             'GIT_TERMINAL_PROMPT'  => '0',
+            // Nur diese Wege – kein ext::, kein Umweg über andere Helfer.
+            'GIT_ALLOW_PROTOCOL'   => self::PROTOKOLLE,
             'GIT_ASKPASS'          => self::askpass(),
             self::TOKEN_VARIABLE   => self::token(),
             // Ohne das fragt Git bei einem abgelaufenen Token endlos nach.
@@ -948,7 +1018,7 @@ final class LocationSync
         proc_close($prozess);
 
         if ($rc !== 0) {
-            Logger::info('Inventar-Abgleich: git ' . ($argumente[0] ?? '') . ' rc=' . $rc . ' ' . trim($fehler));
+            Logger::info('Inventar-Abgleich: git ' . ($argumente[0] ?? '') . ' rc=' . $rc . ' ' . self::ohneToken(trim($fehler)));
             return [
                 'ok'      => false,
                 'ausgabe' => $ausgabe,

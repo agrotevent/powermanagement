@@ -210,9 +210,20 @@ Bei einer vorhandenen **InfluxDB 1.8** mit Anmeldung ist das „Token“
    | `nodered` | alles | Node-RED |
    | `powermanagement` | alles | Oberfläche und Sammler |
 
-   `shelly` kann so keine Messwerte unter `pm/` einschleusen – ein falsch
-   eingestelltes oder übernommenes Gerät verfälscht die Auswertung nicht.
-5. **InfluxDB 2:** Ersteinrichtung mit Organisation `powermanagement`,
+   `shelly` kann so nichts direkt unter `pm/` schreiben. **Grenze:** Alle
+   Shellys teilen sich diesen einen Zugang, und er darf die Themen *aller*
+   Geräte lesen und schreiben. Wer ihn kennt (aus einem Shelly ausgelesen
+   oder unverschlüsselt im Netz mitgeschnitten – Port 1883 ist ohne TLS),
+   kann jedes Relais schalten und über die rohen Geräte-Themen, die Node-RED
+   weiterverarbeitet, Messwerte vortäuschen. Deshalb: den Broker per
+   Firewall nur aus den Netzen der Geräte erreichbar machen (Abschnitt 8)
+   und das Kennwort wie ein Schlüssel zur Anlage behandeln.
+   Die Kennwörter werden gehasht eingetragen, ohne je auf der Kommandozeile
+   (und damit in der Prozessliste) zu stehen.
+5. **InfluxDB 2:** Bis die Ersteinrichtung gemacht ist, lauscht sie nur
+   auf `127.0.0.1` – sonst könnte ihr im Netz jemand zuvorkommen und
+   Administrator und Token anlegen. Danach ist sie wie gewohnt unter
+   `http://<IP>:8086` erreichbar. Ersteinrichtung mit Organisation `powermanagement`,
    Bucket `strom`, Benutzer `admin` (zufälliges Kennwort), eine DBRP-Zuordnung
    `strom/autogen → strom` für InfluxQL, und zwei Tokens: eines zum Lesen und
    Schreiben für Oberfläche und Sammler, eines nur zum Schreiben für
@@ -220,7 +231,8 @@ Bei einer vorhandenen **InfluxDB 1.8** mit Anmeldung ist das „Token“
 6. **Node-RED 4** in `/opt/node-red` (eigene `package.json`, gehört root),
    Flows und Einstellungen im userDir `/var/lib/powermanagement/node-red`
    (gehört dem Systembenutzer `nodered`). Editor nur über nginx unter
-   `/node-red/`, Anmeldung `admin` mit zufälligem Kennwort.
+   `/node-red/`, Anmeldung `admin` mit zufälligem Kennwort; nginx lässt je
+   Adresse nur fünf Anmeldeversuche in der Minute durch.
 7. **Oberfläche:** PHP-FPM-Pool, nginx-Site, Datenbank, Administrator,
    InfluxDB- und MQTT-Zugang (verschlüsselt in der Datenbank).
 8. **Dienste:** `powermanagement-nodered`, `powermanagement-sammler`,

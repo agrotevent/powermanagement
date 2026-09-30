@@ -172,6 +172,10 @@ switch ($befehl) {
         $ok = true;
         $aus('Datenbank:  ' . Database::driver() . ', ' . (int) Database::scalar('SELECT COUNT(*) FROM users') . ' Benutzer, '
             . (int) Database::scalar('SELECT COUNT(*) FROM objekte WHERE ist_vorlage = 0') . ' Anlagen');
+        if (Crypto::schluesselFehler() !== null) {
+            $aus('Schlüssel:  ' . Crypto::schluesselFehler());
+            $ok = false;
+        }
         if (Config::isDemo()) {
             $aus('Demo-Modus: InfluxDB und MQTT werden nicht gebraucht.');
             break;
@@ -314,6 +318,11 @@ switch ($befehl) {
         break;
 
     case 'demo:seed':
+        // Die Demo legt Konten mit bekannten Kennwörtern an (technik darf
+        // schalten) und löscht mit --reset gleichnamige – nie im Betrieb.
+        if (!Config::isDemo()) {
+            $fehler('demo:seed gibt es nur im Demo-Modus (app.demo in config/config.php).');
+        }
         $aus(DemoSeed::anlegen(isset($optionen['reset'])));
         break;
 

@@ -111,12 +111,20 @@ final class MesspunktService
         return $titel;
     }
 
-    public static function speichern(int $objektId, ?int $id, array $daten): array
+    /**
+     * @param bool $abJetzt ein neu zugeordnetes Gerät zählt erst ab jetzt (gueltig_ab) –
+     *                      für Benutzer, die seine Vorgeschichte nicht sehen dürfen
+     */
+    public static function speichern(int $objektId, ?int $id, array $daten, bool $abJetzt = false): array
     {
         $geraet = trim((string) ($daten['geraet'] ?? ''));
         $kanal = trim((string) ($daten['kanal'] ?? ''));
         if ($geraet === '') {
             return ['ok' => false, 'message' => 'Bitte ein Gerät wählen.'];
+        }
+        // Gerät und Kanal landen in MQTT-Themen und InfluxDB-Abfragen.
+        if (!self::kennungGueltig($geraet) || ($kanal !== '' && !self::kennungGueltig($kanal))) {
+            return ['ok' => false, 'message' => 'Gerät und Kanal: keine Leer-, Steuer- oder Sonderzeichen wie + # < > " \'.'];
         }
         $anschluss = (int) ($daten['anschluss_id'] ?? 0);
         if ($anschluss > 0 && Database::first('SELECT id FROM anschluesse WHERE id = ? AND objekt_id = ?', [$anschluss, $objektId]) === null) {
@@ -137,17 +145,30 @@ final class MesspunktService
             'schutzorgan_id' => $schutz > 0 ? $schutz : null,
         ];
         if ($id !== null) {
-            if (Database::first('SELECT id FROM messpunkte WHERE id = ? AND objekt_id = ?', [$id, $objektId]) === null) {
+            $alt = Database::first('SELECT geraet, kanal FROM messpunkte WHERE id = ? AND objekt_id = ?', [$id, $objektId]);
+            if ($alt === null) {
                 return ['ok' => false, 'message' => 'Diesen Messpunkt gibt es an der Anlage nicht.'];
+            }
+            if ($abJetzt && ($alt['geraet'] !== $felder['geraet'] || $alt['kanal'] !== $felder['kanal'])) {
+                $felder['gueltig_ab'] = gmdate('c');
             }
             Database::update('messpunkte', $id, $felder);
         } else {
             $felder['created_at'] = gmdate('c');
+            if ($abJetzt) {
+                $felder['gueltig_ab'] = $felder['created_at'];
+            }
             $id = Database::insert('messpunkte', $felder);
         }
         Zugriff::vergessen();
         Audit::log('messpunkt.speichern', 'objekt', (string) $objektId, ['geraet' => $geraet, 'kanal' => $kanal]);
         return ['ok' => true, 'message' => 'Messgerät zugeordnet.', 'id' => $id];
+    }
+
+    /** Eine Geräte- oder Kanalkennung, die in Themen und Abfragen nichts anrichtet. */
+    public static function kennungGueltig(string $kennung): bool
+    {
+        return preg_match('/^[^\x00-\x20\x7f+#<>"\'\\\\]{1,128}$/u', $kennung) === 1;
     }
 
     public static function loeschen(int $objektId, int $id): array

@@ -91,7 +91,14 @@
         fetch(adresse(el.dataset.mp, el.dataset.feld, el.dataset.messung, phasen, null, el.dataset.quelle), { credentials: 'same-origin', headers: { Accept: 'application/json' } })
             .then(function (a) { return a.json(); })
             .then(function (d) {
-                if (d.ok === false && d.message) { el.innerHTML = '<div class="diagramm-leer">' + d.message + '</div>'; return; }
+                if (d.ok === false && d.message) {
+                    // Als Text, nie als HTML: die Meldung kann Teile einer Fehlerantwort der Datenbank enthalten.
+                    var leer = document.createElement('div');
+                    leer.className = 'diagramm-leer';
+                    leer.textContent = d.message;
+                    el.replaceChildren(leer);
+                    return;
+                }
                 var namen = [], serien = [], farben = [];
                 Object.keys(d.serien).forEach(function (name) {
                     namen.push(name === 'sum' ? 'Summe' : (name === el.dataset.feld ? d.name : name));

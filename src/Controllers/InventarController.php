@@ -27,7 +27,7 @@ final class InventarController extends Controller
     {
         $art = $request->str('art');
         $this->view('inventar/index', [
-            'liste'  => InventarService::liste(['art' => $art, 'suche' => $request->str('suche')]),
+            'liste'  => InventarService::fuerBetrachter(InventarService::liste(['art' => $art, 'suche' => $request->str('suche')])),
             'art'    => $art,
             'suche'  => $request->str('suche'),
             'darf'   => Auth::can('inventar.manage'),
@@ -105,6 +105,17 @@ final class InventarController extends Controller
                 'stelle' => (string) ($request->arr('stelle')[$i] ?? ''), 'bezeichnung' => (string) ($request->arr('bezeichnung')[$i] ?? ''),
             ];
         }
+        // Neue Shellys im Stück: nur solche, die man auch einer Anlage zuordnen
+        // dürfte – beim Einsetzen messen sie sonst für die eigene Anlage.
+        $bisher = $id !== null ? array_column(InventarService::messgeraete($id), 'geraet') : [];
+        foreach ($zeilen as $zeile) {
+            $geraet = trim($zeile['geraet']);
+            if ($geraet !== '' && !in_array($geraet, $bisher, true) && !Zugriff::darfGeraetZuordnen($geraet)) {
+                Flash::error($geraet . ' misst an einer Anlage, die du nicht bearbeiten darfst.');
+                $this->back('/inventar');
+                return;
+            }
+        }
         $ergebnis = InventarService::speichern($id, [
             'art' => $request->str('art'), 'kennung' => $request->str('kennung'), 'name' => $request->str('name'),
             'vorlage_id' => $request->int('vorlage_id'), 'steckertyp_id' => $request->int('steckertyp_id'),
@@ -133,6 +144,14 @@ final class InventarController extends Controller
         $objekt = AnlagenService::find((int) ($params['id'] ?? 0));
         if ($objekt === null || !Zugriff::darfBearbeiten($objekt)) {
             $this->verweigern($request, 'Diese Anlage darfst du nicht bearbeiten.');
+            return;
+        }
+        // Steckt das Stück gerade woanders, wird es dort abgezogen – das darf
+        // nur, wer auch dort bearbeiten darf.
+        $bisher = ($item = InventarService::find($request->int('inventar_id'))) !== null && $item['einsatz'] !== null
+            ? AnlagenService::find((int) $item['einsatz']['objekt_id']) : null;
+        if ($bisher !== null && (int) $bisher['id'] !== (int) $objekt['id'] && !Zugriff::darfBearbeiten($bisher)) {
+            $this->verweigern($request, 'Das Stück steckt gerade in einer Anlage, die du nicht bearbeiten darfst.');
             return;
         }
         $anschluss = $request->int('anschluss_id');

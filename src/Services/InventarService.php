@@ -69,6 +69,31 @@ final class InventarService
         return $out;
     }
 
+    /**
+     * Wo ein Stück gerade steckt, erfährt nur, wer die Anlage sieht – wie auf
+     * der Seite des Stücks. Sonst stünden in der Liste Anlagen und Standorte
+     * anderer Kunden.
+     *
+     * @param list<array<string,mixed>> $liste aus liste()
+     * @return list<array<string,mixed>>
+     */
+    public static function fuerBetrachter(array $liste): array
+    {
+        foreach ($liste as &$i) {
+            $e = $i['einsatz'] ?? null;
+            if ($e === null) {
+                continue;
+            }
+            $o = AnlagenService::find((int) $e['objekt_id']);
+            if ($o === null || !Zugriff::siehtObjekt($o)) {
+                $i['einsatz'] = array_merge($e, ['anlage_name' => 'eine nicht freigegebene Anlage', 'objekt_name' => 'eine nicht freigegebene Anlage',
+                    'site_name' => '', 'anschluss_name' => null]);
+            }
+        }
+        unset($i);
+        return $liste;
+    }
+
     public static function find(int $id): ?array
     {
         $i = Database::first(
@@ -203,6 +228,9 @@ final class InventarService
                 continue;
             }
             $kanal = trim((string) ($g['kanal'] ?? ''));
+            if (!MesspunktService::kennungGueltig($geraet) || ($kanal !== '' && !MesspunktService::kennungGueltig($kanal))) {
+                return ['ok' => false, 'message' => 'Gerät und Kanal: keine Leer-, Steuer- oder Sonderzeichen wie + # < > " \'.'];
+            }
             $stelle = (string) ($g['stelle'] ?? '');
             if (!isset($stellen[$stelle])) {
                 $stelle = $art === 'zwischenstecker' ? 'durchgang' : 'einspeisung';

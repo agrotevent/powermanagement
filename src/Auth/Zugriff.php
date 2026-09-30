@@ -105,8 +105,15 @@ final class Zugriff
         };
     }
 
-    /** Deckt die Freigabe dieses Gerät (Datenquelle) ab – ggf. nur einen Kanal? */
-    private static function decktGeraet(array $freigabe, int $datenquelleId, string $kanal = ''): bool
+    /**
+     * Deckt die Freigabe dieses Gerät (Datenquelle) ab – ggf. nur einen Kanal?
+     *
+     * $kanal null: irgendein Kanal genügt (sehen). Beim Schalten steht der
+     * Kanal fest, und eine Freigabe für einen Kanal gilt nur für genau ihn –
+     * auch nicht für einen Befehl ohne Kanal (etwa den Betriebsmodus eines
+     * Wechselrichters, wenn nur sein Relais freigegeben ist).
+     */
+    private static function decktGeraet(array $freigabe, int $datenquelleId, ?string $kanal = null): bool
     {
         if ((string) $freigabe['ziel_art'] === 'alles') {
             return true;
@@ -115,7 +122,7 @@ final class Zugriff
             return false;
         }
         $nurKanal = (string) ($freigabe['ziel_kanal'] ?? '');
-        return $nurKanal === '' || $kanal === '' || $nurKanal === $kanal;
+        return $nurKanal === '' || $kanal === null || $nurKanal === $kanal;
     }
 
     // ------------------------------------------------------------ Sehen
@@ -219,9 +226,15 @@ final class Zugriff
 
     public static function darfBearbeiten(array $objekt): bool
     {
-        if (!Auth::can('anlagen.manage')) {
-            return false;
-        }
+        return Auth::can('anlagen.manage') && self::bearbeitetObjekt($objekt);
+    }
+
+    /**
+     * Deckt eine Freigabe mit „bearbeiten“ diese Anlage ab? Ohne Blick auf
+     * das Recht dazu – das prüft, wer fragt (Anlagen ändern, Kabel zeichnen).
+     */
+    public static function bearbeitetObjekt(array $objekt): bool
+    {
         if (self::alles()) {
             return true;
         }
@@ -231,6 +244,61 @@ final class Zugriff
             }
         }
         return false;
+    }
+
+    /**
+     * Darf der Benutzer am Standort selbst etwas ändern – Etagen, Grundriss,
+     * Maßstab, Georeferenz, Kabel? Wie bei Anlagen braucht es dafür eine
+     * Freigabe mit „bearbeiten“ (für alles oder diesen Standort); sehen allein
+     * genügt nicht. Welches Recht dazu gehört (Pläne pflegen, Kabel zeichnen),
+     * prüft die Route.
+     */
+    public static function darfStandortAendern(int $siteId): bool
+    {
+        if (self::alles()) {
+            return true;
+        }
+        foreach (self::freigaben() as $freigabe) {
+            if ((int) $freigabe['darf_bearbeiten'] !== 1) {
+                continue;
+            }
+            $art = (string) $freigabe['ziel_art'];
+            if ($art === 'alles' || ($art === 'site' && (int) $freigabe['ziel_id'] === $siteId)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Darf der Benutzer dieses Gerät einer Anlage zuordnen – als Messpunkt
+     * oder in einem Inventarstück?
+     *
+     * Wer alles sieht oder Datenquellen verwaltet: ja. Sonst nur ein Gerät, das
+     * gerade nirgends misst oder nur an Anlagen, die er selbst bearbeiten
+     * darf. Sonst holte er sich über die eigene Anlage die Messwerte – und mit
+     * einer Schalt-Freigabe für die eigene Anlage die Steuerung – einer fremden.
+     */
+    public static function darfGeraetZuordnen(string $geraet): bool
+    {
+        if (self::geraetMitGeschichte()) {
+            return true;
+        }
+        foreach (self::objekteZuGeraet($geraet) as $objekt) {
+            if (!self::darfBearbeiten($objekt)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
+     * Darf ein neu zugeordnetes Gerät seine ganze Vorgeschichte mitbringen?
+     * Nur für den, der sie ohnehin sehen darf – sonst zählt es ab jetzt.
+     */
+    public static function geraetMitGeschichte(): bool
+    {
+        return self::alles() || Auth::can('datenquellen.manage');
     }
 
     /** Neue Anlagen auf einem Standort anlegen? */

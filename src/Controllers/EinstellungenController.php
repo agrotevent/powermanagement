@@ -56,13 +56,34 @@ final class EinstellungenController extends Controller
 
     public function location(Request $request): void
     {
-        Settings::put('inventory.repo_url', $request->str('repo_url'));
-        Settings::put('inventory.branch', $request->str('branch') ?: 'main');
-        if ($request->str('token') !== '') {
-            LocationSync::tokenSetzen($request->str('token') === '-' ? '' : $request->str('token'));
+        $adresse = $request->str('repo_url');
+        $fehler = LocationSync::adresseFehler($adresse);
+        if ($fehler !== null) {
+            Flash::error($fehler);
+            $this->redirect('/system/einstellungen');
+            return;
         }
-        Audit::log('einstellungen.location', 'settings', '', ['repo' => $request->str('repo_url')]);
-        Flash::success('Location-Abgleich gespeichert.');
+        $zweig = $request->str('branch') ?: 'main';
+        if (!LocationSync::zweigGueltig($zweig)) {
+            Flash::error('Der Zweig darf nur Buchstaben, Ziffern und . _ / - enthalten und nicht mit - beginnen.');
+            $this->redirect('/system/einstellungen');
+            return;
+        }
+        $vorher = LocationSync::repoUrl();
+        $token = $request->str('token');
+        Settings::put('inventory.repo_url', $adresse);
+        Settings::put('inventory.branch', $zweig);
+        $meldung = 'Location- und Verteiler-Abgleich gespeichert.';
+        if ($token !== '') {
+            LocationSync::tokenSetzen($token === '-' ? '' : $token);
+        } elseif (LocationSync::tokenHinterlegt() && LocationSync::server($vorher) !== LocationSync::server($adresse)) {
+            // Ein Token gilt für seinen Server. Zieht die Adresse um, ginge
+            // es sonst bei der ersten Abfrage an den neuen – wer immer das ist.
+            LocationSync::tokenSetzen('');
+            $meldung .= ' Das hinterlegte Token galt für den bisherigen Server und ist entfernt – für den neuen bitte eines eintragen.';
+        }
+        Audit::log('einstellungen.location', 'settings', '', ['repo' => $adresse]);
+        Flash::success($meldung);
         $this->redirect('/system/einstellungen');
     }
 
