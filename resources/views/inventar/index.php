@@ -13,7 +13,7 @@ $zustand = [
 ?>
 <div class="toolbar-zeile">
     <form method="get" action="/inventar" class="inline-form">
-        <select name="art" onchange="this.form.submit()" aria-label="Art">
+        <select name="art" data-absenden aria-label="Art">
             <option value="">Verteiler und Zwischenstecker</option>
             <?php foreach (InventarService::ARTEN as $k => $n): ?>
                 <option value="<?= $k ?>"<?= $art === $k ? ' selected' : '' ?>><?= View::e($n) ?></option>

@@ -23,10 +23,10 @@ abstract class Controller
         Response::redirect($to);
     }
 
+    /** Zurück zur Seite, von der die Anfrage kam – nur innerhalb dieser Seite. */
     protected function back(string $fallback = '/'): void
     {
-        $referer = $_SERVER['HTTP_REFERER'] ?? '';
-        $this->redirect($referer !== '' ? $referer : $fallback);
+        $this->redirect(Response::zurueckZiel($fallback));
     }
 
     protected function json(mixed $data, int $status = 200): void

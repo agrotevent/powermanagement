@@ -84,6 +84,19 @@ try {
     $benutzer['admin'] = BenutzerService::anlegen($kennung . '-admin', $kennwort, 'admin', false);
     $benutzer['kunde'] = BenutzerService::anlegen($kennung . '-kunde', $kennwort, 'kunde', false);
     $benutzer['technik'] = BenutzerService::anlegen($kennung . '-technik', $kennwort, 'technik', false);
+    $benutzer['zwei'] = BenutzerService::anlegen($kennung . '-zwei', $kennwort, 'kunde', false);
+    $benutzer['vorlaeufig'] = BenutzerService::anlegen($kennung . '-vorlaeufig', $kennwort, 'kunde', true);
+    // Eine Rolle nur mit „Benutzer verwalten“ – ohne Administration.
+    $verwalterRolle = (int) BenutzerService::rolleSpeichern(null, $kennung . ' verwalter', '', ['system.users.manage', 'dashboard.view'])['id'];
+    $benutzer['verwalter'] = BenutzerService::anlegen($kennung . '-verwalter', $kennwort,
+        (string) Database::scalar('SELECT role_key FROM roles WHERE id = ?', [$verwalterRolle]), false);
+    $kleinRolle = (int) BenutzerService::rolleSpeichern(null, $kennung . ' klein', '', ['dashboard.view'])['id'];
+    // Planer: ändert auf einem eigenen Standort, sieht einen fremden nur.
+    $planerRolle = (int) BenutzerService::rolleSpeichern(null, $kennung . ' planer', '', ['anlagen.view', 'anlagen.manage', 'karte.view', 'plans.manage', 'leitungen.manage'])['id'];
+    $benutzer['planer'] = BenutzerService::anlegen($kennung . '-planer', $kennwort,
+        (string) Database::scalar('SELECT role_key FROM roles WHERE id = ?', [$planerRolle]), false);
+    $benutzer['klein'] = BenutzerService::anlegen($kennung . '-klein', $kennwort,
+        (string) Database::scalar('SELECT role_key FROM roles WHERE id = ?', [$kleinRolle]), false);
 
     // ---------------------------------------------------- ohne Anmeldung
     $leer = tempnam(sys_get_temp_dir(), 'pm-web-');
@@ -387,7 +400,105 @@ try {
         $r = aufruf($basis, $technik['dose'], 'POST', '/verteiler-abgleich/' . $aktion, ['alle' => 1, 'bereich' => 'inventar', 'schluessel' => 'x', '_token' => $technik['token']]);
         gleich($r['status'], 403, 'Technik darf im Verteiler-Abgleich nicht ' . $aktion);
     }
+    // Die Repository-Adresse (und damit, wohin das Token geht) nur mit „Einstellungen ändern“
+    $r = aufruf($basis, $technik['dose'], 'POST', '/system/einstellungen/location', ['repo_url' => 'https://evil.example/x.git', '_token' => $technik['token']]);
+    gleich($r['status'], 403, 'Repository-Adresse nur mit „Einstellungen ändern“');
+
+    // ---------------------------------------------------- Anmeldung und Sitzung
+    // Nach der Anmeldung nur auf eigene Pfade – „/\\evil“ machen Browser zu „//evil“
+    $dose = tempnam(sys_get_temp_dir(), 'pm-web-');
+    $dosen[] = $dose;
+    foreach (['/\\evil.example', "/\t/evil.example", '//evil.example', 'https://evil.example'] as $next) {
+        $seite = aufruf($basis, $dose, 'GET', '/login');
+        $r = aufruf($basis, $dose, 'POST', '/login', ['username' => $kennung . '-zwei', 'password' => $kennwort, 'next' => $next, '_token' => token($seite['text'])]);
+        pruefe($r['status'] === 302 && preg_match('#^/[A-Za-z]#', (string) $r['ziel']) === 1, 'next=' . json_encode($next) . ' führt nicht hinaus: ' . $r['ziel']);
+        aufruf($basis, $dose, 'POST', '/logout', ['_token' => token(aufruf($basis, $dose, 'GET', '/profil')['text'])]);
+    }
+    // Das Token zählt nur aus dem Formular; ein fremder Referer wird nicht angesteuert
+    $vorher = (int) Database::scalar('SELECT COUNT(*) FROM steckertypen');
+    $r = aufruf($basis, $admin['dose'], 'POST', '/stecker/speichern?_token=' . rawurlencode($admin['token']), ['name' => $kennung . '-stecker'], ['Referer: https://evil.example/x']);
+    pruefe($r['status'] === 302 && !str_contains((string) $r['ziel'], 'evil'), 'Token aus der Adresse zählt nicht, fremder Referer wird nicht angesteuert: ' . $r['ziel']);
+    gleich((int) Database::scalar('SELECT COUNT(*) FROM steckertypen'), $vorher, 'nichts gespeichert');
+    // Kennwort geändert: die andere Sitzung endet, diese läuft weiter
+    $sitzungA = anmelden($basis, $kennung . '-zwei', $kennwort);
+    $sitzungB = anmelden($basis, $kennung . '-zwei', $kennwort);
+    $dosen[] = $sitzungA['dose'];
+    $dosen[] = $sitzungB['dose'];
+    $neu = 'Geaendert-' . bin2hex(random_bytes(6)) . '1';
+    $r = aufruf($basis, $sitzungA['dose'], 'POST', '/profil/passwort', ['current_password' => $kennwort, 'new_password' => $neu, 'new_password_repeat' => $neu, '_token' => $sitzungA['token']]);
+    pruefe($r['status'] === 302 && !str_starts_with((string) $r['ziel'], '/login'), 'Kennwort geändert');
+    gleich(aufruf($basis, $sitzungA['dose'], 'GET', '/profil')['status'], 200, 'die Sitzung, die es geändert hat, läuft weiter');
+    $r = aufruf($basis, $sitzungB['dose'], 'GET', '/dashboard');
+    pruefe($r['status'] === 302 && str_starts_with((string) $r['ziel'], '/login'), 'die andere Sitzung mit dem alten Kennwort ist beendet');
+    // Mit vorläufigem Kennwort geht es nur zum Profil
+    $vorlaeufig = anmelden($basis, $kennung . '-vorlaeufig', $kennwort);
+    $dosen[] = $vorlaeufig['dose'];
+    $r = aufruf($basis, $vorlaeufig['dose'], 'GET', '/dashboard');
+    pruefe($r['status'] === 302 && $r['ziel'] === '/profil', 'vorläufiges Kennwort: erst ein eigenes, dann der Rest');
+
+    // ---------------------------------------------------- Benutzer verwalten ohne Administration
+    $verwalter = anmelden($basis, $kennung . '-verwalter', $kennwort);
+    $dosen[] = $verwalter['dose'];
+    $adminRolle = (int) Database::scalar('SELECT id FROM roles WHERE is_system = 1 ORDER BY id LIMIT 1');
+    aufruf($basis, $verwalter['dose'], 'POST', '/system/benutzer/speichern', ['id' => $benutzer['verwalter'], 'username' => $kennung . '-verwalter', 'is_active' => 1,
+        'rollen' => [$adminRolle => ['aktiv' => 1], $verwalterRolle => ['aktiv' => 1]], '_token' => $verwalter['token']]);
+    pruefe(Database::first('SELECT id FROM user_roles WHERE user_id = ? AND role_id = ?', [$benutzer['verwalter'], $adminRolle]) === null,
+        'Benutzerverwaltung gibt sich nicht die Administratorrolle');
+    aufruf($basis, $verwalter['dose'], 'POST', '/system/rollen/speichern', ['name' => $kennung . ' alles', 'rechte' => ['*'], '_token' => $verwalter['token']]);
+    pruefe(Database::first('SELECT id FROM roles WHERE name = ?', [$kennung . ' alles']) === null, 'keine Rolle mit allen Rechten');
+    aufruf($basis, $verwalter['dose'], 'POST', '/system/rollen/speichern', ['id' => $verwalterRolle, 'name' => $kennung . ' verwalter', 'rechte' => ['system.users.manage', 'dashboard.view', 'anlagen.scope.all'], '_token' => $verwalter['token']]);
+    pruefe(!in_array('anlagen.scope.all', BenutzerService::rollenRechte($verwalterRolle), true), 'die eigene Rolle bekommt keine Rechte dazu');
+    aufruf($basis, $verwalter['dose'], 'POST', '/system/benutzer/speichern', ['id' => $benutzer['admin'], 'username' => $kennung . '-admin', 'is_active' => 1,
+        'password' => 'Uebernahme-2026-x', 'rollen' => [$adminRolle => ['aktiv' => 1]], '_token' => $verwalter['token']]);
+    pruefe(password_verify($kennwort, (string) Database::scalar('SELECT password_hash FROM users WHERE id = ?', [$benutzer['admin']])), 'das Kennwort des Administrators bleibt');
+    aufruf($basis, $verwalter['dose'], 'POST', '/system/freigaben/speichern', ['subject_type' => 'user', 'subject_id' => $benutzer['verwalter'], 'ziel_art' => 'alles', 'darf_steuern' => 1, '_token' => $verwalter['token']]);
+    gleich((int) Database::scalar("SELECT COUNT(*) FROM freigaben WHERE subject_type = 'user' AND subject_id = ?", [$benutzer['verwalter']]), 0, 'keine Freigabe auf alles für sich selbst');
+    aufruf($basis, $verwalter['dose'], 'POST', '/system/benutzer/speichern', ['id' => $benutzer['zwei'], 'username' => $kennung . '-zwei', 'full_name' => 'Geändert', 'is_active' => 1,
+        'rollen' => [], '_token' => $verwalter['token']]);
+    gleich((string) Database::scalar('SELECT full_name FROM users WHERE id = ?', [$benutzer['zwei']]), '', 'ein Konto mit Rechten, die der Verwalter nicht hat (Kunde: Statistik), bleibt unverändert');
+    aufruf($basis, $verwalter['dose'], 'POST', '/system/benutzer/speichern', ['id' => $benutzer['klein'], 'username' => $kennung . '-klein', 'full_name' => 'Geändert', 'is_active' => 1,
+        'rollen' => [$kleinRolle => ['aktiv' => 1]], '_token' => $verwalter['token']]);
+    gleich((string) Database::scalar('SELECT full_name FROM users WHERE id = ?', [$benutzer['klein']]), 'Geändert', 'ein Konto mit weniger Rechten lässt sich verwalten');
+
+    // ---------------------------------------------------- Ändern nur, wo „bearbeiten“ freigegeben ist
+    $fremd = Database::first('SELECT l.id AS leitung, l.floor_id, f.site_id, f.name AS etage FROM leitungen l JOIN floors f ON f.id = l.floor_id ORDER BY l.id LIMIT 1');
+    if ($fremd !== null) {
+        $werk = \App\Services\SiteService::saveSite(null, ['name' => $kennung . ' Werk']);
+        $werkEtage = \App\Services\SiteService::saveFloor(null, ['site_id' => $werk, 'name' => 'Halle']);
+        $eigen = (int) \App\Services\AnlagenService::speichern(null, ['art' => 'verteilung', 'name' => $kennung . ' eigen', 'floor_id' => $werkEtage,
+            'plan_x' => 10, 'plan_y' => 10, 'ohne_anschluesse' => true])['id'];
+        BenutzerService::freigabeSpeichern(['subject_type' => 'user', 'subject_id' => $benutzer['planer'], 'ziel_art' => 'site', 'ziel_id' => $werk, 'darf_bearbeiten' => 1]);
+        BenutzerService::freigabeSpeichern(['subject_type' => 'user', 'subject_id' => $benutzer['planer'], 'ziel_art' => 'site', 'ziel_id' => (int) $fremd['site_id']]);
+        $planer = anmelden($basis, $kennung . '-planer', $kennwort);
+        $dosen[] = $planer['dose'];
+        $json = ['Accept: application/json'];
+        aufruf($basis, $planer['dose'], 'POST', '/standorte/etage', ['site_id' => $werk, 'id' => (int) $fremd['floor_id'], 'name' => $kennung . ' gekapert', '_token' => $planer['token']]);
+        gleich(Database::first('SELECT name, site_id FROM floors WHERE id = ?', [(int) $fremd['floor_id']]), ['name' => $fremd['etage'], 'site_id' => $fremd['site_id']],
+            'eine fremde Etage lässt sich über ihre ID nicht umbenennen oder herüberziehen');
+        $r = aufruf($basis, $planer['dose'], 'POST', '/karte/massstab', ['floor_id' => (int) $fremd['floor_id'], 'entfernen' => 1, '_token' => $planer['token']], $json);
+        gleich($r['status'], 403, 'Maßstab eines nur sichtbaren Standorts: nicht änderbar');
+        $r = aufruf($basis, $planer['dose'], 'POST', '/karte/leitung/loeschen', ['id' => (int) $fremd['leitung'], '_token' => $planer['token']], $json);
+        pruefe($r['status'] === 403 && Database::first('SELECT id FROM leitungen WHERE id = ?', [(int) $fremd['leitung']]) !== null,
+            'ein Kabel auf einem nur sichtbaren Standort lässt sich nicht löschen');
+        aufruf($basis, $planer['dose'], 'POST', '/anlagen/speichern', ['art' => 'verteilung', 'name' => $kennung . ' eingeschleust', 'site_id' => $werk,
+            'floor_id' => (int) $fremd['floor_id'], '_token' => $planer['token']]);
+        pruefe(Database::first('SELECT id FROM objekte WHERE name = ?', [$kennung . ' eingeschleust']) === null,
+            'eine neue Anlage landet nicht über eine fremde Etage auf einem fremden Standort');
+        $r = aufruf($basis, $planer['dose'], 'POST', '/karte/objekt/verschieben', ['id' => $eigen, 'floor_id' => (int) $fremd['floor_id'], 'x' => 50, 'y' => 50, '_token' => $planer['token']], $json);
+        pruefe($r['status'] === 403 && (int) Database::scalar('SELECT site_id FROM objekte WHERE id = ?', [$eigen]) === $werk,
+            'die eigene Anlage lässt sich nicht in einen fremden Plan schieben');
+        $r = aufruf($basis, $planer['dose'], 'POST', '/karte/objekt/verschieben', ['id' => $eigen, 'floor_id' => $werkEtage, 'x' => 20, 'y' => 30, '_token' => $planer['token']], $json);
+        pruefe($r['status'] === 200 && (float) Database::scalar('SELECT plan_x FROM objekte WHERE id = ?', [$eigen]) === 20.0, 'auf dem eigenen Standort schon');
+        foreach (Database::select('SELECT id FROM objekte WHERE site_id = ?', [$werk]) as $o) {
+            \App\Services\AnlagenService::loeschen((int) $o['id']);
+        }
+        \App\Services\SiteService::deleteSite($werk);
+    }
 } finally {
+    Database::execute('DELETE FROM steckertypen WHERE name LIKE ?', [$kennung . '%']);
+    foreach (Database::select('SELECT id FROM roles WHERE name LIKE ?', [$kennung . '%']) as $rolle) {
+        BenutzerService::rolleLoeschen((int) $rolle['id']);
+    }
     Database::execute('DELETE FROM leitungen WHERE name LIKE ?', [$kennung . '%']);
     foreach (Database::select('SELECT id FROM inventar WHERE kennung LIKE ?', [$kennung . '%']) as $i) {
         Database::execute('UPDATE einsaetze SET bis = ? WHERE inventar_id = ? AND bis IS NULL', [gmdate('c'), (int) $i['id']]);

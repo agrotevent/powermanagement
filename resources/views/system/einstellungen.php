@@ -62,7 +62,7 @@ $feld = static function (string $schluessel, string $typ = 'text', string $platz
     <button class="btn" type="submit">InfluxDB, MQTT und Node-RED prüfen</button>
 </form>
 
-<?php if (View::can('inventory.push')): ?>
+<?php if (View::can('settings.manage')): ?>
 <form method="post" action="/system/einstellungen/location" class="card mt">
     <?= Csrf::field() ?>
     <div class="card-head"><h2>Location- und Verteiler-Abgleich</h2><span class="hint">dasselbe Repository wie in MasterAdmin</span></div>

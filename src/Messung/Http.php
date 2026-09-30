@@ -23,6 +23,11 @@ final class Http
         if (is_callable(self::$attrappe)) {
             return (self::$attrappe)($methode, $url, $optionen);
         }
+        // Nur HTTP(S): eine Adresse aus den Einstellungen (InfluxDB) soll
+        // nicht über file://, gopher:// oder dict:// woanders hingreifen.
+        if (!in_array(strtolower((string) parse_url($url, PHP_URL_SCHEME)), ['http', 'https'], true)) {
+            return ['ok' => false, 'status' => 0, 'rumpf' => '', 'fehler' => 'Nur http:// und https:// sind erlaubt.'];
+        }
         $kopf = [];
         foreach ((array) ($optionen['kopf'] ?? []) as $name => $wert) {
             $kopf[] = $name . ': ' . $wert;
@@ -38,6 +43,8 @@ final class Http
                 CURLOPT_CONNECTTIMEOUT => min(5, $zeit),
                 CURLOPT_TIMEOUT        => $zeit,
                 CURLOPT_FOLLOWLOCATION => false,
+                CURLOPT_PROTOCOLS      => CURLPROTO_HTTP | CURLPROTO_HTTPS,
+                CURLOPT_REDIR_PROTOCOLS => CURLPROTO_HTTP | CURLPROTO_HTTPS,
             ]);
             if (isset($optionen['rumpf'])) {
                 curl_setopt($ch, CURLOPT_POSTFIELDS, (string) $optionen['rumpf']);

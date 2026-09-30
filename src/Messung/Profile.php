@@ -285,6 +285,10 @@ final class Profile
             if (!is_array($r) || trim((string) ($r['feld'] ?? '')) === '' || trim((string) ($r['kanal'] ?? '')) === '') {
                 return "Register {$nr}: „kanal“ und „feld“ sind Pflicht.";
             }
+            // Beide landen als Namen in der InfluxDB – nur einfache Zeichen.
+            if (preg_match('/^[A-Za-z0-9_:.-]{1,64}$/', (string) $r['kanal']) !== 1 || preg_match('/^[A-Za-z0-9_:.-]{1,64}$/', (string) $r['feld']) !== 1) {
+                return "Register {$nr}: „kanal“ und „feld“ nur mit Buchstaben, Ziffern und _ : . - (höchstens 64 Zeichen).";
+            }
             if (!in_array((string) ($r['typ'] ?? 'u16'), $typen, true)) {
                 return "Register {$nr}: unbekannter Typ „" . ($r['typ'] ?? '') . '“ (erlaubt: ' . implode(', ', $typen) . ').';
             }

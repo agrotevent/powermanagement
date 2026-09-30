@@ -282,7 +282,13 @@ final class Markdown
         if (preg_match('/^([a-z0-9-]+)\.md(#.*)?$/i', $ziel, $m) === 1) {
             return '/handbuch/' . strtolower($m[1]) . ($m[2] ?? '');
         }
-        if (str_starts_with($ziel, 'javascript:')) {
+        // Nur eigene Pfade, Anker und http(s)/mailto – kein javascript:, data:,
+        // vbscript: (auch nicht in Großbuchstaben oder mit Leerzeichen davor).
+        $schema = strtolower((string) parse_url(trim($ziel), PHP_URL_SCHEME));
+        if ($schema !== '' && !in_array($schema, ['http', 'https', 'mailto'], true)) {
+            return '#';
+        }
+        if (preg_match('/^\s*[a-z][a-z0-9+.-]*:/i', $ziel) === 1 && $schema === '') {
             return '#';
         }
         return $ziel;

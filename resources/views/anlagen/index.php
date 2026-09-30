@@ -15,18 +15,18 @@ $neuText = $fest === true && ($filter['art'] === '' || $filter['art'] === 'ansch
 ?>
 <div class="toolbar-zeile">
     <form method="get" action="/anlagen" class="inline-form">
-        <select name="art" onchange="this.form.submit()" aria-label="Art">
+        <select name="art" data-absenden aria-label="Art">
             <option value="">Alle Arten</option>
             <?php foreach (AnlagenService::ARTEN as $k => $a): ?>
                 <option value="<?= $k ?>"<?= $filter['art'] === $k ? ' selected' : '' ?>><?= View::e($a['mehrzahl']) ?></option>
             <?php endforeach; ?>
         </select>
-        <select name="fest" onchange="this.form.submit()" aria-label="Fest oder mobil">
+        <select name="fest" data-absenden aria-label="Fest oder mobil">
             <option value="">Fest und mobil</option>
             <option value="1"<?= $fest === true ? ' selected' : '' ?>>Feststromanschlüsse</option>
             <option value="0"<?= $fest === false ? ' selected' : '' ?>>Mobile Anlagen</option>
         </select>
-        <select name="standort" onchange="this.form.submit()" aria-label="Standort">
+        <select name="standort" data-absenden aria-label="Standort">
             <option value="0">Alle Standorte</option>
             <?php foreach ($standorte as $s): ?>
                 <option value="<?= (int) $s['id'] ?>"<?= (int) $filter['site_id'] === (int) $s['id'] ? ' selected' : '' ?>><?= View::e($s['name']) ?></option>

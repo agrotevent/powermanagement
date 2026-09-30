@@ -230,6 +230,16 @@ as_app() {
     (cd "$ZIEL" && runuser -u "$APP_USER" -- "$@")
 }
 
+# Ein Verzeichnis in storage/ anlegen – als Anwendungsbenutzer, nicht als
+# root. storage/ gehört der Anwendung: liegt dort ein Verweis (etwa
+# storage/logs → /etc/profile.d), übereignete ein „install -d -o“ als root
+# dessen Ziel der Anwendung. Als sie selbst angelegt, bekommt sie nur, was
+# sie ohnehin darf.
+app_verzeichnis() {
+    as_app mkdir -p -- "$1"
+    as_app chmod "${2:-750}" -- "$1"
+}
+
 # Zufallskennwort nur aus Buchstaben und Ziffern: lässt sich in der Shelly-
 # Oberfläche, in URLs und Konfigurationsdateien ohne Maskieren eintragen.
 zufall() {
@@ -616,9 +626,10 @@ find "$ZIEL" -path "$ZIEL/storage" -prune -o ! -path "$ZIEL/config/config.php" \
     -exec chown root:root {} + -exec chmod go+rX,go-w {} +
 install -d -o "$APP_USER" -g "$APP_USER" -m 750 "$ZIEL/storage"
 for d in logs plans demo cache sessions backups; do
-    install -d -o "$APP_USER" -g "$APP_USER" -m 750 "$ZIEL/storage/$d"
+    app_verzeichnis "$ZIEL/storage/$d"
 done
-chown -R "$APP_USER:$APP_USER" "$ZIEL/storage"
+# -R folgt keinen Verweisen (-P ist die Vorgabe) und ändert nur die Einträge selbst.
+chown -R -P "$APP_USER:$APP_USER" "$ZIEL/storage"
 
 HOST_IP="$(primary_ip)"
 if [[ "$PORT" == "80" ]]; then
@@ -673,12 +684,27 @@ if [[ "$MIT_MOSQUITTO" == "ja" ]]; then
     # bleiben, die drei eigenen werden gesetzt. mosquitto_passwd selbst
     # möchte eine Datei, die root gehört, der Broker eine, die mosquitto
     # gehört – also auf einer Kopie arbeiten und danach übergeben.
+    #
+    # Nicht mit „mosquitto_passwd -b datei benutzer kennwort“: dann stünde
+    # das Kennwort in der Prozessliste, die im Container jeder lesen kann.
+    # Stattdessen die drei eigenen Einträge im Klartext in eine eigene
+    # Datei (printf ist eingebaut, kein eigener Prozess), dort hashen (-U)
+    # und in die vorhandene Datei übernehmen – deren übrige Einträge sind
+    # schon gehasht und blieben es.
     PASSWD=/etc/mosquitto/powermanagement.passwd
+    NEU_PASSWD="$(mktemp)"
+    {
+        printf 'shelly:%s\n' "$MQTT_SHELLY_KENNWORT"
+        printf '%s:%s\n' "$MQTT_NR_BENUTZER" "$MQTT_NODERED_KENNWORT"
+        printf '%s:%s\n' "$MQTT_PM_BENUTZER" "$MQTT_PM_KENNWORT"
+    } > "$NEU_PASSWD"
+    mosquitto_passwd -U "$NEU_PASSWD"
     TMP_PASSWD="$(mktemp)"
-    [[ -f "$PASSWD" ]] && cat "$PASSWD" > "$TMP_PASSWD"
-    mosquitto_passwd -b "$TMP_PASSWD" shelly "$MQTT_SHELLY_KENNWORT"
-    mosquitto_passwd -b "$TMP_PASSWD" "$MQTT_NR_BENUTZER" "$MQTT_NODERED_KENNWORT"
-    mosquitto_passwd -b "$TMP_PASSWD" "$MQTT_PM_BENUTZER" "$MQTT_PM_KENNWORT"
+    if [[ -f "$PASSWD" ]]; then
+        awk -F: -v a=shelly -v b="$MQTT_NR_BENUTZER" -v c="$MQTT_PM_BENUTZER" '$1 != a && $1 != b && $1 != c' "$PASSWD" > "$TMP_PASSWD"
+    fi
+    cat "$NEU_PASSWD" >> "$TMP_PASSWD"
+    rm -f "$NEU_PASSWD"
     install -o mosquitto -g mosquitto -m 600 "$TMP_PASSWD" "$PASSWD"
     rm -f "$TMP_PASSWD"
 
@@ -736,18 +762,30 @@ if [[ "$MIT_INFLUX" == "ja" ]]; then
     if [[ -f /etc/influxdb/config.toml ]] && ! grep -q '^reporting-disabled' /etc/influxdb/config.toml; then
         echo 'reporting-disabled = true' >> /etc/influxdb/config.toml
     fi
+    # Bis die Ersteinrichtung gemacht ist, steht /api/v2/setup jedem offen,
+    # der die InfluxDB erreicht – wer zuerst kommt, legt Administrator und
+    # Operator-Token an. Deshalb lauscht sie bis dahin nur auf 127.0.0.1.
+    # Bricht das Skript vorher ab, bleibt es dabei (sicher, nicht offen);
+    # der nächste Lauf räumt die Datei weg.
+    INFLUX_ERST=/etc/systemd/system/influxdb.service.d/powermanagement-ersteinrichtung.conf
+    install -d -m 755 "$(dirname "$INFLUX_ERST")"
+    printf '[Service]\nEnvironment=INFLUXD_HTTP_BIND_ADDRESS=127.0.0.1:8086\n' > "$INFLUX_ERST"
+    systemctl daemon-reload
     systemctl enable --quiet influxdb
     systemctl restart influxdb
-    echo "    Warte auf die InfluxDB …"
-    for _ in $(seq 1 60); do
-        curl -sf --max-time 2 "$INFLUX_LOKAL/health" >/dev/null 2>&1 && break
-        sleep 1
-    done
-    if ! curl -sf --max-time 2 "$INFLUX_LOKAL/health" >/dev/null 2>&1; then
-        echo "Die InfluxDB antwortet nicht auf $INFLUX_LOKAL/health." >&2
-        echo "Nachsehen: systemctl status influxdb; journalctl -u influxdb" >&2
-        exit 1
-    fi
+    influx_warten() {
+        echo "    Warte auf die InfluxDB …"
+        for _ in $(seq 1 60); do
+            curl -sf --max-time 2 "$INFLUX_LOKAL/health" >/dev/null 2>&1 && break
+            sleep 1
+        done
+        if ! curl -sf --max-time 2 "$INFLUX_LOKAL/health" >/dev/null 2>&1; then
+            echo "Die InfluxDB antwortet nicht auf $INFLUX_LOKAL/health." >&2
+            echo "Nachsehen: systemctl status influxdb; journalctl -u influxdb" >&2
+            exit 1
+        fi
+    }
+    influx_warten
 
     schritt "InfluxDB einrichten (Organisation, Bucket, Tokens)"
     ERSTEINRICHTUNG="$(curl -sS --max-time 10 "$INFLUX_LOKAL/api/v2/setup" | json_wert allowed)"
@@ -777,6 +815,11 @@ if [[ "$MIT_INFLUX" == "ja" ]]; then
     else
         echo "    InfluxDB ist bereits eingerichtet"
     fi
+    # Eingerichtet: wieder wie konfiguriert erreichbar (Oberfläche, Grafana).
+    rm -f "$INFLUX_ERST"
+    systemctl daemon-reload
+    systemctl restart influxdb
+    influx_warten
 
     INFLUX_OPERATOR_TOKEN="$(zugang INFLUX_OPERATOR_TOKEN)"
     if [[ -z "$INFLUX_OPERATOR_TOKEN" ]]; then
@@ -884,11 +927,13 @@ if [[ "$MIT_NODERED" == "ja" ]]; then
     HASH_DATEI="$NODERED_DIR/admin-kennwort.bcrypt"
     if [[ -z "$NODERED_ADMIN_KENNWORT" || ! -s "$HASH_DATEI" ]]; then
         NODERED_ADMIN_KENNWORT="$(zugang_oder_neu NODERED_ADMIN_KENNWORT 20)"
+        # Geschrieben von nodered selbst: der Ordner gehört ihm, und ein
+        # Verweis darin (auf eine Datei, die root liest) brächte als root
+        # geschrieben und per chown übergeben ihm fremde Dateien.
         PM_KENNWORT="$NODERED_ADMIN_KENNWORT" php -r '
             $h = password_hash(getenv("PM_KENNWORT"), PASSWORD_BCRYPT);
-            echo "\$2b\$" . substr($h, 4), "\n";' > "$HASH_DATEI"
-        chown nodered:nodered "$HASH_DATEI"
-        chmod 600 "$HASH_DATEI"
+            echo "\$2b\$" . substr($h, 4), "\n";' \
+            | runuser -u nodered -- sh -c 'umask 077; rm -f -- "$1"; cat > "$1"' _ "$HASH_DATEI"
     fi
     zugang_setzen NODERED_ADMIN_BENUTZER admin
 
@@ -914,7 +959,10 @@ if [[ "$MIT_NODERED" == "ja" ]]; then
     # Zugang zum Broker in flows_cred.json unter der festen ID des Broker-
     # Nodes. Andere Einträge (Nodes, die jemand ergänzt hat) bleiben stehen.
     # Werte über die Umgebung, nicht über die Kommandozeile.
-    PM_DATEI="$NODERED_DIR/flows_cred.json" PM_BENUTZER="$MQTT_NR_BENUTZER" PM_KENNWORT="$MQTT_NODERED_KENNWORT" node -e '
+    # Als nodered: sein Ordner, seine Datei – ein Verweis darin führt dann
+    # nirgends hin, wo nodered nicht ohnehin schreiben darf.
+    PM_DATEI="$NODERED_DIR/flows_cred.json" PM_BENUTZER="$MQTT_NR_BENUTZER" PM_KENNWORT="$MQTT_NODERED_KENNWORT" \
+        runuser -u nodered -- node -e '
         const fs = require("fs");
         const datei = process.env.PM_DATEI;
         let d = {};
@@ -926,11 +974,10 @@ if [[ "$MIT_NODERED" == "ja" ]]; then
             d = {};
         }
         d.pm_broker = Object.assign({}, d.pm_broker, { user: process.env.PM_BENUTZER, password: process.env.PM_KENNWORT });
-        fs.writeFileSync(datei + ".neu", JSON.stringify(d, null, 4) + "\n", { mode: 0o600 });
+        try { fs.unlinkSync(datei + ".neu"); } catch (e) {}
+        fs.writeFileSync(datei + ".neu", JSON.stringify(d, null, 4) + "\n", { mode: 0o600, flag: "wx" });
         fs.renameSync(datei + ".neu", datei);
     '
-    chown nodered:nodered "$NODERED_DIR/flows_cred.json"
-    chmod 600 "$NODERED_DIR/flows_cred.json"
 
     # Umgebung für den Dienst. Werte in einfachen Anführungszeichen: so
     # nimmt systemd sie wörtlich.

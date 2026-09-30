@@ -120,6 +120,11 @@ final class Datenquellen
                 return ['ok' => false, 'message' => 'Bitte ein Registerprofil wählen.'];
             }
         }
+        // Das MQTT-Präfix eines Shelly wird zum Thema, an das geschaltet wird:
+        // + und # wären Platzhalter für viele Geräte zugleich.
+        if ($art === 'shelly' && preg_match('#^[^\s+\#\x00-\x1f\x7f]*$#', trim((string) ($daten['extern_id'] ?? ''))) !== 1) {
+            return ['ok' => false, 'message' => 'Das MQTT-Präfix darf keine Leerzeichen und kein + oder # enthalten.'];
+        }
         if (in_array($art, ['comap_cloud', 'victron_vrm', 'shelly'], true) && trim((string) ($daten['extern_id'] ?? '')) === '') {
             return ['ok' => false, 'message' => match ($art) {
                 'comap_cloud' => 'Bitte die unitGuid der Steuerung angeben (steht in WebSupervisor bzw. kommt über „Einheiten abrufen“).',

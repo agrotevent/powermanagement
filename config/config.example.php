@@ -43,6 +43,13 @@ return [
         'idle_timeout'        => 3600,
         'lockout_attempts'    => 5,
         'lockout_minutes'     => 15,
+        // Fehlversuche je Adresse im selben Zeitraum, dann wird sie gebremst.
+        'ip_attempts'         => 20,
+        // Längste Sitzung in Sekunden, auch wenn sie benutzt wird (0 = ohne).
+        'max_session'         => 43200,
+        // Sitzungs-Cookie nur über HTTPS: true erzwingt es, wenn der Proxy
+        // davor kein X-Forwarded-Proto schickt; null = wie die Anfrage kam.
+        'cookie_secure'       => null,
         'password_min_length' => 12,
         // Adressen von Reverse-Proxys, deren X-Forwarded-For geglaubt wird.
         'trusted_proxies'     => ['127.0.0.1'],

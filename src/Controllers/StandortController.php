@@ -26,7 +26,8 @@ final class StandortController extends Controller
             return;
         }
         $id = $request->int('id') ?: null;
-        if ($id !== null && !Zugriff::siehtStandort($id)) {
+        if ($id !== null && !Zugriff::darfStandortAendern($id)) {
+            Flash::error('Diesen Standort darfst du nicht ändern.');
             $this->back('/standorte');
             return;
         }
@@ -51,12 +52,21 @@ final class StandortController extends Controller
     public function etageSpeichern(Request $request): void
     {
         $siteId = $request->int('site_id');
-        if (!Zugriff::siehtStandort($siteId) || $request->str('name') === '') {
+        $id = $request->int('id') ?: null;
+        $alt = $id !== null ? SiteService::floor($id) : null;
+        // Eine vorhandene Etage nur auf ihrem eigenen Standort – sonst ließe
+        // sich über die ID eine fremde Etage umbenennen und herüberziehen.
+        if (!Zugriff::darfStandortAendern($siteId) || ($id !== null && ($alt === null || (int) $alt['site_id'] !== $siteId))) {
+            Flash::error('Diese Etage darfst du nicht ändern.');
+            $this->redirect('/standorte');
+            return;
+        }
+        if ($request->str('name') === '') {
             Flash::error('Bitte einen Namen angeben.');
             $this->redirect('/standorte');
             return;
         }
-        SiteService::saveFloor($request->int('id') ?: null, [
+        SiteService::saveFloor($id, [
             'site_id'    => $siteId,
             'name'       => $request->str('name'),
             'level_no'   => $request->int('level_no'),
@@ -71,7 +81,7 @@ final class StandortController extends Controller
     public function etageLoeschen(Request $request): void
     {
         $etage = SiteService::floor($request->int('id'));
-        if ($etage !== null && Zugriff::siehtStandort((int) $etage['site_id'])) {
+        if ($etage !== null && Zugriff::darfStandortAendern((int) $etage['site_id'])) {
             SiteService::deleteFloor((int) $etage['id']);
             Flash::success('Etage gelöscht. Kabel und Kabelwege dieser Etage sind mit entfernt.');
         }
@@ -81,7 +91,12 @@ final class StandortController extends Controller
     public function grundriss(Request $request): void
     {
         $siteId = $request->int('site_id');
-        if (!Zugriff::siehtStandort($siteId) || !isset($_FILES['plan'])) {
+        if (!Zugriff::darfStandortAendern($siteId)) {
+            Flash::error('Auf diesem Standort darfst du keinen Grundriss hinterlegen.');
+            $this->redirect('/standorte');
+            return;
+        }
+        if (!isset($_FILES['plan'])) {
             Flash::error('Bitte eine Datei wählen.');
             $this->redirect('/standorte');
             return;

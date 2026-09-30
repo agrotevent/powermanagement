@@ -11,6 +11,8 @@ use App\Support\Csrf;
 use App\Support\Database;
 use App\Support\Flash;
 use App\Support\Request;
+use App\Support\Response;
+use App\Support\Session;
 
 final class AuthController extends Controller
 {
@@ -36,8 +38,10 @@ final class AuthController extends Controller
             $this->redirect('/profil');
             return;
         }
-        $next = $request->str('next', '');
-        if ($next === '' || !str_starts_with($next, '/') || str_starts_with($next, '//') || $next === '/login') {
+        // Nur ein Pfad auf dieser Seite – sonst leitete ein präparierter
+        // Link nach der echten Anmeldung auf eine fremde Seite weiter.
+        $next = Response::sichererPfad($request->str('next', ''));
+        if ($next === null || $next === '/login') {
             $next = Auth::landingPath();
         }
         $this->redirect($next);
@@ -93,13 +97,18 @@ final class AuthController extends Controller
             $this->redirect('/profil');
             return;
         }
+        $hash = password_hash($new, PASSWORD_DEFAULT);
         Database::update('users', (int) $user['id'], [
-            'password_hash' => password_hash($new, PASSWORD_DEFAULT),
+            'password_hash' => $hash,
             'must_change_password' => 0,
             'updated_at' => gmdate('c'),
         ]);
         Audit::log('auth.passwort', 'user', (string) $user['id']);
-        Csrf::token();
+        // Andere Sitzungen mit dem alten Kennwort enden (Auth::user()); diese
+        // läuft mit neuer Sitzungs-ID und neuem Token weiter.
+        Session::regenerate();
+        Auth::sitzungBinden($hash);
+        Csrf::erneuern();
         Flash::success('Passwort geändert.');
         $this->redirect(Auth::landingPath());
     }

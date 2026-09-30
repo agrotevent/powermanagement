@@ -19,7 +19,7 @@ $darfSetzen = $darfAnlegen;
 <div class="karte-kopf">
     <form method="get" action="/karte" class="inline-form">
         <label class="sr-only" for="etage-wahl">Etage</label>
-        <select id="etage-wahl" name="etage" onchange="this.form.submit()">
+        <select id="etage-wahl" name="etage" data-absenden>
             <?php foreach ($standorte as $s): ?>
                 <optgroup label="<?= View::e($s['name']) ?>">
                     <?php foreach ($s['floors'] as $f): ?>

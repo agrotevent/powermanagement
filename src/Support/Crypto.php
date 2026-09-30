@@ -6,8 +6,25 @@ namespace App\Support;
 /** Symmetrische Verschlüsselung (libsodium) für Zugangsdaten (Modbus, Cloud, Repository). */
 final class Crypto
 {
+    /** Taugt app.key? null = ja, sonst der Grund. */
+    public static function schluesselFehler(): ?string
+    {
+        $key = trim((string) Config::get('app.key', ''));
+        if ($key === '' || $key === 'base64:' || str_contains($key, 'CHANGEME')) {
+            return 'In config/config.php fehlt ein eigener app.key (dort steht der Platzhalter). Einen neuen erzeugt: '
+                . 'php -r \'echo "base64:".base64_encode(random_bytes(32)), PHP_EOL;\'';
+        }
+        return null;
+    }
+
     private static function key(): string
     {
+        // Ohne eigenen Schlüssel wäre er öffentlich bekannt (der Platzhalter
+        // aus der Vorlage bzw. sha256('pm:')) – dann lieber gar nicht.
+        $fehler = self::schluesselFehler();
+        if ($fehler !== null) {
+            throw new \RuntimeException($fehler);
+        }
         $key = (string) Config::get('app.key', '');
         if (str_starts_with($key, 'base64:')) {
             $key = (string) base64_decode(substr($key, 7), true);

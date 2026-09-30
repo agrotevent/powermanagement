@@ -71,18 +71,25 @@ final class Steuerung
             return ['ok' => false, 'message' => 'Diese Datenquelle gibt es nicht.'];
         }
         $objekt = $objektId !== null ? \App\Services\AnlagenService::find($objektId) : null;
+        // Erst den Befehl bestimmen, dann prüfen – mit dem Kanal, den der
+        // Befehl wirklich schaltet. Bei Modbus und ComAp steht er in der
+        // Befehlsliste; der Kanal aus der Anfrage zählt dort nicht, sonst
+        // ließe eine Freigabe für „Relais 1“ jeden anderen Befehl zu.
+        $bekannt = null;
+        foreach (self::befehle($quelle, [$kanal]) as $b) {
+            if ($b['schluessel'] === $befehl && ($b['kanal'] === $kanal || $quelle['art'] !== 'shelly')) {
+                $bekannt = $b;
+                break;
+            }
+        }
+        if ($bekannt !== null) {
+            $kanal = (string) $bekannt['kanal'];
+        }
         if (!Zugriff::darfSteuern($quelle, $kanal, $objekt)) {
             self::protokoll($quelle, $objektId, $befehl, $kanal, false, 'abgelehnt: keine Schalt-Freigabe');
             return ['ok' => false, 'message' => 'Für dieses Gerät fehlt die Schalt-Freigabe – oder die Steuerung der Anlage ist gesperrt.'];
         }
-        $bekannt = false;
-        foreach (self::befehle($quelle, [$kanal]) as $b) {
-            if ($b['schluessel'] === $befehl && ($b['kanal'] === $kanal || $quelle['art'] !== 'shelly')) {
-                $bekannt = true;
-                break;
-            }
-        }
-        if (!$bekannt) {
+        if ($bekannt === null) {
             return ['ok' => false, 'message' => 'Diesen Befehl kennt das Gerät nicht.'];
         }
 

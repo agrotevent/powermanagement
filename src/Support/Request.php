@@ -55,8 +55,17 @@ final class Request
         $remote  = (string) ($_SERVER['REMOTE_ADDR'] ?? '0.0.0.0');
         $trusted = (array) Config::get('security.trusted_proxies', []);
         if (in_array($remote, $trusted, true) && !empty($_SERVER['HTTP_X_FORWARDED_FOR'])) {
-            $parts = explode(',', (string) $_SERVER['HTTP_X_FORWARDED_FOR']);
-            return trim($parts[0]);
+            // Von rechts lesen: der Proxy hängt an, was er gesehen hat. Links
+            // steht, was der Aufrufer selbst mitgeschickt hat – das zählt nicht.
+            $teile = array_reverse(array_map('trim', explode(',', (string) $_SERVER['HTTP_X_FORWARDED_FOR'])));
+            foreach ($teile as $adresse) {
+                if (filter_var($adresse, FILTER_VALIDATE_IP) === false) {
+                    break;
+                }
+                if (!in_array($adresse, $trusted, true)) {
+                    return $adresse;
+                }
+            }
         }
         return $remote;
     }

@@ -282,6 +282,29 @@ document.addEventListener('DOMContentLoaded', function () {
         });
     }
 
+    // Auswahlfelder mit Wirkung – als data-Attribut statt onchange="…": die
+    // Content-Security-Policy lässt nur Skripte aus Dateien zu.
+    // data-absenden: das Formular beim Ändern gleich absenden (Filter).
+    document.querySelectorAll('[data-absenden]').forEach(function (el) {
+        el.addEventListener('change', function () { if (el.form) { el.form.submit(); } });
+    });
+    // data-neu-laden="art": die Seite mit ?art=<Wert> neu laden (plus data-neu-laden-zusatz).
+    document.querySelectorAll('[data-neu-laden]').forEach(function (el) {
+        el.addEventListener('change', function () {
+            var parameter = new URLSearchParams(el.dataset.neuLadenZusatz || '');
+            parameter.set(el.dataset.neuLaden, el.value);
+            window.location.search = '?' + parameter.toString();
+        });
+    });
+    // data-fest-von-vorlage: „fest“ übernimmt der gewählte Katalog-Typ.
+    document.querySelectorAll('[data-fest-von-vorlage]').forEach(function (el) {
+        el.addEventListener('change', function () {
+            var option = el.selectedOptions[0];
+            var fest = el.form ? el.form.querySelector('#fest') : null;
+            if (option && fest && option.dataset.fest !== undefined) { fest.checked = option.dataset.fest === '1'; }
+        });
+    });
+
     // Laufende Aufträge alle 4 Sekunden nachladen.
     var live = document.querySelector('[data-job-live]');
     if (live) {

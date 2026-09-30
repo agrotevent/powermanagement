@@ -505,3 +505,20 @@ Katalog bzw. das Inventar pflegen darf. Hochladen und Entfernen braucht
 je Konto mit eigenem Zeitraum, **Freigaben** je Benutzer. Details und
 Beispiele stehen in [rechte.md](rechte.md). Das **Audit-Log** (*System →
 Audit-Log*) zeichnet Anmeldungen, Änderungen und Schaltvorgänge auf.
+
+**Anmeldung und Sitzung**
+
+- Nach fünf falschen Kennwörtern ist ein Konto 15 Minuten gesperrt
+  (`security.lockout_attempts`, `security.lockout_minutes`). Die Meldungen
+  verraten nicht, ob es ein Konto gibt – auch ein unbekannter Name ist nach
+  fünf Versuchen „gesperrt“. Von einer Adresse aus sind im selben Zeitraum
+  höchstens 20 Fehlversuche möglich (`security.ip_attempts`), gleich für
+  welche Konten.
+- Wird ein Kennwort geändert – selbst im Profil oder von der Verwaltung –,
+  enden alle anderen Sitzungen dieses Kontos. Eine Sitzung endet außerdem
+  nach einer Stunde ohne Aktivität (`security.idle_timeout`) und spätestens
+  nach zwölf Stunden (`security.max_session`).
+- Ein Konto mit vorläufigem Kennwort kommt erst nach dem eigenen Kennwort
+  weiter als bis zum Profil.
+- Steht ein TLS-Proxy davor, der kein `X-Forwarded-Proto` schickt, erzwingt
+  `security.cookie_secure => true` das Sitzungs-Cookie nur über HTTPS.

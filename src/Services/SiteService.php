@@ -219,8 +219,13 @@ final class SiteService
          * verschwunden. Wo er hingehört, weiß nur der Benutzer; hat der
          * Standort schon Etagen, wird deshalb nachgefragt statt geraten.
          */
-        $floorIdsGewaehlt = array_values(array_filter(array_map('intval', (array) ($options['floor_ids'] ?? []))));
         $vorhandene       = self::floors($siteId);
+        // Nur Etagen dieses Standorts – eine fremde Etagen-ID aus dem
+        // Formular bekäme sonst diesen Grundriss.
+        $floorIdsGewaehlt = array_values(array_intersect(
+            array_filter(array_map('intval', (array) ($options['floor_ids'] ?? []))),
+            array_map(static fn ($f) => (int) $f['id'], $vorhandene)
+        ));
         if ($floorIdsGewaehlt === [] && $vorhandene !== [] && empty($options['neue_etagen'])) {
             return [
                 'ok'      => false,
@@ -372,18 +377,23 @@ final class SiteService
         if (preg_match_all('/\/Type\s*\/Page\b(?!s)/', $content, $matches)) {
             $count = count($matches[0]);
             if ($count > 0) {
-                return $count;
+                return min($count, self::MAX_PDF_SEITEN);
             }
         }
         if (preg_match_all('/\/Count\s+(\d+)/', $content, $matches)) {
             $counts = array_map('intval', $matches[1]);
             $max = $counts === [] ? 0 : max($counts);
             if ($max > 0) {
-                return $max;
+                // Die Zahl steht im PDF – „/Count 99999999“ legte sonst so
+                // viele Etagen an und kachelte jede.
+                return min($max, self::MAX_PDF_SEITEN);
             }
         }
         return 1;
     }
+
+    /** Mehr Seiten werden aus einem PDF nicht auf Etagen verteilt. */
+    public const MAX_PDF_SEITEN = 60;
 
     private static function uploadError(int $code): string
     {

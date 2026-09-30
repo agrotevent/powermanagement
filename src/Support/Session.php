@@ -11,10 +11,15 @@ final class Session
             return;
         }
         session_name((string) Config::get('security.session_name', 'pm_session'));
+        // Nur Sitzungs-IDs, die der Server selbst vergeben hat.
+        ini_set('session.use_strict_mode', '1');
+        // „Secure“ von Hand erzwingen, wenn der Proxy davor kein
+        // X-Forwarded-Proto schickt; ohne Angabe: wie die Anfrage kam.
+        $sicher = Config::get('security.cookie_secure');
         session_set_cookie_params([
             'lifetime' => 0,
             'path'     => '/',
-            'secure'   => self::isHttps(),
+            'secure'   => $sicher === null ? self::isHttps() : (bool) $sicher,
             'httponly' => true,
             'samesite' => 'Lax',
         ]);

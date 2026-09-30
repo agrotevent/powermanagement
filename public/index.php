@@ -179,7 +179,9 @@ $router->get('/system/einstellungen', [EinstellungenController::class, 'index'],
 $router->post('/system/einstellungen/speichern', [EinstellungenController::class, 'speichern'], 'settings.manage');
 $router->post('/system/einstellungen/pruefen', [EinstellungenController::class, 'pruefen'], 'settings.manage');
 // Adresse und Token des Location-Repositories setzt, wer hochladen darf.
-$router->post('/system/einstellungen/location', [EinstellungenController::class, 'location'], 'inventory.push');
+// Adresse und Zweig des Repositorys: nur mit „Einstellungen ändern“ – wer die
+// Adresse umstellt, lenkt das hinterlegte Token dorthin.
+$router->post('/system/einstellungen/location', [EinstellungenController::class, 'location'], 'settings.manage');
 
 $router->get('/audit', [AuditController::class, 'index'], 'audit.view');
 

@@ -201,6 +201,11 @@ final class BereichController extends Controller
         $feld = $request->str('feld') === 'i' ? 'i' : 'p';
         $fehler = null;
         $reihe = BereichService::reihe($b, $feld, $von, $bis, null, $fehler);
+        if ($fehler !== null && !Auth::can('datenquellen.manage')) {
+            // Wie in der Statistik: die Meldung der InfluxDB ins Protokoll.
+            \App\Support\Logger::info('Bereich ' . (int) $b['id'] . ': ' . $fehler);
+            $fehler = 'Die Messdaten ließen sich gerade nicht abfragen.';
+        }
         $this->json([
             'ok' => $fehler === null, 'message' => $fehler, 'feld' => $feld, 'einheit' => Messdaten::einheit($feld),
             'name' => Messdaten::feldName($feld), 'zeiten' => $reihe['zeiten'], 'serien' => $reihe['serien'], 'schritt' => $reihe['schritt'],
@@ -231,7 +236,7 @@ final class BereichController extends Controller
             }
         }
         ksort($daten);
-        $zeilen = [implode(';', array_map(static fn ($s) => '"' . str_replace('"', '""', $s) . '"', $spalten))];
+        $zeilen = [implode(';', array_map([StatistikController::class, 'csvFeld'], $spalten))];
         foreach ($daten as $ms => $werte) {
             $zeile = [Zeit::anzeige(Zeit::iso(intdiv($ms, 1000)), 'Y-m-d H:i:s')];
             foreach (array_slice($spalten, 1) as $s) {

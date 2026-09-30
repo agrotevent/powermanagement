@@ -11,6 +11,9 @@ final class Router
     /** @var array<int,array{method:string,pattern:string,handler:callable|array,permission:?string}> */
     private array $routes = [];
 
+    /** Was ein Konto mit vorläufigem Kennwort erreicht. */
+    private const OHNE_NEUES_KENNWORT = ['/profil', '/profil/passwort', '/logout', '/login', '/manifest'];
+
     public function get(string $path, array|callable $handler, ?string $permission = null): void
     {
         $this->add('GET', $path, $handler, $permission);
@@ -73,9 +76,21 @@ final class Router
                 }
             }
 
-            if ($method === 'POST' && !Csrf::check($request->str('_token'))) {
+            // Ein Konto mit vorläufigem Kennwort kommt nur bis zum Profil:
+            // erst ein eigenes Kennwort, dann der Rest.
+            if (Auth::check() && (int) (Auth::user()['must_change_password'] ?? 0) === 1
+                && !in_array($path, self::OHNE_NEUES_KENNWORT, true)) {
+                Flash::warning('Bitte zuerst ein neues Passwort vergeben.');
+                Response::redirect('/profil');
+                return;
+            }
+
+            // Das Token nur aus dem Formular – nie aus der Adresse, wo es in
+            // Protokollen, im Verlauf und im Referer landen würde.
+            $token = $_POST['_token'] ?? null;
+            if ($method === 'POST' && !Csrf::check(is_string($token) ? $token : null)) {
                 Flash::error('Sicherheitstoken ungültig oder abgelaufen. Bitte erneut versuchen.');
-                Response::redirect($_SERVER['HTTP_REFERER'] ?? '/');
+                Response::redirect(Response::zurueckZiel('/'));
                 return;
             }
 

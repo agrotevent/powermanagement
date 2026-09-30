@@ -22,7 +22,9 @@ final class Logger
             "[%s] %s: %s %s\n",
             gmdate('Y-m-d H:i:s'),
             strtoupper($level),
-            $message,
+            // Eine Zeile je Eintrag: Umbrüche aus Fehlermeldungen von Geräten,
+            // Clouds oder git fälschten sonst weitere Einträge.
+            str_replace(["\r", "\n"], ['\\r', '\\n'], $message),
             $context === [] ? '' : json_encode($context, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES)
         );
         @file_put_contents($file, $line, FILE_APPEND | LOCK_EX);

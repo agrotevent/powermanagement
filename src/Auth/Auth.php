@@ -5,6 +5,7 @@ namespace App\Auth;
 
 use App\Support\Audit;
 use App\Support\Config;
+use App\Support\Csrf;
 use App\Support\Database;
 use App\Support\Session;
 use App\Support\Zeit;
@@ -24,18 +25,34 @@ final class Auth
 
     public static function attempt(string $username, string $password, string $ip): array
     {
+        $max     = max(1, (int) Config::get('security.lockout_attempts', 5));
+        $fenster = 60 * max(1, (int) Config::get('security.lockout_minutes', 15));
+        $falsch  = ['ok' => false, 'message' => 'Benutzername oder Passwort falsch.'];
+
+        // Je Adresse: wer viele Konten durchprobiert, wird gebremst – ganz
+        // gleich, ob es sie gibt. Das begrenzt auch, wie viele Konten sich von
+        // einer Adresse aus sperren lassen.
+        $vonHier = self::fehlversuche('ip', $ip, time() - $fenster);
+        if (count($vonHier) >= max($max, (int) Config::get('security.ip_attempts', 20))) {
+            $min = max(1, (int) ceil(((int) Zeit::ts($vonHier[0]) + $fenster - time()) / 60));
+            self::logFailure($username, $ip, 'Adresse gebremst');
+            return ['ok' => false, 'message' => "Zu viele fehlgeschlagene Anmeldungen von dieser Adresse. Bitte in {$min} Minute(n) erneut versuchen."];
+        }
+
         $user = Database::first('SELECT * FROM users WHERE username = ?', [$username]);
 
         if (!$user) {
-            // Timing angleichen, damit gültige Benutzernamen nicht erkennbar sind.
+            // Ein unbekanntes Konto verhält sich wie ein bekanntes: gleiche
+            // Rechenzeit, gleiche Meldung, und nach zu vielen Versuchen auch
+            // „gesperrt“ – sonst verriete die Sperre, welche Namen es gibt.
             password_verify($password, '$2y$12$usesomesillystringfore7hnbRJHxXVLeakoG8K30M1OVGm5Buu');
+            $versuche = self::fehlversuche('username', $username, time() - $fenster);
+            if (count($versuche) >= $max) {
+                $min = max(1, (int) ceil(((int) Zeit::ts($versuche[count($versuche) - 1]) + $fenster - time()) / 60));
+                return ['ok' => false, 'message' => "Konto gesperrt. Bitte in {$min} Minute(n) erneut versuchen."];
+            }
             self::logFailure($username, $ip, 'unbekannter Benutzer');
-            return ['ok' => false, 'message' => 'Benutzername oder Passwort falsch.'];
-        }
-
-        if ((int) $user['is_active'] !== 1) {
-            self::logFailure($username, $ip, 'Konto deaktiviert');
-            return ['ok' => false, 'message' => 'Dieses Konto ist deaktiviert.'];
+            return $falsch;
         }
 
         if (!empty($user['locked_until']) && strtotime((string) $user['locked_until']) > time()) {
@@ -44,16 +61,21 @@ final class Auth
         }
 
         if (!password_verify($password, (string) $user['password_hash'])) {
-            $attempts = (int) $user['failed_logins'] + 1;
-            $max      = (int) Config::get('security.lockout_attempts', 5);
-            $data     = ['failed_logins' => $attempts];
-            if ($attempts >= $max) {
-                $data['locked_until']  = gmdate('c', time() + 60 * (int) Config::get('security.lockout_minutes', 15));
-                $data['failed_logins'] = 0;
-            }
-            Database::update('users', (int) $user['id'], $data);
+            // Hochzählen in der Datenbank, nicht im PHP: gleichzeitige
+            // Anfragen zählen sonst alle von demselben Stand aus weiter.
+            Database::execute('UPDATE users SET failed_logins = failed_logins + 1 WHERE id = ?', [(int) $user['id']]);
+            Database::execute(
+                'UPDATE users SET locked_until = ?, failed_logins = 0 WHERE id = ? AND failed_logins >= ?',
+                [gmdate('c', time() + $fenster), (int) $user['id'], $max]
+            );
             self::logFailure($username, $ip, 'falsches Passwort');
-            return ['ok' => false, 'message' => 'Benutzername oder Passwort falsch.'];
+            return $falsch;
+        }
+
+        // Erst nach dem Kennwort: sonst verriete die Meldung, dass es das Konto gibt.
+        if ((int) $user['is_active'] !== 1) {
+            self::logFailure($username, $ip, 'Konto deaktiviert');
+            return ['ok' => false, 'message' => 'Dieses Konto ist deaktiviert.'];
         }
 
         // Erst nach dem Kennwort prüfen: sonst verriete die Meldung, dass
@@ -64,8 +86,10 @@ final class Auth
             return ['ok' => false, 'message' => $zeitraum];
         }
 
-        if (password_needs_rehash((string) $user['password_hash'], PASSWORD_DEFAULT)) {
-            Database::update('users', (int) $user['id'], ['password_hash' => password_hash($password, PASSWORD_DEFAULT)]);
+        $hash = (string) $user['password_hash'];
+        if (password_needs_rehash($hash, PASSWORD_DEFAULT)) {
+            $hash = password_hash($password, PASSWORD_DEFAULT);
+            Database::update('users', (int) $user['id'], ['password_hash' => $hash]);
         }
 
         Database::update('users', (int) $user['id'], [
@@ -77,6 +101,9 @@ final class Auth
 
         Session::regenerate();
         Session::put('user_id', (int) $user['id']);
+        Session::put('angemeldet', time());
+        self::sitzungBinden($hash);
+        Csrf::erneuern();
         self::$user = null;
         self::$permissions = null;
         Audit::log('auth.login', 'user', (string) $user['id'], ['ip' => $ip]);
@@ -99,6 +126,39 @@ final class Auth
             return 'Dieser Zugang ist am ' . Zeit::anzeige($user['gueltig_bis']) . ' abgelaufen.';
         }
         return null;
+    }
+
+    /**
+     * Fehlgeschlagene Anmeldungen seit $seit – nach Adresse oder Benutzername,
+     * älteste zuerst (Zeitpunkte).
+     *
+     * @return list<string>
+     */
+    private static function fehlversuche(string $spalte, string $wert, int $seit): array
+    {
+        $spalte = $spalte === 'ip' ? 'ip' : 'username';
+        return array_column(Database::select(
+            "SELECT created_at FROM audit_log WHERE action = 'auth.login_failed' AND {$spalte} = ? AND created_at > ? ORDER BY created_at",
+            [$wert, gmdate('c', $seit)]
+        ), 'created_at');
+    }
+
+    /**
+     * Die Sitzung an das jetzige Kennwort binden.
+     *
+     * Wird das Kennwort geändert – selbst oder von der Verwaltung –, endet
+     * jede Sitzung, die mit dem alten angemeldet war: auch die auf dem
+     * Tablet, das jemand liegen gelassen hat, oder die mit einem
+     * abgegriffenen Sitzungs-Cookie.
+     */
+    public static function sitzungBinden(string $kennwortHash): void
+    {
+        Session::put('kennwort', self::kennwortMarke($kennwortHash));
+    }
+
+    private static function kennwortMarke(string $kennwortHash): string
+    {
+        return hash('sha256', 'pm-sitzung|' . $kennwortHash);
     }
 
     private static function logFailure(string $username, string $ip, string $reason): void
@@ -141,6 +201,14 @@ final class Auth
         }
         $user = Database::first('SELECT * FROM users WHERE id = ? AND is_active = 1', [(int) $id]);
         if (!$user) {
+            return null;
+        }
+        // Kennwort seitdem geändert, oder die Sitzung ist älter als erlaubt:
+        // dann ist sie zu Ende – auch wenn sie die ganze Zeit benutzt wurde.
+        $hoechstens = (int) Config::get('security.max_session', 43200);
+        if (!hash_equals(self::kennwortMarke((string) $user['password_hash']), (string) Session::get('kennwort', ''))
+            || ($hoechstens > 0 && time() - (int) Session::get('angemeldet', 0) > $hoechstens)) {
+            Session::forget('user_id');
             return null;
         }
         // Abgelaufen, während die Sitzung offen war: dann ist sie zu Ende.

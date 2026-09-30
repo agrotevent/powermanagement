@@ -24,7 +24,7 @@ $zahl = static fn ($v) => $v === null ? '' : rtrim(rtrim(number_format((float) $
                 <div class="field-row">
                     <div class="field">
                         <label for="art">Art</label>
-                        <select id="art" name="art" onchange="location.search = '?art=' + this.value + '<?= $neu && $vorlage ? '&vorlage=1' : '' ?>';">
+                        <select id="art" name="art" data-neu-laden="art"<?= $neu && $vorlage ? ' data-neu-laden-zusatz="vorlage=1"' : '' ?>>
                             <?php foreach (AnlagenService::ARTEN as $k => $a): ?>
                                 <option value="<?= $k ?>"<?= $art === $k ? ' selected' : '' ?>><?= View::e($a['name']) ?></option>
                             <?php endforeach; ?>
@@ -132,7 +132,7 @@ $zahl = static fn ($v) => $v === null ? '' : rtrim(rtrim(number_format((float) $
                 <?php if ($neu && !$vorlage && $vorlagen !== []): ?>
                     <div class="field">
                         <label for="vorlage_id">Anschlüsse und Sicherungen übernehmen von</label>
-                        <select id="vorlage_id" name="vorlage_id" onchange="const o = this.selectedOptions[0]; if (o.dataset.fest !== undefined) { this.form.querySelector('#fest').checked = o.dataset.fest === '1'; }">
+                        <select id="vorlage_id" name="vorlage_id" data-fest-von-vorlage>
                             <option value="0" data-fest="<?= $fest ? 1 : 0 ?>">Vorschlag für <?= View::e($artInfo['name']) ?></option>
                             <?php foreach ($vorlagen as $v): ?>
                                 <option value="<?= (int) $v['id'] ?>" data-fest="<?= (int) $v['fest'] ?>"><?= View::e($v['name']) ?> (<?= View::e(AnlagenService::kurzform((int) $v['id'])) ?>)<?= (int) $v['fest'] === 1 ? ' – fest' : '' ?></option>

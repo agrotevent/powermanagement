@@ -7,6 +7,7 @@ use App\Auth\Auth;
 use App\Auth\Zugriff;
 use App\Services\AnlagenService;
 use App\Services\AufbauService;
+use App\Services\LeitungService;
 use App\Services\SiteService;
 use App\Support\Flash;
 use App\Support\Request;
@@ -93,8 +94,13 @@ final class AufbauController extends Controller
         }
         $art = $request->str('art') === 'leitung' ? 'leitung' : 'objekt';
         $refId = $request->int('ref_id');
+        // Ein Kabel wie auf der Karte: mit „Kabel zeichnen“ und „bearbeiten“
+        // am Standort oder an einer Anlage an einem seiner Enden.
+        $l = $art === 'leitung' ? LeitungService::find($refId) : null;
         $darf = $art === 'leitung'
-            ? Auth::can('leitungen.manage')
+            ? Auth::can('leitungen.manage') && (Zugriff::darfStandortAendern((int) $a['site_id'])
+                || array_filter([$l['von_objekt_id'] ?? null, $l['zu_objekt_id'] ?? null], static fn ($id) => $id !== null
+                    && ($o = AnlagenService::find((int) $id)) !== null && Zugriff::bearbeitetObjekt($o)) !== [])
             : (($o = AnlagenService::find($refId)) !== null ? Zugriff::darfBearbeiten($o) : Zugriff::darfAufStandortAnlegen((int) $a['site_id']));
         if (!$darf) {
             if ($request->wantsJson()) {

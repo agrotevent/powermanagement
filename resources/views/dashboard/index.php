@@ -18,7 +18,7 @@ foreach ($objekte as $o) {
 <div class="toolbar-zeile">
     <form method="get" action="/dashboard" class="inline-form">
         <label class="sr-only" for="standort">Standort</label>
-        <select id="standort" name="standort" onchange="this.form.submit()">
+        <select id="standort" name="standort" data-absenden>
             <option value="0">Alle Standorte</option>
             <?php foreach ($standorte as $s): ?>
                 <option value="<?= (int) $s['id'] ?>"<?= $siteId === (int) $s['id'] ? ' selected' : '' ?>><?= View::e($s['name']) ?></option>

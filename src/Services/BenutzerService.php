@@ -27,6 +27,75 @@ final class BenutzerService
         'geraet' => 'Einzelnes Gerät (Datenquelle)',
     ];
 
+    // ------------------------------------------------------------ Wer darf was vergeben
+
+    /**
+     * Darf der angemeldete Benutzer diese Rechte vergeben?
+     *
+     * Nur, was er selbst hat – „*“ (Administration) nur, wer selbst „*“ hat.
+     * Sonst wäre „Benutzer verwalten“ eine Hintertür zu allem: sich selbst die
+     * Administratorrolle geben, eine Rolle mit allen Rechten anlegen oder das
+     * Kennwort des Administrators setzen und sich als er anmelden.
+     *
+     * @param list<string> $rechte
+     */
+    public static function darfVergeben(array $rechte): bool
+    {
+        $eigene = Auth::permissions();
+        if (in_array('*', $eigene, true)) {
+            return true;
+        }
+        foreach ($rechte as $recht) {
+            if ($recht === '*' || !in_array($recht, $eigene, true)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /** @return list<string> Rechte einer Rolle */
+    public static function rollenRechte(int $rolleId): array
+    {
+        return array_column(Database::select('SELECT permission FROM role_permissions WHERE role_id = ?', [$rolleId]), 'permission');
+    }
+
+    /**
+     * Rechte eines Kontos aus allen zugewiesenen Rollen – auch denen, die erst
+     * später gelten: wer morgen Administrator ist, ist heute schon nicht mehr
+     * von jemandem mit weniger Rechten zu verwalten.
+     *
+     * @return list<string>
+     */
+    public static function benutzerRechte(int $userId): array
+    {
+        return array_values(array_unique(array_column(Database::select(
+            'SELECT rp.permission FROM role_permissions rp JOIN user_roles ur ON ur.role_id = rp.role_id WHERE ur.user_id = ?',
+            [$userId]
+        ), 'permission')));
+    }
+
+    /** Darf der angemeldete Benutzer dieses Konto ändern, sperren, löschen oder ihm Freigaben geben? */
+    public static function darfVerwalten(int $userId): bool
+    {
+        return self::darfVergeben(self::benutzerRechte($userId));
+    }
+
+    /**
+     * Darf der angemeldete Benutzer diese Freigabe vergeben (oder entfernen)?
+     *
+     * Freigaben reichen so weit wie ein Recht: „alles“ oder „schalten“ gibt
+     * nur, wer die Administration hat; eine Freigabe auf Standort, Anlage oder
+     * Gerät nur, wer selbst alles sieht („Alle Standorte …“). Wer weniger
+     * sieht, könnte sonst sich oder anderen mehr geben, als er selbst hat.
+     */
+    public static function darfFreigabeVergeben(string $zielArt, bool $steuern): bool
+    {
+        if (in_array('*', Auth::permissions(), true)) {
+            return true;
+        }
+        return $zielArt !== 'alles' && !$steuern && Zugriff::alles();
+    }
+
     // ------------------------------------------------------------ Rollen
 
     public static function standardRollenAnlegen(): int

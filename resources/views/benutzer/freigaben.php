@@ -80,7 +80,7 @@ $zeit = static function (?string $ab, ?string $bis): string {
         </div>
     </form>
 </div>
-<script>
+<script nonce="<?= \App\Support\View::e(\App\Support\View::nonce()) ?>">
 (function () {
     var form = document.getElementById('freigabe-form');
     var ziel = form.querySelector('[name=ziel_art]');

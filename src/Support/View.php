@@ -126,6 +126,19 @@ final class View
         return ['content' => $content, 'vars' => $vars];
     }
 
+    private static ?string $nonce = null;
+
+    /**
+     * Die Nonce dieser Antwort für eigene Inline-Skripte. Die Content-
+     * Security-Policy (Response::html) lässt nur Skripte aus eigenen Dateien
+     * und mit genau dieser Nonce zu – ein eingeschleustes <script> oder
+     * onclick="…" läuft nicht.
+     */
+    public static function nonce(): string
+    {
+        return self::$nonce ??= base64_encode(random_bytes(16));
+    }
+
     public static function e(?string $value): string
     {
         return htmlspecialchars((string) $value, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');

@@ -136,8 +136,25 @@ final class AnlagenController extends Controller
     {
         $id = $request->int('id') ?: null;
         $daten = $_POST;
+        // Wohin die Anlage kommt – wie im Service: die Etage bestimmt den
+        // Standort. Geprüft wird dieser, nicht der aus dem Formular; sonst
+        // landete eine Anlage mit eigenem Standort und fremder Etage dort.
+        $zielStandort = (int) ($daten['site_id'] ?? 0) ?: null;
+        if ((int) ($daten['floor_id'] ?? 0) > 0 && ($zielEtage = SiteService::floor((int) $daten['floor_id'])) !== null) {
+            $zielStandort = (int) $zielEtage['site_id'];
+        }
         if ($id !== null) {
-            if ($this->anlage(['id' => $id], true) === null) {
+            $objekt = $this->anlage(['id' => $id], true);
+            if ($objekt === null) {
+                return;
+            }
+            // Eine Anlage bleibt Anlage, ein Katalog-Typ bleibt Katalog-Typ:
+            // sonst würde eine eigene Anlage zum Typ, den alle sehen, oder ein
+            // Typ zur Anlage auf einem beliebigen Standort.
+            $daten['ist_vorlage'] = (int) $objekt['ist_vorlage'];
+            $bisher = $objekt['site_id'] !== null ? (int) $objekt['site_id'] : null;
+            if ((int) $objekt['ist_vorlage'] === 0 && $zielStandort !== $bisher && !Zugriff::darfAufStandortAnlegen($zielStandort)) {
+                Response::forbidden('Auf diesen Standort darfst du die Anlage nicht verlegen.');
                 return;
             }
         } elseif (!empty($daten['ist_vorlage'])) {
@@ -145,7 +162,7 @@ final class AnlagenController extends Controller
                 Response::forbidden('Standard-Verteiler pflegt, wer den Steckverbinder-Katalog pflegen darf.');
                 return;
             }
-        } elseif (!Zugriff::darfAufStandortAnlegen((int) ($daten['site_id'] ?? 0) ?: null)) {
+        } elseif (!Zugriff::darfAufStandortAnlegen($zielStandort)) {
             Response::forbidden('Auf diesem Standort darfst du keine Anlagen anlegen.');
             return;
         }
@@ -191,7 +208,7 @@ final class AnlagenController extends Controller
             'kennzahlen'   => $kennzahlen,
             'einsaetze'    => (int) $objekt['ist_vorlage'] === 1 ? [] : InventarService::einsaetzeAnObjekt($id, true),
             'inventar'     => (int) $objekt['ist_vorlage'] === 0 && Zugriff::darfBearbeiten($objekt) && Auth::can('datenquellen.view')
-                ? array_values(array_filter(InventarService::liste(), static fn ($i) => $i['zustand'] !== 'defekt' && (int) ($i['einsatz']['objekt_id'] ?? 0) !== $id))
+                ? array_values(array_filter(InventarService::fuerBetrachter(InventarService::liste()), static fn ($i) => $i['zustand'] !== 'defekt' && (int) ($i['einsatz']['objekt_id'] ?? 0) !== $id))
                 : [],
             'auswertung'   => MesspunktService::auswertung(),
             'reiter'       => $request->str('reiter', 'uebersicht'),
@@ -315,7 +332,13 @@ final class AnlagenController extends Controller
         if (!empty($daten['geraet_kanal']) && str_contains((string) $daten['geraet_kanal'], '|')) {
             [$daten['geraet'], $daten['kanal']] = explode('|', (string) $daten['geraet_kanal'], 2);
         }
-        $ergebnis = MesspunktService::speichern((int) $objekt['id'], $request->int('messpunkt_id') ?: null, $daten);
+        $geraet = trim((string) ($daten['geraet'] ?? ''));
+        if ($geraet !== '' && !Zugriff::darfGeraetZuordnen($geraet)) {
+            $this->antwort($request, ['ok' => false, 'message' => 'Dieses Gerät misst an einer Anlage, die du nicht bearbeiten darfst.'],
+                '/anlagen/' . (int) $objekt['id'] . '?reiter=messung');
+            return;
+        }
+        $ergebnis = MesspunktService::speichern((int) $objekt['id'], $request->int('messpunkt_id') ?: null, $daten, !Zugriff::geraetMitGeschichte());
         $this->antwort($request, $ergebnis, '/anlagen/' . (int) $objekt['id'] . '?reiter=messung');
     }
 

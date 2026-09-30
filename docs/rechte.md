@@ -25,6 +25,19 @@ und Stromplanung haben es.
 Rollen und ihre Rechte lassen sich unter **System → Rollen & Rechte** anpassen oder
 neu anlegen. Die Rolle *Administration* behält immer alle Rechte.
 
+**Rechte vergibt nur, wer sie selbst hat.** Wer „Benutzer verwalten“ darf,
+aber nicht die Administration hat, kann:
+
+- keine Rolle mit Rechten anlegen oder ändern, die er selbst nicht hat (und
+  nie „alle Rechte“),
+- keine solche Rolle zuweisen – auch nicht sich selbst,
+- kein Konto ändern, sperren, entsperren, löschen oder mit neuem Kennwort
+  versehen, das Rechte hat, die ihm fehlen (etwa einen Administrator),
+- Freigaben nur vergeben, wenn er selbst alle Standorte sieht, und keine auf
+  „alles“ oder mit „schalten“ – die vergibt nur die Administration.
+
+Sonst wäre „Benutzer verwalten“ eine Hintertür zu allem.
+
 Das Rechte-Verzeichnis steht in `src/Auth/Permissions.php`.
 
 ## Zeit an drei Stellen
@@ -76,12 +89,27 @@ Rechte → Freigaben** (gilt für alle mit dieser Rolle, solange die Zuweisung g
 |------|-----------|
 | *Gilt für* | **alles**, ein **Standort** (mit allen Anlagen darauf), eine **Anlage** oder ein **Gerät** (Datenquelle) |
 | *nur Kanal* | nur bei Geräten: z. B. `switch:2`. Leer bedeutet alle Kanäle. |
-| *darf Anlagen bearbeiten* | wirkt nur zusammen mit dem Recht „Anlagen ändern“. Beschränkt das Bearbeiten auf den freigegebenen Bereich. |
+| *darf Anlagen bearbeiten* | wirkt nur zusammen mit dem Recht „Anlagen ändern“ (bzw. „Kabel zeichnen“, „Grundrisse pflegen“). Beschränkt das Bearbeiten auf den freigegebenen Bereich. |
 | *darf schalten* | wirkt nur zusammen mit dem Recht „Geräte schalten“ (`steuern`) |
 | *gültig ab/bis* | wann die Freigabe wirkt |
 | *Daten ab/bis* | welche Messdaten sichtbar sind (siehe oben) |
 
 ![Freigabe des Demo-Kontos „veranstalter“: nur das Festivalgelände, nur die Festivalwoche](bilder/freigaben.png)
+
+**Sehen ist nicht ändern.** Was sich an einem Standort ändern lässt, braucht
+eine Freigabe mit *bearbeiten* – nicht nur eine, die ihn sichtbar macht:
+
+| Was | braucht |
+|-----|---------|
+| Anlage anlegen, verlegen (auch über die Etage), ins Inventar einsetzen | „Anlagen ändern“ + *bearbeiten* für den Standort (bzw. für die Anlage) |
+| Kabel, Kabelweg, Kabelbrücke zeichnen, ändern, löschen | „Kabel zeichnen“ + *bearbeiten* für den Standort **oder** für eine Anlage an einem Kabelende |
+| Etagen, Grundriss, Maßstab, Georeferenz | „Grundrisse pflegen“ + *bearbeiten* für den Standort |
+| ein Messgerät einer Anlage zuordnen | es darf gerade an keiner Anlage messen, die man nicht bearbeiten darf; ohne „alle Standorte“ bzw. „Datenquellen verwalten“ zählen seine Messwerte erst ab der Zuordnung |
+| ein Inventarstück einsetzen, das gerade woanders steckt | *bearbeiten* auch dort, wo es herauskommt |
+
+Eine Anlage oder ein Kabel, das man nicht sieht, erscheint auch in Listen
+und Fenstern nur als „nicht freigegeben“ – etwa als Ende eines Kabels oder
+als Einsatzort eines Inventarstücks.
 
 ## Schalten – je Gerät einzeln
 
@@ -96,6 +124,10 @@ nur ausgeführt, wenn **alle drei** Bedingungen erfüllt sind:
    abdeckt. Das kann eine Freigabe für alles, für den Standort, für die
    Anlage oder **genau für dieses Gerät** sein, optional nur für einen
    **Kanal**. Ausnahme: `anlagen.scope.all` ersetzt diese Bedingung.
+   Eine Freigabe für einen Kanal gilt nur für genau diesen – nicht für
+   andere und nicht für Befehle ohne Kanal (etwa den Betriebsmodus eines
+   Victron, wenn nur sein Relais freigegeben ist). Bei Modbus und ComAp
+   zählt der Kanal, den der Befehl im Registerprofil hat.
 
 So bekommt die Elektrikerin auf dem Gelände eine Schalt-Freigabe nur für den
 Shelly der Geländebeleuchtung (oder nur dessen `switch:0`). Alles andere
