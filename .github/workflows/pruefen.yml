@@ -38,7 +38,7 @@ jobs:
           php -l bin/power > /dev/null
           for f in public/assets/js/*.js; do node --check "$f"; done
           for f in public/assets/js/module/*.js; do node --experimental-default-type=module --check "$f"; done
-          bash -n deploy/install-debian.sh deploy/update-debian.sh
+          bash -n deploy/*.sh
           shellcheck -S warning -e SC2016,SC1111 deploy/*.sh
           node -e 'JSON.parse(require("fs").readFileSync("deploy/node-red/flows.json", "utf8"))'
 

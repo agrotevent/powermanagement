@@ -99,6 +99,32 @@ try {
     gleich((int) Database::scalar("SELECT COUNT(*) FROM schaltvorgaenge WHERE geraet LIKE ? AND ergebnis = 'ok'", [$kennung . '%']), 2, 'beide Schaltvorgänge protokolliert');
     $erg = Steuerung::ausfuehren($gen2, 'aus', 'dimmer:0');
     pruefe(!$erg['ok'], 'unbekannter Kanal wird abgelehnt');
+    pruefe(preg_match('#"src":"pm-steuerung-[0-9a-f]{8}"#', $log) === 1, 'ohne eigenen MQTT-Zugang: Antwort wie bisher an pm-steuerung-…/rpc');
+
+    // Mit eigenem MQTT-Zugang antwortet der Shelly in seinen eigenen Baum
+    // (nur dorthin darf er schreiben) – Steuerung fragt dann mit src im Baum.
+    $jetzt = gmdate('c');
+    Database::insert('mqtt_zugaenge', ['benutzer' => $kennung . '-gen2', 'praefix' => $kennung . '-gen2', 'geraet' => $kennung . '-gen2', 'generation' => 2,
+        'kennwort_hash' => \App\Messung\MqttZugaenge::hash('x'), 'zustand' => 'eigen', 'kennwort_am' => $jetzt, 'created_at' => $jetzt]);
+    $erg = Steuerung::ausfuehren($gen2, 'ein', 'switch:0');
+    pruefe($erg['ok'], 'Gen2 mit eigenem Zugang geschaltet – ' . $erg['message']);
+    $log = (string) @file_get_contents($protokoll);
+    pruefe(str_contains($log, '"src":"' . $kennung . '-gen2/pm-steuerung-'), 'mit eigenem Zugang: src im Baum des Geräts');
+    Database::execute('DELETE FROM mqtt_zugaenge WHERE praefix = ?', [$kennung . '-gen2']);
+
+    // Eine Antwort mit falschem dst zählt nicht.
+    putenv('ATTRAPPE_FALSCHES_DST=1');
+    $gen2b = (int) Datenquellen::speichern(null, ['art' => 'shelly', 'name' => 'Prüf-Shelly falsch', 'geraet' => $kennung . '-falsch',
+        'extern_id' => $kennung . '-falsch', 'profil' => 'gen2', 'aktiv' => 1])['id'];
+    $quellen[] = $gen2b;
+    hintergrund(['php', __DIR__ . '/hilfen/shelly-attrappe.php', $host, (string) $port, $kennung . '-falsch', $protokoll]);
+    putenv('ATTRAPPE_FALSCHES_DST');
+    for ($i = 0; $i < 50 && substr_count((string) @file_get_contents($protokoll), 'bereit') < 3; $i++) {
+        usleep(100_000);
+    }
+    alsBenutzer($admin);
+    $erg = Steuerung::ausfuehren($gen2b, 'ein', 'switch:0');
+    pruefe(!$erg['ok'] && str_contains($erg['message'], 'nicht geantwortet'), 'Antwort mit falschem dst wird nicht gezählt');
 
     // Ohne Schalt-Recht: abgelehnt und protokolliert
     alsBenutzer(null);
@@ -139,6 +165,7 @@ try {
         Datenquellen::loeschen($id);
     }
     Database::execute('DELETE FROM schaltvorgaenge WHERE geraet LIKE ?', [$kennung . '%']);
+    Database::execute('DELETE FROM mqtt_zugaenge WHERE praefix LIKE ?', [$kennung . '%']);
     @unlink($protokoll);
     @unlink($brokerConf);
 }

@@ -625,7 +625,8 @@ fi
 find "$ZIEL" -path "$ZIEL/storage" -prune -o ! -path "$ZIEL/config/config.php" \
     -exec chown root:root {} + -exec chmod go+rX,go-w {} +
 install -d -o "$APP_USER" -g "$APP_USER" -m 750 "$ZIEL/storage"
-for d in logs plans demo cache sessions backups; do
+# mqtt/: Soll und Ergebnis der eigenen MQTT-Zugänge (deploy/mqtt-zugaenge.sh)
+for d in logs plans demo cache sessions backups mqtt mqtt/soll mqtt/ist; do
     app_verzeichnis "$ZIEL/storage/$d"
 done
 # -R folgt keinen Verweisen (-P ist die Vorgabe) und ändert nur die Einträge selbst.
@@ -669,16 +670,17 @@ if [[ "$MIT_MOSQUITTO" == "ja" ]]; then
     MQTT_PM_BENUTZER="powermanagement"
     MQTT_NR_BENUTZER="nodered"
 
-    vorlage_uebernehmen "$ZIEL/deploy/mosquitto/powermanagement.conf" \
-        /etc/mosquitto/conf.d/powermanagement.conf root:root 644 \
-        /etc/mosquitto/powermanagement.conf.powermanagement-neu
-    [[ "$VORLAGE_ERGEBNIS" == "behalten" ]] && hinweis "/etc/mosquitto/conf.d/powermanagement.conf ist verändert – neue Fassung: /etc/mosquitto/powermanagement.conf.powermanagement-neu"
     # Mosquitto 2 liest Kennwort- und ACL-Datei erst nach dem Wechsel auf
     # seinen eigenen Benutzer und warnt, wenn sie jemand anderem gehören.
+    # powermanagement.acl ist die Grundlage; Mosquitto liest die wirksame
+    # Fassung, die deploy/mqtt-zugaenge.sh daraus baut (weiter unten).
     vorlage_uebernehmen "$ZIEL/deploy/mosquitto/powermanagement.acl" \
         /etc/mosquitto/powermanagement.acl mosquitto:mosquitto 600 \
         /etc/mosquitto/powermanagement.acl.powermanagement-neu
-    [[ "$VORLAGE_ERGEBNIS" == "behalten" ]] && hinweis "/etc/mosquitto/powermanagement.acl ist verändert – neue Fassung liegt als .powermanagement-neu daneben"
+    if [[ "$VORLAGE_ERGEBNIS" == "behalten" ]]; then
+        hinweis "/etc/mosquitto/powermanagement.acl ist verändert – neue Fassung liegt als .powermanagement-neu daneben."
+        hinweis "Für eigene Zugänge je Shelly die pattern-Zeilen von dort übernehmen."
+    fi
 
     # Kennwortdatei: vorhandene Einträge (etwa von Hand ergänzte Benutzer)
     # bleiben, die drei eigenen werden gesetzt. mosquitto_passwd selbst
@@ -692,6 +694,22 @@ if [[ "$MIT_MOSQUITTO" == "ja" ]]; then
     # und in die vorhandene Datei übernehmen – deren übrige Einträge sind
     # schon gehasht und blieben es.
     PASSWD=/etc/mosquitto/powermanagement.passwd
+    # Oben in der Datei steht womöglich der Block mit den eigenen Zugängen
+    # der Shellys – den schreibt deploy/mqtt-zugaenge.sh unter derselben
+    # Sperre. Der Abgleich hier lässt ihn stehen (keiner seiner Namen ist
+    # shelly, nodered oder powermanagement). Die Sperrdatei liegt in
+    # /etc/mosquitto (gehört root), nicht im für alle beschreibbaren
+    # /run/lock, und nur root darf sie öffnen – sonst könnte jemand die
+    # Sperre halten und den Helfer dauerhaft aussperren.
+    UMASK_VORHER="$(umask)"
+    umask 077
+    exec 8>>/etc/mosquitto/powermanagement-mqtt-zugaenge.lock
+    umask "$UMASK_VORHER"
+    chmod 600 /etc/mosquitto/powermanagement-mqtt-zugaenge.lock
+    if ! flock -w 30 8; then
+        echo "Die Kennwortdatei ist gesperrt (läuft deploy/mqtt-zugaenge.sh?) – später erneut versuchen." >&2
+        exit 1
+    fi
     NEU_PASSWD="$(mktemp)"
     {
         printf 'shelly:%s\n' "$MQTT_SHELLY_KENNWORT"
@@ -707,6 +725,31 @@ if [[ "$MIT_MOSQUITTO" == "ja" ]]; then
     rm -f "$NEU_PASSWD"
     install -o mosquitto -g mosquitto -m 600 "$TMP_PASSWD" "$PASSWD"
     rm -f "$TMP_PASSWD"
+    exec 8>&-
+
+    # Eigene Zugänge je Shelly: Block in der Kennwortdatei prüfen und die
+    # wirksame ACL bauen. Neu geladen wird hier nicht – der Broker startet
+    # gleich ohnehin neu.
+    HELFER_RC=0
+    HELFER_MELDUNG="$(bash "$ZIEL/deploy/mqtt-zugaenge.sh" --ziel="$ZIEL" --app-benutzer="$APP_USER" \
+        --neu-laden=nein 2>&1 >/dev/null)" || HELFER_RC=$?
+    if [[ "$HELFER_RC" -ne 0 ]]; then
+        hinweis "deploy/mqtt-zugaenge.sh meldet einen Fehler (Exit $HELFER_RC):"
+        printf '%s\n' "$HELFER_MELDUNG" | sed 's/^/      /' >&2
+    elif [[ -n "$HELFER_MELDUNG" ]]; then
+        printf '%s\n' "$HELFER_MELDUNG" | sed 's/^/    /'
+    fi
+    if [[ ! -f /etc/mosquitto/powermanagement-wirksam.acl ]]; then
+        # Ohne wirksame ACL startet der Broker nicht – dann wenigstens die
+        # Grundlage (ohne Sperren).
+        install -o mosquitto -g mosquitto -m 600 /etc/mosquitto/powermanagement.acl \
+            /etc/mosquitto/powermanagement-wirksam.acl
+    fi
+
+    vorlage_uebernehmen "$ZIEL/deploy/mosquitto/broker.conf" \
+        /etc/mosquitto/conf.d/powermanagement.conf root:root 644 \
+        /etc/mosquitto/powermanagement.conf.powermanagement-neu
+    [[ "$VORLAGE_ERGEBNIS" == "behalten" ]] && hinweis "/etc/mosquitto/conf.d/powermanagement.conf ist verändert – neue Fassung: /etc/mosquitto/powermanagement.conf.powermanagement-neu"
 
     systemctl enable --quiet mosquitto
     systemctl restart mosquitto
@@ -953,7 +996,9 @@ if [[ "$MIT_NODERED" == "ja" ]]; then
         ersetzt)  echo "    Flows durch die mitgelieferte Fassung ersetzt" ;;
         behalten) hinweis "Die Flows in Node-RED wurden verändert und bleiben, wie sie sind."
                   hinweis "Die mitgelieferte Fassung liegt unter $NODERED_DIR/flows.powermanagement-neu.json"
-                  hinweis "(im Editor: Menü → Importieren) – oder erneut mit --flows-ersetzen aufrufen." ;;
+                  hinweis "(im Editor: Menü → Importieren) – oder erneut mit --flows-ersetzen aufrufen."
+                  hinweis "Eigene MQTT-Zugänge der Shellys brauchen die neuen Flows (Schutzliste pm/status/mqtt-zugaenge,"
+                  hinweis "Antworten unter <präfix>/pm-nodered/rpc)." ;;
     esac
 
     # Zugang zum Broker in flows_cred.json unter der festen ID des Broker-
@@ -1104,7 +1149,12 @@ einstellung mqtt.port "$MQTT_PORT"
 
 # ================================================================ Dienste
 schritt "Sammler, Wartung und Protokolle einrichten"
-for unit in powermanagement-sammler.service powermanagement-wartung.service powermanagement-wartung.timer; do
+DIENSTE=(powermanagement-sammler.service powermanagement-wartung.service powermanagement-wartung.timer)
+# Eigene MQTT-Zugänge: der Helfer läuft bei jeder Änderung des Solls (.path)
+# und alle zwei Minuten (.timer) – nur mit dem Broker hier im Container.
+[[ "$MIT_MOSQUITTO" == "ja" ]] && DIENSTE+=(powermanagement-mqtt-zugaenge.service
+    powermanagement-mqtt-zugaenge.path powermanagement-mqtt-zugaenge.timer)
+for unit in "${DIENSTE[@]}"; do
     sed -e "s|__APP_USER__|$APP_USER|g" -e "s|__APP_DIR__|$ZIEL|g" \
         "$ZIEL/deploy/$unit" > "/etc/systemd/system/$unit"
 done
@@ -1114,6 +1164,13 @@ systemctl daemon-reload
 systemctl enable --quiet powermanagement-sammler.service
 systemctl restart powermanagement-sammler.service
 systemctl enable --quiet --now powermanagement-wartung.timer
+if [[ "$MIT_MOSQUITTO" == "ja" ]]; then
+    systemctl enable --quiet --now powermanagement-mqtt-zugaenge.path powermanagement-mqtt-zugaenge.timer
+    # Einmal gleich laufen lassen: das Ergebnis oben entstand noch vor der
+    # Broker-Konfiguration (acl_wirksam) – die Oberfläche soll den Stand
+    # danach sehen.
+    systemctl start --no-block powermanagement-mqtt-zugaenge.service || true
+fi
 
 # Einstellungen dieser Installation für das Update-Skript
 cat > "$INSTALLATION_CONF" <<KONF
@@ -1188,7 +1245,7 @@ TMP_Z="$(mktemp "$ETC/.zugaenge.XXXXXX")"
     echo "# Lauf wieder ein – erzeugte Kennwörter bleiben so gleich."
     echo "#"
     echo "# OBERFLAECHE_KENNWORT ist das Erstkennwort; nach der ersten Anmeldung gilt es nicht mehr."
-    echo "# MQTT_SHELLY_* ist der Zugang, der in allen Shelly-Geräten eingetragen wird."
+    echo "# MQTT_SHELLY_* ist der gemeinsame Zugang der Shellys ohne eigenen Zugang."
     echo "# INFLUX_OPERATOR_TOKEN darf alles in der InfluxDB – gut aufheben, nicht weitergeben."
     ueberschrift=""
     for k in "${BEKANNT[@]}"; do
@@ -1238,6 +1295,7 @@ if [[ "$MIT_MOSQUITTO" == "ja" ]]; then
     echo "                Benutzer shelly"
     echo "                Kennwort $MQTT_SHELLY_KENNWORT"
     echo "                Gen2+: „Generic status update over MQTT“ und „RPC status notifications“ einschalten"
+    echo "                Eigene Zugänge je Shelly: Oberfläche → Messtechnik → MQTT-Zugänge"
 fi
 if [[ "$MIT_INFLUX" == "ja" ]]; then
     echo

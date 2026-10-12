@@ -419,6 +419,92 @@ Aggregate und alles, was nie aus der Ferne geschaltet werden darf: an der
 Anlage unter *Bearbeiten* **„Steuerung sperren“**. Die Sperre gilt für jeden, auch für
 Administratoren.
 
+## MQTT-Zugänge der Shellys
+
+*Messtechnik → MQTT-Zugänge*. Alle Shellys melden sich zunächst mit dem
+**gemeinsamen Zugang** `shelly` am Broker an – so wie bei der Installation
+eingerichtet. Das bleibt so, bis jedes Gerät umgestellt ist: der laufende
+Betrieb ändert sich nicht. Wer das gemeinsame Kennwort aber aus einem
+einzigen Gerät ausliest, kann damit jedes andere schalten und mitlesen.
+Deshalb lassen sich die Geräte **eines nach dem anderen** auf einen
+**eigenen Zugang** umstellen, der nur den Themenbaum seines Geräts darf.
+
+![MQTT-Zugänge](bilder/mqtt-zugaenge.png)
+
+Die Liste zeigt jeden bekannten Shelly – aus den Messdaten (das Präfix
+meldet Node-RED) und den schaltbaren Datenquellen – mit seinem Zugang:
+
+| Zugang | heißt | nächster Schritt |
+|--------|-------|------------------|
+| gemeinsamer Zugang | wie bisher | *Eigenen Zugang einrichten* |
+| angelegt | Zugang am Broker; Gen2: noch nicht übertragen, Gen1: Kennwort angezeigt | Gen2 *Übertragen*, Gen1 am Gerät eintragen, dann *Umstellung prüfen* |
+| wartet auf Neustart | Gen2: Zugang steht im Gerät, gilt ab dem nächsten Neustart; bis dahin gelten beide | Gerät neu starten, dann *Umstellung prüfen* |
+| eigener Zugang | bestätigt: das Gerät nutzt ihn, der gemeinsame Zugang kann es weder schalten noch mitlesen | – |
+
+**Gen2+** (Plus, Pro, Gen3/4): *Eigenen Zugang einrichten* fragt das Gerät
+erst (antwortet es, stimmt das Präfix, wartet es nicht schon auf einen
+Neustart), legt dann den Zugang am Broker an, meldet sich zur Probe damit an
+und überträgt Benutzer und Kennwort mit `MQTT.SetConfig` ans Gerät. **Die
+App startet kein Gerät neu** – je nach Modell kann ein Neustart die Ausgänge
+schalten. Der neue Zugang gilt also ab dem nächsten Neustart: über die
+Weboberfläche des Shelly oder beim nächsten Ausschalten des Verteilers.
+*Übertragen* fragt vorher das Gerät: hat es den Zugang schon gespeichert und
+ist seitdem neu gestartet, lehnt es ab – ein neues Kennwort am Broker würde
+das Gerät sonst abhängen.
+
+*von Hand* (Gen2): legt den Zugang an, ohne ihn per MQTT zu übertragen.
+Benutzer und Kennwort werden einmal angezeigt und in der Weboberfläche des
+Shelly unter *Einstellungen → MQTT* eingetragen (nur Username und
+Password), dann neu starten.
+
+**Gen1**: Gen1 nimmt Einstellungen nicht über MQTT an. Benutzer (die
+Geräte-ID) und Kennwort werden **einmal** angezeigt – mit Knopf zum
+Kopieren – und in der Weboberfläche des Shelly unter *Internet & Security →
+Advanced Developer Settings* eingetragen (nur Username und Password; beim
+Speichern startet er neu). Geht das Kennwort verloren: *Neues Kennwort*.
+
+**Umstellung prüfen** sperrt den gemeinsamen Zugang kurz (Gen2 höchstens
+90 s, Gen1 120 s) auf dieses Gerät und fragt es: Gen2 per RPC, Gen1 mit
+„update“. Antwortet es trotzdem, nutzt es den eigenen Zugang – die Sperre
+bleibt dann dauerhaft. Antwortet es nicht, fällt die Sperre sofort weg und
+nichts ist verändert. Gen2 ohne Neustart seit der Übertragung wird gar nicht
+erst gesperrt (*ohne Neustart* prüft trotzdem). Bei einem bestätigten Gerät
+sieht *Prüfen* zusätzlich nach, ob die Sperre am Broker wirkt; fehlt sie,
+steht das Gerät als **nicht gesperrt** in der Liste.
+
+**Neues Kennwort** wird immer einmal angezeigt und am Gerät eingetragen –
+nie per MQTT übertragen: wer das bisherige Gerätekennwort kennt, dürfte den
+Themenbaum des Geräts lesen und sähe ein übertragenes neues ebenso. Der
+Broker nimmt sofort nur noch das neue an; bis es am Gerät steht, ist das
+Gerät getrennt. So wird auch ein Gerät ersetzt (gleiches Präfix): *Neues
+Kennwort* und am neuen Gerät eintragen.
+
+**Entfernen** löscht den Zugang und hebt die Sperre auf. Nutzt das Gerät
+ihn noch, ist es getrennt, bis dort wieder der gemeinsame Zugang steht. Bei
+Gen2, solange die Umstellung nicht bestätigt ist, wird vorher das Gerät
+gefragt: hat es den Zugang schon gespeichert, nutzt es ihn ab dem nächsten
+Neustart – dann geht Entfernen nur mit *erzwingen* (vorher am Gerät wieder
+den gemeinsamen Zugang eintragen).
+
+**Doppelgänger**: Melden sich unter demselben Gerätenamen mehrere Präfixe
+(etwa `kuehlhaus` und `shelly/kuehlhaus`), ist nicht klar, welches das echte
+Gerät ist – dann lässt sich keines umstellen, bis das geklärt ist.
+
+**Grenzen**, offen gesagt:
+
+- Die Übertragung bei Gen2 läuft noch über den Themenbaum, den der
+  gemeinsame Zugang lesen darf. Wer das gemeinsame Kennwort kennt und genau
+  dann mitliest, sieht das neue. Wer das ausschließen will, nimmt *von Hand*.
+- Wer das gemeinsame Kennwort kennt, kann ein umgestelltes Gerät vom Broker
+  werfen, indem er sich mit dessen Client-ID anmeldet (Mosquitto bindet
+  Client-IDs nicht an Benutzer). Schalten oder mitlesen kann er es nicht.
+- Den Gen1-Rundruf `shellies/command` darf der gemeinsame Zugang weiter
+  schreiben (announce, update, update_fw – nur offizielle Firmware).
+
+In der Datenquellen-Liste steht an jedem schaltbaren Shelly, welchen Zugang
+er nutzt. Was dazu am Broker passiert, steht in
+[installation-debian-lxc.md](installation-debian-lxc.md).
+
 ## Standorte und Location-Abgleich
 
 **Standorte** verwaltet Standorte, Etagen und Grundrisse. Pläne kommen als

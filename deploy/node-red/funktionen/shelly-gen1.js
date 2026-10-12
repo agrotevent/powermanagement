@@ -13,6 +13,19 @@
  *   temperature             °C
  *   announce                JSON mit id, model, mac, ip, fw_ver
  * und shellies/announce als Antwort auf „announce" an shellies/command.
+ * Ein Gerät mit eigenem MQTT-Zugang (Benutzer = <id>) darf nur in seinen
+ * Baum shellies/<id>/# schreiben – shellies/announce verwirft der Broker
+ * still. Die Geräteinfo kommt dann aus shellies/<id>/announce, das das
+ * Gerät beim Verbinden mit dem Broker ebenfalls schickt.
+ *
+ * Themen unter shellies/<id>/pm-…/ (Prüfungen der Oberfläche im Baum des
+ * Geräts, z. B. shellies/<id>/pm-probe/…) stammen nicht vom Gerät und
+ * werden übergangen.
+ *
+ * Für ein Gerät mit eigenem MQTT-Zugang (Liste aus „MQTT-Zugänge merken")
+ * gilt nur sein genaues Präfix shellies/<id>: Meldungen unter einer anders
+ * geschriebenen ID mit demselben Gerätenamen und Einträge auf
+ * shellies/announce werden verworfen.
  *
  * Ausgang: normalisierte Messwerte und Punkte für die Geräteliste – weiter
  * an „Messwert → Line Protocol".
@@ -40,6 +53,31 @@ function geraeteName(id) {
     return String(id).toLowerCase().replace(/[^a-z0-9_.-]/g, '-');
 }
 
+// Eine Geräte-ID ist genau eine Themenebene. „__proto__" taugt nicht als
+// Schlüssel im Flow-Kontext – die Zuweisung setzte den Prototyp, statt
+// einen Eintrag anzulegen.
+function brauchbareId(id) {
+    return typeof id === 'string' && /^[^/+#]+$/.test(id) && geraeteName(id) !== '__proto__';
+}
+
+// Eintrag im Flow-Kontext, nur eigene Schlüssel – ein Gerät „constructor"
+// fände sonst die Eigenschaft von Object.prototype.
+function eigen(objekt, schluessel) {
+    return Object.prototype.hasOwnProperty.call(objekt, schluessel) ? objekt[schluessel] : undefined;
+}
+
+// Geräte mit eigenem MQTT-Zugang (globaler Kontext, „MQTT-Zugänge merken"):
+// Gerätename → genaues Präfix. Ihren Baum sperrt der Broker für den
+// gemeinsamen Zugang, nicht aber einen Doppelgänger mit demselben
+// Gerätenamen (shellies/SHELLY1-b929cc statt shellies/shelly1-B929CC,
+// shellies/kuehlhaus für shelly/kuehlhaus). Kommt eine Meldung für ein
+// solches Gerät nicht aus seinem Baum, stammt sie nicht von ihm.
+const geschuetzt = global.get('mqtt_geschuetzt') || {};
+function fremderBaum(id, praefix) {
+    const p = eigen(geschuetzt, geraeteName(id));
+    return p !== undefined && p !== praefix;
+}
+
 function alsZahl(text) {
     const t = String(text).trim();
     if (t === '') {
@@ -50,7 +88,12 @@ function alsZahl(text) {
 }
 
 const teile = String(msg.topic || '').split('/');
-if (teile[0] !== 'shellies' || teile.length < 2) {
+if (teile[0] !== 'shellies' || teile.length < 2 || !brauchbareId(teile[1])) {
+    return null;
+}
+// Prüf-Themen der Oberfläche im Baum eines Geräts: kein Messwert und auch
+// kein Lebenszeichen des Geräts.
+if (teile.length >= 3 && teile[2].startsWith('pm-')) {
     return null;
 }
 let text = msg.payload;
@@ -79,8 +122,16 @@ if (teile[1] === 'announce' || (teile.length === 3 && teile[2] === 'announce')) 
     } catch (e) {
         return null;
     }
+    // Auf shellies/announce nennt die Nutzlast das Gerät – auch dann genau
+    // eine Themenebene, sonst entstünde ein Präfix, unter dem kein Gerät zu
+    // erreichen ist.
     const id = teile[1] === 'announce' ? a && a.id : teile[1];
-    if (!a || typeof a !== 'object' || !id) {
+    if (!a || typeof a !== 'object' || !brauchbareId(id)) {
+        return null;
+    }
+    // shellies/announce liegt in keinem Gerätebaum – ein Gerät mit eigenem
+    // Zugang darf dort nicht schreiben.
+    if (fremderBaum(id, teile[1] === 'announce' ? '' : 'shellies/' + id)) {
         return null;
     }
     const txt = (wert) => (typeof wert === 'string' && wert !== '' ? wert : undefined);
@@ -99,6 +150,9 @@ if (teile[1] === 'command' || teile[teile.length - 1] === 'command') {
 }
 
 const id = teile[1];
+if (fremderBaum(id, 'shellies/' + id)) {
+    return null;
+}
 const geraet = geraeteName(id);
 const rest = teile.slice(2);
 const ausgabe = [];
@@ -117,7 +171,8 @@ function messwert(kanal, phasen, zustand) {
 // Das Gerät in die Liste eintragen, sobald es sich überhaupt meldet –
 // announce kommt nur beim Verbinden und auf Nachfrage.
 const bekannte = flow.get('gen1_geraete') || {};
-if (!bekannte[geraet] || jetzt - bekannte[geraet] > INFO_ALLE_MS) {
+const zuletzt = eigen(bekannte, geraet);
+if (!zuletzt || jetzt - zuletzt > INFO_ALLE_MS) {
     bekannte[geraet] = jetzt;
     flow.set('gen1_geraete', bekannte);
     ausgabe.push(geraetePunkt(id, {}));
@@ -182,7 +237,7 @@ if (rest.length === 1 && rest[0] === 'online') {
             // deshalb beim Wert der höchsten Phase: dann stammen alle
             // Summanden aus derselben Runde.
             const alle = flow.get('gen1_emeter') || {};
-            const g = alle[geraet] || { nr: 0, phasen: {}, summe: {}, runde: {} };
+            const g = eigen(alle, geraet) || { nr: 0, phasen: {}, summe: {}, runde: {} };
             alle[geraet] = g;
             g.nr++;
             g.phasen[phase] = g.phasen[phase] || {};

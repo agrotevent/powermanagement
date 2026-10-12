@@ -1,0 +1,16 @@
+# /etc/systemd/system/powermanagement-mqtt-zugaenge.path
+#
+# Startet powermanagement-mqtt-zugaenge.service, sobald die Anwendung ein
+# neues Soll nach storage/mqtt/soll/ legt (Temp-Datei + Umbenennen).
+#
+# Platzhalter: __APP_DIR__
+
+[Unit]
+Description=PowerManagement: Änderungen an den eigenen MQTT-Zugängen beobachten
+
+[Path]
+PathChanged=__APP_DIR__/storage/mqtt/soll
+Unit=powermanagement-mqtt-zugaenge.service
+
+[Install]
+WantedBy=paths.target

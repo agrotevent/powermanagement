@@ -181,7 +181,7 @@ git -C /opt/powermanagement remote get-url origin
 | `--aufbewahrung=0` | wie lange Messwerte bleiben: `0` = unbegrenzt, sonst Tage (`800`) oder `104w` |
 | `--ohne-influx --influx-url=… --influx-token=…` | eine **vorhandene** InfluxDB nutzen (1.8, 2.x oder 3.x) |
 | `--influx-db=strom` | Name der Datenbank bzw. des Buckets |
-| `--ohne-mosquitto --mqtt-host=… --mqtt-benutzer=… --mqtt-kennwort=…` | einen vorhandenen Broker nutzen |
+| `--ohne-mosquitto --mqtt-host=… --mqtt-benutzer=… --mqtt-kennwort=…` | einen vorhandenen Broker nutzen (eigene Zugänge je Shelly dann von Hand, Abschnitt 5) |
 | `--ohne-nodered` | kein Node-RED (dann muss etwas anderes Shelly-Werte übersetzen und in die InfluxDB schreiben) |
 | `--flows-ersetzen` | vorhandene Node-RED-Flows durch die mitgelieferten ersetzen |
 | `--git-zugang=<datei>` | Token-Datei an anderer Stelle |
@@ -202,24 +202,37 @@ Bei einer vorhandenen **InfluxDB 1.8** mit Anmeldung ist das „Token“
    Er verschlüsselt die hinterlegten Zugänge – mitsichern!
 4. **Mosquitto:** `/etc/mosquitto/conf.d/powermanagement.conf` (Port 1883
    auf allen Schnittstellen, keine anonyme Anmeldung), drei Benutzer mit
-   zufälligen Kennwörtern:
+   zufälligen Kennwörtern – und später je Shelly ein eigener:
 
    | Benutzer | darf | wer |
    |----------|------|-----|
-   | `shelly` | alles außer `pm/#` | alle Shelly-Geräte |
+   | `shelly` | alles außer `pm/#` und den Themenbäumen der Shellys mit eigenem Zugang | Shellys ohne eigenen Zugang (gemeinsamer Zugang) |
+   | `<präfix>` (Gen1: Geräte-ID) | nur den eigenen Themenbaum `<präfix>/#` (Gen1 `shellies/<id>/#`), dazu `shellies/command` lesen | je ein Shelly mit eigenem Zugang (Abschnitt 5) |
    | `nodered` | alles | Node-RED |
    | `powermanagement` | alles | Oberfläche und Sammler |
 
    `shelly` kann so nichts direkt unter `pm/` schreiben. **Grenze:** Alle
-   Shellys teilen sich diesen einen Zugang, und er darf die Themen *aller*
-   Geräte lesen und schreiben. Wer ihn kennt (aus einem Shelly ausgelesen
-   oder unverschlüsselt im Netz mitgeschnitten – Port 1883 ist ohne TLS),
-   kann jedes Relais schalten und über die rohen Geräte-Themen, die Node-RED
-   weiterverarbeitet, Messwerte vortäuschen. Deshalb: den Broker per
-   Firewall nur aus den Netzen der Geräte erreichbar machen (Abschnitt 8)
-   und das Kennwort wie ein Schlüssel zur Anlage behandeln.
+   Shellys ohne eigenen Zugang teilen sich diesen einen, und er darf die
+   Themen all dieser Geräte lesen und schreiben. Wer ihn kennt (aus einem
+   Shelly ausgelesen oder unverschlüsselt im Netz mitgeschnitten – Port
+   1883 ist ohne TLS), kann jedes Relais daran schalten und über die rohen
+   Geräte-Themen, die Node-RED weiterverarbeitet, Messwerte vortäuschen.
+   Deshalb: die Shellys nach und nach auf **eigene Zugänge** umstellen
+   (Abschnitt 5) – ein umgestelltes Gerät erreicht der gemeinsame Zugang
+   nicht mehr –, den Broker per Firewall nur aus den Netzen der Geräte
+   erreichbar machen (Abschnitt 8) und das Kennwort wie einen Schlüssel zur
+   Anlage behandeln.
    Die Kennwörter werden gehasht eingetragen, ohne je auf der Kommandozeile
    (und damit in der Prozessliste) zu stehen.
+
+   Die Rechte stehen in `/etc/mosquitto/powermanagement.acl` (Grundlage).
+   Mosquitto liest daraus die **wirksame** Fassung
+   `/etc/mosquitto/powermanagement-wirksam.acl`, die
+   `deploy/mqtt-zugaenge.sh` baut: Grundlage plus je Shelly mit eigenem
+   Zugang eine Sperre `topic deny <präfix>/#` für `shelly`. Der Helfer läuft
+   als root, gestartet von `powermanagement-mqtt-zugaenge.path` (sobald die
+   Oberfläche etwas ändert) und `.timer` (alle zwei Minuten); die Oberfläche
+   selbst darf `/etc/mosquitto` nicht anfassen.
 5. **InfluxDB 2:** Bis die Ersteinrichtung gemacht ist, lauscht sie nur
    auf `127.0.0.1` – sonst könnte ihr im Netz jemand zuvorkommen und
    Administrator und Token anlegen. Danach ist sie wie gewohnt unter
@@ -236,7 +249,9 @@ Bei einer vorhandenen **InfluxDB 1.8** mit Anmeldung ist das „Token“
 7. **Oberfläche:** PHP-FPM-Pool, nginx-Site, Datenbank, Administrator,
    InfluxDB- und MQTT-Zugang (verschlüsselt in der Datenbank).
 8. **Dienste:** `powermanagement-nodered`, `powermanagement-sammler`,
-   `powermanagement-wartung.timer` (täglich), Logrotate.
+   `powermanagement-wartung.timer` (täglich),
+   `powermanagement-mqtt-zugaenge.path` und `.timer` (eigene MQTT-Zugänge,
+   nur mit Mosquitto im Container), Logrotate.
 9. **Prüfung** mit `bin/power pruefen` und eine Zusammenfassung mit allen
    Zugängen.
 
@@ -254,7 +269,13 @@ Mosquitto-ACL – neue Fassungen solcher Dateien legt es mit
 | `/etc/powermanagement/node-red.env` | Umgebung für Node-RED: Broker, InfluxDB-Adresse und Token (640, root:nodered) |
 | `/etc/powermanagement/installation.conf` | was installiert wurde – liest das Update-Skript |
 | `/var/lib/powermanagement/node-red/` | Flows, `flows_cred.json` (Broker-Anmeldung, 600), `settings.js`, `admin-kennwort.bcrypt` |
-| `/etc/mosquitto/powermanagement.{passwd,acl}` | Broker-Benutzer und -Rechte |
+| `/etc/mosquitto/powermanagement.passwd` | Broker-Benutzer (nur Hashes); oben der Block der eigenen Zugänge – den schreibt nur der Helfer |
+| `/etc/mosquitto/powermanagement.acl` | Grundlage der Rechte – Änderungen von Hand nur hier |
+| `/etc/mosquitto/powermanagement-wirksam.acl` | was Mosquitto liest: Grundlage + Sperren für den gemeinsamen Zugang; wird bei jedem Lauf des Helfers neu geschrieben |
+| `/opt/powermanagement/storage/mqtt/` | `soll/zugaenge.txt` (schreibt die Oberfläche: Konten, Hashes, Sperren), `ist/ergebnis.txt` (schreibt der Helfer: was gilt, Fehler) |
+| `/opt/powermanagement/deploy/mqtt-zugaenge.sh` | der Helfer (root): prüft das Soll und überträgt es nach `/etc/mosquitto` |
+| `/etc/systemd/system/powermanagement-mqtt-zugaenge.{service,path,timer}` | starten den Helfer bei jeder Änderung und alle zwei Minuten |
+| `/etc/mosquitto/powermanagement-mqtt-zugaenge.lock` | Sperre: Helfer und Installationsskript schreiben die Kennwortdatei nie gleichzeitig (nur root) |
 
 ## 4 · Erste Anmeldung
 
@@ -287,10 +308,11 @@ ist dasselbe.) Danach den Wert in `zugaenge.txt` nachtragen.
 
 ## 5 · Shelly-Geräte anbinden
 
-Alle Shellys verwenden denselben Zugang: Server `10.10.0.60:1883`,
-Benutzer **`shelly`**, Kennwort `MQTT_SHELLY_KENNWORT` aus `zugaenge.txt`.
-Ohne TLS – der Broker ist nur im LAN bzw. über WireGuard erreichbar
-(Abschnitt 8).
+Zum Anbinden verwenden alle Shellys denselben, **gemeinsamen** Zugang:
+Server `10.10.0.60:1883`, Benutzer **`shelly`**, Kennwort
+`MQTT_SHELLY_KENNWORT` aus `zugaenge.txt`. Ohne TLS – der Broker ist nur im
+LAN bzw. über WireGuard erreichbar (Abschnitt 8). Danach lässt sich jedes
+Gerät einzeln auf einen **eigenen Zugang** umstellen (weiter unten).
 
 ### Gen2+ (Plus, Pro, Gen3, Gen4 – etwa Pro 3EM, Plus 1PM, Plug S)
 
@@ -330,6 +352,142 @@ geht dort nicht.
 Energie von Relais meldet Gen1 in *Wattminuten*; Node-RED rechnet in Wh
 um. Die Summe über die Phasen eines EM/3EM bildet Node-RED selbst, sobald
 von allen Phasen ein frischer Wert vorliegt.
+
+### Eigener Zugang je Shelly
+
+Der gemeinsame Zugang hat einen Haken: Wer sein Kennwort aus *einem* Gerät
+ausliest, kann *jedes* Gerät daran schalten und mitlesen. Ein eigener
+Zugang darf nur den Themenbaum seines Geräts (`<präfix>/#`, Gen1
+`shellies/<id>/#`). Sobald bestätigt ist, dass das Gerät ihn nutzt, sperrt
+der Broker dem gemeinsamen Zugang diesen Baum – erst damit ist das Gerät
+geschützt. Geräte ohne eigenen Zugang arbeiten unverändert weiter; umgestellt
+wird Gerät für Gerät, im laufenden Betrieb.
+
+Das geht in der Oberfläche unter **Messtechnik → MQTT-Zugänge**; umstellen
+darf, wer das Recht `mqtt.zugaenge` hat (nur zusammen mit „Alle Standorte,
+Anlagen und Messdaten“). Die Liste zeigt jeden Shelly, den Node-RED
+gemeldet hat, mit seinem Zugang. Benutzername am Broker ist das
+MQTT-Präfix des Geräts (`shellypro4pm-a0b1c2d3e4f5` bzw.
+`shelly/hauptverteilung`), bei Gen1 die Geräte-ID (`shelly1-B929CC`).
+PowerManagement speichert das Kennwort nirgends im Klartext – nur den Hash
+beim Broker. Melden sich unter demselben Gerätenamen mehrere Präfixe
+(Doppelgänger, etwa `kuehlhaus` und `shelly/kuehlhaus`), lässt sich keines
+umstellen, bis geklärt ist, welches das echte Gerät ist.
+
+**Gen2+**
+
+1. Beim Gerät **„Eigenen Zugang einrichten“**. Der Zugang wird am Broker
+   angelegt und per `MQTT.SetConfig` ans Gerät übertragen – nur Benutzer und
+   Kennwort; Server, Präfix und alle anderen Einstellungen bleiben. Oder
+   **„von Hand“**: Benutzer und Kennwort erscheinen einmal und werden in der
+   Weboberfläche des Geräts unter *Settings → MQTT* eingetragen – dann geht
+   nichts davon über MQTT (siehe „Grenzen“).
+2. Den Shelly **neu starten** (Weboberfläche des Geräts → *Reboot*, oder
+   Strom aus und wieder ein). Erst dann meldet er sich mit dem neuen Zugang
+   an. PowerManagement startet nie selbst ein Gerät neu; bis zum Neustart
+   gelten beide Zugänge, die Messung läuft durch.
+3. **„Umstellung prüfen“**. Der gemeinsame Zugang wird dafür bis zu 90 s
+   auf dieses Gerät gesperrt. Antwortet das Gerät trotzdem, nutzt es den
+   eigenen Zugang: Zustand „eigener Zugang“, die Sperre bleibt dauerhaft.
+   Antwortet es nicht (noch nicht neu gestartet), fällt die Sperre sofort
+   wieder weg und nichts ist verloren.
+
+**Gen1**
+
+1. **„Eigenen Zugang einrichten“** – Benutzer und Kennwort erscheinen
+   **genau einmal**.
+2. In der Weboberfläche des Geräts unter *Internet & Security → Advanced –
+   Developer Settings* bei **Username / Password** eintragen, Server und
+   alles andere lassen, speichern (das Gerät startet neu).
+3. **„Umstellung prüfen“** (Sperre bis zu 120 s).
+
+**Später**
+
+* **Neues Kennwort:** erscheint einmal und wird am Gerät eingetragen (bei
+  beiden Generationen; nie per MQTT – wer das bisherige Gerätekennwort
+  kennt, dürfte dort mitlesen). Der Broker nimmt sofort nur noch das neue
+  an, bis zum Eintragen ist das Gerät getrennt. Auch der Weg, wenn ein Gerät
+  mit eigenem Zugang durch ein neues mit gleichem Präfix ersetzt wird.
+* **Entfernen:** Konto und Sperre fallen weg. Nutzt das Gerät den eigenen
+  Zugang schon, ist es sofort getrennt – am Gerät wieder `shelly` und das
+  gemeinsame Kennwort eintragen. Bei Gen2+ vor der Bestätigung fragt die
+  Oberfläche erst das Gerät: hat es den Zugang schon gespeichert, nutzte es
+  ihn ab dem nächsten Neustart – dann nur mit **erzwingen**.
+
+**Grenzen**
+
+* Die Übertragung per `MQTT.SetConfig` läuft durch den Themenbaum des
+  Geräts, den der gemeinsame Zugang zu diesem Zeitpunkt noch lesen darf.
+  Wer das gemeinsame Kennwort kennt und genau dann mitliest, sieht das neue
+  Gerätekennwort. Wer das ausschließen will, richtet „von Hand“ ein.
+* Mosquitto bindet Client-IDs nicht an Benutzer: Wer das gemeinsame
+  Kennwort kennt, kann ein umgestelltes Gerät vom Broker werfen, indem er
+  sich mit dessen Client-ID anmeldet. Schalten oder mitlesen kann er es
+  nicht.
+* Den Gen1-Rundruf `shellies/command` darf der gemeinsame Zugang weiter
+  schreiben (`announce`, `update`, `update_fw` – nur offizielle Firmware);
+  Gen1-Geräte am gemeinsamen Zugang brauchen ihn.
+* Gespeicherte (retained) Nachrichten, die der gemeinsame Zugang vor der
+  Umstellung im Baum des Geräts abgelegt hat, liefert der Broker danach
+  nicht mehr aus (`check_retain_source true` in
+  `/etc/mosquitto/conf.d/powermanagement.conf`).
+* Den Schutz vor Doppelgänger-Präfixen in den Messwerten leistet Node-RED
+  (Liste unter `pm/status/mqtt-zugaenge`). Wer die Flows im Editor geändert
+  hat und sie beim Update behält, hat ihn nicht – die Seite „MQTT-Zugänge“
+  meldet dann, dass Node-RED die Liste nicht bestätigt.
+
+Hinter den Kulissen schreibt die Oberfläche den Sollzustand nach
+`storage/mqtt/soll/zugaenge.txt`; `powermanagement-mqtt-zugaenge.path`
+startet daraufhin `deploy/mqtt-zugaenge.sh`. Der Helfer prüft das Soll
+streng (bei einem Fehler ändert er nichts), schreibt den Block oben in
+`/etc/mosquitto/powermanagement.passwd` und die wirksame ACL, lädt
+Mosquitto neu (SIGHUP – bestehende Verbindungen bleiben) und legt das
+Ergebnis nach `storage/mqtt/ist/ergebnis.txt` (als `www-data`). Der
+Zeitgeber wiederholt das alle zwei Minuten und räumt dabei abgelaufene
+Prüf-Sperren ab. Von Hand anstoßen: `systemctl start
+powermanagement-mqtt-zugaenge.service`. Der Dienst läuft mit
+`ProtectSystem=full` und darf nur `/etc/mosquitto` schreiben – kein Pfad,
+den die Anwendung besitzt, damit ein Verweis dort ihm nichts freigibt.
+Laufen Installation oder Update den Helfer ohne Neuladen (sie starten den
+Broker selbst), legt er bei Änderungen die Marke
+`/etc/mosquitto/powermanagement-mqtt-zugaenge.neuladen` an; bricht der
+Aufrufer danach ab, holt der nächste Lauf das Neuladen nach.
+Auf der Kommandozeile zeigt `bin/power mqtt:zugaenge` (als `www-data`),
+welches Gerät welchen Zugang hat.
+
+**Nicht umstellbar** sind Geräte, deren Präfix sich nicht als Benutzername
+eignet: Gen2+ nur Kleinbuchstaben, Ziffern, `_ . -` (bis 64 Zeichen) oder
+`shelly/<name>`; Gen1-IDs dürfen auch Großbuchstaben enthalten. Reserviert
+sind `shelly`, `shellies`, `nodered`, `powermanagement`, `pm`, `command`,
+`announce`, alles mit `pm-`, `pm_`, `pm.` am Anfang sowie Namen, die schon
+von Hand in der Kennwortdatei stehen. Solche Geräte bleiben beim
+gemeinsamen Zugang – oder bekommen im Gerät ein anderes Präfix.
+
+**Fremder Broker (`--ohne-mosquitto`):** Dann richtet die Installation
+weder den Helfer noch seine Einheiten ein, und die Oberfläche kann nichts
+umstellen. Eigene Zugänge lassen sich dort von Hand nach demselben Schema
+anlegen: je Gerät ein Benutzer = Präfix (Gen1: Geräte-ID) mit eigenem
+Kennwort, in der ACL dieselben drei Zeilen wie am Ende von
+`deploy/mosquitto/powermanagement.acl`
+
+```
+pattern readwrite %u/#
+pattern readwrite shellies/%u/#
+pattern read shellies/command
+```
+
+und für den gemeinsamen Zugang je umgestelltem Gerät eine Sperre:
+
+```
+user shelly
+topic deny shellypro4pm-a0b1c2d3e4f5/#
+topic deny shellies/shelly1-B929CC/#
+```
+
+Dazu in der Broker-Konfiguration `check_retain_source true`, damit
+gespeicherte Nachrichten des gemeinsamen Zugangs im gesperrten Baum nicht
+weiter ausgeliefert werden. Das Kennwort am Gerät von Hand eintragen (Gen2+:
+*Settings → MQTT*), Gerät neu starten, dann sperren und Broker neu laden.
 
 ### Prüfen
 
@@ -596,7 +754,11 @@ Das Skript
 3. führt die Migrationen aus (`bin/power migrate`),
 4. zieht fehlende Pakete nach,
 5. gleicht systemd-Einheiten, PHP-FPM-Pool und Logrotate ab,
-6. startet die Dienste neu, kachelt die Grundrisse und prüft mit
+6. gleicht die Mosquitto-Dateien ab: Grundlage der ACL, eigene Zugänge
+   (`deploy/mqtt-zugaenge.sh` baut die wirksame ACL neu), Konfiguration –
+   Mosquitto wird dafür nur neu geladen, die Shellys bleiben verbunden;
+   neu gestartet wird er nur, wenn sich die Konfiguration ändert,
+7. startet die Dienste neu, kachelt die Grundrisse und prüft mit
    `bin/power pruefen`.
 
 **Geht dabei etwas schief, kommt der alte Stand zurück** – Quellcode und
@@ -609,6 +771,36 @@ sind; die neue Fassung liegt dann unter
 im Editor über *Menü → Importieren* übernommen werden – oder mit
 `--flows-ersetzen` (die alten werden als `flows.json.vor-<zeit>` gesichert).
 Dasselbe gilt für `settings.js`, die nginx-Site und die Mosquitto-Dateien.
+
+**Mosquitto-Rechte von Hand ändern** nur in der Grundlage
+`/etc/mosquitto/powermanagement.acl` (erlaubt: Zeilen mit `user`, `topic`,
+`pattern` und Kommentare), danach
+`systemctl start powermanagement-mqtt-zugaenge.service`. Die wirksame
+Datei `powermanagement-wirksam.acl` und den Block oben in der
+Kennwortdatei schreibt der Helfer bei jedem Lauf neu – Änderungen dort sind
+nach spätestens zwei Minuten weg. Ist die Grundlage verändert, bleibt sie
+beim Update, wie sie ist; fehlen ihr die `pattern`-Zeilen für die eigenen
+Zugänge, stehen sie in `powermanagement.acl.powermanagement-neu` daneben
+und müssen von Hand übernommen werden (sonst dürfen eigene Zugänge nichts,
+und die Oberfläche meldet es). Eine von Hand veränderte
+`conf.d/powermanagement.conf` braucht für die Sperren die Zeile
+`acl_file /etc/mosquitto/powermanagement-wirksam.acl`.
+
+**Update von einer Fassung ohne eigene MQTT-Zugänge:** Das laufende
+Update-Skript ist dabei noch das alte. Es holt den neuen Code und spielt
+eine Übergangsfassung der Mosquitto-Konfiguration ein
+(`deploy/mosquitto/powermanagement.conf` – Mosquitto liest damit weiter die
+Grundlage `powermanagement.acl`); Broker und Shellys laufen weiter, die
+eigenen Zugänge aber noch nicht – die Oberfläche meldet unter
+*MQTT-Zugänge*, dass der Broker-Abgleich nicht eingerichtet ist. Dann
+`update-debian.sh` **ein zweites Mal** aufrufen: Jetzt läuft das neue
+Skript; es meldet „Eigene MQTT-Zugänge sind noch nicht eingerichtet – wird
+nachgeholt“, richtet Helfer, Einheiten, `storage/mqtt/` und die wirksame ACL
+ein und stellt die Konfiguration auf die gültige Vorlage
+`deploy/mosquitto/broker.conf` um (ein Neustart des Brokers).
+
+Das neue Update-Skript holt fehlende Teile (wirksame ACL, Einheiten,
+`storage/mqtt/`) auch sonst nach, wenn der Code schon aktuell ist.
 
 | Option | Wofür |
 |--------|-------|
@@ -706,6 +898,7 @@ cd /opt/powermanagement && runuser -u www-data -- php bin/power pruefen
 systemctl status powermanagement-nodered powermanagement-sammler mosquitto influxdb nginx php8.4-fpm
 journalctl -u powermanagement-nodered -f      # Node-RED: Verbindung, Warnungen der Flows
 journalctl -u powermanagement-sammler -f      # Modbus, Cloud
+journalctl -u powermanagement-mqtt-zugaenge   # eigene MQTT-Zugänge: eine Zeile je Lauf
 tail -f /opt/powermanagement/storage/logs/app.log
 tail -f /var/log/mosquitto/mosquitto.log
 
@@ -729,7 +922,12 @@ printf 'Authorization: Token %s\n' "$T" | curl -sG -H @- http://127.0.0.1:8086/q
 
 | Symptom | Ursache / Abhilfe |
 |---------|-------------------|
-| Shelly verbindet sich nicht (`Not authorized` im Mosquitto-Log) | Benutzer/Kennwort im Gerät falsch – `shelly` und `MQTT_SHELLY_KENNWORT` aus `zugaenge.txt`. Kennwort ohne Leerzeichen abtippen. |
+| Shelly verbindet sich nicht (`not authorised` im Mosquitto-Log) | Benutzer/Kennwort im Gerät falsch – `shelly` und `MQTT_SHELLY_KENNWORT` aus `zugaenge.txt`. Kennwort ohne Leerzeichen abtippen. |
+| Shelly mit eigenem Zugang verbindet sich nicht mehr (`not authorised`) | Altes Kennwort im Gerät (nach „Neues Kennwort“ noch nicht neu gestartet bzw. bei Gen1 nicht eingetragen) oder der Zugang wurde entfernt. In der Oberfläche „Neues Kennwort“ – oder am Gerät wieder den gemeinsamen Zugang eintragen und den eigenen entfernen. Steht der Benutzer im Block? `grep '^# konto' /etc/mosquitto/powermanagement.passwd` (zeigt keine Hashes) und `journalctl -u powermanagement-mqtt-zugaenge`. |
+| Eigener Zugang verbunden, aber keine Messwerte, Schalten ohne Antwort | Der Grundlage fehlen die `pattern`-Zeilen (von Hand verändert, Abschnitt 10): `grep ^pattern /etc/mosquitto/powermanagement-wirksam.acl` muss drei Zeilen zeigen. |
+| Oberfläche: „Broker-Abgleich nicht eingerichtet“ oder Fehler | Gerade von einer Fassung ohne eigene Zugänge aktualisiert? Dann `update-debian.sh` noch einmal aufrufen (Abschnitt 10). Sonst: `systemctl status powermanagement-mqtt-zugaenge.path powermanagement-mqtt-zugaenge.timer`, `journalctl -u powermanagement-mqtt-zugaenge` (`uebernommen: …`, `abgelehnt: Zeile … (code)`, `fehler: …`), `cat /opt/powermanagement/storage/mqtt/ist/ergebnis.txt`. `marker`: Block in der Kennwortdatei beschädigt – die Zeilen von `# >>> powermanagement geraetezugaenge` bis `# <<< …` löschen, dann `cd /opt/powermanagement && runuser -u www-data -- php bin/power mqtt:zugaenge-schreiben` (schreibt das Soll neu). `basis`: in der Grundlage steht eine Zeile, die nicht mit `user`, `topic` oder `pattern` beginnt. `viele`: mehr als fünf Zugänge auf einmal entfernt – gewollt? Dann `mqtt:zugaenge-schreiben --viele-entfernen`. `neuladen`: Mosquitto ließ sich nicht neu laden (`systemctl status mosquitto`) – die Dateien bleiben auf dem alten Stand, der nächste Lauf versucht es erneut. |
+| Mosquitto-Log: `ACL pattern 'shellies/command' does not contain '%c' or '%u'` | Gewollt – alle eigenen Zugänge dürfen den Gen1-Rundruf lesen. |
+| Mosquitto startet nicht: `Unable to open acl_file … powermanagement-wirksam.acl` | Die wirksame ACL fehlt: `systemctl start powermanagement-mqtt-zugaenge.service` baut sie, danach `systemctl restart mosquitto` – oder zur Not die Grundlage kopieren: `install -o mosquitto -g mosquitto -m 600 /etc/mosquitto/powermanagement.acl /etc/mosquitto/powermanagement-wirksam.acl`. |
 | Shelly Gen2 verbunden, aber keine Messwerte | „Generic status update over MQTT“ ist aus. Prüfen mit `mosquitto_sub … -t '+/status/#' -v`. |
 | Gen2-Gerät fehlt in der Geräteliste mit Modell/Firmware | „RPC over MQTT“ bzw. „MQTT Control“ im Gerät ausgeschaltet – ohne das antwortet es nicht auf `Shelly.GetDeviceInfo`. Messwerte kommen trotzdem. |
 | Gen1 meldet sich, EM/3EM ohne Summe | Die Summe entsteht erst, wenn alle Phasen innerhalb von 30 s geliefert haben – nach dem Start ab der zweiten Runde. Update-Periode im Gerät prüfen. |

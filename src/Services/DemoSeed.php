@@ -21,7 +21,7 @@ final class DemoSeed
     public static function anlegen(bool $zuruecksetzen): string
     {
         if ($zuruecksetzen) {
-            foreach (['aufbau_posten', 'aufbauten', 'einsaetze', 'inventar_messgeraete', 'inventar', 'bereich_mitglieder', 'bereiche', 'leitungen', 'messpunkte', 'anschluesse', 'schutzorgane', 'objekte', 'datenquellen', 'freigaben', 'floors', 'sites', 'schaltvorgaenge'] as $tabelle) {
+            foreach (['aufbau_posten', 'aufbauten', 'einsaetze', 'inventar_messgeraete', 'inventar', 'bereich_mitglieder', 'bereiche', 'leitungen', 'messpunkte', 'anschluesse', 'schutzorgane', 'objekte', 'datenquellen', 'freigaben', 'floors', 'sites', 'schaltvorgaenge', 'mqtt_zugaenge'] as $tabelle) {
                 Database::execute('DELETE FROM ' . $tabelle);
             }
             Database::execute("DELETE FROM user_roles WHERE user_id IN (SELECT id FROM users WHERE username IN ('veranstalter', 'technik'))");
@@ -283,6 +283,21 @@ final class DemoSeed
             'notiz' => 'Lichtkreise schalten', 'created_by' => 'demo', 'created_at' => gmdate('c'),
         ]);
         unset($gx);
+
+        // ---- Eigene MQTT-Zugänge: das Licht ist umgestellt, das Kaffeemobil
+        // wartet auf seinen Neustart. Der Hash ist ein Platzhalter – im
+        // Demo-Modus gibt es keinen Broker.
+        foreach (['shellypro4pm-licht' => ['eigen', 30], 'shellypro1pm-kaffee' => ['uebertragen', 2]] as $praefix => [$zustand, $tage]) {
+            $am = gmdate('c', time() - $tage * 86400);
+            Database::insert('mqtt_zugaenge', [
+                'benutzer' => $praefix, 'praefix' => $praefix, 'geraet' => $praefix, 'generation' => 2,
+                'kennwort_hash' => '$7$101$' . str_repeat('A', 16) . '$' . str_repeat('A', 86) . '==',
+                'zustand' => $zustand, 'neustart_noetig' => $zustand === 'uebertragen' ? 1 : 0,
+                'kennwort_am' => $am, 'uebertragen_am' => $am, 'bestaetigt_am' => $zustand === 'eigen' ? gmdate('c', time() - ($tage - 1) * 86400) : null,
+                'meldung' => $zustand === 'uebertragen' ? 'Wirksam ab dem nächsten Neustart des Geräts.' : '',
+                'created_by' => null, 'created_at' => $am, 'updated_at' => $am,
+            ]);
+        }
 
         return 'Demo-Gelände angelegt: ' . (int) Database::scalar('SELECT COUNT(*) FROM objekte WHERE ist_vorlage = 0') . ' Anlagen (davon '
             . (int) Database::scalar('SELECT COUNT(*) FROM objekte WHERE ist_vorlage = 0 AND fest = 1') . ' Feststromanschlüsse), '

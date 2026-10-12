@@ -1,18 +1,30 @@
 # /etc/mosquitto/powermanagement.acl
 #
-# Rechte am Broker. Das Installationsskript kopiert diese Datei nach
-# /etc/mosquitto/ (Besitzer mosquitto, Rechte 600 – Mosquitto 2 liest sie
-# erst nach dem Wechsel auf seinen eigenen Benutzer und warnt bei anderen
-# Rechten).
+# Rechte am Broker – die Grundlage. Das Installationsskript kopiert diese
+# Datei nach /etc/mosquitto/ (Besitzer mosquitto, Rechte 600 – Mosquitto 2
+# liest sie erst nach dem Wechsel auf seinen eigenen Benutzer und warnt bei
+# anderen Rechten).
+#
+# Mosquitto liest nicht diese Datei, sondern
+# /etc/mosquitto/powermanagement-wirksam.acl. Die baut deploy/mqtt-zugaenge.sh
+# aus dieser Grundlage und hängt die Sperren für Shellys mit eigenem Zugang
+# an. Eigene Änderungen gehören hierher (danach den Helfer laufen lassen:
+# systemctl start powermanagement-mqtt-zugaenge.service) – nie in die
+# wirksame Datei, die wird bei jedem Lauf neu geschrieben. Erlaubt sind nur
+# Zeilen mit user, topic oder pattern sowie Kommentare.
 #
 # „deny" wirkt unabhängig von der Reihenfolge: Mosquitto prüft erst alle
 # Verbote, dann die Erlaubnisse.
 
-# Shelly-Geräte: alles – ihre eigenen Themen, RPC-Antworten an
-# pm-nodered/rpc, Gen1-announce –, nur nicht pm/#. Dort stehen die
-# normalisierten Messwerte und der Status der Pipeline; ein falsch
-# eingestelltes oder übernommenes Gerät soll dort nichts hineinschreiben
-# können, was die Oberfläche für echte Messwerte hält.
+# Gemeinsamer Zugang der Shelly-Geräte ohne eigenen Zugang: alles – ihre
+# eigenen Themen, RPC-Antworten an pm-nodered/rpc, Gen1-announce –, nur
+# nicht pm/#. Dort stehen die normalisierten Messwerte und der Status der
+# Pipeline; ein falsch eingestelltes oder übernommenes Gerät soll dort
+# nichts hineinschreiben können, was die Oberfläche für echte Messwerte
+# hält. Die Themenbäume der Shellys mit eigenem Zugang nimmt der Helfer
+# diesem Zugang in der wirksamen Datei weg (topic deny <präfix>/#).
+# Die Zeile „user shelly" muss genau so lauten – sonst kann der Helfer
+# nichts sperren (im Ergebnis: sperre_moeglich nein).
 user shelly
 topic readwrite #
 topic deny pm/#
@@ -24,3 +36,20 @@ topic readwrite #
 # Oberfläche und Sammler: Messwerte veröffentlichen, Geräte schalten.
 user powermanagement
 topic readwrite #
+
+# Shellys mit eigenem Zugang. Benutzername = MQTT-Präfix des Geräts
+# (Gen2: Geräte-ID oder shelly/<name>), bei Gen1 die Geräte-ID ohne
+# „shellies/". Jedes Gerät darf nur in seinem eigenen Themenbaum lesen und
+# schreiben – dort liegen auch die RPC-Antworten an Node-RED und an die
+# Oberfläche (<präfix>/pm-…/rpc). Fremde Geräte, pm/# und die Themen von
+# Node-RED erreicht es nicht.
+pattern readwrite %u/#
+# Gen1: shellies/<id>/…
+pattern readwrite shellies/%u/#
+# Gen1-Rundruf an alle Geräte (announce, update). Mosquitto meldet beim
+# Laden „ACL pattern 'shellies/command' does not contain '%c' or '%u'“ –
+# das ist hier gewollt: alle eigenen Zugänge dürfen ihn lesen.
+# shellies/announce schreiben dürfen eigene Zugänge nicht; Mosquitto
+# verwirft das still. Node-RED bekommt die Geräte-Info auch über
+# shellies/<id>/announce.
+pattern read shellies/command

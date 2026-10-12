@@ -1,6 +1,7 @@
 <?php
 use App\Messung\Datenquellen;
 use App\Messung\Messdaten;
+use App\Messung\MqttZugaenge;
 use App\Support\Csrf;
 use App\Support\View;
 use App\Support\Zeit;
@@ -53,6 +54,9 @@ $form = $bearbeiten ?? ($neuArt !== '' ? ['id' => 0, 'art' => $neuArt, 'name' =>
                     <td data-label="Kennung" class="small mono"><?= View::e($q['geraet']) ?></td>
                     <td data-label="Letzter Kontakt" class="small">
                         <?php if ($q['art'] === 'shelly'): ?><span class="muted">meldet sich über MQTT</span>
+                            <?php $mqttZugang = MqttZugaenge::nachPraefix((string) $q['extern_id']); ?>
+                            <div><a class="badge <?= $mqttZugang === null ? '' : ($mqttZugang['zustand'] === 'eigen' ? 'ok' : 'info') ?>" href="/datenquellen/mqtt-zugaenge#z-<?= View::e(MqttZugaenge::geraetName((string) $q['extern_id'])) ?>"
+                                ><?= View::e($mqttZugang === null ? 'gemeinsamer Zugang' : (MqttZugaenge::ZUSTAENDE[$mqttZugang['zustand']] ?? $mqttZugang['zustand'])) ?></a></div>
                         <?php else: ?>
                             <?= View::e(Zeit::anzeige($q['letzter_kontakt'])) ?>
                             <?php if (!empty($q['letzter_fehler'])): ?><div class="text-warn"><?= View::e((string) $q['letzter_fehler']) ?></div><?php endif; ?>

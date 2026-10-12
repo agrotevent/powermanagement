@@ -93,6 +93,54 @@ Einrichtung am Gerät (MQTT-Server, Benutzer `shelly`, *Generic status
 update over MQTT* bei Gen2+): siehe
 [Installationsanleitung, Abschnitt 5](installation-debian-lxc.md#5--shelly-geräte-anbinden).
 
+**Eigener Zugang je Gerät:** Statt des gemeinsamen Zugangs `shelly` kann
+jeder Shelly einen eigenen Broker-Benutzer bekommen (*Messtechnik →
+MQTT-Zugänge*). Der Benutzer ist bei Gen2+ das Präfix (`<id>` oder
+`shelly/<name>`), bei Gen1 die Geräte-ID ohne `shellies/`. Er darf nur im
+Baum des Geräts lesen und schreiben (`<präfix>/#` bzw. `shellies/<id>/#`)
+und `shellies/command` lesen. Sobald bestätigt ist, dass das Gerät über
+den eigenen Zugang verbunden ist, sperrt der Broker diesen Baum für den
+gemeinsamen Zugang `shelly`. Gen1-Geräte mit eigenem Zugang dürfen
+`shellies/announce` nicht schreiben; Modell und Firmware kommen dann aus
+`shellies/<id>/announce`.
+
+**Schutz vor Doppelgängern:** Node-RED bildet den Gerätenamen aus dem
+Präfix (letztes Segment, klein). `kuehlhaus/…` ergibt also denselben Namen
+wie `shelly/kuehlhaus/…`, `shellies/SHELLY1-b929cc` denselben wie
+`shellies/shelly1-B929CC` – und unter einem solchen Präfix dürfte der
+gemeinsame Zugang weiter schreiben. Deshalb veröffentlicht PowerManagement
+die Geräte mit bestätigtem eigenem Zugang (Gerätename → genaues Präfix)
+retained auf `pm/status/mqtt-zugaenge`, wo der gemeinsame Zugang nicht
+schreiben darf. Für diese Geräte nimmt Node-RED Messwerte, `online`,
+Geräteinfo und `announce` nur unter dem genauen Präfix an; alles andere –
+auch `shellies/announce` und RPC-Antworten auf `pm-nodered/rpc` – verwirft
+es. Eine ungültige Nachricht auf dem Thema ändert nichts, eine leere Liste
+hebt den Schutz auf. Jede angenommene Liste quittiert Node-RED retained auf
+`pm/status/nodered-schutz` mit `{"ts": …, "anzahl": …, "zeit": …}` (`ts`
+der Liste oder `null`, Zahl der geschützten Geräte, Zeitpunkt der Annahme
+in ms) – fehlt die Quittung oder bleibt sie bei einem älteren `ts` stehen,
+wirkt der Schutz in Node-RED nicht, etwa bei alten, von Hand geänderten
+Flows.
+
+**RPC-Antworten (Gen2+):** Ein Shelly antwortet an `<src>/rpc`. Damit
+ein eigener Zugang dorthin schreiben darf – und der gemeinsame nicht –,
+liegt der Absender im Baum des Geräts:
+
+| Anfrage | Absender (`src`) | Antwort auf |
+|---------|------------------|-------------|
+| Schalten (`Switch.Set`), Gerät mit eigenem Zugang (in jedem Zustand) | `<präfix>/pm-steuerung-<8 hex>` | `<präfix>/pm-steuerung-<8 hex>/rpc` |
+| Schalten, Gerät ohne eigenen Zugang | `pm-steuerung-<8 hex>` | `pm-steuerung-<8 hex>/rpc` |
+| MQTT-Zugänge (Prüfen, Kennwort übertragen) | `<präfix>/pm-konto-<8 hex>` | `<präfix>/pm-konto-<8 hex>/rpc` |
+| Node-RED `Shelly.GetDeviceInfo` | `<präfix>/pm-nodered` | `<präfix>/pm-nodered/rpc` |
+| Node-RED, nach 60 s ohne Antwort einmal | `pm-nodered` | `pm-nodered/rpc` |
+
+Eine Antwort gilt nur, wenn Thema, `id` und `dst` zur Anfrage passen und
+sie kein `method` enthält. Nach einem Neustart von Node-RED fehlt die
+Anfrage; dann ordnet Node-RED eine Antwort im Baum eines Geräts über das
+Präfix im Thema zu, eine Antwort auf `pm-nodered/rpc` gar nicht. Themen im
+Baum eines Geräts, deren nächster Teil mit `pm-` beginnt, sind keine
+Meldungen des Geräts – Node-RED übergeht sie.
+
 **Schalten:** Einen Shelly mit Schaltausgang macht man unter
 *Geräte in der InfluxDB* mit **„schaltbar machen“** zur Datenquelle. Das
 MQTT-Präfix und die Generation übernimmt PowerManagement aus der InfluxDB.
@@ -254,8 +302,8 @@ passt.
 
 | Tab | Aufgabe |
 |-----|---------|
-| PowerManagement | Eingang `pm/messwert/#`, Herzschlag auf `pm/status/nodered` |
-| Shelly Gen2+ | `+/status/#`, `+/online`, RPC-Geräteinfo |
+| PowerManagement | Eingang `pm/messwert/#`, Herzschlag auf `pm/status/nodered`, Geräte mit eigenem Zugang von `pm/status/mqtt-zugaenge` (globaler Kontext) |
+| Shelly Gen2+ | `+/status/#`, `+/online`, RPC-Geräteinfo (Antworten auf `+/pm-nodered/rpc`, `shelly/+/pm-nodered/rpc`, `pm-nodered/rpc`) |
 | Shelly Gen1 | `shellies/#` |
 | Schreiben | bündelt im Sekundentakt (bis 5000 Zeilen je Anfrage, ab 500 wartenden sofort), puffert bei Ausfall bis 50 000 Zeilen bzw. 5 min und schreibt mit Originalzeit nach |
 

@@ -34,6 +34,7 @@ final class Permissions
             'statistik.export'   => 'Messdaten als CSV exportieren',
             'datenquellen.view'  => 'Datenquellen, Geräte und Registerprofile ansehen',
             'datenquellen.manage'=> 'Datenquellen anlegen, Zugänge hinterlegen, Messpunkte zuordnen',
+            'mqtt.zugaenge'      => 'Eigene MQTT-Zugänge der Shellys einrichten, prüfen und entfernen (nur zusammen mit „Alle Standorte, Anlagen und Messdaten“)',
         ],
         'Steuerung' => [
             // Schalten ist ein Eingriff in den laufenden Betrieb: ein

@@ -97,6 +97,10 @@ try {
         (string) Database::scalar('SELECT role_key FROM roles WHERE id = ?', [$planerRolle]), false);
     $benutzer['klein'] = BenutzerService::anlegen($kennung . '-klein', $kennwort,
         (string) Database::scalar('SELECT role_key FROM roles WHERE id = ?', [$kleinRolle]), false);
+    // MQTT-Zugänge verwalten, aber nicht alle Geräte sehen.
+    $mqttRolle = (int) BenutzerService::rolleSpeichern(null, $kennung . ' mqtt', '', ['datenquellen.view', 'mqtt.zugaenge'])['id'];
+    $benutzer['mqtt'] = BenutzerService::anlegen($kennung . '-mqtt', $kennwort,
+        (string) Database::scalar('SELECT role_key FROM roles WHERE id = ?', [$mqttRolle]), false);
 
     // ---------------------------------------------------- ohne Anmeldung
     $leer = tempnam(sys_get_temp_dir(), 'pm-web-');
@@ -123,7 +127,7 @@ try {
 
     $seiten = ['/dashboard', '/dashboard/live', '/profil', '/karte', '/anlagen', '/anlagen/baum', '/anlagen/katalog', '/anlagen/neu',
         '/stecker', '/standorte', '/location', '/verteiler-abgleich', '/statistik', '/statistik?zeitraum=7d', '/statistik?zeitraum=frei&von=2026-01-01&bis=2026-01-02',
-        '/datenquellen', '/datenquellen/profile', '/steuerung/protokoll', '/system/benutzer', '/system/freigaben?art=user&id=' . $benutzer['kunde'],
+        '/datenquellen', '/datenquellen/profile', '/datenquellen/mqtt-zugaenge', '/datenquellen/mqtt-zugaenge?filter=eigen', '/steuerung/protokoll', '/system/benutzer', '/system/freigaben?art=user&id=' . $benutzer['kunde'],
         '/system/freigaben?art=role&id=' . (int) Database::scalar("SELECT id FROM roles WHERE role_key = 'kunde'"), '/system/rollen',
         '/system/einstellungen', '/audit', '/anlagen?fest=1', '/anlagen?fest=0', '/anlagen/neu?art=anschluss&fest=1',
         '/anlagen/neu?art=anschluss&vorlage=1&fest=1'];
@@ -400,6 +404,26 @@ try {
         $r = aufruf($basis, $technik['dose'], 'POST', '/verteiler-abgleich/' . $aktion, ['alle' => 1, 'bereich' => 'inventar', 'schluessel' => 'x', '_token' => $technik['token']]);
         gleich($r['status'], 403, 'Technik darf im Verteiler-Abgleich nicht ' . $aktion);
     }
+    // Eigene MQTT-Zugänge: ändern nur mit „mqtt.zugaenge“ UND allen Geräten
+    $zugaengeVorher = (int) Database::scalar('SELECT COUNT(*) FROM mqtt_zugaenge');
+    foreach (['einrichten' => ['praefix' => 'shellypro4pm-' . $kennung, 'generation' => 2], 'pruefen' => ['id' => 1], 'erneuern' => ['id' => 1], 'entfernen' => ['id' => 1], 'uebertragen' => ['id' => 1]] as $aktion => $felder) {
+        $r = aufruf($basis, $technik['dose'], 'POST', '/datenquellen/mqtt-zugaenge/' . $aktion, $felder + ['_token' => $technik['token']]);
+        gleich($r['status'], 403, 'Technik darf MQTT-Zugänge nicht ' . $aktion);
+    }
+    $mqttNutzer = anmelden($basis, $kennung . '-mqtt', $kennwort);
+    $dosen[] = $mqttNutzer['dose'];
+    $r = aufruf($basis, $mqttNutzer['dose'], 'GET', '/datenquellen/mqtt-zugaenge');
+    pruefe($r['status'] === 200 && !str_contains($r['text'], 'Eigenen Zugang einrichten</button>'), 'mit „mqtt.zugaenge“ ohne alle Geräte: Liste ja, Knöpfe nein');
+    $r = aufruf($basis, $mqttNutzer['dose'], 'POST', '/datenquellen/mqtt-zugaenge/einrichten', ['praefix' => 'shellypro4pm-' . $kennung, 'generation' => 2, '_token' => $mqttNutzer['token']]);
+    gleich($r['status'], 403, '„mqtt.zugaenge“ ohne „Alle Standorte …“ → 403');
+    $r = aufruf($basis, $admin['dose'], 'POST', '/datenquellen/mqtt-zugaenge/einrichten', ['praefix' => 'shellypro4pm-' . $kennung, 'generation' => 2]);
+    pruefe($r['status'] === 302 && Database::scalar('SELECT COUNT(*) FROM mqtt_zugaenge') == $zugaengeVorher, 'MQTT-Zugang einrichten ohne CSRF-Token → abgelehnt');
+    $r = aufruf($basis, $admin['dose'], 'POST', '/datenquellen/mqtt-zugaenge/einrichten', ['praefix' => 'shellypro4pm-' . $kennung, 'generation' => 2, '_token' => $admin['token']]);
+    pruefe($r['status'] === 302 && stripos($r['kopf'], 'no-store') !== false, 'Admin im Demo-Modus: Weiterleitung, nicht zwischengespeichert');
+    gleich((int) Database::scalar('SELECT COUNT(*) FROM mqtt_zugaenge'), $zugaengeVorher, 'im Demo-Modus wird kein Zugang angelegt');
+    $r = aufruf($basis, $admin['dose'], 'GET', '/datenquellen/mqtt-zugaenge');
+    pruefe(!str_contains($r['text'], '$7$'), 'kein Kennwort-Hash in der Seite');
+
     // Die Repository-Adresse (und damit, wohin das Token geht) nur mit „Einstellungen ändern“
     $r = aufruf($basis, $technik['dose'], 'POST', '/system/einstellungen/location', ['repo_url' => 'https://evil.example/x.git', '_token' => $technik['token']]);
     gleich($r['status'], 403, 'Repository-Adresse nur mit „Einstellungen ändern“');

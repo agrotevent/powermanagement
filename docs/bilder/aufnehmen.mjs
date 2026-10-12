@@ -144,6 +144,8 @@ async function link(page, text) {
     await foto(page, 'location');
     await oeffnen(page, '/datenquellen');
     await foto(page, 'datenquellen');
+    await oeffnen(page, '/datenquellen/mqtt-zugaenge');
+    await oben(page, 'mqtt-zugaenge', 1250);
     await ctx.close();
 }
 

@@ -305,6 +305,19 @@ document.addEventListener('DOMContentLoaded', function () {
         });
     });
 
+    // data-kopieren="#id": Text des Elements in die Zwischenablage.
+    document.querySelectorAll('[data-kopieren]').forEach(function (knopf) {
+        knopf.addEventListener('click', function () {
+            var quelle = document.querySelector(knopf.dataset.kopieren);
+            if (!quelle || !navigator.clipboard) { return; }
+            navigator.clipboard.writeText(quelle.textContent).then(function () {
+                var vorher = knopf.textContent;
+                knopf.textContent = 'kopiert';
+                window.setTimeout(function () { knopf.textContent = vorher; }, 1500);
+            });
+        });
+    });
+
     // Laufende Aufträge alle 4 Sekunden nachladen.
     var live = document.querySelector('[data-job-live]');
     if (live) {
