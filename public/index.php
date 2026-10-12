@@ -16,6 +16,7 @@ use App\Controllers\EinstellungenController;
 use App\Controllers\KarteController;
 use App\Controllers\LocationController;
 use App\Controllers\ManifestController;
+use App\Controllers\MqttZugaengeController;
 use App\Controllers\StandortController;
 use App\Controllers\StatistikController;
 use App\Controllers\SteckerController;
@@ -157,6 +158,12 @@ $router->get('/datenquellen/profile', [DatenquellenController::class, 'profile']
 $router->get('/datenquellen/profile/{id}', [DatenquellenController::class, 'profil'], 'datenquellen.view');
 $router->post('/datenquellen/profile/speichern', [DatenquellenController::class, 'profilSpeichern'], 'datenquellen.manage');
 $router->post('/datenquellen/profile/loeschen', [DatenquellenController::class, 'profilLoeschen'], 'datenquellen.manage');
+// Eigene MQTT-Zugänge der Shellys: ändern nur mit „mqtt.zugaenge“ und allen
+// Geräten (prüft der Controller).
+$router->get('/datenquellen/mqtt-zugaenge', [MqttZugaengeController::class, 'index'], 'datenquellen.view');
+foreach (['einrichten', 'uebertragen', 'pruefen', 'erneuern', 'entfernen'] as $aktion) {
+    $router->post('/datenquellen/mqtt-zugaenge/' . $aktion, [MqttZugaengeController::class, $aktion], 'mqtt.zugaenge');
+}
 
 // Schalten: das Recht allein genügt nicht – der Controller prüft zusätzlich
 // die Schalt-Freigabe für genau dieses Gerät (Zugriff::darfSteuern).

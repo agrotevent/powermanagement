@@ -119,6 +119,10 @@ final class Steuerung
      * Gen2+: JSON-RPC an <präfix>/rpc, die Antwort kommt an <src>/rpc – so
      * lässt sich melden, ob der Shelly den Befehl angenommen hat, statt nur
      * „gesendet“. Gen1 kennt keine Antwort; dort genügt das Absenden.
+     *
+     * Hat der Shelly einen eigenen MQTT-Zugang, liegt src in seinem Baum
+     * (<präfix>/pm-steuerung-…): nur dorthin darf er antworten, und nur er
+     * darf es (MqttZugaenge). Ohne eigenen Zugang bleibt es beim alten src.
      */
     private static function shelly(array $quelle, string $befehl, string $kanal): array
     {
@@ -134,26 +138,15 @@ final class Steuerung
                 $mqtt->veroeffentlichen($praefix . '/relay/' . $nr . '/command', $an ? 'on' : 'off', 1);
                 return ['ok' => true, 'message' => $quelle['name'] . ': „' . ($an ? 'Ein' : 'Aus') . '“ gesendet (Gen1 bestätigt nicht – der Zustand erscheint mit dem nächsten Messwert).'];
             }
-            $src = 'pm-steuerung-' . bin2hex(random_bytes(4));
-            $id = random_int(1, 1_000_000);
-            $mqtt->abonnieren([$src . '/rpc']);
-            $mqtt->veroeffentlichen($praefix . '/rpc', (string) json_encode([
-                'id' => $id, 'src' => $src, 'method' => 'Switch.Set', 'params' => ['id' => $nr, 'on' => $an],
-            ]), 1);
-            $antwort = null;
-            $mqtt->lauschen(5, static function (string $thema, string $nachricht) use ($id, &$antwort): bool {
-                $daten = json_decode($nachricht, true);
-                if (is_array($daten) && (int) ($daten['id'] ?? 0) === $id) {
-                    $antwort = $daten;
-                    return true;
-                }
-                return false;
-            });
-            if ($antwort === null) {
-                return ['ok' => false, 'message' => $quelle['name'] . ' hat nicht geantwortet. Ist das Gerät online und das MQTT-Präfix richtig?'];
+            $eigenerZugang = MqttZugaenge::nachPraefix($praefix) !== null;
+            $antwort = ShellyRpc::aufrufen($mqtt, $praefix, ShellyRpc::quelle($praefix, 'steuerung', $eigenerZugang),
+                'Switch.Set', ['id' => $nr, 'on' => $an]);
+            if (!$antwort['ok'] && !isset($antwort['error'])) {
+                return ['ok' => false, 'message' => $quelle['name'] . ' hat nicht geantwortet. Ist das Gerät online und das MQTT-Präfix richtig?'
+                    . ($eigenerZugang ? ' (Eigener MQTT-Zugang – unter Messtechnik → MQTT-Zugänge prüfen.)' : '')];
             }
             if (isset($antwort['error'])) {
-                return ['ok' => false, 'message' => $quelle['name'] . ' meldet: ' . ($antwort['error']['message'] ?? 'Fehler')];
+                return ['ok' => false, 'message' => $quelle['name'] . ' meldet: ' . mb_substr((string) ($antwort['error']['message'] ?? 'Fehler'), 0, 200)];
             }
             return ['ok' => true, 'message' => $quelle['name'] . ' (' . $kanal . ') ist jetzt ' . ($an ? 'eingeschaltet' : 'ausgeschaltet') . '.'];
         } finally {

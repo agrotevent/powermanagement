@@ -167,6 +167,16 @@ Standorten), für das Inventar „Inventar pflegen“. Was jemand nicht pflegen
 darf, wird übergangen und in der Meldung genannt. Hochladen und aus dem
 Repository entfernen braucht „… ins Repository hochladen“.
 
+## MQTT-Zugänge
+
+Die Liste *Messtechnik → MQTT-Zugänge* sieht, wer „Datenquellen ansehen“
+hat. Einrichten, prüfen, ein neues Kennwort vergeben und entfernen braucht
+„Eigene MQTT-Zugänge der Shellys“ **und** „Alle Standorte, Anlagen und
+Messdaten“: ein Zugang am Broker gilt für das ganze Gerät, und die
+Umstellung sperrt den gemeinsamen Zugang darauf – das lässt sich nicht auf
+einen Standort begrenzen. Kennwörter werden nie gespeichert und nie
+protokolliert; das Audit-Log nennt nur Gerät und Schritt.
+
 ## Bereiche
 
 Einen Bereich sieht, wer seinen Standort sieht. In die Summe kommen aber nur

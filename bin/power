@@ -31,8 +31,22 @@ declare(strict_types=1);
  *                                   --alle: was im Repository neu oder neuer ist
  *   bin/power verteiler:hochladen --alle | <typ|inventar> <schlüssel>
  *                                   --alle: was nur hier steht oder hier geändert wurde
+ *   bin/power mqtt:zugaenge         Shellys mit gemeinsamem oder eigenem MQTT-Zugang (ohne Geheimnisse)
+ *   bin/power mqtt:vorpruefen <präfix> | --alle
+ *                                   Gen2, nur lesend: antwortet das Gerät an einen Absender in
+ *                                   seinem Baum, stimmt das Präfix, wartet es auf einen Neustart?
+ *   bin/power mqtt:zugang-einrichten <präfix> [--gen1]
+ *                                   Gen2: anlegen, prüfen, übertragen (wirksam ab Neustart).
+ *                                   Gen1: das Kennwort steht einmal auf der Standardausgabe
+ *   bin/power mqtt:zugang-pruefen <präfix> | --alle [--erzwingen]
+ *                                   Umstellung bestätigen (sperrt dann den gemeinsamen Zugang)
+ *   bin/power mqtt:zugang-entfernen <präfix> --ja
+ *   bin/power mqtt:zugaenge-schreiben [--viele-entfernen]
+ *                                   Sollzustand für den Broker neu schreiben und warten
+ *                                   (als Besitzer von storage/mqtt, z. B. sudo -u www-data)
  *   bin/power demo:seed [--reset]   Demo-Gelände mit Anlagen, Kabeln und Benutzern anlegen
- *   bin/power wartung               Protokolle aufräumen (täglich per Timer)
+ *   bin/power wartung               Protokolle aufräumen, abgebrochene MQTT-Prüfungen
+ *                                   zurücksetzen (täglich per Timer)
  */
 
 require dirname(__DIR__) . '/src/bootstrap.php';
@@ -40,6 +54,7 @@ require dirname(__DIR__) . '/src/bootstrap.php';
 use App\Messung\Influx;
 use App\Messung\Messdaten;
 use App\Messung\Mqtt;
+use App\Messung\MqttZugaenge;
 use App\Messung\Profile;
 use App\Messung\Sammler;
 use App\Services\AnlagenService;
@@ -199,6 +214,11 @@ switch ($befehl) {
             $aus('MQTT:       FEHLER – ' . $e->getMessage());
             $ok = false;
         }
+        $e = MqttZugaenge::ergebnis();
+        $aus('Zugänge:    ' . ($e === null ? 'Broker-Abgleich nicht eingerichtet (nur mit mitinstalliertem Mosquitto)'
+            : 'Abgleich ' . $e['status'] . ', zuletzt ' . date('d.m.Y H:i', $e['zeit']) . ', ' . count($e['konten']) . ' eigene Zugänge, ' . count($e['gesperrt']) . ' gesperrt'
+              . ($e['basis_muster'] ? '' : ' – ACL-Muster fehlen') . ($e['acl_wirksam'] ? '' : ' – Mosquitto liest nicht die erzeugte ACL')
+              . ($e['fehler'] !== [] ? ' – ' . MqttZugaenge::fehlerText($e['fehler']) : '')));
         if ($influx['ok']) {
             $pipeline = Messdaten::pipeline();
             $aus('Schreiben:  ' . ($pipeline === null ? 'in der letzten Stunde kein Herzschlag von Node-RED in der InfluxDB'
@@ -317,6 +337,102 @@ switch ($befehl) {
         $ergebnis['ok'] ? $aus($ergebnis['message']) : $fehler($ergebnis['message']);
         break;
 
+    case 'mqtt:zugaenge':
+        $fehlerText = null;
+        foreach (MqttZugaenge::uebersicht($fehlerText) as $z) {
+            $aus(sprintf('  %-40s Gen%d  %-22s %s', $z['praefix'], $z['generation'], MqttZugaenge::ZUSTAENDE[$z['zustand']] ?? $z['zustand'],
+                $z['umstellbar'] || $z['zugang'] !== null ? '' : '(nicht umstellbar)'));
+        }
+        if ($fehlerText !== null) {
+            $aus('InfluxDB: ' . $fehlerText);
+        }
+        $grund = MqttZugaenge::verfuegbar();
+        $aus($grund ?? 'Broker-Abgleich bereit.');
+        break;
+
+    case 'mqtt:vorpruefen':
+    case 'mqtt:zugang-pruefen':
+        $ziele = isset($optionen['alle']) ? null : [(string) ($werte[0] ?? '')];
+        if ($ziele === ['']) {
+            $fehler('Bitte ein MQTT-Präfix oder --alle angeben.');
+        }
+        $alleOk = true;
+        if ($befehl === 'mqtt:vorpruefen') {
+            if ($ziele === null) {
+                $ziele = array_column(array_filter(MqttZugaenge::uebersicht(), static fn (array $z): bool => $z['generation'] === 2), 'praefix');
+            }
+            foreach ($ziele as $praefix) {
+                $erg = MqttZugaenge::vorpruefen($praefix);
+                $aus(($erg['ok'] ? 'OK      ' : 'FEHLER  ') . $erg['message']);
+                $alleOk = $alleOk && $erg['ok'];
+            }
+        } else {
+            $zugaenge = $ziele === null
+                ? array_filter(MqttZugaenge::alle(), static fn (array $z): bool => in_array($z['zustand'], ['angelegt', 'uebertragen', 'eigen'], true))
+                : array_filter([MqttZugaenge::nachPraefix($ziele[0])]);
+            if ($zugaenge === []) {
+                $fehler($ziele === null ? 'Keine Zugänge zu prüfen.' : 'Für dieses Präfix gibt es keinen eigenen Zugang.');
+            }
+            foreach ($zugaenge as $z) {
+                // Ohne Neustart gibt es bei Gen2 nichts zu bestätigen – mit
+                // --alle still übergehen.
+                $erg = MqttZugaenge::pruefen((int) $z['id'], isset($optionen['erzwingen']));
+                if ($ziele === null && !empty($erg['neustart'])) {
+                    $aus('wartet  ' . $z['praefix'] . ': noch nicht neu gestartet');
+                    continue;
+                }
+                $aus(($erg['ok'] ? 'OK      ' : 'FEHLER  ') . $erg['message']);
+                $alleOk = $alleOk && $erg['ok'];
+            }
+        }
+        exit($alleOk ? 0 : 1);
+
+    case 'mqtt:zugang-einrichten':
+        $praefix = (string) ($werte[0] ?? '');
+        if ($praefix === '') {
+            $fehler('Bitte das MQTT-Präfix angeben (Gen1: shellies/<ID>).');
+        }
+        $erg = MqttZugaenge::einrichten($praefix, isset($optionen['gen1']) ? 1 : 2);
+        if (!$erg['ok']) {
+            $fehler($erg['message']);
+        }
+        $aus($erg['message']);
+        if (isset($erg['kennwort'])) {
+            $aus('Benutzer: ' . $erg['benutzer']);
+            $aus('Kennwort: ' . $erg['kennwort'] . '   (wird nicht wieder angezeigt)');
+        }
+        break;
+
+    case 'mqtt:zugang-entfernen':
+        $zugang = MqttZugaenge::nachPraefix((string) ($werte[0] ?? ''));
+        if ($zugang === null) {
+            $fehler('Für dieses Präfix gibt es keinen eigenen Zugang.');
+        }
+        if (!isset($optionen['ja'])) {
+            $fehler('Ein Gerät, das den Zugang nutzt, ist danach getrennt. Bestätigen mit --ja.');
+        }
+        $erg = MqttZugaenge::entfernen((int) $zugang['id']);
+        $erg['ok'] ? $aus($erg['message']) : $fehler($erg['message']);
+        break;
+
+    case 'mqtt:zugaenge-schreiben':
+        try {
+            $lauf = MqttZugaenge::sollSchreiben(isset($optionen['viele-entfernen']));
+        } catch (\RuntimeException $e) {
+            $fehler($e->getMessage());
+        }
+        $aus('Sollzustand geschrieben (Lauf ' . $lauf . '). Warte auf den Broker …');
+        for ($i = 0; $i < 100; $i++) {
+            $e = MqttZugaenge::ergebnis();
+            if ($e !== null && $e['lauf'] !== null && $e['lauf'] >= $lauf) {
+                $aus('Broker-Abgleich: ' . $e['status'] . ', ' . count($e['konten']) . ' Zugänge, ' . count($e['gesperrt']) . ' gesperrt'
+                    . ($e['fehler'] !== [] ? ' – ' . MqttZugaenge::fehlerText($e['fehler']) : ''));
+                exit(in_array($e['status'], ['ok', 'unveraendert'], true) ? 0 : 1);
+            }
+            usleep(200_000);
+        }
+        $fehler('Der Broker-Abgleich hat sich nicht gemeldet (journalctl -u powermanagement-mqtt-zugaenge).');
+
     case 'demo:seed':
         // Die Demo legt Konten mit bekannten Kennwörtern an (technik darf
         // schalten) und löscht mit --reset gleichnamige – nie im Betrieb.
@@ -331,6 +447,9 @@ switch ($befehl) {
         $a = Database::execute('DELETE FROM audit_log WHERE created_at < ?', [$grenze]);
         $s = Database::execute('DELETE FROM schaltvorgaenge WHERE created_at < ?', [$grenze]);
         $aus("Aufgeräumt: {$a} Audit-Einträge, {$s} Schaltvorgänge (älter als 400 Tage).");
+        foreach (MqttZugaenge::wartung() as $meldung) {
+            $aus($meldung);
+        }
         break;
 
     default:

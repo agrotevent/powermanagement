@@ -147,16 +147,24 @@ const flows = [
 
     // -------------------------------------------------------- Shelly Gen2+
     kommentar('pm_kommentar_gen2', T_GEN2, 'Shelly Gen2+ (Plus, Pro, Gen3, Gen4)', [
-        'Im Gerät unter **Einstellungen → MQTT**: Server `<IP>:1883`, Benutzer `shelly`,',
-        '„Generic status update over MQTT" und „RPC status notifications" einschalten.',
+        'Im Gerät unter **Einstellungen → MQTT**: Server `<IP>:1883`, Benutzer `shelly`',
+        '(oder der eigene Zugang des Geräts, siehe unten), „Generic status update',
+        'over MQTT" und „RPC status notifications" einschalten.',
         '',
         'Das Präfix ist ab Werk die Geräte-ID (`shellypro3em-a0b1c2d3e4f5`);',
         '`shelly/<name>` geht ebenso. Der Gerätename in der Datenbank ist das',
         'letzte Segment des Präfixes.',
         '',
         'Beim ersten Sehen eines Geräts und danach alle 6 h fragt der Flow per',
-        'RPC `Shelly.GetDeviceInfo` ab (Antwort auf `pm-nodered/rpc`) und trägt',
-        'Modell, Firmware und MAC in die Messung `geraet` ein.',
+        'RPC `Shelly.GetDeviceInfo` ab und trägt Modell, Firmware und MAC in die',
+        'Messung `geraet` ein. Absender ist `<präfix>/pm-nodered`, die Antwort',
+        'kommt auf `<präfix>/pm-nodered/rpc`. Bleibt sie 60 s aus, fragt der Flow',
+        'einmal mit dem alten Absender `pm-nodered` (Antwort auf `pm-nodered/rpc`).',
+        'Es gilt nur eine Antwort mit passender id, passendem Thema und `dst`.',
+        '',
+        'Eigener Zugang je Gerät (Oberfläche → Messtechnik → MQTT-Zugänge):',
+        'Benutzer = Präfix, Rechte nur auf `<präfix>/#`. Deshalb liegen Absender',
+        'und Antwort im Baum des Geräts.',
     ].join('\n'), 200, 40),
     mqttIn('pm_gen2_in_status', T_GEN2, '+/status/#', '+/status/#', '0', 130, 100, ['pm_gen2_uebersetzen']),
     mqttIn('pm_gen2_in_status_shelly', T_GEN2, 'shelly/+/status/#', 'shelly/+/status/#', '0', 150, 140, ['pm_gen2_uebersetzen']),
@@ -164,27 +172,41 @@ const flows = [
     mqttIn('pm_gen2_in_online_shelly', T_GEN2, 'shelly/+/online', 'shelly/+/online', '0', 140, 220, ['pm_gen2_uebersetzen']),
     funktion('pm_gen2_uebersetzen', T_GEN2, 'Shelly Gen2+ übersetzen', 'shelly-gen2.js', 2,
         'Übersetzt `<präfix>/status/<komponente>` und `<präfix>/online` in normalisierte Messwerte.\n\n'
-        + 'Ausgang 1: Messwerte → „Schreiben". Ausgang 2: RPC-Anfrage an `<präfix>/rpc`.',
+        + 'Ausgang 1: Messwerte → „Schreiben". Ausgang 2: RPC-Anfrage an `<präfix>/rpc` '
+        + '(Absender `<präfix>/pm-nodered`, nach 60 s ohne Antwort einmal `pm-nodered`).',
         400, 160, [['pm_link_gen2'], ['pm_gen2_rpc_aus']]),
     linkOut('pm_link_gen2', T_GEN2, 'zu „Schreiben"', [LINK_ZIEL], 605, 140),
     mqttOut('pm_gen2_rpc_aus', T_GEN2, 'RPC an das Gerät', '', '1', 'false', 660, 180),
-    mqttIn('pm_gen2_in_rpc', T_GEN2, 'pm-nodered/rpc', 'pm-nodered/rpc', '1', 140, 300, ['pm_gen2_geraeteinfo']),
+    // RPC-Antworten: im Baum des Geräts (<id>/… und shelly/<name>/…) und
+    // auf dem alten Thema für den Rückfall.
+    mqttIn('pm_gen2_in_rpc_baum', T_GEN2, '+/pm-nodered/rpc', '+/pm-nodered/rpc', '1', 150, 300, ['pm_gen2_geraeteinfo']),
+    mqttIn('pm_gen2_in_rpc_baum_shelly', T_GEN2, 'shelly/+/pm-nodered/rpc', 'shelly/+/pm-nodered/rpc', '1', 170, 340,
+        ['pm_gen2_geraeteinfo']),
+    mqttIn('pm_gen2_in_rpc', T_GEN2, 'pm-nodered/rpc', 'pm-nodered/rpc', '1', 140, 380, ['pm_gen2_geraeteinfo']),
     funktion('pm_gen2_geraeteinfo', T_GEN2, 'Shelly Gen2+ Geräteinfo', 'shelly-gen2-geraeteinfo.js', 1,
-        'Antwort auf `Shelly.GetDeviceInfo` → Punkt der Messung `geraet` (Modell, Firmware, MAC).',
-        400, 300, [['pm_link_gen2_info']]),
-    linkOut('pm_link_gen2_info', T_GEN2, 'zu „Schreiben"', [LINK_ZIEL], 605, 300),
+        'Antwort auf `Shelly.GetDeviceInfo` (`<präfix>/pm-nodered/rpc`, Rückfall `pm-nodered/rpc`) '
+        + '→ Punkt der Messung `geraet` (Modell, Firmware, MAC).\n\n'
+        + 'Es gilt nur eine Antwort, die zu einer offenen Anfrage passt (id, Thema, `dst`); '
+        + 'ohne Anfrage nur eine im Baum eines Geräts.',
+        420, 340, [['pm_link_gen2_info']]),
+    linkOut('pm_link_gen2_info', T_GEN2, 'zu „Schreiben"', [LINK_ZIEL], 625, 340),
 
     // -------------------------------------------------------- Shelly Gen1
     kommentar('pm_kommentar_gen1', T_GEN1, 'Shelly Gen1', [
         'Im Gerät unter **Internet & Security → Advanced Developer Settings**:',
-        '„Enable action execution via MQTT", Server `<IP>:1883`, Benutzer `shelly`.',
+        '„Enable action execution via MQTT", Server `<IP>:1883`, Benutzer `shelly`',
+        'oder der eigene Zugang des Geräts (Benutzer = Geräte-ID ohne `shellies/`,',
+        'Rechte nur auf `shellies/<id>/#`).',
         '',
         '`relay/N/energy` liefert Gen1 in **Wattminuten** – der Flow rechnet in Wh um.',
         'Die Summe über die Phasen eines EM/3EM entsteht hier, sobald von allen',
         'Phasen ein frischer Wert (< 30 s) vorliegt.',
         '',
         'Nach dem Start fragt der Flow einmal mit `announce` an `shellies/command`',
-        'alle Gen1-Geräte nach Modell und Firmware.',
+        'alle Gen1-Geräte nach Modell und Firmware. Geräte mit eigenem Zugang',
+        'dürfen `shellies/announce` nicht schreiben; ihre Angaben kommen aus',
+        '`shellies/<id>/announce`. Themen unter `shellies/<id>/pm-…` sind',
+        'Prüfungen der Oberfläche und werden übergangen.',
     ].join('\n'), 130, 40),
     mqttIn('pm_gen1_in', T_GEN1, 'shellies/#', 'shellies/#', '0', 120, 120, ['pm_gen1_uebersetzen']),
     funktion('pm_gen1_uebersetzen', T_GEN1, 'Shelly Gen1 übersetzen', 'shelly-gen1.js', 1,

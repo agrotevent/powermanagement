@@ -1,0 +1,126 @@
+<?php
+declare(strict_types=1);
+
+namespace App\Controllers;
+
+use App\Auth\Auth;
+use App\Auth\Zugriff;
+use App\Messung\MqttZugaenge;
+use App\Support\Config;
+use App\Support\Request;
+use App\Support\Response;
+
+/**
+ * Eigene MQTT-Zugänge der Shellys – Übersicht und Umstellung Gerät für Gerät.
+ *
+ * Ansehen: „datenquellen.view“ (sieht ohnehin alle Geräte). Ändern:
+ * „mqtt.zugaenge“ und dazu alle Geräte ohne Freigabe-Grenze
+ * (anlagen.scope.all) – ein Zugang am Broker gilt für das ganze Gerät, und
+ * die Umstellung sperrt den gemeinsamen Zugang darauf.
+ */
+final class MqttZugaengeController extends Controller
+{
+    private const ZIEL = '/datenquellen/mqtt-zugaenge';
+
+    public function index(Request $request): void
+    {
+        $fehler = null;
+        $filter = $request->str('filter');
+        $liste = MqttZugaenge::uebersicht($fehler);
+        $zaehler = ['gemeinsam' => 0, 'wartet' => 0, 'eigen' => 0, 'nicht' => 0];
+        foreach ($liste as $z) {
+            $zaehler[self::gruppe($z)]++;
+        }
+        if (isset($zaehler[$filter])) {
+            $liste = array_values(array_filter($liste, static fn (array $z): bool => self::gruppe($z) === $filter));
+        } else {
+            $filter = '';
+        }
+        $this->view('mqtt-zugaenge/index', [
+            'liste'     => $liste,
+            'zaehler'   => $zaehler,
+            'filter'    => $filter,
+            'fehler'    => $fehler,
+            'ergebnis'  => MqttZugaenge::ergebnis(),
+            'grund'     => MqttZugaenge::verfuegbar(),
+            'hindernis' => Config::isDemo() ? null : MqttZugaenge::sperreHindernis(),
+            'darf'      => Auth::can('mqtt.zugaenge') && Zugriff::alles(),
+        ]);
+    }
+
+    private static function gruppe(array $z): string
+    {
+        return match (true) {
+            $z['zustand'] === 'eigen'     => 'eigen',
+            $z['zugang'] !== null         => 'wartet',
+            !$z['umstellbar']             => 'nicht',
+            default                       => 'gemeinsam',
+        };
+    }
+
+    /** Ändern nur mit allen Geräten – sonst 403. */
+    private function erlaubt(): bool
+    {
+        header('Cache-Control: no-store');
+        if (!Zugriff::alles()) {
+            Response::forbidden();
+            return false;
+        }
+        return true;
+    }
+
+    public function einrichten(Request $request): void
+    {
+        if (!$this->erlaubt()) {
+            return;
+        }
+        $ergebnis = MqttZugaenge::einrichten($request->str('praefix'), $request->int('generation') === 1 ? 1 : 2);
+        $this->ergebnis($request, $ergebnis);
+    }
+
+    public function uebertragen(Request $request): void
+    {
+        if ($this->erlaubt()) {
+            $this->ergebnis($request, MqttZugaenge::uebertragen($request->int('id')));
+        }
+    }
+
+    public function pruefen(Request $request): void
+    {
+        if ($this->erlaubt()) {
+            $this->ergebnis($request, MqttZugaenge::pruefen($request->int('id'), $request->bool('erzwingen')));
+        }
+    }
+
+    public function erneuern(Request $request): void
+    {
+        if ($this->erlaubt()) {
+            $this->ergebnis($request, MqttZugaenge::kennwortErneuern($request->int('id')));
+        }
+    }
+
+    public function entfernen(Request $request): void
+    {
+        if ($this->erlaubt()) {
+            $this->ergebnis($request, MqttZugaenge::entfernen($request->int('id')));
+        }
+    }
+
+    /**
+     * Ein Kennwort (Gen1) wird genau einmal gezeigt: direkt in der Antwort,
+     * nie in Flash, Sitzung oder Weiterleitung.
+     */
+    private function ergebnis(Request $request, array $ergebnis): void
+    {
+        if (isset($ergebnis['kennwort'])) {
+            $this->view('mqtt-zugaenge/einmalig', [
+                'benutzer' => (string) ($ergebnis['benutzer'] ?? ''),
+                'kennwort' => (string) $ergebnis['kennwort'],
+                'meldung'  => (string) $ergebnis['message'],
+            ]);
+            return;
+        }
+        unset($ergebnis['kennwort']);
+        $this->antwort($request, $ergebnis, self::ZIEL);
+    }
+}

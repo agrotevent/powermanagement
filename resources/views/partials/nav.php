@@ -35,6 +35,7 @@ $groups = [
     'Messtechnik' => [
         ['/datenquellen',         'Datenquellen & Geräte', null, 'datenquellen.view'],
         ['/datenquellen/profile', 'Registerprofile',       null, 'datenquellen.view'],
+        ['/datenquellen/mqtt-zugaenge', 'MQTT-Zugänge',    null, 'datenquellen.view'],
     ],
     'Standorte' => [
         ['/standorte',            'Standorte & Etagen',  null, 'plans.manage'],

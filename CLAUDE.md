@@ -38,6 +38,13 @@ keine Build-Schritte. JS-Bibliotheken liegen fertig unter `public/assets/vendor`
 - **Geheimnisse** (Tokens, Kennwörter, Cloud-Zugänge) verschlüsselt ablegen
   (`Crypto`, `Settings::geheimnisSetzen`, `Datenquellen::zugang`). Sie
   gehören nie in Logs, Audit oder Antworten.
+- **Broker-Zugänge der Shellys** nur über `MqttZugaenge` (Soll-Datei in
+  `storage/mqtt/soll` → root-Helfer `deploy/mqtt-zugaenge.sh`); `/etc/mosquitto`
+  schreibt außer dem Installationsskript nur dieser Helfer. Shelly-RPC nur
+  über `ShellyRpc` (feste Methodenliste), Schalten weiter nur über
+  `Steuerung::ausfuehren()`. Kennwörter eigener Zugänge werden nie
+  gespeichert (nur der Mosquitto-Hash): Gen2 direkt ans Gerät, Gen1 genau
+  einmal angezeigt. Die App startet nie ein Gerät neu.
 - Neue Tabellen oder Spalten kommen als **neue Migration** dazu
   (`database/migrations/00N_*.sql`). Vorhandene Migrationen nie ändern.
 - Oberfläche **mobil zuerst**: Tabellen mit `tabelle-karten` und
@@ -70,7 +77,9 @@ bash -n deploy/*.sh && shellcheck -S warning -e SC2016,SC1111 deploy/*.sh
 | `tests/bereiche.php` | Bereiche: Summe ohne Doppelzählung, Live/Verlauf, Aufräumen; Materialliste und Kabelstückelung |
 | `tests/georeferenz.php` | Plan ↔ Breite/Länge, Koordinaten lesen, Längen aus der Georeferenz, strom.json |
 | `tests/modbus.php` | Modbus TCP, Victron-Profil, Line Protocol |
-| `tests/mqtt.php` | MQTT-Client, Shelly schalten (Gen1/Gen2), Sammler → MQTT (eigener Mosquitto) |
+| `tests/mqtt.php` | MQTT-Client, Shelly schalten (Gen1/Gen2, Antwort im Baum bei eigenem Zugang, falsches dst), Sammler → MQTT (eigener Mosquitto) |
+| `tests/mqtt-helfer.php` | Helfer `deploy/mqtt-zugaenge.sh`: Namensregeln, Soll-Datei prüfen und ablehnen, Block in der Kennwortdatei, wirksame ACL, Rechte am Broker mit der echten ACL (eigener Mosquitto) |
+| `tests/mqtt-zugaenge.php` | Eigene MQTT-Zugänge von App bis Broker: Gen2 einrichten/übertragen/prüfen/Neustart/neues Kennwort/entfernen, Gen1, Sperre des gemeinsamen Zugangs, Kontoprobe gegen falsche ACLs, keine Geheimnisse (eigener Mosquitto, Shelly-Attrappen) |
 | `tests/influx.php` | InfluxQL: Livewerte, Verläufe, Datenfenster, Energie je Tag (eigene InfluxDB 1.x) |
 | `tests/cloud.php` | ComAp WebSupervisor, Victron VRM (Http-Attrappe) |
 | `tests/web.php` | alle Seiten ohne PHP-Meldung, 403/404, CSRF, Schalt-Ablehnung, Weiterleitungen, Sitzung nach Kennwortwechsel, Benutzerverwaltung ohne Administration, Ändern nur mit „bearbeiten“ (eigener PHP-Server) |

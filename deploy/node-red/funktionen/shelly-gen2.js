@@ -12,8 +12,17 @@
  * Ausgang 1: normalisierte Messwerte (dasselbe Format, das der PHP-Sammler
  *            auf pm/messwert/<gerät>/<kanal> schickt) und Punkte für die
  *            Geräteliste – beides geht weiter an „Messwert → Line Protocol".
- * Ausgang 2: RPC-Anfrage Shelly.GetDeviceInfo an <präfix>/rpc. Die Antwort
- *            kommt auf pm-nodered/rpc und landet in „Shelly Gen2+ Geräteinfo".
+ * Ausgang 2: RPC-Anfrage Shelly.GetDeviceInfo an <präfix>/rpc mit dem
+ *            Absender (src) <präfix>/pm-nodered. Der Shelly antwortet an
+ *            <src>/rpc, also <präfix>/pm-nodered/rpc – im Baum des Geräts.
+ *            Nur dorthin darf ein Shelly mit eigenem MQTT-Zugang schreiben
+ *            (Benutzer = Präfix, Recht auf <präfix>/#), und genau diesen
+ *            Baum sperrt der Broker für den gemeinsamen Zugang „shelly",
+ *            sobald der eigene Zugang bestätigt ist. Bleibt die Antwort 60 s
+ *            aus, fragt der Flow beim nächsten Status des Geräts genau
+ *            einmal mit dem alten Absender pm-nodered (Antwort auf
+ *            pm-nodered/rpc). Die Antworten wertet „Shelly Gen2+ Geräteinfo"
+ *            aus.
  *
  * Einheiten, wie sie der Shelly liefert und die Oberfläche erwartet:
  * u V, i A, p W, s VA, pf ohne Einheit, f Hz, e/e_rueck Wh (Zählerstand).
@@ -21,12 +30,16 @@
 
 const ABSENDER = 'pm-nodered';
 const INFO_ALLE_MS = 6 * 3600 * 1000;    // Geräteinfo alle 6 h auffrischen
+const RUECKFALL_NACH_MS = 60 * 1000;     // ohne Antwort: einmal mit altem Absender
 const ANFRAGE_VERFALL_MS = 10 * 60 * 1000;
 
 // Themen, die zwar auf +/status/# oder +/online passen, aber nicht von
-// einem Shelly kommen: die eigenen (pm/status/nodered!), Gen1 und die
-// RPC-Antworten.
-const FREMDE_PRAEFIXE = ['pm', 'shellies', ABSENDER, '$SYS'];
+// einem Shelly kommen: die eigenen (pm/status/nodered!), die Absender der
+// Oberfläche und von Node-RED (pm-nodered, pm-steuerung-…, pm-konto-…),
+// Gen1 und der Broker selbst.
+function fremd(e) {
+    return e === 'pm' || e.startsWith('pm-') || e === 'shellies' || e === '$SYS';
+}
 
 // Gerätename für Tags: letztes Segment des Präfixes, klein, nur
 // [a-z0-9_.-] – alles andere wird zu „-". So bleibt der Name in Themen,
@@ -62,16 +75,19 @@ const teile = thema.split('/');
 let praefix;
 let art;
 let komponente;
-if (teile[0] === 'shelly' && teile.length >= 3 && (teile[2] === 'status' || teile[2] === 'online')) {
+if (teile[0] === 'shelly' && teile.length >= 3
+    && (teile[2] === 'status' || teile[2] === 'online' || teile[2].startsWith('pm-'))) {
     praefix = teile.slice(0, 2).join('/');
     art = teile[2];
     komponente = teile.slice(3).join('/');
 } else {
     praefix = teile[0];
-    art = teile[1];
+    art = teile[1] || '';
     komponente = teile.slice(2).join('/');
 }
-if (!praefix || FREMDE_PRAEFIXE.includes(teile[0])) {
+// Im Baum eines Geräts liegen auch die Absender von Oberfläche und Node-RED
+// (<präfix>/pm-…/rpc) – das sind keine Meldungen des Geräts.
+if (!praefix || fremd(teile[0]) || art.startsWith('pm-')) {
     return null;
 }
 
@@ -222,29 +238,43 @@ if (typ === 'switch') {
 // ihm Befehle schicken kann.
 const bekannte = flow.get('gen2_geraete') || {};
 const eintrag = bekannte[geraet];
+const offen = flow.get('gen2_rpc') || {};
 let anfrage = null;
+
+// Anfrage stellen und als offen merken. Die Antwort nennt als src nur die
+// Geräte-ID; mit eigenem Präfix (shelly/<name>) wäre daraus der Gerätename
+// nicht abzuleiten. Deshalb steht hier, welche Anfrage an welches Gerät ging
+// und mit welchem Absender – nur eine Antwort auf <src>/rpc mit dst = src
+// gilt („Shelly Gen2+ Geräteinfo").
+//
+// Die id ist zufällig, nicht fortlaufend: Beim Rückfall auf pm-nodered/rpc
+// kann jeder mit dem gemeinsamen Zugang dorthin schreiben, die Anfrage an
+// ein gesperrtes Gerät aber nicht mitlesen – eine fortlaufende Nummer wäre
+// zu erraten.
+function rpcAnfrage(src, versuch) {
+    let id;
+    do {
+        id = 1000000 + Math.floor(Math.random() * 1999000000);
+    } while (Object.prototype.hasOwnProperty.call(offen, String(id)));
+    offen[id] = { geraet, praefix, src, t: jetzt, versuch };
+    flow.set('gen2_rpc', offen);
+    return {
+        topic: praefix + '/rpc',
+        payload: JSON.stringify({ id, src, method: 'Shelly.GetDeviceInfo' }),
+    };
+}
+
 if (!eintrag || jetzt - eintrag.angefragt > INFO_ALLE_MS || eintrag.praefix !== praefix) {
     bekannte[geraet] = { praefix, angefragt: jetzt };
     flow.set('gen2_geraete', bekannte);
 
-    const offen = flow.get('gen2_rpc') || {};
     for (const id of Object.keys(offen)) {
         if (jetzt - offen[id].t > ANFRAGE_VERFALL_MS) {
             delete offen[id];
         }
     }
-    const id = (flow.get('gen2_rpc_nr') || 0) + 1;
-    flow.set('gen2_rpc_nr', id);
-    // Die Antwort nennt als src nur die Geräte-ID. Mit eigenem Präfix
-    // (shelly/<name>) wäre daraus der Gerätename nicht abzuleiten – deshalb
-    // merken, welche Anfrage an welches Gerät ging.
-    offen[id] = { geraet, praefix, t: jetzt };
-    flow.set('gen2_rpc', offen);
-
-    anfrage = {
-        topic: praefix + '/rpc',
-        payload: JSON.stringify({ id, src: ABSENDER, method: 'Shelly.GetDeviceInfo' }),
-    };
+    // Versuch 1: Absender im Baum des Geräts
+    anfrage = rpcAnfrage(praefix + '/' + ABSENDER, 1);
     ausgabe.push({
         punkte: [{
             messung: 'geraet',
@@ -255,6 +285,19 @@ if (!eintrag || jetzt - eintrag.angefragt > INFO_ALLE_MS || eintrag.praefix !== 
     });
 
     node.status({ fill: 'green', shape: 'dot', text: Object.keys(bekannte).length + ' Geräte' });
+} else {
+    // Versuch 2: Versuch 1 ist älter als 60 s und unbeantwortet (eine
+    // Antwort löscht alle offenen Anfragen des Geräts) – dann einmal mit dem
+    // alten Absender pm-nodered, für Geräte, die nicht in ihren eigenen Baum
+    // antworten. Ein Shelly mit eigenem Zugang darf pm-nodered/rpc nicht
+    // schreiben; seine Antwort auf Versuch 1 gilt weiterhin.
+    const offeneDesGeraets = Object.keys(offen)
+        .map((id) => offen[id])
+        .filter((a) => a.geraet === geraet && a.praefix === praefix);
+    const erster = offeneDesGeraets.find((a) => a.versuch === 1);
+    if (erster && jetzt - erster.t > RUECKFALL_NACH_MS && !offeneDesGeraets.some((a) => a.versuch === 2)) {
+        anfrage = rpcAnfrage(ABSENDER, 2);
+    }
 }
 
 const messwerte = ausgabe.filter((m) => m !== null);

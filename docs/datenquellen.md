@@ -93,6 +93,33 @@ Einrichtung am Gerät (MQTT-Server, Benutzer `shelly`, *Generic status
 update over MQTT* bei Gen2+): siehe
 [Installationsanleitung, Abschnitt 5](installation-debian-lxc.md#5--shelly-geräte-anbinden).
 
+**Eigener Zugang je Gerät:** Statt des gemeinsamen Zugangs `shelly` kann
+jeder Shelly einen eigenen Broker-Benutzer bekommen (*Messtechnik →
+MQTT-Zugänge*). Der Benutzer ist bei Gen2+ das Präfix (`<id>` oder
+`shelly/<name>`), bei Gen1 die Geräte-ID ohne `shellies/`. Er darf nur im
+Baum des Geräts lesen und schreiben (`<präfix>/#` bzw. `shellies/<id>/#`)
+und `shellies/command` lesen. Sobald bestätigt ist, dass das Gerät über
+den eigenen Zugang verbunden ist, sperrt der Broker diesen Baum für den
+gemeinsamen Zugang `shelly`. Gen1-Geräte mit eigenem Zugang dürfen
+`shellies/announce` nicht schreiben; Modell und Firmware kommen dann aus
+`shellies/<id>/announce`.
+
+**RPC-Antworten (Gen2+):** Ein Shelly antwortet an `<src>/rpc`. Damit
+ein eigener Zugang dorthin schreiben darf – und der gemeinsame nicht –,
+liegt der Absender im Baum des Geräts:
+
+| Anfrage | Absender (`src`) | Antwort auf |
+|---------|------------------|-------------|
+| Schalten (`Switch.Set`), Gerät mit eigenem Zugang | `<präfix>/pm-steuerung-<8 hex>` | `<präfix>/pm-steuerung-<8 hex>/rpc` |
+| Schalten, Gerät ohne eigenen Zugang | `pm-steuerung-<8 hex>` | `pm-steuerung-<8 hex>/rpc` |
+| MQTT-Zugänge (Prüfen, Kennwort übertragen) | `<präfix>/pm-konto-<8 hex>` | `<präfix>/pm-konto-<8 hex>/rpc` |
+| Node-RED `Shelly.GetDeviceInfo` | `<präfix>/pm-nodered` | `<präfix>/pm-nodered/rpc` |
+| Node-RED, nach 60 s ohne Antwort einmal | `pm-nodered` | `pm-nodered/rpc` |
+
+Eine Antwort gilt nur, wenn Thema, `id` und `dst` zur Anfrage passen und
+sie kein `method` enthält. Themen im Baum eines Geräts, deren nächster Teil
+mit `pm-` beginnt, sind keine Meldungen des Geräts – Node-RED übergeht sie.
+
 **Schalten:** Einen Shelly mit Schaltausgang macht man unter
 *Geräte in der InfluxDB* mit **„schaltbar machen“** zur Datenquelle. Das
 MQTT-Präfix und die Generation übernimmt PowerManagement aus der InfluxDB.
@@ -255,7 +282,7 @@ passt.
 | Tab | Aufgabe |
 |-----|---------|
 | PowerManagement | Eingang `pm/messwert/#`, Herzschlag auf `pm/status/nodered` |
-| Shelly Gen2+ | `+/status/#`, `+/online`, RPC-Geräteinfo |
+| Shelly Gen2+ | `+/status/#`, `+/online`, RPC-Geräteinfo (Antworten auf `+/pm-nodered/rpc`, `shelly/+/pm-nodered/rpc`, `pm-nodered/rpc`) |
 | Shelly Gen1 | `shellies/#` |
 | Schreiben | bündelt im Sekundentakt (bis 5000 Zeilen je Anfrage, ab 500 wartenden sofort), puffert bei Ausfall bis 50 000 Zeilen bzw. 5 min und schreibt mit Originalzeit nach |
 

@@ -188,8 +188,16 @@ pruefe('flows.json nutzt nur Kern-Nodes und ist in sich stimmig', () => {
     assert.equal(broker.port, '${MQTT_PORT}');
     assert.ok(!('credentials' in broker) && !('user' in broker) && !('password' in broker), 'Zugangsdaten stehen in flows.json');
     const themen = flows.filter((n) => n.type === 'mqtt in').map((n) => n.topic).sort();
-    assert.deepEqual(themen, ['+/online', '+/status/#', 'pm-nodered/rpc', 'pm/messwert/#',
-        'shellies/#', 'shelly/+/online', 'shelly/+/status/#']);
+    assert.deepEqual(themen, ['+/online', '+/pm-nodered/rpc', '+/status/#', 'pm-nodered/rpc', 'pm/messwert/#',
+        'shellies/#', 'shelly/+/online', 'shelly/+/pm-nodered/rpc', 'shelly/+/status/#']);
+    // RPC-Antworten: im Baum des Geräts und auf dem alten Thema, alle an die
+    // Geräteinfo, mit QoS 1
+    const rpcEingaenge = flows.filter((n) => n.type === 'mqtt in' && n.topic.endsWith('pm-nodered/rpc'));
+    assert.equal(rpcEingaenge.length, 3);
+    for (const n of rpcEingaenge) {
+        assert.equal(n.qos, '1', n.id + ': QoS');
+        assert.deepEqual(n.wires, [['pm_gen2_geraeteinfo']], n.id + ': Ziel');
+    }
     const status = flows.find((n) => n.id === 'pm_status_aus');
     assert.equal(status.topic, 'pm/status/nodered');
     assert.equal(status.retain, 'true');
@@ -267,19 +275,20 @@ pruefe('Shelly Gen2: online, Geräteinfo per RPC und fremde Themen', () => {
     const [online] = gen2.lauf({ topic: 'shellyplus1pm-aabbcc/online', payload: 'true' });
     assert.deepEqual(zeilenAus(online), [`zustand,geraet=shellyplus1pm-aabbcc,kanal=geraet,typ=shelly online=1 ${T()}`]);
 
-    // Erstes Sehen: Geräteeintrag sofort, RPC-Anfrage an das Präfix
+    // Erstes Sehen: Geräteeintrag sofort, RPC-Anfrage an das Präfix,
+    // Absender im Baum des Geräts
     const [aus, rpc] = gen2.lauf({ topic: 'shelly/Halle 3/status/sys', payload: '{"mac":"A0B1C2D3E4F5"}' });
     assert.deepEqual(zeilenAus(aus), [`geraet,geraet=halle-3,typ=shelly generation=2,praefix="shelly/Halle 3" ${T()}`]);
     assert.equal(rpc.length, 1);
     assert.equal(rpc[0].topic, 'shelly/Halle 3/rpc');
     const anfrage = JSON.parse(rpc[0].payload);
-    assert.deepEqual({ src: anfrage.src, method: anfrage.method }, { src: 'pm-nodered', method: 'Shelly.GetDeviceInfo' });
+    assert.deepEqual({ src: anfrage.src, method: anfrage.method }, { src: 'shelly/Halle 3/pm-nodered', method: 'Shelly.GetDeviceInfo' });
 
     // Antwort: Zuordnung über die Anfrage-ID, nicht über src
     const [punkte] = info.lauf({
-        topic: 'pm-nodered/rpc',
+        topic: 'shelly/Halle 3/pm-nodered/rpc',
         payload: JSON.stringify({
-            id: anfrage.id, src: 'shellyplus1pm-a0b1c2d3e4f5', dst: 'pm-nodered',
+            id: anfrage.id, src: 'shellyplus1pm-a0b1c2d3e4f5', dst: 'shelly/Halle 3/pm-nodered',
             result: { name: 'Halle "3"', id: 'shellyplus1pm-a0b1c2d3e4f5', mac: 'A0B1C2D3E4F5', model: 'SNSW-001P16EU', gen: 2, ver: '1.4.4', app: 'Plus1PM' },
         }),
     });
@@ -296,6 +305,188 @@ pruefe('Shelly Gen2: online, Geräteinfo per RPC und fremde Themen', () => {
     // Eigene Themen und Gen1 gehören nicht hierher
     assert.deepEqual(gen2.lauf({ topic: 'pm/status/nodered', payload: '{"geschrieben":1}' }), [[], []]);
     assert.deepEqual(gen2.lauf({ topic: 'shellies/online', payload: 'true' }), [[], []]);
+    // Absender von Node-RED und Oberfläche (pm-…), auch im Baum eines Geräts
+    assert.deepEqual(gen2.lauf({ topic: 'pm-nodered/status/sys', payload: '{}' }), [[], []]);
+    assert.deepEqual(gen2.lauf({ topic: 'pm-steuerung-0a1b2c3d/online', payload: 'true' }), [[], []]);
+    assert.deepEqual(gen2.lauf({ topic: 'shellyplus1pm-neu/pm-probe', payload: 'true' }), [[], []]);
+    assert.deepEqual(gen2.lauf({ topic: 'shelly/halle-9/pm-probe/status/sys', payload: '{}' }), [[], []]);
+    assert.deepEqual(gen2.lauf({ topic: '$SYS/status/x', payload: '{}' }), [[], []]);
+    assert.equal(flow.get('gen2_geraete')['halle-9'], undefined, 'Prüf-Thema hat ein Gerät angelegt');
+});
+
+// Offene Anfragen im Flow-Kontext, als Liste
+const offeneAnfragen = (flow) => Object.values(flow.get('gen2_rpc') || {});
+const geraeteinfo = (id, dst, zusatz = {}) => JSON.stringify(Object.assign({
+    id, src: 'shellyplus1pm-a0b1c2d3e4f5', dst,
+    result: { id: 'shellyplus1pm-a0b1c2d3e4f5', mac: 'A0B1C2D3E4F5', model: 'SNSW-001P16EU', gen: 2, ver: '1.5.0', app: 'Plus1PM' },
+}, zusatz));
+
+pruefe('Shelly Gen2: RPC-Absender im Baum des Geräts (<id> und shelly/<name>)', () => {
+    const flow = speicher();
+    const gen2 = funktion('Shelly Gen2+ übersetzen', { flow });
+    for (const [thema, praefix, geraet] of [
+        ['shellypro4pm-a0b1c2d3e4f5/status/switch:0', 'shellypro4pm-a0b1c2d3e4f5', 'shellypro4pm-a0b1c2d3e4f5'],
+        ['shelly/kuehlhaus/status/switch:0', 'shelly/kuehlhaus', 'kuehlhaus'],
+    ]) {
+        const [, rpc] = gen2.lauf({ topic: thema, payload: '{"id":0,"output":true}' });
+        assert.equal(rpc.length, 1, thema);
+        assert.equal(rpc[0].topic, praefix + '/rpc');
+        const a = JSON.parse(rpc[0].payload);
+        assert.equal(a.src, praefix + '/pm-nodered');
+        assert.equal(a.method, 'Shelly.GetDeviceInfo');
+        assert.ok(Number.isInteger(a.id), 'id ist eine ganze Zahl');
+        // Objekte aus der Sandbox haben ein anderes Object.prototype – kopieren
+        const offen = { ...flow.get('gen2_rpc')[a.id] };
+        assert.deepEqual(offen, { geraet, praefix, src: praefix + '/pm-nodered', t: uhr.jetzt, versuch: 1 });
+    }
+    assert.deepEqual(offeneAnfragen(flow).map((a) => a.src).sort(),
+        ['shelly/kuehlhaus/pm-nodered', 'shellypro4pm-a0b1c2d3e4f5/pm-nodered']);
+});
+
+pruefe('Shelly Gen2 Geräteinfo: nur die passende Antwort zählt, sonst bleibt die Anfrage offen', () => {
+    const flow = speicher();
+    const gen2 = funktion('Shelly Gen2+ übersetzen', { flow });
+    const info = funktion('Shelly Gen2+ Geräteinfo', { flow });
+    const [, rpc] = gen2.lauf({ topic: 'shellyplus1pm-a0b1c2d3e4f5/status/switch:0', payload: '{"id":0}' });
+    const { id, src } = JSON.parse(rpc[0].payload);
+    const p = 'shellyplus1pm-a0b1c2d3e4f5';
+    assert.equal(src, p + '/pm-nodered');
+
+    // richtige id auf fremdem Thema: im Baum eines anderen Geräts, auf dem
+    // alten Thema, unter shelly/<name>
+    for (const thema of ['shellyplus1pm-fremd/pm-nodered/rpc', 'pm-nodered/rpc', 'shelly/fremd/pm-nodered/rpc']) {
+        assert.deepEqual(info.lauf({ topic: thema, payload: geraeteinfo(id, src) }), [[]], thema);
+    }
+    // falsches dst
+    assert.deepEqual(info.lauf({ topic: p + '/pm-nodered/rpc', payload: geraeteinfo(id, 'pm-nodered') }), [[]]);
+    assert.deepEqual(info.lauf({ topic: p + '/pm-nodered/rpc', payload: geraeteinfo(id, undefined) }), [[]]);
+    // eine Anfrage oder Meldung (method) ist keine Antwort
+    assert.deepEqual(info.lauf({ topic: p + '/pm-nodered/rpc', payload: geraeteinfo(id, src, { method: 'Shelly.GetDeviceInfo' }) }), [[]]);
+    // ohne result und error, als Liste, kaputt, falsche Themen
+    assert.deepEqual(info.lauf({ topic: p + '/pm-nodered/rpc', payload: JSON.stringify({ id, src: p, dst: src }) }), [[]]);
+    assert.deepEqual(info.lauf({ topic: p + '/pm-nodered/rpc', payload: JSON.stringify([{ id, dst: src, result: {} }]) }), [[]]);
+    assert.deepEqual(info.lauf({ topic: p + '/pm-nodered/rpc', payload: '{kaputt' }), [[]]);
+    assert.deepEqual(info.lauf({ topic: p + '/pm-nodered/rpc/x', payload: geraeteinfo(id, src) }), [[]]);
+    assert.deepEqual(info.lauf({ topic: p + '/rpc', payload: geraeteinfo(id, src) }), [[]]);
+    assert.equal(offeneAnfragen(flow).length, 1, 'Anfrage wurde verworfen');
+    assert.equal(info.protokoll.warnungen.length, 0);
+
+    // die echte Antwort kommt danach noch an – mit Präfix
+    const [punkte] = info.lauf({ topic: p + '/pm-nodered/rpc', payload: geraeteinfo(id, src) });
+    assert.deepEqual(zeilenAus(punkte), [
+        `geraet,geraet=${p},typ=shelly modell="SNSW-001P16EU",produkt="Plus1PM",firmware="1.5.0",generation=2,mac="A0B1C2D3E4F5",praefix="${p}" ${T()}`,
+    ]);
+    assert.equal(offeneAnfragen(flow).length, 0, 'beantwortete Anfrage bleibt offen');
+
+    // Fehlerantwort: Warnung, kein Punkt, Anfrage erledigt
+    uhr.jetzt += 6 * 3600 * 1000 + 1;
+    try {
+        const [, rpc2] = gen2.lauf({ topic: p + '/status/switch:0', payload: '{"id":0}' });
+        const a2 = JSON.parse(rpc2[0].payload);
+        const [nichts] = info.lauf({ topic: p + '/pm-nodered/rpc', payload: JSON.stringify({ id: a2.id, src: p, dst: a2.src, error: { code: -103, message: 'busy' } }) });
+        assert.equal(nichts.length, 0);
+        assert.ok(info.protokoll.warnungen.some((w) => w.includes(p) && w.includes('busy')));
+        assert.equal(offeneAnfragen(flow).length, 0);
+    } finally {
+        uhr.jetzt -= 6 * 3600 * 1000 + 1;
+    }
+});
+
+pruefe('Shelly Gen2: ohne Antwort nach 60 s genau ein zweiter Versuch mit Absender pm-nodered', () => {
+    const start = uhr.jetzt;
+    try {
+        const flow = speicher();
+        const gen2 = funktion('Shelly Gen2+ übersetzen', { flow });
+        const info = funktion('Shelly Gen2+ Geräteinfo', { flow });
+        const p = 'shelly/werkstatt';
+        const status = () => gen2.lauf({ topic: p + '/status/switch:0', payload: '{"id":0,"apower":5}' })[1];
+
+        const [erste] = status();
+        const a1 = JSON.parse(erste.payload);
+        assert.equal(a1.src, p + '/pm-nodered');
+        uhr.jetzt = start + 30 * 1000;
+        assert.equal(status().length, 0, 'nach 30 s schon ein zweiter Versuch');
+        uhr.jetzt = start + 60 * 1000;
+        assert.equal(status().length, 0, 'nach genau 60 s schon ein zweiter Versuch');
+        // online ist keine Statusmeldung
+        uhr.jetzt = start + 61 * 1000;
+        assert.deepEqual(gen2.lauf({ topic: p + '/online', payload: 'true' })[1], []);
+
+        const zweite = status();
+        assert.equal(zweite.length, 1);
+        assert.equal(zweite[0].topic, p + '/rpc');
+        const a2 = JSON.parse(zweite[0].payload);
+        assert.deepEqual({ src: a2.src, method: a2.method }, { src: 'pm-nodered', method: 'Shelly.GetDeviceInfo' });
+        assert.notEqual(a2.id, a1.id);
+        assert.deepEqual({ ...flow.get('gen2_rpc')[a2.id] }, { geraet: 'werkstatt', praefix: p, src: 'pm-nodered', t: uhr.jetzt, versuch: 2 });
+        assert.equal(offeneAnfragen(flow).length, 2, 'Versuch 1 bleibt offen');
+
+        // genau einmal
+        for (const s of [62, 120, 599, 700]) {
+            uhr.jetzt = start + s * 1000;
+            assert.equal(status().length, 0, 'weiterer Versuch nach ' + s + ' s');
+        }
+
+        // Antwort auf Versuch 2 (altes Thema): Gerät aus der Anfrage, beide Versuche erledigt
+        assert.deepEqual(info.lauf({ topic: 'pm-nodered/rpc', payload: geraeteinfo(a2.id, p + '/pm-nodered') }), [[]], 'dst des ersten Versuchs');
+        const [punkte] = info.lauf({ topic: 'pm-nodered/rpc', payload: geraeteinfo(a2.id, 'pm-nodered') });
+        assert.equal(zeilenAus(punkte)[0],
+            `geraet,geraet=werkstatt,typ=shelly modell="SNSW-001P16EU",produkt="Plus1PM",firmware="1.5.0",generation=2,mac="A0B1C2D3E4F5",praefix="${p}" ${T()}`);
+        assert.equal(offeneAnfragen(flow).length, 0);
+        uhr.jetzt = start + 800 * 1000;
+        assert.equal(status().length, 0);
+
+        // Antwort auf Versuch 1 rechtzeitig: kein zweiter Versuch
+        const q = 'shellyplusplugs-0a0b0c0d0e0f';
+        const [b1] = gen2.lauf({ topic: q + '/status/switch:0', payload: '{"id":0}' })[1];
+        const b = JSON.parse(b1.payload);
+        uhr.jetzt += 10 * 1000;
+        assert.equal(info.lauf({ topic: q + '/pm-nodered/rpc', payload: geraeteinfo(b.id, q + '/pm-nodered') })[0].length, 1);
+        uhr.jetzt += 120 * 1000;
+        assert.equal(gen2.lauf({ topic: q + '/status/switch:0', payload: '{"id":0}' })[1].length, 0);
+
+        // Versuch 1 kommt nach Versuch 2 doch noch an: gilt, danach ist nichts mehr offen
+        const r = 'shelly/spaet';
+        const [c1] = gen2.lauf({ topic: r + '/status/switch:0', payload: '{"id":0}' })[1];
+        uhr.jetzt += 61 * 1000;
+        const [c2] = gen2.lauf({ topic: r + '/status/switch:0', payload: '{"id":0}' })[1];
+        assert.equal(JSON.parse(c2.payload).src, 'pm-nodered');
+        const c = JSON.parse(c1.payload);
+        assert.equal(info.lauf({ topic: r + '/pm-nodered/rpc', payload: geraeteinfo(c.id, r + '/pm-nodered') })[0].length, 1);
+        assert.equal(offeneAnfragen(flow).filter((a) => a.praefix === r).length, 0);
+    } finally {
+        uhr.jetzt = start;
+    }
+});
+
+pruefe('Shelly Gen2 Geräteinfo nach einem Neustart: Thema im Baum ordnet zu, altes Thema nicht', () => {
+    // Neustart von Node-RED: der Flow-Kontext ist leer
+    const flow = speicher();
+    const info = funktion('Shelly Gen2+ Geräteinfo', { flow });
+    const p = 'shellyplus1pm-a0b1c2d3e4f5';
+
+    const [punkte] = info.lauf({ topic: p + '/pm-nodered/rpc', payload: geraeteinfo(1234567, p + '/pm-nodered') });
+    assert.deepEqual(zeilenAus(punkte), [
+        `geraet,geraet=${p},typ=shelly modell="SNSW-001P16EU",produkt="Plus1PM",firmware="1.5.0",generation=2,mac="A0B1C2D3E4F5",praefix="${p}" ${T()}`,
+    ]);
+    // shelly/<name>: Gerätename aus dem letzten Segment, Präfix vollständig
+    const [lager] = info.lauf({ topic: 'shelly/Lager/pm-nodered/rpc', payload: geraeteinfo(7, 'shelly/Lager/pm-nodered') });
+    assert.match(zeilenAus(lager)[0], /^geraet,geraet=lager,typ=shelly .*,praefix="shelly\/Lager" /);
+
+    // altes Thema ohne offene Anfrage: von wem, ist nicht zu erkennen
+    assert.deepEqual(info.lauf({ topic: 'pm-nodered/rpc', payload: geraeteinfo(1234567, 'pm-nodered') }), [[]]);
+    // dst passt nicht zum Thema
+    assert.deepEqual(info.lauf({ topic: p + '/pm-nodered/rpc', payload: geraeteinfo(1, 'pm-nodered') }), [[]]);
+    assert.deepEqual(info.lauf({ topic: p + '/pm-nodered/rpc', payload: geraeteinfo(1, 'shellyplus1pm-anders/pm-nodered') }), [[]]);
+    // kein Präfix eines Shelly
+    for (const praefix of ['pm', 'pm-steuerung-0a1b2c3d', 'shellies', 'a/b', 'shellies/x']) {
+        assert.deepEqual(info.lauf({ topic: praefix + '/pm-nodered/rpc', payload: geraeteinfo(1, praefix + '/pm-nodered') }), [[]], praefix);
+    }
+    // method, id als Text, prototypische Schlüssel
+    assert.deepEqual(info.lauf({ topic: p + '/pm-nodered/rpc', payload: geraeteinfo(1, p + '/pm-nodered', { method: 'NotifyStatus' }) }), [[]]);
+    assert.deepEqual(info.lauf({ topic: p + '/pm-nodered/rpc', payload: geraeteinfo('1', p + '/pm-nodered') }), [[]]);
+    assert.deepEqual(info.lauf({ topic: p + '/pm-nodered/rpc', payload: geraeteinfo('constructor', p + '/pm-nodered') }), [[]]);
+    assert.equal(flow.get('gen2_rpc'), undefined, 'Antwort ohne Anfrage hat den Kontext verändert');
 });
 
 pruefe('Shelly Gen1: Relais – energy in Wattminuten wird zu Wh, Schaltzustand 1/0', () => {
@@ -356,6 +547,30 @@ pruefe('Shelly Gen1: announce ergibt einen Geräteeintrag mit generation=1', () 
     });
     assert.deepEqual(zeilenAus(aus), [
         `geraet,geraet=shellyem3-a1b2c3,typ=shelly generation=1,praefix="shellies/shellyem3-A1B2C3",modell="SHEM-3",firmware="20230913-114244/v1.14.0-gcb84623",mac="A0B1C2A1B2C3",ip="192.168.10.23" ${T()}`,
+    ]);
+});
+
+pruefe('Shelly Gen1: Prüf-Themen pm-… im Baum übergangen, announce im Baum des Geräts', () => {
+    const flow = speicher();
+    const gen1 = funktion('Shelly Gen1 übersetzen', { flow });
+    for (const thema of ['shellies/shelly1-B929CC/pm-probe/0a1b2c3d', 'shellies/shelly1-B929CC/pm-probe/relay/0',
+        'shellies/shelly1-B929CC/pm-konto-0a1b2c3d/rpc']) {
+        assert.deepEqual(gen1.lauf({ topic: thema, payload: 'on' }), [[]], thema);
+    }
+    assert.equal(flow.get('gen1_geraete'), undefined, 'Prüf-Thema hat ein Gerät angelegt');
+
+    // Eigener Zugang: shellies/announce ist gesperrt, shellies/<id>/announce nicht
+    const [aus] = gen1.lauf({
+        topic: 'shellies/shelly1-B929CC/announce',
+        payload: JSON.stringify({ id: 'anderes-geraet', model: 'SHSW-1', mac: 'A4CF12B929CC', ip: '192.168.10.31', new_fw: false, fw_ver: '20230913-112003/v1.14.0-gcb84623' }),
+    });
+    assert.deepEqual(zeilenAus(aus), [
+        `geraet,geraet=shelly1-b929cc,typ=shelly generation=1,praefix="shellies/shelly1-B929CC",modell="SHSW-1",firmware="20230913-112003/v1.14.0-gcb84623",mac="A4CF12B929CC",ip="192.168.10.31" ${T()}`,
+    ]);
+    // danach normale Werte des Geräts
+    assert.deepEqual(zeilenAus(gen1.lauf({ topic: 'shellies/shelly1-B929CC/relay/0', payload: 'off' })[0]), [
+        `geraet,geraet=shelly1-b929cc,typ=shelly generation=1,praefix="shellies/shelly1-B929CC" ${T()}`,
+        `zustand,geraet=shelly1-b929cc,kanal=relay:0,typ=shelly schalter=0 ${T()}`,
     ]);
 });
 

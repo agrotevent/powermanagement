@@ -13,6 +13,14 @@
  *   temperature             °C
  *   announce                JSON mit id, model, mac, ip, fw_ver
  * und shellies/announce als Antwort auf „announce" an shellies/command.
+ * Ein Gerät mit eigenem MQTT-Zugang (Benutzer = <id>) darf nur in seinen
+ * Baum shellies/<id>/# schreiben – shellies/announce verwirft der Broker
+ * still. Die Geräteinfo kommt dann aus shellies/<id>/announce, das das
+ * Gerät beim Verbinden mit dem Broker ebenfalls schickt.
+ *
+ * Themen unter shellies/<id>/pm-…/ (Prüfungen der Oberfläche im Baum des
+ * Geräts, z. B. shellies/<id>/pm-probe/…) stammen nicht vom Gerät und
+ * werden übergangen.
  *
  * Ausgang: normalisierte Messwerte und Punkte für die Geräteliste – weiter
  * an „Messwert → Line Protocol".
@@ -51,6 +59,11 @@ function alsZahl(text) {
 
 const teile = String(msg.topic || '').split('/');
 if (teile[0] !== 'shellies' || teile.length < 2) {
+    return null;
+}
+// Prüf-Themen der Oberfläche im Baum eines Geräts: kein Messwert und auch
+// kein Lebenszeichen des Geräts.
+if (teile.length >= 3 && teile[2].startsWith('pm-')) {
     return null;
 }
 let text = msg.payload;
