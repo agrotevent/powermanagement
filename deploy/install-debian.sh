@@ -996,7 +996,9 @@ if [[ "$MIT_NODERED" == "ja" ]]; then
         ersetzt)  echo "    Flows durch die mitgelieferte Fassung ersetzt" ;;
         behalten) hinweis "Die Flows in Node-RED wurden verändert und bleiben, wie sie sind."
                   hinweis "Die mitgelieferte Fassung liegt unter $NODERED_DIR/flows.powermanagement-neu.json"
-                  hinweis "(im Editor: Menü → Importieren) – oder erneut mit --flows-ersetzen aufrufen." ;;
+                  hinweis "(im Editor: Menü → Importieren) – oder erneut mit --flows-ersetzen aufrufen."
+                  hinweis "Eigene MQTT-Zugänge der Shellys brauchen die neuen Flows (Schutzliste pm/status/mqtt-zugaenge,"
+                  hinweis "Antworten unter <präfix>/pm-nodered/rpc)." ;;
     esac
 
     # Zugang zum Broker in flows_cred.json unter der festen ID des Broker-

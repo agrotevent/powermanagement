@@ -346,6 +346,15 @@ if [[ "$MIT_MOSQUITTO" == "ja" && -f "$ZIEL/deploy/mqtt-zugaenge.sh" ]] \
          || [[ ! -f /etc/systemd/system/powermanagement-mqtt-zugaenge.path ]]; }; then
     MQTT_NACHHOLEN="ja"
 fi
+# Ebenso, wenn Mosquitto noch die Übergangsfassung liest: die installierte
+# Konfiguration ist unverändert die zuletzt ausgelieferte (gemerkte Vorlage),
+# aber nicht broker.conf – etwa nach einem zurückgerollten Update.
+MQTT_KONF="/etc/mosquitto/conf.d/powermanagement.conf"
+MQTT_KONF_MERK="$VORLAGEN/$(printf '%s' "$MQTT_KONF" | tr '/' '_')"
+if [[ "$MIT_MOSQUITTO" == "ja" && -f "$ZIEL/deploy/mosquitto/broker.conf" && -f "$MQTT_KONF_MERK" && -f "$MQTT_KONF" ]] \
+    && cmp -s "$MQTT_KONF_MERK" "$MQTT_KONF" && ! cmp -s "$ZIEL/deploy/mosquitto/broker.conf" "$MQTT_KONF"; then
+    MQTT_NACHHOLEN="ja"
+fi
 
 CODE_NEU="ja"
 if [[ "$ALT" == "$NEU" ]]; then
@@ -433,6 +442,7 @@ SITE_SICHERUNG="$(mktemp)"
 MOSQUITTO_CONF="/etc/mosquitto/conf.d/powermanagement.conf"
 MOSQUITTO_CONF_SICHERUNG="$(mktemp)"
 MOSQUITTO_CONF_GEAENDERT="nein"
+HELFER_GEAENDERT="nein"
 [[ -f "$MOSQUITTO_CONF" ]] && cp -p "$MOSQUITTO_CONF" "$MOSQUITTO_CONF_SICHERUNG"
 # Mit ihr die gemerkte Vorlage (siehe vorlage_uebernehmen) – sonst hielte das
 # nächste Update die zurückgelegte Konfiguration für „von Hand verändert“
@@ -479,6 +489,11 @@ zurueckrollen() {
         fi
         systemctl restart mosquitto >/dev/null 2>&1 || true
         hinweis "Mosquitto-Konfiguration auf den Stand vor dem Update zurückgesetzt."
+    elif [[ "${HELFER_GEAENDERT:-nein}" == "ja" ]]; then
+        # Der Helfer hat Kennwortdatei oder wirksame ACL geändert, der Broker
+        # hat sie aber noch nicht geladen – jetzt, damit Dateien, Ergebnis
+        # und Broker wieder zusammenpassen.
+        systemctl try-reload-or-restart mosquitto >/dev/null 2>&1 || true
     fi
     FPM="$(find /etc/php -mindepth 2 -maxdepth 2 -type d -name fpm 2>/dev/null | awk -F/ '{print $4}' | sort -V | tail -1)"
     if [[ -n "$FPM" ]]; then
@@ -663,7 +678,10 @@ if [[ "$MIT_MOSQUITTO" == "ja" ]]; then
             --neu-laden=nein 2>"$HELFER_MELDUNG")" || HELFER_RC=$?
         sed 's/^/    /' "$HELFER_MELDUNG"
         rm -f "$HELFER_MELDUNG"
-        [[ "${HELFER_AUSGABE##*$'\n'}" == "geaendert" ]] && MOSQUITTO_NEULADEN="ja"
+        if [[ "${HELFER_AUSGABE##*$'\n'}" == "geaendert" ]]; then
+            MOSQUITTO_NEULADEN="ja"
+            HELFER_GEAENDERT="ja"
+        fi
         if [[ "$HELFER_RC" -ne 0 ]]; then
             hinweis "deploy/mqtt-zugaenge.sh endete mit $HELFER_RC (siehe oben; journalctl -u powermanagement-mqtt-zugaenge)."
         fi
@@ -713,7 +731,9 @@ if [[ "$MIT_NODERED" == "ja" && -d "$NODERED_DIR" ]]; then
         behalten)
             hinweis "Die Node-RED-Flows wurden im Editor verändert und bleiben, wie sie sind."
             hinweis "Die neue Fassung liegt unter $NODERED_DIR/flows.powermanagement-neu.json –"
-            hinweis "im Editor über Menü → Importieren übernehmen, oder: $0 --flows-ersetzen" ;;
+            hinweis "im Editor über Menü → Importieren übernehmen, oder: $0 --flows-ersetzen"
+            hinweis "Eigene MQTT-Zugänge der Shellys brauchen die neuen Flows (Schutzliste pm/status/mqtt-zugaenge,"
+            hinweis "Antworten unter <präfix>/pm-nodered/rpc) – sonst meldet die Seite „MQTT-Zugänge“, dass Node-RED sie nicht bestätigt." ;;
     esac
 fi
 

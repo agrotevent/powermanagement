@@ -9,9 +9,11 @@ declare(strict_types=1);
  * Kennwortdatei (übrige Zeilen Byte für Byte), zweiter Lauf ohne Änderung
  * und ohne Neuladen, Ablehnungen (Exit 2, nichts geändert), fehlendes Soll,
  * abgelaufene Prüf-Sperren, Grundlage ohne „user shelly“ oder kaputt,
- * Abgleich des Installationsskripts, keine Hashes in Ausgaben – und die
- * Rechte am Broker: gemeinsamer Zugang, Gerätezugänge Gen2/Gen1, Sperre
- * (auch für ein Abo von vor dem Neuladen), Neuladen trennt niemanden.
+ * Abgleich des Installationsskripts, keine Hashes in Ausgaben, ausstehendes
+ * Neuladen nach --neu-laden=nein (Marke) – und die Rechte am Broker:
+ * gemeinsamer Zugang, Gerätezugänge Gen2/Gen1, Sperre (auch für ein Abo von
+ * vor dem Neuladen und für Retained-Nachrichten, die der gemeinsame Zugang
+ * vorher im Gerätebaum abgelegt hat), Neuladen trennt niemanden.
  */
 
 require __DIR__ . '/hilfen/pruefung.php';
@@ -97,6 +99,20 @@ $verbinden = static function (string $benutzer, string $kennwort, string $name) 
     $c = mqttVerbinden($broker, $benutzer, $kennwort, 'pm-pruef-' . $kennung . '-' . $name);
     $clients[] = $c;
     return $c;
+};
+/** Was bekommt ein frisches Abo auf $thema? Nur das, was der Broker als Retained aufhebt. */
+$behalten = static function (string $benutzer, string $kennwort, string $thema, string $name) use ($verbinden): array {
+    $c = $verbinden($benutzer, $kennwort, $name);
+    $c->abonnieren([$thema]);
+    $nutzlasten = [];
+    $c->lauschen(0.8, static function (string $t, string $n) use ($thema, &$nutzlasten): bool {
+        if ($t === $thema) {
+            $nutzlasten[] = $n;
+        }
+        return false;
+    });
+    $c->trennen();
+    return $nutzlasten;
 };
 
 try {
@@ -231,6 +247,17 @@ try {
     pruefe($angekommen, 'vor der Sperre: Abo des gemeinsamen Zugangs auf den Gerätebaum bekommt Nachrichten');
     $shUnveraendert = $verbinden('shelly', $kw['shelly'], 'shelly-unveraendert');
 
+    // Vor der Umstellung kann der gemeinsame Zugang Retained-Nachrichten im
+    // Baum des Geräts ablegen – etwa einen Schaltbefehl auf <präfix>/rpc. Ohne
+    // check_retain_source bekäme das Gerät ihn nach der Sperre bei jedem
+    // Verbinden wieder.
+    $fremdRpc = '{"id":1,"src":"fremd-' . $kennung . '","method":"Switch.Set","params":{"id":0,"on":true}}';
+    $sh->veroeffentlichen($g2 . '/rpc', $fremdRpc, 1, true);
+    $eigenOnline = 'true-' . $kennung;
+    $d2->veroeffentlichen($g2 . '/online', $eigenOnline, 1, true);
+    gleich($behalten($g2, $kwG2, $g2 . '/rpc', 'g2-retain-vor'), [$fremdRpc],
+        'vor der Sperre: Retained-Nachricht des gemeinsamen Zugangs erreicht das Gerät');
+
     // --------------------------------------------- Sperre „dauerhaft“
     $l = $soll([[$g2, 2, $hG2, 'dauerhaft'], [$g2Name, 2, $hG2Name, '-'], [$g1, 1, $hG1, '-']]);
     $r = $helfer();
@@ -257,6 +284,15 @@ try {
     pruefe(mqttKommtAn($sh2, $nr, $g2Name . '/rpc'), 'gesperrt: nicht gesperrtes Gerät mit eigenem Zugang bleibt erreichbar');
     pruefe(mqttKommtAn($shUnveraendert, $nr, $frei . '/status/switch:1'), 'Neuladen (SIGHUP) lässt die Sitzung des gemeinsamen Zugangs bestehen');
     pruefe(mqttKommtAn($d2, $nr, $g2 . '/status/switch:1'), 'Neuladen lässt die Sitzung des Gerätezugangs bestehen');
+    gleich($behalten($g2, $kwG2, $g2 . '/rpc', 'g2-retain-nach'), [],
+        'gesperrt: Retained-Nachricht des gemeinsamen Zugangs im Gerätebaum erreicht das Gerät nicht mehr (check_retain_source)');
+    gleich($behalten('nodered', $kw['nodered'], $g2 . '/rpc', 'nr-retain-nach'), [],
+        'gesperrt: auch Node-RED bekommt sie nicht mehr');
+    gleich($behalten($g2, $kwG2, $g2 . '/online', 'g2-online-nach'), [$eigenOnline],
+        'gesperrt: eigene Retained-Nachricht des Geräts kommt weiter an');
+    // Aufräumen: leere Retained-Nachricht (Node-RED darf dort schreiben).
+    $nr->veroeffentlichen($g2 . '/rpc', '', 1, true);
+    $nr->veroeffentlichen($g2 . '/online', '', 1, true);
 
     // --------------------------------------------- Prüf-Sperre bis:
     $l = $soll([[$g2, 2, $hG2, 'dauerhaft'], [$g2Name, 2, $hG2Name, 'bis:' . (time() + 3)], [$g1, 1, $hG1, '-']]);
@@ -277,6 +313,10 @@ try {
     gleich($r['code'], 0, 'bereits abgelaufenes bis: kein Fehler');
 
     // --------------------------------------------- Sperre eines Gen1-Geräts
+    $fremdBefehl = 'on-' . $kennung;
+    $sh2->veroeffentlichen('shellies/' . $g1 . '/relay/0/command', $fremdBefehl, 1, true);
+    gleich($behalten($g1, $kwG1, 'shellies/' . $g1 . '/relay/0/command', 'g1-retain-vor'), [$fremdBefehl],
+        'Gen1 vor der Sperre: Retained-Schaltbefehl des gemeinsamen Zugangs erreicht das Gerät');
     $soll([[$g2, 2, $hG2, 'dauerhaft'], [$g2Name, 2, $hG2Name, '-'], [$g1, 1, $hG1, 'dauerhaft']]);
     $r = $helfer();
     $erwartet = [$g2, 'shellies/' . $g1];
@@ -286,6 +326,9 @@ try {
     pruefe(!mqttKommtAn($d1, $sh2, 'shellies/' . $g1 . '/relay/0'), 'Gen1 gesperrt: gemeinsamer Zugang liest den Baum nicht mehr');
     pruefe(mqttKommtAn($nr, $d1, 'shellies/' . $g1 . '/relay/0/command'), 'Gen1 gesperrt: Node-RED erreicht das Gerät weiter');
     pruefe(mqttKommtAn($sh2, $nr, 'shellies/shelly1-' . $kennung . 'X/relay/0'), 'Gen1 gesperrt: anderer Gen1-Baum bleibt für den gemeinsamen Zugang');
+    gleich($behalten($g1, $kwG1, 'shellies/' . $g1 . '/relay/0/command', 'g1-retain-nach'), [],
+        'Gen1 gesperrt: Retained-Schaltbefehl des gemeinsamen Zugangs erreicht das Gerät nicht mehr');
+    $nr->veroeffentlichen('shellies/' . $g1 . '/relay/0/command', '', 1, true);
     $soll([[$g2, 2, $hG2, 'dauerhaft'], [$g2Name, 2, $hG2Name, '-'], [$g1, 1, $hG1, '-']]);
     $r = $helfer();
     gleich($ergebnis()['gesperrt'], [$g2], 'Gen1 wieder frei');
@@ -371,12 +414,63 @@ try {
     pruefe($datei($broker['passwd'])['inhalt'] === $vorP['inhalt'] && $datei($broker['wirksam'])['inhalt'] === $vorW['inhalt'],
         'Neuladen scheitert: Kennwortdatei und wirksame ACL wieder wie vorher');
     gleich($e['gesperrt'], [$g2], 'Neuladen scheitert: Ergebnis nennt, was gilt');
+    clearstatcache(true, $broker['marke']);
+    pruefe(!is_file($broker['marke']), 'Neuladen scheitert, Dateien zurückgelegt: keine Marke (nichts steht aus)');
     $r = $helfer();
     $erwartet = [$g2, $g2Name];
     sort($erwartet, SORT_STRING);
     gleich([$r['code'], $r['letzte'], $ergebnis()['gesperrt']], [0, 'geaendert', $erwartet], 'nächster Lauf übernimmt es');
     $soll([[$g2, 2, $hG2, 'dauerhaft'], [$g2Name, 2, $hG2Name, '-'], [$g1, 1, $hG1, '-']]);
     $helfer();
+
+    // --------------------------------------------- Neuladen steht aus
+    // Installation und Update rufen den Helfer mit --neu-laden=nein und laden
+    // den Broker danach selbst. Scheitern sie vorher (Update zurückgerollt),
+    // holt der nächste Lauf mit Neuladen das nach – obwohl sich an den
+    // Dateien dann nichts mehr ändert.
+    $marke = $broker['marke'];
+    $markeDa = static function () use ($marke): bool {
+        clearstatcache(true, $marke);
+        return is_file($marke);
+    };
+    pruefe(!$markeDa(), 'Läufe mit Neuladen hinterlassen keine Marke');
+    $neuGeladen = mqttNeuGeladen($broker);
+    $soll([[$g2, 2, $hG2, 'dauerhaft'], [$g2Name, 2, $hG2Name, 'dauerhaft'], [$g1, 1, $hG1, '-']]);
+    $r = $helfer(['--neu-laden=nein']);
+    gleich([$r['code'], $r['letzte']], [0, 'geaendert'], '--neu-laden=nein: Dateien geändert');
+    pruefe($markeDa(), '--neu-laden=nein mit Änderung: Marke angelegt');
+    gleich($markeDa() ? decoct(fileperms($marke) & 0777) : null, '600', 'Marke: Rechte 600');
+    usleep(300_000);
+    gleich(mqttNeuGeladen($broker), $neuGeladen, '--neu-laden=nein: Broker nicht neu geladen');
+    pruefe(mqttKommtAn($sh2, $nr, $g2Name . '/rpc'), 'nicht neu geladen: die neue Sperre wirkt noch nicht');
+    $r = $helfer(['--neu-laden=nein']);
+    gleich([$r['code'], $r['letzte']], [0, 'geaendert'], '--neu-laden=nein, Dateien gleich, Neuladen steht aus: geaendert (Aufrufer soll neu laden)');
+    pruefe($markeDa(), '--neu-laden=nein: Marke bleibt');
+    $vorP = $datei($broker['passwd']);
+    $vorW = $datei($broker['wirksam']);
+    $r = $helfer(['--neu-laden=pid:999999999']);
+    $e = $ergebnis();
+    gleich([$r['code'], $r['letzte'], $e['fehler']], [1, 'unveraendert', ['0 neuladen']],
+        'ausstehendes Neuladen scheitert: Exit 1, fehler 0 neuladen');
+    pruefe($markeDa(), 'ausstehendes Neuladen gescheitert: Marke bleibt');
+    pruefe($datei($broker['passwd']) == $vorP && $datei($broker['wirksam']) == $vorW, 'ausstehendes Neuladen gescheitert: Dateien unberührt');
+    $r = $helfer();
+    gleich([$r['code'], $r['letzte']], [0, 'geaendert'], 'nächster Lauf holt das Neuladen nach, obwohl die Dateien gleich bleiben');
+    gleich(mqttNeuGeladen($broker), $neuGeladen + 1, 'genau einmal neu geladen');
+    pruefe(!$markeDa(), 'nach gelungenem Neuladen: Marke gelöscht');
+    pruefe($datei($broker['passwd']) == $vorP && $datei($broker['wirksam']) == $vorW, 'nachgeholtes Neuladen: Dateien unberührt');
+    pruefe(!mqttKommtAn($sh2, $nr, $g2Name . '/rpc'), 'nachgeholtes Neuladen: die Sperre wirkt');
+    $r = $helfer();
+    gleich([$r['code'], $r['letzte'], mqttNeuGeladen($broker)], [0, 'unveraendert', $neuGeladen + 1],
+        'danach: unveraendert, kein weiteres Neuladen');
+    // Ändert ein Lauf mit Neuladen ohnehin Dateien, nimmt er die Marke mit.
+    $soll([[$g2, 2, $hG2, 'dauerhaft'], [$g2Name, 2, $hG2Name, 'dauerhaft'], [$g1, 1, $hG1, 'dauerhaft']]);
+    $helfer(['--neu-laden=nein']);
+    pruefe($markeDa(), 'zweite Marke angelegt');
+    $soll([[$g2, 2, $hG2, 'dauerhaft'], [$g2Name, 2, $hG2Name, '-'], [$g1, 1, $hG1, '-']]);
+    $r = $helfer();
+    gleich([$r['code'], $r['letzte'], $ergebnis()['gesperrt']], [0, 'geaendert', [$g2]], 'Lauf mit Änderung und Neuladen');
+    pruefe(!$markeDa(), 'Lauf mit Änderung und Neuladen: Marke gelöscht');
 
     // --------------------------------------------- fehlendes Soll
     unlink($broker['soll']);

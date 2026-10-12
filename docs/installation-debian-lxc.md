@@ -370,13 +370,18 @@ gemeldet hat, mit seinem Zugang. Benutzername am Broker ist das
 MQTT-Präfix des Geräts (`shellypro4pm-a0b1c2d3e4f5` bzw.
 `shelly/hauptverteilung`), bei Gen1 die Geräte-ID (`shelly1-B929CC`).
 PowerManagement speichert das Kennwort nirgends im Klartext – nur den Hash
-beim Broker.
+beim Broker. Melden sich unter demselben Gerätenamen mehrere Präfixe
+(Doppelgänger, etwa `kuehlhaus` und `shelly/kuehlhaus`), lässt sich keines
+umstellen, bis geklärt ist, welches das echte Gerät ist.
 
 **Gen2+**
 
 1. Beim Gerät **„Eigenen Zugang einrichten“**. Der Zugang wird am Broker
    angelegt und per `MQTT.SetConfig` ans Gerät übertragen – nur Benutzer und
-   Kennwort; Server, Präfix und alle anderen Einstellungen bleiben.
+   Kennwort; Server, Präfix und alle anderen Einstellungen bleiben. Oder
+   **„von Hand“**: Benutzer und Kennwort erscheinen einmal und werden in der
+   Weboberfläche des Geräts unter *Settings → MQTT* eingetragen – dann geht
+   nichts davon über MQTT (siehe „Grenzen“).
 2. Den Shelly **neu starten** (Weboberfläche des Geräts → *Reboot*, oder
    Strom aus und wieder ein). Erst dann meldet er sich mit dem neuen Zugang
    an. PowerManagement startet nie selbst ein Gerät neu; bis zum Neustart
@@ -398,14 +403,38 @@ beim Broker.
 
 **Später**
 
-* **Neues Kennwort:** erzeugt ein neues Kennwort – Gen2+ bekommt es
-  übertragen (wirksam ab dem nächsten Neustart, bis dahin ist das Gerät
-  getrennt), bei Gen1 erscheint es wieder einmal zum Eintragen. Auch der
-  Weg, wenn ein Gerät mit eigenem Zugang durch ein neues mit gleichem Präfix
-  ersetzt wird.
+* **Neues Kennwort:** erscheint einmal und wird am Gerät eingetragen (bei
+  beiden Generationen; nie per MQTT – wer das bisherige Gerätekennwort
+  kennt, dürfte dort mitlesen). Der Broker nimmt sofort nur noch das neue
+  an, bis zum Eintragen ist das Gerät getrennt. Auch der Weg, wenn ein Gerät
+  mit eigenem Zugang durch ein neues mit gleichem Präfix ersetzt wird.
 * **Entfernen:** Konto und Sperre fallen weg. Nutzt das Gerät den eigenen
   Zugang schon, ist es sofort getrennt – am Gerät wieder `shelly` und das
-  gemeinsame Kennwort eintragen.
+  gemeinsame Kennwort eintragen. Bei Gen2+ vor der Bestätigung fragt die
+  Oberfläche erst das Gerät: hat es den Zugang schon gespeichert, nutzte es
+  ihn ab dem nächsten Neustart – dann nur mit **erzwingen**.
+
+**Grenzen**
+
+* Die Übertragung per `MQTT.SetConfig` läuft durch den Themenbaum des
+  Geräts, den der gemeinsame Zugang zu diesem Zeitpunkt noch lesen darf.
+  Wer das gemeinsame Kennwort kennt und genau dann mitliest, sieht das neue
+  Gerätekennwort. Wer das ausschließen will, richtet „von Hand“ ein.
+* Mosquitto bindet Client-IDs nicht an Benutzer: Wer das gemeinsame
+  Kennwort kennt, kann ein umgestelltes Gerät vom Broker werfen, indem er
+  sich mit dessen Client-ID anmeldet. Schalten oder mitlesen kann er es
+  nicht.
+* Den Gen1-Rundruf `shellies/command` darf der gemeinsame Zugang weiter
+  schreiben (`announce`, `update`, `update_fw` – nur offizielle Firmware);
+  Gen1-Geräte am gemeinsamen Zugang brauchen ihn.
+* Gespeicherte (retained) Nachrichten, die der gemeinsame Zugang vor der
+  Umstellung im Baum des Geräts abgelegt hat, liefert der Broker danach
+  nicht mehr aus (`check_retain_source true` in
+  `/etc/mosquitto/conf.d/powermanagement.conf`).
+* Den Schutz vor Doppelgänger-Präfixen in den Messwerten leistet Node-RED
+  (Liste unter `pm/status/mqtt-zugaenge`). Wer die Flows im Editor geändert
+  hat und sie beim Update behält, hat ihn nicht – die Seite „MQTT-Zugänge“
+  meldet dann, dass Node-RED die Liste nicht bestätigt.
 
 Hinter den Kulissen schreibt die Oberfläche den Sollzustand nach
 `storage/mqtt/soll/zugaenge.txt`; `powermanagement-mqtt-zugaenge.path`
@@ -413,9 +442,16 @@ startet daraufhin `deploy/mqtt-zugaenge.sh`. Der Helfer prüft das Soll
 streng (bei einem Fehler ändert er nichts), schreibt den Block oben in
 `/etc/mosquitto/powermanagement.passwd` und die wirksame ACL, lädt
 Mosquitto neu (SIGHUP – bestehende Verbindungen bleiben) und legt das
-Ergebnis nach `storage/mqtt/ist/ergebnis.txt`. Der Zeitgeber wiederholt
-das alle zwei Minuten und räumt dabei abgelaufene Prüf-Sperren ab. Von
-Hand anstoßen: `systemctl start powermanagement-mqtt-zugaenge.service`.
+Ergebnis nach `storage/mqtt/ist/ergebnis.txt` (als `www-data`). Der
+Zeitgeber wiederholt das alle zwei Minuten und räumt dabei abgelaufene
+Prüf-Sperren ab. Von Hand anstoßen: `systemctl start
+powermanagement-mqtt-zugaenge.service`. Der Dienst läuft mit
+`ProtectSystem=full` und darf nur `/etc/mosquitto` schreiben – kein Pfad,
+den die Anwendung besitzt, damit ein Verweis dort ihm nichts freigibt.
+Laufen Installation oder Update den Helfer ohne Neuladen (sie starten den
+Broker selbst), legt er bei Änderungen die Marke
+`/etc/mosquitto/powermanagement-mqtt-zugaenge.neuladen` an; bricht der
+Aufrufer danach ab, holt der nächste Lauf das Neuladen nach.
 Auf der Kommandozeile zeigt `bin/power mqtt:zugaenge` (als `www-data`),
 welches Gerät welchen Zugang hat.
 
@@ -448,8 +484,10 @@ topic deny shellypro4pm-a0b1c2d3e4f5/#
 topic deny shellies/shelly1-B929CC/#
 ```
 
-Das Kennwort am Gerät von Hand eintragen (Gen2+: *Settings → MQTT*), Gerät
-neu starten, dann sperren und Broker neu laden.
+Dazu in der Broker-Konfiguration `check_retain_source true`, damit
+gespeicherte Nachrichten des gemeinsamen Zugangs im gesperrten Baum nicht
+weiter ausgeliefert werden. Das Kennwort am Gerät von Hand eintragen (Gen2+:
+*Settings → MQTT*), Gerät neu starten, dann sperren und Broker neu laden.
 
 ### Prüfen
 

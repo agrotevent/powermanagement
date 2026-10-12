@@ -25,10 +25,16 @@ Type=oneshot
 ExecStart=/bin/bash __APP_DIR__/deploy/mqtt-zugaenge.sh --ziel=__APP_DIR__ --app-benutzer=__APP_USER__
 UMask=0077
 NoNewPrivileges=true
-ProtectSystem=strict
-# /etc/mosquitto: Kennwortdatei, wirksame ACL und die Sperrdatei des Helfers;
-# storage/mqtt: dort schreibt er das Ergebnis (als Anwendungsbenutzer).
-ReadWritePaths=/etc/mosquitto -__APP_DIR__/storage/mqtt
+# „full“, nicht „strict“: Das Ergebnis schreibt der Helfer als
+# Anwendungsbenutzer nach storage/mqtt/ist. Unter „strict“ bräuchte das einen
+# ReadWritePaths-Eintrag auf storage/mqtt – einen Pfad, den die Anwendung
+# besitzt. Ersetzt sie ihn durch einen Verweis (etwa auf /usr/local), folgt
+# systemd ihm beim Einrichten des Namensraums und gäbe dem root-Dienst das
+# Ziel zum Schreiben frei. Hier steht deshalb nur ein Pfad, der ganz root
+# gehört; /usr, /boot und /etc bleiben schreibgeschützt.
+ProtectSystem=full
+# /etc/mosquitto: Kennwortdatei, wirksame ACL, Sperrdatei und Neulade-Marke.
+ReadWritePaths=/etc/mosquitto
 ProtectHome=true
 PrivateTmp=true
 PrivateDevices=true
