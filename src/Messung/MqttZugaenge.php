@@ -432,6 +432,51 @@ final class MqttZugaenge
     }
 
     /**
+     * Hat Node-RED die Schutzliste übernommen? Node-RED bestätigt jede
+     * gültige Liste (retained) unter <prefix>/status/nodered-schutz mit deren
+     * ts. Fehlt die Bestätigung oder nennt sie eine ältere Liste, laufen dort
+     * Flows ohne Doppelgänger-Schutz (etwa von Hand geänderte, beim Update
+     * behaltene).
+     *
+     * @return array{liste:?int,quittung:?int,anzahl:?int,aktuell:bool}|null null = Broker nicht erreichbar
+     */
+    public static function schutzStatus(float $zeit = 1.5): ?array
+    {
+        $prefix = trim((string) Config::get('mqtt.prefix', 'pm'), '/');
+        $themen = [$prefix . '/status/mqtt-zugaenge', $prefix . '/status/nodered-schutz'];
+        try {
+            $mqtt = Mqtt::ausKonfiguration('pm-schutz-' . bin2hex(random_bytes(4)));
+            try {
+                $mqtt->abonnieren($themen);
+                $gesehen = [];
+                $nachrichten = $mqtt->lauschen($zeit, static function (string $t, string $_n, bool $retain) use (&$gesehen): bool {
+                    if ($retain) {
+                        $gesehen[$t] = true;
+                    }
+                    return count($gesehen) === 2;
+                });
+            } finally {
+                $mqtt->trennen();
+            }
+        } catch (\RuntimeException) {
+            return null;
+        }
+        $werte = [];
+        foreach ($nachrichten as $n) {
+            if ($n['retain']) {
+                $werte[$n['thema']] = json_decode($n['nachricht'], true);
+            }
+        }
+        $liste = $werte[$themen[0]]['ts'] ?? null;
+        $quittung = $werte[$themen[1]]['ts'] ?? null;
+        $liste = is_int($liste) ? $liste : null;
+        $quittung = is_int($quittung) ? $quittung : null;
+        return ['liste' => $liste, 'quittung' => $quittung,
+            'anzahl' => is_int($werte[$themen[1]]['anzahl'] ?? null) ? $werte[$themen[1]]['anzahl'] : null,
+            'aktuell' => $liste === null || $liste === $quittung];
+    }
+
+    /**
      * Mit dem neuen Zugang anmelden und nachsehen, dass er genau seinen
      * eigenen Baum darf – nicht weniger (ACL-Muster fehlen) und nicht mehr.
      */
@@ -487,6 +532,87 @@ final class MqttZugaenge
         return $fehler ?? self::kontoprobe($benutzer, $kennwort, (string) $zugang['praefix']);
     }
 
+    // ------------------------------------------------------------ Zustand
+
+    /**
+     * Zustand ändern – nur, wenn er noch der erwartete ist.
+     *
+     * Zwei Bediener (oder Oberfläche und Kommandozeile) dürfen sich nicht
+     * gegenseitig überschreiben: wer zu spät kommt, ändert nichts.
+     *
+     * @param array<string,mixed> $felder nur feste Spaltennamen
+     */
+    private static function setzen(int $id, ?string $erwartet, array $felder): bool
+    {
+        $felder['updated_at'] = gmdate('c');
+        $sql = 'UPDATE mqtt_zugaenge SET ' . implode(', ', array_map(static fn (string $k): string => $k . ' = ?', array_keys($felder))) . ' WHERE id = ?';
+        $parameter = array_values($felder);
+        $parameter[] = $id;
+        if ($erwartet !== null) {
+            $sql .= ' AND zustand = ?';
+            $parameter[] = $erwartet;
+        }
+        return Database::execute($sql, $parameter) > 0;
+    }
+
+    /**
+     * Abgelaufene Prüfungen (Abbruch mitten in der Sperr-Probe) zurücksetzen.
+     * Die befristete Sperre selbst läuft beim Helfer von allein aus.
+     */
+    private static function pruefungenAufraeumen(): void
+    {
+        Database::execute("UPDATE mqtt_zugaenge SET zustand = CASE WHEN generation = 2 AND uebertragen_am IS NOT NULL THEN 'uebertragen' ELSE 'angelegt' END,
+            sperre_bis = NULL, meldung = 'Prüfung abgebrochen.', updated_at = ? WHERE zustand = 'pruefung' AND (sperre_bis IS NULL OR sperre_bis < ?)",
+            [gmdate('c'), gmdate('c')]);
+    }
+
+    /** Wann zuletzt Zugangsdaten ans Gerät gingen (übertragen oder neues Kennwort). */
+    private static function zuletztGeaendert(array $zugang): ?int
+    {
+        $zeiten = array_filter([strtotime((string) ($zugang['uebertragen_am'] ?? '')), strtotime((string) ($zugang['kennwort_am'] ?? ''))]);
+        return $zeiten === [] ? null : max($zeiten);
+    }
+
+    /** Seit der letzten Änderung der Zugangsdaten neu gestartet? */
+    private static function seitAenderungNeuGestartet(array $zugang, array $status): bool
+    {
+        $seit = self::zuletztGeaendert($zugang);
+        $laufzeit = $status['uptime'] ?? null;
+        return $seit !== null && is_numeric($laufzeit) && (float) $laufzeit < time() - $seit;
+    }
+
+    /**
+     * Alle Präfixe, unter denen sich ein Gerätename je gemeldet hat: Node-RED
+     * (InfluxDB, 30 Tage), Datenquellen, Zugänge. Mehr als eines heißt: ein
+     * Doppelgänger – dann ist nicht klar, welches das echte Gerät ist.
+     *
+     * @return list<string>
+     */
+    private static function praefixeZumGeraet(string $geraet): array
+    {
+        $praefixe = [];
+        if (!Config::isDemo()) {
+            $fehler = null;
+            $name = str_replace(['\\', "'"], ['\\\\', "\\'"], $geraet);
+            foreach (Influx::abfragen('SELECT distinct("praefix") FROM "geraet" WHERE "geraet" = \'' . $name . '\' AND time > now() - 30d', $fehler) ?? [] as $serie) {
+                foreach ($serie['values'] ?? [] as $zeile) {
+                    if (is_string($zeile[1] ?? null) && $zeile[1] !== '') {
+                        $praefixe[] = trim($zeile[1], '/');
+                    }
+                }
+            }
+        }
+        foreach (Datenquellen::alle('shelly') as $q) {
+            $praefixe[] = trim((string) $q['extern_id'], '/');
+        }
+        foreach (Database::select('SELECT praefix FROM mqtt_zugaenge') as $z) {
+            $praefixe[] = (string) $z['praefix'];
+        }
+        $praefixe = array_values(array_unique(array_filter($praefixe, static fn (string $p): bool => $p !== '' && self::geraetName($p) === $geraet)));
+        sort($praefixe);
+        return $praefixe;
+    }
+
     // ------------------------------------------------------------ Gerät
 
     private static function verbindung(): Mqtt
@@ -528,6 +654,8 @@ final class MqttZugaenge
         }
         try {
             return self::vorpruefenMit($mqtt, $praefix);
+        } catch (\RuntimeException $e) {
+            return ['ok' => false, 'message' => $praefix . ': ' . $e->getMessage()];
         } finally {
             $mqtt->trennen();
         }
@@ -616,9 +744,15 @@ final class MqttZugaenge
     /**
      * Eigenen Zugang für ein Gerät einrichten.
      *
-     * @return array{ok:bool,message:string,id?:int,benutzer?:string,kennwort?:string}
+     * Gen2 überträgt ihn mit MQTT.SetConfig – außer „von Hand“: dann wird das
+     * Kennwort einmal angezeigt wie bei Gen1. Die Übertragung läuft noch über
+     * den Baum, den der gemeinsame Zugang lesen darf; wer das gemeinsame
+     * Kennwort hat und genau dann mitliest, sähe das neue. Von Hand
+     * eingetragen geht es nicht über MQTT.
+     *
+     * @return array{ok:bool,message:string,id?:int,benutzer?:string,kennwort?:string,generation?:int}
      */
-    public static function einrichten(string $praefix, int $generation): array
+    public static function einrichten(string $praefix, int $generation, bool $vonHand = false): array
     {
         $praefix = trim($praefix, '/');
         if (($grund = self::verfuegbar()) !== null) {
@@ -631,6 +765,12 @@ final class MqttZugaenge
         if (($fehler = self::benutzerFehler($benutzer, $generation)) !== null) {
             return ['ok' => false, 'message' => $praefix . ': ' . $fehler];
         }
+        $geraet = self::geraetName($praefix);
+        $andere = array_values(array_diff(self::praefixeZumGeraet($geraet), [$praefix]));
+        if ($andere !== []) {
+            return ['ok' => false, 'message' => 'Unter dem Gerätenamen „' . $geraet . '“ melden sich mehrere MQTT-Präfixe (' . implode(', ', array_merge([$praefix], $andere))
+                . '). Erst klären, welches das echte Gerät ist – ein Doppelgänger bekäme sonst den eigenen Zugang.'];
+        }
         $mqtt = null;
         try {
             if ($generation === 2) {
@@ -641,20 +781,22 @@ final class MqttZugaenge
                 }
             }
             $kennwort = self::kennwortErzeugen();
+            $hash = self::hash($kennwort);
             $jetzt = gmdate('c');
             try {
                 $id = Database::insert('mqtt_zugaenge', [
-                    'benutzer'      => $benutzer,
-                    'praefix'       => $praefix,
-                    'geraet'        => self::geraetName($praefix),
-                    'generation'    => $generation,
-                    'kennwort_hash' => self::hash($kennwort),
-                    'zustand'       => 'angelegt',
-                    'kennwort_am'   => $jetzt,
-                    'meldung'       => '',
-                    'created_by'    => Auth::id(),
-                    'created_at'    => $jetzt,
-                    'updated_at'    => $jetzt,
+                    'benutzer'        => $benutzer,
+                    'praefix'         => $praefix,
+                    'geraet'          => $geraet,
+                    'generation'      => $generation,
+                    'kennwort_hash'   => $hash,
+                    'zustand'         => 'angelegt',
+                    'neustart_noetig' => 1,
+                    'kennwort_am'     => $jetzt,
+                    'meldung'         => '',
+                    'created_by'      => Auth::id(),
+                    'created_at'      => $jetzt,
+                    'updated_at'      => $jetzt,
                 ]);
             } catch (\PDOException) {
                 return ['ok' => false, 'message' => $praefix . ': ' . self::FEHLERTEXTE['doppelt']];
@@ -666,13 +808,13 @@ final class MqttZugaenge
                 self::anwenden();
                 return ['ok' => false, 'message' => $praefix . ': ' . $fehler . ' Es wurde nichts eingerichtet.'];
             }
-            Audit::log('mqtt_zugang.einrichten', 'mqtt_zugang', (string) $id, ['benutzer' => $benutzer, 'generation' => $generation]);
-            if ($generation === 1) {
-                Database::update('mqtt_zugaenge', $id, ['meldung' => 'Benutzer und Kennwort am Gerät eintragen, dann „Umstellung prüfen“.', 'updated_at' => gmdate('c')]);
-                return ['ok' => true, 'id' => $id, 'benutzer' => $benutzer, 'kennwort' => $kennwort,
+            Audit::log('mqtt_zugang.einrichten', 'mqtt_zugang', (string) $id, ['benutzer' => $benutzer, 'generation' => $generation, 'von_hand' => $generation === 1 || $vonHand]);
+            if ($generation === 1 || $vonHand) {
+                self::setzen($id, 'angelegt', ['meldung' => 'Benutzer und Kennwort am Gerät eintragen, neu starten, dann „Umstellung prüfen“.']);
+                return ['ok' => true, 'id' => $id, 'benutzer' => $benutzer, 'kennwort' => $kennwort, 'generation' => $generation,
                     'message' => 'Eigener Zugang für ' . $praefix . ' angelegt.'];
             }
-            return self::uebertragenMit($mqtt, $zugang, $kennwort);
+            return self::uebertragenMit($mqtt, $zugang, $kennwort, $hash);
         } catch (\RuntimeException $e) {
             return ['ok' => false, 'message' => $praefix . ': ' . $e->getMessage()];
         } finally {
@@ -681,35 +823,50 @@ final class MqttZugaenge
     }
 
     /** Gen2: Zugang ans Gerät geben (MQTT.SetConfig, ohne Neustart). */
-    private static function uebertragenMit(Mqtt $mqtt, array $zugang, string $kennwort): array
+    private static function uebertragenMit(Mqtt $mqtt, array $zugang, string $kennwort, string $hash): array
     {
         $id = (int) $zugang['id'];
         $praefix = (string) $zugang['praefix'];
         $benutzer = (string) $zugang['benutzer'];
+        // Wurde der Zugang inzwischen entfernt oder neu vergeben? Dann geht
+        // dieses Kennwort nicht mehr ans Gerät – es gälte am Broker nicht.
+        if (Database::scalar('SELECT kennwort_hash FROM mqtt_zugaenge WHERE id = ?', [$id]) !== $hash) {
+            return ['ok' => false, 'message' => $praefix . ': der Zugang wurde inzwischen geändert oder entfernt – nichts übertragen.'];
+        }
         // QoS 0: ist das Gerät gerade weg, soll das Kennwort nicht beim
         // Broker liegen bleiben.
         $setzen = self::rpc($mqtt, $praefix, 'MQTT.SetConfig', ['config' => ['user' => $benutzer, 'pass' => $kennwort]], 0);
-        $gelesen = $setzen['ok'] ? self::rpc($mqtt, $praefix, 'MQTT.GetConfig') : $setzen;
-        if (!$setzen['ok'] || !$gelesen['ok'] || ($gelesen['result']['user'] ?? null) !== $benutzer) {
-            $grund = !$setzen['ok'] ? self::antwortFehlt($praefix, $setzen) : 'das Gerät hat den Benutzer nicht übernommen.';
-            Database::update('mqtt_zugaenge', $id, ['zustand' => 'angelegt', 'meldung' => mb_substr('Übertragen fehlgeschlagen – erneut übertragen.', 0, 255), 'updated_at' => gmdate('c')]);
-            return ['ok' => false, 'id' => $id, 'message' => 'Zugang am Broker angelegt, aber nicht übertragen: ' . $grund . ' „Übertragen“ versucht es erneut.'];
+        if (!$setzen['ok']) {
+            // Ob es angekommen ist, weiß niemand. „Übertragen“ fragt vorher
+            // das Gerät und hängt es nicht ab.
+            self::setzen($id, null, ['zustand' => 'angelegt', 'meldung' => 'Übertragen ohne Antwort – ob das Gerät den Zugang gespeichert hat, ist unklar. Vor einem Neustart erneut übertragen.']);
+            return ['ok' => false, 'id' => $id, 'message' => 'Zugang am Broker angelegt, aber nicht übertragen: ' . self::antwortFehlt($praefix, $setzen) . ' „Übertragen“ versucht es erneut.'];
         }
         $neustart = ($setzen['result']['restart_required'] ?? true) !== false;
-        Database::update('mqtt_zugaenge', $id, [
+        $gelesen = self::rpc($mqtt, $praefix, 'MQTT.GetConfig');
+        $bestaetigt = $gelesen['ok'] && ($gelesen['result']['user'] ?? null) === $benutzer;
+        self::setzen($id, null, [
             'zustand'         => 'uebertragen',
             'uebertragen_am'  => gmdate('c'),
             'neustart_noetig' => $neustart ? 1 : 0,
-            'meldung'         => $neustart ? 'Wirksam ab dem nächsten Neustart des Geräts.' : '',
-            'updated_at'      => gmdate('c'),
+            'meldung'         => !$bestaetigt ? 'Übertragen, aber nicht zurückgelesen – nach dem Neustart „Umstellung prüfen“.'
+                : ($neustart ? 'Wirksam ab dem nächsten Neustart des Geräts.' : ''),
         ]);
         Audit::log('mqtt_zugang.uebertragen', 'mqtt_zugang', (string) $id, ['benutzer' => $benutzer, 'generation' => 2]);
-        return ['ok' => true, 'id' => $id, 'message' => $neustart
-            ? $praefix . ': Zugang übertragen. Der Shelly nutzt ihn ab seinem nächsten Neustart (Weboberfläche oder Strom aus/ein) – bis dahin bleibt er beim gemeinsamen Zugang, beide gelten. Danach „Umstellung prüfen“.'
-            : $praefix . ': Zugang übertragen und sofort wirksam. Jetzt „Umstellung prüfen“.'];
+        return ['ok' => true, 'id' => $id, 'message' => match (true) {
+            !$bestaetigt => $praefix . ': Zugang übertragen, das Gerät hat ihn aber nicht zurückgemeldet. Nach seinem nächsten Neustart „Umstellung prüfen“.',
+            $neustart    => $praefix . ': Zugang übertragen. Der Shelly nutzt ihn ab seinem nächsten Neustart (Weboberfläche oder Strom aus/ein) – bis dahin bleibt er beim gemeinsamen Zugang, beide gelten. Danach „Umstellung prüfen“.',
+            default      => $praefix . ': Zugang übertragen und sofort wirksam. Jetzt „Umstellung prüfen“.',
+        }];
     }
 
-    /** Gen2: Zugang (erneut) übertragen – mit neuem Kennwort. */
+    /**
+     * Gen2: Zugang (erneut) übertragen – mit neuem Kennwort.
+     *
+     * Vorher wird das Gerät gefragt: hat es den Zugang schon gespeichert und
+     * nutzt ihn (neu gestartet, oder sofort wirksam), dann hängte ein neues
+     * Kennwort am Broker es ab – das wird abgelehnt.
+     */
     public static function uebertragen(int $id): array
     {
         $zugang = self::find($id);
@@ -729,22 +886,25 @@ final class MqttZugaenge
             return ['ok' => false, 'message' => $e->getMessage()];
         }
         try {
-            $status = self::rpc($mqtt, $praefix, 'Sys.GetStatus');
-            if (!$status['ok']) {
+            $konfig = self::rpc($mqtt, $praefix, 'MQTT.GetConfig');
+            $status = $konfig['ok'] ? self::rpc($mqtt, $praefix, 'Sys.GetStatus') : $konfig;
+            if (!$konfig['ok'] || !$status['ok']) {
                 return ['ok' => false, 'message' => self::antwortFehlt($praefix, $status)];
             }
-            // Schon mit dem übertragenen Zugang neu gestartet? Dann würde ein
-            // neues Kennwort das Gerät abhängen.
-            if ($zugang['zustand'] === 'uebertragen' && self::seitUebertragungNeuGestartet($zugang, $status['result'])) {
-                return ['ok' => false, 'message' => $praefix . ' ist seit der Übertragung neu gestartet – jetzt „Umstellung prüfen“.'];
+            if (($konfig['result']['user'] ?? null) === $zugang['benutzer']
+                && ((int) $zugang['neustart_noetig'] === 0 || self::seitAenderungNeuGestartet($zugang, $status['result']))) {
+                return ['ok' => false, 'message' => $praefix . ' hat den eigenen Zugang gespeichert und nutzt ihn vermutlich schon – jetzt „Umstellung prüfen“. Ein neues Kennwort am Broker würde es abhängen.'];
             }
             $kennwort = self::kennwortErzeugen();
-            Database::update('mqtt_zugaenge', $id, ['kennwort_hash' => self::hash($kennwort), 'kennwort_am' => gmdate('c'), 'updated_at' => gmdate('c')]);
+            $hash = self::hash($kennwort);
+            if (!self::setzen($id, (string) $zugang['zustand'], ['kennwort_hash' => $hash, 'kennwort_am' => gmdate('c')])) {
+                return ['ok' => false, 'message' => $praefix . ': der Zugang wurde gerade geändert – bitte neu laden.'];
+            }
             $fehler = self::kontoAnwenden($zugang, $kennwort);
             if ($fehler !== null) {
                 return ['ok' => false, 'message' => $praefix . ': ' . $fehler];
             }
-            return self::uebertragenMit($mqtt, $zugang, $kennwort);
+            return self::uebertragenMit($mqtt, $zugang, $kennwort, $hash);
         } catch (\RuntimeException $e) {
             return ['ok' => false, 'message' => $praefix . ': ' . $e->getMessage()];
         } finally {
@@ -752,18 +912,11 @@ final class MqttZugaenge
         }
     }
 
-    private static function seitUebertragungNeuGestartet(array $zugang, array $status): bool
-    {
-        $seit = strtotime((string) ($zugang['uebertragen_am'] ?? ''));
-        $laufzeit = $status['uptime'] ?? null;
-        return $seit !== false && is_numeric($laufzeit) && empty($status['restart_required'])
-            && (float) $laufzeit < time() - $seit;
-    }
-
     /**
      * Umstellung prüfen und bestätigen.
      *
-     * Eigen: nur nachsehen, ob das Gerät über den eigenen Zugang antwortet.
+     * Eigen: nachsehen, ob die Sperre am Broker wirkt und das Gerät über den
+     * eigenen Zugang antwortet.
      * Sonst: gemeinsamen Zugang kurz auf den Baum des Geräts sperren und
      * nachweisen, dass es trotzdem erreichbar ist – dann bleibt die Sperre.
      *
@@ -771,6 +924,7 @@ final class MqttZugaenge
      */
     public static function pruefen(int $id, bool $erzwingen = false): array
     {
+        self::pruefungenAufraeumen();
         $zugang = self::find($id);
         if ($zugang === null) {
             return ['ok' => false, 'message' => 'Diesen Zugang gibt es nicht.'];
@@ -783,20 +937,17 @@ final class MqttZugaenge
         if ($zugang['zustand'] === 'pruefung') {
             return ['ok' => false, 'message' => $praefix . ' wird gerade geprüft.'];
         }
-        if ($zugang['zustand'] === 'angelegt' && $generation === 2) {
-            return ['ok' => false, 'message' => $praefix . ': erst übertragen.'];
-        }
         try {
             $mqtt = self::verbindung();
         } catch (\RuntimeException $e) {
             return ['ok' => false, 'message' => $e->getMessage()];
         }
         try {
-            if ($zugang['zustand'] === 'eigen') {
-                return self::eigenPruefen($mqtt, $zugang);
-            }
             if (($hindernis = self::sperreHindernis()) !== null) {
                 return ['ok' => false, 'message' => $hindernis];
+            }
+            if ($zugang['zustand'] === 'eigen') {
+                return self::eigenPruefen($mqtt, $zugang);
             }
             if ($generation === 2) {
                 $konfig = self::rpc($mqtt, $praefix, 'MQTT.GetConfig');
@@ -804,15 +955,15 @@ final class MqttZugaenge
                     return ['ok' => false, 'message' => self::antwortFehlt($praefix, $konfig)];
                 }
                 if (($konfig['result']['user'] ?? null) !== $zugang['benutzer']) {
-                    return ['ok' => false, 'message' => $praefix . ': am Gerät ist ein anderer Benutzer eingetragen – „Übertragen“.'];
+                    return ['ok' => false, 'message' => $praefix . ': am Gerät ist ein anderer Benutzer eingetragen – „Übertragen“ oder von Hand eintragen.'];
                 }
                 $status = self::rpc($mqtt, $praefix, 'Sys.GetStatus');
                 if (!$status['ok']) {
                     return ['ok' => false, 'message' => self::antwortFehlt($praefix, $status)];
                 }
-                // Ohne Neustart gilt der übertragene Zugang nur, wenn das Gerät
-                // ihn sofort übernommen hat (restart_required false).
-                if (!$erzwingen && (int) $zugang['neustart_noetig'] === 1 && !self::seitUebertragungNeuGestartet($zugang, $status['result'])) {
+                // Ohne Neustart gilt der Zugang nur, wenn das Gerät ihn sofort
+                // übernommen hat (restart_required false).
+                if (!$erzwingen && (int) $zugang['neustart_noetig'] === 1 && !self::seitAenderungNeuGestartet($zugang, $status['result'])) {
                     return ['ok' => false, 'neustart' => true, 'message' => $praefix . ' ist seit der Übertragung nicht neu gestartet und nutzt noch den gemeinsamen Zugang. Erst neu starten (Weboberfläche oder Strom aus/ein), dann prüfen.'];
                 }
             }
@@ -827,19 +978,24 @@ final class MqttZugaenge
     private static function eigenPruefen(Mqtt $mqtt, array $zugang): array
     {
         $praefix = (string) $zugang['praefix'];
-        $felder = ['updated_at' => gmdate('c')];
+        $gesperrt = static fn (array $e): bool => in_array($praefix, $e['gesperrt'], true);
+        // Nur mit wirksamer Sperre sagt eine Antwort etwas – sonst könnte
+        // auch ein Gerät am gemeinsamen Zugang antworten.
+        if (!$gesperrt((array) self::ergebnis()) && ($fehler = self::anwenden($gesperrt)) !== null) {
+            return ['ok' => false, 'message' => $praefix . ': die Sperre des gemeinsamen Zugangs wirkt am Broker nicht – ' . $fehler];
+        }
+        $felder = [];
         $ok = self::nachweis($mqtt, $zugang);
         if ($ok && (int) $zugang['generation'] === 2 && (int) $zugang['neustart_noetig'] === 1) {
             $status = self::rpc($mqtt, $praefix, 'Sys.GetStatus');
-            $seit = strtotime((string) $zugang['kennwort_am']);
-            if ($status['ok'] && $seit !== false && is_numeric($status['result']['uptime'] ?? null) && (float) $status['result']['uptime'] < time() - $seit) {
+            if ($status['ok'] && self::seitAenderungNeuGestartet($zugang, $status['result'])) {
                 $felder['neustart_noetig'] = 0;
             }
         }
-        $felder['meldung'] = $ok ? '' : 'Antwortet nicht über den eigenen Zugang.';
-        Database::update('mqtt_zugaenge', (int) $zugang['id'], $felder);
+        $felder['meldung'] = $ok ? ((int) ($felder['neustart_noetig'] ?? $zugang['neustart_noetig']) === 1 ? (string) $zugang['meldung'] : '') : 'Antwortet nicht über den eigenen Zugang.';
+        self::setzen((int) $zugang['id'], 'eigen', $felder);
         return $ok
-            ? ['ok' => true, 'message' => $praefix . ' nutzt den eigenen Zugang.']
+            ? ['ok' => true, 'message' => $praefix . ' nutzt den eigenen Zugang; der gemeinsame Zugang kann es weder schalten noch mitlesen.']
             : ['ok' => false, 'message' => $praefix . ' antwortet nicht – offline, oder am Gerät steht ein anderes Kennwort.'];
     }
 
@@ -848,44 +1004,92 @@ final class MqttZugaenge
         $id = (int) $zugang['id'];
         $praefix = (string) $zugang['praefix'];
         $generation = (int) $zugang['generation'];
-        $zurueck = $generation === 2 ? 'uebertragen' : 'angelegt';
-        Database::update('mqtt_zugaenge', $id, ['zustand' => 'pruefung', 'sperre_bis' => gmdate('c', time() + self::PRUEFUNG_SEKUNDEN[$generation]), 'updated_at' => gmdate('c')]);
+        $vorher = (string) $zugang['zustand'];
+        if (!self::setzen($id, $vorher, ['zustand' => 'pruefung', 'sperre_bis' => gmdate('c', time() + self::PRUEFUNG_SEKUNDEN[$generation])])) {
+            return ['ok' => false, 'message' => $praefix . ': der Zugang wurde gerade geändert – bitte neu laden.'];
+        }
         $gesperrt = static fn (array $e): bool => in_array($praefix, $e['gesperrt'], true);
-        $fehler = self::anwenden($gesperrt);
         $ok = false;
-        if ($fehler === null) {
-            usleep(800_000);
-            $ok = self::nachweis($mqtt, $zugang);
+        $fehler = null;
+        try {
+            $fehler = self::anwenden($gesperrt);
+            if ($fehler === null) {
+                usleep(800_000);
+                $ok = self::nachweis($mqtt, $zugang);
+            }
+        } catch (\RuntimeException $e) {
+            $fehler = $e->getMessage();
         }
         if (!$ok) {
-            Database::update('mqtt_zugaenge', $id, ['zustand' => $zurueck, 'sperre_bis' => null,
-                'meldung' => $fehler === null ? 'Prüfung fehlgeschlagen: antwortet nur über den gemeinsamen Zugang.' : 'Prüfung abgebrochen.', 'updated_at' => gmdate('c')]);
+            // Zurück, wie es war – nur, wenn niemand sonst inzwischen etwas
+            // geändert hat.
+            self::setzen($id, 'pruefung', ['zustand' => $vorher, 'sperre_bis' => null,
+                'meldung' => $fehler === null ? 'Prüfung fehlgeschlagen: antwortet nur über den gemeinsamen Zugang.' : 'Prüfung abgebrochen.']);
             self::anwenden(static fn (array $e): bool => !in_array($praefix, $e['gesperrt'], true));
             Audit::log('mqtt_zugang.pruefung_fehlgeschlagen', 'mqtt_zugang', (string) $id, ['benutzer' => $zugang['benutzer'], 'generation' => $generation]);
             return ['ok' => false, 'message' => $fehler !== null ? $praefix . ': ' . $fehler : ($generation === 2
                 ? $praefix . ' antwortet nur über den gemeinsamen Zugang – noch nicht umgestellt. Nichts geändert.'
                 : $praefix . ' sendet über den eigenen Zugang nichts – Benutzer und Kennwort am Gerät prüfen. Nichts geändert.')];
         }
-        Database::update('mqtt_zugaenge', $id, ['zustand' => 'eigen', 'sperre_bis' => null, 'bestaetigt_am' => gmdate('c'),
-            'neustart_noetig' => 0, 'meldung' => '', 'updated_at' => gmdate('c')]);
+        if (!self::setzen($id, 'pruefung', ['zustand' => 'eigen', 'sperre_bis' => null, 'bestaetigt_am' => gmdate('c'), 'neustart_noetig' => 0, 'meldung' => ''])) {
+            self::anwenden();
+            return ['ok' => false, 'message' => $praefix . ': der Zugang wurde während der Prüfung geändert oder entfernt.'];
+        }
         $fehler = self::anwenden($gesperrt);
         Audit::log('mqtt_zugang.bestaetigt', 'mqtt_zugang', (string) $id, ['benutzer' => $zugang['benutzer'], 'generation' => $generation]);
-        return ['ok' => true, 'message' => $praefix . ' nutzt jetzt den eigenen Zugang. Der gemeinsame Zugang hat auf dieses Gerät keinen Zugriff mehr.'
+        return ['ok' => true, 'message' => $praefix . ' nutzt jetzt den eigenen Zugang. Der gemeinsame Zugang kann dieses Gerät weder schalten noch mitlesen.'
             . ($fehler !== null ? ' Hinweis: ' . $fehler : '')];
     }
 
     /**
-     * Neues Kennwort.
+     * Neues Kennwort – wird genau einmal angezeigt und am Gerät eingetragen.
      *
-     * Gen1: wird einmal angezeigt; bis es am Gerät steht, ist das Gerät
-     * getrennt. Gen2 „eigen“: geht über den eigenen, privaten Kanal ans
-     * Gerät und gilt ab dessen nächstem Neustart – Mosquitto trennt das
-     * Gerät aber sofort, es ist bis dahin offline.
+     * Bewusst nicht über MQTT: wer das bisherige Gerätekennwort kennt (etwa
+     * weil er die erste Übertragung mitgelesen hat), darf <präfix>/rpc lesen
+     * und sähe ein übertragenes neues Kennwort ebenso. Mosquitto trennt das
+     * Gerät sofort; bis das neue Kennwort am Gerät steht, ist es offline.
      *
-     * @return array{ok:bool,message:string,benutzer?:string,kennwort?:string}
+     * @return array{ok:bool,message:string,benutzer?:string,kennwort?:string,generation?:int}
      */
     public static function kennwortErneuern(int $id): array
     {
+        self::pruefungenAufraeumen();
+        $zugang = self::find($id);
+        if ($zugang === null) {
+            return ['ok' => false, 'message' => 'Diesen Zugang gibt es nicht.'];
+        }
+        if (($grund = self::verfuegbar()) !== null) {
+            return ['ok' => false, 'message' => $grund];
+        }
+        $praefix = (string) $zugang['praefix'];
+        if (!in_array($zugang['zustand'], ['angelegt', 'eigen'], true)) {
+            return ['ok' => false, 'message' => $praefix . ': ein neues Kennwort gibt es für angelegte und bestätigte Zugänge.'];
+        }
+        $kennwort = self::kennwortErzeugen();
+        $generation = (int) $zugang['generation'];
+        if (!self::setzen($id, (string) $zugang['zustand'], ['kennwort_hash' => self::hash($kennwort), 'kennwort_am' => gmdate('c'),
+            'neustart_noetig' => 1, 'meldung' => 'Neues Kennwort am Gerät eintragen.'])) {
+            return ['ok' => false, 'message' => $praefix . ': der Zugang wurde gerade geändert – bitte neu laden.'];
+        }
+        $fehler = self::kontoAnwenden($zugang, $kennwort);
+        Audit::log('mqtt_zugang.kennwort', 'mqtt_zugang', (string) $id, ['benutzer' => $zugang['benutzer'], 'generation' => $generation]);
+        if ($fehler !== null) {
+            return ['ok' => false, 'message' => $praefix . ': ' . $fehler];
+        }
+        return ['ok' => true, 'benutzer' => (string) $zugang['benutzer'], 'kennwort' => $kennwort, 'generation' => $generation,
+            'message' => 'Neues Kennwort für ' . $praefix . '. Der Broker nimmt nur noch dieses an – das Gerät ist getrennt, bis es eingetragen ist.'];
+    }
+
+    /**
+     * Zugang löschen – samt Sperre des gemeinsamen Zugangs.
+     *
+     * Gen2, noch nicht bestätigt: hat das Gerät den Zugang schon gespeichert,
+     * nutzt es ihn ab dem nächsten Neustart und wäre dann abgehängt – das
+     * geht nur mit $erzwingen.
+     */
+    public static function entfernen(int $id, bool $erzwingen = false): array
+    {
+        self::pruefungenAufraeumen();
         $zugang = self::find($id);
         if ($zugang === null) {
             return ['ok' => false, 'message' => 'Diesen Zugang gibt es nicht.'];
@@ -897,62 +1101,39 @@ final class MqttZugaenge
         if ($zugang['zustand'] === 'pruefung') {
             return ['ok' => false, 'message' => $praefix . ' wird gerade geprüft.'];
         }
-        if ((int) $zugang['generation'] === 2 && $zugang['zustand'] !== 'eigen') {
-            return self::uebertragen($id);
-        }
-        $kennwort = self::kennwortErzeugen();
-        $mqtt = null;
-        try {
-            if ((int) $zugang['generation'] === 2) {
+        if (!$erzwingen && (int) $zugang['generation'] === 2 && $zugang['zustand'] !== 'eigen') {
+            try {
                 $mqtt = self::verbindung();
-                $setzen = self::rpc($mqtt, $praefix, 'MQTT.SetConfig', ['config' => ['user' => (string) $zugang['benutzer'], 'pass' => $kennwort]], 0);
-                $gelesen = $setzen['ok'] ? self::rpc($mqtt, $praefix, 'MQTT.GetConfig') : $setzen;
-                if (!$setzen['ok'] || !$gelesen['ok'] || ($gelesen['result']['user'] ?? null) !== $zugang['benutzer']) {
-                    return ['ok' => false, 'message' => $praefix . ': neues Kennwort nicht übertragen – ' . (!$setzen['ok'] ? self::antwortFehlt($praefix, $setzen) : 'Gerät hat es nicht übernommen.') . ' Nichts geändert.'];
+                try {
+                    $konfig = self::rpc($mqtt, $praefix, 'MQTT.GetConfig');
+                } finally {
+                    $mqtt->trennen();
                 }
+            } catch (\RuntimeException $e) {
+                $konfig = ['ok' => false, 'message' => $e->getMessage()];
             }
-            Database::update('mqtt_zugaenge', $id, ['kennwort_hash' => self::hash($kennwort), 'kennwort_am' => gmdate('c'),
-                'neustart_noetig' => (int) $zugang['generation'] === 2 ? 1 : 0,
-                'meldung' => (int) $zugang['generation'] === 2 ? 'Neues Kennwort gilt ab dem nächsten Neustart – bis dahin getrennt.' : 'Neues Kennwort am Gerät eintragen.',
-                'updated_at' => gmdate('c')]);
-            $fehler = self::kontoAnwenden($zugang, $kennwort);
-            Audit::log('mqtt_zugang.kennwort', 'mqtt_zugang', (string) $id, ['benutzer' => $zugang['benutzer'], 'generation' => (int) $zugang['generation']]);
-            if ($fehler !== null) {
-                return ['ok' => false, 'message' => $praefix . ': ' . $fehler];
+            if (!$konfig['ok']) {
+                return ['ok' => false, 'erzwingbar' => true, 'message' => self::antwortFehlt($praefix, $konfig)
+                    . ' Ob es den eigenen Zugang schon gespeichert hat, ist unklar – dann verlöre es beim nächsten Neustart die Verbindung. „Entfernen erzwingen“, wenn das in Kauf genommen wird.'];
             }
-            if ((int) $zugang['generation'] === 1) {
-                return ['ok' => true, 'benutzer' => (string) $zugang['benutzer'], 'kennwort' => $kennwort, 'message' => 'Neues Kennwort für ' . $praefix . '.'];
+            if (($konfig['result']['user'] ?? null) === $zugang['benutzer']) {
+                return ['ok' => false, 'erzwingbar' => true, 'message' => $praefix . ' hat den eigenen Zugang gespeichert und nutzt ihn ab dem nächsten Neustart. Erst in seiner Weboberfläche wieder den gemeinsamen Zugang eintragen – oder „Entfernen erzwingen“.'];
             }
-            return ['ok' => true, 'message' => $praefix . ': neues Kennwort übertragen. Der Shelly ist bis zu seinem nächsten Neustart getrennt – jetzt neu starten.'];
-        } catch (\RuntimeException $e) {
-            return ['ok' => false, 'message' => $praefix . ': ' . $e->getMessage()];
-        } finally {
-            $mqtt?->trennen();
         }
-    }
-
-    /** Zugang löschen – samt Sperre des gemeinsamen Zugangs. */
-    public static function entfernen(int $id): array
-    {
-        $zugang = self::find($id);
-        if ($zugang === null) {
-            return ['ok' => false, 'message' => 'Diesen Zugang gibt es nicht.'];
-        }
-        if (($grund = self::verfuegbar()) !== null) {
-            return ['ok' => false, 'message' => $grund];
+        if (Database::execute('DELETE FROM mqtt_zugaenge WHERE id = ? AND zustand = ?', [$id, $zugang['zustand']]) === 0) {
+            return ['ok' => false, 'message' => $praefix . ': der Zugang wurde gerade geändert – bitte neu laden.'];
         }
         $benutzer = (string) $zugang['benutzer'];
-        Database::delete('mqtt_zugaenge', $id);
         $fehler = self::anwenden(static fn (array $e): bool => !in_array($benutzer, $e['konten'], true));
-        Audit::log('mqtt_zugang.entfernt', 'mqtt_zugang', (string) $id, ['benutzer' => $benutzer, 'generation' => (int) $zugang['generation']]);
+        Audit::log('mqtt_zugang.entfernt', 'mqtt_zugang', (string) $id, ['benutzer' => $benutzer, 'generation' => (int) $zugang['generation'], 'erzwungen' => $erzwingen]);
         return ['ok' => $fehler === null, 'message' => $fehler !== null
-            ? $zugang['praefix'] . ': ' . $fehler
-            : $zugang['praefix'] . ': eigener Zugang entfernt. Ein Gerät, das ihn noch nutzt, ist jetzt getrennt – dort wieder den gemeinsamen Zugang eintragen.'];
+            ? $praefix . ': ' . $fehler
+            : $praefix . ': eigener Zugang entfernt. Ein Gerät, das ihn noch nutzt, ist jetzt getrennt – dort wieder den gemeinsamen Zugang eintragen.'];
     }
 
     /**
      * Nächtliche Wartung: abgebrochene Prüfungen zurücksetzen, Broker und
-     * Datenbank vergleichen.
+     * Datenbank vergleichen, Schutzliste für Node-RED auffrischen.
      *
      * @return list<string>
      */
@@ -962,16 +1143,11 @@ final class MqttZugaenge
             return [];
         }
         $meldungen = [];
-        $jetzt = time();
-        $geaendert = false;
-        foreach (Database::select("SELECT id, praefix, generation, sperre_bis FROM mqtt_zugaenge WHERE zustand = 'pruefung'") as $z) {
-            $bis = strtotime((string) $z['sperre_bis']);
-            if ($bis === false || $bis <= $jetzt) {
-                Database::update('mqtt_zugaenge', (int) $z['id'], ['zustand' => (int) $z['generation'] === 2 ? 'uebertragen' : 'angelegt',
-                    'sperre_bis' => null, 'meldung' => 'Prüfung abgebrochen.', 'updated_at' => gmdate('c')]);
-                $meldungen[] = $z['praefix'] . ': abgebrochene Prüfung zurückgesetzt.';
-                $geaendert = true;
-            }
+        $vorher = (int) Database::scalar("SELECT COUNT(*) FROM mqtt_zugaenge WHERE zustand = 'pruefung'");
+        self::pruefungenAufraeumen();
+        $zurueckgesetzt = $vorher - (int) Database::scalar("SELECT COUNT(*) FROM mqtt_zugaenge WHERE zustand = 'pruefung'");
+        if ($zurueckgesetzt > 0) {
+            $meldungen[] = 'MQTT-Zugänge: ' . $zurueckgesetzt . ' abgebrochene Prüfung(en) zurückgesetzt.';
         }
         $e = self::ergebnis();
         if ($e === null) {
@@ -980,16 +1156,7 @@ final class MqttZugaenge
             }
             return $meldungen;
         }
-        if ($geaendert) {
-            try {
-                self::sollSchreiben();
-            } catch (\RuntimeException $ex) {
-                $meldungen[] = 'MQTT-Zugänge: ' . $ex->getMessage();
-            }
-        }
-        if (($fehler = self::schutzVeroeffentlichen()) !== null) {
-            $meldungen[] = 'MQTT-Zugänge: Schutzliste für Node-RED nicht veröffentlicht – ' . $fehler;
-        }
+        $jetzt = time();
         if ($e['zeit'] < $jetzt - 900) {
             $meldungen[] = 'MQTT-Zugänge: der Broker-Abgleich hat sich seit über 15 Minuten nicht gemeldet (Zeitgeber powermanagement-mqtt-zugaenge.timer prüfen).';
         }
@@ -997,8 +1164,16 @@ final class MqttZugaenge
         sort($hier);
         $dort = $e['konten'];
         sort($dort);
-        if ($hier !== $dort && !$geaendert) {
+        if ($hier !== $dort) {
             $meldungen[] = 'MQTT-Zugänge: Broker und Datenbank weichen ab (' . count($dort) . ' am Broker, ' . count($hier) . ' hier) – bin/power mqtt:zugaenge-schreiben.';
+        }
+        foreach (self::alle() as $z) {
+            if ($z['zustand'] === 'eigen' && (!$e['acl_wirksam'] || !in_array($z['praefix'], $e['gesperrt'], true))) {
+                $meldungen[] = 'MQTT-Zugänge: ' . $z['praefix'] . ' ist bestätigt, aber der gemeinsame Zugang ist am Broker nicht gesperrt.';
+            }
+        }
+        if (($fehler = self::schutzVeroeffentlichen()) !== null) {
+            $meldungen[] = 'MQTT-Zugänge: Schutzliste für Node-RED nicht veröffentlicht – ' . $fehler;
         }
         foreach ($meldungen as $m) {
             Logger::info($m);
@@ -1010,14 +1185,17 @@ final class MqttZugaenge
      * Alle bekannten Shellys mit ihrem Zugang: aus den Messdaten (Präfix
      * meldet Node-RED), den Datenquellen und den Zugängen.
      *
-     * @return list<array{praefix:string,generation:int,geraet:string,name:string,zuletzt:?int,benutzer:?string,zugang:?array,zustand:string,umstellbar:bool,grund:string}>
+     * @return list<array{praefix:string,generation:int,geraet:string,name:string,zuletzt:?int,benutzer:?string,zugang:?array,zustand:string,umstellbar:bool,grund:string,geschuetzt:bool,doppelt:bool}>
      */
     public static function uebersicht(?string &$fehler = null): array
     {
+        self::pruefungenAufraeumen();
         $zeilen = [];
         $merken = static function (string $praefix, int $generation, string $name = '', ?int $zuletzt = null) use (&$zeilen): void {
             $praefix = trim($praefix, '/');
-            if ($praefix === '' || ($generation !== 1 && $generation !== 2)) {
+            // Gen3/Gen4 sprechen dasselbe wie Gen2 (Node-RED meldet „gen“ des Geräts).
+            $generation = $generation >= 2 ? 2 : $generation;
+            if ($praefix === '' || $generation !== 1 && $generation !== 2) {
                 return;
             }
             $z = $zeilen[$praefix] ?? ['praefix' => $praefix, 'generation' => $generation, 'name' => '', 'zuletzt' => null];
@@ -1048,21 +1226,31 @@ final class MqttZugaenge
             $zugaenge[$z['praefix']] = $z;
             $merken((string) $z['praefix'], (int) $z['generation']);
         }
+        $e = Config::isDemo() ? null : self::ergebnis();
+        $jeGeraet = [];
+        foreach (array_keys($zeilen) as $praefix) {
+            $jeGeraet[self::geraetName((string) $praefix)][] = (string) $praefix;
+        }
         $out = [];
         foreach ($zeilen as $praefix => $z) {
             $praefix = (string) $praefix;
             $zugang = $zugaenge[$praefix] ?? null;
             $generation = $zugang !== null ? (int) $zugang['generation'] : $z['generation'];
             $benutzer = $zugang !== null ? (string) $zugang['benutzer'] : self::benutzerAusPraefix($praefix, $generation);
+            $geraet = self::geraetName($praefix);
+            $doppelt = count($jeGeraet[$geraet] ?? []) > 1;
             $grund = '';
             if ($zugang === null) {
                 $code = $benutzer === null ? 'zeichen' : self::namensFehler($benutzer, $generation);
                 $grund = $code !== null ? self::FEHLERTEXTE[$code] : '';
+                if ($grund === '' && $doppelt) {
+                    $grund = 'Unter demselben Gerätenamen melden sich mehrere Präfixe – erst klären, welches das echte Gerät ist.';
+                }
             }
             $out[] = [
                 'praefix'    => $praefix,
                 'generation' => $generation,
-                'geraet'     => self::geraetName($praefix),
+                'geraet'     => $geraet,
                 'name'       => $z['name'],
                 'zuletzt'    => $z['zuletzt'],
                 'benutzer'   => $benutzer,
@@ -1070,6 +1258,10 @@ final class MqttZugaenge
                 'zustand'    => $zugang !== null ? (string) $zugang['zustand'] : 'gemeinsam',
                 'umstellbar' => $zugang === null && $grund === '',
                 'grund'      => $grund,
+                // Bestätigt UND am Broker wirklich gesperrt (Demo: wie bestätigt).
+                'geschuetzt' => $zugang !== null && $zugang['zustand'] === 'eigen'
+                    && ($e === null ? Config::isDemo() : $e['acl_wirksam'] && in_array($praefix, $e['gesperrt'], true)),
+                'doppelt'    => $doppelt,
             ];
         }
         usort($out, static fn (array $a, array $b): int => strcmp($a['praefix'], $b['praefix']));

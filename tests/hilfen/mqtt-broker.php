@@ -112,8 +112,9 @@ function mqttNeuGeladen(array $broker): int
  *
  * @param array<string,string> $nutzer
  * @return array{host:string,port:int,pid:int,dir:string,passwd:string,basis:string,wirksam:string,conf:string,
- *               soll:string,ist:string,lock:string,mqttdir:string}
+ *               soll:string,ist:string,lock:string,marke:string,mqttdir:string}
  *   mqttdir = Verzeichnis mit soll/ und ist/ (für Config mqtt.zugaenge_verzeichnis)
+ *   marke   = Marke „Neuladen steht aus“ (statt /etc/mosquitto/powermanagement-mqtt-zugaenge.neuladen)
  */
 function mqttTestbroker(array $nutzer, ?string $basisAcl = null): array
 {
@@ -141,6 +142,7 @@ function mqttTestbroker(array $nutzer, ?string $basisAcl = null): array
         'soll' => $dir . '/mqtt/soll/zugaenge.txt',
         'ist' => $dir . '/mqtt/ist/ergebnis.txt',
         'lock' => $dir . '/zugaenge.lock',
+        'marke' => $dir . '/zugaenge.neuladen',
         'mqttdir' => $dir . '/mqtt',
     ];
 
@@ -162,6 +164,9 @@ function mqttTestbroker(array $nutzer, ?string $basisAcl = null): array
         . "allow_anonymous false\n"
         . "password_file {$broker['passwd']}\n"
         . "acl_file {$broker['wirksam']}\n"
+        // Wie deploy/mosquitto/broker.conf: Retained-Nachrichten nur, solange
+        // ihr Absender noch schreiben darf.
+        . "check_retain_source true\n"
         . "persistence false\n"
         . "log_dest file {$dir}/mosquitto.log\n"
         . "log_type error\nlog_type warning\nlog_type notice\nlog_type information\n";
@@ -169,6 +174,9 @@ function mqttTestbroker(array $nutzer, ?string $basisAcl = null): array
 
     // Wirksame ACL vom echten Helfer – vor dem Start, ohne Neuladen.
     $erst = mqttHelfer($broker, ['--neu-laden=nein']);
+    // Der Broker startet erst jetzt und liest die Dateien so, wie sie sind –
+    // nichts steht aus (wie bei der Installation, die danach neu startet).
+    @unlink($broker['marke']);
     if (!is_file($broker['wirksam'])) {
         // Grundlage unbrauchbar (so gewollt in einer Prüfung): wie die
         // Installation dann wenigstens die Grundlage nehmen.
@@ -190,7 +198,8 @@ function mqttTestbroker(array $nutzer, ?string $basisAcl = null): array
 }
 
 /**
- * Helfer mit den Pfaden des Testbrokers (--app-benutzer= --ohne-eigentuemerpruefung --neu-laden=pid:<pid>).
+ * Helfer mit den Pfaden des Testbrokers (--app-benutzer= --ohne-eigentuemerpruefung --neu-laden=pid:<pid>,
+ * Sperrdatei und Neulade-Marke im Temp-Verzeichnis – nie unter /etc/mosquitto).
  * Eine Option in $zusatz ersetzt die gleichnamige Vorgabe. Hat der Helfer
  * etwas geändert und per SIGHUP neu laden lassen, wartet die Funktion, bis
  * der Broker das getan hat.
@@ -212,6 +221,7 @@ function mqttHelfer(array $broker, array $zusatz = [], ?string $stdin = null): a
         '--soll' => $broker['soll'],
         '--ist' => $broker['ist'],
         '--lock' => $broker['lock'],
+        '--neuladen-marke' => $broker['marke'] ?? $broker['dir'] . '/zugaenge.neuladen',
     ];
     foreach ($zusatz as $option) {
         unset($vorgaben[explode('=', $option, 2)[0]]);

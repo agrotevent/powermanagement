@@ -34,10 +34,23 @@
  *
  * Nach einem Neustart von Node-RED ist die Liste leer, bis der Broker die
  * gespeicherte Nachricht beim Abonnieren schickt.
+ *
+ * Quittung (einziger Ausgang → „pm/status/nodered-schutz"): Jede
+ * angenommene Liste bestätigt die Funktion retained mit QoS 1:
+ *   { "ts": 1727200000000, "anzahl": 3, "zeit": 1727200000123 }
+ * ts ist der Zeitstempel der angenommenen Liste (null, wenn sie keinen
+ * numerischen hatte), anzahl die Zahl der geschützten Geräte, zeit der
+ * Zeitpunkt der Annahme (ms). Läuft eine Installation mit alten, von Hand
+ * geänderten Flows ohne diese Funktion, fehlt die Quittung oder bleibt bei
+ * einem älteren ts stehen – daran ist zu erkennen, dass der Schutz nicht
+ * wirkt. Ungültiges wird nicht quittiert; es bleibt die letzte Quittung
+ * stehen, so wie die letzte gültige Liste gilt. Auch die Quittung liegt
+ * unter pm/#, der gemeinsame Zugang kann sie nicht fälschen.
  */
 
 const SCHLUESSEL = 'mqtt_geschuetzt';
 const PRAEFIX_MAX = 200;
+const QUITTUNG = 'pm/status/nodered-schutz';
 
 function hat(objekt, schluessel) {
     return Object.prototype.hasOwnProperty.call(objekt, schluessel);
@@ -87,5 +100,15 @@ for (const geraet of Object.keys(daten.geschuetzt)) {
 }
 
 global.set(SCHLUESSEL, neu);
-node.status({ fill: 'green', shape: 'dot', text: Object.keys(neu).length + ' geschützt' });
-return null;
+const anzahl = Object.keys(neu).length;
+node.status({ fill: 'green', shape: 'dot', text: anzahl + ' geschützt' });
+return {
+    topic: QUITTUNG,
+    retain: true,
+    qos: 1,
+    payload: JSON.stringify({
+        ts: typeof daten.ts === 'number' && Number.isFinite(daten.ts) ? daten.ts : null,
+        anzahl,
+        zeit: Date.now(),
+    }),
+};

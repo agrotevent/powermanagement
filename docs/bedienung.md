@@ -439,16 +439,23 @@ meldet Node-RED) und den schaltbaren Datenquellen – mit seinem Zugang:
 | gemeinsamer Zugang | wie bisher | *Eigenen Zugang einrichten* |
 | angelegt | Zugang am Broker; Gen2: noch nicht übertragen, Gen1: Kennwort angezeigt | Gen2 *Übertragen*, Gen1 am Gerät eintragen, dann *Umstellung prüfen* |
 | wartet auf Neustart | Gen2: Zugang steht im Gerät, gilt ab dem nächsten Neustart; bis dahin gelten beide | Gerät neu starten, dann *Umstellung prüfen* |
-| eigener Zugang | bestätigt: das Gerät nutzt ihn, der gemeinsame Zugang hat darauf keinen Zugriff mehr | – |
+| eigener Zugang | bestätigt: das Gerät nutzt ihn, der gemeinsame Zugang kann es weder schalten noch mitlesen | – |
 
 **Gen2+** (Plus, Pro, Gen3/4): *Eigenen Zugang einrichten* fragt das Gerät
 erst (antwortet es, stimmt das Präfix, wartet es nicht schon auf einen
 Neustart), legt dann den Zugang am Broker an, meldet sich zur Probe damit an
-und überträgt Benutzer und Kennwort mit `MQTT.SetConfig` ans Gerät. Das
-Kennwort sieht niemand. **Die App startet kein Gerät neu** – je nach Modell
-kann ein Neustart die Ausgänge schalten. Der neue Zugang gilt also ab dem
-nächsten Neustart: über die Weboberfläche des Shelly oder beim nächsten
-Ausschalten des Verteilers.
+und überträgt Benutzer und Kennwort mit `MQTT.SetConfig` ans Gerät. **Die
+App startet kein Gerät neu** – je nach Modell kann ein Neustart die Ausgänge
+schalten. Der neue Zugang gilt also ab dem nächsten Neustart: über die
+Weboberfläche des Shelly oder beim nächsten Ausschalten des Verteilers.
+*Übertragen* fragt vorher das Gerät: hat es den Zugang schon gespeichert und
+ist seitdem neu gestartet, lehnt es ab – ein neues Kennwort am Broker würde
+das Gerät sonst abhängen.
+
+*von Hand* (Gen2): legt den Zugang an, ohne ihn per MQTT zu übertragen.
+Benutzer und Kennwort werden einmal angezeigt und in der Weboberfläche des
+Shelly unter *Einstellungen → MQTT* eingetragen (nur Username und
+Password), dann neu starten.
 
 **Gen1**: Gen1 nimmt Einstellungen nicht über MQTT an. Benutzer (die
 Geräte-ID) und Kennwort werden **einmal** angezeigt – mit Knopf zum
@@ -461,22 +468,38 @@ Speichern startet er neu). Geht das Kennwort verloren: *Neues Kennwort*.
 „update“. Antwortet es trotzdem, nutzt es den eigenen Zugang – die Sperre
 bleibt dann dauerhaft. Antwortet es nicht, fällt die Sperre sofort weg und
 nichts ist verändert. Gen2 ohne Neustart seit der Übertragung wird gar nicht
-erst gesperrt (*ohne Neustart* prüft trotzdem).
+erst gesperrt (*ohne Neustart* prüft trotzdem). Bei einem bestätigten Gerät
+sieht *Prüfen* zusätzlich nach, ob die Sperre am Broker wirkt; fehlt sie,
+steht das Gerät als **nicht gesperrt** in der Liste.
 
-**Neues Kennwort**: Gen1 – wird einmal angezeigt, das Gerät ist bis zum
-Eintragen getrennt. Gen2 mit eigenem Zugang – geht über den eigenen Kanal
-ans Gerät; der Broker trennt es sofort, es meldet sich nach seinem nächsten
-Neustart wieder an.
+**Neues Kennwort** wird immer einmal angezeigt und am Gerät eingetragen –
+nie per MQTT übertragen: wer das bisherige Gerätekennwort kennt, dürfte den
+Themenbaum des Geräts lesen und sähe ein übertragenes neues ebenso. Der
+Broker nimmt sofort nur noch das neue an; bis es am Gerät steht, ist das
+Gerät getrennt. So wird auch ein Gerät ersetzt (gleiches Präfix): *Neues
+Kennwort* und am neuen Gerät eintragen.
 
 **Entfernen** löscht den Zugang und hebt die Sperre auf. Nutzt das Gerät
-ihn noch, ist es getrennt, bis dort wieder der gemeinsame Zugang steht. Wird
-ein umgestelltes Gerät ersetzt (gleiches Präfix): *Neues Kennwort* und am
-neuen Gerät eintragen – oder entfernen.
+ihn noch, ist es getrennt, bis dort wieder der gemeinsame Zugang steht. Bei
+Gen2, solange die Umstellung nicht bestätigt ist, wird vorher das Gerät
+gefragt: hat es den Zugang schon gespeichert, nutzt es ihn ab dem nächsten
+Neustart – dann geht Entfernen nur mit *erzwingen* (vorher am Gerät wieder
+den gemeinsamen Zugang eintragen).
 
-Hinweis: Die erste Übertragung bei Gen2 läuft noch über den Themenbaum, den
-der gemeinsame Zugang lesen darf. Wer das gemeinsame Kennwort kennt und genau
-dann mitliest, sieht das neue. Wer das ausschließen will, vergibt nach der
-Umstellung *Neues Kennwort* (dann über den privaten Kanal).
+**Doppelgänger**: Melden sich unter demselben Gerätenamen mehrere Präfixe
+(etwa `kuehlhaus` und `shelly/kuehlhaus`), ist nicht klar, welches das echte
+Gerät ist – dann lässt sich keines umstellen, bis das geklärt ist.
+
+**Grenzen**, offen gesagt:
+
+- Die Übertragung bei Gen2 läuft noch über den Themenbaum, den der
+  gemeinsame Zugang lesen darf. Wer das gemeinsame Kennwort kennt und genau
+  dann mitliest, sieht das neue. Wer das ausschließen will, nimmt *von Hand*.
+- Wer das gemeinsame Kennwort kennt, kann ein umgestelltes Gerät vom Broker
+  werfen, indem er sich mit dessen Client-ID anmeldet (Mosquitto bindet
+  Client-IDs nicht an Benutzer). Schalten oder mitlesen kann er es nicht.
+- Den Gen1-Rundruf `shellies/command` darf der gemeinsame Zugang weiter
+  schreiben (announce, update, update_fw – nur offizielle Firmware).
 
 In der Datenquellen-Liste steht an jedem schaltbaren Shelly, welchen Zugang
 er nutzt. Was dazu am Broker passiert, steht in

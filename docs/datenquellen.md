@@ -115,7 +115,12 @@ schreiben darf. Für diese Geräte nimmt Node-RED Messwerte, `online`,
 Geräteinfo und `announce` nur unter dem genauen Präfix an; alles andere –
 auch `shellies/announce` und RPC-Antworten auf `pm-nodered/rpc` – verwirft
 es. Eine ungültige Nachricht auf dem Thema ändert nichts, eine leere Liste
-hebt den Schutz auf.
+hebt den Schutz auf. Jede angenommene Liste quittiert Node-RED retained auf
+`pm/status/nodered-schutz` mit `{"ts": …, "anzahl": …, "zeit": …}` (`ts`
+der Liste oder `null`, Zahl der geschützten Geräte, Zeitpunkt der Annahme
+in ms) – fehlt die Quittung oder bleibt sie bei einem älteren `ts` stehen,
+wirkt der Schutz in Node-RED nicht, etwa bei alten, von Hand geänderten
+Flows.
 
 **RPC-Antworten (Gen2+):** Ein Shelly antwortet an `<src>/rpc`. Damit
 ein eigener Zugang dorthin schreiben darf – und der gemeinsame nicht –,

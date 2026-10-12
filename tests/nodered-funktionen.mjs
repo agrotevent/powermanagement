@@ -203,6 +203,18 @@ pruefe('flows.json nutzt nur Kern-Nodes und ist in sich stimmig', () => {
     assert.equal(merken.type, 'function');
     assert.equal(merken.name, 'MQTT-Zugänge merken');
     assert.equal(merken.func, readFileSync(join(WURZEL, 'deploy', 'node-red', 'funktionen', 'mqtt-zugaenge.js'), 'utf8'));
+    // Quittung: einziger Ausgang an genau eine mqtt-out-Node, retained mit
+    // QoS 1 auf pm/status/nodered-schutz
+    assert.equal(merken.outputs, 1);
+    assert.deepEqual(merken.wires, [['pm_schutz_aus']]);
+    const quittung = flows.find((n) => n.id === 'pm_schutz_aus');
+    assert.equal(quittung.type, 'mqtt out');
+    assert.equal(quittung.topic, 'pm/status/nodered-schutz');
+    assert.equal(quittung.qos, '1');
+    assert.equal(quittung.retain, 'true');
+    assert.equal(quittung.broker, 'pm_broker');
+    assert.equal(quittung.z, merken.z);
+    assert.deepEqual(flows.filter((n) => n.type === 'mqtt out' && n.topic === 'pm/status/nodered-schutz').map((n) => n.id), ['pm_schutz_aus']);
     const tabVon = (id) => flows.find((n) => n.id === id).z;
     assert.notEqual(tabVon('pm_mqtt_zugaenge'), tabVon('pm_gen2_uebersetzen'));
     assert.notEqual(tabVon('pm_gen1_uebersetzen'), tabVon('pm_gen2_uebersetzen'));
@@ -673,7 +685,7 @@ const gemerkt = (global) => ({ ...global.get('mqtt_geschuetzt') });
 pruefe('MQTT-Zugänge: Liste im globalen Kontext, Ungültiges übergangen, letzte gültige gilt', () => {
     const global = speicher();
     const zug = funktion('MQTT-Zugänge merken', { global });
-    assert.deepEqual(zug.lauf(schutzliste(SCHUTZ)), []);
+    assert.equal(zug.lauf(schutzliste(SCHUTZ))[0].length, 1);
     assert.deepEqual(gemerkt(global), SCHUTZ);
     assert.equal(zug.protokoll.warnungen.length, 0);
     assert.equal(zug.protokoll.status.at(-1).text, '3 geschützt');
@@ -690,7 +702,8 @@ pruefe('MQTT-Zugänge: Liste im globalen Kontext, Ungültiges übergangen, letzt
         ].map((geschuetzt) => JSON.stringify({ ts: 1, geschuetzt })),
     ];
     for (const payload of ungueltig) {
-        assert.deepEqual(zug.lauf({ topic: ZUGAENGE_THEMA, payload }), [], payload);
+        // übergangen und nicht quittiert – die letzte Quittung bleibt stehen
+        assert.deepEqual(zug.lauf({ topic: ZUGAENGE_THEMA, payload }), [[]], 'quittiert: ' + payload);
         assert.deepEqual(gemerkt(global), SCHUTZ, 'übernommen: ' + payload);
     }
     assert.equal(zug.protokoll.warnungen.length, ungueltig.length);
@@ -712,6 +725,79 @@ pruefe('MQTT-Zugänge: Liste im globalen Kontext, Ungültiges übergangen, letzt
     zug.lauf(schutzliste({}));
     assert.deepEqual(gemerkt(global), {});
     assert.equal(zug.protokoll.status.at(-1).text, '0 geschützt');
+});
+
+// Quittung einer angenommenen Liste: die eine Nachricht auf dem Ausgang,
+// Nutzlast als Objekt
+function quittung(ausgaenge) {
+    assert.equal(ausgaenge.length, 1);
+    assert.equal(ausgaenge[0].length, 1, 'keine Quittung');
+    const [m] = ausgaenge[0];
+    assert.equal(m.topic, 'pm/status/nodered-schutz');
+    assert.equal(m.retain, true);
+    assert.equal(m.qos, 1);
+    assert.equal(typeof m.payload, 'string');
+    return JSON.parse(m.payload);
+}
+
+pruefe('MQTT-Zugänge: jede gültige Liste quittiert auf pm/status/nodered-schutz, Ungültiges nicht', () => {
+    const start = uhr.jetzt;
+    try {
+        const global = speicher();
+        const zug = funktion('MQTT-Zugänge merken', { global });
+
+        // ts der Liste, Zahl der geschützten Geräte, Zeitpunkt der Annahme
+        const liste = schutzliste(SCHUTZ);
+        uhr.jetzt += 1234;
+        assert.deepEqual(quittung(zug.lauf(liste)), { ts: start, anzahl: 3, zeit: start + 1234 });
+
+        // dieselbe Liste noch einmal (z. B. nach neuem Abonnieren): wieder quittiert
+        uhr.jetzt += 1000;
+        assert.deepEqual(quittung(zug.lauf(liste)), { ts: start, anzahl: 3, zeit: start + 2234 });
+
+        // Ungültiges: keine Quittung, auch nicht für eine gelöschte
+        // gespeicherte Nachricht (leere Nutzlast); der Schutz bleibt
+        for (const payload of ['', '{kaputt', '{"ts":5}', JSON.stringify({ ts: 5, geschuetzt: { neu: 'shelly/neu', kaputt: 'shelly/#' } })]) {
+            assert.deepEqual(zug.lauf({ topic: ZUGAENGE_THEMA, payload }), [[]], payload);
+        }
+        assert.deepEqual(gemerkt(global), SCHUTZ);
+
+        // leere Liste: auch das ist eine gültige Liste – anzahl 0
+        uhr.jetzt += 1000;
+        assert.deepEqual(quittung(zug.lauf({ topic: ZUGAENGE_THEMA, payload: JSON.stringify({ ts: 42, geschuetzt: {} }) })),
+            { ts: 42, anzahl: 0, zeit: start + 3234 });
+        assert.deepEqual(gemerkt(global), {});
+
+        // ohne numerischen ts: null; 0 ist ein Zeitstempel
+        for (const [daten, ts] of [
+            [{ geschuetzt: { a: 'shelly/a' } }, null],
+            [{ ts: null, geschuetzt: { a: 'shelly/a' } }, null],
+            [{ ts: '1727200000000', geschuetzt: { a: 'shelly/a' } }, null],
+            [{ ts: [1], geschuetzt: { a: 'shelly/a' } }, null],
+            [{ ts: 0, geschuetzt: { a: 'shelly/a' } }, 0],
+            [{ ts: 1.5, geschuetzt: { a: 'shelly/a' } }, 1.5],
+        ]) {
+            assert.deepEqual(quittung(zug.lauf({ topic: ZUGAENGE_THEMA, payload: JSON.stringify(daten) })),
+                { ts, anzahl: 1, zeit: uhr.jetzt }, JSON.stringify(daten));
+        }
+        // als Objekt (statt Text) übergeben: NaN und Unendlich sind kein ts
+        for (const ts of [NaN, Infinity]) {
+            assert.equal(quittung(zug.lauf({ topic: ZUGAENGE_THEMA, payload: { ts, geschuetzt: {} } })).ts, null, String(ts));
+        }
+
+        // Puffer; „__proto__" zählt nicht mit
+        assert.deepEqual(quittung(zug.lauf({
+            topic: ZUGAENGE_THEMA,
+            payload: Buffer.from('{"ts":7,"geschuetzt":{"__proto__":{"x":"y"},"a":"shelly/a","b":"shelly/b"}}'),
+        })), { ts: 7, anzahl: 2, zeit: uhr.jetzt });
+
+        // Die Quittung nennt keine Geräte oder Präfixe
+        const [[m]] = zug.lauf(schutzliste(SCHUTZ));
+        assert.deepEqual(Object.keys(JSON.parse(m.payload)).sort(), ['anzahl', 'ts', 'zeit']);
+        assert.equal(zug.protokoll.fehler.length, 0);
+    } finally {
+        uhr.jetzt = start;
+    }
 });
 
 pruefe('MQTT-Zugänge: Doppelgänger eines Geräts mit eigenem Zugang verworfen, sein Präfix nicht', () => {

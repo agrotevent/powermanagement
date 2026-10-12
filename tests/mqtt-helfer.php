@@ -239,7 +239,7 @@ try {
     gleich($e['gesperrt'], [$g2], 'Ergebnis: gesperrt <präfix>');
     $w = (string) file_get_contents($broker['wirksam']);
     $teil = "\n# --- erzeugt von mqtt-zugaenge.sh - nicht von Hand aendern ---\n"
-        . "# Gemeinsamer Zugang: kein Zugriff auf Shellys mit eigenem Zugang.\nuser shelly\ntopic deny {$g2}/#\n";
+        . "# Gemeinsamer Zugang: Themen der Shellys mit eigenem Zugang weder lesen noch schreiben.\nuser shelly\ntopic deny {$g2}/#\n";
     gleich($w, (string) file_get_contents($broker['basis']) . $teil, 'wirksame ACL = Grundlage + erzeugter Teil');
     pruefe(str_contains((string) file_get_contents($broker['passwd']), "# konto {$g2} 2 dauerhaft\n"), 'Block hält die Sperre fest');
 

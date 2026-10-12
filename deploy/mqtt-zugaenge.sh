@@ -18,17 +18,28 @@
 # Zeilen der Kennwortdatei außerhalb des Blocks (shelly, nodered,
 # powermanagement, von Hand angelegte) bleiben Byte für Byte, wie sie sind.
 #
+# Mit --neu-laden=nein (Installation, Update: die laden bzw. starten den
+# Broker selbst) legt er bei geänderten Dateien die Marke
+# /etc/mosquitto/powermanagement-mqtt-zugaenge.neuladen an. Scheitert der
+# Aufrufer danach (Update zurückgerollt), wüsste sonst kein späterer Lauf,
+# dass der Broker die Dateien nie geladen hat – sie sind ja unverändert. Ein
+# Lauf mit Neuladen lädt darum einmal neu, solange die Marke da ist, und
+# löscht sie erst, wenn das geklappt hat.
+#
 # Aufruf:
 #   mqtt-zugaenge.sh --ziel=DIR --app-benutzer=USER [--neu-laden=systemd|pid:N|nein]
 #                    [--viele-entfernen]
 #   Prüf-/Testoptionen: --passwd=F --basis=F --wirksam=F --conf=F (mehrfach)
-#                       --soll=F --ist=F --lock=F --ohne-eigentuemerpruefung
+#                       --soll=F --ist=F --lock=F --neuladen-marke=F
+#                       --ohne-eigentuemerpruefung
 #                       --app-benutzer=   (leer: Soll und Ergebnis direkt, ohne setpriv)
 #   mqtt-zugaenge.sh --nur-namen   liest „<generation> <benutzer>“ je Zeile von der
 #                                  Standardeingabe, schreibt je Zeile „ok“ oder
 #                                  „fehler <code>“ (feste Namensregeln)
 #
 # Letzte Zeile auf stdout: geaendert | unveraendert | abgelehnt
+# („geaendert“ auch, wenn nur ein ausstehendes Neuladen nachgeholt wurde
+# bzw. – mit --neu-laden=nein – noch aussteht: der Aufrufer soll neu laden.)
 # Exit 0 = ok/unverändert, 2 = Soll abgelehnt (wirksame ACL trotzdem aus dem
 # aktuellen Block gebaut), 1 = Fehler.
 #
@@ -51,7 +62,7 @@ MARKE_ENDE='# <<< powermanagement geraetezugaenge'
 MARKE_ANFANG_KURZ='# >>> powermanagement geraetezugaenge'
 MARKE_ENDE_KURZ='# <<< powermanagement geraetezugaenge'
 ERZEUGT_KOPF='# --- erzeugt von mqtt-zugaenge.sh - nicht von Hand aendern ---'
-ERZEUGT_TEXT='# Gemeinsamer Zugang: kein Zugriff auf Shellys mit eigenem Zugang.'
+ERZEUGT_TEXT='# Gemeinsamer Zugang: Themen der Shellys mit eigenem Zugang weder lesen noch schreiben.'
 
 GROESSE_MAX=262144
 KONTEN_MAX=2000
@@ -91,6 +102,9 @@ IST=""
 # ein anderer Benutzer vorher einen Verweis oder eine eigene Datei unter
 # diesem Namen ablegen. /etc/mosquitto gehört root.
 LOCK="/etc/mosquitto/powermanagement-mqtt-zugaenge.lock"
+# Marke „Dateien geändert, Broker noch nicht neu geladen“ – ebenfalls in
+# /etc/mosquitto, nur root.
+NEULADEN_MARKE="/etc/mosquitto/powermanagement-mqtt-zugaenge.neuladen"
 EIGENTUEMER_PRUEFEN="ja"
 NUR_NAMEN="nein"
 CONF_NEU=""
@@ -130,6 +144,7 @@ for arg in "$@"; do
         --soll=*)          einmal --soll; pfad_setzen SOLL "${arg#*=}" --soll ;;
         --ist=*)           einmal --ist; pfad_setzen IST "${arg#*=}" --ist ;;
         --lock=*)          einmal --lock; pfad_setzen LOCK "${arg#*=}" --lock ;;
+        --neuladen-marke=*) einmal --neuladen-marke; pfad_setzen NEULADEN_MARKE "${arg#*=}" --neuladen-marke ;;
         --ohne-eigentuemerpruefung) einmal "$arg"; EIGENTUEMER_PRUEFEN="nein" ;;
         --nur-namen)       einmal "$arg"; NUR_NAMEN="ja" ;;
         *)                 aufruf_fehler "unbekannte Option: ${arg%%=*}" ;;
@@ -616,6 +631,27 @@ datei_ersetzen() {
     OFFEN_TMP=""
 }
 
+# Marke für ein ausstehendes Neuladen. Fehler hier brechen nichts ab: Ohne
+# Marke fehlt nur das Nachholen, mit einer übriggebliebenen lädt der
+# nächste Lauf einmal zu viel neu (SIGHUP – unschädlich).
+marke_da() {
+    [[ -e "$NEULADEN_MARKE" || -L "$NEULADEN_MARKE" ]]
+}
+marke_setzen() {
+    marke_da && return 0
+    if ! ( : >> "$NEULADEN_MARKE" ) 2>/dev/null; then
+        echo "mqtt-zugaenge.sh: Marke $NEULADEN_MARKE ließ sich nicht anlegen" >&2
+        return 0
+    fi
+    chmod 600 -- "$NEULADEN_MARKE" 2>/dev/null || true
+}
+marke_loeschen() {
+    marke_da || return 0
+    rm -f -- "$NEULADEN_MARKE" 2>/dev/null \
+        || echo "mqtt-zugaenge.sh: Marke $NEULADEN_MARKE ließ sich nicht löschen" >&2
+    return 0
+}
+
 neu_laden() {
     case "$NEU_LADEN" in
         nein) return 0 ;;
@@ -796,8 +832,27 @@ runde() {
         fi
         [[ "$passwd_ersetzt" == "ja" || "$wirksam_ersetzt" == "ja" ]] && geaendert="ja"
 
+        # Hat ein Lauf mit --neu-laden=nein Dateien geändert, die der Broker
+        # womöglich nie geladen hat (Marke)? Dann gilt das als Änderung, auch
+        # wenn die Dateien jetzt gleich bleiben.
+        local ausstehend="nein"
+        if [[ "$geaendert" != "ja" ]] && marke_da; then
+            ausstehend="ja"
+            geaendert="ja"
+        fi
+        if [[ "$geaendert" == "ja" && "$NEU_LADEN" == "nein" ]]; then
+            marke_setzen
+        fi
+
+        # Scheitert das Neuladen, bleibt eine Marke stehen (auch eine aus
+        # einem früheren Lauf – die zurückgelegten Dateien hat der Broker dann
+        # ebenso wenig geladen).
         if [[ "$geaendert" == "ja" ]] && ! neu_laden; then
-            echo "mqtt-zugaenge.sh: Mosquitto ließ sich nicht neu laden – alter Stand wiederhergestellt" >&2
+            if [[ "$ausstehend" == "ja" ]]; then
+                echo "mqtt-zugaenge.sh: Mosquitto ließ sich nicht neu laden – das ausstehende Neuladen versucht der nächste Lauf" >&2
+            else
+                echo "mqtt-zugaenge.sh: Mosquitto ließ sich nicht neu laden – alter Stand wiederhergestellt" >&2
+            fi
             FEHLER+=("0 neuladen")
             fehler="ja"
             geaendert="nein"
@@ -818,6 +873,12 @@ runde() {
         else
             if [[ "$geaendert" == "ja" ]]; then
                 RUNDE_GEAENDERT="ja"
+                if [[ "$NEU_LADEN" == "nein" ]]; then
+                    echo "mqtt-zugaenge.sh: Broker noch nicht neu geladen (Marke $NEULADEN_MARKE) – das übernimmt der Aufrufer, sonst der nächste Lauf" >&2
+                else
+                    marke_loeschen
+                    [[ "$ausstehend" == "ja" ]] && echo "mqtt-zugaenge.sh: ausstehendes Neuladen nachgeholt" >&2
+                fi
                 for name in "${!S_GEN[@]}"; do
                     if [[ -z "${B_GEN[$name]+x}" ]]; then
                         plus+=1

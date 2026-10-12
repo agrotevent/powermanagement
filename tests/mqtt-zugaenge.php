@@ -193,6 +193,11 @@ try {
     $stoppen($geraet2);
     [$geraet2, $bereit] = $starten($p2, $log2, $p2, $kennwort2);
     pruefe($bereit, 'nach dem Neustart: Anmeldung mit dem eigenen Zugang');
+    // „Erneut übertragen“ hinge es jetzt ab (neues Kennwort am Broker) – abgelehnt
+    $hashVorher = Database::scalar('SELECT kennwort_hash FROM mqtt_zugaenge WHERE id = ?', [(int) $zugang2['id']]);
+    $erg = MqttZugaenge::uebertragen((int) $zugang2['id']);
+    pruefe(!$erg['ok'] && str_contains($erg['message'], 'nutzt ihn vermutlich schon'), 'Übertragen nach dem Neustart abgelehnt – ' . $erg['message']);
+    gleich(Database::scalar('SELECT kennwort_hash FROM mqtt_zugaenge WHERE id = ?', [(int) $zugang2['id']]), $hashVorher, 'Kennwort am Broker unverändert');
     $erg = MqttZugaenge::pruefen((int) $zugang2['id']);
     pruefe($erg['ok'], 'Umstellung bestätigt – ' . $erg['message']);
     gleich(MqttZugaenge::nachPraefix($p2)['zustand'] ?? null, 'eigen', 'Zustand „eigener Zugang“');
@@ -218,12 +223,20 @@ try {
     $erg = MqttZugaenge::pruefen((int) $zugang2['id']);
     pruefe($erg['ok'], '„eigen“ erneut prüfen – ' . $erg['message']);
 
-    // Neues Kennwort: geht über den eigenen Kanal ans Gerät, gilt nach dem Neustart
+    // Node-RED bestätigt die Schutzliste (hier von Hand als „nodered“)
+    $liste = MqttZugaenge::schutzStatus();
+    pruefe($liste !== null && $liste['liste'] !== null && !$liste['aktuell'], 'ohne Bestätigung von Node-RED: Schutz gilt als nicht übernommen');
+    $quittung = mqttVerbinden($broker, 'nodered', $kw['nodered'], $kennung . '-quittung');
+    $quittung->veroeffentlichen('pm/status/nodered-schutz', (string) json_encode(['ts' => $liste['liste'] ?? 0, 'anzahl' => 1, 'zeit' => 1]), 1, true);
+    $quittung->trennen();
+    pruefe((MqttZugaenge::schutzStatus()['aktuell'] ?? false) === true, 'mit Bestätigung von Node-RED: Schutz übernommen');
+
+    // Neues Kennwort: einmal angezeigt (nie per MQTT), am Gerät eingetragen
     $erg = MqttZugaenge::kennwortErneuern((int) $zugang2['id']);
-    pruefe($erg['ok'] && !isset($erg['kennwort']), 'Gen2: neues Kennwort übertragen – ' . $erg['message']);
-    $konfig = (array) json_decode((string) @file_get_contents($log2 . '.konfig'), true);
-    $kennwortNeu = (string) ($konfig['pass'] ?? '');
-    pruefe($kennwortNeu !== '' && $kennwortNeu !== $kennwort2, 'Gerät hat das neue Kennwort gespeichert');
+    pruefe($erg['ok'] && strlen((string) ($erg['kennwort'] ?? '')) === 24 && ($erg['generation'] ?? 0) === 2, 'Gen2: neues Kennwort einmal zurück – ' . $erg['message']);
+    $kennwortNeu = (string) ($erg['kennwort'] ?? '');
+    pruefe(!str_contains((string) file_get_contents($log2), $kennwortNeu), 'neues Kennwort ging nicht über MQTT');
+    file_put_contents($log2 . '.konfig', (string) json_encode(['user' => $p2, 'pass' => $kennwortNeu]));
     $abgewiesen = false;
     try {
         mqttVerbinden($broker, $p2, $kennwort2, $kennung . '-alt')->trennen();
@@ -243,6 +256,50 @@ try {
     pruefe(mqttKommtAn($gemeinsam, $beobachter, $p2 . '/rpc'), 'gemeinsamer Zugang erreicht das Gerät wieder');
     pruefe(!isset($schutz()[MqttZugaenge::geraetName($p2)]), 'entfernt: nicht mehr in der Schutzliste');
     $stoppen($geraet2);
+
+    // --------------------------------------------- Gen2: Entfernen fragt das Gerät, von Hand einrichten
+    $p3 = $kennung . '-gen2b';
+    $log3 = sys_get_temp_dir() . '/' . $p3 . '.log';
+    array_push($dateien, $log3, $log3 . '.konfig');
+    [$geraet3, $bereit] = $starten($p3, $log3, 'shelly', $kw['shelly']);
+    pruefe($bereit, 'zweite Gen2-Attrappe am gemeinsamen Zugang');
+    $erg = MqttZugaenge::einrichten($p3, 2);
+    $zugang3 = MqttZugaenge::nachPraefix($p3);
+    pruefe($erg['ok'] && ($zugang3['zustand'] ?? '') === 'uebertragen', 'zweites Gerät übertragen – ' . $erg['message']);
+    $erg = MqttZugaenge::entfernen((int) $zugang3['id']);
+    pruefe(!$erg['ok'] && !empty($erg['erzwingbar']) && MqttZugaenge::nachPraefix($p3) !== null, 'Entfernen abgelehnt: Gerät hat den Zugang gespeichert – ' . $erg['message']);
+    $erg = MqttZugaenge::entfernen((int) $zugang3['id'], true);
+    pruefe($erg['ok'] && MqttZugaenge::nachPraefix($p3) === null, 'Entfernen erzwungen');
+    // Der Bediener trägt am Gerät wieder den gemeinsamen Zugang ein und startet neu
+    $stoppen($geraet3);
+    @unlink($log3 . '.konfig');
+    [$geraet3, $bereit] = $starten($p3, $log3, 'shelly', $kw['shelly']);
+    $logLaenge = strlen((string) file_get_contents($log3));
+    $erg = MqttZugaenge::einrichten($p3, 2, true);
+    pruefe($erg['ok'] && strlen((string) ($erg['kennwort'] ?? '')) === 24 && ($erg['generation'] ?? 0) === 2, 'Gen2 von Hand: Kennwort einmal zurück');
+    $kennwort3 = (string) ($erg['kennwort'] ?? '');
+    $neu = substr((string) file_get_contents($log3), $logLaenge);
+    pruefe(!str_contains($neu, $kennwort3) && !str_contains($neu, 'MQTT.SetConfig'), 'von Hand: nichts per MQTT übertragen');
+    $zugang3 = MqttZugaenge::nachPraefix($p3);
+    gleich($zugang3['zustand'] ?? null, 'angelegt', 'von Hand: Zustand „angelegt“');
+    $erg = MqttZugaenge::pruefen((int) $zugang3['id']);
+    pruefe(!$erg['ok'] && str_contains($erg['message'], 'anderer Benutzer'), 'vor dem Eintragen: Prüfung lehnt ab – ' . $erg['message']);
+    // „Weboberfläche“: Zugang eintragen, speichern, neu starten
+    file_put_contents($log3 . '.konfig', (string) json_encode(['user' => $p3, 'pass' => $kennwort3]));
+    $stoppen($geraet3);
+    [$geraet3, $bereit] = $starten($p3, $log3, $p3, $kennwort3);
+    pruefe($bereit, 'von Hand eingetragen, mit eigenem Zugang angemeldet');
+    $erg = MqttZugaenge::pruefen((int) $zugang3['id']);
+    pruefe($erg['ok'] && (MqttZugaenge::nachPraefix($p3)['zustand'] ?? '') === 'eigen' && $gesperrt($p3), 'von Hand eingerichtet und bestätigt – ' . $erg['message']);
+    $stoppen($geraet3);
+
+    // Doppelgänger: zwei Präfixe mit demselben Gerätenamen → kein Zugang
+    $dg = $kennung . '-dg';
+    $quellen[] = (int) Datenquellen::speichern(null, ['art' => 'shelly', 'name' => 'Prüf-Doppelgänger', 'geraet' => $dg . '-quelle', 'extern_id' => 'shelly/' . $dg, 'profil' => 'gen2', 'aktiv' => 1])['id'];
+    $erg = MqttZugaenge::einrichten($dg, 2);
+    pruefe(!$erg['ok'] && str_contains($erg['message'], 'mehrere MQTT-Präfixe'), 'Doppelgänger-Präfix: Einrichten abgelehnt – ' . $erg['message']);
+    $zeilen = array_column(MqttZugaenge::uebersicht(), null, 'praefix');
+    pruefe(($zeilen['shelly/' . $dg]['doppelt'] ?? true) === false, 'Übersicht: einzelnes Präfix ist kein Doppelgänger');
 
     // --------------------------------------------- Gen1
     $id1 = $kennung . '-G1AB';
@@ -285,7 +342,7 @@ try {
     pruefe(!$erg['ok'] && str_contains($erg['message'], 'demselben Namen'), 'gleicher Gerätename (nur Groß/Klein anders) abgelehnt');
 
     // --------------------------------------------- keine Geheimnisse
-    $suchen = [$kennwort2, $kennwortNeu, $kennwort1, $kennwort1b];
+    $suchen = [$kennwort2, $kennwortNeu, $kennwort3, $kennwort1, $kennwort1b];
     $audit = (string) json_encode(Database::select("SELECT * FROM audit_log WHERE action LIKE 'mqtt_zugang.%'"));
     $soll = (string) @file_get_contents($broker['soll']);
     $ist = (string) @file_get_contents($broker['ist']);

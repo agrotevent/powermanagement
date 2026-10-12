@@ -35,12 +35,13 @@ declare(strict_types=1);
  *   bin/power mqtt:vorpruefen <präfix> | --alle
  *                                   Gen2, nur lesend: antwortet das Gerät an einen Absender in
  *                                   seinem Baum, stimmt das Präfix, wartet es auf einen Neustart?
- *   bin/power mqtt:zugang-einrichten <präfix> [--gen1]
+ *   bin/power mqtt:zugang-einrichten <präfix> [--gen1] [--von-hand]
  *                                   Gen2: anlegen, prüfen, übertragen (wirksam ab Neustart).
- *                                   Gen1: das Kennwort steht einmal auf der Standardausgabe
+ *                                   Gen1 und --von-hand: das Kennwort steht einmal auf der
+ *                                   Standardausgabe und wird am Gerät eingetragen
  *   bin/power mqtt:zugang-pruefen <präfix> | --alle [--erzwingen]
  *                                   Umstellung bestätigen (sperrt dann den gemeinsamen Zugang)
- *   bin/power mqtt:zugang-entfernen <präfix> --ja
+ *   bin/power mqtt:zugang-entfernen <präfix> --ja [--erzwingen]
  *   bin/power mqtt:zugaenge-schreiben [--viele-entfernen]
  *                                   Sollzustand für den Broker neu schreiben und warten
  *                                   (als Besitzer von storage/mqtt, z. B. sudo -u www-data)
@@ -219,6 +220,14 @@ switch ($befehl) {
             : 'Abgleich ' . $e['status'] . ', zuletzt ' . date('d.m.Y H:i', $e['zeit']) . ', ' . count($e['konten']) . ' eigene Zugänge, ' . count($e['gesperrt']) . ' gesperrt'
               . ($e['basis_muster'] ? '' : ' – ACL-Muster fehlen') . ($e['acl_wirksam'] ? '' : ' – Mosquitto liest nicht die erzeugte ACL')
               . ($e['fehler'] !== [] ? ' – ' . MqttZugaenge::fehlerText($e['fehler']) : '')));
+        if ($e !== null && $e['gesperrt'] !== []) {
+            $schutz = MqttZugaenge::schutzStatus();
+            $aus('Schutz:     ' . match (true) {
+                $schutz === null       => 'Broker nicht erreichbar',
+                $schutz['aktuell']     => 'Node-RED hat die Liste der umgestellten Geräte bestätigt',
+                default                => 'Node-RED hat die Liste der umgestellten Geräte NICHT bestätigt – Flows aktualisieren',
+            });
+        }
         if ($influx['ok']) {
             $pipeline = Messdaten::pipeline();
             $aus('Schreiben:  ' . ($pipeline === null ? 'in der letzten Stunde kein Herzschlag von Node-RED in der InfluxDB'
@@ -392,7 +401,7 @@ switch ($befehl) {
         if ($praefix === '') {
             $fehler('Bitte das MQTT-Präfix angeben (Gen1: shellies/<ID>).');
         }
-        $erg = MqttZugaenge::einrichten($praefix, isset($optionen['gen1']) ? 1 : 2);
+        $erg = MqttZugaenge::einrichten($praefix, isset($optionen['gen1']) ? 1 : 2, isset($optionen['von-hand']));
         if (!$erg['ok']) {
             $fehler($erg['message']);
         }
@@ -411,7 +420,7 @@ switch ($befehl) {
         if (!isset($optionen['ja'])) {
             $fehler('Ein Gerät, das den Zugang nutzt, ist danach getrennt. Bestätigen mit --ja.');
         }
-        $erg = MqttZugaenge::entfernen((int) $zugang['id']);
+        $erg = MqttZugaenge::entfernen((int) $zugang['id'], isset($optionen['erzwingen']));
         $erg['ok'] ? $aus($erg['message']) : $fehler($erg['message']);
         break;
 

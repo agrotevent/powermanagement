@@ -105,7 +105,8 @@ const flows = [
         '',
         'Welche Shellys einen eigenen MQTT-Zugang haben, meldet die Oberfläche',
         'auf `pm/status/mqtt-zugaenge`; die Shelly-Tabs lesen die Liste aus dem',
-        'globalen Kontext.',
+        'globalen Kontext. Jede angenommene Liste quittiert Node-RED retained',
+        'auf `pm/status/nodered-schutz`.',
     ].join('\n')),
     tab(T_GEN2, 'Shelly Gen2+', 'Shelly Plus/Pro/Gen3/Gen4 – Status über MQTT („Generic status update over MQTT").'),
     tab(T_GEN1, 'Shelly Gen1', 'Shelly Gen1 – ein Thema je Wert unter shellies/<id>/…'),
@@ -142,7 +143,9 @@ const flows = [
         '* **pm/status/mqtt-zugaenge** – Shellys mit eigenem MQTT-Zugang',
         '  (Gerätename → Präfix, retained von der Oberfläche). Für sie gilt in',
         '  den Shelly-Tabs nur ihr genaues Präfix; ein anderes Präfix mit',
-        '  demselben Gerätenamen wird verworfen.',
+        '  demselben Gerätenamen wird verworfen. Jede angenommene Liste wird',
+        '  retained auf `pm/status/nodered-schutz` quittiert (`ts` der Liste,',
+        '  `anzahl` geschützter Geräte, `zeit` der Annahme).',
         '',
         'Zugänge stehen nicht hier, sondern in `/etc/powermanagement/node-red.env`',
         '(InfluxDB, Broker-Adresse) und `flows_cred.json` (Broker-Anmeldung).',
@@ -154,13 +157,17 @@ const flows = [
     linkOut('pm_link_messwert', T_START, 'zu „Schreiben"', [LINK_ZIEL], 355, 140),
     mqttIn('pm_in_mqtt_zugaenge', T_START, 'pm/status/mqtt-zugaenge', 'pm/status/mqtt-zugaenge', '1', 170, 200,
         ['pm_mqtt_zugaenge']),
-    funktion('pm_mqtt_zugaenge', T_START, 'MQTT-Zugänge merken', 'mqtt-zugaenge.js', 0,
+    funktion('pm_mqtt_zugaenge', T_START, 'MQTT-Zugänge merken', 'mqtt-zugaenge.js', 1,
         'Merkt sich im globalen Kontext (`mqtt_geschuetzt`), welche Shellys über ihren eigenen '
         + 'MQTT-Zugang verbunden sind: Gerätename → genaues Präfix.\n\n'
         + '„Shelly Gen2+ übersetzen", „Shelly Gen2+ Geräteinfo" und „Shelly Gen1 übersetzen" verwerfen '
         + 'für diese Geräte alles unter einem anderen Präfix. Ungültige Nachrichten werden übergangen, '
-        + 'es gilt die letzte gültige Liste.',
-        420, 200, []),
+        + 'es gilt die letzte gültige Liste.\n\n'
+        + 'Ausgang 1: Quittung jeder angenommenen Liste auf `pm/status/nodered-schutz` (retained, QoS 1): '
+        + '`{"ts": <ts der Liste oder null>, "anzahl": <geschützte Geräte>, "zeit": <ms>}`. '
+        + 'Ungültiges wird nicht quittiert.',
+        420, 200, [['pm_schutz_aus']]),
+    mqttOut('pm_schutz_aus', T_START, 'pm/status/nodered-schutz', 'pm/status/nodered-schutz', '1', 'true', 680, 200),
 
     // -------------------------------------------------------- Shelly Gen2+
     kommentar('pm_kommentar_gen2', T_GEN2, 'Shelly Gen2+ (Plus, Pro, Gen3, Gen4)', [

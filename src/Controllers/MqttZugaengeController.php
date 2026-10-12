@@ -36,7 +36,14 @@ final class MqttZugaengeController extends Controller
         } else {
             $filter = '';
         }
+        // Bestätigt Node-RED die Schutzliste? Nur fragen, wenn es etwas zu
+        // schützen gibt – das kostet einen Blick auf den Broker.
+        $schutz = null;
+        if (!Config::isDemo() && $zaehler['eigen'] > 0) {
+            $schutz = MqttZugaenge::schutzStatus();
+        }
         $this->view('mqtt-zugaenge/index', [
+            'schutz'    => $schutz,
             'liste'     => $liste,
             'zaehler'   => $zaehler,
             'filter'    => $filter,
@@ -74,7 +81,7 @@ final class MqttZugaengeController extends Controller
         if (!$this->erlaubt()) {
             return;
         }
-        $ergebnis = MqttZugaenge::einrichten($request->str('praefix'), $request->int('generation') === 1 ? 1 : 2);
+        $ergebnis = MqttZugaenge::einrichten($request->str('praefix'), $request->int('generation') === 1 ? 1 : 2, $request->bool('von_hand'));
         $this->ergebnis($request, $ergebnis);
     }
 
@@ -102,7 +109,7 @@ final class MqttZugaengeController extends Controller
     public function entfernen(Request $request): void
     {
         if ($this->erlaubt()) {
-            $this->ergebnis($request, MqttZugaenge::entfernen($request->int('id')));
+            $this->ergebnis($request, MqttZugaenge::entfernen($request->int('id'), $request->bool('erzwingen')));
         }
     }
 
@@ -117,6 +124,7 @@ final class MqttZugaengeController extends Controller
                 'benutzer' => (string) ($ergebnis['benutzer'] ?? ''),
                 'kennwort' => (string) $ergebnis['kennwort'],
                 'meldung'  => (string) $ergebnis['message'],
+                'generation' => (int) ($ergebnis['generation'] ?? 1),
             ]);
             return;
         }

@@ -21,12 +21,12 @@ $aktiv = $darf && ($grund === null || \App\Support\Config::isDemo());
     <div class="card-body">
         <p>Alle Shellys melden sich bisher mit dem <strong>gemeinsamen Zugang</strong> <span class="mono">shelly</span> am Broker an.
             Wer dieses Kennwort aus einem Gerät ausliest, kann damit jedes andere Gerät schalten und mitlesen. Ein <strong>eigener Zugang</strong>
-            darf nur den Themenbaum seines Geräts – und sobald die Umstellung bestätigt ist, hat der gemeinsame Zugang auf dieses Gerät keinen Zugriff mehr.
+            darf nur den Themenbaum seines Geräts – und sobald die Umstellung bestätigt ist, kann der gemeinsame Zugang dieses Gerät weder schalten noch mitlesen.
             Der gemeinsame Zugang bleibt für alle anderen Geräte, bis jedes umgestellt ist.</p>
         <ol class="small mb0">
             <li><strong>Gen2+</strong> (Plus, Pro, Gen3/4): „Eigenen Zugang einrichten“ legt ihn am Broker an und überträgt ihn ans Gerät.
                 Wirksam wird er mit dem <strong>nächsten Neustart</strong> des Geräts (Weboberfläche oder Strom aus/ein) – die App startet nie selbst neu.
-                Bis dahin gelten beide Zugänge.</li>
+                Bis dahin gelten beide Zugänge. Die Übertragung läuft noch über den gemeinsamen Zugang; wer das ausschließen will, nimmt „von Hand“.</li>
             <li><strong>Gen1</strong>: Benutzer und Kennwort werden einmal angezeigt und am Gerät eingetragen (Internet &amp; Security → Advanced Developer Settings).</li>
             <li><strong>Umstellung prüfen</strong>: der gemeinsame Zugang wird für bis zu <?= (int) MqttZugaenge::PRUEFUNG_SEKUNDEN[2] ?> s (Gen1: <?= (int) MqttZugaenge::PRUEFUNG_SEKUNDEN[1] ?> s)
                 auf dieses Gerät gesperrt. Antwortet es trotzdem, nutzt es den eigenen Zugang, und die Sperre bleibt. Sonst fällt sie sofort weg.</li>
@@ -37,6 +37,15 @@ $aktiv = $darf && ($grund === null || \App\Support\Config::isDemo());
 <?php if ($grund !== null): ?><div class="notice warn"><?= View::e($grund) ?></div><?php endif; ?>
 <?php if ($grund === null && $hindernis !== null): ?><div class="notice warn">Einrichten geht, bestätigen nicht: <?= View::e($hindernis) ?></div><?php endif; ?>
 <?php if ($fehler !== null): ?><div class="notice danger">Geräteliste aus der InfluxDB: <?= View::e($fehler) ?></div><?php endif; ?>
+<?php if ($schutz !== null && !$schutz['aktuell']): ?>
+    <div class="notice warn">Node-RED hat die Liste der umgestellten Geräte nicht bestätigt. Dort laufen vermutlich Flows ohne Schutz vor Doppelgänger-Präfixen
+        (etwa von Hand geänderte, beim Update behaltene). Die Flows aktualisieren – siehe docs/installation-debian-lxc.md.</div>
+<?php endif; ?>
+<?php $ungeschuetzt = array_filter($liste, static fn (array $z): bool => $z['zustand'] === 'eigen' && !$z['geschuetzt']); ?>
+<?php if ($ungeschuetzt !== []): ?>
+    <div class="notice danger">Bei <?= count($ungeschuetzt) ?> bestätigten Gerät(en) ist der gemeinsame Zugang am Broker gerade <strong>nicht</strong> gesperrt.
+        „Prüfen“ stellt die Sperre wieder her, sobald der Broker-Abgleich arbeitet.</div>
+<?php endif; ?>
 <?php if ($ergebnis !== null && $ergebnis['fehler'] !== []): ?>
     <div class="notice warn">Der Broker-Abgleich meldet: <?= View::e(MqttZugaenge::fehlerText($ergebnis['fehler'])) ?></div>
 <?php endif; ?>
@@ -77,7 +86,9 @@ $aktiv = $darf && ($grund === null || \App\Support\Config::isDemo());
                     </td>
                     <td data-label="Zugang">
                         <span class="badge <?= View::e($badge[$z['zustand']] ?? '') ?>"><?= View::e(MqttZugaenge::ZUSTAENDE[$z['zustand']] ?? $z['zustand']) ?></span>
-                        <?php if ($zugang !== null && (int) $zugang['neustart_noetig'] === 1 && $z['zustand'] === 'eigen'): ?><span class="badge warn">Neustart nötig</span><?php endif; ?>
+                        <?php if ($zugang !== null && (int) $zugang['neustart_noetig'] === 1 && $z['zustand'] === 'eigen'): ?><span class="badge warn">neues Kennwort eintragen</span><?php endif; ?>
+                        <?php if ($z['zustand'] === 'eigen' && !$z['geschuetzt']): ?><span class="badge bad">nicht gesperrt</span><?php endif; ?>
+                        <?php if ($z['doppelt']): ?><span class="badge warn" title="Mehrere Präfixe mit demselben Gerätenamen">Doppelgänger?</span><?php endif; ?>
                         <?php if ($zugang !== null && (string) $zugang['meldung'] !== ''): ?><div class="small muted"><?= View::e((string) $zugang['meldung']) ?></div><?php endif; ?>
                         <?php if (!$z['umstellbar'] && $zugang === null): ?><div class="small muted"><?= View::e($z['grund']) ?></div><?php endif; ?>
                     </td>
@@ -97,6 +108,13 @@ $aktiv = $darf && ($grund === null || \App\Support\Config::isDemo());
                                     <?= Csrf::field() ?><input type="hidden" name="praefix" value="<?= View::e($z['praefix']) ?>"><input type="hidden" name="generation" value="<?= (int) $z['generation'] ?>">
                                     <button class="btn btn-sm btn-primary" type="submit">Eigenen Zugang einrichten</button>
                                 </form>
+                                <?php if ((int) $z['generation'] === 2): ?>
+                                    <form method="post" action="/datenquellen/mqtt-zugaenge/einrichten" data-laeuft="richtet ein …"
+                                          data-confirm="<?= View::e('Eigenen Zugang für ' . $z['praefix'] . ' anlegen, ohne ihn per MQTT zu übertragen? Benutzer und Kennwort werden einmal angezeigt und in der Weboberfläche des Shelly eingetragen.') ?>">
+                                        <?= Csrf::field() ?><input type="hidden" name="praefix" value="<?= View::e($z['praefix']) ?>"><input type="hidden" name="generation" value="2"><input type="hidden" name="von_hand" value="1">
+                                        <button class="btn btn-sm btn-ghost" type="submit" title="Kennwort anzeigen und am Gerät eintragen – geht nicht über MQTT">von Hand</button>
+                                    </form>
+                                <?php endif; ?>
                             <?php endif; ?>
                             <?php if ($zugang !== null && (int) $z['generation'] === 2 && in_array($z['zustand'], ['angelegt', 'uebertragen'], true)): ?>
                                 <form method="post" action="/datenquellen/mqtt-zugaenge/uebertragen" data-laeuft="überträgt …">
@@ -104,7 +122,7 @@ $aktiv = $darf && ($grund === null || \App\Support\Config::isDemo());
                                     <button class="btn btn-sm<?= $z['zustand'] === 'angelegt' ? ' btn-primary' : '' ?>" type="submit"><?= $z['zustand'] === 'angelegt' ? 'Übertragen' : 'Erneut übertragen' ?></button>
                                 </form>
                             <?php endif; ?>
-                            <?php if ($zugang !== null && $z['zustand'] !== 'pruefung' && !($z['zustand'] === 'angelegt' && (int) $z['generation'] === 2)): ?>
+                            <?php if ($zugang !== null && $z['zustand'] !== 'pruefung'): ?>
                                 <form method="post" action="/datenquellen/mqtt-zugaenge/pruefen" data-laeuft="prüft …" data-laeuft-hinweis="Das dauert bis zu einer halben Minute.">
                                     <?= Csrf::field() ?><input type="hidden" name="id" value="<?= $id ?>">
                                     <button class="btn btn-sm<?= $z['zustand'] !== 'eigen' ? ' btn-primary' : '' ?>" type="submit"><?= $z['zustand'] === 'eigen' ? 'Prüfen' : 'Umstellung prüfen' ?></button>
@@ -117,11 +135,9 @@ $aktiv = $darf && ($grund === null || \App\Support\Config::isDemo());
                                     </form>
                                 <?php endif; ?>
                             <?php endif; ?>
-                            <?php if ($zugang !== null && ($z['zustand'] === 'eigen' || ((int) $z['generation'] === 1 && $z['zustand'] === 'angelegt'))): ?>
+                            <?php if ($zugang !== null && in_array($z['zustand'], ['angelegt', 'eigen'], true)): ?>
                                 <form method="post" action="/datenquellen/mqtt-zugaenge/erneuern" data-laeuft="erneuert …"
-                                      data-confirm="<?= View::e((int) $z['generation'] === 1
-                                          ? 'Neues Kennwort für ' . $z['praefix'] . '? Das Gerät ist getrennt, bis es eingetragen ist.'
-                                          : 'Neues Kennwort für ' . $z['praefix'] . ' übertragen? Das Gerät ist bis zu seinem nächsten Neustart getrennt.') ?>">
+                                      data-confirm="<?= View::e('Neues Kennwort für ' . $z['praefix'] . '? Es wird einmal angezeigt und am Gerät eingetragen. Bis dahin ist das Gerät getrennt.') ?>">
                                     <?= Csrf::field() ?><input type="hidden" name="id" value="<?= $id ?>">
                                     <button class="btn btn-sm btn-ghost" type="submit">Neues Kennwort</button>
                                 </form>
@@ -132,6 +148,13 @@ $aktiv = $darf && ($grund === null || \App\Support\Config::isDemo());
                                     <?= Csrf::field() ?><input type="hidden" name="id" value="<?= $id ?>">
                                     <button class="btn btn-sm btn-ghost" type="submit">Entfernen</button>
                                 </form>
+                                <?php if ((int) $z['generation'] === 2 && $z['zustand'] !== 'eigen'): ?>
+                                    <form method="post" action="/datenquellen/mqtt-zugaenge/entfernen" data-laeuft="entfernt …"
+                                          data-confirm="Entfernen erzwingen? Hat der Shelly den eigenen Zugang schon gespeichert, verliert er beim nächsten Neustart die Verbindung – vorher in seiner Weboberfläche wieder den gemeinsamen Zugang eintragen.">
+                                        <?= Csrf::field() ?><input type="hidden" name="id" value="<?= $id ?>"><input type="hidden" name="erzwingen" value="1">
+                                        <button class="btn btn-sm btn-ghost" type="submit" title="Ohne das Gerät zu fragen">erzwingen</button>
+                                    </form>
+                                <?php endif; ?>
                             <?php endif; ?>
                         </div>
                         <?php endif; ?>
@@ -142,4 +165,5 @@ $aktiv = $darf && ($grund === null || \App\Support\Config::isDemo());
         </table>
     </div>
 </div>
-<p class="small muted">Wird ein Gerät mit eigenem Zugang ersetzt (gleiches Präfix, neues Gerät): „Neues Kennwort“ und am neuen Gerät eintragen – oder den Zugang entfernen, dann gilt dort wieder der gemeinsame.</p>
+<p class="small muted">Wird ein Gerät mit eigenem Zugang ersetzt (gleiches Präfix, neues Gerät): „Neues Kennwort“ und am neuen Gerät eintragen – oder den Zugang entfernen, dann gilt dort wieder der gemeinsame.
+    Ein neues Kennwort wird immer angezeigt, nie per MQTT übertragen: wer das bisherige Kennwort kennt, könnte dort mitlesen.</p>

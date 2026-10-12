@@ -15,10 +15,16 @@ $subtitle = 'Wird nur jetzt angezeigt';
             <dd><code id="mqtt-kennwort"><?= View::e($kennwort) ?></code> <button class="btn btn-sm btn-ghost" type="button" data-kopieren="#mqtt-kennwort">kopieren</button></dd>
         </dl>
         <ol class="small">
-            <li>Weboberfläche des Shelly öffnen: <strong>Internet &amp; Security → Advanced Developer Settings</strong>.</li>
-            <li>Nur <strong>Username</strong> und <strong>Password</strong> ändern; Server und alles andere unverändert lassen.</li>
-            <li>Speichern – der Shelly startet dabei neu und meldet sich mit dem eigenen Zugang an.</li>
-            <li>Hier „Umstellung prüfen“: dann verliert der gemeinsame Zugang den Zugriff auf dieses Gerät.</li>
+            <?php if ($generation === 1): ?>
+                <li>Weboberfläche des Shelly öffnen: <strong>Internet &amp; Security → Advanced Developer Settings</strong>.</li>
+                <li>Nur <strong>Username</strong> und <strong>Password</strong> ändern; Server und alles andere unverändert lassen.</li>
+                <li>Speichern – der Shelly startet dabei neu und meldet sich mit dem eigenen Zugang an.</li>
+            <?php else: ?>
+                <li>Weboberfläche des Shelly öffnen: <strong>Einstellungen → MQTT</strong>.</li>
+                <li>Nur <strong>Username</strong> und <strong>Password</strong> ändern; Server, Client-ID und Präfix unverändert lassen.</li>
+                <li>Speichern und neu starten (der Shelly bietet es an) – danach meldet er sich mit dem eigenen Zugang an.</li>
+            <?php endif; ?>
+            <li>Hier „Umstellung prüfen“: danach kann der gemeinsame Zugang dieses Gerät weder schalten noch mitlesen.</li>
         </ol>
     </div>
     <div class="card-footer btn-row">

@@ -43,8 +43,9 @@ keine Build-Schritte. JS-Bibliotheken liegen fertig unter `public/assets/vendor`
   schreibt außer dem Installationsskript nur dieser Helfer. Shelly-RPC nur
   über `ShellyRpc` (feste Methodenliste), Schalten weiter nur über
   `Steuerung::ausfuehren()`. Kennwörter eigener Zugänge werden nie
-  gespeichert (nur der Mosquitto-Hash): Gen2 direkt ans Gerät, Gen1 genau
-  einmal angezeigt. Die App startet nie ein Gerät neu.
+  gespeichert (nur der Mosquitto-Hash): Gen2 per `MQTT.SetConfig` ans Gerät
+  oder von Hand; Gen1 und jedes neue Kennwort genau einmal angezeigt, nie
+  per MQTT. Die App startet nie ein Gerät neu.
 - Neue Tabellen oder Spalten kommen als **neue Migration** dazu
   (`database/migrations/00N_*.sql`). Vorhandene Migrationen nie ändern.
 - Oberfläche **mobil zuerst**: Tabellen mit `tabelle-karten` und
