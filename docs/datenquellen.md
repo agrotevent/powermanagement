@@ -104,6 +104,19 @@ gemeinsamen Zugang `shelly`. Gen1-Geräte mit eigenem Zugang dürfen
 `shellies/announce` nicht schreiben; Modell und Firmware kommen dann aus
 `shellies/<id>/announce`.
 
+**Schutz vor Doppelgängern:** Node-RED bildet den Gerätenamen aus dem
+Präfix (letztes Segment, klein). `kuehlhaus/…` ergibt also denselben Namen
+wie `shelly/kuehlhaus/…`, `shellies/SHELLY1-b929cc` denselben wie
+`shellies/shelly1-B929CC` – und unter einem solchen Präfix dürfte der
+gemeinsame Zugang weiter schreiben. Deshalb veröffentlicht PowerManagement
+die Geräte mit bestätigtem eigenem Zugang (Gerätename → genaues Präfix)
+retained auf `pm/status/mqtt-zugaenge`, wo der gemeinsame Zugang nicht
+schreiben darf. Für diese Geräte nimmt Node-RED Messwerte, `online`,
+Geräteinfo und `announce` nur unter dem genauen Präfix an; alles andere –
+auch `shellies/announce` und RPC-Antworten auf `pm-nodered/rpc` – verwirft
+es. Eine ungültige Nachricht auf dem Thema ändert nichts, eine leere Liste
+hebt den Schutz auf.
+
 **RPC-Antworten (Gen2+):** Ein Shelly antwortet an `<src>/rpc`. Damit
 ein eigener Zugang dorthin schreiben darf – und der gemeinsame nicht –,
 liegt der Absender im Baum des Geräts:
@@ -284,7 +297,7 @@ passt.
 
 | Tab | Aufgabe |
 |-----|---------|
-| PowerManagement | Eingang `pm/messwert/#`, Herzschlag auf `pm/status/nodered` |
+| PowerManagement | Eingang `pm/messwert/#`, Herzschlag auf `pm/status/nodered`, Geräte mit eigenem Zugang von `pm/status/mqtt-zugaenge` (globaler Kontext) |
 | Shelly Gen2+ | `+/status/#`, `+/online`, RPC-Geräteinfo (Antworten auf `+/pm-nodered/rpc`, `shelly/+/pm-nodered/rpc`, `pm-nodered/rpc`) |
 | Shelly Gen1 | `shellies/#` |
 | Schreiben | bündelt im Sekundentakt (bis 5000 Zeilen je Anfrage, ab 500 wartenden sofort), puffert bei Ausfall bis 50 000 Zeilen bzw. 5 min und schreibt mit Originalzeit nach |

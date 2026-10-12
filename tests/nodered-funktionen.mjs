@@ -658,6 +658,180 @@ pruefe('Shelly Gen1: Prüf-Themen pm-… im Baum übergangen, announce im Baum d
     }
 });
 
+// Liste der Shellys mit eigenem MQTT-Zugang, wie sie die Oberfläche
+// retained auf pm/status/mqtt-zugaenge veröffentlicht
+const ZUGAENGE_THEMA = 'pm/status/mqtt-zugaenge';
+const schutzliste = (geschuetzt) => ({ topic: ZUGAENGE_THEMA, payload: JSON.stringify({ ts: uhr.jetzt, geschuetzt }) });
+const SCHUTZ = {
+    kuehlhaus: 'shelly/kuehlhaus',
+    'shellypro4pm-a0b1c2d3e4f5': 'shellypro4pm-a0b1c2d3e4f5',
+    'shelly1-b929cc': 'shellies/shelly1-B929CC',
+};
+// Objekte aus der Sandbox haben ein anderes Object.prototype – kopieren
+const gemerkt = (global) => ({ ...global.get('mqtt_geschuetzt') });
+
+pruefe('MQTT-Zugänge: Liste im globalen Kontext, Ungültiges übergangen, letzte gültige gilt', () => {
+    const global = speicher();
+    const zug = funktion('MQTT-Zugänge merken', { global });
+    assert.deepEqual(zug.lauf(schutzliste(SCHUTZ)), []);
+    assert.deepEqual(gemerkt(global), SCHUTZ);
+    assert.equal(zug.protokoll.warnungen.length, 0);
+    assert.equal(zug.protokoll.status.at(-1).text, '3 geschützt');
+
+    const p200 = 'shelly/' + 'x'.repeat(193);
+    const ungueltig = [
+        '{kaputt', '', 'null', '[]', '"text"', '42',
+        '{}', '{"ts":1}', '{"geschuetzt":null}', '{"geschuetzt":[]}', '{"geschuetzt":"shelly/a"}',
+        ...[{ a: '' }, { a: 42 }, { a: null }, { a: true }, { a: { p: 'shelly/a' } }, { a: ['shelly/a'] },
+            { a: 'shelly/+' }, { a: 'shelly/#' }, { a: '+/status' }, { a: 'shelly/a\u0000' }, { a: p200 + 'x' },
+            { '': 'shelly/a' }, { 'a+': 'shelly/a' }, { 'a#': 'shelly/a' }, { 'a\u0000': 'shelly/a' },
+            // ein ungültiger Eintrag verwirft die ganze Nachricht
+            { neu: 'shelly/neu', kaputt: '' },
+        ].map((geschuetzt) => JSON.stringify({ ts: 1, geschuetzt })),
+    ];
+    for (const payload of ungueltig) {
+        assert.deepEqual(zug.lauf({ topic: ZUGAENGE_THEMA, payload }), [], payload);
+        assert.deepEqual(gemerkt(global), SCHUTZ, 'übernommen: ' + payload);
+    }
+    assert.equal(zug.protokoll.warnungen.length, ungueltig.length);
+    assert.ok(zug.protokoll.warnungen.every((w) => !w.includes('shelly/')), 'Warnung nennt den Inhalt');
+    assert.equal(zug.protokoll.status.at(-1).text, 'ungültig übergangen – 3 geschützt');
+
+    // Puffer und 200 Zeichen gehen; „__proto__" wird ausgelassen, ohne den
+    // Prototyp zu setzen
+    zug.lauf({
+        topic: ZUGAENGE_THEMA,
+        payload: Buffer.from('{"ts":1,"geschuetzt":{"__proto__":{"kuehlhaus":"x"},"lang":"' + p200 + '","constructor":"shelly/constructor"}}'),
+    });
+    const liste = global.get('mqtt_geschuetzt');
+    assert.deepEqual(gemerkt(global), { lang: p200, constructor: 'shelly/constructor' });
+    assert.equal(Object.getPrototypeOf(Object.getPrototypeOf(liste)), null, 'Prototyp der Liste verändert');
+    assert.equal(liste.kuehlhaus, undefined);
+
+    // leere Liste: nichts geschützt
+    zug.lauf(schutzliste({}));
+    assert.deepEqual(gemerkt(global), {});
+    assert.equal(zug.protokoll.status.at(-1).text, '0 geschützt');
+});
+
+pruefe('MQTT-Zugänge: Doppelgänger eines Geräts mit eigenem Zugang verworfen, sein Präfix nicht', () => {
+    const start = uhr.jetzt;
+    try {
+        // „MQTT-Zugänge merken", die Gen2+-Funktionen und Gen1 liegen auf
+        // verschiedenen Tabs: eigener Flow-Kontext, gemeinsamer globaler
+        const global = speicher();
+        const flowGen2 = speicher();
+        const flowGen1 = speicher();
+        const zug = funktion('MQTT-Zugänge merken', { global });
+        const gen2 = funktion('Shelly Gen2+ übersetzen', { flow: flowGen2, global });
+        const info = funktion('Shelly Gen2+ Geräteinfo', { flow: flowGen2, global });
+        const gen1 = funktion('Shelly Gen1 übersetzen', { flow: flowGen1, global });
+        const schalter = '{"id":0,"output":true,"apower":5}';
+
+        // Noch ohne Liste: ein Doppelgänger von shelly/kuehlhaus bekommt eine
+        // Anfrage – sie ist noch offen, wenn die Liste ankommt
+        const [, rpcAlt] = gen2.lauf({ topic: 'kuehlhaus/status/switch:0', payload: schalter });
+        const alt = JSON.parse(rpcAlt[0].payload);
+        assert.equal(alt.src, 'kuehlhaus/pm-nodered');
+
+        zug.lauf(schutzliste(SCHUTZ));
+
+        // Gen2+: einteiliges Präfix statt shelly/<name>, andere Schreibweise,
+        // shelly/<id> statt <id>, Gerätename eines Gen1-Geräts
+        for (const thema of [
+            'kuehlhaus/status/switch:0', 'kuehlhaus/online', 'Kuehlhaus/status/switch:0', 'shelly/KUEHLHAUS/status/switch:0',
+            'shelly/shellypro4pm-a0b1c2d3e4f5/status/switch:0', 'SHELLYPRO4PM-A0B1C2D3E4F5/online',
+            'shelly1-b929cc/status/switch:0', 'shelly/shelly1-B929CC/online',
+        ]) {
+            assert.deepEqual(gen2.lauf({ topic: thema, payload: thema.endsWith('/online') ? 'true' : schalter }), [[], []], thema);
+        }
+        assert.deepEqual(Object.keys(flowGen2.get('gen2_geraete')), ['kuehlhaus'], 'Doppelgänger hat ein Gerät angelegt');
+
+        // Geräteinfo unter dem Doppelgänger: weder auf die alte Anfrage noch
+        // ohne Anfrage (nach einem Neustart) – die Anfrage bleibt offen
+        assert.deepEqual(info.lauf({ topic: 'kuehlhaus/pm-nodered/rpc', payload: geraeteinfo(alt.id, alt.src) }), [[]]);
+        assert.deepEqual(info.lauf({ topic: 'kuehlhaus/pm-nodered/rpc', payload: geraeteinfo(4711, 'kuehlhaus/pm-nodered') }), [[]]);
+        assert.deepEqual(info.lauf({ topic: 'shelly/Kuehlhaus/pm-nodered/rpc', payload: geraeteinfo(4712, 'shelly/Kuehlhaus/pm-nodered') }), [[]]);
+        assert.deepEqual(info.lauf({ topic: 'shelly1-b929cc/pm-nodered/rpc', payload: geraeteinfo(4713, 'shelly1-b929cc/pm-nodered') }), [[]]);
+        assert.deepEqual(offeneAnfragen(flowGen2).map((a) => a.src), ['kuehlhaus/pm-nodered']);
+
+        // das eigene Präfix geht durch wie bisher
+        const [werte, rpc] = gen2.lauf({ topic: 'shelly/kuehlhaus/status/switch:0', payload: schalter });
+        assert.deepEqual(zeilenAus(werte), [
+            `strom,geraet=kuehlhaus,kanal=switch:0,phase=sum,typ=shelly p=5 ${T()}`,
+            `zustand,geraet=kuehlhaus,kanal=switch:0,typ=shelly schalter=1 ${T()}`,
+            `geraet,geraet=kuehlhaus,typ=shelly generation=2,praefix="shelly/kuehlhaus" ${T()}`,
+        ]);
+        const a1 = JSON.parse(rpc[0].payload);
+        assert.equal(a1.src, 'shelly/kuehlhaus/pm-nodered');
+        assert.deepEqual(zeilenAus(gen2.lauf({ topic: 'shellypro4pm-a0b1c2d3e4f5/online', payload: 'false' })[0]),
+            [`zustand,geraet=shellypro4pm-a0b1c2d3e4f5,kanal=geraet,typ=shelly online=0 ${T()}`]);
+
+        // Rückfall auf pm-nodered/rpc: dorthin darf das Gerät nicht schreiben,
+        // die Antwort zählt nicht; die im eigenen Baum schon
+        uhr.jetzt += 61 * 1000;
+        const [rueckfall] = gen2.lauf({ topic: 'shelly/kuehlhaus/status/switch:0', payload: schalter })[1];
+        const a2 = JSON.parse(rueckfall.payload);
+        assert.equal(a2.src, 'pm-nodered');
+        assert.deepEqual(info.lauf({ topic: 'pm-nodered/rpc', payload: geraeteinfo(a2.id, 'pm-nodered') }), [[]]);
+        assert.equal(offeneAnfragen(flowGen2).filter((a) => a.geraet === 'kuehlhaus' && a.praefix === 'shelly/kuehlhaus').length, 2);
+        const [punkte] = info.lauf({ topic: 'shelly/kuehlhaus/pm-nodered/rpc', payload: geraeteinfo(a1.id, a1.src) });
+        assert.equal(zeilenAus(punkte)[0],
+            `geraet,geraet=kuehlhaus,typ=shelly modell="SNSW-001P16EU",produkt="Plus1PM",firmware="1.5.0",generation=2,mac="A0B1C2D3E4F5",praefix="shelly/kuehlhaus" ${T()}`);
+        assert.equal(offeneAnfragen(flowGen2).filter((a) => a.praefix === 'shelly/kuehlhaus').length, 0);
+        // nach einem Neustart im eigenen Baum ebenso
+        assert.equal(info.lauf({ topic: 'shelly/kuehlhaus/pm-nodered/rpc', payload: geraeteinfo(99, 'shelly/kuehlhaus/pm-nodered') })[0].length, 1);
+        assert.equal(info.protokoll.warnungen.length, 0);
+
+        // Gen1: andere Schreibweise der ID, shellies/announce (dort darf ein
+        // Gerät mit eigenem Zugang nicht schreiben), Gerätenamen von Gen2+-Geräten
+        for (const [thema, payload] of [
+            ['shellies/SHELLY1-b929cc/relay/0', 'on'],
+            ['shellies/shelly1-b929cc/relay/0/power', '1000'],
+            ['shellies/Shelly1-B929CC/online', 'false'],
+            ['shellies/shelly1-b929cc/announce', JSON.stringify({ id: 'shelly1-b929cc', model: 'SHSW-1', fw_ver: 'falsch' })],
+            ['shellies/announce', JSON.stringify({ id: 'shelly1-B929CC', model: 'SHSW-1', fw_ver: 'falsch' })],
+            ['shellies/announce', JSON.stringify({ id: 'SHELLY1-b929cc', model: 'SHSW-1' })],
+            ['shellies/kuehlhaus/relay/0', 'off'],
+            ['shellies/shellypro4pm-a0b1c2d3e4f5/emeter/0/power', '1'],
+        ]) {
+            assert.deepEqual(gen1.lauf({ topic: thema, payload }), [[]], thema);
+        }
+        assert.equal(flowGen1.get('gen1_geraete'), undefined, 'Doppelgänger hat ein Gerät angelegt');
+        assert.equal(flowGen1.get('gen1_emeter'), undefined);
+        // das eigene Präfix geht durch
+        assert.deepEqual(zeilenAus(gen1.lauf({ topic: 'shellies/shelly1-B929CC/relay/0', payload: 'on' })[0]), [
+            `geraet,geraet=shelly1-b929cc,typ=shelly generation=1,praefix="shellies/shelly1-B929CC" ${T()}`,
+            `zustand,geraet=shelly1-b929cc,kanal=relay:0,typ=shelly schalter=1 ${T()}`,
+        ]);
+        assert.deepEqual(zeilenAus(gen1.lauf({ topic: 'shellies/shelly1-B929CC/announce', payload: JSON.stringify({ id: 'x', model: 'SHSW-1' }) })[0]),
+            [`geraet,geraet=shelly1-b929cc,typ=shelly generation=1,praefix="shellies/shelly1-B929CC",modell="SHSW-1" ${T()}`]);
+
+        // Geräte ohne eigenen Zugang wie bisher
+        assert.equal(zeilenAus(gen1.lauf({ topic: 'shellies/announce', payload: JSON.stringify({ id: 'shelly1-AAAAAA', model: 'SHSW-1' }) })[0]).length, 1);
+        assert.equal(zeilenAus(gen1.lauf({ topic: 'shellies/SHELLY1-aaaaaa/relay/0', payload: 'on' })[0]).length, 2);
+        assert.equal(zeilenAus(gen2.lauf({ topic: 'shellyplus1-frei/status/switch:0', payload: schalter })[0]).length, 3);
+        assert.equal(zeilenAus(gen2.lauf({ topic: 'shelly/frei/online', payload: 'true' })[0]).length, 1);
+
+        // Ungültiges ändert nichts – auch nicht eine gelöschte gespeicherte
+        // Nachricht (leere Nutzlast)
+        zug.lauf({ topic: ZUGAENGE_THEMA, payload: '' });
+        zug.lauf({ topic: ZUGAENGE_THEMA, payload: JSON.stringify({ ts: 1, geschuetzt: { kuehlhaus: 'kuehlhaus/#' } }) });
+        assert.deepEqual(gen2.lauf({ topic: 'kuehlhaus/status/switch:0', payload: schalter }), [[], []]);
+        assert.deepEqual(gen1.lauf({ topic: 'shellies/SHELLY1-b929cc/relay/0', payload: 'on' }), [[]]);
+
+        // leere Liste: kein Schutz mehr, alles wie vorher
+        zug.lauf(schutzliste({}));
+        assert.ok(zeilenAus(gen2.lauf({ topic: 'kuehlhaus/status/switch:0', payload: schalter })[0])
+            .includes(`strom,geraet=kuehlhaus,kanal=switch:0,phase=sum,typ=shelly p=5 ${T()}`));
+        assert.ok(zeilenAus(gen1.lauf({ topic: 'shellies/SHELLY1-b929cc/relay/0', payload: 'off' })[0])
+            .includes(`zustand,geraet=shelly1-b929cc,kanal=relay:0,typ=shelly schalter=0 ${T()}`));
+        assert.equal(info.lauf({ topic: 'kuehlhaus/pm-nodered/rpc', payload: geraeteinfo(4711, 'kuehlhaus/pm-nodered') })[0].length, 1);
+    } finally {
+        uhr.jetzt = start;
+    }
+});
+
 pruefe('Escaping: Tags und Feldschlüssel (Komma, Leerzeichen, =, \\), Texte (" und \\)', () => {
     const zeilen = zeilenAus([{
         topic: 'pm/messwert/gen 1,a=b/kanal\\',
