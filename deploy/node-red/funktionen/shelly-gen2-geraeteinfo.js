@@ -24,6 +24,11 @@
  * Statusmeldungen. Auf pm-nodered/rpc ist ohne Anfrage nicht zu erkennen,
  * von welchem Gerät die Antwort stammt – sie wird verworfen.
  *
+ * Für ein Gerät mit eigenem MQTT-Zugang (Liste aus „MQTT-Zugänge merken")
+ * zählt nur eine Antwort auf <sein präfix>/pm-nodered/rpc – weder eine
+ * unter einem anderen Präfix mit demselben Gerätenamen noch eine auf
+ * pm-nodered/rpc, wohin das Gerät gar nicht schreiben darf.
+ *
  * Daraus entsteht ein Punkt der Messung „geraet" – aus ihr baut die
  * Oberfläche die Liste der Geräte:
  *   geraet,geraet=<g>,typ=shelly modell="…",name="…",firmware="…",generation=2,mac="…",praefix="…"
@@ -85,14 +90,6 @@ if (anfrage) {
         // gehört nicht zu dieser Anfrage – sie bleibt offen
         return null;
     }
-    // Beantwortet: diese Anfrage und die übrigen Versuche für dasselbe Gerät
-    // sind erledigt (sonst stellte „übersetzen" noch einen Versuch 2).
-    for (const id of Object.keys(offen)) {
-        if (id === schluessel || (offen[id].geraet === anfrage.geraet && offen[id].praefix === anfrage.praefix)) {
-            delete offen[id];
-        }
-    }
-    flow.set('gen2_rpc', offen);
     geraet = anfrage.geraet;
     praefix = anfrage.praefix;
 } else {
@@ -109,6 +106,27 @@ if (anfrage) {
     }
     geraet = geraeteName(themaPraefix);
     praefix = themaPraefix;
+}
+
+// Gerät mit eigenem MQTT-Zugang (globaler Kontext, „MQTT-Zugänge merken"):
+// Es schreibt nur in seinen Baum, die Antwort kommt also auf
+// <sein präfix>/pm-nodered/rpc. Eine Antwort unter einem Doppelgänger mit
+// demselben Gerätenamen oder auf pm-nodered/rpc stammt nicht von ihm – die
+// Anfrage bleibt offen.
+const geschuetzt = global.get('mqtt_geschuetzt') || {};
+if (hat(geschuetzt, geraet) && geschuetzt[geraet] !== themaPraefix) {
+    return null;
+}
+
+if (anfrage) {
+    // Beantwortet: diese Anfrage und die übrigen Versuche für dasselbe Gerät
+    // sind erledigt (sonst stellte „übersetzen" noch einen Versuch 2).
+    for (const id of Object.keys(offen)) {
+        if (id === schluessel || (offen[id].geraet === anfrage.geraet && offen[id].praefix === anfrage.praefix)) {
+            delete offen[id];
+        }
+    }
+    flow.set('gen2_rpc', offen);
 }
 
 if (antwort.error || antwort.result === null || typeof antwort.result !== 'object' || Array.isArray(antwort.result)) {

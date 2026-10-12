@@ -87,9 +87,13 @@ WIRKSAM="/etc/mosquitto/powermanagement-wirksam.acl"
 CONF_LISTE=()
 SOLL=""
 IST=""
-LOCK="/run/lock/powermanagement-mqtt-zugaenge.lock"
+# Nicht unter /run/lock: das ist für alle beschreibbar (1777) – dort könnte
+# ein anderer Benutzer vorher einen Verweis oder eine eigene Datei unter
+# diesem Namen ablegen. /etc/mosquitto gehört root.
+LOCK="/etc/mosquitto/powermanagement-mqtt-zugaenge.lock"
 EIGENTUEMER_PRUEFEN="ja"
 NUR_NAMEN="nein"
+CONF_NEU=""
 
 aufruf_fehler() {
     echo "mqtt-zugaenge.sh: $1" >&2
@@ -97,12 +101,12 @@ aufruf_fehler() {
 }
 
 # Pfad aus einer Option: absolut, ohne Zeilenumbruch.
-pfad() {
-    local wert="$1" option="$2"
-    if [[ "$wert" != /* || "$wert" == *$'\n'* ]]; then
-        aufruf_fehler "$option erwartet einen absoluten Pfad"
+#   pfad_setzen <variable> <wert> <option>
+pfad_setzen() {
+    if [[ "$2" != /* || "$2" == *$'\n'* ]]; then
+        aufruf_fehler "$3 erwartet einen absoluten Pfad"
     fi
-    printf '%s' "$wert"
+    printf -v "$1" '%s' "$2"
 }
 
 declare -A GESEHEN=()
@@ -115,17 +119,17 @@ einmal() {
 
 for arg in "$@"; do
     case "$arg" in
-        --ziel=*)          einmal --ziel; ZIEL="$(pfad "${arg#*=}" --ziel)"; ZIEL="${ZIEL%/}" ;;
+        --ziel=*)          einmal --ziel; pfad_setzen ZIEL "${arg#*=}" --ziel; [[ "$ZIEL" == / ]] || ZIEL="${ZIEL%/}" ;;
         --app-benutzer=*)  einmal --app-benutzer; APP_BENUTZER="${arg#*=}"; APP_GESETZT="ja" ;;
         --neu-laden=*)     einmal --neu-laden; NEU_LADEN="${arg#*=}" ;;
         --viele-entfernen) einmal --viele-entfernen; VIELE_ENTFERNEN="ja" ;;
-        --passwd=*)        einmal --passwd; PASSWD="$(pfad "${arg#*=}" --passwd)" ;;
-        --basis=*)         einmal --basis; BASIS="$(pfad "${arg#*=}" --basis)" ;;
-        --wirksam=*)       einmal --wirksam; WIRKSAM="$(pfad "${arg#*=}" --wirksam)" ;;
-        --conf=*)          CONF_LISTE+=("$(pfad "${arg#*=}" --conf)") ;;
-        --soll=*)          einmal --soll; SOLL="$(pfad "${arg#*=}" --soll)" ;;
-        --ist=*)           einmal --ist; IST="$(pfad "${arg#*=}" --ist)" ;;
-        --lock=*)          einmal --lock; LOCK="$(pfad "${arg#*=}" --lock)" ;;
+        --passwd=*)        einmal --passwd; pfad_setzen PASSWD "${arg#*=}" --passwd ;;
+        --basis=*)         einmal --basis; pfad_setzen BASIS "${arg#*=}" --basis ;;
+        --wirksam=*)       einmal --wirksam; pfad_setzen WIRKSAM "${arg#*=}" --wirksam ;;
+        --conf=*)          pfad_setzen CONF_NEU "${arg#*=}" --conf; CONF_LISTE+=("$CONF_NEU") ;;
+        --soll=*)          einmal --soll; pfad_setzen SOLL "${arg#*=}" --soll ;;
+        --ist=*)           einmal --ist; pfad_setzen IST "${arg#*=}" --ist ;;
+        --lock=*)          einmal --lock; pfad_setzen LOCK "${arg#*=}" --lock ;;
         --ohne-eigentuemerpruefung) einmal "$arg"; EIGENTUEMER_PRUEFEN="nein" ;;
         --nur-namen)       einmal "$arg"; NUR_NAMEN="ja" ;;
         *)                 aufruf_fehler "unbekannte Option: ${arg%%=*}" ;;
@@ -249,7 +253,12 @@ aufraeumen() {
 trap aufraeumen EXIT
 
 # Zwei Läufe (Pfad-Einheit, Zeitgeber, Installation) nie gleichzeitig.
-exec 9>"$LOCK" || aufruf_fehler "Sperrdatei $LOCK lässt sich nicht öffnen"
+# „>>“: eine vorhandene Datei nie kürzen. Kindprozesse als App-Benutzer
+# bekommen diesen Deskriptor nicht mit (9>&- bei setpriv).
+exec 9>>"$LOCK" || aufruf_fehler "Sperrdatei $LOCK lässt sich nicht öffnen"
+# Nur der Besitzer darf sie öffnen – wer sie lesen kann, kann sie auch
+# sperren und den Helfer so aussperren.
+chmod go-rwx -- "$LOCK" 2>/dev/null || true
 flock -w 30 9 || aufruf_fehler "Sperre $LOCK nach 30 s nicht frei"
 
 # ------------------------------------------------------------- Bausteine
@@ -257,7 +266,8 @@ JETZT=0
 
 # Soll lesen – als App-Benutzer: einer Datei (oder einem Verweis), die
 # www-data nicht lesen darf, folgt der Helfer so nie. Höchstens ein Byte über
-# der Grenze, damit „zu groß“ erkennbar bleibt.
+# der Grenze, damit „zu groß“ erkennbar bleibt. „timeout“: tauscht jemand
+# zwischen test und head eine FIFO unter, hängt der Lauf nicht (samt Sperre).
 # SOLL_ZUSTAND: da | fehlt | unlesbar
 SOLL_ZUSTAND=""
 soll_holen() {
@@ -265,14 +275,14 @@ soll_holen() {
     : > "$ziel"
     if [[ -z "$APP_BENUTZER" ]]; then
         if [[ -f "$SOLL" ]]; then
-            head -c "$((GROESSE_MAX + 1))" -- "$SOLL" > "$ziel" 2>/dev/null || rc=1
+            timeout -s KILL 10 head -c "$((GROESSE_MAX + 1))" -- "$SOLL" > "$ziel" 2>/dev/null 9>&- || rc=1
         else
             rc=3
         fi
     else
         setpriv --reuid="$APP_UID" --regid="$APP_GID" --init-groups -- \
-            /bin/sh -c 'test -f "$1" || exit 3; exec head -c "$2" -- "$1"' sh "$SOLL" "$((GROESSE_MAX + 1))" \
-            > "$ziel" 2>/dev/null || rc=$?
+            /bin/sh -c 'test -f "$1" || exit 3; exec timeout -s KILL 10 head -c "$2" -- "$1"' \
+            sh "$SOLL" "$((GROESSE_MAX + 1))" > "$ziel" 2>/dev/null 9>&- || rc=$?
     fi
     case "$rc" in
         0) SOLL_ZUSTAND="da" ;;
@@ -468,9 +478,18 @@ passwd_lesen() {
         return 0
     fi
 
+    # Namen so lesen, wie Mosquitto es tut: Kommentar nur mit „#“ ganz vorn,
+    # Zeilen ohne „:“ zählen nicht, führende „:“ überliest es, und um den
+    # Namen herum fällt Leerraum weg (aus „ hand :…“ wird „hand“). Bei
+    # doppelten Namen gilt in Mosquitto die *letzte* Zeile – ein Konto im
+    # Block oben würde von Hand angelegte also nicht ersetzen, aber auch nie
+    # wirken. Darum gelten diese Namen als reserviert.
     while IFS= read -r zeile || [[ -n "$zeile" ]]; do
-        [[ -z "$zeile" || "$zeile" == \#* ]] && continue
-        name="${zeile%%:*}"
+        [[ "$zeile" == \#* || "$zeile" != *:* ]] && continue
+        name="${zeile#"${zeile%%[!:]*}"}"
+        name="${name%%:*}"
+        name="${name#"${name%%[![:space:]]*}"}"
+        name="${name%"${name##*[![:space:]]}"}"
         [[ "$name" =~ $RE_NAME_ALLG ]] && AUSSEN[$name]=1
     done < "$ARBEIT/aussen"
 
@@ -628,7 +647,7 @@ ergebnis_schreiben() {
             /bin/sh -c 'umask 027
                 t=$(mktemp "$(dirname "$1")/.ergebnis.XXXXXX") || exit 1
                 if cat > "$t" && chmod 640 "$t" && mv -f "$t" "$1"; then exit 0; fi
-                rm -f "$t"; exit 1' sh "$IST" < "$quelle" 2>/dev/null
+                rm -f "$t"; exit 1' sh "$IST" < "$quelle" > /dev/null 2>&1 9>&-
     fi
 }
 
@@ -758,36 +777,63 @@ runde() {
             fi
         } > "$ARBEIT/wirksam.neu"
 
+        # Die alten Fassungen aufheben: Lässt sich der Broker nicht neu laden,
+        # kommen sie zurück – dann stimmen Dateien, Ergebnis und Broker
+        # weiter überein, und der nächste Lauf versucht es erneut.
+        local passwd_ersetzt="nein" wirksam_ersetzt="nein" wirksam_alt="nein"
         if ! cmp -s -- "$ARBEIT/passwd.neu" "$PASSWD"; then
+            cat -- "$PASSWD" > "$ARBEIT/passwd.alt"
             datei_ersetzen "$ARBEIT/passwd.neu" "$PASSWD"
-            geaendert="ja"
+            passwd_ersetzt="ja"
         fi
         if [[ ! -f "$WIRKSAM" ]] || ! cmp -s -- "$ARBEIT/wirksam.neu" "$WIRKSAM"; then
-            datei_ersetzen "$ARBEIT/wirksam.neu" "$WIRKSAM"
-            geaendert="ja"
-        fi
-        if [[ "$geaendert" == "ja" ]]; then
-            RUNDE_GEAENDERT="ja"
-            if ! neu_laden; then
-                echo "mqtt-zugaenge.sh: Mosquitto ließ sich nicht neu laden" >&2
-                FEHLER+=("0 neuladen")
-                fehler="ja"
+            if [[ -f "$WIRKSAM" ]]; then
+                cat -- "$WIRKSAM" > "$ARBEIT/wirksam.alt"
+                wirksam_alt="ja"
             fi
-            for name in "${!S_GEN[@]}"; do
-                if [[ -z "${B_GEN[$name]+x}" ]]; then
-                    plus+=1
-                elif [[ "${B_GEN[$name]}" != "${S_GEN[$name]}" || "${B_HASH[$name]}" != "${S_HASH[$name]}" \
-                        || "${B_SPERRE[$name]}" != "${S_SPERRE[$name]}" ]]; then
-                    anders+=1
-                fi
-            done
-            for name in "${!B_GEN[@]}"; do
-                [[ -n "${S_GEN[$name]+x}" ]] || minus+=1
-            done
+            datei_ersetzen "$ARBEIT/wirksam.neu" "$WIRKSAM"
+            wirksam_ersetzt="ja"
         fi
-        konten=(${namen[@]+"${namen[@]}"})
-        GESPERRT=()
-        [[ "$SPERRE_MOEGLICH" == "ja" ]] && GESPERRT=(${sperren[@]+"${sperren[@]}"})
+        [[ "$passwd_ersetzt" == "ja" || "$wirksam_ersetzt" == "ja" ]] && geaendert="ja"
+
+        if [[ "$geaendert" == "ja" ]] && ! neu_laden; then
+            echo "mqtt-zugaenge.sh: Mosquitto ließ sich nicht neu laden – alter Stand wiederhergestellt" >&2
+            FEHLER+=("0 neuladen")
+            fehler="ja"
+            geaendert="nein"
+            if [[ "$passwd_ersetzt" == "ja" ]]; then
+                datei_ersetzen "$ARBEIT/passwd.alt" "$PASSWD"
+            fi
+            # Eine wirksame Datei, die vorher fehlte, liest der Broker gerade
+            # nicht – sie bleibt (ein späterer Start braucht sie).
+            if [[ "$wirksam_alt" == "ja" ]]; then
+                datei_ersetzen "$ARBEIT/wirksam.alt" "$WIRKSAM"
+            elif [[ "$wirksam_ersetzt" == "ja" ]]; then
+                RUNDE_GEAENDERT="ja"
+            fi
+            for name in "${!B_GEN[@]}"; do
+                konten+=("$name")
+            done
+            gesperrt_aus_datei
+        else
+            if [[ "$geaendert" == "ja" ]]; then
+                RUNDE_GEAENDERT="ja"
+                for name in "${!S_GEN[@]}"; do
+                    if [[ -z "${B_GEN[$name]+x}" ]]; then
+                        plus+=1
+                    elif [[ "${B_GEN[$name]}" != "${S_GEN[$name]}" || "${B_HASH[$name]}" != "${S_HASH[$name]}" \
+                            || "${B_SPERRE[$name]}" != "${S_SPERRE[$name]}" ]]; then
+                        anders+=1
+                    fi
+                done
+                for name in "${!B_GEN[@]}"; do
+                    [[ -n "${S_GEN[$name]+x}" ]] || minus+=1
+                done
+            fi
+            konten=(${namen[@]+"${namen[@]}"})
+            GESPERRT=()
+            [[ "$SPERRE_MOEGLICH" == "ja" ]] && GESPERRT=(${sperren[@]+"${sperren[@]}"})
+        fi
     fi
 
     if [[ "$fehler" == "ja" ]]; then
@@ -807,10 +853,12 @@ runde() {
     fi
 
     # Eine Zeile fürs Journal – Namen höchstens, nie Hashes.
-    if [[ "$RUNDE_STATUS" == "fehler" ]]; then
-        echo "fehler: Zeile ${FEHLER[0]%% *} (${FEHLER[0]#* })" >&2
-    elif [[ "$RUNDE_STATUS" == "abgelehnt" ]]; then
-        echo "abgelehnt: Zeile ${FEHLER[0]%% *} (${FEHLER[0]#* })" >&2
+    if [[ "$RUNDE_STATUS" == "fehler" || "$RUNDE_STATUS" == "abgelehnt" ]]; then
+        local eintrag text=""
+        for eintrag in "${FEHLER[@]}"; do
+            text+="${text:+, }Zeile ${eintrag%% *} (${eintrag#* })"
+        done
+        echo "$RUNDE_STATUS: $text" >&2
     else
         echo "uebernommen: +$plus -$minus ~$anders Konten, ${#GESPERRT[@]} Sperren (Lauf $SOLL_LAUF)" >&2
     fi

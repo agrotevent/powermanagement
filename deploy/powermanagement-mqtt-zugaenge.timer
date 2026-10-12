@@ -1,0 +1,15 @@
+# /etc/systemd/system/powermanagement-mqtt-zugaenge.timer
+#
+# Gleicht die eigenen MQTT-Zugänge regelmäßig ab: räumt abgelaufene
+# Prüf-Sperren ab und fängt Änderungen, die die Pfad-Einheit verpasst hat.
+
+[Unit]
+Description=PowerManagement: eigene MQTT-Zugänge regelmäßig abgleichen
+
+[Timer]
+OnBootSec=1min
+OnUnitInactiveSec=2min
+AccuracySec=15s
+
+[Install]
+WantedBy=timers.target

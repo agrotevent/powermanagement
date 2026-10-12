@@ -1,0 +1,34 @@
+# /etc/systemd/system/powermanagement-mqtt-zugaenge.service
+#
+# Überträgt die eigenen MQTT-Zugänge der Shellys aus der Anwendung
+# (storage/mqtt/soll/zugaenge.txt) in Mosquitto: Kennwortdatei (Block oben)
+# und wirksame ACL, danach Neuladen des Brokers. Läuft als root, liest das
+# Soll und schreibt das Ergebnis (storage/mqtt/ist/ergebnis.txt) aber als
+# Anwendungsbenutzer. Gestartet von powermanagement-mqtt-zugaenge.path (bei
+# jeder Änderung) und .timer (alle zwei Minuten: abgelaufene Prüf-Sperren,
+# verpasste Änderungen).
+#
+# Platzhalter: __APP_USER__, __APP_DIR__
+
+[Unit]
+Description=PowerManagement: eigene MQTT-Zugänge der Shellys in Mosquitto übernehmen
+After=mosquitto.service
+ConditionPathExists=/etc/mosquitto/powermanagement.passwd
+# Ohne Startbegrenzung: Prüft die Oberfläche mehrere Geräte nacheinander,
+# startet die Pfad-Einheit den Dienst schnell hintereinander. Mit der
+# Vorgabe (5 Starts in 10 s) gäbe systemd auf – und die Pfad-Einheit gleich
+# mit („unit-start-limit-hit“).
+StartLimitIntervalSec=0
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash __APP_DIR__/deploy/mqtt-zugaenge.sh --ziel=__APP_DIR__ --app-benutzer=__APP_USER__
+UMask=0077
+NoNewPrivileges=true
+ProtectSystem=strict
+# /etc/mosquitto: Kennwortdatei, wirksame ACL und die Sperrdatei des Helfers;
+# storage/mqtt: dort schreibt er das Ergebnis (als Anwendungsbenutzer).
+ReadWritePaths=/etc/mosquitto -__APP_DIR__/storage/mqtt
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true

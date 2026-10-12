@@ -110,15 +110,18 @@ liegt der Absender im Baum des Geräts:
 
 | Anfrage | Absender (`src`) | Antwort auf |
 |---------|------------------|-------------|
-| Schalten (`Switch.Set`), Gerät mit eigenem Zugang | `<präfix>/pm-steuerung-<8 hex>` | `<präfix>/pm-steuerung-<8 hex>/rpc` |
+| Schalten (`Switch.Set`), Gerät mit eigenem Zugang (in jedem Zustand) | `<präfix>/pm-steuerung-<8 hex>` | `<präfix>/pm-steuerung-<8 hex>/rpc` |
 | Schalten, Gerät ohne eigenen Zugang | `pm-steuerung-<8 hex>` | `pm-steuerung-<8 hex>/rpc` |
 | MQTT-Zugänge (Prüfen, Kennwort übertragen) | `<präfix>/pm-konto-<8 hex>` | `<präfix>/pm-konto-<8 hex>/rpc` |
 | Node-RED `Shelly.GetDeviceInfo` | `<präfix>/pm-nodered` | `<präfix>/pm-nodered/rpc` |
 | Node-RED, nach 60 s ohne Antwort einmal | `pm-nodered` | `pm-nodered/rpc` |
 
 Eine Antwort gilt nur, wenn Thema, `id` und `dst` zur Anfrage passen und
-sie kein `method` enthält. Themen im Baum eines Geräts, deren nächster Teil
-mit `pm-` beginnt, sind keine Meldungen des Geräts – Node-RED übergeht sie.
+sie kein `method` enthält. Nach einem Neustart von Node-RED fehlt die
+Anfrage; dann ordnet Node-RED eine Antwort im Baum eines Geräts über das
+Präfix im Thema zu, eine Antwort auf `pm-nodered/rpc` gar nicht. Themen im
+Baum eines Geräts, deren nächster Teil mit `pm-` beginnt, sind keine
+Meldungen des Geräts – Node-RED übergeht sie.
 
 **Schalten:** Einen Shelly mit Schaltausgang macht man unter
 *Geräte in der InfluxDB* mit **„schaltbar machen“** zur Datenquelle. Das

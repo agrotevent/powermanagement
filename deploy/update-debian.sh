@@ -15,8 +15,11 @@
 #
 # Unverändert bleiben: config/config.php, storage/ (Datenbank, Grundrisse,
 # Protokolle), eigene Änderungen an den Node-RED-Flows, an settings.js, an
-# der nginx-Site und an der Mosquitto-ACL. Neue Fassungen dieser Dateien
-# legt das Skript daneben (…powermanagement-neu…) und sagt Bescheid.
+# der nginx-Site und an der Mosquitto-ACL (Grundlage powermanagement.acl).
+# Neue Fassungen dieser Dateien legt das Skript daneben
+# (…powermanagement-neu…) und sagt Bescheid. Die eigenen MQTT-Zugänge der
+# Shellys (Block in der Kennwortdatei, wirksame ACL) gleicht
+# deploy/mqtt-zugaenge.sh ab.
 
 # -E: der ERR-Trap muss auch greifen, wenn ein Kommando in einer Funktion
 # scheitert – sonst bliebe ein halb eingespieltes Update stehen.
@@ -137,8 +140,12 @@ as_app() {
 }
 
 # Zwei Läufe gleichzeitig (etwa von Hand und aus einem Zeitplan) würden
-# sich gegenseitig die Datenbank zurückrollen.
-exec 9>/run/lock/powermanagement-update.lock
+# sich gegenseitig die Datenbank zurückrollen. Die Sperrdatei liegt in
+# /etc/powermanagement (nur root), nicht im für alle beschreibbaren
+# /run/lock: Dort könnte ein anderer Benutzer vorher einen Verweis unter
+# diesem Namen anlegen, dessen Ziel root dann beim Öffnen leert.
+install -d -m 750 "$ETC"
+exec 9>>"$ETC/update.lock"
 if ! flock -n 9; then
     echo "Ein anderes Update läuft gerade." >&2
     exit 1
@@ -329,14 +336,30 @@ if ! GIT_TERMINAL_PROMPT=0 git -C "$ZIEL" fetch --quiet origin "$ZWEIG"; then
 fi
 NEU="$(git -C "$ZIEL" rev-parse "origin/$ZWEIG")"
 
+# Eigene MQTT-Zugänge noch nicht eingerichtet (wirksame ACL oder Einheiten
+# fehlen)? Das kommt vor, wenn der Code schon neu ist, aber ein älteres
+# Update-Skript ihn geholt hat – das kannte diese Schritte noch nicht. Dann
+# auch ohne neuen Code abgleichen.
+MQTT_NACHHOLEN="nein"
+if [[ "$MIT_MOSQUITTO" == "ja" && -f "$ZIEL/deploy/mqtt-zugaenge.sh" ]] \
+    && { [[ ! -f /etc/mosquitto/powermanagement-wirksam.acl ]] \
+         || [[ ! -f /etc/systemd/system/powermanagement-mqtt-zugaenge.path ]]; }; then
+    MQTT_NACHHOLEN="ja"
+fi
+
 CODE_NEU="ja"
 if [[ "$ALT" == "$NEU" ]]; then
     CODE_NEU="nein"
     echo "    Bereits auf dem neuesten Stand ($(git -C "$ZIEL" log -1 --format='%h %s'))."
-    if [[ "$FLOWS_ERSETZEN" != "ja" ]]; then
+    if [[ "$FLOWS_ERSETZEN" != "ja" && "$MQTT_NACHHOLEN" != "ja" ]]; then
         exit 0
     fi
-    echo "    --flows-ersetzen: nur die Node-RED-Flows werden neu eingespielt."
+    if [[ "$FLOWS_ERSETZEN" == "ja" ]]; then
+        echo "    --flows-ersetzen: nur die Node-RED-Flows werden neu eingespielt."
+    fi
+    if [[ "$MQTT_NACHHOLEN" == "ja" ]]; then
+        echo "    Eigene MQTT-Zugänge sind noch nicht eingerichtet – wird nachgeholt."
+    fi
 else
     echo "    Neu:         $(git -C "$ZIEL" log -1 --format='%h %s' "$NEU")"
     echo
@@ -404,6 +427,23 @@ MIGRIERT="nein"
 SITE="/etc/nginx/sites-available/powermanagement"
 SITE_SICHERUNG="$(mktemp)"
 [[ -f "$SITE" ]] && cp -p "$SITE" "$SITE_SICHERUNG"
+# Die Mosquitto-Konfiguration ebenso: Mit der neuen Fassung liest der Broker
+# die wirksame ACL – der alte Code samt alter Konfiguration muss nach einem
+# Fehlschlag wieder zusammenpassen.
+MOSQUITTO_CONF="/etc/mosquitto/conf.d/powermanagement.conf"
+MOSQUITTO_CONF_SICHERUNG="$(mktemp)"
+MOSQUITTO_CONF_GEAENDERT="nein"
+[[ -f "$MOSQUITTO_CONF" ]] && cp -p "$MOSQUITTO_CONF" "$MOSQUITTO_CONF_SICHERUNG"
+# Mit ihr die gemerkte Vorlage (siehe vorlage_uebernehmen) – sonst hielte das
+# nächste Update die zurückgelegte Konfiguration für „von Hand verändert“
+# und ließe sie stehen.
+MOSQUITTO_CONF_MERK="$VORLAGEN/$(printf '%s' "$MOSQUITTO_CONF" | tr '/' '_')"
+MOSQUITTO_MERK_SICHERUNG="$(mktemp)"
+MOSQUITTO_MERK_DA="nein"
+if [[ -f "$MOSQUITTO_CONF_MERK" ]]; then
+    cp -p "$MOSQUITTO_CONF_MERK" "$MOSQUITTO_MERK_SICHERUNG"
+    MOSQUITTO_MERK_DA="ja"
+fi
 
 zurueckrollen() {
     # set -E vererbt den Trap auch in Subshells (as_app). Zurückrollen soll
@@ -429,6 +469,16 @@ zurueckrollen() {
     if [[ -s "$SITE_SICHERUNG" ]]; then
         cp -p "$SITE_SICHERUNG" "$SITE"
         systemctl reload nginx >/dev/null 2>&1 || true
+    fi
+    if [[ "$MOSQUITTO_CONF_GEAENDERT" == "ja" && -s "$MOSQUITTO_CONF_SICHERUNG" ]]; then
+        cp -p "$MOSQUITTO_CONF_SICHERUNG" "$MOSQUITTO_CONF"
+        if [[ "$MOSQUITTO_MERK_DA" == "ja" ]]; then
+            cp -p "$MOSQUITTO_MERK_SICHERUNG" "$MOSQUITTO_CONF_MERK" || true
+        else
+            rm -f "$MOSQUITTO_CONF_MERK"
+        fi
+        systemctl restart mosquitto >/dev/null 2>&1 || true
+        hinweis "Mosquitto-Konfiguration auf den Stand vor dem Update zurückgesetzt."
     fi
     FPM="$(find /etc/php -mindepth 2 -maxdepth 2 -type d -name fpm 2>/dev/null | awk -F/ '{print $4}' | sort -V | tail -1)"
     if [[ -n "$FPM" ]]; then
@@ -459,7 +509,8 @@ if [[ "$CODE_NEU" == "ja" ]]; then
     # Oberfläche läuft weiter und soll nicht kurz ihre Dateien verlieren.
     find "$ZIEL" -path "$ZIEL/storage" -prune -o ! -path "$ZIEL/config/config.php" \
         -exec chown root:root {} + -exec chmod go+rX,go-w {} +
-    for d in logs plans demo cache sessions backups; do
+    # mqtt/: Soll und Ergebnis der eigenen MQTT-Zugänge (deploy/mqtt-zugaenge.sh)
+    for d in logs plans demo cache sessions backups mqtt mqtt/soll mqtt/ist; do
         app_verzeichnis "$ZIEL/storage/$d"
     done
     chown -R -P "$APP_USER:$APP_USER" "$ZIEL/storage"
@@ -507,11 +558,22 @@ FPM_VERSION="$(find /etc/php -mindepth 2 -maxdepth 2 -type d -name fpm 2>/dev/nu
     | awk -F/ '{print $4}' | sort -V | tail -1)"
 NODERED_NEUSTART="nein"
 MOSQUITTO_NEUSTART="nein"
+MOSQUITTO_NEULADEN="nein"
 EINHEITEN_NEU="nein"
+
+if [[ "$MIT_MOSQUITTO" == "ja" ]]; then
+    # Auch ohne neuen Code (MQTT_NACHHOLEN): das Verzeichnis für Soll und
+    # Ergebnis der eigenen MQTT-Zugänge muss da sein.
+    for d in mqtt mqtt/soll mqtt/ist; do
+        app_verzeichnis "$ZIEL/storage/$d"
+    done
+fi
 
 # systemd-Einheiten: gehören der Anwendung, werden immer abgeglichen.
 EINHEITEN=(powermanagement-sammler.service powermanagement-wartung.service powermanagement-wartung.timer)
 [[ "$MIT_NODERED" == "ja" ]] && EINHEITEN+=(powermanagement-nodered.service)
+[[ "$MIT_MOSQUITTO" == "ja" ]] && EINHEITEN+=(powermanagement-mqtt-zugaenge.service
+    powermanagement-mqtt-zugaenge.path powermanagement-mqtt-zugaenge.timer)
 for einheit in "${EINHEITEN[@]}"; do
     [[ -f "$ZIEL/deploy/$einheit" ]] || continue
     gerendert="$(sed -e "s|__APP_USER__|$APP_USER|g" -e "s|__APP_DIR__|$ZIEL|g" \
@@ -532,6 +594,9 @@ fi
 systemctl enable --quiet powermanagement-sammler.service
 systemctl enable --quiet --now powermanagement-wartung.timer
 [[ "$MIT_NODERED" == "ja" ]] && systemctl enable --quiet powermanagement-nodered.service
+if [[ "$MIT_MOSQUITTO" == "ja" && -f /etc/systemd/system/powermanagement-mqtt-zugaenge.path ]]; then
+    systemctl enable --quiet --now powermanagement-mqtt-zugaenge.path powermanagement-mqtt-zugaenge.timer
+fi
 
 sed -e "s|__APP_USER__|$APP_USER|g" -e "s|__APP_DIR__|$ZIEL|g" \
     "$ZIEL/deploy/powermanagement.logrotate" > /etc/logrotate.d/powermanagement
@@ -577,16 +642,57 @@ if [[ -f "$SITE" ]]; then
 fi
 
 if [[ "$MIT_MOSQUITTO" == "ja" ]]; then
-    vorlage_uebernehmen "$ZIEL/deploy/mosquitto/powermanagement.conf" \
-        /etc/mosquitto/conf.d/powermanagement.conf root:root 644 \
-        /etc/mosquitto/powermanagement.conf.powermanagement-neu
-    [[ "$VORLAGE_ERGEBNIS" == "ersetzt" || "$VORLAGE_ERGEBNIS" == "neu" ]] && MOSQUITTO_NEUSTART="ja"
-    [[ "$VORLAGE_ERGEBNIS" == "behalten" ]] && hinweis "Mosquitto-Konfiguration verändert – neue Fassung: /etc/mosquitto/powermanagement.conf.powermanagement-neu"
+    # 1. Grundlage der ACL. Mosquitto liest sie nicht direkt, sondern die
+    #    wirksame Fassung, die der Helfer daraus baut – ein Neuladen genügt.
     vorlage_uebernehmen "$ZIEL/deploy/mosquitto/powermanagement.acl" \
         /etc/mosquitto/powermanagement.acl mosquitto:mosquitto 600 \
         /etc/mosquitto/powermanagement.acl.powermanagement-neu
-    [[ "$VORLAGE_ERGEBNIS" == "ersetzt" || "$VORLAGE_ERGEBNIS" == "neu" ]] && MOSQUITTO_NEUSTART="ja"
-    [[ "$VORLAGE_ERGEBNIS" == "behalten" ]] && hinweis "Mosquitto-ACL verändert – neue Fassung: /etc/mosquitto/powermanagement.acl.powermanagement-neu"
+    [[ "$VORLAGE_ERGEBNIS" == "ersetzt" || "$VORLAGE_ERGEBNIS" == "neu" ]] && MOSQUITTO_NEULADEN="ja"
+    if [[ "$VORLAGE_ERGEBNIS" == "behalten" ]]; then
+        hinweis "Mosquitto-ACL verändert – neue Fassung: /etc/mosquitto/powermanagement.acl.powermanagement-neu"
+        hinweis "Für eigene Zugänge je Shelly die pattern-Zeilen von dort übernehmen (Änderungen von Hand nur"
+        hinweis "in /etc/mosquitto/powermanagement.acl, nie in der wirksamen Datei)."
+    fi
+
+    # 2. Eigene Zugänge je Shelly: wirksame ACL aus Grundlage und Block der
+    #    Kennwortdatei bauen. Neu geladen wird unten, einmal für alles.
+    if [[ -f "$ZIEL/deploy/mqtt-zugaenge.sh" && -f /etc/mosquitto/powermanagement.passwd ]]; then
+        HELFER_RC=0
+        HELFER_MELDUNG="$(mktemp)"
+        HELFER_AUSGABE="$(bash "$ZIEL/deploy/mqtt-zugaenge.sh" --ziel="$ZIEL" --app-benutzer="$APP_USER" \
+            --neu-laden=nein 2>"$HELFER_MELDUNG")" || HELFER_RC=$?
+        sed 's/^/    /' "$HELFER_MELDUNG"
+        rm -f "$HELFER_MELDUNG"
+        [[ "${HELFER_AUSGABE##*$'\n'}" == "geaendert" ]] && MOSQUITTO_NEULADEN="ja"
+        if [[ "$HELFER_RC" -ne 0 ]]; then
+            hinweis "deploy/mqtt-zugaenge.sh endete mit $HELFER_RC (siehe oben; journalctl -u powermanagement-mqtt-zugaenge)."
+        fi
+    fi
+    # Nachholen: ein älteres Update-Skript hat womöglich schon die neue
+    # Konfiguration eingespielt und den Broker ohne wirksame ACL neu
+    # gestartet – dann steht er. Unten auf jeden Fall (neu) starten.
+    [[ "$MQTT_NACHHOLEN" == "ja" ]] && MOSQUITTO_NEULADEN="ja"
+    if [[ ! -f /etc/mosquitto/powermanagement-wirksam.acl ]]; then
+        # Ohne wirksame ACL startet der Broker mit der neuen Konfiguration
+        # nicht – dann wenigstens die Grundlage (ohne Sperren).
+        install -o mosquitto -g mosquitto -m 600 /etc/mosquitto/powermanagement.acl \
+            /etc/mosquitto/powermanagement-wirksam.acl
+        MOSQUITTO_NEULADEN="ja"
+    fi
+
+    # 3. Konfiguration: der Wechsel auf die wirksame Datei braucht einmal
+    #    einen Neustart.
+    vorlage_uebernehmen "$ZIEL/deploy/mosquitto/broker.conf" \
+        "$MOSQUITTO_CONF" root:root 644 \
+        /etc/mosquitto/powermanagement.conf.powermanagement-neu
+    if [[ "$VORLAGE_ERGEBNIS" == "ersetzt" || "$VORLAGE_ERGEBNIS" == "neu" ]]; then
+        MOSQUITTO_NEUSTART="ja"
+        MOSQUITTO_CONF_GEAENDERT="ja"
+    fi
+    if [[ "$VORLAGE_ERGEBNIS" == "behalten" ]]; then
+        hinweis "Mosquitto-Konfiguration verändert – neue Fassung: /etc/mosquitto/powermanagement.conf.powermanagement-neu"
+        hinweis "Eigene Zugänge je Shelly brauchen dort: acl_file /etc/mosquitto/powermanagement-wirksam.acl"
+    fi
 fi
 
 if [[ "$MIT_NODERED" == "ja" && -d "$NODERED_DIR" ]]; then
@@ -620,6 +726,16 @@ systemctl reload nginx || systemctl restart nginx
 if [[ "$MOSQUITTO_NEUSTART" == "ja" ]]; then
     systemctl restart mosquitto
     echo "    mosquitto neu gestartet"
+elif [[ "$MOSQUITTO_NEULADEN" == "ja" ]]; then
+    # Neu laden (SIGHUP): bestehende Verbindungen der Shellys bleiben. Läuft
+    # der Broker gerade nicht, wird er gestartet.
+    systemctl reload-or-restart mosquitto
+    echo "    mosquitto neu geladen"
+fi
+if [[ "$MIT_MOSQUITTO" == "ja" && -f /etc/systemd/system/powermanagement-mqtt-zugaenge.service ]]; then
+    # Ergebnis für die Oberfläche auffrischen – der Lauf oben sah die neue
+    # Broker-Konfiguration noch nicht.
+    systemctl start --no-block powermanagement-mqtt-zugaenge.service || true
 fi
 if [[ "$MIT_NODERED" == "ja" && "$NODERED_NEUSTART" == "ja" ]]; then
     systemctl restart powermanagement-nodered.service
@@ -631,7 +747,7 @@ echo "    Sammler läuft wieder"
 # Ab hier ist das Update eingespielt – was jetzt noch scheitert, rollt es
 # nicht mehr zurück.
 trap - ERR
-rm -f "$SITE_SICHERUNG"
+rm -f "$SITE_SICHERUNG" "$MOSQUITTO_CONF_SICHERUNG" "$MOSQUITTO_MERK_SICHERUNG"
 [[ -n "${SCHNAPPSCHUSS_DIR:-}" ]] && rm -rf "$SCHNAPPSCHUSS_DIR"
 
 if [[ "$CODE_NEU" == "ja" ]]; then

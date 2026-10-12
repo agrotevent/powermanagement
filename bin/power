@@ -422,6 +422,9 @@ switch ($befehl) {
             $fehler($e->getMessage());
         }
         $aus('Sollzustand geschrieben (Lauf ' . $lauf . '). Warte auf den Broker …');
+        if (($schutz = MqttZugaenge::schutzVeroeffentlichen()) !== null) {
+            $aus('Schutzliste für Node-RED nicht veröffentlicht: ' . $schutz);
+        }
         for ($i = 0; $i < 100; $i++) {
             $e = MqttZugaenge::ergebnis();
             if ($e !== null && $e['lauf'] !== null && $e['lauf'] >= $lauf) {

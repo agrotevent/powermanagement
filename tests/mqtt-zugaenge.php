@@ -33,7 +33,8 @@ if ((\App\Support\Programm::finden('mosquitto', ['-h']) ?? (is_file('/usr/sbin/m
     uebersprungen('mqtt-zugaenge', 'mosquitto ist nicht installiert');
 }
 
-$kennung = 'pm-pruef-' . bin2hex(random_bytes(3));
+// Nicht „pm-…“: das ist für Gerätezugänge reserviert.
+$kennung = 'pruef-' . bin2hex(random_bytes(3));
 $kw = ['shelly' => 'gemeinsam-' . bin2hex(random_bytes(6)), 'nodered' => 'nr-' . bin2hex(random_bytes(6)), 'powermanagement' => 'pm-' . bin2hex(random_bytes(6))];
 $broker = mqttTestbroker($kw);
 $dateien = [];
@@ -80,6 +81,15 @@ $stoppen = static function ($p): void {
     }
 };
 $gesperrt = static fn (string $praefix): bool => in_array($praefix, MqttZugaenge::ergebnis()['gesperrt'] ?? [], true);
+/** Schutzliste für Node-RED, wie sie gespeichert (retained) am Broker liegt. */
+$schutz = static function () use ($broker, $kw, $kennung): array {
+    $leser = mqttVerbinden($broker, 'nodered', $kw['nodered'], $kennung . '-schutz-' . bin2hex(random_bytes(2)));
+    $leser->abonnieren(['pm/status/mqtt-zugaenge']);
+    $n = $leser->lauschen(1.5, static fn (string $t, string $_m, bool $retain): bool => $retain);
+    $leser->trennen();
+    $letzte = end($n);
+    return $letzte !== false ? (array) (json_decode($letzte['nachricht'], true)['geschuetzt'] ?? []) : [];
+};
 $konten = static fn (): array => MqttZugaenge::ergebnis()['konten'] ?? [];
 
 $admin = (int) Database::scalar("SELECT ur.user_id FROM user_roles ur JOIN roles r ON r.id = ur.role_id WHERE r.role_key = 'admin' ORDER BY ur.user_id LIMIT 1");
@@ -174,7 +184,10 @@ try {
     pruefe(!$erg['ok'], 'trotzdem prüfen: Gerät hängt noch am gemeinsamen Zugang → fehlgeschlagen – ' . $erg['message']);
     gleich(MqttZugaenge::nachPraefix($p2)['zustand'] ?? null, 'uebertragen', 'nach fehlgeschlagener Prüfung wieder „wartet auf Neustart“');
     pruefe(!$gesperrt($p2), 'Prüf-Sperre wieder aufgehoben');
-    pruefe(MqttZugaenge::vorpruefen($p2)['ok'], 'Gerät über den gemeinsamen Zugang wieder erreichbar');
+    // (Vorprüfen sagte jetzt „wartet auf Neustart“ – also direkt fragen.)
+    $frage = Mqtt::ausKonfiguration($kennung . '-frage');
+    pruefe(ShellyRpc::aufrufen($frage, $p2, ShellyRpc::quelle($p2, 'konto', true), 'Sys.GetStatus')['ok'], 'Gerät über den gemeinsamen Zugang wieder erreichbar');
+    $frage->trennen();
 
     // „Neustart“: die Attrappe meldet sich mit dem gespeicherten Zugang an
     $stoppen($geraet2);
@@ -184,6 +197,11 @@ try {
     pruefe($erg['ok'], 'Umstellung bestätigt – ' . $erg['message']);
     gleich(MqttZugaenge::nachPraefix($p2)['zustand'] ?? null, 'eigen', 'Zustand „eigener Zugang“');
     pruefe($gesperrt($p2), 'gemeinsamer Zugang dauerhaft gesperrt');
+    gleich($schutz()[MqttZugaenge::geraetName($p2)] ?? null, $p2, 'Schutzliste für Node-RED: Gerätename → Präfix (retained unter pm/)');
+    $gemeinsamSchreiber = mqttVerbinden($broker, 'shelly', $kw['shelly'], $kennung . '-faelscher');
+    $gemeinsamSchreiber->veroeffentlichen('pm/status/mqtt-zugaenge', '{"geschuetzt":{}}', 1, true);
+    $gemeinsamSchreiber->trennen();
+    pruefe(isset($schutz()[MqttZugaenge::geraetName($p2)]), 'gemeinsamer Zugang kann die Schutzliste nicht überschreiben');
 
     $gemeinsam = mqttVerbinden($broker, 'shelly', $kw['shelly'], $kennung . '-gemeinsam');
     $beobachter = mqttVerbinden($broker, 'nodered', $kw['nodered'], $kennung . '-beobachter');
@@ -223,6 +241,7 @@ try {
     $erg = MqttZugaenge::entfernen((int) $zugang2['id']);
     pruefe($erg['ok'] && !in_array($p2, $konten(), true) && !$gesperrt($p2), 'entfernt: kein Zugang, keine Sperre – ' . $erg['message']);
     pruefe(mqttKommtAn($gemeinsam, $beobachter, $p2 . '/rpc'), 'gemeinsamer Zugang erreicht das Gerät wieder');
+    pruefe(!isset($schutz()[MqttZugaenge::geraetName($p2)]), 'entfernt: nicht mehr in der Schutzliste');
     $stoppen($geraet2);
 
     // --------------------------------------------- Gen1

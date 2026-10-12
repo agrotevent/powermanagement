@@ -24,6 +24,10 @@
  *            pm-nodered/rpc). Die Antworten wertet „Shelly Gen2+ Geräteinfo"
  *            aus.
  *
+ * Für ein Gerät mit eigenem MQTT-Zugang (Liste aus „MQTT-Zugänge merken")
+ * gilt nur sein eigenes Präfix: Meldungen unter einem anderen Präfix, das
+ * denselben Gerätenamen ergibt, werden verworfen.
+ *
  * Einheiten, wie sie der Shelly liefert und die Oberfläche erwartet:
  * u V, i A, p W, s VA, pf ohne Einheit, f Hz, e/e_rueck Wh (Zählerstand).
  */
@@ -92,6 +96,20 @@ if (!praefix || fremd(teile[0]) || art.startsWith('pm-')) {
 }
 
 const geraet = geraeteName(praefix);
+// „__proto__" taugt nicht als Schlüssel im Flow-Kontext (die Zuweisung
+// setzte den Prototyp, statt einen Eintrag anzulegen).
+if (geraet === '__proto__') {
+    return null;
+}
+// Geräte mit eigenem MQTT-Zugang (globaler Kontext, „MQTT-Zugänge merken"):
+// Gerätename → genaues Präfix. Ihren Baum sperrt der Broker für den
+// gemeinsamen Zugang, nicht aber einen Doppelgänger mit demselben
+// Gerätenamen (kuehlhaus/… statt shelly/kuehlhaus/…). Was für ein solches
+// Gerät unter einem anderen Präfix ankommt, stammt nicht von ihm.
+const geschuetzt = global.get('mqtt_geschuetzt') || {};
+if (Object.prototype.hasOwnProperty.call(geschuetzt, geraet) && geschuetzt[geraet] !== praefix) {
+    return null;
+}
 const jetzt = Date.now();
 let text = msg.payload;
 if (Buffer.isBuffer(text)) {
@@ -237,7 +255,8 @@ if (typ === 'switch') {
 // MQTT nicht antwortet – und die Oberfläche kennt das Präfix, unter dem sie
 // ihm Befehle schicken kann.
 const bekannte = flow.get('gen2_geraete') || {};
-const eintrag = bekannte[geraet];
+// nur eigene Schlüssel – ein Gerät „constructor" fände sonst Object.prototype
+const eintrag = Object.prototype.hasOwnProperty.call(bekannte, geraet) ? bekannte[geraet] : undefined;
 const offen = flow.get('gen2_rpc') || {};
 let anfrage = null;
 
@@ -264,14 +283,29 @@ function rpcAnfrage(src, versuch) {
     };
 }
 
+// Wartet diese Anfrage noch auf ihren Rückfall (Versuch 1, zu dem es keinen
+// Versuch 2 gibt)?
+function wartetAufRueckfall(a) {
+    return a.versuch === 1 && !Object.keys(offen).some((id) => offen[id].versuch === 2
+        && offen[id].geraet === a.geraet && offen[id].praefix === a.praefix);
+}
+
 if (!eintrag || jetzt - eintrag.angefragt > INFO_ALLE_MS || eintrag.praefix !== praefix) {
     bekannte[geraet] = { praefix, angefragt: jetzt };
     flow.set('gen2_geraete', bekannte);
 
-    for (const id of Object.keys(offen)) {
-        if (jetzt - offen[id].t > ANFRAGE_VERFALL_MS) {
-            delete offen[id];
-        }
+    // Aufräumen. Die neue Runde ersetzt die alten Anfragen dieses Geräts.
+    // Sonst verfällt eine offene Anfrage nach 10 min – ein Versuch 1, dem
+    // der Rückfall noch fehlt, aber erst nach 6 h: Der Rückfall kommt mit
+    // der nächsten Statusmeldung des Geräts, und die lässt bei einem Gerät
+    // ohne Last auch einmal länger auf sich warten.
+    const verfallen = Object.keys(offen).filter((id) => {
+        const a = offen[id];
+        const frist = wartetAufRueckfall(a) ? INFO_ALLE_MS : ANFRAGE_VERFALL_MS;
+        return a.geraet === geraet || !(jetzt - a.t <= frist);
+    });
+    for (const id of verfallen) {
+        delete offen[id];
     }
     // Versuch 1: Absender im Baum des Geräts
     anfrage = rpcAnfrage(praefix + '/' + ABSENDER, 1);
@@ -291,11 +325,9 @@ if (!eintrag || jetzt - eintrag.angefragt > INFO_ALLE_MS || eintrag.praefix !== 
     // alten Absender pm-nodered, für Geräte, die nicht in ihren eigenen Baum
     // antworten. Ein Shelly mit eigenem Zugang darf pm-nodered/rpc nicht
     // schreiben; seine Antwort auf Versuch 1 gilt weiterhin.
-    const offeneDesGeraets = Object.keys(offen)
-        .map((id) => offen[id])
-        .filter((a) => a.geraet === geraet && a.praefix === praefix);
-    const erster = offeneDesGeraets.find((a) => a.versuch === 1);
-    if (erster && jetzt - erster.t > RUECKFALL_NACH_MS && !offeneDesGeraets.some((a) => a.versuch === 2)) {
+    const erster = Object.keys(offen).map((id) => offen[id])
+        .find((a) => a.geraet === geraet && a.praefix === praefix && wartetAufRueckfall(a));
+    if (erster && jetzt - erster.t > RUECKFALL_NACH_MS) {
         anfrage = rpcAnfrage(ABSENDER, 2);
     }
 }

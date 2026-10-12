@@ -70,6 +70,7 @@ final class MqttZugaenge
         'viele'      => 'Es würden auf einmal mehr als 5 Zugänge entfernt – abgelehnt (bin/power mqtt:zugaenge-schreiben --viele-entfernen).',
         'marker'     => 'Die Kennwortdatei des Brokers hat einen beschädigten Block der Gerätezugänge.',
         'basis'      => 'Die ACL-Grundlage des Brokers enthält unbekannte Zeilen.',
+        'neuladen'   => 'Mosquitto ließ sich nicht neu laden – der alte Stand gilt weiter, der nächste Lauf versucht es erneut.',
     ];
 
     private const KOPF = '# powermanagement mqtt-zugaenge 1';
@@ -380,7 +381,7 @@ final class MqttZugaenge
         return implode(' ', $teile);
     }
 
-    /** Soll schreiben und warten; null = übernommen. */
+    /** Soll schreiben und warten; null = übernommen. Danach die Schutzliste für Node-RED. */
     private static function anwenden(?callable $bedingung = null, bool $entfernenErlaubt = false): ?string
     {
         try {
@@ -388,7 +389,46 @@ final class MqttZugaenge
         } catch (\RuntimeException $e) {
             return $e->getMessage();
         }
-        return self::aufBrokerWarten($lauf, $bedingung);
+        $fehler = self::aufBrokerWarten($lauf, $bedingung);
+        self::schutzVeroeffentlichen();
+        return $fehler;
+    }
+
+    /**
+     * Welche Geräte umgestellt sind – für Node-RED, gespeichert (retained)
+     * unter <prefix>/status/mqtt-zugaenge.
+     *
+     * Node-RED leitet den Gerätenamen verlustbehaftet ab (letztes Segment,
+     * klein). Ohne diese Liste könnte der gemeinsame Zugang unter einem
+     * Doppelgänger-Präfix (kuehlhaus/… statt des gesperrten shelly/kuehlhaus,
+     * shellies/SHELLY1-b929cc statt shellies/shelly1-B929CC) Messwerte für ein
+     * umgestelltes Gerät einspeisen. Unter pm/ darf er nicht schreiben.
+     *
+     * @return string|null null = veröffentlicht, sonst der Fehler (auch im Log)
+     */
+    public static function schutzVeroeffentlichen(): ?string
+    {
+        if (Config::isDemo()) {
+            return null;
+        }
+        $geschuetzt = [];
+        foreach (Database::select("SELECT praefix, geraet FROM mqtt_zugaenge WHERE zustand = 'eigen' ORDER BY geraet") as $z) {
+            $geschuetzt[(string) $z['geraet']] = (string) $z['praefix'];
+        }
+        $thema = trim((string) Config::get('mqtt.prefix', 'pm'), '/') . '/status/mqtt-zugaenge';
+        try {
+            $mqtt = Mqtt::ausKonfiguration('pm-zugaenge-' . bin2hex(random_bytes(4)));
+            try {
+                $mqtt->veroeffentlichen($thema, (string) json_encode(['ts' => (int) floor(microtime(true) * 1000),
+                    'geschuetzt' => (object) $geschuetzt], JSON_UNESCAPED_SLASHES), 1, true);
+            } finally {
+                $mqtt->trennen();
+            }
+            return null;
+        } catch (\RuntimeException $e) {
+            Logger::error('MQTT-Zugänge: Schutzliste für Node-RED nicht veröffentlicht', ['fehler' => $e->getMessage()]);
+            return $e->getMessage();
+        }
     }
 
     /**
@@ -946,6 +986,9 @@ final class MqttZugaenge
             } catch (\RuntimeException $ex) {
                 $meldungen[] = 'MQTT-Zugänge: ' . $ex->getMessage();
             }
+        }
+        if (($fehler = self::schutzVeroeffentlichen()) !== null) {
+            $meldungen[] = 'MQTT-Zugänge: Schutzliste für Node-RED nicht veröffentlicht – ' . $fehler;
         }
         if ($e['zeit'] < $jetzt - 900) {
             $meldungen[] = 'MQTT-Zugänge: der Broker-Abgleich hat sich seit über 15 Minuten nicht gemeldet (Zeitgeber powermanagement-mqtt-zugaenge.timer prüfen).';
