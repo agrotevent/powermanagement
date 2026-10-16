@@ -18,7 +18,9 @@ use App\Services\BereichService;
 use App\Support\Database;
 
 $port = freierPort();
-hintergrund(['php', '-S', '127.0.0.1:' . $port, '-t', dirname(__DIR__) . '/public']);
+// Mehrere Arbeiter: eine Seite, die die eigene Schnittstelle aufruft (eine
+// andere Instanz über die Loopback-Adresse), wartete sonst auf sich selbst.
+hintergrund(['php', '-S', '127.0.0.1:' . $port, '-t', dirname(__DIR__) . '/public'], ['PHP_CLI_SERVER_WORKERS' => '4']);
 for ($i = 0; $i < 50 && !erreichbar('127.0.0.1', $port); $i++) {
     usleep(100_000);
 }
@@ -325,13 +327,53 @@ try {
     pruefe($r['status'] === 302, 'POST mit falschem Token → Weiterleitung');
     gleich((int) Database::scalar('SELECT COUNT(*) FROM steckertypen'), $vorher, 'POST mit falschem Token ändert nichts');
 
+    // ---------------------------------------------------- Schnittstelle (API)
+    alsBenutzer($benutzer['admin']);
+    $zugang = \App\Services\ApiZugaenge::anlegen(['name' => $kennung . ' Zugang', 'befugnisse' => ['plaene.lesen']]);
+    alsBenutzer(null);
+    pruefe($zugang['ok'], 'Zugang für die Schnittstelle angelegt');
+    $zugangId = (int) ($zugang['id'] ?? 0);
+    foreach (['/system/schnittstelle', '/system/schnittstelle/' . $zugangId] as $pfad) {
+        $r = aufruf($basis, $admin['dose'], 'GET', $pfad);
+        pruefe($r['status'] === 200, 'Admin ' . $pfad . ' → ' . $r['status']);
+        pruefe(phpMeldung($r['text']) === null, 'Admin ' . $pfad . ' ohne PHP-Meldung ' . (string) phpMeldung($r['text']));
+    }
+    gleich(aufruf($basis, $admin['dose'], 'GET', '/system/schnittstelle/999999999')['status'], 404, 'unbekannter Zugang → 404');
+    gleich(aufruf($basis, $admin['dose'], 'GET', '/system/schnittstelle/anlegen')['status'], 404, '/system/schnittstelle/anlegen per GET → 404');
+    $tokensVorher = (int) Database::scalar('SELECT COUNT(*) FROM api_tokens');
+    foreach ([
+        '/system/schnittstelle/anlegen' => ['name' => $kennung . ' ohne csrf', 'befugnisse' => ['plaene.lesen']],
+        '/system/schnittstelle/' . $zugangId . '/speichern' => ['name' => $kennung . ' gekapert', 'befugnisse' => ['plaene.lesen']],
+        '/system/schnittstelle/' . $zugangId . '/anzeigen' => ['kennwort' => $kennwort],
+        '/system/schnittstelle/' . $zugangId . '/widerrufen' => [],
+        '/system/schnittstelle/' . $zugangId . '/loeschen' => [],
+    ] as $pfad => $felder) {
+        $r = aufruf($basis, $admin['dose'], 'POST', $pfad, $felder);
+        pruefe($r['status'] === 302 && !str_contains($r['text'], 'mtma_'), 'Schnittstelle ' . $pfad . ' ohne CSRF-Token → abgelehnt');
+    }
+    gleich([(int) Database::scalar('SELECT COUNT(*) FROM api_tokens'), Database::first('SELECT name, revoked_at FROM api_tokens WHERE id = ?', [$zugangId])],
+        [$tokensVorher, ['name' => $kennung . ' Zugang', 'revoked_at' => null]], 'ohne CSRF-Token ändert sich an den Zugängen nichts');
+    $r = aufruf($basis, $leer, 'GET', '/api/v1/info');
+    pruefe($r['status'] === 401 && (json_decode($r['text'], true)['ok'] ?? true) === false && $r['ziel'] === null
+        && stripos($r['kopf'], 'application/json') !== false && stripos($r['kopf'], 'Set-Cookie') === false, '/api/v1/info ohne Token → 401 JSON, keine Anmeldeseite, kein Cookie');
+    $r = aufruf($basis, $admin['dose'], 'GET', '/api/v1/info');
+    gleich($r['status'], 401, '/api/v1/info mit Sitzung, aber ohne Token → 401 (die Sitzung zählt dort nicht)');
+
     // ---------------------------------------------------- Kunde ohne Freigabe
     $kunde = anmelden($basis, $kennung . '-kunde', $kennwort);
     $dosen[] = $kunde['dose'];
     foreach (['/datenquellen', '/system/benutzer', '/system/einstellungen', '/audit', '/stecker', '/standorte', '/anlagen/neu', '/steuerung/protokoll', '/bereiche/neu',
-        '/inventar', '/inventar/neu', '/verteiler-abgleich', '/location'] as $pfad) {
+        '/inventar', '/inventar/neu', '/verteiler-abgleich', '/location', '/system/schnittstelle', '/system/schnittstelle/' . $zugangId] as $pfad) {
         gleich(aufruf($basis, $kunde['dose'], 'GET', $pfad)['status'], 403, 'Kunde ' . $pfad);
     }
+    // Ohne „api.manage“ nichts an den Zugängen – auch nicht widerrufen
+    foreach (['anlegen' => ['name' => $kennung . ' vom Kunden', 'befugnisse' => ['plaene.lesen']], $zugangId . '/widerrufen' => [],
+        $zugangId . '/anzeigen' => ['kennwort' => $kennwort], $zugangId . '/speichern' => ['name' => $kennung . ' vom Kunden']] as $aktion => $felder) {
+        $r = aufruf($basis, $kunde['dose'], 'POST', '/system/schnittstelle/' . $aktion, $felder + ['_token' => $kunde['token']]);
+        pruefe($r['status'] === 403 && !str_contains($r['text'], 'mtma_'), 'Kunde: Schnittstelle ' . $aktion . ' → 403');
+    }
+    gleich(Database::first('SELECT name, revoked_at FROM api_tokens WHERE id = ?', [$zugangId]), ['name' => $kennung . ' Zugang', 'revoked_at' => null],
+        'der Zugang bleibt, wie er war');
     if ($etage > 0) {
         gleich(aufruf($basis, $kunde['dose'], 'GET', '/karte/' . $etage . '/geojson')['status'], 403, 'Kunde ohne Freigabe: kein GeoJSON');
         $r = aufruf($basis, $kunde['dose'], 'POST', '/karte/georeferenz', ['floor_id' => $etage, 'entfernen' => 1, '_token' => $kunde['token']], ['Accept: application/json']);
@@ -519,6 +561,11 @@ try {
         \App\Services\SiteService::deleteSite($werk);
     }
 } finally {
+    foreach (Database::select('SELECT id FROM api_tokens WHERE name LIKE ?', [$kennung . '%']) as $t) {
+        Database::execute('DELETE FROM api_token_standorte WHERE token_id = ?', [(int) $t['id']]);
+        Database::execute('DELETE FROM api_tokens WHERE id = ?', [(int) $t['id']]);
+        Database::execute("DELETE FROM audit_log WHERE target_type = 'api_token' AND target_id = ?", [(string) $t['id']]);
+    }
     Database::execute('DELETE FROM steckertypen WHERE name LIKE ?', [$kennung . '%']);
     foreach (Database::select('SELECT id FROM roles WHERE name LIKE ?', [$kennung . '%']) as $rolle) {
         BenutzerService::rolleLoeschen((int) $rolle['id']);

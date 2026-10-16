@@ -11,19 +11,26 @@ declare(strict_types=1);
  * werden keine Pfade; Namen brechen kein Line Protocol; CSV ohne Formeln;
  * nur http(s); kein öffentlicher Schlüssel; PDF-Werkzeuge hängen nicht.
  *
+ * Schnittstelle: Befugnisse und Standorte eines Tokens vergibt nur, wer die
+ * Rechte dazu hat; ein verfälschtes Token wird nie angezeigt; die Ansichten
+ * kommen ohne Inline-Skript aus.
+ *
  * Die Prüfungen über HTTP (Weiterleitungen, Sitzung, Token, Benutzer-
- * verwaltung) stehen in web.php.
+ * verwaltung) stehen in web.php und schnittstelle.php.
  */
 
 require __DIR__ . '/hilfen/pruefung.php';
 
+use App\Auth\ApiZugang;
 use App\Auth\Auth;
+use App\Auth\Permissions;
 use App\Auth\Zugriff;
 use App\Controllers\StatistikController;
 use App\Messung\Datenquellen;
 use App\Messung\Http;
 use App\Messung\Influx;
 use App\Services\AnlagenService;
+use App\Services\ApiZugaenge;
 use App\Services\BenutzerService;
 use App\Services\LocationBundle;
 use App\Services\LocationSync;
@@ -65,6 +72,65 @@ try {
     pruefe(BenutzerService::darfVergeben(['*']) && BenutzerService::darfVerwalten($benutzer['technik'])
         && BenutzerService::darfFreigabeVergeben('alles', true), 'die Administration darf alles vergeben');
     alsBenutzer(null);
+
+    // ------------------------------------------------ Schnittstelle: Zugänge vergeben
+    foreach (Permissions::standardRollen() as $schluessel => $rolle) {
+        if ($schluessel !== 'admin') {
+            pruefe(preg_grep('/^api\./', $rolle['permissions']) === [], 'Standardrolle ' . $schluessel . ' ohne api.*');
+        }
+    }
+    gleich((int) Database::scalar("SELECT COUNT(*) FROM role_permissions rp JOIN roles r ON r.id = rp.role_id
+        WHERE rp.permission LIKE 'api.%' AND r.role_key IN ('planung', 'technik', 'kunde')"), 0, 'die api.*-Rechte hat nur die Administration (*)');
+    $rollen['api'] = (int) BenutzerService::rolleSpeichern(null, $k . ' api', '', ['api.manage', 'karte.view'])['id'];
+    $rollen['apialles'] = (int) BenutzerService::rolleSpeichern(null, $k . ' apialles', '',
+        ['api.manage', 'karte.view', 'plans.manage', 'anlagen.view', 'anlagen.scope.all'])['id'];
+    $benutzer['api'] = BenutzerService::anlegen($k . '-api', 'Pruefung2026!!', $rolleKey($rollen['api']), false);
+    $benutzer['apialles'] = BenutzerService::anlegen($k . '-apialles', 'Pruefung2026!!', $rolleKey($rollen['apialles']), false);
+    $sites['api'] = SiteService::saveSite(null, ['name' => $k . ' API']);
+    alsBenutzer($benutzer['api']);
+    $r = ApiZugaenge::anlegen(['name' => $k . ' Zugang', 'befugnisse' => ['plaene.lesen'], 'sehen' => [$sites['api']]]);
+    pruefe(!$r['ok'] && str_contains($r['message'], 'Alle Standorte'), 'Standorte für ein Token nur mit „Alle Standorte …“');
+    $r = ApiZugaenge::anlegen(['name' => $k . ' Zugang', 'befugnisse' => ['feststrom']]);
+    pruefe(!$r['ok'] && str_contains($r['message'], 'feststrom'), 'Feststrom nur, wer Anlagen sehen darf');
+    pruefe(!ApiZugaenge::anlegen(['name' => $k . ' Zugang', 'befugnisse' => ['plaene.vorschlagen']])['ok'], 'vorschlagen nur mit „Standorte pflegen“');
+    pruefe(!ApiZugaenge::anlegen(['name' => $k . ' Zugang', 'befugnisse' => ['plaene.lesen'], 'user_id' => $benutzer['admin']])['ok'],
+        'an ein Konto mit mehr Rechten lässt sich kein Token binden');
+    gleich((int) Database::scalar('SELECT COUNT(*) FROM api_tokens WHERE name LIKE ?', [$k . '%']), 0, 'nichts davon gespeichert');
+    alsBenutzer($benutzer['apialles']);
+    $r = ApiZugaenge::anlegen(['name' => $k . ' schreibt fest', 'befugnisse' => ['plaene.schreiben', 'feststrom'], 'sehen' => [$sites['api']]]);
+    pruefe(!$r['ok'] && str_contains($r['message'], 'Feststrom'), 'schreiben mit Feststrom nur mit „Anlagen ändern“ und „Kabel einzeichnen“');
+    $schreibt = ApiZugaenge::anlegen(['name' => $k . ' schreibt', 'befugnisse' => ['plaene.schreiben'], 'bearbeiten' => [$sites['api']]]);
+    pruefe($schreibt['ok'] && ApiZugaenge::anlegen(['name' => $k . ' schlägt vor', 'befugnisse' => ['plaene.vorschlagen', 'feststrom']])['ok'],
+        'schreiben allein und vorschlagen mit Feststrom schon');
+    $tokenZeile = ApiZugang::pruefen('Bearer ' . $schreibt['token'], '127.0.0.1');
+    pruefe($tokenZeile !== null && !isset($tokenZeile['token_hash']) && !isset($tokenZeile['token_enc']), 'geprüftes Token ohne Hash und Verschlüsseltes');
+    pruefe(ApiZugang::bearbeitet($tokenZeile, $sites['api']), 'mit „schreiben“ und Freigabe „bearbeiten“: bearbeiten');
+    Database::execute("UPDATE api_tokens SET befugnisse = '[\"plaene.lesen\"]' WHERE id = ?", [(int) $schreibt['id']]);
+    pruefe(ApiZugang::sieht(ApiZugang::pruefen('Bearer ' . $schreibt['token'], '127.0.0.1'), $sites['api'])
+        && !ApiZugang::bearbeitet(ApiZugang::pruefen('Bearer ' . $schreibt['token'], '127.0.0.1'), $sites['api']), 'nur lesen: sehen ja, bearbeiten nein');
+    // Ein verfälschtes token_enc zeigt nichts an
+    alsBenutzer($benutzer['admin']);
+    $falsch = Crypto::encrypt('mtma_' . str_repeat('B', 40));
+    Database::execute('UPDATE api_tokens SET token_enc = ? WHERE id = ?', [$falsch, (int) $schreibt['id']]);
+    $r = ApiZugaenge::klartext((int) $schreibt['id'], 'Pruefung2026!!');
+    pruefe(!$r['ok'] && !isset($r['token']), 'verfälschtes token_enc (anderes Token): nichts angezeigt');
+    Database::execute("UPDATE api_tokens SET token_enc = 'kaputt' WHERE id = ?", [(int) $schreibt['id']]);
+    pruefe(!isset(ApiZugaenge::klartext((int) $schreibt['id'], 'Pruefung2026!!')['token']), 'unlesbares token_enc: nichts angezeigt');
+    pruefe(!isset(ApiZugaenge::klartext((int) $schreibt['id'], 'falsch')['token']), 'falsches Kennwort: nichts angezeigt');
+    alsBenutzer($benutzer['apialles']);
+    pruefe(!ApiZugaenge::loeschen((int) $schreibt['id'])['ok'], 'ein gültiger Zugang lässt sich nicht löschen');
+    alsBenutzer(null);
+    pruefe(ApiZugang::pruefen('Bearer ' . $schreibt['token'] . 'x', '127.0.0.1') === null && ApiZugang::pruefen('Token ' . $schreibt['token'], '127.0.0.1') === null
+        && ApiZugang::pruefen('Bearer ' . strtoupper($schreibt['token']), '127.0.0.1') === null, 'nur genau das Token im Kopf „Bearer“');
+    // Die Ansichten der Schnittstelle: kein Skript ohne Nonce, keine on…=, kein javascript:
+    $ansichten = array_merge(glob(dirname(__DIR__) . '/resources/views/schnittstelle/*.php') ?: [], [dirname(__DIR__) . '/resources/views/partials/token-standorte.php']);
+    pruefe(count($ansichten) >= 4, 'Ansichten der Schnittstelle gefunden');
+    foreach ($ansichten as $datei) {
+        $text = (string) file_get_contents($datei);
+        $name = basename(dirname($datei)) . '/' . basename($datei);
+        pruefe(preg_match('/<script(?![^>]*\bnonce=)/i', $text) !== 1, $name . ': kein <script> ohne Nonce');
+        pruefe(preg_match('/\son[a-z]+\s*=/i', $text) !== 1 && stripos($text, 'javascript:') === false, $name . ': kein on…= und kein javascript:');
+    }
 
     // ------------------------------------------------ Anmeldung
     $unbekannt = $k . '-niemand';
@@ -184,6 +250,11 @@ try {
 } finally {
     alsBenutzer(null);
     Config::set('app.key', $alterSchluessel);
+    foreach (Database::select('SELECT id FROM api_tokens WHERE name LIKE ?', [$k . '%']) as $t) {
+        Database::execute('DELETE FROM api_token_standorte WHERE token_id = ?', [(int) $t['id']]);
+        Database::execute('DELETE FROM api_tokens WHERE id = ?', [(int) $t['id']]);
+        Database::execute("DELETE FROM audit_log WHERE target_type = 'api_token' AND target_id = ?", [(string) $t['id']]);
+    }
     foreach ($sites as $siteId) {
         foreach (Database::select('SELECT id FROM objekte WHERE site_id = ?', [$siteId]) as $o) {
             AnlagenService::loeschen((int) $o['id']);

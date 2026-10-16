@@ -41,12 +41,14 @@ document.addEventListener('DOMContentLoaded', function () {
         sync();
     });
 
-    // "Alle auswählen" in Tabellen und Port-Gittern.
+    // "Alle auswählen" in Tabellen und Port-Gittern. Mit data-toggle-name
+    // nur die Kästchen dieses Namens (eine Spalte, etwa „sehen[]“).
     document.querySelectorAll('[data-toggle-all]').forEach(function (master) {
         master.addEventListener('change', function () {
             var scope = document.querySelector(master.dataset.toggleAll);
             if (!scope) { return; }
             scope.querySelectorAll('input[type=checkbox]:not([disabled])').forEach(function (box) {
+                if (master.dataset.toggleName && box.name !== master.dataset.toggleName) { return; }
                 box.checked = master.checked;
                 box.dispatchEvent(new Event('change'));
             });
@@ -305,16 +307,44 @@ document.addEventListener('DOMContentLoaded', function () {
         });
     });
 
-    // data-kopieren="#id": Text des Elements in die Zwischenablage.
+    // data-auswaehlen: ein Feld zum Kopieren (Token) beim Antippen ganz markieren.
+    document.querySelectorAll('[data-auswaehlen]').forEach(function (feld) {
+        ['focus', 'click'].forEach(function (art) {
+            feld.addEventListener(art, function () { if (feld.select) { feld.select(); } });
+        });
+    });
+
+    // data-kopieren="#id": Text des Elements (bei Eingabefeldern ihr Wert) in
+    // die Zwischenablage. Ohne sichere Verbindung (http im lokalen Netz) gibt
+    // es navigator.clipboard nicht – dann markieren und den alten Weg nehmen.
     document.querySelectorAll('[data-kopieren]').forEach(function (knopf) {
         knopf.addEventListener('click', function () {
             var quelle = document.querySelector(knopf.dataset.kopieren);
-            if (!quelle || !navigator.clipboard) { return; }
-            navigator.clipboard.writeText(quelle.textContent).then(function () {
+            if (!quelle) { return; }
+            var feld = quelle.tagName === 'INPUT' || quelle.tagName === 'TEXTAREA';
+            var text = feld ? quelle.value : quelle.textContent;
+            var gemeldet = function () {
                 var vorher = knopf.textContent;
                 knopf.textContent = 'kopiert';
                 window.setTimeout(function () { knopf.textContent = vorher; }, 1500);
-            });
+            };
+            if (navigator.clipboard && window.isSecureContext) {
+                navigator.clipboard.writeText(text).then(gemeldet);
+                return;
+            }
+            if (feld) {
+                quelle.focus();
+                quelle.select();
+            } else {
+                var bereich = document.createRange();
+                bereich.selectNodeContents(quelle);
+                var auswahl = window.getSelection();
+                auswahl.removeAllRanges();
+                auswahl.addRange(bereich);
+            }
+            try {
+                if (document.execCommand('copy')) { gemeldet(); }
+            } catch (e) { /* markiert ist es – dann von Hand kopieren */ }
         });
     });
 

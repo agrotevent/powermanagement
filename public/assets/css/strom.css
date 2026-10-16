@@ -453,3 +453,13 @@ tr.abweichung-zeile td { background: var(--warning-light); }
 .karte-seite .pm-phasen { font-size: .74rem; }
 .karte-seite .pm-phasen th, .karte-seite .pm-phasen td { padding: .15rem .25rem; }
 .pm-phasen th { text-transform: none; letter-spacing: normal; }
+
+/* Schnittstelle (API): Token zum Kopieren, „Anzeigen“ mit Kennwort,
+   Standort-Freigaben eines Zugangs. */
+.api-token-zeile { display: flex; flex-wrap: wrap; gap: .5rem; align-items: center; }
+.api-token-zeile input { flex: 1 1 22rem; min-width: 0; font-size: .95rem; }
+.api-anzeigen { display: flex; flex-wrap: wrap; gap: .3rem; margin-top: .3rem; }
+.api-anzeigen input { width: 11rem; max-width: 100%; }
+.token-standorte-alle { margin-bottom: .3rem; }
+.token-standorte .check { margin-bottom: 0; }
+#api-pruefen { word-break: break-all; }

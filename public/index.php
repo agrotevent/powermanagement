@@ -4,6 +4,7 @@ declare(strict_types=1);
 require dirname(__DIR__) . '/src/bootstrap.php';
 
 use App\Controllers\AnlagenController;
+use App\Controllers\ApiController;
 use App\Controllers\AuditController;
 use App\Controllers\AufbauController;
 use App\Controllers\AuthController;
@@ -17,6 +18,7 @@ use App\Controllers\KarteController;
 use App\Controllers\LocationController;
 use App\Controllers\ManifestController;
 use App\Controllers\MqttZugaengeController;
+use App\Controllers\SchnittstelleController;
 use App\Controllers\StandortController;
 use App\Controllers\StatistikController;
 use App\Controllers\SteckerController;
@@ -25,6 +27,18 @@ use App\Controllers\VerteilerAbgleichController;
 use App\Support\Request;
 use App\Support\Router;
 use App\Support\Session;
+
+/*
+ * Die Schnittstelle für andere Instanzen (/api/v1) läuft vor Sitzung und
+ * Router: ohne Cookie, ohne CSRF-Token, ohne Weiterleitung auf die
+ * Anmeldung – jede Anfrage meldet sich mit ihrem Token selbst an und
+ * bekommt JSON zurück.
+ */
+$anfrage = new Request();
+if (ApiController::zustaendig($anfrage->path())) {
+    (new ApiController())->bearbeiten($anfrage);
+    return;
+}
 
 Session::start();
 
@@ -190,6 +204,16 @@ $router->post('/system/einstellungen/pruefen', [EinstellungenController::class, 
 // Adresse umstellt, lenkt das hinterlegte Token dorthin.
 $router->post('/system/einstellungen/location', [EinstellungenController::class, 'location'], 'settings.manage');
 
+// Schnittstelle (API): Zugänge für andere Instanzen. Anlegen, Ändern,
+// Anzeigen und Löschen zusätzlich nur mit „Alle Standorte …“ (prüft der
+// Controller); widerrufen darf jeder mit dem Recht – das nimmt nur weg.
+$router->get('/system/schnittstelle', [SchnittstelleController::class, 'index'], 'api.manage');
+$router->post('/system/schnittstelle/anlegen', [SchnittstelleController::class, 'anlegen'], 'api.manage');
+$router->get('/system/schnittstelle/{id}', [SchnittstelleController::class, 'zugang'], 'api.manage');
+foreach (['speichern', 'anzeigen', 'widerrufen', 'loeschen'] as $aktion) {
+    $router->post('/system/schnittstelle/{id}/' . $aktion, [SchnittstelleController::class, $aktion], 'api.manage');
+}
+
 $router->get('/audit', [AuditController::class, 'index'], 'audit.view');
 
-$router->dispatch(new Request());
+$router->dispatch($anfrage);
