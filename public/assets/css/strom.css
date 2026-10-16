@@ -478,3 +478,10 @@ tr.abweichung-zeile td { background: var(--warning-light); }
 @media (max-width: 720px) {
     .api-aktionen { justify-content: flex-start; }
 }
+
+/* Änderungsvorschläge: Notiz mit Zeilenumbrüchen, Feststrom je Etage (+ ~ −). */
+.vorschlag-notiz { white-space: pre-wrap; overflow-wrap: anywhere; }
+.vorschlag-etagen .check { margin-bottom: 0; }
+.vorschlag-etagen .badge + .badge { margin-left: .25rem; }
+.vorschlag-art { font-weight: 600; margin-top: .15rem; }
+.vorschlag-namen { margin: .1rem 0 .3rem; padding-left: 1rem; overflow-wrap: anywhere; }

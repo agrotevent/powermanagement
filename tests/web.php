@@ -394,6 +394,32 @@ try {
     gleich([(int) Database::scalar('SELECT COUNT(*) FROM api_partner'), Database::first('SELECT partner_id FROM sites WHERE id = ?', [$instanzSite])], $vorher,
         'ohne CSRF-Token weder eingetragen noch ausgetragen noch verknüpft');
 
+    // ---------------------------------------------------- Änderungsvorschläge
+    // Ein Vorschlag, wie ihn die Schnittstelle ablegt – mit Text, der maskiert ankommen muss.
+    $instanzEtage = (int) Database::scalar('SELECT id FROM floors WHERE site_id = ? ORDER BY id LIMIT 1', [$instanzSite]);
+    $instanzEtageKey = \App\Services\LocationBundle::schluesselSichern('floors', $instanzEtage, 'Halle');
+    $vorschlagId = Database::insert('api_vorschlaege', [
+        'token_id' => $zugangId, 'token_name' => $kennung . ' Zugang', 'absender' => $kennung . ' <i>Absender</i>', 'site_id' => $instanzSite,
+        'site_key' => $instanzKey, 'daten' => json_encode(['location' => ['format' => 1, 'art' => 'location', 'schluessel' => $instanzKey, 'name' => 'dort',
+            'etagen' => [['schluessel' => $instanzEtageKey, 'name' => '<script>x</script>', 'ebene' => 0, 'reihenfolge' => 0, 'massstab' => '1:250', 'plan' => null]]]]),
+        'dateien' => '{}', 'notiz' => '<b>Notiz</b>', 'status' => 'offen', 'created_at' => gmdate('c'),
+    ]);
+    foreach (['/vorschlaege', '/vorschlaege/' . $vorschlagId] as $pfad) {
+        $r = aufruf($basis, $admin['dose'], 'GET', $pfad);
+        pruefe($r['status'] === 200, 'Admin ' . $pfad . ' → ' . $r['status']);
+        pruefe(phpMeldung($r['text']) === null, 'Admin ' . $pfad . ' ohne PHP-Meldung ' . (string) phpMeldung($r['text']));
+        pruefe(!str_contains($r['text'], '<i>Absender</i>') && !str_contains($r['text'], '<b>Notiz</b>') && !str_contains($r['text'], '<script>x'),
+            'Admin ' . $pfad . ': Text von dort maskiert');
+    }
+    gleich(aufruf($basis, $admin['dose'], 'GET', '/vorschlaege/999999999')['status'], 404, 'unbekannter Vorschlag → 404');
+    foreach (['/vorschlaege/' . $vorschlagId . '/annehmen' => ['etagen' => [$instanzEtageKey], 'teile' => ['grundriss']],
+        '/vorschlaege/' . $vorschlagId . '/ablehnen' => ['grund' => 'ohne CSRF']] as $pfad => $felder) {
+        $r = aufruf($basis, $admin['dose'], 'POST', $pfad, $felder);
+        pruefe($r['status'] === 302 && $r['ziel'] !== '/vorschlaege/' . $vorschlagId, 'Vorschläge ' . $pfad . ' ohne CSRF-Token → abgelehnt');
+    }
+    gleich([Database::scalar('SELECT status FROM api_vorschlaege WHERE id = ?', [$vorschlagId]), Database::scalar('SELECT scale_note FROM floors WHERE id = ?', [$instanzEtage])],
+        ['offen', ''], 'ohne CSRF-Token weder angenommen noch abgelehnt');
+
     // ---------------------------------------------------- Kunde ohne Freigabe
     $kunde = anmelden($basis, $kennung . '-kunde', $kennwort);
     $dosen[] = $kunde['dose'];
@@ -414,10 +440,20 @@ try {
         gleich(aufruf($basis, $kunde['dose'], 'GET', $pfad)['status'], 403, 'Kunde ' . $pfad);
     }
     foreach (['anlegen' => ['adresse' => $basis, 'token' => 'mtma_' . str_repeat('k', 40)], $selbstId . '/loeschen' => [], $selbstId . '/pruefen' => [],
-        $selbstId . '/uebernehmen' => ['schluessel' => $instanzKey], $selbstId . '/loesen' => ['site_id' => $instanzSite]] as $aktion => $felder) {
+        $selbstId . '/uebernehmen' => ['schluessel' => $instanzKey], $selbstId . '/loesen' => ['site_id' => $instanzSite],
+        $selbstId . '/zurueck' => ['site_id' => $instanzSite, 'erzwingen' => '1']] as $aktion => $felder) {
         gleich(aufruf($basis, $kunde['dose'], 'POST', '/instanzen/' . $aktion, $felder + ['_token' => $kunde['token']])['status'], 403, 'Kunde: Instanzen ' . $aktion . ' → 403');
     }
     pruefe(\App\Services\PartnerService::find($selbstId) !== null, 'die Instanz bleibt eingetragen');
+    // Ohne „api.vorschlaege“ keine Änderungsvorschläge
+    foreach (['/vorschlaege', '/vorschlaege/' . $vorschlagId, '/vorschlaege/' . $vorschlagId . '/datei?pfad=plaene%2Fx.svg'] as $pfad) {
+        gleich(aufruf($basis, $kunde['dose'], 'GET', $pfad)['status'], 403, 'Kunde ' . $pfad);
+    }
+    foreach (['annehmen' => ['etagen' => [$instanzEtageKey], 'teile' => ['grundriss']], 'ablehnen' => ['grund' => 'vom Kunden']] as $aktion => $felder) {
+        gleich(aufruf($basis, $kunde['dose'], 'POST', '/vorschlaege/' . $vorschlagId . '/' . $aktion, $felder + ['_token' => $kunde['token']])['status'], 403,
+            'Kunde: Vorschlag ' . $aktion . ' → 403');
+    }
+    gleich(Database::scalar('SELECT status FROM api_vorschlaege WHERE id = ?', [$vorschlagId]), 'offen', 'der Vorschlag bleibt offen');
     if ($etage > 0) {
         gleich(aufruf($basis, $kunde['dose'], 'GET', '/karte/' . $etage . '/geojson')['status'], 403, 'Kunde ohne Freigabe: kein GeoJSON');
         $r = aufruf($basis, $kunde['dose'], 'POST', '/karte/georeferenz', ['floor_id' => $etage, 'entfernen' => 1, '_token' => $kunde['token']], ['Accept: application/json']);
@@ -618,6 +654,10 @@ try {
         }
     }
     foreach (Database::select('SELECT id FROM api_tokens WHERE name LIKE ?', [$kennung . '%']) as $t) {
+        foreach (Database::select('SELECT id FROM api_vorschlaege WHERE token_id = ?', [(int) $t['id']]) as $v) {
+            Database::execute('DELETE FROM api_vorschlaege WHERE id = ?', [(int) $v['id']]);
+            Database::execute("DELETE FROM audit_log WHERE target_type = 'api_vorschlag' AND target_id = ?", [(string) $v['id']]);
+        }
         Database::execute('DELETE FROM api_token_standorte WHERE token_id = ?', [(int) $t['id']]);
         Database::execute('DELETE FROM api_tokens WHERE id = ?', [(int) $t['id']]);
         Database::execute("DELETE FROM audit_log WHERE target_type = 'api_token' AND target_id = ?", [(string) $t['id']]);

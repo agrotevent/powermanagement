@@ -267,9 +267,9 @@ try {
     gleich(a('POST', '/api/v1/locations/x/vorschlaege', $tVoll, '{"location":{}}', ['Content-Type: text/plain'])['status'], 415, 'ohne JSON-Inhaltstyp: 415');
     $r = a('POST', '/api/v1/locations/x/vorschlaege', $tVoll, str_repeat('a', 49 * 1024 * 1024));
     pruefe($r['status'] === 413 && ($r['json']['ok'] ?? true) === false, '49 MiB: 413 als JSON');
-    if (!class_exists('App\\Services\\VorschlagService')) {
-        gleich(a('POST', '/api/v1/locations/x/vorschlaege', $tVoll, '{"location":{"art":"location"}}')['status'], 501, 'Vorschläge: noch nicht angenommen (501)');
-    }
+    $r = a('POST', '/api/v1/locations/x/vorschlaege', $tVoll, '{"location":{"art":"location"}}');
+    gleich([$r['status'], $r['json']['ok'] ?? null, array_key_exists('status', (array) $r['json'])], [404, false, false],
+        'Vorschlag an eine unbekannte Location: 404 als JSON (ohne internen Status)');
     $r = a('HEAD', '/api/v1/info', $tVoll);
     pruefe($r['status'] === 200 && $r['roh'] === '', 'HEAD /info: 200 ohne Körper');
     $r = a('HEAD', '/api/v1/info', null);

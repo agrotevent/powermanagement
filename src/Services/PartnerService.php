@@ -365,11 +365,16 @@ final class PartnerService
         $url = rtrim((string) ($partner['base_url'] ?? ''), '/') . '/api/v1' . $pfad;
         $zeit = $roh ? self::DATEI_ZEITLIMIT : self::ZEITLIMIT;
         $kopf = ['Authorization' => 'Bearer ' . $token, 'Accept' => $roh ? '*/*' : 'application/json'];
-        $optionen = ['verbindung' => self::VERBINDUNGSZEIT, 'zeit' => $zeit, 'max' => $roh ? SiteService::MAX_UPLOAD_BYTES : self::MAX_ANTWORT];
+        $optionen = ['verbindung' => self::VERBINDUNGSZEIT, 'max' => $roh ? SiteService::MAX_UPLOAD_BYTES : self::MAX_ANTWORT];
         if ($koerper !== null) {
             $kopf['Content-Type'] = 'application/json';
             $optionen['rumpf'] = (string) json_encode($koerper, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_PRESERVE_ZERO_FRACTION);
+            // Grundrisse im Körper (zurückschicken): so lange wie für einen Download.
+            if (strlen($optionen['rumpf']) > 1024 * 1024) {
+                $zeit = self::DATEI_ZEITLIMIT;
+            }
         }
+        $optionen['zeit'] = $zeit;
         $a = Http::anfrage($methode, $url, ['kopf' => $kopf] + $optionen);
         if (!$a['ok']) {
             if ((int) ($a['nummer'] ?? 0) === Http::ZU_GROSS) {

@@ -25,6 +25,7 @@ use App\Controllers\StatistikController;
 use App\Controllers\SteckerController;
 use App\Controllers\SteuerungController;
 use App\Controllers\VerteilerAbgleichController;
+use App\Controllers\VorschlaegeController;
 use App\Support\Request;
 use App\Support\Router;
 use App\Support\Session;
@@ -224,6 +225,15 @@ $router->get('/instanzen/{id}', [InstanzenController::class, 'instanz'], 'api.pa
 $router->get('/instanzen/{id}/zuordnen', [InstanzenController::class, 'zuordnen'], 'api.partner');
 foreach (['pruefen', 'loeschen', 'uebernehmen', 'loesen', 'zurueck'] as $aktion) {
     $router->post('/instanzen/{id}/' . $aktion, [InstanzenController::class, $aktion], 'api.partner');
+}
+
+// Änderungsvorschläge anderer Instanzen (Seite A): sehen nur mit dem ganzen
+// Standort, annehmen nur mit „bearbeiten“ – prüft VorschlagService.
+$router->get('/vorschlaege', [VorschlaegeController::class, 'index'], 'api.vorschlaege');
+$router->get('/vorschlaege/{id}', [VorschlaegeController::class, 'vorschlag'], 'api.vorschlaege');
+$router->get('/vorschlaege/{id}/datei', [VorschlaegeController::class, 'datei'], 'api.vorschlaege');
+foreach (['annehmen', 'ablehnen'] as $aktion) {
+    $router->post('/vorschlaege/{id}/' . $aktion, [VorschlaegeController::class, $aktion], 'api.vorschlaege');
 }
 
 $router->get('/audit', [AuditController::class, 'index'], 'audit.view');

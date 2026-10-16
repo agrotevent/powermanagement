@@ -6,6 +6,7 @@ namespace App\Services;
 use App\Auth\Auth;
 use App\Auth\Zugriff;
 use App\Support\Audit;
+use App\Support\Config;
 use App\Support\Database;
 use App\Support\Fingerabdruck;
 use App\Support\Logger;
@@ -557,14 +558,263 @@ final class PartnerAbgleich
     }
 
     /**
-     * Änderungen hier an die verknüpfte Location dort schicken – hochladen
-     * (Gegenseite mit „plaene.schreiben“) oder als Vorschlag.
+     * Änderungen hier an die verknüpfte Location dort schicken.
      *
-     * @return array{ok:bool,message:string}
+     * Hat das Token dort „plaene.schreiben“, übernimmt die Gegenseite sie
+     * gleich (Hochladen) – aber nur auf dem Stand, den sie zuletzt geliefert
+     * hat (basis = partner_stand), sonst antwortet sie mit 409; $erzwingen
+     * schreibt ausdrücklich darüber hinweg. Mit nur „plaene.vorschlagen“
+     * kommt es dort als Vorschlag an, den jemand bestätigt.
+     *
+     * Geschickt werden nur verknüpfte Etagen, die dort bearbeitet werden
+     * dürfen – mit den Schlüsseln, Namen, Ebenen und der Reihenfolge von dort
+     * (die bleiben dort ohnehin), dem Plan, Maßstab, Maßstab-Text, Notizen
+     * und der Georeferenz von hier. Eine Plandatei nur, wenn sie sich von der
+     * dort unterscheidet. Nie Dosen, Racks, APs, Messpunkte oder Mobiles.
+     * Feststrom nur zu einer PowerManagement-Instanz, deren Token ihn liest,
+     * und nur mit „Anlagen ansehen“ hier.
+     *
+     * @return array{ok:bool,message:string,uebernommen?:bool,id?:int}
      */
     public static function zurueckschicken(int $siteId, string $notiz, bool $erzwingen = false): array
     {
-        return ['ok' => false, 'message' => 'Zurückschicken ist in dieser Fassung noch nicht verfügbar.'];
+        $nein = static fn (string $meldung): array => ['ok' => false, 'message' => $meldung];
+        $site = SiteService::find($siteId);
+        if ($site === null || $site['partner_id'] === null || (string) $site['partner_schluessel'] === '') {
+            return $nein('Dieser Standort ist mit keiner anderen Instanz verknüpft.');
+        }
+        $partner = PartnerService::find((int) $site['partner_id']);
+        if ($partner === null) {
+            return $nein('Die Instanz, mit der dieser Standort verknüpft ist, ist hier nicht mehr eingetragen.');
+        }
+        if (!Auth::can('api.partner') || !Auth::can('plans.manage') || !Zugriff::darfStandortAendern($siteId)) {
+            return $nein('Zurückschicken braucht das Recht „Standorte, Etagen und Grundrisse pflegen“ und eine Freigabe mit „bearbeiten“ an diesem Standort.');
+        }
+        $schreiben = PartnerService::darfDort($partner, 'plaene.schreiben');
+        if (!$schreiben && !PartnerService::darfDort($partner, 'plaene.vorschlagen')) {
+            return $nein('Das Token darf dort weder schreiben noch Änderungen vorschlagen – „Verbindung prüfen“ holt die aktuellen Befugnisse.');
+        }
+        $dortKey = (string) $site['partner_schluessel'];
+        $geholt = self::holen($partner, $dortKey);
+        if (!$geholt['ok']) {
+            return $nein($geholt['message']);
+        }
+        $dortEtagen = $geholt['location']['etagen'];
+        $pm = PartnerService::istPowerManagement($partner);
+        $mitFeststrom = $pm && PartnerService::darfDort($partner, 'feststrom') && is_array($geholt['strom'])
+            && array_key_exists('anlagen', $geholt['strom']) && Auth::can('anlagen.view');
+
+        // Erst lesen (vergibt fehlende eigene Schlüssel), dann übersetzen.
+        $hier = ApiBestand::locationDaten($siteId, $mitFeststrom);
+        $nachDort = [];
+        foreach (Database::select("SELECT sync_key, partner_schluessel FROM floors WHERE site_id = ? AND partner_schluessel <> ''", [$siteId]) as $f) {
+            $nachDort[(string) $f['sync_key']] = (string) $f['partner_schluessel'];
+        }
+        $etagen = [];
+        $dateien = [];
+        $groesse = 0;
+        $gesendet = [];
+        $dateiFuerSha = [];
+        foreach ($hier['location']['etagen'] as $e) {
+            $dk = $nachDort[(string) $e['schluessel']] ?? null;
+            $gegen = $dk !== null ? ($dortEtagen[$dk] ?? null) : null;
+            if (!is_array($gegen) || ($gegen['bearbeiten'] ?? false) !== true) {
+                continue;
+            }
+            // Name, Ebene und Reihenfolge von dort – MasterAdmin übernähme sonst die Namen von hier.
+            $etage = [
+                'schluessel'  => $dk,
+                'name'        => self::text($gegen['name'] ?? '', 190) ?: (string) $e['name'],
+                'ebene'       => is_numeric($gegen['ebene'] ?? null) ? (int) $gegen['ebene'] : (int) $e['ebene'],
+                'reihenfolge' => is_numeric($gegen['reihenfolge'] ?? null) ? (int) $gegen['reihenfolge'] : (int) $e['reihenfolge'],
+                'massstab'    => (string) $e['massstab'],
+                'notizen'     => (string) $e['notizen'],
+                'plan'        => null,
+            ];
+            if (is_array($e['plan'])) {
+                $sha = (string) $e['plan']['sha256'];
+                $endung = strtolower(pathinfo((string) $e['plan']['datei'], PATHINFO_EXTENSION));
+                // Ein PDF für mehrere Etagen geht einmal hinüber.
+                $datei = $dateiFuerSha[$sha] ??= 'plaene/' . $dk . '.' . $endung;
+                $etage['plan'] = [
+                    'datei'        => $datei,
+                    'typ'          => (string) $e['plan']['typ'],
+                    'seite'        => (int) $e['plan']['seite'],
+                    'originalname' => (string) $e['plan']['originalname'],
+                    'sha256'       => $sha,
+                ];
+                $dortSha = is_array($gegen['plan'] ?? null) && is_string($gegen['plan']['sha256'] ?? null) ? strtolower($gegen['plan']['sha256']) : '';
+                if ($dortSha !== $sha && !isset($dateien[$datei])) {
+                    $pfad = (string) ($hier['dateien'][(string) $e['plan']['datei']] ?? '');
+                    $bytes = $pfad !== '' ? (int) @filesize($pfad) : 0;
+                    if ($bytes <= 0) {
+                        return $nein(sprintf('Der Grundriss von „%s“ ließ sich hier nicht lesen – nichts geschickt.', (string) $e['name']));
+                    }
+                    if ($bytes > ApiBestand::MAX_DATEI_BYTES) {
+                        return $nein(sprintf('Der Grundriss von „%s“ ist zu groß zum Zurückschicken (%.1f MiB, höchstens %d MiB) – nichts geschickt.',
+                            (string) $e['name'], $bytes / 1048576, intdiv(ApiBestand::MAX_DATEI_BYTES, 1048576)));
+                    }
+                    $dateien[$datei] = base64_encode((string) file_get_contents($pfad));
+                    $groesse += strlen($dateien[$datei]);
+                }
+            }
+            if (array_key_exists('referenz', $e)) {
+                $etage['referenz'] = $e['referenz'];
+            }
+            $etagen[] = $etage;
+            $gesendet[(string) $e['schluessel']] = $dk;
+        }
+        if ($etagen === []) {
+            return $nein('Dort ist keine der verknüpften Etagen zum Bearbeiten freigegeben – zurückschicken geht nicht.');
+        }
+        $dortLoc = $geholt['location'];
+        $location = [
+            'format'     => LocationBundle::FORMAT_LOCATION,
+            'art'        => 'location',
+            'schluessel' => $dortKey,
+            'name'       => self::text($dortLoc['name'] ?? '', 190) ?: (string) $site['name'],
+            'adresse'    => self::text($dortLoc['adresse'] ?? '', 255),
+            'notizen'    => is_string($dortLoc['notizen'] ?? null) ? mb_substr($dortLoc['notizen'], 0, 5000) : '',
+            'etagen'     => $etagen,
+        ];
+
+        $strom = null;
+        $anlagenZahl = $leitungenZahl = 0;
+        if ($pm) {
+            $geo = [];
+            foreach ((array) $hier['strom']['georeferenz'] as $hk => $g) {
+                if (isset($gesendet[(string) $hk]) && is_array($g)) {
+                    $geo[$gesendet[(string) $hk]] = $g;
+                }
+            }
+            $strom = ['format' => LocationBundle::FORMAT_STROM, 'art' => 'strom', 'schluessel' => $dortKey, 'georeferenz' => $geo === [] ? new \stdClass() : $geo];
+            if ($mitFeststrom) {
+                // Schlüssel dort: der verknüpfte, sonst der eigene („neu dort“).
+                $anlageKey = [];
+                foreach (Database::select('SELECT sync_key, partner_schluessel FROM objekte WHERE site_id = ?', [$siteId]) as $o) {
+                    $anlageKey[(string) $o['sync_key']] = (string) $o['partner_schluessel'] !== '' ? (string) $o['partner_schluessel'] : (string) $o['sync_key'];
+                }
+                $leitungKey = [];
+                foreach (Database::select('SELECT l.sync_key, l.partner_schluessel FROM leitungen l JOIN floors f ON f.id = l.floor_id WHERE f.site_id = ?', [$siteId]) as $l) {
+                    $leitungKey[(string) $l['sync_key']] = (string) $l['partner_schluessel'] !== '' ? (string) $l['partner_schluessel'] : (string) $l['sync_key'];
+                }
+                $anlagen = [];
+                foreach ((array) $hier['strom']['anlagen'] as $a) {
+                    $hk = (string) ($a['etage'] ?? '');
+                    if (!isset($gesendet[$hk])) {
+                        continue;
+                    }
+                    unset($a['messpunkte']);
+                    $a['schluessel'] = $anlageKey[(string) $a['schluessel']] ?? (string) $a['schluessel'];
+                    $a['etage'] = $gesendet[$hk];
+                    $anlagen[] = $a;
+                }
+                $leitungen = [];
+                foreach ((array) $hier['strom']['leitungen'] as $l) {
+                    $hk = (string) ($l['etage'] ?? '');
+                    if (!isset($gesendet[$hk])) {
+                        continue;
+                    }
+                    $l['schluessel'] = $leitungKey[(string) $l['schluessel']] ?? (string) $l['schluessel'];
+                    $l['etage'] = $gesendet[$hk];
+                    foreach (['von', 'zu'] as $ende) {
+                        if (is_string($l[$ende] ?? null)) {
+                            $l[$ende] = $anlageKey[$l[$ende]] ?? $l[$ende];
+                        }
+                    }
+                    $leitungen[] = $l;
+                }
+                $strom['steckertypen'] = array_values((array) $hier['strom']['steckertypen']);
+                $strom['anlagen'] = $anlagen;
+                $strom['leitungen'] = $leitungen;
+                $anlagenZahl = count($anlagen);
+                $leitungenZahl = count($leitungen);
+            }
+        }
+
+        $koerper = [
+            'location' => $location,
+            'dateien'  => $dateien === [] ? new \stdClass() : $dateien,
+            'notiz'    => mb_substr($notiz, 0, 2000),
+            'absender' => mb_substr(trim((string) preg_replace('/[\x00-\x1F\x7F]+/u', ' ', (string) Config::get('app.name', 'PowerManagement'))), 0, 120),
+            'basis'    => (string) $site['partner_stand'],
+        ];
+        if ($strom !== null) {
+            $koerper['strom'] = $strom;
+        }
+        if ($erzwingen && $schreiben) {
+            $koerper['erzwingen'] = true;
+        }
+        $ohneDateien = $koerper;
+        $ohneDateien['dateien'] = [];
+        if ($groesse + strlen((string) json_encode($ohneDateien, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES)) > VorschlagService::MAX_KOERPER) {
+            return $nein(sprintf('Zusammen sind die Grundrisse zu groß für eine Sendung (höchstens %d MiB) – nichts geschickt.',
+                intdiv(VorschlagService::MAX_KOERPER, 1048576)));
+        }
+        unset($ohneDateien);
+
+        $dateienZahl = count($dateien);
+        $r = PartnerService::anfrage($partner, 'POST', '/locations/' . rawurlencode($dortKey) . '/vorschlaege', $koerper);
+        unset($koerper, $dateien);
+        if (!$r['ok']) {
+            if ((int) $r['status'] === 409) {
+                return $nein('Dort hat sich etwas geändert – erst übernehmen (oder ausdrücklich überschreiben).');
+            }
+            return $nein($r['message']);
+        }
+        $id = is_int($r['daten']['id'] ?? null) ? (int) $r['daten']['id'] : 0;
+        $details = [
+            'partner'    => (int) $partner['id'],
+            'schluessel' => $dortKey,
+            'site_id'    => $siteId,
+            'etagen'     => count($etagen),
+            'dateien'    => $dateienZahl,
+            'feststrom'  => $mitFeststrom,
+            'id'         => $id,
+        ];
+        $was = sprintf('%d Etage(n)%s', count($etagen), $mitFeststrom ? sprintf(', %d Feststromanschluss/-anschlüsse, %d feste(s) Kabel', $anlagenZahl, $leitungenZahl) : '');
+        if (($r['daten']['uebernommen'] ?? false) === true) {
+            $stand = $r['daten']['stand'] ?? null;
+            if (is_string($stand) && preg_match('/^[0-9a-f]{1,64}$/', $stand) === 1) {
+                Database::execute('UPDATE sites SET partner_stand = ?, partner_at = ? WHERE id = ?', [$stand, gmdate('c'), $siteId]);
+                Database::execute('UPDATE sites SET partner_hash = ? WHERE id = ?', [self::hierStand($siteId), $siteId]);
+            }
+            Audit::log('api.partner.hochgeladen', 'site', (string) $siteId, $details);
+            return ['ok' => true, 'uebernommen' => true, 'id' => $id,
+                'message' => sprintf('Bei „%s“ übernommen (%s).', (string) $partner['name'], $was)];
+        }
+        Audit::log('api.partner.vorschlag', 'site', (string) $siteId, $details);
+        return ['ok' => true, 'uebernommen' => false, 'id' => $id, 'message' => sprintf('Vorschlag Nr. %d ist dort eingegangen.', $id)];
+    }
+
+    /**
+     * Temp-Ordner von Plan-Downloads, die ein abgebrochener Lauf liegen ließ
+     * (älter als ein Tag). Nur Ordner, die genau so heißen, wie tempOrdner()
+     * sie anlegt. Läuft in bin/power wartung und vor jedem neuen Download:
+     * unter systemd hat php-fpm meist ein eigenes /tmp (PrivateTmp), das der
+     * Wartungsdienst nicht sieht.
+     *
+     * @return list<string>
+     */
+    public static function wartung(?string $temp = null, ?int $jetzt = null): array
+    {
+        $temp = rtrim($temp ?? sys_get_temp_dir(), '/');
+        $jetzt ??= time();
+        $weg = 0;
+        foreach (glob($temp . '/pm-partner-*', GLOB_ONLYDIR) ?: [] as $ordner) {
+            if (is_link($ordner) || preg_match('/^pm-partner-[0-9a-f]{12}$/', basename($ordner)) !== 1 || (int) @filemtime($ordner) >= $jetzt - 86400) {
+                continue;
+            }
+            foreach (glob($ordner . '/*') ?: [] as $f) {
+                if (is_link($f) || is_file($f)) {
+                    @unlink($f);
+                }
+            }
+            if (@rmdir($ordner)) {
+                $weg++;
+            }
+        }
+        return [sprintf('Andere Instanzen: %d liegengebliebene Temp-Ordner entfernt.', $weg)];
     }
 
     // ---------------------------------------------------------------- Stand hier
@@ -783,6 +1033,7 @@ final class PartnerAbgleich
 
     private static function tempOrdner(): string
     {
+        self::wartung();
         $ordner = sys_get_temp_dir() . '/pm-partner-' . bin2hex(random_bytes(6));
         if (!mkdir($ordner, 0700, true) && !is_dir($ordner)) {
             Logger::error('Andere Instanz: Temp-Ordner ließ sich nicht anlegen: ' . $ordner);

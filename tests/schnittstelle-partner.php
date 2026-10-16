@@ -595,6 +595,101 @@ try {
     inBAls($bAdmin, 'return PartnerAbgleich::uebernehmen(PartnerService::find($pid), $key, null, null, true);', ['pid' => $pid, 'key' => $halleKey]);
     $zeile = $halleZeile();
     pruefe(str_contains($zeile, '>aktuell<') && !str_contains($zeile, '/zurueck"'), 'aktuell: kein Weg zurück angeboten');
+
+    // ================================================= Rundreise: als Vorschlag zurückschicken, dort annehmen
+    $mitBefugnis(['plaene.vorschlagen', 'feststrom']);
+    $erdKey = (string) Database::scalar('SELECT sync_key FROM leitungen WHERE id = ?', [(int) $erd['id']]);
+    $aBild = static fn (): array => [LeitungService::find((int) $erd['id'])['punkte'], (float) PlanMassstabService::lesen(SiteService::floor($f1))['meter'],
+        (int) Database::scalar('SELECT COUNT(*) FROM objekte WHERE site_id = ?', [$sites['halle']])];
+    $aVorher = $aBild();
+    $r = inBAls($bAdmin, <<<'PHP'
+        $p = PartnerService::find($pid);
+        $u = PartnerAbgleich::uebernehmen($p, $key, null, null, true);
+        $f = (int) Database::scalar('SELECT id FROM floors WHERE site_id = ? AND partner_schluessel = ?', [$halle, $f1Key]);
+        $kabel = (int) Database::scalar('SELECT id FROM leitungen WHERE floor_id = ? AND fest = 1 ORDER BY id LIMIT 1', [$f]);
+        LeitungService::punkteSetzen($kabel, [[10, 10], [20, 30], [40, 10]]);
+        PlanMassstabService::speichern($f, ['x' => 10.0, 'y' => 90.0], ['x' => 70.0, 'y' => 90.0], 150.0, 1.0);
+        $neu = (int) AnlagenService::speichern(null, ['art' => 'verteilung', 'fest' => 1, 'name' => $marke . ' nur in B', 'floor_id' => $f, 'plan_x' => 30, 'plan_y' => 60])['id'];
+        $liste = static fn (): ?string => array_column(PartnerAbgleich::locations($p)['locations'], null, 'schluessel')[$key]['zustand'] ?? null;
+        $vorher = $liste();
+        $z = PartnerAbgleich::zurueckschicken($halle, 'Kabel neu verlegt');
+        return ['u' => $u, 'vorher' => $vorher, 'z' => $z, 'nachher' => $liste(), 'neu' => $neu,
+            'neuKey' => (string) Database::scalar('SELECT sync_key FROM objekte WHERE id = ?', [$neu]),
+            'stand' => (string) Database::scalar('SELECT partner_stand FROM sites WHERE id = ?', [$halle]),
+            'audit' => Database::first("SELECT details FROM audit_log WHERE action = 'api.partner.vorschlag' ORDER BY id DESC LIMIT 1")];
+        PHP, ['pid' => $pid, 'key' => $halleKey, 'halle' => $bHalle, 'f1Key' => $f1Key, 'marke' => $marke]);
+    pruefe($r['u']['ok'] && $r['vorher'] === 'hier', 'B: übernommen, dann Kabel, Maßstab und eine eigene Anlage geändert → hier geändert');
+    $vid = (int) ($r['z']['id'] ?? 0);
+    gleich([$r['z']['ok'], $r['z']['message'], $r['z']['uebernommen'] ?? null], [true, 'Vorschlag Nr. ' . $vid . ' ist dort eingegangen.', false],
+        'nur „vorschlagen“ dort: als Vorschlag zurückgeschickt');
+    gleich($r['nachher'], 'hier', '… der Stand von dort bleibt, hier weiter „hier geändert“');
+    pruefe($r['audit'] !== null && (json_decode((string) $r['audit']['details'], true)['id'] ?? 0) === $vid, 'B: Audit api.partner.vorschlag');
+    $v = \App\Services\VorschlagService::find($vid);
+    $vEtagen = array_column((array) ($v['daten']['location']['etagen'] ?? []), 'schluessel');
+    sort($vEtagen);
+    $erwartet = [$f1Key, $f2Key];
+    sort($erwartet);
+    $vAnlagen = array_column((array) ($v['daten']['strom']['anlagen'] ?? []), 'schluessel');
+    pruefe($v !== null && $v['status'] === 'offen' && $v['absender'] === 'Instanz B' && $v['site_key'] === $halleKey && $vEtagen === $erwartet
+        && $v['basis_stand'] === $r['stand'], 'A: ein offener Vorschlag von „Instanz B“ mit den Schlüsseln von A und dem Stand des letzten Abrufs');
+    pruefe(in_array($haKey, $vAnlagen, true) && in_array($r['neuKey'], $vAnlagen, true)
+        && in_array($erdKey, array_column((array) ($v['daten']['strom']['leitungen'] ?? []), 'schluessel'), true),
+        'A: Anlagen und Kabel mit den Schlüsseln von A, die neue mit ihrem eigenen');
+    pruefe(($v['dateien'] ?? null) === [] && !is_dir(\App\Services\VorschlagService::ordner($vid)), 'A: keine Plandatei (Prüfsumme gleich)');
+    gleich($aBild(), $aVorher, 'A: vor dem Annehmen unverändert');
+    $a = \App\Services\VorschlagService::annehmen($vid, [$f1Key, $f2Key], ['grundriss', 'feststrom']);
+    pruefe($a['ok'], 'A nimmt an: ' . $a['message']);
+    $aNachher = $aBild();
+    gleich([array_map(static fn ($p) => [$p['x'], $p['y']], $aNachher[0]), $aNachher[1], $aNachher[2]], [[[10.0, 10.0], [20.0, 30.0], [40.0, 10.0]], 150.0, $aVorher[2] + 1],
+        'A: Kabel neu verlegt, Maßstab von B, die Anlage von B dazu');
+    // B erfährt nicht, dass sein Vorschlag angenommen wurde (dafür gibt es noch
+    // keinen Abruf): dort ist etwas neu, hier weicht vom letzten Abruf ab.
+    gleich($zustand($halleKey), 'beide', 'B: danach „beide geändert“ – dort neu, hier noch nicht abgeglichen');
+
+    // ================================================= „plaene.schreiben“: Hochladen
+    $mitBefugnis(['plaene.schreiben', 'feststrom']);
+    $r = inBAls($bAdmin, <<<'PHP'
+        $p = PartnerService::find($pid);
+        $u = PartnerAbgleich::uebernehmen($p, $key, null, null, true);
+        $nurB = Database::select('SELECT id, partner_schluessel FROM objekte WHERE name = ?', [$marke . ' nur in B']);
+        $f = (int) Database::scalar('SELECT id FROM floors WHERE site_id = ? AND partner_schluessel = ?', [$halle, $f1Key]);
+        $kabel = Database::first('SELECT * FROM leitungen WHERE floor_id = ? AND fest = 1 ORDER BY id LIMIT 1', [$f]);
+        $danach = [array_map(static fn ($p) => [$p['x'], $p['y']], LeitungService::punkteLesen((string) $kabel['punkte'])),
+            (float) PlanMassstabService::lesen(SiteService::floor($f))['meter']];
+        $zustand = array_column(PartnerAbgleich::locations($p)['locations'], null, 'schluessel')[$key]['zustand'] ?? null;
+        AnlagenService::position($bHa, (int) AnlagenService::find($bHa)['floor_id'], 81.0, 82.0);
+        return ['u' => $u, 'nurB' => $nurB, 'danach' => $danach, 'zustand' => $zustand];
+        PHP, ['pid' => $pid, 'key' => $halleKey, 'bHa' => $bHa, 'marke' => $marke, 'halle' => $bHalle, 'f1Key' => $f1Key]);
+    pruefe($r['u']['ok'] && count($r['nurB']) === 1 && (string) $r['nurB'][0]['partner_schluessel'] !== '',
+        'B übernimmt: die Anlage von B ist jetzt verknüpft (über ihren Schlüssel), nicht doppelt');
+    gleich([$r['danach'], $r['zustand']], [[[[10.0, 10.0], [20.0, 30.0], [40.0, 10.0]], 150.0], 'aktuell'],
+        '… die eigenen Änderungen kommen unverändert zurück, danach aktuell');
+    gleich($zustand($halleKey), 'hier', 'B verschiebt seine Kopie → hier geändert');
+    $zeile = $halleZeile();
+    pruefe(str_contains($zeile, '>Hochladen</button>') && !str_contains($zeile, 'name="erzwingen"'), 'B: Hochladen angeboten');
+    $r = ui($basisB, $dose, 'POST', '/instanzen/' . $pid . '/zurueck', ['site_id' => (string) $bHalle, '_token' => $csrf]);
+    $seite = ui($basisB, $dose, 'GET', '/instanzen/' . $pid);
+    pruefe($r['status'] === 302 && $r['ziel'] === '/instanzen/' . $pid && str_contains($seite['text'], 'Bei „' . htmlspecialchars((string) \App\Support\Config::get('app.name')) . '“ übernommen'),
+        'B: Hochladen über das Formular → Meldung „Bei … übernommen“');
+    gleich([(float) AnlagenService::find($ha)['plan_x'], (float) AnlagenService::find($ha)['plan_y'], (int) AnlagenService::find($ha)['steuerung_gesperrt']], [81.0, 82.0, 0],
+        'A: der Hausanschluss steht, wo B ihn hingeschoben hat');
+    gleich($zustand($halleKey), 'aktuell', 'beide Seiten aktuell');
+    pruefe(inBAls(null, "return Database::first(\"SELECT id FROM audit_log WHERE action = 'api.partner.hochgeladen' ORDER BY id DESC LIMIT 1\");") !== null,
+        'B: Audit api.partner.hochgeladen');
+    pruefe(Database::first("SELECT id FROM api_vorschlaege WHERE token_id = ? AND status = 'angenommen' AND entscheidung LIKE '%direkt%'", [$tokenIds[0]]) !== null,
+        'A: direkt Übernommenes steht als angenommen in den Vorschlägen');
+
+    AnlagenService::position($ha, $f1, 12.0, 13.0);
+    inBAls($bAdmin, 'return AnlagenService::position($bHa, (int) AnlagenService::find($bHa)["floor_id"], 83.0, 84.0);', ['bHa' => $bHa]);
+    gleich($zustand($halleKey), 'beide', 'A und B verschieben → beide geändert');
+    $r = inBAls($bAdmin, 'return PartnerAbgleich::zurueckschicken($halle, "", false);', ['halle' => $bHalle]);
+    pruefe(!$r['ok'] && $r['message'] === 'Dort hat sich etwas geändert – erst übernehmen (oder ausdrücklich überschreiben).'
+        && (float) AnlagenService::find($ha)['plan_x'] === 12.0, 'beide geändert: Hochladen ohne „erzwingen“ → 409, dort nichts geändert');
+    $zeile = $halleZeile();
+    pruefe(str_contains($zeile, 'name="erzwingen" value="1"'), 'B: Hochladen bietet jetzt nur das Überschreiben an');
+    $r = inBAls($bAdmin, 'return PartnerAbgleich::zurueckschicken($halle, "", true);', ['halle' => $bHalle]);
+    pruefe($r['ok'] && ($r['uebernommen'] ?? false) && (float) AnlagenService::find($ha)['plan_x'] === 83.0, 'mit „erzwingen“: dort übernommen – ' . $r['message']);
+    gleich($zustand($halleKey), 'aktuell', '… danach wieder aktuell');
     $mitBefugnis(['plaene.lesen', 'feststrom']);
 
     // ================================================= Lösen, Widerrufen, neues Token
@@ -615,7 +710,8 @@ try {
     pruefe($r['l']['ok'] && !$r['nochmal']['ok'], 'Lösen: ' . $r['l']['message']);
     gleich($r['site'], ['partner_id' => null, 'partner_schluessel' => '', 'partner_stand' => '', 'partner_hash' => '', 'partner_at' => null], 'Lösen leert die Verknüpfung am Standort');
     pruefe(array_unique(array_merge($r['floors'], $r['objekte'], $r['leitungen'])) === [''], '… an Etagen, Anlagen und Kabeln');
-    pruefe($r['zahl'][0] === $r['zahl'][1] && $r['zahl'][0] === 2, '… die Daten bleiben');
+    // Hausanschluss, Säule und die Anlage, die B selbst dazugelegt hat
+    pruefe($r['zahl'][0] === $r['zahl'][1] && $r['zahl'][0] === 3, '… die Daten bleiben');
     gleich($r['zustand'], 'passt', 'danach passt die Location wieder zum Standort (gleicher Name)');
 
     ApiZugaenge::widerrufen($tokenIds[0]);
@@ -705,7 +801,9 @@ try {
     $maToken = 'mtma_' . str_repeat('M', 43);
     $mitDosen = true;
     $maDatei = 0;
-    $maLocation = static function () use ($fixture, $svg, $maKey, $marke, &$mitDosen): array {
+    $aussenBearbeiten = false;
+    $maGesendet = null;
+    $maLocation = static function () use ($fixture, $svg, $maKey, $marke, &$mitDosen, &$aussenBearbeiten): array {
         $loc = $fixture;
         $loc['schluessel'] = $maKey;
         $loc['name'] = $marke . ' MA Lager';
@@ -718,10 +816,10 @@ try {
         }
         $loc['etagen'][] = ['schluessel' => 'aussen', 'name' => 'Außen', 'ebene' => 0, 'reihenfolge' => 1, 'massstab' => '', 'notizen' => '',
             'plan' => ['datei' => 'plaene/aussen.webp', 'typ' => 'image', 'seite' => 1, 'originalname' => 'a.webp', 'sha256' => str_repeat('0', 64)],
-            'referenz' => null, 'bearbeiten' => false, 'dosen' => [], 'racks' => [], 'aps' => []];
+            'referenz' => null, 'bearbeiten' => $aussenBearbeiten, 'dosen' => [], 'racks' => [], 'aps' => []];
         return $loc;
     };
-    Http::$attrappe = static function (string $m, string $url, array $o) use ($maKey, $maToken, $maLocation, $svg, &$maDatei): array {
+    Http::$attrappe = static function (string $m, string $url, array $o) use ($maKey, $maToken, $maLocation, $svg, &$maDatei, &$maGesendet): array {
         $json = static fn (int $s, array $d): array => ['ok' => true, 'status' => $s, 'rumpf' => (string) json_encode($d), 'fehler' => ''];
         if (($o['kopf']['Authorization'] ?? '') !== 'Bearer ' . $maToken) {
             return $json(401, ['ok' => false, 'message' => 'Kein gültiges Token.']);
@@ -736,6 +834,10 @@ try {
                     'dosen' => count((array) ($e['dosen'] ?? [])), 'racks' => count((array) ($e['racks'] ?? []))], $loc['etagen'])]]]),
             $pfad === '/locations/' . $maKey => $json(200, ['ok' => true, 'location' => $loc, 'stand' => substr(hash('sha256', json_encode($loc)), 0, 16),
                 'strom' => ['art' => 'strom', 'format' => 2, 'anlagen' => [['schluessel' => 'x', 'art' => 'anschluss', 'fest' => true, 'name' => 'darf nicht kommen']]]]),
+            $m === 'POST' && $pfad === '/locations/' . $maKey . '/vorschlaege' => (function () use ($o, $json, &$maGesendet): array {
+                $maGesendet = json_decode((string) ($o['rumpf'] ?? ''), true);
+                return $json(201, ['ok' => true, 'message' => 'Vorschlag eingegangen – er wird übernommen, sobald ihn dort jemand bestätigt.', 'id' => 7]);
+            })(),
             $pfad === '/locations/' . $maKey . '/datei?pfad=plaene%2Fgrundriss.svg' => (function () use ($svg, &$maDatei): array {
                 $maDatei++;
                 return ['ok' => true, 'status' => 200, 'rumpf' => $svg, 'fehler' => ''];
@@ -771,6 +873,28 @@ try {
     pruefe($r['ok'] && count($fremd2['dosen'] ?? []) === count($fremd['dosen']) && ($fremd2['racks'][0]['watt'] ?? null) === 0,
         'Antwort ohne „dosen“: die Dosen bleiben, die Racks kommen neu');
     gleich($maDatei, 1, 'der unveränderte Plan wird kein zweites Mal geholt');
+
+    // Zurückschicken an MasterAdmin: nur Format 1, Schlüssel und Namen von dort, nie strom/dosen/racks/aps
+    $aussenBearbeiten = true;
+    $maHaupt = (int) $maFloors[0]['id'];
+    PlanMassstabService::speichern($maHaupt, ['x' => 5.0, 'y' => 90.0], ['x' => 95.0, 'y' => 90.0], 44.0, 0.5);
+    Database::update('floors', $maHaupt, ['name' => 'Heißt hier anders']);
+    $r = PartnerAbgleich::zurueckschicken($maSite, 'vom Lager');
+    gleich([$r['ok'], $r['message']], [true, 'Vorschlag Nr. 7 ist dort eingegangen.'], 'an MasterAdmin zurückgeschickt: ' . $r['message']);
+    $gesendet = (array) $maGesendet;
+    $gEtagen = array_column((array) ($gesendet['location']['etagen'] ?? []), null, 'schluessel');
+    $fixKey = (string) $fixture['etagen'][0]['schluessel'];
+    pruefe(!array_key_exists('strom', $gesendet) && ($gesendet['location']['format'] ?? 0) === 1 && ($gesendet['location']['schluessel'] ?? '') === $maKey
+        && array_keys($gEtagen) === [$fixKey, 'aussen'], 'an MasterAdmin: ohne strom, Format 1, mit den Etagenschlüsseln von dort');
+    pruefe(($gEtagen[$fixKey]['name'] ?? '') === (string) $fixture['etagen'][0]['name'] && ($gEtagen['aussen']['name'] ?? '') === 'Außen',
+        'an MasterAdmin: Namen von dort (der Name hier geht nicht hinüber)');
+    pruefe(array_filter($gEtagen, static fn (array $e): bool => array_key_exists('dosen', $e) || array_key_exists('racks', $e) || array_key_exists('aps', $e)) === [],
+        'an MasterAdmin: keine dosen, racks, aps');
+    pruefe((float) ($gEtagen[$fixKey]['referenz']['meter'] ?? 0) === 44.0 && !array_key_exists('referenz', $gEtagen['aussen'] ?? ['referenz' => 1]),
+        'an MasterAdmin: referenz nur, wo hier ein Maßstab gesetzt ist');
+    pruefe(($gesendet['dateien'] ?? null) === [] && ($gEtagen[$fixKey]['plan']['sha256'] ?? '') === hash('sha256', $svg)
+        && ($gesendet['basis'] ?? null) === (string) Database::scalar('SELECT partner_stand FROM sites WHERE id = ?', [$maSite]),
+        'an MasterAdmin: der unveränderte Plan nur mit Prüfsumme, ohne Datei; der Stand des letzten Abrufs');
     Http::$attrappe = null;
 } finally {
     Http::$attrappe = null;
@@ -790,6 +914,15 @@ try {
         SiteService::deleteSite($maSite);
     }
     foreach ($tokenIds as $id) {
+        foreach (Database::select('SELECT id FROM api_vorschlaege WHERE token_id = ?', [$id]) as $vz) {
+            $ordner = \App\Services\VorschlagService::ordner((int) $vz['id']);
+            foreach (glob($ordner . '/*') ?: [] as $f) {
+                @unlink($f);
+            }
+            @rmdir($ordner);
+            Database::execute('DELETE FROM api_vorschlaege WHERE id = ?', [(int) $vz['id']]);
+            Database::execute("DELETE FROM audit_log WHERE target_type = 'api_vorschlag' AND target_id = ?", [(string) $vz['id']]);
+        }
         Database::execute('DELETE FROM api_token_standorte WHERE token_id = ?', [$id]);
         Database::execute('DELETE FROM api_tokens WHERE id = ?', [$id]);
         Database::execute("DELETE FROM audit_log WHERE target_type = 'api_token' AND target_id = ?", [(string) $id]);

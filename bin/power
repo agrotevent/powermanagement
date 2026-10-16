@@ -47,7 +47,9 @@ declare(strict_types=1);
  *                                   (als Besitzer von storage/mqtt, z. B. sudo -u www-data)
  *   bin/power demo:seed [--reset]   Demo-Gelände mit Anlagen, Kabeln und Benutzern anlegen
  *   bin/power wartung               Protokolle aufräumen, abgebrochene MQTT-Prüfungen
- *                                   zurücksetzen (täglich per Timer)
+ *                                   zurücksetzen, entschiedene Änderungsvorschläge (älter
+ *                                   als 400 Tage) und verwaiste Vorschlags- und Temp-Ordner
+ *                                   entfernen (täglich per Timer)
  */
 
 require dirname(__DIR__) . '/src/bootstrap.php';
@@ -62,9 +64,11 @@ use App\Services\AnlagenService;
 use App\Services\BenutzerService;
 use App\Services\DemoSeed;
 use App\Services\LocationSync;
+use App\Services\PartnerAbgleich;
 use App\Services\PlanTileService;
 use App\Services\SiteService;
 use App\Services\VerteilerSync;
+use App\Services\VorschlagService;
 use App\Support\Config;
 use App\Support\Crypto;
 use App\Support\Database;
@@ -460,6 +464,11 @@ switch ($befehl) {
         $s = Database::execute('DELETE FROM schaltvorgaenge WHERE created_at < ?', [$grenze]);
         $aus("Aufgeräumt: {$a} Audit-Einträge, {$s} Schaltvorgänge (älter als 400 Tage).");
         foreach (MqttZugaenge::wartung() as $meldung) {
+            $aus($meldung);
+        }
+        // Schnittstelle: entschiedene Vorschläge, verwaiste Vorschlagsordner,
+        // liegengebliebene Temp-Ordner von Plan-Downloads
+        foreach ([...VorschlagService::wartung(), ...PartnerAbgleich::wartung()] as $meldung) {
             $aus($meldung);
         }
         break;

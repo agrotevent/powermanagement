@@ -6,6 +6,7 @@ namespace App\Controllers;
 use App\Auth\ApiZugang;
 use App\Services\ApiBestand;
 use App\Services\LocationBundle;
+use App\Services\VorschlagService;
 use App\Support\Audit;
 use App\Support\Config;
 use App\Support\Logger;
@@ -187,11 +188,12 @@ final class ApiController
     }
 
     /**
-     * Änderungen einer anderen Instanz entgegennehmen.
+     * Änderungen einer anderen Instanz entgegennehmen – als Vorschlag oder,
+     * mit „plaene.schreiben“ und passendem Stand, direkt.
      *
      * Hier wird nur der Körper geprüft (Art, Größe, JSON); was darin steht,
-     * prüft VorschlagService (alles oder nichts). Solange es den nicht gibt,
-     * nimmt diese Instanz nichts an.
+     * prüft VorschlagService (alles oder nichts) und nennt den Status:
+     * 201, 403, 404, 409 (Stand veraltet), 422, 429.
      */
     private function vorschlag(Request $request, array $token, string $schluessel): void
     {
@@ -214,12 +216,7 @@ final class ApiController
             return;
         }
         unset($roh);
-        $dienst = 'App\\Services\\VorschlagService';
-        if (!class_exists($dienst)) {
-            $this->antwort(['ok' => false, 'message' => 'Änderungen nimmt diese Instanz noch nicht an.'], 501);
-            return;
-        }
-        $ergebnis = $dienst::einreichen($token, $schluessel, $koerper);
+        $ergebnis = VorschlagService::einreichen($token, $schluessel, $koerper);
         $status = (int) ($ergebnis['status'] ?? (!empty($ergebnis['ok']) ? 201 : 422));
         unset($ergebnis['status']);
         $this->antwort($ergebnis, $status);
