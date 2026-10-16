@@ -12,6 +12,7 @@ use App\Controllers\BereichController;
 use App\Controllers\BenutzerController;
 use App\Controllers\DashboardController;
 use App\Controllers\DatenquellenController;
+use App\Controllers\InstanzenController;
 use App\Controllers\InventarController;
 use App\Controllers\EinstellungenController;
 use App\Controllers\KarteController;
@@ -212,6 +213,17 @@ $router->post('/system/schnittstelle/anlegen', [SchnittstelleController::class, 
 $router->get('/system/schnittstelle/{id}', [SchnittstelleController::class, 'zugang'], 'api.manage');
 foreach (['speichern', 'anzeigen', 'widerrufen', 'loeschen'] as $aktion) {
     $router->post('/system/schnittstelle/{id}/' . $aktion, [SchnittstelleController::class, $aktion], 'api.manage');
+}
+
+// Andere Instanzen (Seite B): Locations von dort übernehmen, zuordnen,
+// verknüpfen, lösen und zurückschicken – woran, prüft PartnerAbgleich
+// (Standort mit „bearbeiten“, Pläne, Anlagen, Kabel, Steckertypen).
+$router->get('/instanzen', [InstanzenController::class, 'index'], 'api.partner');
+$router->post('/instanzen/anlegen', [InstanzenController::class, 'anlegen'], 'api.partner');
+$router->get('/instanzen/{id}', [InstanzenController::class, 'instanz'], 'api.partner');
+$router->get('/instanzen/{id}/zuordnen', [InstanzenController::class, 'zuordnen'], 'api.partner');
+foreach (['pruefen', 'loeschen', 'uebernehmen', 'loesen', 'zurueck'] as $aktion) {
+    $router->post('/instanzen/{id}/' . $aktion, [InstanzenController::class, $aktion], 'api.partner');
 }
 
 $router->get('/audit', [AuditController::class, 'index'], 'audit.view');

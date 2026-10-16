@@ -359,6 +359,41 @@ try {
     $r = aufruf($basis, $admin['dose'], 'GET', '/api/v1/info');
     gleich($r['status'], 401, '/api/v1/info mit Sitzung, aber ohne Token → 401 (die Sitzung zählt dort nicht)');
 
+    // ---------------------------------------------------- Andere Instanzen
+    // Diese Instanz als ihre eigene Gegenseite (über die Loopback-Adresse) –
+    // mit einem eigenen Standort, damit kein Bestand einen Schlüssel bekommt.
+    alsBenutzer($benutzer['admin']);
+    $instanzSite = \App\Services\SiteService::saveSite(null, ['name' => $kennung . ' Instanz <b>']);
+    \App\Services\SiteService::saveFloor(null, ['site_id' => $instanzSite, 'name' => 'Halle']);
+    $selbstZugang = \App\Services\ApiZugaenge::anlegen(['name' => $kennung . ' selbst', 'befugnisse' => ['plaene.lesen', 'feststrom'], 'sehen' => [$instanzSite]]);
+    $selbst = \App\Services\PartnerService::anlegen($kennung . ' selbst', $basis . '/api/v1', (string) ($selbstZugang['token'] ?? ''));
+    alsBenutzer(null);
+    pruefe($selbst['ok'], 'diese Instanz als andere eingetragen: ' . $selbst['message']);
+    $selbstId = (int) ($selbst['id'] ?? 0);
+    $instanzKey = \App\Services\LocationBundle::schluesselSichern('sites', $instanzSite, $kennung . ' Instanz');
+    foreach (['/instanzen', '/instanzen/' . $selbstId, '/instanzen/' . $selbstId . '/zuordnen?schluessel=' . rawurlencode($instanzKey)] as $pfad) {
+        $r = aufruf($basis, $admin['dose'], 'GET', $pfad);
+        pruefe($r['status'] === 200, 'Admin ' . $pfad . ' → ' . $r['status']);
+        pruefe(phpMeldung($r['text']) === null, 'Admin ' . $pfad . ' ohne PHP-Meldung ' . (string) phpMeldung($r['text']));
+    }
+    $r = aufruf($basis, $admin['dose'], 'GET', '/instanzen/' . $selbstId);
+    pruefe(str_contains($r['text'], htmlspecialchars($kennung . ' Instanz <b>')) && str_contains($r['text'], 'passt zu') && !str_contains($r['text'], (string) ($selbstZugang['token'] ?? 'x')),
+        'Instanzseite: die Location dort (maskiert), „passt zu“ (gleicher Schlüssel), kein Token');
+    foreach (['/instanzen/999999999', '/instanzen/x', '/instanzen/' . $selbstId . '/zuordnen?schluessel=gibt-es-nicht'] as $pfad) {
+        $r = aufruf($basis, $admin['dose'], 'GET', $pfad);
+        pruefe(in_array($r['status'], [302, 404], true) && phpMeldung($r['text']) === null, 'Admin ' . $pfad . ' → ' . $r['status']);
+    }
+    $vorher = [(int) Database::scalar('SELECT COUNT(*) FROM api_partner'), Database::first('SELECT partner_id FROM sites WHERE id = ?', [$instanzSite])];
+    foreach (['/instanzen/anlegen' => ['adresse' => $basis, 'token' => (string) ($selbstZugang['token'] ?? '')], '/instanzen/' . $selbstId . '/pruefen' => [],
+        '/instanzen/' . $selbstId . '/loeschen' => [], '/instanzen/' . $selbstId . '/uebernehmen' => ['schluessel' => $instanzKey, 'aktion' => 'verknuepfen',
+        'ziel' => (string) $instanzSite, 'etagen' => []], '/instanzen/' . $selbstId . '/loesen' => ['site_id' => $instanzSite],
+        '/instanzen/' . $selbstId . '/zurueck' => ['site_id' => $instanzSite]] as $pfad => $felder) {
+        $r = aufruf($basis, $admin['dose'], 'POST', $pfad, $felder);
+        pruefe($r['status'] === 302 && $r['ziel'] !== '/instanzen/' . $selbstId, 'Andere Instanzen ' . $pfad . ' ohne CSRF-Token → abgelehnt');
+    }
+    gleich([(int) Database::scalar('SELECT COUNT(*) FROM api_partner'), Database::first('SELECT partner_id FROM sites WHERE id = ?', [$instanzSite])], $vorher,
+        'ohne CSRF-Token weder eingetragen noch ausgetragen noch verknüpft');
+
     // ---------------------------------------------------- Kunde ohne Freigabe
     $kunde = anmelden($basis, $kennung . '-kunde', $kennwort);
     $dosen[] = $kunde['dose'];
@@ -374,6 +409,15 @@ try {
     }
     gleich(Database::first('SELECT name, revoked_at FROM api_tokens WHERE id = ?', [$zugangId]), ['name' => $kennung . ' Zugang', 'revoked_at' => null],
         'der Zugang bleibt, wie er war');
+    // Ohne „api.partner“ keine anderen Instanzen
+    foreach (['/instanzen', '/instanzen/' . $selbstId, '/instanzen/' . $selbstId . '/zuordnen?schluessel=' . rawurlencode($instanzKey)] as $pfad) {
+        gleich(aufruf($basis, $kunde['dose'], 'GET', $pfad)['status'], 403, 'Kunde ' . $pfad);
+    }
+    foreach (['anlegen' => ['adresse' => $basis, 'token' => 'mtma_' . str_repeat('k', 40)], $selbstId . '/loeschen' => [], $selbstId . '/pruefen' => [],
+        $selbstId . '/uebernehmen' => ['schluessel' => $instanzKey], $selbstId . '/loesen' => ['site_id' => $instanzSite]] as $aktion => $felder) {
+        gleich(aufruf($basis, $kunde['dose'], 'POST', '/instanzen/' . $aktion, $felder + ['_token' => $kunde['token']])['status'], 403, 'Kunde: Instanzen ' . $aktion . ' → 403');
+    }
+    pruefe(\App\Services\PartnerService::find($selbstId) !== null, 'die Instanz bleibt eingetragen');
     if ($etage > 0) {
         gleich(aufruf($basis, $kunde['dose'], 'GET', '/karte/' . $etage . '/geojson')['status'], 403, 'Kunde ohne Freigabe: kein GeoJSON');
         $r = aufruf($basis, $kunde['dose'], 'POST', '/karte/georeferenz', ['floor_id' => $etage, 'entfernen' => 1, '_token' => $kunde['token']], ['Accept: application/json']);
@@ -561,6 +605,18 @@ try {
         \App\Services\SiteService::deleteSite($werk);
     }
 } finally {
+    foreach (Database::select('SELECT id FROM api_partner WHERE name LIKE ?', [$kennung . '%']) as $p) {
+        \App\Services\PartnerService::loeschen((int) $p['id']);
+        Database::execute("DELETE FROM audit_log WHERE target_type = 'api_partner' AND target_id = ?", [(string) $p['id']]);
+    }
+    foreach (Database::select('SELECT id FROM sites WHERE name LIKE ?', [$kennung . '%']) as $s) {
+        $etagen = array_column(Database::select('SELECT id FROM floors WHERE site_id = ?', [(int) $s['id']]), 'id');
+        \App\Services\SiteService::deleteSite((int) $s['id']);
+        Database::execute("DELETE FROM audit_log WHERE action = 'site.delete' AND target_id = ?", [(string) $s['id']]);
+        foreach ($etagen as $etage) {
+            Database::execute("DELETE FROM audit_log WHERE action = 'floor.delete' AND target_id = ?", [(string) $etage]);
+        }
+    }
     foreach (Database::select('SELECT id FROM api_tokens WHERE name LIKE ?', [$kennung . '%']) as $t) {
         Database::execute('DELETE FROM api_token_standorte WHERE token_id = ?', [(int) $t['id']]);
         Database::execute('DELETE FROM api_tokens WHERE id = ?', [(int) $t['id']]);

@@ -13,7 +13,8 @@ declare(strict_types=1);
  *
  * Schnittstelle: Befugnisse und Standorte eines Tokens vergibt nur, wer die
  * Rechte dazu hat; ein verfälschtes Token wird nie angezeigt; die Ansichten
- * kommen ohne Inline-Skript aus.
+ * kommen ohne Inline-Skript aus; was eine andere Instanz schickt (Meldungen,
+ * Namen), kommt nur maskiert auf die Seite.
  *
  * Die Prüfungen über HTTP (Weiterleitungen, Sitzung, Token, Benutzer-
  * verwaltung) stehen in web.php und schnittstelle.php.
@@ -40,6 +41,7 @@ use App\Support\Config;
 use App\Support\Crypto;
 use App\Support\Database;
 use App\Support\Response;
+use App\Support\View;
 
 $k = 'pm-sich-' . bin2hex(random_bytes(3));
 $ip = '198.51.100.' . random_int(1, 254);
@@ -123,14 +125,39 @@ try {
     pruefe(ApiZugang::pruefen('Bearer ' . $schreibt['token'] . 'x', '127.0.0.1') === null && ApiZugang::pruefen('Token ' . $schreibt['token'], '127.0.0.1') === null
         && ApiZugang::pruefen('Bearer ' . strtoupper($schreibt['token']), '127.0.0.1') === null, 'nur genau das Token im Kopf „Bearer“');
     // Die Ansichten der Schnittstelle: kein Skript ohne Nonce, keine on…=, kein javascript:
-    $ansichten = array_merge(glob(dirname(__DIR__) . '/resources/views/schnittstelle/*.php') ?: [], [dirname(__DIR__) . '/resources/views/partials/token-standorte.php']);
-    pruefe(count($ansichten) >= 4, 'Ansichten der Schnittstelle gefunden');
+    $ansichten = array_merge(glob(dirname(__DIR__) . '/resources/views/schnittstelle/*.php') ?: [], glob(dirname(__DIR__) . '/resources/views/instanzen/*.php') ?: [],
+        [dirname(__DIR__) . '/resources/views/partials/token-standorte.php']);
+    pruefe(count($ansichten) >= 7, 'Ansichten der Schnittstelle und der anderen Instanzen gefunden');
     foreach ($ansichten as $datei) {
         $text = (string) file_get_contents($datei);
         $name = basename(dirname($datei)) . '/' . basename($datei);
         pruefe(preg_match('/<script(?![^>]*\bnonce=)/i', $text) !== 1, $name . ': kein <script> ohne Nonce');
         pruefe(preg_match('/\son[a-z]+\s*=/i', $text) !== 1 && stripos($text, 'javascript:') === false, $name . ': kein on…= und kein javascript:');
     }
+
+    // Was eine andere Instanz schickt, kommt in der Instanzseite nur maskiert an:
+    // ihre Meldung, Namen von Locations und Etagen; ein Schlüssel, der keiner
+    // ist, wird übergangen.
+    $gegenseite = ['id' => 0, 'name' => $k . ' Gegenseite', 'base_url' => 'http://gegenseite.example', 'token' => 'mtma_' . str_repeat('g', 40),
+        'remote_name' => '<b>fett</b>', 'remote_produkt' => '', 'befugnisse' => ['plaene.lesen'], 'unverschluesselt' => true, 'powermanagement' => false,
+        'verified_at' => null, 'token_prefix' => 'mtma_ggggggg', 'letzter_fehler' => '<script>alert(2)</script>'];
+    $dortAntwort = ['ok' => true, 'status' => 403, 'rumpf' => json_encode(['ok' => false, 'message' => '<script>alert(1)</script>']), 'fehler' => ''];
+    Http::$attrappe = static function () use (&$dortAntwort): array {
+        return $dortAntwort;
+    };
+    $seite = View::partial('instanzen/instanz', ['partner' => $gegenseite, 'locations' => \App\Services\PartnerAbgleich::locations($gegenseite), 'planen' => true]);
+    pruefe(str_contains($seite, '&lt;script&gt;alert(1)&lt;/script&gt;') && !str_contains($seite, '<script>alert(1)'), 'Meldung von dort maskiert');
+    pruefe(!str_contains($seite, '<script>alert(2)') && !str_contains($seite, '<b>fett</b>'), 'gespeicherter Fehler und Name von dort maskiert');
+    $dortAntwort = ['ok' => true, 'status' => 200, 'fehler' => '', 'rumpf' => json_encode(['ok' => true, 'locations' => [
+        ['schluessel' => 'halle', 'name' => '<img src=x onerror=alert(3)>', 'stand' => 'abc', 'etagen' => [['schluessel' => 'eg', 'name' => '<svg onload=alert(4)>', 'plan' => true]]],
+        ['schluessel' => '../../etc', 'name' => 'Pfad', 'stand' => 'abc', 'etagen' => []],
+    ]])];
+    $liste = \App\Services\PartnerAbgleich::locations($gegenseite);
+    $seite = View::partial('instanzen/instanz', ['partner' => $gegenseite, 'locations' => $liste, 'planen' => true]);
+    pruefe(count($liste['locations']) === 1 && $liste['uebergangen'] === 1, 'Location mit ungültigem Schlüssel übergangen');
+    pruefe(str_contains($seite, '&lt;img src=x onerror=alert(3)&gt;') && !str_contains($seite, '<img src=x') && !str_contains($seite, '<svg onload'),
+        'Namen von dort maskiert');
+    Http::$attrappe = null;
 
     // ------------------------------------------------ Anmeldung
     $unbekannt = $k . '-niemand';

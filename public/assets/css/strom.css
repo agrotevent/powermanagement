@@ -463,3 +463,18 @@ tr.abweichung-zeile td { background: var(--warning-light); }
 .token-standorte-alle { margin-bottom: .3rem; }
 .token-standorte .check { margin-bottom: 0; }
 #api-pruefen { word-break: break-all; }
+
+/* Andere Instanzen: Etagen dort → hier, Aktionen je Location, Zurückschicken. */
+.api-adresse { word-break: break-all; }
+.api-etagen .api-etage { display: flex; flex-wrap: wrap; gap: .1rem .5rem; padding: .15rem 0; }
+.api-etagen .api-etage + .api-etage { border-top: 1px dashed var(--border); }
+.api-ziel { flex-basis: 100%; }
+.api-aktionen { justify-content: flex-end; }
+.api-aktionen form { margin: 0; }
+.api-zurueck > summary { list-style: none; cursor: pointer; }
+.api-zurueck > summary::-webkit-details-marker { display: none; }
+.api-zurueck[open] > form { display: flex; flex-direction: column; gap: .3rem; margin-top: .4rem; min-width: min(18rem, 100%); text-align: left; }
+.api-neues-token input { max-width: 100%; }
+@media (max-width: 720px) {
+    .api-aktionen { justify-content: flex-start; }
+}
