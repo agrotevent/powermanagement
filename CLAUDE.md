@@ -29,6 +29,11 @@ keine Build-Schritte. JS-Bibliotheken liegen fertig unter `public/assets/vendor`
   kein `onclick="…"`, kein `javascript:`. Verhalten über `data-`-Attribute
   in `app.js`; ein unvermeidbares `<script>` bekommt `nonce="<?= View::e(View::nonce()) ?>"`.
   Texte aus Antworten per `textContent`, nie per `innerHTML`.
+- **Nichts hält die Sitzung, während es wartet.** PHP sperrt die
+  Sitzungsdatei für die ganze Anfrage. Endpunkte, die regelmäßig abgefragt
+  werden oder auf InfluxDB, Geräte oder Clouds warten, rufen vorher
+  `Session::freigeben()` (danach nur noch lesen). Abfragen im Browser
+  starten erst, wenn die vorige fertig ist (`live.js`, `karte.js`).
 - **Weiterleitungen** nur auf eigene Pfade: `Response::sichererPfad()`,
   `Response::zurueckZiel()` statt `$_SERVER['HTTP_REFERER']` oder `next`.
 - **Zeiten** werden in UTC gespeichert (ISO 8601) und in der Zeitzone der
@@ -85,6 +90,7 @@ bash -n deploy/*.sh tests/*.sh && shellcheck -S warning -e SC2016,SC1111 deploy/
 | `tests/influx.php` | InfluxQL: Livewerte, Verläufe, Datenfenster, Energie je Tag (eigene InfluxDB 1.x) |
 | `tests/cloud.php` | ComAp WebSupervisor, Victron VRM (Http-Attrappe) |
 | `tests/web.php` | alle Seiten ohne PHP-Meldung, 403/404, CSRF, Schalt-Ablehnung, Weiterleitungen, Sitzung nach Kennwortwechsel, Benutzerverwaltung ohne Administration, Ändern nur mit „bearbeiten“ (eigener PHP-Server) |
+| `tests/sitzung.php` | Sitzungssperre: Live-Endpunkte (Anlage, Dashboard, Karte, Bereiche) geben die Sitzung frei – Speichern und Seiten kommen bei träger InfluxDB durch (eigene Instanz, InfluxDB-Attrappe) |
 | `tests/sicherheit.php` | Rechte vergeben, Anmelde-Bremse ohne Kontoerkennung, Geräte zuordnen, Kanal-Freigaben beim Schalten, Schlüssel aus dem Repository, Line Protocol, CSV, Adressen, app.key, PDF-Werkzeuge |
 | `tests/nodered-funktionen.mjs` | Node-RED-Funktionen, `flows.json` passt zu den Quellen |
 | `tests/installation-debian.sh` | `deploy/install-debian.sh` auf frischem Debian 13 mit systemd (Docker): Erstinstallation, zweiter Lauf (Kennwörter, app.key bleiben), Update mit neuem Ordner in `storage/`; Rechte (Code root, `storage/` www-data), Dienste, Anmeldung, Broker, `bin/power pruefen` |
