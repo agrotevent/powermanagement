@@ -61,10 +61,11 @@ php bin/power demo:seed
 # alle Prüfskripte – vor jedem Commit
 for t in tests/*.php; do php "$t" || break; done
 node tests/nodered-funktionen.mjs
+bash tests/installation-debian.sh   # nur mit Docker – sonst übernimmt das die CI
 
 # Syntax
 find . -name '*.php' -not -path './.git/*' -print0 | xargs -0 -n1 php -l > /dev/null
-bash -n deploy/*.sh && shellcheck -S warning -e SC2016,SC1111 deploy/*.sh
+bash -n deploy/*.sh tests/*.sh && shellcheck -S warning -e SC2016,SC1111 deploy/*.sh tests/*.sh
 ```
 
 | Prüfskript | prüft |
@@ -86,6 +87,7 @@ bash -n deploy/*.sh && shellcheck -S warning -e SC2016,SC1111 deploy/*.sh
 | `tests/web.php` | alle Seiten ohne PHP-Meldung, 403/404, CSRF, Schalt-Ablehnung, Weiterleitungen, Sitzung nach Kennwortwechsel, Benutzerverwaltung ohne Administration, Ändern nur mit „bearbeiten“ (eigener PHP-Server) |
 | `tests/sicherheit.php` | Rechte vergeben, Anmelde-Bremse ohne Kontoerkennung, Geräte zuordnen, Kanal-Freigaben beim Schalten, Schlüssel aus dem Repository, Line Protocol, CSV, Adressen, app.key, PDF-Werkzeuge |
 | `tests/nodered-funktionen.mjs` | Node-RED-Funktionen, `flows.json` passt zu den Quellen |
+| `tests/installation-debian.sh` | `deploy/install-debian.sh` auf frischem Debian 13 mit systemd (Docker): Erstinstallation, zweiter Lauf (Kennwörter, app.key bleiben), Update mit neuem Ordner in `storage/`; Rechte (Code root, `storage/` www-data), Dienste, Anmeldung, Broker, `bin/power pruefen` |
 
 Prüfskripte legen eigene Daten mit eindeutiger Kennung an und löschen sie am
 Ende. Sie wählen Datensätze über Eigenschaften, nie über die kleinste ID.
