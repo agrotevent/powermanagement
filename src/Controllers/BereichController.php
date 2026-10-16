@@ -15,6 +15,7 @@ use App\Support\Database;
 use App\Support\Flash;
 use App\Support\Request;
 use App\Support\Response;
+use App\Support\Session;
 use App\Support\Zeit;
 use App\Support\Zeitraum;
 
@@ -59,6 +60,8 @@ final class BereichController extends Controller
     /** Livewerte aller sichtbaren Bereiche (oder eines) – für die Aktualisierung alle 5 s. */
     public function live(Request $request): void
     {
+        // Nur lesen, und das regelmäßig – die Sitzung nicht gesperrt halten.
+        Session::freigeben();
         $id = $request->int('id');
         $out = [];
         foreach (BereichService::alle() as $b) {

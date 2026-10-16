@@ -10,6 +10,7 @@ use App\Services\AnlagenService;
 use App\Services\LiveService;
 use App\Services\SiteService;
 use App\Support\Request;
+use App\Support\Session;
 
 final class DashboardController extends Controller
 {
@@ -71,6 +72,8 @@ final class DashboardController extends Controller
     /** Livewerte aller sichtbaren Anlagen (für das Nachladen alle paar Sekunden). */
     public function live(Request $request): void
     {
+        // Nur lesen, und das regelmäßig – die Sitzung nicht gesperrt halten.
+        Session::freigeben();
         $siteId = $request->int('standort');
         $objekte = Zugriff::filtern(AnlagenService::liste($siteId > 0 ? ['site_id' => $siteId] : []));
         $this->json(['ts' => time(), 'objekte' => LiveService::fuerObjekte($objekte)]);

@@ -19,6 +19,7 @@ use App\Services\SiteService;
 use App\Support\Database;
 use App\Support\Request;
 use App\Support\Response;
+use App\Support\Session;
 
 /**
  * Die Karte: Grundriss (wie in MasterAdmin) mit Anlagen, Kabeln,
@@ -260,6 +261,8 @@ final class KarteController extends Controller
         if ($etage === null) {
             return;
         }
+        // Nur lesen, und das regelmäßig – die Sitzung nicht gesperrt halten.
+        Session::freigeben();
         $objekte = Zugriff::filtern(AnlagenService::liste(['floor_id' => (int) $etage['id']]));
         $this->json(['ts' => time(), 'objekte' => LiveService::fuerObjekte($objekte)]);
     }
