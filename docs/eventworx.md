@@ -40,6 +40,10 @@ auch kein PDF hoch. Die übernommenen Werte werden in den Bericht
 3. **Verbindung prüfen.** Erst fragt PowerManagement `check/ping`, dann
    zählt es die lesbaren Aufträge und Angebote. Erfolg sieht so aus:
    „Verbunden mit firma.eventworx.biz – 1.234 Aufträge/Angebote lesbar.“
+   Dasselbe auf dem Server: `sudo -u www-data php bin/power eventworx:pruefen`
+   (Exitcode 1, wenn es nicht klappt).
+
+![Karte „Eventworx“ in den Einstellungen (Demo-Modus)](bilder/einstellungen-eventworx.png)
 
 Für das Token gilt:
 
@@ -73,7 +77,8 @@ Das Token kommt auch dann aus der Oberfläche, nie aus der Datei.
 
 Im Bericht hat der Abschnitt Kunde drei Reiter: **Freitext | Eventworx | Aus
 früherem Bericht**. Die Oberfläche sagt dazu, dass die Kundendaten aus dem
-Eventworx-Vorgang kommen.
+Eventworx-Vorgang kommen. Ist Eventworx nicht eingerichtet oder fehlt das
+Recht, ist der Reiter grau und nennt den Grund.
 
 1. **Suchen:** Auftrags- oder Angebotsnummer eintippen, dann Knopf oder
    Enter. Es gibt keine Live-Suche beim Tippen. Gesucht wird unter Aufträgen
@@ -87,6 +92,8 @@ Eventworx-Vorgang kommen.
    Bericht merkt sich nur den Verweis (Host, Kennung, Art, Nummer, Zeit).
    Daraus wird der Link „In Eventworx öffnen“, über den man das fertige PDF
    dort von Hand anhängen kann.
+
+![Übernahme aus dem Demo-Vorgang AU-1042: je Gruppe ein Häkchen, abweichende Werte nebeneinander](bilder/bericht-eventworx.png)
 
 Die Nummer ist der sichere Weg. Ob Eventworx mit dem Suchtext auch in Titel
 und Kundennamen sucht, ist am echten Mandanten noch nicht geprüft.

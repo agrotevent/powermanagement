@@ -53,6 +53,9 @@ final class BerichtService
     /** Höchstens ein Ereignis „gespeichert“ je Benutzer und zehn Minuten. */
     private const GESPEICHERT_TAKT = 600;
 
+    /** Ab wann die Wartung einen unveränderten Entwurf meldet. */
+    private const ENTWURF_LIEGT_TAGE = 180;
+
     private const QUELLEN = ['anschluss', 'generator', 'wechselrichter'];
 
     /** Was beim Einfrieren dazukommt – und beim Zurückziehen und in der Korrektur wieder geht (dazu kopf.pruefer, kopf.eventworx). */
@@ -1294,9 +1297,8 @@ final class BerichtService
         $id = (int) $b['id'];
         $name = BerichtPdf::dateiname($b);
         if (in_array((string) $b['status'], ['abgeschlossen', 'ersetzt'], true)) {
-            $z = Database::first('SELECT daten FROM bericht_pdf WHERE bericht_id = ?', [$id]);
-            $bytes = $z !== null ? base64_decode((string) $z['daten'], true) : false;
-            if (is_string($bytes) && $bytes !== '') {
+            $bytes = self::pdfGespeichert($id);
+            if ($bytes !== null) {
                 return ['name' => $name, 'bytes' => $bytes, 'gespeichert' => true, 'sha256' => hash('sha256', $bytes)];
             }
             // Ohne gespeichertes PDF (Integritätsbefund): neu aus dem eingefrorenen Inhalt.
@@ -1308,6 +1310,14 @@ final class BerichtService
         }
         $bytes = BerichtPdf::erzeugen($b, self::unterschriften($id), true);
         return ['name' => $name, 'bytes' => $bytes, 'gespeichert' => false, 'sha256' => hash('sha256', $bytes)];
+    }
+
+    /** Die gespeicherten Bytes des PDF (abgeschlossen oder ersetzt) – oder null. */
+    public static function pdfGespeichert(int $id): ?string
+    {
+        $z = Database::first('SELECT daten FROM bericht_pdf WHERE bericht_id = ?', [$id]);
+        $bytes = $z !== null ? base64_decode((string) $z['daten'], true) : false;
+        return is_string($bytes) && $bytes !== '' ? $bytes : null;
     }
 
     /** Prüfsumme des gespeicherten PDF (SHA-256) – oder null. */
@@ -1463,6 +1473,57 @@ final class BerichtService
         $nummer = Database::scalar('SELECT nummer FROM berichte WHERE id = ?', [$id]);
         self::transaktion(static fn () => self::alleZeilenLoeschen($id));
         Audit::log('bericht.geloescht', 'bericht', (string) $id, ['nummer' => is_string($nummer) ? $nummer : null]);
+    }
+
+    /**
+     * Was die tägliche Wartung zu den Berichten meldet – sie löscht keine:
+     * Berichte über der Aufbewahrungsfrist und lange liegende Entwürfe.
+     *
+     * @return list<string>
+     */
+    public static function wartungHinweise(): array
+    {
+        $out = [];
+        $n = count(self::faellig());
+        if ($n > 0) {
+            $out[] = $n . ($n === 1 ? ' Übergabebericht' : ' Übergabeberichte') . ' über der Aufbewahrungsfrist (bin/power berichte:aufbewahrung).';
+        }
+        $m = (int) Database::scalar(
+            "SELECT COUNT(*) FROM berichte WHERE status = 'entwurf' AND COALESCE(updated_at, created_at) < ?",
+            [gmdate('c', time() - self::ENTWURF_LIEGT_TAGE * 86400)]
+        );
+        if ($m > 0) {
+            $out[] = $m . ($m === 1 ? ' Entwurf' : ' Entwürfe') . ' eines Übergabeberichts seit ' . self::ENTWURF_LIEGT_TAGE . ' Tagen unverändert.';
+        }
+        return $out;
+    }
+
+    // ------------------------------------------------------------ Kommandozeile
+
+    /**
+     * Ein Bericht über seine Nummer (`UB-2026-0042`, eine Korrektur
+     * `UB-2026-0042-K1`); mit $fassung eine andere Fassung derselben Nummer.
+     */
+    public static function nachNummer(string $nummer, ?int $fassung = null): ?array
+    {
+        $b = Database::first('SELECT id, jahr, laufnr, fassung FROM berichte WHERE nummer = ? ORDER BY fassung LIMIT 1', [trim($nummer)]);
+        if ($b !== null && $fassung !== null && $fassung !== (int) $b['fassung']) {
+            $b = $b['jahr'] === null || $b['laufnr'] === null ? null
+                : Database::first('SELECT id FROM berichte WHERE jahr = ? AND laufnr = ? AND fassung = ?', [(int) $b['jahr'], (int) $b['laufnr'], $fassung]);
+        }
+        return $b === null ? null : self::find((int) $b['id']);
+    }
+
+    /**
+     * Alle eingefrorenen Berichte (vom Prüfer unterschrieben, abgeschlossen,
+     * ersetzt) – nur Nummer, Fassung und Status, ohne Inhalt.
+     *
+     * @return list<array{id:int,nummer:string,fassung:int,status:string}>
+     */
+    public static function eingefrorene(): array
+    {
+        return array_map(static fn (array $b): array => ['id' => (int) $b['id'], 'nummer' => (string) $b['nummer'], 'fassung' => (int) $b['fassung'], 'status' => (string) $b['status']],
+            Database::select("SELECT id, nummer, fassung, status FROM berichte WHERE status IN ('geprueft', 'abgeschlossen', 'ersetzt') ORDER BY jahr, laufnr, fassung, id"));
     }
 
     /** 31.12. des Jahres „Prüfdatum + Aufbewahrung“. */

@@ -983,6 +983,87 @@ try {
     pruefe(in_array('ersetzt', array_column(BerichtService::ereignisse($u1), 'ereignis'), true)
         && in_array('korrektur_angelegt', array_column(BerichtService::ereignisse($u1), 'ereignis'), true), 'Ereignisse am Vorgänger: Korrektur angelegt, ersetzt');
 
+    // ================================================== Kommandozeile und Wartung
+    /** bin/power mit diesen Argumenten: [Exitcode, Ausgabe (stdout und stderr)] */
+    $cli = static function (string ...$argumente): array {
+        $p = proc_open(array_merge([PHP_BINARY, dirname(__DIR__) . '/bin/power'], $argumente), [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $rohre);
+        $aus = stream_get_contents($rohre[1]) . stream_get_contents($rohre[2]);
+        fclose($rohre[1]);
+        fclose($rohre[2]);
+        return [proc_close($p), (string) $aus];
+    };
+    $ohneKundendaten = static function (string $aus) use ($kundeName, $kundeMail, $vorbehalte, $unterzeichner): bool {
+        foreach ([$kundeName, $kundeMail, $vorbehalte, $unterzeichner] as $geheim) {
+            if (str_contains($aus, $geheim)) {
+                return false;
+            }
+        }
+        return true;
+    };
+    [$code, $aus] = $cli('berichte:pruefen', $nummer1);
+    pruefe($code === 0 && str_contains($aus, 'OK') && str_contains($aus, $nummer1 . ' (Fassung 1, ersetzt)') && $ohneKundendaten($aus), 'CLI berichte:pruefen <nummer>: OK, ohne Kundendaten');
+    [$code, $aus] = $cli('berichte:pruefen', $nummer1, '--fassung', '2', '--pdf');
+    pruefe($code === 0 && str_contains($aus, $nummer1 . '-K1 (Fassung 2, abgeschlossen)') && !str_contains($aus, 'Hinweis'), 'CLI berichte:pruefen --fassung 2 --pdf: Korrektur, neu erzeugt gleich');
+    gleich($cli('berichte:pruefen', $nummer1, '--fassung=9')[0], 1, 'CLI: unbekannte Fassung → Exit 1');
+    $rohK1 = (string) Database::scalar('SELECT daten FROM bericht_pdf WHERE bericht_id = ?', [$k1]);
+    $kaputt = (string) base64_decode($rohK1, true);
+    $kaputt[200] = $kaputt[200] === 'x' ? 'y' : 'x';
+    Database::execute('UPDATE bericht_pdf SET daten = ? WHERE bericht_id = ?', [base64_encode($kaputt), $k1]);
+    [$code, $aus] = $cli('berichte:pruefen', $nummer1 . '-K1');
+    pruefe($code === 1 && str_contains($aus, 'BEFUND') && str_contains($aus, 'PDF verändert'), 'CLI: ein PDF-Byte geändert → Befund, Exit 1');
+    Database::execute('UPDATE bericht_pdf SET daten = ? WHERE bericht_id = ?', [$rohK1, $k1]);
+    [$code, $aus] = $cli('berichte:pruefen');
+    pruefe(str_contains($aus, $nummer1 . ' (Fassung 1') && str_contains($aus, $nummer1 . '-K1 (Fassung 2') && str_contains($aus, ' geprüft, ') && $ohneKundendaten($aus),
+        'CLI berichte:pruefen ohne Nummer: alle unterschriebenen, ohne Kundendaten');
+
+    $zielOrdner = sys_get_temp_dir() . '/' . $kennung . '-pdf';
+    mkdir($zielOrdner, 0700);
+    try {
+        $ziel = $zielOrdner . '/bericht.pdf';
+        [$code, $aus] = $cli('berichte:pdf', $nummer1, $ziel);
+        pruefe($code === 0 && is_file($ziel) && file_get_contents($ziel) === $pdfBytes && str_contains($aus, hash('sha256', $pdfBytes)), 'CLI berichte:pdf: genau die gespeicherten Bytes');
+        file_put_contents($ziel, 'vorher');
+        [$code, $aus] = $cli('berichte:pdf', $nummer1, $ziel);
+        pruefe($code === 1 && str_contains($aus, 'gibt es schon') && file_get_contents($ziel) === 'vorher', 'CLI berichte:pdf überschreibt keine vorhandene Datei');
+        [$code, $aus] = $cli('berichte:pdf', $nummer1, $zielOrdner . '/k1.pdf', '--fassung=2');
+        pruefe($code === 0 && file_get_contents($zielOrdner . '/k1.pdf') === base64_decode($rohK1, true), 'CLI berichte:pdf --fassung=2: das PDF der Korrektur');
+        [$code, $aus] = $cli('berichte:pdf', (string) BerichtService::find($u3)['nummer'], $zielOrdner . '/u3.pdf');
+        pruefe($code === 1 && str_contains($aus, 'kein PDF gespeichert') && !is_file($zielOrdner . '/u3.pdf'), 'CLI berichte:pdf: ohne Abschluss kein PDF');
+        gleich($cli('berichte:pdf', $praefix . '-1999-9999', $zielOrdner . '/x.pdf')[0], 1, 'CLI berichte:pdf: unbekannte Nummer → Exit 1');
+    } finally {
+        array_map('unlink', glob($zielOrdner . '/*') ?: []);
+        rmdir($zielOrdner);
+    }
+
+    $entwurfAlt = (int) BerichtService::anlegen($siteId, null, [])['id'];
+    Database::update('berichte', $entwurfAlt, ['updated_at' => gmdate('c', time() - 200 * 86400)]);
+    Database::update('berichte', $u1, ['aufbewahren_bis' => '2000-12-31']);
+    $meldungen = implode(' ', BerichtService::wartungHinweise());
+    pruefe(preg_match('/\d+ Übergabeberichte? über der Aufbewahrungsfrist \(bin\/power berichte:aufbewahrung\)/u', $meldungen) === 1
+        && preg_match('/\d+ Entw(urf|ürfe) eines Übergabeberichts seit 180 Tagen unverändert/u', $meldungen) === 1, 'Wartung meldet fällige Berichte und liegende Entwürfe: ' . $meldungen);
+    pruefe(BerichtService::find($u1) !== null && BerichtService::find($entwurfAlt) !== null, 'Wartung löscht keine Berichte');
+    [$code, $aus] = $cli('berichte:aufbewahrung');
+    pruefe($code === 0 && str_contains($aus, $nummer1) && str_contains($aus, '--ausfuehren') && BerichtService::find($u1) !== null && $ohneKundendaten($aus),
+        'CLI berichte:aufbewahrung zeigt nur, löscht ohne --ausfuehren nichts');
+    // Löschen nur, wenn ausschließlich eigene Berichte fällig sind (die mit
+    // Prüfdatum 2001 sind es ohnehin) – fremde Daten bleiben unangetastet.
+    $eigene = array_map('intval', array_column(Database::select(
+        'SELECT id FROM berichte WHERE erstellt_von IN (' . implode(',', array_map('intval', $benutzer)) . ')'
+    ), 'id'));
+    $faellig = array_map('intval', array_column(BerichtService::faellig(), 'id'));
+    if (in_array($u1, $faellig, true) && array_diff($faellig, $eigene) === []) {
+        [$code, $aus] = $cli('berichte:aufbewahrung', '--ausfuehren');
+        $rest = (int) Database::scalar('SELECT COUNT(*) FROM berichte WHERE id IN (' . implode(',', $faellig) . ')')
+            + (int) Database::scalar('SELECT COUNT(*) FROM bericht_pdf WHERE bericht_id IN (' . implode(',', $faellig) . ')');
+        pruefe($code === 0 && $rest === 0 && str_contains($aus, count($faellig) . ' gelöscht')
+            && (int) Database::scalar("SELECT COUNT(*) FROM audit_log WHERE action = 'bericht.geloescht' AND details LIKE ?", ['%"' . $nummer1 . '"%']) === 1,
+            'CLI berichte:aufbewahrung --ausfuehren löscht samt PDF, Audit mit Nummer');
+    }
+    if (App\Support\Config::isDemo()) {
+        [$code, $aus] = $cli('eventworx:pruefen');
+        pruefe($code === 0 && str_contains($aus, 'Demo-Modus'), 'CLI eventworx:pruefen im Demo-Modus');
+    }
+
     // ================================================== Datenschutz
     foreach ([$kundeName, $kundeMail, $vorbehalte, $unterzeichner] as $geheim) {
         gleich((int) Database::scalar('SELECT COUNT(*) FROM audit_log WHERE details LIKE ?', ['%' . $geheim . '%']), 0, 'nicht im Audit: ' . $geheim);
@@ -1029,6 +1110,10 @@ try {
         $w === null ? Settings::forget($s) : Settings::put($s, $w);
     }
     Database::execute('DELETE FROM audit_log WHERE username LIKE ? OR details LIKE ?', [$kennung . '%', '%' . $kennung . '%']);
+    if (isset($praefix)) {
+        // Aus der Kommandozeile (Benutzer „system“): erkennbar an der Nummer mit dem eigenen Kürzel.
+        Database::execute("DELETE FROM audit_log WHERE action LIKE 'bericht.%' AND details LIKE ?", ['%"' . $praefix . '-%']);
+    }
     gleich((int) Database::scalar('SELECT COUNT(*) FROM berichte WHERE titel LIKE ? OR kunde_name LIKE ? OR nummer LIKE ?', ['%' . $kennung . '%', '%' . $kennung . '%', $kennung . '%']), 0,
         'aufgeräumt: keine Berichte der Prüfung');
 }

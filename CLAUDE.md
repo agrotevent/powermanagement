@@ -98,7 +98,7 @@ bash -n deploy/*.sh && shellcheck -S warning -e SC2016,SC1111 deploy/*.sh
 | `tests/mqtt-zugaenge.php` | Eigene MQTT-Zugänge von App bis Broker: Gen2 einrichten/übertragen/prüfen/Neustart/neues Kennwort/entfernen, Gen1, Sperre des gemeinsamen Zugangs, Kontoprobe gegen falsche ACLs, keine Geheimnisse (eigener Mosquitto, Shelly-Attrappen) |
 | `tests/influx.php` | InfluxQL: Livewerte, Verläufe, Datenfenster, Energie je Tag (eigene InfluxDB 1.x) |
 | `tests/cloud.php` | ComAp WebSupervisor, Victron VRM (Http-Attrappe) |
-| `tests/berichte.php` | Übergabeberichte: Vorbelegung aus Plan/Schutzorganen/Kabeln/Inventar (Messwerte nie), Grenzwerte (Zs/Ik, R_iso, RCD, TT/IT, Erdung), Speichern (Version/409, 422, IDs nur vom Server, kein Gleitkomma), Abschluss-Prüfung, Unterschrift (nur Striche aus ganzen Zahlen), Einfrieren/Nummer/Siegel, Zurückziehen, Kunde und ohne Kunde, Kundenmodus und Kennwort, Integrität, PDF beim Abschluss (gespeichert, Neuerzeugung byte-gleich, ein Byte geändert → Befund), Korrektur, Kunde aus früherem Bericht, Sichtbarkeit mit Datenfenster, Löschen/Verwerfen, Lösch-Abläufe, Aufbewahrung, Datenschutz |
+| `tests/berichte.php` | Übergabeberichte: Vorbelegung aus Plan/Schutzorganen/Kabeln/Inventar (Messwerte nie), Grenzwerte (Zs/Ik, R_iso, RCD, TT/IT, Erdung), Speichern (Version/409, 422, IDs nur vom Server, kein Gleitkomma), Abschluss-Prüfung, Unterschrift (nur Striche aus ganzen Zahlen), Einfrieren/Nummer/Siegel, Zurückziehen, Kunde und ohne Kunde, Kundenmodus und Kennwort, Integrität, PDF beim Abschluss (gespeichert, Neuerzeugung byte-gleich, ein Byte geändert → Befund), Korrektur, Kunde aus früherem Bericht, Sichtbarkeit mit Datenfenster, Löschen/Verwerfen, Lösch-Abläufe, Aufbewahrung, Kommandozeile (`berichte:pruefen`/`pdf`/`aufbewahrung`) und Wartungs-Hinweise, Datenschutz |
 | `tests/bericht-pdf.php` | PDF der Übergabeberichte: eigener Schreiber, Schrift als Teilmenge (Prüfsumme, Glyphen, kein .notdef), Layout mit poppler (A4, Schriften eingebettet, Texte, Tabellenkopf je Seite, keine Bilder, Fuß „Blatt x von y“), zweimal erzeugt gleiche Bytes, Vorschau, ohne Kunde, Korrektur, 300 Kreise (ohne poppler übersprungen) |
 | `tests/eventworx.php` | Eventworx nur lesend: Adresse, Token an den Host gebunden, Pfadliste, Anfragen, Aufbereitung ohne Beträge/Notizen, Fehlerantworten, Nachlesen bei `data:null`, Drossel, Demo, keine Geheimnisse in Log/Audit/Meldungen (Http-Attrappe) |
 | `tests/web.php` | alle Seiten ohne PHP-Meldung, 403/404, CSRF (mit `Accept: application/json` 419/401 als JSON), Schalt-Ablehnung, Weiterleitungen, Sitzung nach Kennwortwechsel, Benutzerverwaltung ohne Administration, Ändern nur mit „bearbeiten“, Übergabeberichte (Seiten, PDF mit Kopfzeilen/Vorschau/gespeicherten Bytes, Autosave 200/409/422/423, Eventworx-Demo, Firma-Karte, Prüfer-Qualifikation, Rechte von Kunde und Planer, Unterschreiben, Kundenmodus-Sperre und Entsperren, ohne Kunde, Korrektur) (eigener PHP-Server) |
@@ -129,6 +129,11 @@ php bin/power demo:seed --reset
 php -S 127.0.0.1:8080 -t public &
 NPM_ROOT=$(npm root -g) node docs/bilder/aufnehmen.mjs http://127.0.0.1:8080
 ```
+
+Die Übergabeberichte nimmt das Skript als Demo-Prüfer `technik` auf; Blatt 1
+des PDF holt es über `bin/power berichte:pdf` und `pdftoppm`. Den vom Prüfer
+unterschriebenen Demo-Bericht übergibt es dabei an den Kunden und entsperrt
+wieder – er lässt sich danach nicht mehr zurückziehen.
 
 Für den Verteiler-Abgleich legt das Skript sich ein eigenes Repository im
 Temp-Ordner an (kein Token, nichts auf GitHub) und stellt Einstellungen und
