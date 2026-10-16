@@ -171,11 +171,13 @@ Repository entfernen braucht „… ins Repository hochladen“.
 
 Einen Katalog importieren (*Standard-Verteiler → Importieren …*) darf, wer
 „Anlagen ändern“ **und** „Alle Standorte, Anlagen und Messdaten“ hat – der
-Katalog gilt für alle Standorte. Bringt die Datei Steckertypen mit, die es
-hier noch nicht gibt, braucht es dazu „Steckverbinder-Katalog pflegen“;
-sonst wird nichts übernommen, und die Meldung nennt die fehlenden
-Steckertypen. Danach gelten für die Typen dieselben Rechte wie für jeden
-Standard-Verteiler.
+Katalog gilt für alle Standorte. Benutzt ein ausgewählter Typ einen
+Steckertyp, den es hier noch nicht gibt, braucht es dazu
+„Steckverbinder-Katalog pflegen“ – sonst wird nichts übernommen, und die
+Meldung nennt die Steckertypen und die Typen, die sie brauchen. Ohne dieses
+Recht stehen solche Typen in der Vorschau ohne Haken da; Typen ohne neue
+Stecker lassen sich trotzdem übernehmen. Danach gelten für die Typen
+dieselben Rechte wie für jeden Standard-Verteiler.
 
 ## MQTT-Zugänge
 

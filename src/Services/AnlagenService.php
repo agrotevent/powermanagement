@@ -724,9 +724,10 @@ final class AnlagenService
 
     /**
      * Eine Anlage auf einen anderen Katalog-Typ umstellen – etwa wenn beim
-     * Aufbau statt des geplanten PD 32 ein PD 63 steht. Anschlüsse und
-     * Schutzorgane kommen aus dem Katalog; Kabel und Messgeräte bleiben an
-     * „ihrem“ Anschluss (gleiche Richtung und Nummer), sonst an der Anlage.
+     * Aufbau statt des geplanten PD 32 ein PD 63 steht. Anschlüsse,
+     * Schutzorgane und die Eigenschaften des Typs kommen aus dem Katalog;
+     * Kabel und Messgeräte bleiben an „ihrem“ Anschluss (gleiche Richtung
+     * und Nummer), sonst an der Anlage.
      */
     public static function typUebernehmen(int $objektId, int $vorlageId): array
     {
@@ -763,9 +764,26 @@ final class AnlagenService
         foreach ($messgeraete as $id => $alt) {
             Database::update('messpunkte', $id, ['anschluss_id' => $alt !== null ? ($neu[$alt] ?? null) : null]);
         }
+        // Die Eigenschaften des Typs (Artikelnummer, Gewicht, Zuleitung …)
+        // wechseln mit: was vom bisherigen Typ stammt, geht, die des neuen
+        // gelten; was nur dieses Stück hat (etwa „Nächste Prüfung“), bleibt.
+        $eigenschaften = self::eigenschaftenFiltern((string) $objekt['art'], (array) $objekt['eigenschaften']);
+        $bisher = trim((string) $objekt['modell']) !== '' ? Database::select(
+            'SELECT eigenschaften FROM objekte WHERE ist_vorlage = 1 AND art = ? AND modell = ? AND id <> ?',
+            [(string) $objekt['art'], (string) $objekt['modell'], $vorlageId]) : [];
+        if (count($bisher) === 1) {
+            $vomTyp = self::eigenschaftenFiltern((string) $objekt['art'], (array) (json_decode((string) $bisher[0]['eigenschaften'], true) ?: []));
+            foreach ($vomTyp as $k => $w) {
+                if (array_key_exists($k, $eigenschaften) && $eigenschaften[$k] === $w) {
+                    unset($eigenschaften[$k]);
+                }
+            }
+        }
+        $eigenschaften = self::eigenschaftenFiltern((string) $objekt['art'], (array) $vorlage['eigenschaften']) + $eigenschaften;
         Database::update('objekte', $objektId, [
             'modell' => $vorlage['modell'], 'hersteller' => $vorlage['hersteller'],
-            'nennstrom_a' => $vorlage['nennstrom_a'], 'nennleistung_kva' => $vorlage['nennleistung_kva'], 'updated_at' => gmdate('c'),
+            'nennstrom_a' => $vorlage['nennstrom_a'], 'nennleistung_kva' => $vorlage['nennleistung_kva'],
+            'eigenschaften' => json_encode($eigenschaften, JSON_UNESCAPED_UNICODE), 'updated_at' => gmdate('c'),
         ]);
         Audit::log('anlage.typ', 'objekt', (string) $objektId, ['von' => $objekt['modell'], 'nach' => $vorlage['modell']]);
         return ['ok' => true, 'message' => '„' . $objekt['name'] . '“ ist jetzt ' . ($vorlage['modell'] ?: $vorlage['name']) . '.'];

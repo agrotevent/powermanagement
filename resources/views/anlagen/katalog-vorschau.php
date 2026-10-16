@@ -8,7 +8,14 @@ $quelle = $stand['quelle'] !== '' ? $stand['quelle'] : $datei;
 $subtitle = 'Vorschau: ' . $quelle;
 $z = $stand['zahlen'];
 $anzahl = count($stand['typen']);
-$waehlbar = $z['neu'] + $z['anders'];
+// Ein Typ, der einen neuen Steckertyp braucht, lässt sich ohne das Recht
+// dazu nicht übernehmen – er steht ohne Haken da und sagt, warum.
+$gesperrt = static fn (array $t): bool => !$erlaubt['stecker'] && $t['stecker_neu'] !== [];
+$waehlbar = count(array_filter($stand['typen'], static fn ($t) => in_array($t['zustand'], ['neu', 'anders'], true) && !$gesperrt($t)));
+$zahl = static fn ($v): string => rtrim(rtrim(number_format((float) $v, 1, ',', ''), '0'), ',');
+$steckerText = static fn (array $s): string => $s['name'] . ' (' . $zahl($s['strom_a']) . ' A, ' . ($s['phasen'] === 1 ? '1-phasig' : '3-phasig')
+    . ', ' . $s['spannung_v'] . ' V) für ' . KatalogImport::namen($s['typen']);
+$steckerNamen = static fn (array $t): string => implode(', ', array_map(static fn ($n) => '„' . $n . '“', $t['stecker_neu']));
 ?>
 <div class="toolbar-zeile">
     <a class="btn btn-sm btn-ghost" href="/anlagen/katalog/import">← andere Datei</a>
@@ -31,10 +38,10 @@ $waehlbar = $z['neu'] + $z['anders'];
         <?php if ($stand['steckertypen'] !== []): ?>
             <div class="notice<?= $erlaubt['stecker'] ? '' : ' warn' ?> mt">
                 <strong>Neue Steckertypen:</strong>
-                <?= View::e(implode(', ', array_map(static fn ($s) => $s['name'] . ' (' . count($s['typen']) . ' ' . (count($s['typen']) === 1 ? 'Typ' : 'Typen') . ')', $stand['steckertypen']))) ?>.
+                <?= View::e(implode('; ', array_map($steckerText, $stand['steckertypen']))) ?>.
                 <?= $erlaubt['stecker']
                     ? 'Sie werden mit angelegt, sobald ein Typ übernommen wird, der sie benutzt.'
-                    : 'Anlegen darf sie nur, wer den Steckverbinder-Katalog pflegt – Typen mit diesen Steckern lassen sich so nicht übernehmen.' ?>
+                    : 'Anlegen darf sie nur, wer den Steckverbinder-Katalog pflegt – diese Typen stehen deshalb ohne Haken da; die übrigen lassen sich übernehmen.' ?>
             </div>
         <?php endif; ?>
         <?php if ($z['anders'] > 0): ?>
@@ -42,7 +49,7 @@ $waehlbar = $z['neu'] + $z['anders'];
                 korrigiert hat. Er bleibt, wie er ist, außer du hakst ausdrücklich <em>überschreiben</em> an.</p>
         <?php endif; ?>
         <?php if ($waehlbar === 0): ?>
-            <p class="small mt mb0 muted">Nichts zu übernehmen – alle Typen stehen schon genauso hier oder taugen nicht.</p>
+            <p class="small mt mb0 muted">Nichts zu übernehmen – alle Typen stehen schon genauso hier<?= $erlaubt['stecker'] ? '' : ', brauchen einen neuen Steckertyp' ?> oder taugen nicht.</p>
         <?php endif; ?>
     </div>
 </div>
@@ -54,7 +61,7 @@ $waehlbar = $z['neu'] + $z['anders'];
         <?php if ($waehlbar > 0): ?>
             <div class="btn-row">
                 <button class="btn btn-sm" type="button" data-auswahl-an="#import-auswahl input[data-zustand=neu]">alle neuen</button>
-                <button class="btn btn-sm btn-ghost" type="button" data-auswahl-aus="#import-auswahl input[type=checkbox]">keine</button>
+                <button class="btn btn-sm btn-ghost" type="button" data-auswahl-aus="#import-auswahl input[type=checkbox]:not(:disabled)">keine</button>
             </div>
         <?php endif; ?>
     </div>
@@ -66,10 +73,15 @@ $waehlbar = $z['neu'] + $z['anders'];
                 <?php [$text, $klasse] = KatalogImport::ZUSTAENDE[$t['zustand']]; ?>
                 <tr class="import-<?= View::e($t['zustand']) ?>">
                     <td class="import-haken">
-                        <?php if ($t['zustand'] === 'neu'): ?>
+                        <?php if (in_array($t['zustand'], ['neu', 'anders'], true) && $gesperrt($t)): ?>
+                            <label class="check"><input type="checkbox" disabled data-zustand="<?= View::e($t['zustand']) ?>-stecker">
+                                <?= $t['zustand'] === 'neu' ? 'übernehmen' : 'überschreiben' ?></label>
+                            <div class="small text-warn">braucht den neuen Steckertyp <?= View::e($steckerNamen($t)) ?></div>
+                        <?php elseif ($t['zustand'] === 'neu'): ?>
                             <label class="check"><input type="checkbox" name="neu[]" value="<?= View::e($t['schluessel']) ?>" data-zustand="neu" checked> übernehmen</label>
                         <?php elseif ($t['zustand'] === 'anders'): ?>
-                            <label class="check"><input type="checkbox" name="ueberschreiben[]" value="<?= View::e($t['schluessel']) ?>" data-zustand="anders"> überschreiben</label>
+                            <?php /* Mit dem Stand, den diese Vorschau zeigt – eine spätere Korrektur wird nicht überschrieben. */ ?>
+                            <label class="check"><input type="checkbox" name="ueberschreiben[]" value="<?= View::e($t['schluessel'] . ':' . $t['stand']) ?>" data-zustand="anders"> überschreiben</label>
                         <?php else: ?>
                             <span class="muted small"><?= $t['zustand'] === 'gleich' ? 'nichts zu tun' : 'nicht übernehmbar' ?></span>
                         <?php endif; ?>
@@ -107,7 +119,7 @@ $waehlbar = $z['neu'] + $z['anders'];
     <?php if ($waehlbar > 0): ?>
         <div class="card-footer btn-row import-fuss">
             <button class="btn btn-primary" type="submit">Ausgewählte übernehmen</button>
-            <span class="small muted" data-auswahl-zahl="#import-auswahl input[type=checkbox]" aria-live="polite"></span>
+            <span class="small muted" data-auswahl-zahl="#import-auswahl input[type=checkbox]:not(:disabled)" aria-live="polite"></span>
         </div>
     <?php endif; ?>
 </form>

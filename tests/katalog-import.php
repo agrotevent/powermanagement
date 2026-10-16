@@ -5,14 +5,17 @@ declare(strict_types=1);
  * Katalog-Import: Standard-Verteiler und Aggregate aus einem Paket.
  *
  * Geprüft wird das Format (kein JSON, falsche Art, Format 2, leere Liste,
- * doppelter Schlüssel, unbekannte Art, Stecker ohne Beschreibung … – je eine
- * klare Meldung, nichts angelegt), der Ablauf (neu → übernommen mit
+ * doppelter Schlüssel, unbekannte Art, Stecker ohne Beschreibung, neuer
+ * Stecker ohne Werte, Kraftstoff außerhalb der Auswahl, leere Spannung … – je
+ * eine klare Meldung, nichts angelegt), der Ablauf (neu → übernommen mit
  * Anschlüssen, Schutzorganen samt Vorschaltung, Eigenschaften und
- * Steckertypen → beim nächsten Lesen „schon da“), dass importierte Typen
- * bearbeitbar bleiben und ein erneuter Import die Korrektur nur auf
- * ausdrücklichen Wunsch ersetzt, die Rechte, „alles oder nichts“, die
- * abgelegte Vorschau und die Kommandozeile in einer eigenen Instanz – dort
- * auch jedes mitgelieferte Paket unter resources/kataloge.
+ * Steckertypen, ohne Messpunkte → beim nächsten Lesen „schon da“), dass
+ * importierte Typen bearbeitbar bleiben und ein erneuter Import die Korrektur
+ * nur auf ausdrücklichen Wunsch und nur im Stand der Vorschau ersetzt, der
+ * Typwechsel einer Anlage samt Eigenschaften, die Rechte, „alles oder
+ * nichts“, die abgelegte Vorschau und die Kommandozeile in einer eigenen
+ * Instanz – und jedes mitgelieferte Paket unter resources/kataloge in seiner
+ * eigenen, leeren Instanz.
  *
  * Eigene Daten tragen eine zufällige Kennung im Namen und Schlüssel und
  * werden am Ende gelöscht; Steckertypen nur, wenn die Prüfung sie angelegt hat.
@@ -70,11 +73,12 @@ $abgang = static fn (string $stecker, int $nr, ?string $schutz = null, string $b
 
 // Drei eigene Typen: eine Verteilung mit neuem Stecker, Schutzorganen in
 // fremder Reihenfolge mit eigenen Verweisen und einem Stecker in
-// Großbuchstaben, ein Generator mit Zahlen als Text, ein Schukoverteiler mit
-// einer Eigenschaft, die es hier nicht gibt.
+// Großbuchstaben, ein Generator mit Zahlen als Text und dem Kraftstoff in
+// Kleinbuchstaben, ein Schukoverteiler mit einer Eigenschaft, die es hier
+// nicht gibt, und einem Messpunkt (der an einem Katalog-Typ nichts zu suchen hat).
 $harting = $k . '-harting';
 $t1 = $typ($k . '-pd63', [
-    'art' => 'verteilung', 'name' => $k . ' PD 63/32', 'hersteller' => 'Prüfbau', 'modell' => 'PD 63/32', 'nennstrom_a' => 63,
+    'art' => 'verteilung', 'name' => $k . ' PD 63/32', 'hersteller' => 'Prüfbau', 'modell' => $K . ' PD 63/32', 'nennstrom_a' => 63,
     'eigenschaften' => ['artikelnummer' => 'BSS-' . $K . '-1', 'gehaeuse' => 'Gummi, gelb', 'schutzart' => 'IP44',
         'gewicht_kg' => '38,5', 'zuleitung' => '2,0 m 5G16'],
     'schutzorgane' => [
@@ -95,7 +99,7 @@ $t1 = $typ($k . '-pd63', [
 $t2 = $typ($k . '-sg60', [
     'art' => 'generator', 'name' => $k . ' SG 60', 'hersteller' => 'Prüfbau', 'modell' => 'SG 60', 'nennleistung_kva' => '60', 'phasen' => '3',
     'eigenschaften' => ['artikelnummer' => 'BSS-' . $K . '-2', 'gewicht_kg' => 1200, 'abmessungen' => '3200 × 1100 × 1800',
-        'kraftstoff' => 'Diesel', 'tank_l' => 120],
+        'kraftstoff' => 'diesel', 'tank_l' => 120],
     'schutzorgane' => [
         ['art' => 'hauptschalter', 'bezeichnung' => 'Q1', 'nennstrom_a' => 100, 'pole' => 3],
         ['art' => 'rcd', 'bezeichnung' => 'F1', 'nennstrom_a' => 63, 'fehlerstrom_ma' => 300, 'rcd_typ' => 'B', 'pole' => 4, 'vor' => 's1'],
@@ -106,6 +110,7 @@ $t3 = $typ($k . '-sv16', [
     'art' => 'verteilung', 'name' => $k . ' SV 16', 'nennstrom_a' => 16, 'eigenschaften' => ['gewicht_kg' => 6, 'farbe' => 'gelb'],
     'anschluesse' => [['richtung' => 'eingang', 'stecker' => 'cee16', 'nr' => 1, 'bezeichnung' => 'E1'],
         $abgang('schuko', 1), $abgang('schuko', 2), $abgang('schuko', 3)],
+    'messpunkte' => [['geraet' => $k . '-shelly-fremd', 'kanal' => '0', 'rolle' => 'einspeisung', 'anschluss' => 'eingang:1']],
 ]);
 $drei = $paket([$t1, $t2, $t3]);
 $schluessel = [$k . '-pd63', $k . '-sg60', $k . '-sv16'];
@@ -168,6 +173,25 @@ try {
     $einzeln($kaputt($t3, static function (array &$t) use ($abgang): void {
         $t['typ']['anschluesse'] = array_map(static fn ($n) => $abgang('schuko', $n), range(1, KatalogImport::HOECHSTENS_JE_TYP + 1));
     }), 'Mehr als ' . KatalogImport::HOECHSTENS_JE_TYP . ' Anschlüsse', 'zu viele Anschlüsse');
+    // Was still anders ankäme: leere Spannung (wäre 1 V), ein Kraftstoff, den
+    // die Auswahl nicht kennt (ginge beim ersten Speichern verloren), ein
+    // neuer Stecker ohne Nennstrom (wäre 16 A), mit Text (0 A), ohne Namen.
+    $einzeln($kaputt($t1, static function (array &$t): void { $t['typ']['spannung_v'] = ''; }), '„Spannung“', 'leere Spannung');
+    $einzeln($kaputt($t1, static function (array &$t): void { $t['typ']['spannung_v'] = 0; }), '„Spannung“', 'Spannung 0 V');
+    $einzeln($kaputt($t2, static function (array &$t): void { $t['typ']['eigenschaften']['kraftstoff'] = 'Diesl'; }),
+        'Eigenschaft „Kraftstoff“: „Diesl“ gibt es nicht – möglich sind Diesel, HVO, Gas, Benzin', 'Kraftstoff außerhalb der Auswahl');
+    $einzeln($kaputt($t1, static function (array &$t): void { unset($t['steckertypen'][1]['strom_a']); }),
+        '(neu): „strom_a“', 'neuer Steckertyp ohne Nennstrom');
+    $einzeln($kaputt($t1, static function (array &$t): void { $t['steckertypen'][1]['strom_a'] = 'vierhundert'; }), '(neu): „strom_a“', 'Nennstrom als Text');
+    $einzeln($kaputt($t1, static function (array &$t): void { $t['steckertypen'][1]['strom_a'] = 0; }), '(neu): „strom_a“', 'Nennstrom 0 A');
+    $einzeln($kaputt($t1, static function (array &$t): void { $t['steckertypen'][1]['name'] = ' '; }), '(neu): kein Name', 'neuer Steckertyp ohne Namen');
+    $einzeln($kaputt($t1, static function (array &$t): void { $t['steckertypen'][1]['phasen'] = 2; }), '(neu): „phasen“', 'neuer Steckertyp mit 2 Phasen');
+    $einzeln($kaputt($t1, static function (array &$t): void { unset($t['steckertypen'][1]['spannung_v']); }), '(neu): „spannung_v“', 'neuer Steckertyp ohne Spannung');
+    // Vorhandene Stecker (auch in anderer Schreibweise) brauchen keine Werte –
+    // sie werden nicht angelegt.
+    $ohneWerte = $kaputt($t1, static function (array &$t): void { $t['steckertypen'][0] = ['schluessel' => 'CEE32']; });
+    $z = $zeile(KatalogImport::lesen($json($paket([$ohneWerte]))), $k . '-pd63');
+    pruefe($z['zustand'] === 'neu', 'vorhandener Steckertyp ohne Werte: kein Fehler (' . (string) $z['fehler'] . ')');
 
     // ---------------------------------------------------------------- Ablauf: neu → übernehmen → schon da
     $l = KatalogImport::lesen($json($drei));
@@ -176,9 +200,12 @@ try {
     gleich($zustaende($l), array_fill_keys($schluessel, 'neu'), 'alle drei neu');
     gleich($l['zahlen'], ['neu' => 3, 'gleich' => 0, 'anders' => 0, 'fehler' => 0], 'Zusammenfassung');
     gleich(array_column($l['steckertypen'], 'name', 'schluessel'), [$harting => $K . ' Harting 16 A'], 'nur der benutzte neue Steckertyp würde angelegt');
+    gleich([$l['steckertypen'][0]['strom_a'], $l['steckertypen'][0]['phasen'], $l['steckertypen'][0]['spannung_v'], $l['steckertypen'][0]['typen']],
+        [16.0, 3, 400, [$k . ' PD 63/32']], 'neuer Steckertyp mit seinen Werten und den Typen, die ihn brauchen');
     pruefe(str_contains($zeile($l, $k . '-pd63')['kurz'], $K . ' Harting 16 A') && str_contains($zeile($l, $k . '-pd63')['kurz'], '4 Schutzorgane'),
         'Kurzbeschreibung mit Anschlüssen und Schutzorganen: ' . $zeile($l, $k . '-pd63')['kurz']);
     pruefe(str_contains(implode(' ', $zeile($l, $k . '-sv16')['hinweise']), '„farbe“'), 'Hinweis: Eigenschaft, die es hier nicht gibt, bleibt weg');
+    pruefe(str_contains(implode(' ', $zeile($l, $k . '-sv16')['hinweise']), 'Messpunkte'), 'Hinweis: Messpunkte bleiben weg');
     gleich($angelegt(), 0, 'Lesen legt nichts an');
 
     alsBenutzer($planung);
@@ -201,6 +228,15 @@ try {
     gleich($v2['eigenschaften'], ['artikelnummer' => 'BSS-' . $K . '-2', 'kraftstoff' => 'Diesel', 'tank_l' => 120.0, 'gewicht_kg' => 1200.0, 'abmessungen' => '3200 × 1100 × 1800'],
         'Generator: Artikelnummer, Gewicht leer, Abmessungen, Kraftstoff, Tank');
     gleich(AnlagenService::find($id3)['eigenschaften'], ['gewicht_kg' => 6.0], 'unbekannte Eigenschaft bleibt weg');
+    gleich([(int) Database::scalar('SELECT COUNT(*) FROM messpunkte WHERE objekt_id = ?', [$id3]),
+        (int) Database::scalar('SELECT COUNT(*) FROM messpunkte WHERE geraet = ?', [$k . '-shelly-fremd'])], [0, 0],
+        'kein Messpunkt aus der Datei – das Gerät bleibt unzugeordnet');
+    // Ebenso im Verteiler-Abgleich, der dieselbe Funktion benutzt.
+    $mp = VerteilerBundle::typAnwenden($k . '-mp', $typ($k . '-mp', ['art' => 'verteilung', 'name' => $k . ' MP', 'anschluesse' => [$abgang('schuko', 1)],
+        'messpunkte' => [['geraet' => $k . '-shelly-fremd', 'kanal' => '0', 'rolle' => 'einspeisung']]]));
+    gleich([$mp['ok'], (int) Database::scalar('SELECT COUNT(*) FROM messpunkte WHERE geraet = ?', [$k . '-shelly-fremd'])], [true, 0],
+        'Verteiler-Abgleich: Messpunkte der Datei bleiben weg');
+    AnlagenService::loeschen((int) $mp['id']);
     gleich(AnlagenService::kurzform($id1), '1× CEE 63 A → 2× CEE 32 A, 1× Schuko, 1× ' . $K . ' Harting 16 A', 'Anschlüsse der Verteilung');
     $hartingId = (int) Database::scalar('SELECT id FROM steckertypen WHERE schluessel = ?', [$harting]);
     pruefe($hartingId > 0 && (string) Database::scalar('SELECT name FROM steckertypen WHERE id = ?', [$hartingId]) === $K . ' Harting 16 A', 'neuer Steckertyp angelegt');
@@ -249,6 +285,19 @@ try {
     $kopie = AnlagenService::kopieren((int) $buehne['id'], $k . ' Bühne 2');
     gleich(AnlagenService::find((int) $kopie['id'])['eigenschaften'], $b['eigenschaften'], 'Kopie behält die Eigenschaften');
 
+    // Auf einen anderen Typ umgestellt (etwa beim Einsetzen eines Inventarstücks):
+    // die Eigenschaften des neuen Typs gelten (auch vor einer eigenen Angabe –
+    // dort steht jetzt ein anderes Gerät), die des alten gehen, was nur dieses
+    // Stück hat und der neue Typ nicht sagt, bleibt.
+    $gross = (int) AnlagenService::speichern(null, ['art' => 'verteilung', 'name' => $k . ' PD 125', 'ist_vorlage' => 1, 'modell' => $K . ' PD 125',
+        'ohne_anschluesse' => true, 'eigenschaften' => ['artikelnummer' => 'BSS-' . $K . '-9', 'gewicht_kg' => 80, 'schutzart' => 'IP44']])['id'];
+    $stueck = AnlagenService::find((int) $buehne['id']);
+    $stueck['eigenschaften']['pruefung_bis'] = '2027-03';
+    AnlagenService::speichern((int) $buehne['id'], $stueck);
+    pruefe(AnlagenService::typUebernehmen((int) $buehne['id'], $gross)['ok'], 'auf einen anderen Typ umgestellt');
+    gleich(AnlagenService::find((int) $buehne['id'])['eigenschaften'], ['artikelnummer' => 'BSS-' . $K . '-9', 'gewicht_kg' => 80.0, 'schutzart' => 'IP44', 'pruefung_bis' => '2027-03'],
+        'Eigenschaften des neuen Typs; Gehäuse und Zuleitung des alten weg, das Prüfdatum des Stücks bleibt');
+
     // ---------------------------------------------------------------- Bearbeitbar wie jeder Typ
     // Wie das Formular: alle Felder der Art, Name und Gewicht korrigiert
     $form = AnlagenService::find($id1);
@@ -281,12 +330,28 @@ try {
     pruefe($u['ok'] && $u['ueberschrieben'] === [] && $u['uebergangen'] === [$k . ' PD 63/32'], 'ohne Auswahl übergangen: ' . $u['message']);
     gleich([AnlagenService::find($id1)['name'], $anschluss($id1, 'abgang', 1)['bezeichnung'], (float) Database::scalar('SELECT nennstrom_a FROM schutzorgane WHERE id = ?', [(int) $schutz['Q3']['id']])],
         [$k . ' PD 63/32 (korrigiert)', 'Bühne links', 13.0], 'Korrektur bleibt');
-    $u = KatalogImport::uebernehmen((array) $l['paket'], [], [$k . '-pd63']);
-    pruefe($u['ok'] && $u['ueberschrieben'] === [$k . ' PD 63/32'] && $u['neu'] === [], 'ausdrücklich überschrieben: ' . $u['message']);
+
+    // Mit dem Stand der Vorschau: wer „überschreiben“ angehakt hat, ersetzt nur
+    // den Stand, den die Vorschau zeigte – keine Korrektur, die danach kam.
+    pruefe(preg_match('/^[0-9a-f]{64}$/', (string) $z1['stand']) === 1, 'Stand des Typs hier in der Vorschau');
+    $spaeter = AnlagenService::find($id1);
+    $spaeter['nennstrom_a'] = 35;
+    $spaeter['notizen'] = 'nach der Vorschau korrigiert';
+    $spaeter['ist_vorlage'] = 1;
+    AnlagenService::speichern($id1, $spaeter);
+    $u = KatalogImport::uebernehmen((array) $l['paket'], [], [$k . '-pd63'], null, [$k . '-pd63' => (string) $z1['stand']]);
+    pruefe($u['ok'] && $u['ueberschrieben'] === [] && $u['veraendert'] === [$k . ' PD 63/32'] && str_contains($u['message'], 'seit der Vorschau hier geändert'),
+        'nach der Vorschau korrigiert: nicht überschrieben – ' . $u['message']);
+    gleich([(float) AnlagenService::find($id1)['nennstrom_a'], AnlagenService::find($id1)['notizen']], [35.0, 'nach der Vorschau korrigiert'], 'die spätere Korrektur bleibt');
+    $u = KatalogImport::uebernehmen((array) $l['paket'], [$k . '-sg60', $k . '-pd63'], [], null, []);
+    pruefe($u['ok'] && $u['neu'] === [] && in_array($k . ' PD 63/32', $u['veraendert'], true), 'als „neu“ gewählt, inzwischen hier: bleibt');
+    $l = KatalogImport::lesen($json($drei));
+    $u = KatalogImport::uebernehmen((array) $l['paket'], [], [$k . '-pd63'], null, [$k . '-pd63' => (string) $zeile($l, $k . '-pd63')['stand']]);
+    pruefe($u['ok'] && $u['ueberschrieben'] === [$k . ' PD 63/32'] && $u['neu'] === [], 'mit dem Stand von jetzt ausdrücklich überschrieben: ' . $u['message']);
     gleich((int) Database::scalar('SELECT id FROM objekte WHERE ist_vorlage = 1 AND sync_key = ?', [$k . '-pd63']), $id1, 'derselbe Eintrag, ersetzt');
     $v1 = AnlagenService::find($id1);
-    gleich([$v1['name'], $v1['eigenschaften']['gewicht_kg'], AnlagenService::kurzform($id1), $anschluss($id1, 'abgang', 1)['bezeichnung']],
-        [$k . ' PD 63/32', 38.5, '1× CEE 63 A → 2× CEE 32 A, 1× Schuko, 1× ' . $K . ' Harting 16 A', 'X1'], 'Stand der Datei');
+    gleich([$v1['name'], $v1['eigenschaften']['gewicht_kg'], AnlagenService::kurzform($id1), $anschluss($id1, 'abgang', 1)['bezeichnung'], (float) $v1['nennstrom_a'], $v1['notizen']],
+        [$k . ' PD 63/32', 38.5, '1× CEE 63 A → 2× CEE 32 A, 1× Schuko, 1× ' . $K . ' Harting 16 A', 'X1', 63.0, ''], 'Stand der Datei');
     gleich($zustaende(KatalogImport::lesen($json($drei))), array_fill_keys($schluessel, 'gleich'), 'danach wieder schon da');
     gleich(AnlagenService::find((int) $buehne['id'])['name'], $k . ' Bühne', 'Anlagen aus dem Typ bleiben, wie sie sind');
 
@@ -364,40 +429,58 @@ try {
     // ---------------------------------------------------------------- Kommandozeile in eigener Instanz
     $wurzel = dirname(__DIR__);
     $vorlage = is_file($wurzel . '/config/config.php') ? $wurzel . '/config/config.php' : $wurzel . '/config/config.example.php';
-    file_put_contents($ordner . '/config.php', '<?php
+    /**
+     * Eine eigene, frisch eingerichtete Instanz (eigene SQLite im eigenen
+     * Ordner): bin/power darin aufrufen und ihre Datenbank lesen.
+     *
+     * @return array{0:callable(list<string>):array{0:int,1:string},1:callable(string,array=):mixed} bin/power, SQL dort (erste Spalte)
+     */
+    $instanz = static function (string $name) use ($wurzel, $ordner, $vorlage, $kennwort): array {
+        $config = $ordner . '/config-' . $name . '.php';
+        $datenbank = $ordner . '/datenbank-' . $name . '.sqlite';
+        file_put_contents($config, '<?php
 $c = require ' . var_export($vorlage, true) . ';
 $c["app"]["demo"] = true;
 $c["database"]["driver"] = "sqlite";
-$c["database"]["path"] = ' . var_export($ordner . '/datenbank.sqlite', true) . ';
+$c["database"]["path"] = ' . var_export($datenbank, true) . ';
 return $c;
 ');
-    $power = static function (array $argumente) use ($wurzel, $ordner): array {
-        $p = proc_open(array_merge(['php', $wurzel . '/bin/power'], $argumente), [1 => ['pipe', 'w'], 2 => ['pipe', 'w']],
-            $rohre, $wurzel, ['POWERMANAGEMENT_CONFIG' => $ordner . '/config.php'] + getenv());
-        $aus = stream_get_contents($rohre[1]) . stream_get_contents($rohre[2]);
-        fclose($rohre[1]);
-        fclose($rohre[2]);
-        return [proc_close($p), (string) $aus];
+        $power = static function (array $argumente) use ($wurzel, $config): array {
+            $p = proc_open(array_merge(['php', $wurzel . '/bin/power'], $argumente), [1 => ['pipe', 'w'], 2 => ['pipe', 'w']],
+                $rohre, $wurzel, ['POWERMANAGEMENT_CONFIG' => $config] + getenv());
+            $aus = stream_get_contents($rohre[1]) . stream_get_contents($rohre[2]);
+            fclose($rohre[1]);
+            fclose($rohre[2]);
+            return [proc_close($p), (string) $aus];
+        };
+        [$rc, $aus] = $power(['install', 'pruefer', $kennwort, '--ohne-wechsel']);
+        if ($rc !== 0) {
+            throw new RuntimeException('Instanz ' . $name . ' nicht eingerichtet: ' . $aus);
+        }
+        $db = new PDO('sqlite:' . $datenbank, null, null, [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION, PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC]);
+        $dort = static function (string $sql, array $werte = []) use ($db): mixed {
+            $s = $db->prepare($sql);
+            $s->execute($werte);
+            return $s->fetchColumn();
+        };
+        return [$power, $dort];
     };
-    [$rc] = $power(['install', 'pruefer', $kennwort, '--ohne-wechsel']);
-    gleich($rc, 0, 'eigene Instanz eingerichtet');
-    $db = new PDO('sqlite:' . $ordner . '/datenbank.sqlite', null, null, [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION, PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC]);
-    $dort = static function (string $sql, array $werte = []) use ($db): mixed {
-        $s = $db->prepare($sql);
-        $s->execute($werte);
-        return $s->fetchColumn();
-    };
+    [$power, $dort] = $instanz('cli');
+    pruefe(true, 'eigene Instanz eingerichtet');
     file_put_contents($ordner . '/paket.json', $json($drei));
     [$rc, $aus] = $power(['katalog:import', $ordner . '/paket.json', '--pruefen']);
     pruefe($rc === 0 && substr_count($aus, '  neu ') === 3 && str_contains($aus, 'nichts geändert'), 'CLI --pruefen: je Typ eine Zeile');
+    pruefe(str_contains($aus, 'Steckertyp neu: ' . $K . ' Harting 16 A (' . $harting . ', 16 A, 3-phasig, 400 V)'), 'CLI: neuer Steckertyp mit Werten');
     gleich((int) $dort('SELECT COUNT(*) FROM objekte WHERE ist_vorlage = 1'), 0, 'CLI --pruefen legt nichts an');
     [$rc, $aus] = $power(['katalog:import', $ordner . '/paket.json']);
     pruefe($rc === 0 && str_contains($aus, '3 neu angelegt'), 'CLI: angelegt – ' . trim($aus));
     gleich((int) $dort('SELECT COUNT(*) FROM objekte WHERE ist_vorlage = 1 AND sync_key LIKE ?', [$k . '-%']), 3, 'CLI: drei Typen in der Instanz');
     gleich($dort("SELECT username FROM audit_log WHERE action = 'katalog.import' ORDER BY id DESC LIMIT 1"), 'cli', 'Audit: Akteur „cli“');
-    $db->prepare('UPDATE objekte SET name = ? WHERE sync_key = ?')->execute([$k . ' SG 60 (geprüft)', $k . '-sg60']);
+    [$rc, $aus] = $power(['katalog:import', $ordner . '/paket.json', '--pruefen']);
+    pruefe($rc === 0 && substr_count($aus, '  schon da ') === 3, 'CLI: danach „schon da“ wie in der Vorschau');
+    $dort('UPDATE objekte SET name = ? WHERE sync_key = ?', [$k . ' SG 60 (geprüft)', $k . '-sg60']);
     [$rc, $aus] = $power(['katalog:import', $ordner . '/paket.json']);
-    pruefe($rc === 0 && str_contains($aus, '  anders  ' . $k . ' SG 60') && str_contains($aus, '--ueberschreiben'), 'CLI: hier anders, bleibt');
+    pruefe($rc === 0 && str_contains($aus, '  hier anders ' . $k . ' SG 60 – Unterschiede: Name') && str_contains($aus, '--ueberschreiben'), 'CLI: hier anders, bleibt');
     gleich($dort('SELECT name FROM objekte WHERE sync_key = ?', [$k . '-sg60']), $k . ' SG 60 (geprüft)', 'CLI ohne --ueberschreiben: Korrektur bleibt');
     [$rc, $aus] = $power(['katalog:import', $ordner . '/paket.json', '--ueberschreiben']);
     pruefe($rc === 0 && str_contains($aus, '1 überschrieben'), 'CLI --ueberschreiben');
@@ -406,25 +489,59 @@ return $c;
     [$rc, $aus] = $power(['katalog:import', $ordner . '/kaputt.json']);
     pruefe($rc === 1 && str_contains($aus, 'Format 2'), 'CLI: Fehler mit Meldung und Rückgabewert 1');
 
-    // Jede mitgelieferte Datei: gültiges Paket, Schlüssel eindeutig, jeder
-    // Stecker auflösbar, Import in die eigene Instanz legt alle Typen an.
-    $mitgeliefert = glob($wurzel . '/resources/kataloge/*.json') ?: [];
-    pruefe(count(KatalogImport::mitgeliefert()) === count($mitgeliefert), 'Liste der mitgelieferten Kataloge');
-    foreach ($mitgeliefert as $datei) {
-        $name = basename($datei);
+    /**
+     * Ein Paket so prüfen wie jede mitgelieferte Datei: gültiges Paket mit
+     * Quelle, Schlüssel eindeutig, jeder Typ taugt und jeder Stecker ist
+     * auflösbar – gelesen und importiert in eine eigene, leere Instanz (nur
+     * der Grundbestand an Steckern, nichts aus anderen Dateien) –, alle Typen
+     * angelegt, danach jeder „schon da“.
+     *
+     * @return list<string> was nicht stimmt; leer = in Ordnung
+     */
+    $katalogPruefen = static function (string $datei, string $instanzName) use ($instanz): array {
+        $probleme = [];
         $daten = json_decode((string) file_get_contents($datei), true);
-        pruefe(is_array($daten) && ($daten['art'] ?? '') === KatalogImport::ART && is_string($daten['quelle'] ?? null) && $daten['quelle'] !== '', $name . ': Paket mit Quelle');
+        if (!is_array($daten) || ($daten['art'] ?? '') !== KatalogImport::ART || !is_string($daten['quelle'] ?? null) || $daten['quelle'] === '') {
+            $probleme[] = 'kein Paket mit Quelle';
+        }
         $schl = array_map(static fn ($t) => (string) ($t['schluessel'] ?? ''), (array) ($daten['typen'] ?? []));
-        gleich(count(array_unique($schl)), count($schl), $name . ': Schlüssel eindeutig');
-        // Gelesen gegen einen leeren Katalog – nur mit dem Grundbestand an Steckern
+        if (count(array_unique($schl)) !== count($schl)) {
+            $probleme[] = 'Schlüssel nicht eindeutig';
+        }
+        [$power, $dort] = $instanz($instanzName);
         [$rc, $aus] = $power(['katalog:import', $datei, '--pruefen']);
-        pruefe($rc === 0 && !str_contains($aus, '  fehler '), $name . ': jeder Typ taugt, jeder Stecker auflösbar' . ($rc !== 0 || str_contains($aus, '  fehler ') ? "\n" . $aus : ''));
+        if ($rc !== 0 || str_contains($aus, '  Fehler ')) {
+            $probleme[] = "nicht jeder Typ taugt:\n" . $aus;
+            return $probleme;
+        }
         $vorher = (int) $dort('SELECT COUNT(*) FROM objekte WHERE ist_vorlage = 1');
         [$rc, $aus] = $power(['katalog:import', $datei]);
         $neu = (int) $dort('SELECT COUNT(*) FROM objekte WHERE ist_vorlage = 1') - $vorher;
-        pruefe($rc === 0 && $neu === count($schl), $name . ': Import legt alle ' . count($schl) . ' Typen an (' . $neu . ')');
+        if ($rc !== 0 || $neu !== count($schl)) {
+            $probleme[] = 'Import legt ' . $neu . ' statt ' . count($schl) . " Typen an:\n" . $aus;
+        }
         [$rc, $aus] = $power(['katalog:import', $datei, '--pruefen']);
-        pruefe($rc === 0 && substr_count($aus, '  gleich ') === count($schl), $name . ': danach jeder Typ „schon da“');
+        if ($rc !== 0 || substr_count($aus, '  schon da ') !== count($schl)) {
+            $probleme[] = "danach nicht jeder Typ „schon da“:\n" . $aus;
+        }
+        return $probleme;
+    };
+    // Die Prüfung selbst: a.json beschreibt den Stecker, b.json benutzt ihn
+    // nur – b taugt allein nicht, auch wenn a vorher geprüft wurde.
+    $steckerX = ['schluessel' => $k . '-x', 'name' => $K . ' X', 'strom_a' => 32, 'phasen' => 3, 'spannung_v' => 400];
+    file_put_contents($ordner . '/a.json', $json($paket([$typ($k . '-a', ['art' => 'verteilung', 'name' => $k . ' A', 'anschluesse' => [$abgang($k . '-x', 1)]], [$steckerX])], 'Prüfung A')));
+    file_put_contents($ordner . '/b.json', $json($paket([$typ($k . '-b', ['art' => 'verteilung', 'name' => $k . ' B', 'anschluesse' => [$abgang($k . '-x', 1)]])], 'Prüfung B')));
+    gleich($katalogPruefen($ordner . '/a.json', 'a'), [], 'Prüfung der Kataloge: a.json in Ordnung');
+    $b = $katalogPruefen($ordner . '/b.json', 'b');
+    pruefe(count($b) === 1 && str_contains($b[0], 'fehlt'), 'Prüfung der Kataloge: b.json allein taugt nicht (jede Datei in eigener Instanz)');
+
+    // Jede mitgelieferte Datei, jede in ihrer eigenen leeren Instanz.
+    $mitgeliefert = glob($wurzel . '/resources/kataloge/*.json') ?: [];
+    pruefe(count(KatalogImport::mitgeliefert()) === count($mitgeliefert), 'Liste der mitgelieferten Kataloge');
+    foreach ($mitgeliefert as $n => $datei) {
+        $probleme = $katalogPruefen($datei, 'katalog-' . $n);
+        pruefe($probleme === [], basename($datei) . ': gültig, jeder Stecker auflösbar, Import in eine leere Instanz legt alle Typen an'
+            . ($probleme !== [] ? "\n" . implode("\n", $probleme) : ''));
     }
 } finally {
     alsBenutzer(null);

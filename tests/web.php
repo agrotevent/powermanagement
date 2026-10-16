@@ -122,6 +122,10 @@ try {
     $mqttRolle = (int) BenutzerService::rolleSpeichern(null, $kennung . ' mqtt', '', ['datenquellen.view', 'mqtt.zugaenge'])['id'];
     $benutzer['mqtt'] = BenutzerService::anlegen($kennung . '-mqtt', $kennwort,
         (string) Database::scalar('SELECT role_key FROM roles WHERE id = ?', [$mqttRolle]), false);
+    // Katalog importieren, aber keine Steckertypen anlegen.
+    $importRolle = (int) BenutzerService::rolleSpeichern(null, $kennung . ' import', '', ['anlagen.view', 'anlagen.manage', 'anlagen.scope.all'])['id'];
+    $benutzer['import'] = BenutzerService::anlegen($kennung . '-import', $kennwort,
+        (string) Database::scalar('SELECT role_key FROM roles WHERE id = ?', [$importRolle]), false);
 
     // ---------------------------------------------------- ohne Anmeldung
     $leer = tempnam(sys_get_temp_dir(), 'pm-web-');
@@ -342,13 +346,14 @@ try {
 
     // Katalog importieren: Seite, Vorschau nach Upload, Übernehmen nur mit
     // CSRF-Token und nur das Angehakte, Eigenschaften im Formular, kein JSON
-    $importTyp = static fn (string $schluessel, string $name, array $eigenschaften): array => ['format' => 1, 'art' => 'verteiler-typ',
+    $importTyp = static fn (string $schluessel, string $name, array $eigenschaften, string $abgang = 'schuko', array $stecker = []): array => ['format' => 1, 'art' => 'verteiler-typ',
         'schluessel' => $schluessel, 'typ' => ['art' => 'verteilung', 'fest' => false, 'name' => $name, 'modell' => 'Web', 'eigenschaften' => $eigenschaften,
             'schutzorgane' => [['ref' => 's1', 'art' => 'hauptschalter', 'bezeichnung' => 'Q1', 'nennstrom_a' => 32, 'pole' => 3]],
-            'anschluesse' => [['richtung' => 'eingang', 'stecker' => 'cee32', 'nr' => 1], ['richtung' => 'abgang', 'stecker' => 'schuko', 'nr' => 1, 'schutz' => 's1']]],
-        'steckertypen' => []];
+            'anschluesse' => [['richtung' => 'eingang', 'stecker' => 'cee32', 'nr' => 1], ['richtung' => 'abgang', 'stecker' => $abgang, 'nr' => 1, 'schutz' => 's1']]],
+        'steckertypen' => $stecker];
+    // Gewicht mit drei Nachkommastellen: das Formular darf es nicht runden.
     $importPaket = (string) json_encode(['format' => 1, 'art' => 'verteiler-typen', 'quelle' => $kennung . ' Webkatalog', 'typen' => [
-        $importTyp($kennung . '-web-a', $kennung . ' Web A', ['artikelnummer' => 'W-1', 'gewicht_kg' => 12.5, 'zuleitung' => '2,0 m 5G2,5']),
+        $importTyp($kennung . '-web-a', $kennung . ' Web A', ['artikelnummer' => 'W-1', 'gewicht_kg' => 12.125, 'zuleitung' => '2,0 m 5G2,5']),
         $importTyp($kennung . '-web-b', $kennung . ' Web B', [])]], JSON_UNESCAPED_UNICODE);
     $importId = static fn (string $schluessel): int => (int) Database::scalar('SELECT id FROM objekte WHERE ist_vorlage = 1 AND sync_key = ?', [$schluessel]);
     pruefe(str_contains(aufruf($basis, $admin['dose'], 'GET', '/anlagen/katalog')['text'], 'href="/anlagen/katalog/import"'), 'Katalog: Knopf „Importieren …“');
@@ -360,6 +365,7 @@ try {
     preg_match('/name="kennung" value="([0-9a-f]{32})"/', $vorschau['text'], $m);
     $importKennung = $m[1] ?? '';
     pruefe($vorschau['status'] === 200 && $importKennung !== '' && substr_count($vorschau['text'], 'name="neu[]"') === 2
+        && preg_match_all('/name="neu\[\]"[^>]*\bchecked\b/', $vorschau['text']) === 2
         && str_contains($vorschau['text'], 'data-label="Zustand"') && str_contains($vorschau['text'], $kennung . ' Webkatalog')
         && str_contains($vorschau['text'], 'data-auswahl-an=') && phpMeldung($vorschau['text']) === null, 'Vorschau: zwei neue Typen, vorausgewählt');
     $r = aufruf($basis, $admin['dose'], 'POST', '/anlagen/katalog/import/uebernehmen', ['kennung' => $importKennung, 'neu' => [$kennung . '-web-a']]);
@@ -377,8 +383,8 @@ try {
     pruefe(aufruf($basis, $admin['dose'], 'POST', '/anlagen/katalog/import/uebernehmen', ['kennung' => $importKennung, 'neu' => [$kennung . '-web-b'],
         '_token' => $admin['token']])['ziel'] === '/anlagen/katalog/import' && $importId($kennung . '-web-b') === 0, 'Vorschau nach dem Übernehmen verbraucht');
     $form = aufruf($basis, $admin['dose'], 'GET', '/anlagen/' . $webA . '/bearbeiten');
-    pruefe(str_contains($form['text'], 'name="eigenschaften[artikelnummer]" value="W-1"') && str_contains($form['text'], 'name="eigenschaften[gewicht_kg]" value="12,5"')
-        && str_contains($form['text'], 'Gewicht (kg)'), 'Formular zeigt die importierten Eigenschaften');
+    pruefe(str_contains($form['text'], 'name="eigenschaften[artikelnummer]" value="W-1"') && str_contains($form['text'], 'name="eigenschaften[gewicht_kg]" value="12,125"')
+        && str_contains($form['text'], 'Gewicht (kg)'), 'Formular zeigt die importierten Eigenschaften, ungerundet');
     $r = aufruf($basis, $admin['dose'], 'POST', '/anlagen/speichern', ['id' => $webA, 'art' => 'verteilung', 'name' => $kennung . ' Web A (korrigiert)', 'modell' => 'Web',
         'spannung_v' => 400, 'phasen' => 3, 'status' => 'geplant', 'fest' => 0, 'eigenschaften' => ['artikelnummer' => 'W-1', 'gewicht_kg' => '13', 'zuleitung' => '2,0 m 5G2,5'],
         '_token' => $admin['token']]);
@@ -390,6 +396,32 @@ try {
     pruefe(substr_count($vorschau['text'], 'name="ueberschreiben[]"') === 1 && substr_count($vorschau['text'], 'name="neu[]"') === 1
         && str_contains($vorschau['text'], 'Unterschiede: Name, Eigenschaften') && !preg_match('/name="ueberschreiben\[\]"[^>]*checked/', $vorschau['text']),
         'erneut: korrigierter Typ „hier anders“, nicht vorausgewählt');
+    // „überschreiben“ gilt dem Stand, den die Vorschau zeigt: wer danach
+    // korrigiert, behält seine Korrektur, und die Vorschau bleibt offen.
+    $ueberWert = static function (string $html) use ($kennung): string {
+        preg_match('/name="ueberschreiben\[\]" value="([^"]+)"/', $html, $m);
+        return html_entity_decode($m[1] ?? '');
+    };
+    $kennungAus = static function (string $html): string {
+        preg_match('/name="kennung" value="([0-9a-f]{32})"/', $html, $m);
+        return $m[1] ?? '';
+    };
+    $wert = $ueberWert($vorschau['text']);
+    pruefe(preg_match('/^' . preg_quote($kennung . '-web-a', '/') . ':[0-9a-f]{64}$/', $wert) === 1, 'überschreiben trägt den Stand der Vorschau: ' . $wert);
+    Database::execute('UPDATE objekte SET notizen = ? WHERE id = ?', ['nach der Vorschau korrigiert', $webA]);
+    $r = aufruf($basis, $admin['dose'], 'POST', '/anlagen/katalog/import/uebernehmen', ['kennung' => $kennungAus($vorschau['text']), 'ueberschreiben' => [$wert],
+        '_token' => $admin['token']]);
+    $vorschau = aufruf($basis, $admin['dose'], 'GET', '/anlagen/katalog/import?vorschau=1');
+    pruefe($r['ziel'] === '/anlagen/katalog/import?vorschau=1' && (string) Database::scalar('SELECT notizen FROM objekte WHERE id = ?', [$webA]) === 'nach der Vorschau korrigiert'
+        && str_contains($vorschau['text'], 'class="flash warning"') && str_contains($vorschau['text'], 'seit der Vorschau hier geändert, bleibt (' . $kennung . ' Web A)')
+        && str_contains($vorschau['text'], 'name="ueberschreiben[]"'), 'Korrektur nach der Vorschau bleibt; Warnung, Vorschau bleibt offen');
+    pruefe($ueberWert($vorschau['text']) !== $wert, 'die Vorschau zeigt den Stand von jetzt');
+    $r = aufruf($basis, $admin['dose'], 'POST', '/anlagen/katalog/import/uebernehmen', ['kennung' => $kennungAus($vorschau['text']),
+        'ueberschreiben' => [$ueberWert($vorschau['text'])], '_token' => $admin['token']]);
+    pruefe($r['ziel'] === '/anlagen/katalog' && (string) Database::scalar('SELECT notizen FROM objekte WHERE id = ?', [$webA]) === ''
+        && (string) Database::scalar('SELECT name FROM objekte WHERE id = ?', [$webA]) === $kennung . ' Web A', 'mit dem Stand von jetzt überschrieben');
+    $r = hochladen($basis, $admin['dose'], '/anlagen/katalog/import/vorschau', ['_token' => $admin['token']], 'datei', $importPaket, 'web.json');
+    $vorschau = aufruf($basis, $admin['dose'], 'GET', '/anlagen/katalog/import?vorschau=1');
     aufruf($basis, $admin['dose'], 'POST', '/anlagen/katalog/import/verwerfen', ['_token' => $admin['token']]);
     pruefe(!str_contains(aufruf($basis, $admin['dose'], 'GET', '/anlagen/katalog/import')['text'], 'Zur Vorschau'), 'Vorschau verworfen');
     $r = hochladen($basis, $admin['dose'], '/anlagen/katalog/import/vorschau', ['_token' => $admin['token']], 'datei', 'das ist kein JSON', 'kaputt.json');
@@ -399,6 +431,32 @@ try {
     pruefe($r['status'] === 302 && !str_contains((string) $r['ziel'], 'vorschau=1'), 'Upload ohne CSRF-Token: keine Vorschau');
     aufruf($basis, $admin['dose'], 'POST', '/anlagen/katalog/import/vorschau', ['mitgeliefert' => '../../config/config.php', '_token' => $admin['token']]);
     pruefe(str_contains(aufruf($basis, $admin['dose'], 'GET', '/anlagen/katalog/import')['text'], 'Diesen mitgelieferten Katalog gibt es nicht'), 'mitgelieferter Katalog nur aus der Liste, kein Pfad');
+
+    // Ohne „Steckverbinder-Katalog pflegen“: ein Typ mit neuem Stecker steht
+    // ohne Haken da und sagt, warum; die übrigen lassen sich übernehmen.
+    $importeur = anmelden($basis, $kennung . '-import', $kennwort);
+    $dosen[] = $importeur['dose'];
+    $steckerPaket = (string) json_encode(['format' => 1, 'art' => 'verteiler-typen', 'quelle' => $kennung . ' Steckerkatalog', 'typen' => [
+        $importTyp($kennung . '-web-c', $kennung . ' Web C', [], $kennung . '-harting',
+            [['schluessel' => $kennung . '-harting', 'name' => $kennung . ' Harting 16 A', 'strom_a' => 16, 'phasen' => 3, 'spannung_v' => 400]]),
+        $importTyp($kennung . '-web-d', $kennung . ' Web D', [])]], JSON_UNESCAPED_UNICODE);
+    hochladen($basis, $importeur['dose'], '/anlagen/katalog/import/vorschau', ['_token' => $importeur['token']], 'datei', $steckerPaket, 'stecker.json');
+    $vorschau = aufruf($basis, $importeur['dose'], 'GET', '/anlagen/katalog/import?vorschau=1');
+    pruefe($vorschau['status'] === 200 && substr_count($vorschau['text'], 'name="neu[]"') === 1
+        && str_contains($vorschau['text'], 'value="' . $kennung . '-web-d" data-zustand="neu" checked')
+        && str_contains($vorschau['text'], 'disabled data-zustand="neu-stecker"')
+        && str_contains($vorschau['text'], 'braucht den neuen Steckertyp „' . $kennung . ' Harting 16 A“')
+        && str_contains($vorschau['text'], $kennung . ' Harting 16 A (16 A, 3-phasig, 400 V) für ' . $kennung . ' Web C')
+        && phpMeldung($vorschau['text']) === null, 'ohne Stecker-Recht: Typ mit neuem Stecker ohne Haken, mit Grund; Hinweis nennt Werte und Typ');
+    $r = aufruf($basis, $importeur['dose'], 'POST', '/anlagen/katalog/import/uebernehmen', ['kennung' => $kennungAus($vorschau['text']),
+        'neu' => [$kennung . '-web-c', $kennung . '-web-d'], '_token' => $importeur['token']]);
+    $vorschau = aufruf($basis, $importeur['dose'], 'GET', '/anlagen/katalog/import?vorschau=1');
+    pruefe($r['ziel'] === '/anlagen/katalog/import?vorschau=1' && $importId($kennung . '-web-d') === 0
+        && str_contains($vorschau['text'], 'gebraucht von ' . $kennung . ' Web C'), 'trotzdem angehakt: nichts übernommen, die Meldung nennt den Typ');
+    $r = aufruf($basis, $importeur['dose'], 'POST', '/anlagen/katalog/import/uebernehmen', ['kennung' => $kennungAus($vorschau['text']),
+        'neu' => [$kennung . '-web-d'], '_token' => $importeur['token']]);
+    pruefe($r['ziel'] === '/anlagen/katalog' && $importId($kennung . '-web-d') > 0 && $importId($kennung . '-web-c') === 0
+        && (int) Database::scalar('SELECT COUNT(*) FROM steckertypen WHERE schluessel = ?', [$kennung . '-harting']) === 0, 'die übrigen übernommen, kein Steckertyp angelegt');
 
     // POST ohne gültiges Token wird nicht ausgeführt
     $vorher = (int) Database::scalar('SELECT COUNT(*) FROM steckertypen');

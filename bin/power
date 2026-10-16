@@ -364,12 +364,14 @@ switch ($befehl) {
         }
         $aus(($stand['quelle'] !== '' ? $stand['quelle'] : basename($datei)) . ': ' . count($stand['typen']) . ' Typen');
         foreach ($stand['typen'] as $t) {
-            $aus(sprintf('  %-7s %s', $t['zustand'], $t['name'])
+            // Wie die Abzeichen der Vorschau: „neu“, „schon da“, „hier anders“, „Fehler“
+            $aus('  ' . str_pad(KatalogImport::ZUSTAENDE[$t['zustand']][0], 12) . $t['name']
                 . ($t['fehler'] !== null ? ' – ' . $t['fehler'] : '')
-                . ($t['unterschiede'] !== [] ? ' – hier anders: ' . implode(', ', $t['unterschiede']) : ''));
+                . ($t['unterschiede'] !== [] ? ' – Unterschiede: ' . implode(', ', $t['unterschiede']) : ''));
         }
         foreach ($stand['steckertypen'] as $s) {
-            $aus('  Steckertyp neu: ' . $s['name'] . ' (' . $s['schluessel'] . ')');
+            $aus('  Steckertyp neu: ' . $s['name'] . ' (' . $s['schluessel'] . ', ' . rtrim(rtrim(number_format($s['strom_a'], 1, ',', ''), '0'), ',')
+                . ' A, ' . $s['phasen'] . '-phasig, ' . $s['spannung_v'] . ' V)');
         }
         $z = $stand['zahlen'];
         if (isset($optionen['pruefen'])) {

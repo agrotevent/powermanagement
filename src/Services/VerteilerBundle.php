@@ -375,7 +375,8 @@ final class VerteilerBundle
      * Typ, der hier und dort unabhängig angelegt wurde, wird nicht doppelt).
      * Anschlüsse und Schutzorgane stehen danach so da wie in der Datei.
      * Anlagen, die früher aus dem Typ entstanden sind, bleiben, wie sie sind
-     * – sie sind Kopien und werden einzeln angepasst.
+     * – sie sind Kopien und werden einzeln angepasst. Messpunkte einer Datei
+     * bleiben weg (siehe unten).
      *
      * @return array{ok:bool,message:string,id?:int}
      */
@@ -403,7 +404,13 @@ final class VerteilerBundle
             return $ergebnis;
         }
         $id = (int) $ergebnis['id'];
-        LocationBundle::belegungErsetzen($id, $t, LocationBundle::steckertypenSichern((array) ($daten['steckertypen'] ?? [])));
+        // Ein Katalog-Typ misst nichts: Messpunkte gehören zu einer Anlage, die
+        // irgendwo steht, und entstehen nur über den MesspunktService (mit
+        // Gültigkeit und Audit). Ein Messpunkt aus einer Datei am Typ zählte
+        // das Gerät still als zugeordnet und verschöbe die Rechte daran
+        // (Zugriff::objekteZuGeraet).
+        LocationBundle::belegungErsetzen($id, array_diff_key($t, ['messpunkte' => true]),
+            LocationBundle::steckertypenSichern((array) ($daten['steckertypen'] ?? [])));
         Database::execute('UPDATE objekte SET sync_key = ? WHERE id = ?', [$schluessel, $id]);
         return ['ok' => true, 'message' => 'Standard-Verteiler „' . (string) ($t['name'] ?? $schluessel) . '“ übernommen.', 'id' => $id];
     }

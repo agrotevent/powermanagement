@@ -11,7 +11,7 @@ $vorlage = (int) $objekt['ist_vorlage'] === 1;
 $fest = (int) ($objekt['fest'] ?? 0) === 1;
 $title = $neu ? ($vorlage ? 'Neuer Standard-Verteiler' : ($fest && $art === 'anschluss' ? 'Neuer Feststromanschluss' : 'Neue ' . $artInfo['name'])) : $objekt['name'] . ' bearbeiten';
 $subtitle = $vorlage ? 'Katalog: wird mit Anschlüssen und Sicherungen auf der Karte platziert' : $artInfo['name'];
-$zahl = static fn ($v) => $v === null ? '' : rtrim(rtrim(number_format((float) $v, 2, ',', ''), '0'), ',');
+$zahl = [View::class, 'zahlFeld'];
 ?>
 <form method="post" action="/anlagen/speichern" class="card">
     <?= Csrf::field() ?>
@@ -123,6 +123,10 @@ $zahl = static fn ($v) => $v === null ? '' : rtrim(rtrim(number_format((float) $
                                 <?php foreach ($zusatz as $option): ?>
                                     <option<?= (string) $wert === $option ? ' selected' : '' ?>><?= View::e($option) ?></option>
                                 <?php endforeach; ?>
+                                <?php if ((string) $wert !== '' && !in_array((string) $wert, $zusatz, true)): ?>
+                                    <?php /* Ein Wert, den die Auswahl nicht kennt (etwa aus einem Abgleich), bleibt beim Speichern erhalten. */ ?>
+                                    <option value="<?= View::e((string) $wert) ?>" selected><?= View::e((string) $wert) ?></option>
+                                <?php endif; ?>
                             </select>
                         <?php else: ?>
                             <input id="e_<?= $schluessel ?>" name="eigenschaften[<?= $schluessel ?>]" value="<?= View::e(is_float($wert) ? $zahl($wert) : (string) $wert) ?>"<?= $typ === 'zahl' ? ' inputmode="decimal"' : '' ?>>

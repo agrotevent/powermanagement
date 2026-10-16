@@ -235,10 +235,14 @@ Jeder Typ ist eine Datei im Format des [Verteiler-Abgleichs](#verteiler-abgleich
 importieren. Der `schluessel` ist eindeutig im Paket (a–z, 0–9,
 Bindestriche); an ihm erkennt ein späterer Import den Typ wieder. Jeden
 Stecker aus `anschluesse` gibt es hier schon, oder er ist unter
-`steckertypen` beschrieben. Zu den Eigenschaften gehören bei Verteilungen Artikelnummer,
+`steckertypen` beschrieben – ein neuer vollständig mit `name`, `strom_a`,
+`phasen` (1 oder 3) und `spannung_v`, denn mit diesen Werten rechnen Kabel,
+Schutzorgane und Auslastung. Zu den Eigenschaften gehören bei Verteilungen Artikelnummer,
 Gehäuse, Schutzart, Zuleitung und Gewicht, bei Generatoren Artikelnummer,
-Gewicht leer und Abmessungen (L × B × H in mm) neben Kraftstoff, Tank und
-Verbrauch.
+Gewicht leer und Abmessungen (L × B × H in mm) neben Kraftstoff (Diesel,
+HVO, Gas oder Benzin – Groß- und Kleinschreibung egal), Tank und Verbrauch.
+`spannung_v` ist eine Zahl oder fehlt ganz (dann 400 V). Messpunkte gehören
+nicht zu einem Katalog-Typ und bleiben weg.
 
 **Mitgelieferte Kataloge** liegen unter `resources/kataloge/*.json` und
 stehen auf der Import-Seite zur Auswahl – mit Quelle und Anzahl der Typen.
@@ -252,9 +256,12 @@ Name, Art, Bestückung und Zustand:
 | **neu** | gibt es hier noch nicht | ja |
 | **schon da** | steht hier genauso | – |
 | **hier anders** | steht hier anders als in der Datei – meist, weil jemand einen Fehler korrigiert hat; aufklappbar, was genau anders ist | nein („überschreiben“) |
-| **Fehler** | die Datei taugt für diesen Typ nicht (Grund steht dabei: unbekannte Art, Stecker ohne Beschreibung, Abgang an einem Schutzorgan, das es nicht gibt …) | – |
+| **Fehler** | die Datei taugt für diesen Typ nicht (Grund steht dabei: unbekannte Art, Stecker ohne Beschreibung, neuer Stecker ohne Nennstrom, Kraftstoff, den die Auswahl nicht kennt, Abgang an einem Schutzorgan, das es nicht gibt …) | – |
 
-Darüber stehen die Steckertypen, die neu angelegt würden. *alle neuen* und
+Darüber stehen die Steckertypen, die neu angelegt würden, mit Nennstrom,
+Phasen, Spannung und den Typen, die sie brauchen. Wer den
+Steckverbinder-Katalog nicht pflegen darf, sieht diese Typen ohne Haken und
+mit dem Hinweis, welcher Stecker fehlt. *alle neuen* und
 *keine* setzen die Haken; **Ausgewählte übernehmen** legt an bzw. ersetzt –
 alles in einem Zug: geht ein Typ schief, wird nichts übernommen. Die
 Meldung im Katalog nennt die Typen, die neuen und überschriebenen Einträge
@@ -262,7 +269,10 @@ sind dort einmal markiert. Eine Vorschau liegt eine Stunde bereit.
 
 **Ein Import überschreibt nie still eine Korrektur.** Was hier anders
 steht, bleibt, wie es ist – auch beim nächsten Import desselben Pakets –,
-solange niemand ausdrücklich *überschreiben* anhakt.
+solange niemand ausdrücklich *überschreiben* anhakt. Der Haken gilt für den
+Stand, den die Vorschau gezeigt hat: korrigiert jemand den Typ, während die
+Vorschau offen ist, bleibt seine Korrektur stehen. Wird so nichts
+übernommen, bleibt die Vorschau offen und zeigt den Stand von jetzt.
 
 **Danach** sind die Typen gewöhnliche Standard-Verteiler: Name,
 Nennwerte, Eigenschaften, Anschlüsse und Sicherungen lassen sich bearbeiten,

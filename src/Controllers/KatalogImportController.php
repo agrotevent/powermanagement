@@ -139,15 +139,33 @@ final class KatalogImportController extends Controller
             return;
         }
         $neu = $request->arr('neu');
-        $ueberschreiben = $request->arr('ueberschreiben');
+        // „überschreiben“ trägt den Stand, den die Vorschau gezeigt hat
+        // („schluessel:stand“) – ersetzt wird nur dieser, keine Korrektur, die
+        // jemand seitdem gespeichert hat. In einem Feld je Haken, damit auch
+        // 500 Typen unter max_input_vars bleiben.
+        $ueberschreiben = [];
+        $gesehen = [];
+        foreach ($request->arr('ueberschreiben') as $wert) {
+            [$schluessel, $stand] = array_pad(explode(':', $wert, 2), 2, '');
+            $ueberschreiben[] = $schluessel;
+            $gesehen[$schluessel] = $stand;
+        }
         if ($neu === [] && $ueberschreiben === []) {
             Flash::warning('Nichts ausgewählt – angehakt wird, was übernommen werden soll.');
             $this->redirect(self::VORSCHAU);
             return;
         }
-        $ergebnis = KatalogImport::uebernehmen($bereit['paket'], $neu, $ueberschreiben);
+        $ergebnis = KatalogImport::uebernehmen($bereit['paket'], $neu, $ueberschreiben, null, $gesehen);
         if (!$ergebnis['ok']) {
             Flash::error($ergebnis['message']);
+            $this->redirect(self::VORSCHAU);
+            return;
+        }
+        if ($ergebnis['neu'] === [] && $ergebnis['ueberschrieben'] === []) {
+            // Nichts geschehen (etwa weil hier inzwischen jemand anderes
+            // übernommen oder korrigiert hat): die Vorschau bleibt und zeigt
+            // den Stand jetzt – dort lässt sich neu wählen.
+            Flash::warning($ergebnis['message']);
             $this->redirect(self::VORSCHAU);
             return;
         }

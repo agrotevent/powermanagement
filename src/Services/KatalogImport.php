@@ -80,7 +80,8 @@ final class KatalogImport
      * Ein Paket lesen und mit dem Katalog hier vergleichen.
      *
      * @return array{ok:bool,message:string,paket:?array,quelle:string,typen:list<array<string,mixed>>,
-     *               steckertypen:list<array{schluessel:string,name:string,typen:list<string>}>,zahlen:array<string,int>}
+     *               steckertypen:list<array{schluessel:string,name:string,typen:list<string>,strom_a:float,phasen:int,spannung_v:int}>,
+     *               zahlen:array<string,int>}
      */
     public static function lesen(string $json): array
     {
@@ -167,7 +168,7 @@ final class KatalogImport
                 continue;
             }
             foreach ($zeile['stecker_neu'] as $k => $name) {
-                $stecker[$k] ??= ['schluessel' => $k, 'name' => $name, 'typen' => []];
+                $stecker[$k] ??= ['schluessel' => $k, 'name' => $name, 'typen' => []] + $zeile['stecker_angaben'][$k];
                 $stecker[$k]['typen'][] = $zeile['name'];
             }
         }
@@ -191,7 +192,8 @@ final class KatalogImport
     private static function typVergleichen(mixed $t, int $n, array $hier): array
     {
         $zeile = ['schluessel' => '', 'name' => 'Eintrag ' . ($n + 1), 'art' => '', 'art_name' => '', 'zustand' => 'fehler',
-            'unterschiede' => [], 'abweichungen' => [], 'kurz' => '', 'fehler' => null, 'hinweise' => [], 'id' => null, 'stecker_neu' => []];
+            'unterschiede' => [], 'abweichungen' => [], 'kurz' => '', 'fehler' => null, 'hinweise' => [], 'id' => null,
+            'stand' => '', 'stecker_neu' => [], 'stecker_angaben' => []];
         if (!is_array($t)) {
             $zeile['fehler'] = 'Der Eintrag ist kein Typ.';
             return $zeile;
@@ -209,6 +211,12 @@ final class KatalogImport
         if ($zeile['fehler'] !== null) {
             return $zeile;
         }
+        if (is_array($inhalt['messpunkte'] ?? null) && $inhalt['messpunkte'] !== []) {
+            $zeile['hinweise'][] = 'Messpunkte gehören zu einer aufgestellten Anlage, nicht zum Katalog-Typ – sie bleiben weg.';
+        }
+        // Verglichen wird, was übernommen würde (wie in uebernehmen()).
+        $t = self::bereinigt($t);
+        $inhalt = VerteilerBundle::inhalt($t);
         // Welche Steckertypen beim Übernehmen dazukämen – wie
         // LocationBundle::steckertypenSichern sie anlegt.
         $beschrieben = (array) self::beschriebeneStecker($t);
@@ -225,8 +233,11 @@ final class KatalogImport
         foreach ((array) ($inhalt['anschluesse'] ?? []) as $a) {
             $s = (string) $a['stecker'];
             $sauber = LocationBundle::schluessel($s, 'stecker');
-            if (!isset($hier[$s]) && !isset($hier[$sauber])) {
-                $zeile['stecker_neu'][$sauber] = mb_substr(trim((string) ($beschrieben[$s]['name'] ?? '')), 0, 190) ?: $s;
+            if (!isset($hier[$s]) && !isset($hier[$sauber]) && !isset($zeile['stecker_neu'][$sauber])) {
+                $b = $beschrieben[$s];
+                $zeile['stecker_neu'][$sauber] = mb_substr(trim((string) $b['name']), 0, 190);
+                $zeile['stecker_angaben'][$sauber] = ['strom_a' => (float) $b['strom_a'], 'phasen' => (int) $b['phasen'] === 1 ? 1 : 3,
+                    'spannung_v' => (int) $b['spannung_v']];
             }
         }
         $fremd = array_diff(array_keys((array) ($inhalt['eigenschaften'] ?? [])), array_keys(AnlagenService::FELDER[$art]));
@@ -255,7 +266,10 @@ final class KatalogImport
         $kanon = self::kanon($inhalt, $hier);
         $a = ['art' => VerteilerBundle::BEREICHE['typ']['art'], 'typ' => $hierInhalt];
         $b = ['art' => VerteilerBundle::BEREICHE['typ']['art'], 'typ' => $kanon];
-        if (VerteilerBundle::fingerabdruck($a) === VerteilerBundle::fingerabdruck($b)) {
+        // Der Stand hier, wie die Vorschau ihn zeigt – überschrieben wird nur
+        // dieser (uebernehmen(), $gesehen), keine spätere Korrektur.
+        $zeile['stand'] = VerteilerBundle::fingerabdruck($a);
+        if ($zeile['stand'] === VerteilerBundle::fingerabdruck($b)) {
             $zeile['zustand'] = 'gleich';
             return $zeile;
         }
@@ -302,10 +316,14 @@ final class KatalogImport
                 return '„' . $name . '“ muss Text sein.';
             }
         }
-        foreach (['nennleistung_kva' => 'Nennleistung', 'nennstrom_a' => 'Nennstrom', 'spannung_v' => 'Spannung'] as $feld => $name) {
+        foreach (['nennleistung_kva' => 'Nennleistung', 'nennstrom_a' => 'Nennstrom'] as $feld => $name) {
             if (isset($i[$feld]) && $i[$feld] !== '' && !self::zahl($i[$feld], true)) {
                 return '„' . $name . '“ ist keine Zahl.';
             }
+        }
+        // Leer hieße hier nicht „unbekannt“, sondern 1 V (AnlagenService::speichern).
+        if (isset($i['spannung_v']) && (!self::zahl($i['spannung_v'], true) || (float) str_replace(',', '.', trim((string) $i['spannung_v'])) < 1)) {
+            return '„Spannung“ muss eine Zahl in Volt sein (etwa 400 oder 230) – oder ganz fehlen, dann gilt 400.';
         }
         if (isset($i['phasen']) && !in_array((int) (self::zahl($i['phasen'], false) ? $i['phasen'] : 0), [1, 3], true)) {
             return '„Phasen“ muss 1 oder 3 sein.';
@@ -322,6 +340,12 @@ final class KatalogImport
             }
             if ($feld !== null && $feld[1] === 'zahl' && $w !== null && trim((string) $w) !== '' && !self::zahl($w, true)) {
                 return 'Eigenschaft „' . $feld[0] . '“ ist keine Zahl („' . mb_substr((string) $w, 0, 40) . '“).';
+            }
+            // Eine Auswahl nur mit einem ihrer Werte – das Formular zeigte einen
+            // anderen nicht an, und das nächste Speichern verlöre ihn.
+            if ($feld !== null && $feld[1] === 'auswahl' && $w !== null && trim((string) $w) !== '' && self::option($feld[2], $w) === null) {
+                return 'Eigenschaft „' . $feld[0] . '“: „' . mb_substr((string) $w, 0, 40) . '“ gibt es nicht – möglich sind '
+                    . implode(', ', $feld[2]) . '.';
             }
         }
 
@@ -431,7 +455,76 @@ final class KatalogImport
             return (count($namen) === 1 ? 'Steckertyp ' . $namen[0] . ' fehlt' : 'Steckertypen ' . implode(', ', $namen) . ' fehlen')
                 . ' – weder hier vorhanden noch in der Datei beschrieben („steckertypen“).';
         }
+        // Ein Steckertyp, der neu angelegt würde, braucht seine Werte – ein
+        // fehlender Nennstrom würde sonst still 16 A, ein unlesbarer 0 A, und
+        // damit rechnen Kabel, Schutzorgane und Auslastung.
+        foreach ($anschluesse as $a) {
+            $s = (string) $a['stecker'];
+            if (isset($hier[$s]) || isset($hier[LocationBundle::schluessel($s, 'stecker')])) {
+                continue;
+            }
+            $fehler = self::fehlerImStecker($beschrieben[$s]);
+            if ($fehler !== null) {
+                return 'Steckertyp „' . mb_substr($s, 0, 40) . '“ (neu): ' . $fehler;
+            }
+        }
         return null;
+    }
+
+    /** Taugt die Beschreibung eines neuen Steckertyps? Sonst der Grund. */
+    private static function fehlerImStecker(array $s): ?string
+    {
+        if (!is_string($s['name'] ?? null) || trim($s['name']) === '') {
+            return 'kein Name („name“).';
+        }
+        // Ohne Komma: LocationBundle::steckertypenSichern liest die Zahl unverändert.
+        if (!isset($s['strom_a']) || !self::zahl($s['strom_a'], false) || (float) $s['strom_a'] <= 0) {
+            return '„strom_a“ muss der Nennstrom in A sein (eine Zahl über 0).';
+        }
+        if (!isset($s['phasen']) || !self::zahl($s['phasen'], false) || !in_array((float) $s['phasen'], [1.0, 3.0], true)) {
+            return '„phasen“ muss 1 oder 3 sein.';
+        }
+        if (!isset($s['spannung_v']) || !self::zahl($s['spannung_v'], false) || (float) $s['spannung_v'] < 1) {
+            return '„spannung_v“ muss die Spannung in V sein (etwa 400 oder 230).';
+        }
+        return null;
+    }
+
+    /** Die Option einer Auswahl, auch in anderer Schreibweise („diesel“ → „Diesel“) – sonst null. */
+    private static function option(array $optionen, mixed $wert): ?string
+    {
+        $wert = mb_strtolower(trim((string) $wert));
+        foreach ($optionen as $o) {
+            if (mb_strtolower((string) $o) === $wert) {
+                return (string) $o;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Ein Typ der Datei so, wie er übernommen wird: ohne Messpunkte (die
+     * gehören nie zu einem Katalog-Typ), Auswahl-Eigenschaften in der
+     * Schreibweise der Auswahl, nur die Steckertypen, die er benutzt – keine
+     * unbenutzten Einträge im Steckverbinder-Katalog. Nur für einen Typ, den
+     * fehlerImTyp() für gut befunden hat.
+     */
+    private static function bereinigt(array $datei): array
+    {
+        $inhalt = VerteilerBundle::BEREICHE['typ']['inhalt'];
+        $t = (array) $datei[$inhalt];
+        unset($t['messpunkte']);
+        foreach (AnlagenService::FELDER[(string) $t['art']] ?? [] as $k => $feld) {
+            $w = $t['eigenschaften'][$k] ?? null;
+            if ($feld[1] === 'auswahl' && is_scalar($w) && trim((string) $w) !== '') {
+                $t['eigenschaften'][$k] = self::option($feld[2], $w) ?? $w;
+            }
+        }
+        $datei[$inhalt] = $t;
+        $benutzt = array_flip(array_map(static fn ($a) => (string) $a['stecker'], (array) ($t['anschluesse'] ?? [])));
+        $datei['steckertypen'] = array_values(array_filter((array) ($datei['steckertypen'] ?? []),
+            static fn ($s) => isset($benutzt[(string) $s['schluessel']])));
+        return $datei;
     }
 
     /**
@@ -726,16 +819,26 @@ final class KatalogImport
      * bleibt stehen. Neue Steckertypen legt nur an, wer den
      * Steckverbinder-Katalog pflegen darf – sonst geschieht nichts.
      *
+     * Mit $gesehen (aus der Vorschau) gilt die Auswahl nur für den Stand, den
+     * die Vorschau gezeigt hat: wer „überschreiben“ angehakt hat, ersetzt nur
+     * diesen Stand, keine Korrektur, die jemand danach gespeichert hat; ein
+     * „neuer“ Typ, den es inzwischen gibt, und ein überschriebener, den
+     * jemand inzwischen gelöscht hat, bleiben ebenso. Ohne $gesehen
+     * (Kommandozeile – sie liest und übernimmt in einem Zug) zählt der Stand
+     * beim Übernehmen.
+     *
      * @param list<string> $neu Schlüssel der neuen Typen, die angelegt werden
      * @param list<string> $ueberschreiben Schlüssel der hier anderen Typen, die ersetzt werden
      * @param array{katalog:bool,stecker:bool}|null $erlaubt null = Rechte des angemeldeten Benutzers
+     * @param array<string,string>|null $gesehen Schlüssel => Stand hier (Zeile „stand“ aus lesen()), wie die Vorschau ihn zeigte
      * @return array{ok:bool,message:string,neu:list<string>,ueberschrieben:list<string>,uebergangen:list<string>,
-     *               gleich:list<string>,steckertypen:list<string>,ids:array<int,string>} ids: ID => neu|ueberschrieben
+     *               veraendert:list<string>,gleich:list<string>,steckertypen:list<string>,ids:array<int,string>}
+     *         ids: ID => neu|ueberschrieben; veraendert: gewählt, aber seit der Vorschau hier geändert
      */
-    public static function uebernehmen(array $paket, array $neu, array $ueberschreiben, ?array $erlaubt = null): array
+    public static function uebernehmen(array $paket, array $neu, array $ueberschreiben, ?array $erlaubt = null, ?array $gesehen = null): array
     {
-        $ergebnis = ['ok' => false, 'message' => '', 'neu' => [], 'ueberschrieben' => [], 'uebergangen' => [], 'gleich' => [],
-            'steckertypen' => [], 'ids' => []];
+        $ergebnis = ['ok' => false, 'message' => '', 'neu' => [], 'ueberschrieben' => [], 'uebergangen' => [], 'veraendert' => [],
+            'gleich' => [], 'steckertypen' => [], 'ids' => []];
         $erlaubt ??= self::erlaubt();
         if (empty($erlaubt['katalog'])) {
             return ['message' => 'Den Katalog importieren darf, wer Anlagen ändern darf und alle Standorte sieht.'] + $ergebnis;
@@ -747,27 +850,37 @@ final class KatalogImport
         $neu = array_flip(array_map('strval', $neu));
         $ueberschreiben = array_flip(array_map('strval', $ueberschreiben));
         $anwenden = [];
+        $wieGesehen = static fn (string $k, string $jetzt): bool => $gesehen === null
+            || (is_string($gesehen[$k] ?? null) && hash_equals($gesehen[$k], $jetzt));
         foreach ($stand['typen'] as $n => $z) {
             $k = (string) $z['schluessel'];
-            if ($z['zustand'] === 'neu' && (isset($neu[$k]) || isset($ueberschreiben[$k]))) {
+            $gewaehlt = isset($neu[$k]) || isset($ueberschreiben[$k]);
+            if ($z['zustand'] === 'neu' && (isset($neu[$k]) || (isset($ueberschreiben[$k]) && $gesehen === null))) {
                 $anwenden[$n] = 'neu';
-            } elseif ($z['zustand'] === 'anders' && isset($ueberschreiben[$k])) {
+            } elseif ($z['zustand'] === 'anders' && isset($ueberschreiben[$k]) && $wieGesehen($k, (string) $z['stand'])) {
                 $anwenden[$n] = 'ueberschrieben';
             } elseif ($z['zustand'] === 'gleich') {
                 $ergebnis['gleich'][] = $z['name'];
+            } elseif ($gewaehlt && $gesehen !== null && $z['zustand'] !== 'fehler') {
+                $ergebnis['veraendert'][] = $z['name'];
             } else {
                 $ergebnis['uebergangen'][] = $z['name'];
             }
         }
 
         $stecker = [];
+        $brauchen = [];
         foreach (array_keys($anwenden) as $n) {
             $stecker += $stand['typen'][$n]['stecker_neu'];
+            if ($stand['typen'][$n]['stecker_neu'] !== []) {
+                $brauchen[] = $stand['typen'][$n]['name'];
+            }
         }
         if ($stecker !== [] && empty($erlaubt['stecker'])) {
             return ['message' => 'Nichts übernommen: ' . (count($stecker) === 1 ? 'den Steckertyp ' : 'die Steckertypen ')
                 . implode(', ', array_map(static fn ($s) => '„' . $s . '“', $stecker)) . ' gibt es hier noch nicht, und anlegen darf '
-                . (count($stecker) === 1 ? 'ihn' : 'sie') . ' nur, wer den Steckverbinder-Katalog pflegt.'] + $ergebnis;
+                . (count($stecker) === 1 ? 'ihn' : 'sie') . ' nur, wer den Steckverbinder-Katalog pflegt (gebraucht von '
+                . self::namen($brauchen) . ').'] + $ergebnis;
         }
         if ($anwenden === []) {
             $rest = self::rest($ergebnis);
@@ -780,13 +893,7 @@ final class KatalogImport
         try {
             foreach ($anwenden as $n => $wie) {
                 $z = $stand['typen'][$n];
-                $datei = $stand['paket']['typen'][$n];
-                // Nur die Steckertypen, die der Typ auch benutzt – keine
-                // unbenutzten Einträge im Steckverbinder-Katalog.
-                $benutzt = array_flip(array_map(static fn ($a) => (string) $a['stecker'], (array) (VerteilerBundle::inhalt($datei)['anschluesse'] ?? [])));
-                $datei['steckertypen'] = array_values(array_filter((array) ($datei['steckertypen'] ?? []),
-                    static fn ($s) => isset($benutzt[(string) $s['schluessel']])));
-                $e = VerteilerBundle::typAnwenden((string) $z['schluessel'], $datei);
+                $e = VerteilerBundle::typAnwenden((string) $z['schluessel'], self::bereinigt($stand['paket']['typen'][$n]));
                 if (!$e['ok']) {
                     throw new \DomainException('„' . $z['name'] . '“: ' . $e['message']);
                 }
@@ -798,7 +905,7 @@ final class KatalogImport
                 'quelle'         => $stand['quelle'],
                 'neu'            => $ergebnis['neu'],
                 'ueberschrieben' => $ergebnis['ueberschrieben'],
-                'uebergangen'    => $ergebnis['uebergangen'],
+                'uebergangen'    => array_merge($ergebnis['uebergangen'], $ergebnis['veraendert']),
                 'steckertypen'   => $ergebnis['steckertypen'],
             ]);
             $eigene ? $pdo->commit() : Database::execute('RELEASE SAVEPOINT katalog_import');
@@ -832,7 +939,7 @@ final class KatalogImport
         return ['ok' => true, 'message' => $meldung] + $ergebnis;
     }
 
-    /** @return list<string> „3 schon genauso da“, „2 übergangen (A, B)“ */
+    /** @return list<string> „3 schon genauso da“, „2 übergangen (A, B)“, „1 seit der Vorschau hier geändert, bleibt (C)“ */
     private static function rest(array $ergebnis): array
     {
         $out = [];
@@ -841,6 +948,10 @@ final class KatalogImport
         }
         if ($ergebnis['uebergangen'] !== []) {
             $out[] = count($ergebnis['uebergangen']) . ' übergangen (' . self::namen($ergebnis['uebergangen']) . ')';
+        }
+        if ($ergebnis['veraendert'] !== []) {
+            $out[] = count($ergebnis['veraendert']) . ' seit der Vorschau hier geändert, '
+                . (count($ergebnis['veraendert']) === 1 ? 'bleibt' : 'bleiben') . ' (' . self::namen($ergebnis['veraendert']) . ')';
         }
         return $out;
     }

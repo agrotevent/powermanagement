@@ -67,9 +67,9 @@ $subtitle = 'Standard-Verteiler und Aggregate aus einer Datei – erst Vorschau,
 <div class="card">
     <div class="card-head"><h2>So geht der Import</h2></div>
     <div class="card-body small">
-        <p>Die Vorschau zeigt je Typ, ob er <strong>neu</strong> ist, hier <strong>schon genauso</strong> steht, hier
-            <strong>anders</strong> steht (etwa weil jemand einen Fehler von Hand korrigiert hat) oder ob die Datei für ihn
-            <strong>nicht taugt</strong>. Übernommen wird nur, was angehakt ist: neue Typen sind vorausgewählt, geänderte nicht –
+        <p>Die Vorschau zeigt je Typ, ob er <strong>neu</strong> ist, <strong>schon da</strong> (hier genauso wie in der Datei),
+            <strong>hier anders</strong> (etwa weil jemand einen Fehler von Hand korrigiert hat) oder ob er einen <strong>Fehler</strong>
+            hat – dann nennt sie den Grund. Übernommen wird nur, was angehakt ist: neue Typen sind vorausgewählt, geänderte nicht –
             <strong>ein Import überschreibt nie still eine Korrektur.</strong></p>
         <p class="mb0">Danach sind die Typen gewöhnliche Standard-Verteiler: Anschlüsse, Sicherungen und Eigenschaften lassen sich
             bearbeiten, kopieren und löschen wie bei jedem anderen. Fehlende Steckertypen legt der Import mit an – das darf, wer den
