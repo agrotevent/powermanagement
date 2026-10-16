@@ -21,6 +21,7 @@ $groups = [
         ['/anlagen?art=verteilung','Verteilungen',        'V', 'anlagen.view'],
         ['/anlagen?art=generator', 'Generatoren',         'G', 'anlagen.view'],
         ['/anlagen?art=wechselrichter', 'Wechselrichter', 'W', 'anlagen.view'],
+        ['/anlagen?art=tank',      'Tanks',               'T', 'anlagen.view'],
         ['/anlagen/baum',         'Verteilbaum',         null, 'anlagen.view'],
         ['/anlagen/katalog',      'Standard-Verteiler',  null, 'anlagen.view'],
         ['/inventar',             'Inventar',            null, 'datenquellen.view'],

@@ -314,7 +314,13 @@ final class LiveService
         }
         $nachId = [];
         foreach ($objekte as $o) {
-            $nachId[(int) $o['id']] = $o;
+            // An einem Tank wird nie geschaltet – auch wenn sein Shelly ein Relais hat.
+            if (AnlagenService::elektrisch((string) $o['art'])) {
+                $nachId[(int) $o['id']] = $o;
+            }
+        }
+        if ($nachId === []) {
+            return [];
         }
         $ids = array_keys($nachId);
         $rows = Database::select(

@@ -346,8 +346,12 @@ final class LeitungService
             if ($objektId <= 0) {
                 continue;
             }
-            if (Database::first('SELECT id FROM objekte WHERE id = ?', [$objektId]) === null) {
+            $anlage = Database::first('SELECT id, art FROM objekte WHERE id = ?', [$objektId]);
+            if ($anlage === null) {
                 return $fehler('Die Anlage am Kabelende gibt es nicht.');
+            }
+            if (!AnlagenService::elektrisch((string) $anlage['art'])) {
+                return $fehler('Ein Kabel endet nicht an einem ' . (AnlagenService::ARTEN[$anlage['art']]['name'] ?? 'Tank') . '.');
             }
             $felder[$ende . '_objekt_id'] = $objektId;
             $anschlussId = (int) ($daten[$ende . '_anschluss_id'] ?? 0);

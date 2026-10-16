@@ -146,6 +146,9 @@ final class SchutzService
      */
     public static function speichern(int $objektId, ?int $id, array $daten): array
     {
+        if (!self::mitStrom($objektId)) {
+            return ['ok' => false, 'message' => 'Ein Tank hat keine Sicherungen.'];
+        }
         $art = (string) ($daten['art'] ?? 'ls');
         if (!isset(self::ARTEN[$art])) {
             return ['ok' => false, 'message' => 'Unbekannte Art des Schutzorgans.'];
@@ -282,6 +285,9 @@ final class SchutzService
      */
     public static function vorschlagen(int $objektId): array
     {
+        if (!self::mitStrom($objektId)) {
+            return ['ok' => false, 'message' => 'Ein Tank hat keine Sicherungen.'];
+        }
         $anschluesse = Database::select(
             'SELECT a.*, t.strom_a, t.phasen FROM anschluesse a JOIN steckertypen t ON t.id = a.steckertyp_id
              WHERE a.objekt_id = ? ORDER BY a.richtung, t.strom_a DESC, a.nr',
@@ -339,5 +345,11 @@ final class SchutzService
         }
         Audit::log('schutz.vorschlag', 'objekt', (string) $objektId, ['angelegt' => $angelegt]);
         return ['ok' => true, 'message' => $angelegt . ' Schutzorgane vorgeschlagen und den Abgängen zugeordnet. Bitte mit der tatsächlichen Bestückung abgleichen.'];
+    }
+
+    /** Führt die Anlage Strom? (Ein Tank nicht – er hat keine Schutzorgane.) */
+    private static function mitStrom(int $objektId): bool
+    {
+        return AnlagenService::elektrisch((string) Database::scalar('SELECT art FROM objekte WHERE id = ?', [$objektId]));
     }
 }

@@ -385,6 +385,11 @@ function objektKlick(o, e = null) {
         return;
     }
     if (modus === 'kabel') {
+        // Wie der Server: an einem Tank endet kein Kabel.
+        if (o.elektrisch === false) {
+            status('Ein Kabel endet nicht an einem ' + (daten.arten[o.art] ? daten.arten[o.art].name : 'Tank') + '.');
+            return;
+        }
         if (!entwurf) {
             entwurf = { art: 'kabel', punkte: [{ x: o.x, y: o.y }], von: o.id };
             entwurfZeichnen();
@@ -426,7 +431,12 @@ async function objektVerschoben(o, m) {
 function setzenPanel() {
     const vorlage = (v) => `<option value="vorlage:${v.id}">${esc(v.name)} – ${esc(v.kurz)}</option>`;
     const festVorlagen = daten.vorlagen.filter((v) => v.fest).map(vorlage).join('');
-    const mobilVorlagen = daten.vorlagen.filter((v) => !v.fest).map(vorlage).join('');
+    // Mobile Katalog-Typen nach Art: Verteiler (und was sonst Strom führt), Generatoren, Tanks.
+    const gruppe = (v) => (v.art === 'generator' || v.art === 'tank' ? v.art : 'verteiler');
+    const mobil = (g) => daten.vorlagen.filter((v) => !v.fest && gruppe(v) === g).map(vorlage).join('');
+    const mobilGruppen = [['verteiler', 'Standard-Verteiler (mobil)'], ['generator', 'Generatoren aus dem Katalog'], ['tank', 'Tanks aus dem Katalog']]
+        .map(([g, titel]) => [titel, mobil(g)]).filter(([, optionen]) => optionen)
+        .map(([titel, optionen]) => `<optgroup label="${esc(titel)}">${optionen}</optgroup>`).join('');
     const mobilArten = Object.entries(daten.arten).filter(([k]) => k !== 'anschluss')
         .map(([k, a]) => `<option value="mobil:${k}">${esc(a.name)} (leer)</option>`).join('');
     seite.innerHTML = `
@@ -438,7 +448,7 @@ function setzenPanel() {
                     ${festVorlagen}
                     <option value="fest:verteilung">Verteilung, fest eingebaut (leer)</option>
                 </optgroup>
-                ${mobilVorlagen ? `<optgroup label="Standard-Verteiler (mobil)">${mobilVorlagen}</optgroup>` : ''}
+                ${mobilGruppen}
                 <optgroup label="Neue mobile Anlage">${mobilArten}</optgroup>
             </select></div>
         <div class="field"><label for="setzen-name">Name</label>
@@ -508,8 +518,8 @@ async function objektPanel(id) {
         ${o.geo ? `<div class="small anlage-lage">Lage ${koordinate(o.geo.lat)}, ${koordinate(o.geo.lon)} ·
             <a href="${esc(o.geo.link)}" target="_blank" rel="noopener">in der Karte öffnen</a></div>` : ''}
         ${o.inventar && o.inventar.length ? `<div class="small anlage-lage">Aus dem Inventar: ${o.inventar.map((i) => `<strong>${esc(i.kennung)}</strong>${i.anschluss ? ' (' + esc(i.anschluss) + ')' : ''}`).join(', ')}</div>` : ''}
-        ${o.darf && o.art !== 'anschluss' && daten.darf.inventar ? `<div class="small"><a href="/anlagen/${o.id}?reiter=messung">Verteiler oder Zwischenstecker aus dem Inventar einsetzen …</a></div>` : ''}
-        <div class="seite-live" data-seite-live></div>
+        ${o.darf && o.elektrisch && o.art !== 'anschluss' && daten.darf.inventar ? `<div class="small"><a href="/anlagen/${o.id}?reiter=messung">Verteiler oder Zwischenstecker aus dem Inventar einsetzen …</a></div>` : ''}
+        ${o.elektrisch ? '<div class="seite-live" data-seite-live></div>' : ''}
         ${o.messgeraete.length ? `<h3 class="mt">Messgeräte</h3><ul class="liste-schlicht messgeraete">${o.messgeraete.map((m) => `
             <li><span class="messgeraet"><span class="messgeraet-zeichen">M</span>
                 <span class="messgeraet-name">${esc(m.titel)}</span>
@@ -522,7 +532,7 @@ async function objektPanel(id) {
             <div class="btn-row">${s.befehle.map((b) => `<button type="button" class="btn btn-sm ${b.art === 'aus' ? 'btn-danger' : b.art === 'ein' ? 'btn-primary' : ''}"
                 data-schalten data-quelle="${s.quelle_id}" data-befehl="${esc(b.schluessel)}" data-kanal="${esc(s.kanal || b.kanal)}" data-objekt="${s.objekt_id}"
                 data-frage="${esc(s.titel + ': „' + b.name + '“ wirklich ausführen?')}">${esc(b.name)}</button>`).join('')}</div></div>`).join('')}` : ''}
-        <h3 class="mt">Anschlüsse</h3>
+        <h3 class="mt">${o.elektrisch ? 'Anschlüsse' : 'Inhalt'}</h3>
         <p class="small">${esc(o.kurz)}</p>
         ${eingaenge.length ? `<div class="small muted">Eingänge</div><ul class="anschluss-liste">${eingaenge.map(anschlussZeile).join('')}</ul>` : ''}
         ${abgaenge.length ? `<div class="small muted">Abgänge</div><ul class="anschluss-liste">${abgaenge.map(anschlussZeile).join('')}</ul>` : ''}

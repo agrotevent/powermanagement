@@ -8,10 +8,10 @@ $fest = $filter['fest'];
 $title = $fest === true ? 'Feststromanschlüsse' : ($artInfo['mehrzahl'] ?? ($fest === false ? 'Mobile Anlagen' : 'Anlagen'));
 $subtitle = $fest === true
     ? 'Fest installiert, gehören zur Location – werden beim Location-Abgleich übertragen'
-    : 'Stromanschlüsse, Generatoren, Wechselrichter und Verteilungen';
+    : ($filter['art'] === 'tank' ? 'Kraftstofftanks im Plan – mit Inhalt, Maßen und Zulassung' : 'Stromanschlüsse, Generatoren, Wechselrichter, Verteilungen und Tanks');
 $neuArt = $artInfo !== null ? $filter['art'] : ($fest === true ? 'anschluss' : 'verteilung');
 $neuLink = '/anlagen/neu?art=' . $neuArt . ($fest === true ? '&amp;fest=1' : '');
-$neuText = $fest === true && ($filter['art'] === '' || $filter['art'] === 'anschluss') ? 'Neuer Feststromanschluss' : 'Neue ' . ($artInfo['name'] ?? 'Anlage');
+$neuText = $fest === true && ($filter['art'] === '' || $filter['art'] === 'anschluss') ? 'Neuer Feststromanschluss' : ($artInfo['neu'] ?? 'Neue Anlage');
 ?>
 <div class="toolbar-zeile">
     <form method="get" action="/anlagen" class="inline-form">
@@ -46,7 +46,7 @@ $neuText = $fest === true && ($filter['art'] === '' || $filter['art'] === 'ansch
     <div class="table-wrap">
         <table class="tabelle-karten">
             <thead>
-            <tr><th>Anlage</th><th>Standort</th><th>Anschlüsse</th><th>Status</th><th class="num">Leistung</th><th class="num">Auslastung</th></tr>
+            <tr><th>Anlage</th><th>Standort</th><th><?= $filter['art'] === 'tank' ? 'Inhalt' : 'Anschlüsse' ?></th><th>Status</th><th class="num">Leistung</th><th class="num">Auslastung</th></tr>
             </thead>
             <tbody>
             <?php if ($objekte === []): ?>
@@ -63,7 +63,7 @@ $neuText = $fest === true && ($filter['art'] === '' || $filter['art'] === 'ansch
                         <div class="small muted"><?= View::e(trim($o['hersteller'] . ' ' . $o['modell'])) ?></div>
                     </td>
                     <td data-label="Standort"><?= View::e($o['site_name'] ?? '–') ?><?= $o['floor_name'] ? '<div class="small muted">' . View::e($o['floor_name']) . '</div>' : '' ?></td>
-                    <td data-label="Anschlüsse" class="small"><?= View::e($o['kurzform']) ?></td>
+                    <td data-label="<?= AnlagenService::elektrisch((string) $o['art']) ? 'Anschlüsse' : 'Inhalt' ?>" class="small"><?= View::e($o['kurzform']) ?></td>
                     <td data-label="Status"><span class="badge status-<?= View::e($o['status']) ?>"><?= View::e(AnlagenService::STATUS[$o['status']] ?? $o['status']) ?></span></td>
                     <td data-label="Leistung" class="num" data-feld="p"><?= View::e(Messdaten::format($l['p'] ?? null, 'W')) ?></td>
                     <td data-label="Auslastung" class="num" data-feld="auslastung"><?= ($l['auslastung'] ?? null) !== null ? (int) round((float) $l['auslastung']) . ' %' : '' ?></td>

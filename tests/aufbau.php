@@ -143,11 +143,16 @@ try {
     // Last im Betrieb (Demo-Messwerte)
     if (Config::isDemo()) {
         MesspunktService::speichern($a, null, ['geraet' => 'shellypro3em-catering', 'kanal' => 'em:0', 'rolle' => 'einspeisung']);
+        // Ein Tank mit einem Messgerät hat trotzdem keinen Nennstrom und keine Last.
+        $tank = $neu(['art' => 'tank', 'name' => $kennung . ' Tank', 'plan_x' => 30.0, 'plan_y' => 30.0]);
+        Database::insert('messpunkte', ['objekt_id' => $tank, 'geraet' => 'shellypro3em-foodtruck', 'kanal' => 'em:0', 'rolle' => 'einspeisung',
+            'bezeichnung' => '', 'gueltig_ab' => gmdate('c', time() - 7 * 3600), 'created_at' => gmdate('c')]);
         Database::update('aufbauten', $id, ['betrieb_ab' => gmdate('c', time() - 6 * 3600)]);
         $last = array_column(AufbauService::abgleich(AufbauService::find($id))['last'], null, 'id');
         pruefe(isset($last[$a]) && $last[$a]['i_max'] > 0 && $last[$a]['nennstrom'] == 63.0 && $last[$a]['auslastung'] > 0,
             'Last: höchster Strom gegen 63 A – ' . ($last[$a]['auslastung'] ?? '?') . ' %');
         pruefe(($last[$a]['empfehlung']['text'] ?? '') !== '', 'Empfehlung: ' . ($last[$a]['empfehlung']['text'] ?? ''));
+        pruefe(!isset($last[$tank]), 'Last: keine Zeile für einen Tank');
     } else {
         echo "  (Last übersprungen: kein Demo-Modus)\n";
     }

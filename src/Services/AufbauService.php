@@ -505,6 +505,10 @@ final class AufbauService
         }
         $out = [];
         foreach (Zugriff::filtern(AnlagenService::liste(['site_id' => (int) $aufbau['site_id']])) as $o) {
+            // Ein Tank hat keinen Nennstrom und keine Last.
+            if (!AnlagenService::elektrisch((string) $o['art'])) {
+                continue;
+            }
             // Das Hauptmessgerät, das im Betrieb steckte (auch ein inzwischen abgebautes).
             $messpunkte = array_values(array_filter(MesspunktService::fuerObjekt((int) $o['id'], true), static function ($m) use ($von, $bis) {
                 $ab = Zeit::ts($m['gueltig_ab'] ?? null);

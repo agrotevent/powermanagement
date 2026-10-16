@@ -5,16 +5,24 @@ namespace App\Services;
 
 use App\Support\Audit;
 use App\Support\Database;
+use App\Tanks\TankService;
 
 /**
  * Anlagen und ihre Anschlüsse.
  *
- * Vier Arten, eine Tabelle: Stromanschlüsse (Hausanschluss,
- * Baustromverteiler des Netzbetreibers), Generatoren, Wechselrichter und
- * Verteilungen. Was sie unterscheidet, steht in ART und FELDER – die
+ * Fünf Arten, eine Tabelle: Stromanschlüsse (Hausanschluss,
+ * Baustromverteiler des Netzbetreibers), Generatoren, Wechselrichter,
+ * Verteilungen und Tanks. Was sie unterscheidet, steht in ART und FELDER – die
  * Gemeinsamkeiten (Ort, Anschlüsse, Messpunkte, Kabel) sind dieselben, und
  * nur so lässt sich ein Kabel von einem Generator an eine Verteilung und
  * von dort an die nächste ziehen, ohne je Kombination eigene Wege.
+ *
+ * Ein Tank ist keine elektrische Anlage (elektrisch()): Er steht im Plan,
+ * hat Freigaben, Aufbau und Abgleiche wie jede Anlage, aber keine
+ * Anschlüsse, keinen Nennstrom, keine Leistung – kein Kabel endet an ihm,
+ * er steht in keinem Verteilbaum und in keiner Lastsumme. Seine
+ * elektrischen Spalten haben feste Werte, eine Art wechselt nie zwischen
+ * elektrisch und nicht elektrisch.
  *
  * Quer dazu steht, ob eine Anlage **fest installiert** ist (`fest`):
  * Feststromanschlüsse – Hausanschluss, Energiesäule, Wandverteiler, fest
@@ -30,11 +38,17 @@ use App\Support\Database;
  */
 final class AnlagenService
 {
+    /**
+     * Die Arten. `neu` ist die Überschrift für eine neue Anlage („Neuer
+     * Tank“, „Neue Verteilung“), `elektrisch` sagt, ob sie Anschlüsse,
+     * Nennstrom und Leistung hat.
+     */
     public const ARTEN = [
-        'anschluss'      => ['name' => 'Stromanschluss', 'mehrzahl' => 'Stromanschlüsse', 'kuerzel' => 'A', 'farbe' => '#0369a1'],
-        'generator'      => ['name' => 'Generator',      'mehrzahl' => 'Generatoren',     'kuerzel' => 'G', 'farbe' => '#b45309'],
-        'wechselrichter' => ['name' => 'Wechselrichter', 'mehrzahl' => 'Wechselrichter',  'kuerzel' => 'W', 'farbe' => '#7c3aed'],
-        'verteilung'     => ['name' => 'Verteilung',     'mehrzahl' => 'Verteilungen',    'kuerzel' => 'V', 'farbe' => '#15803d'],
+        'anschluss'      => ['name' => 'Stromanschluss', 'mehrzahl' => 'Stromanschlüsse', 'neu' => 'Neuer Stromanschluss', 'kuerzel' => 'A', 'farbe' => '#0369a1', 'elektrisch' => true],
+        'generator'      => ['name' => 'Generator',      'mehrzahl' => 'Generatoren',     'neu' => 'Neuer Generator',      'kuerzel' => 'G', 'farbe' => '#b45309', 'elektrisch' => true],
+        'wechselrichter' => ['name' => 'Wechselrichter', 'mehrzahl' => 'Wechselrichter',  'neu' => 'Neuer Wechselrichter', 'kuerzel' => 'W', 'farbe' => '#7c3aed', 'elektrisch' => true],
+        'verteilung'     => ['name' => 'Verteilung',     'mehrzahl' => 'Verteilungen',    'neu' => 'Neue Verteilung',      'kuerzel' => 'V', 'farbe' => '#15803d', 'elektrisch' => true],
+        'tank'           => ['name' => 'Tank',           'mehrzahl' => 'Tanks',           'neu' => 'Neuer Tank',           'kuerzel' => 'T', 'farbe' => '#57534e', 'elektrisch' => false],
     ];
 
     public const STATUS = [
@@ -68,6 +82,7 @@ final class AnlagenService
             'kraftstoff'    => ['Kraftstoff', 'auswahl', ['Diesel', 'HVO', 'Gas', 'Benzin']],
             'tank_l'        => ['Tankinhalt', 'zahl', 'l'],
             'verbrauch_l_h' => ['Verbrauch bei Volllast', 'zahl', 'l/h'],
+            'verbrauch_kennlinie' => ['Verbrauch je Last (z. B. 100 % 22 / 70 % 16 / 50 % 12)', 'text', 'l/h'],
             'schallpegel'   => ['Schallleistungspegel', 'zahl', 'dB(A)'],
             'gewicht_kg'    => ['Gewicht leer', 'zahl', 'kg'],
             'abmessungen'   => ['Abmessungen L × B × H', 'text', 'mm'],
@@ -88,6 +103,44 @@ final class AnlagenService
             'fi_typ'         => ['FI-Schutz (gesamt)', 'text', ''],
             'pruefung_bis'   => ['Nächste Prüfung (DGUV V3)', 'text', ''],
         ],
+        'tank' => [
+            'artikelnummer'        => ['Artikelnummer', 'text', ''],
+            'inhalt_l'             => ['Nennvolumen', 'zahl', 'l'],
+            'kraftstoff'           => ['Kraftstoff', 'auswahl', ['Diesel', 'HVO', 'Heizöl EL']],
+            'dichte_kg_l'          => ['Dichte (leer = nach Kraftstoff)', 'zahl', 'kg/l'],
+            'bauform'              => ['Bauform', 'auswahl', ['Quader', 'Zylinder stehend', 'Zylinder liegend']],
+            'liter_je_mm'          => ['Inhalt je mm Füllhöhe (leer = aus Peilung oder Betankung)', 'zahl', 'l/mm'],
+            'liter_je_mm_herkunft' => ['Herkunft von „Inhalt je mm“', 'text', ''],
+            'durchmesser_mm'       => ['Innendurchmesser (Zylinder)', 'zahl', 'mm'],
+            'laenge_innen_mm'      => ['Innenlänge (liegender Zylinder)', 'zahl', 'mm'],
+            'fuellgrenze_prozent'  => ['Füllgrenze (leer = 95 %)', 'zahl', '%'],
+            'sumpf_l'              => ['Nicht entnehmbar (leer = 5 % des Nennvolumens)', 'zahl', 'l'],
+            'abmessungen'          => ['Abmessungen L × B × H', 'text', 'mm'],
+            'gewicht_kg'           => ['Gewicht leer', 'zahl', 'kg'],
+            'gewicht_voll_kg'      => ['Gewicht voll (Katalog)', 'zahl', 'kg'],
+            'zulassung'            => ['Zulassung', 'text', ''],
+            'zulassung_bis'        => ['Zulassung gültig bis', 'text', ''],
+            'tankanschluss'        => ['Tankanschluss / Kupplung', 'text', ''],
+            'tankheizung'          => ['Tankheizung', 'auswahl', ['nein', 'ja']],
+            'warnung_prozent'      => ['Warnung unter (leer = Einstellung)', 'zahl', '%'],
+            'alarm_prozent'        => ['Alarm unter (leer = Einstellung)', 'zahl', '%'],
+        ],
+    ];
+
+    /**
+     * Wo eine Art viele Eigenschaften hat, stehen sie in Formular und
+     * Anlagenseite in Gruppen. Was in keiner Gruppe steht, kommt unter
+     * „Weitere Angaben“ dazu.
+     *
+     * @var array<string,array<string,list<string>>>
+     */
+    public const FELDGRUPPEN = [
+        'tank' => [
+            'Katalog'   => ['artikelnummer', 'inhalt_l', 'gewicht_kg', 'gewicht_voll_kg', 'zulassung', 'zulassung_bis', 'tankanschluss', 'tankheizung'],
+            'Maße'      => ['abmessungen', 'bauform', 'durchmesser_mm', 'laenge_innen_mm'],
+            'Kennlinie' => ['kraftstoff', 'dichte_kg_l', 'liter_je_mm', 'liter_je_mm_herkunft', 'fuellgrenze_prozent', 'sumpf_l'],
+            'Grenzen'   => ['warnung_prozent', 'alarm_prozent'],
+        ],
     ];
 
     /**
@@ -102,6 +155,32 @@ final class AnlagenService
         'wechselrichter' => ['eingang' => ['cee32' => 1], 'abgang' => ['cee32' => 1, 'cee16' => 2, 'schuko' => 2]],
         'verteilung'     => ['eingang' => ['cee63' => 1], 'abgang' => ['cee32' => 2, 'cee16' => 4, 'schuko' => 6]],
     ];
+
+    /** Hat diese Art Anschlüsse, Nennstrom und Leistung? (Tank: nein; eine unbekannte Art gilt als elektrisch) */
+    public static function elektrisch(string $art): bool
+    {
+        return (bool) (self::ARTEN[$art]['elektrisch'] ?? true);
+    }
+
+    /**
+     * Die Eigenschaften einer Art in ihren Gruppen (FELDGRUPPEN) –
+     * ohne Gruppen eine einzige ohne Titel.
+     *
+     * @return array<string,list<string>> Titel => Schlüssel aus FELDER
+     */
+    public static function feldGruppen(string $art): array
+    {
+        $alle = array_keys(self::FELDER[$art] ?? []);
+        $gruppen = self::FELDGRUPPEN[$art] ?? [];
+        if ($gruppen === []) {
+            return ['' => $alle];
+        }
+        $rest = array_values(array_diff($alle, array_merge(...array_values($gruppen))));
+        if ($rest !== []) {
+            $gruppen['Weitere Angaben'] = $rest;
+        }
+        return $gruppen;
+    }
 
     /** Ist eine neue Anlage dieser Art fest installiert, solange niemand etwas anderes sagt? */
     public static function festVorgabe(string $art): bool
@@ -290,7 +369,15 @@ final class AnlagenService
             if ($wert === '') {
                 continue;
             }
-            $eigenschaften[$schluessel] = $typ === 'zahl' ? (float) str_replace(',', '.', $wert) : mb_substr($wert, 0, 190);
+            if ($typ === 'zahl') {
+                $zahl = (float) str_replace(',', '.', $wert);
+                // „1e999“ wäre unendlich – und ließe sich nicht als JSON speichern.
+                if (is_finite($zahl)) {
+                    $eigenschaften[$schluessel] = $zahl;
+                }
+                continue;
+            }
+            $eigenschaften[$schluessel] = mb_substr($wert, 0, 190);
         }
         return $eigenschaften;
     }
@@ -354,10 +441,25 @@ final class AnlagenService
             // Eine Vorlage steht nirgends – sie ist ein Bauplan.
             $felder['site_id'] = $felder['floor_id'] = null;
         }
+        $elektrisch = self::elektrisch($art);
+        if (!$elektrisch) {
+            // Ein Tank hat keine Leistung, keinen Nennstrom und nichts zu
+            // schalten. Die Spalten bekommen feste Werte, damit kein Formular
+            // und kein Abgleich Unterschiede erzeugt, die es nicht gibt.
+            $felder['nennleistung_kva'] = null;
+            $felder['nennstrom_a'] = null;
+            $felder['spannung_v'] = 400;
+            $felder['phasen'] = 3;
+            $felder['steuerung_gesperrt'] = 0;
+        }
         // Eine neue Anlage aus einem Katalog-Typ trägt dessen Typ, wenn nichts
         // anderes gesagt ist – daran erkennt der Aufbau, ob ein Verteiler passt.
         if (!$id && (int) ($daten['vorlage_id'] ?? 0) > 0) {
-            $typ = Database::first('SELECT hersteller, modell, eigenschaften FROM objekte WHERE id = ? AND ist_vorlage = 1', [(int) $daten['vorlage_id']]);
+            $typ = Database::first('SELECT art, hersteller, modell, eigenschaften FROM objekte WHERE id = ? AND ist_vorlage = 1', [(int) $daten['vorlage_id']]);
+            // Ein Tank-Typ taugt nicht als Bauplan einer Verteilung und umgekehrt.
+            if ($typ !== null && self::elektrisch((string) $typ['art']) !== $elektrisch) {
+                $typ = null;
+            }
             if ($typ !== null && $felder['modell'] === '') {
                 $felder['modell'] = (string) $typ['modell'];
                 $felder['hersteller'] = $felder['hersteller'] !== '' ? $felder['hersteller'] : (string) $typ['hersteller'];
@@ -385,6 +487,11 @@ final class AnlagenService
             $alt = self::find($id);
             if ($alt === null) {
                 return ['ok' => false, 'message' => 'Diese Anlage gibt es nicht.'];
+            }
+            // Aus einem Generator mit Steckdosen und Kabeln wird kein Tank,
+            // aus einem Tank kein Generator ohne Anschlüsse.
+            if (self::elektrisch((string) $alt['art']) !== $elektrisch) {
+                return ['ok' => false, 'message' => 'Ein Tank wird keine elektrische Anlage (und umgekehrt) – bitte neu anlegen.'];
             }
 
             // Wandert die Anlage auf eine andere Etage, gilt ihr Punkt auf
@@ -418,15 +525,36 @@ final class AnlagenService
         $id = Database::insert('objekte', $felder);
         Audit::log('anlage.create', 'objekt', (string) $id, ['name' => $name, 'art' => $art]);
 
-        // Anschlüsse: aus einer Vorlage oder der Vorschlag je Art.
+        // Anschlüsse: aus einer Vorlage oder der Vorschlag je Art – ein Tank
+        // bekommt keine.
         $vorlageId = (int) ($daten['vorlage_id'] ?? 0);
-        if ($vorlageId > 0 && ($vorlage = self::find($vorlageId)) !== null) {
+        if ($elektrisch && $vorlageId > 0 && ($vorlage = self::find($vorlageId)) !== null) {
             self::anschluesseKopieren($vorlageId, $id);
-        } elseif (empty($daten['ohne_anschluesse'])) {
+        } elseif ($elektrisch && empty($daten['ohne_anschluesse'])) {
             self::vorschlagAnlegen($id, $art);
         }
 
         return ['ok' => true, 'message' => self::artAnzeige($felder) . ' angelegt.', 'id' => $id];
+    }
+
+    /**
+     * Einzelne Eigenschaften setzen, ohne das Formular – etwa den Inhalt je
+     * mm, den eine Betankung ergeben hat. Was nicht in FELDER steht, fällt
+     * weg; leer oder null nimmt eine Eigenschaft heraus.
+     *
+     * @param array<string,mixed> $werte Schlüssel => Wert
+     */
+    public static function eigenschaftSetzen(int $id, array $werte): void
+    {
+        $objekt = self::find($id);
+        if ($objekt === null || $werte === []) {
+            return;
+        }
+        $art = (string) $objekt['art'];
+        $eigenschaften = self::eigenschaftenFiltern($art, array_merge((array) $objekt['eigenschaften'], array_map(
+            static fn (mixed $w): mixed => $w ?? '', $werte)));
+        Database::update('objekte', $id, ['eigenschaften' => json_encode($eigenschaften, JSON_UNESCAPED_UNICODE), 'updated_at' => gmdate('c')]);
+        Audit::log('anlage.eigenschaft', 'objekt', (string) $id, ['schluessel' => array_values(array_intersect(array_keys($werte), array_keys(self::FELDER[$art] ?? [])))]);
     }
 
     public static function loeschen(int $id): array
@@ -569,6 +697,9 @@ final class AnlagenService
      */
     public static function anzahlSetzen(int $objektId, array $soll): array
     {
+        if (!self::elektrisch((string) Database::scalar('SELECT art FROM objekte WHERE id = ?', [$objektId]))) {
+            return ['ok' => false, 'message' => 'Ein Tank hat keine Anschlüsse.'];
+        }
         $typen = self::steckertypenNachId();
         $ist = self::anzahlen($objektId);
         $belegt = self::belegung($objektId);
@@ -790,10 +921,15 @@ final class AnlagenService
     }
 
     /**
-     * Kurzform der Anschlüsse: „1× CEE 63 A → 2× CEE 32 A, 6× Schuko“.
+     * Kurzform der Anschlüsse: „1× CEE 63 A → 2× CEE 32 A, 6× Schuko“ – bei
+     * einem Tank sein Inhalt: „3.000 l · Diesel · Quader“.
      */
     public static function kurzform(int $objektId): string
     {
+        $objekt = Database::first('SELECT art, eigenschaften FROM objekte WHERE id = ?', [$objektId]);
+        if ($objekt !== null && !self::elektrisch((string) $objekt['art'])) {
+            return TankService::kurzform($objekt);
+        }
         $typen = self::steckertypenNachId();
         $teile = ['eingang' => [], 'abgang' => []];
         foreach (self::anzahlen($objektId) as $richtung => $je) {
@@ -841,6 +977,7 @@ final class AnlagenService
 
     /**
      * Der Verteilbaum eines Standorts: Quellen oben, Verteilungen darunter.
+     * Tanks stehen nicht darin – durch sie fließt kein Strom.
      *
      * @return list<array<string,mixed>> Knoten mit 'kinder'
      */
@@ -848,6 +985,9 @@ final class AnlagenService
     {
         $objekte = [];
         foreach (self::liste($siteId !== null ? ['site_id' => $siteId] : []) as $o) {
+            if (!self::elektrisch((string) $o['art'])) {
+                continue;
+            }
             $o['kinder'] = [];
             $o['kabel'] = null;
             $objekte[(int) $o['id']] = $o;

@@ -711,6 +711,10 @@ final class LocationBundle
      */
     public static function belegungErsetzen(int $objektId, array $a, array $stecker): array
     {
+        // Ein Tank hat keine Anschlüsse und Schutzorgane – auch nicht aus einer Datei.
+        if (!AnlagenService::elektrisch((string) Database::scalar('SELECT art FROM objekte WHERE id = ?', [$objektId]))) {
+            $a['schutzorgane'] = $a['anschluesse'] = [];
+        }
         $alt = [];
         foreach (Database::select('SELECT id, richtung, nr FROM anschluesse WHERE objekt_id = ?', [$objektId]) as $r) {
             $alt[(int) $r['id']] = $r['richtung'] . ':' . (int) $r['nr'];

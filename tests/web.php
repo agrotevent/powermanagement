@@ -253,6 +253,48 @@ try {
         $art = aufruf($basis, $admin['dose'], 'GET', '/anlagen/' . (int) ($mobil['id'] ?? 0) . '/bearbeiten?art=generator');
         pruefe($art['status'] === 200 && str_contains($art['text'], 'Wird beim Speichern zu „Generator“') && phpMeldung($art['text']) === null, 'Art im Formular umstellbar');
         Database::execute('DELETE FROM leitungen WHERE name LIKE ?', [$kennung . '%']);
+
+        // Tanks: im Plan setzen, eigene Seite ohne Anschlüsse, Formular ohne elektrische Felder, Art bleibt
+        $tank = $setzen(['art' => 'tank', 'fest' => 0, 'name' => $kennung . '-tank']);
+        $tankId = (int) ($tank['id'] ?? 0);
+        pruefe(($tank['ok'] ?? false) && (int) Database::scalar('SELECT COUNT(*) FROM anschluesse WHERE objekt_id = ?', [$tankId]) === 0, 'Karte: Tank gesetzt, ohne Anschlüsse');
+        $r = aufruf($basis, $admin['dose'], 'POST', '/anlagen/speichern', ['id' => $tankId, 'art' => 'tank', 'name' => $kennung . '-tank', 'floor_id' => $etage,
+            'status' => 'geplant', 'nennleistung_kva' => '80', 'eigenschaften' => ['inhalt_l' => '3000', 'kraftstoff' => 'Diesel', 'liter_je_mm' => '2,78'], '_token' => $admin['token']]);
+        pruefe($r['status'] === 302 && $r['ziel'] === '/anlagen/' . $tankId && Database::scalar('SELECT nennleistung_kva FROM objekte WHERE id = ?', [$tankId]) === null,
+            'Tank per Formular gespeichert, ohne Nennleistung → ' . $r['ziel']);
+        foreach (['', '?reiter=anschluesse', '/bearbeiten', '/druck', '/live'] as $zusatz) {
+            $r = aufruf($basis, $admin['dose'], 'GET', '/anlagen/' . $tankId . $zusatz);
+            pruefe($r['status'] === 200 && phpMeldung($r['text']) === null, 'Tank /anlagen/' . $tankId . $zusatz . ' → ' . $r['status'] . ' ' . (string) phpMeldung($r['text']));
+        }
+        foreach (['/anlagen?art=tank', '/anlagen/neu?art=tank', '/anlagen/neu?art=tank&vorlage=1', '/karte/objekt/' . $tankId] as $pfad) {
+            $r = aufruf($basis, $admin['dose'], 'GET', $pfad);
+            pruefe($r['status'] === 200 && phpMeldung($r['text']) === null, 'Admin ' . $pfad . ' → ' . $r['status']);
+        }
+        $seite = aufruf($basis, $admin['dose'], 'GET', '/anlagen/' . $tankId)['text'];
+        pruefe(str_contains($seite, '3.000 l · Diesel') && str_contains($seite, '2,78') && !str_contains($seite, 'Verteilerplan') && !str_contains($seite, '?reiter=anschluesse'),
+            'Tankseite: Daten mit Inhalt, ohne Verteilerplan und Anschluss-Reiter');
+        $form = aufruf($basis, $admin['dose'], 'GET', '/anlagen/' . $tankId . '/bearbeiten?art=generator')['text'];
+        pruefe(!str_contains($form, 'name="nennleistung_kva"') && !str_contains($form, 'name="steuerung_gesperrt"') && str_contains($form, '<legend>Kennlinie</legend>')
+            && !str_contains($form, '<option value="generator"') && !str_contains($form, 'Wird beim Speichern zu'), 'Tank-Formular: ohne elektrische Felder, in Gruppen, Art bleibt Tank');
+        pruefe(str_contains(aufruf($basis, $admin['dose'], 'GET', '/anlagen/neu?art=tank')['text'], 'Neuer Tank'), 'Formular „Neuer Tank“');
+        $mobilForm = aufruf($basis, $admin['dose'], 'GET', '/anlagen/' . (int) ($mobil['id'] ?? 0) . '/bearbeiten?art=tank')['text'];
+        pruefe(!str_contains($mobilForm, '<option value="tank"') && !str_contains($mobilForm, 'Wird beim Speichern zu „Tank“'), 'eine Verteilung lässt sich nicht zum Tank umstellen');
+        $r = aufruf($basis, $admin['dose'], 'POST', '/anlagen/speichern', ['id' => $tankId, 'art' => 'generator', 'name' => $kennung . '-tank', 'floor_id' => $etage, '_token' => $admin['token']]);
+        pruefe($r['status'] === 302 && (string) Database::scalar('SELECT art FROM objekte WHERE id = ?', [$tankId]) === 'tank', 'Tank → Generator über das Formular abgelehnt');
+        $r = json_decode(aufruf($basis, $admin['dose'], 'POST', '/anlagen/' . $tankId . '/anschluesse', ['abgang' => [(int) Database::scalar("SELECT id FROM steckertypen WHERE schluessel = 'cee16'") => 2],
+            '_token' => $admin['token']], $json)['text'], true);
+        pruefe(($r['ok'] ?? true) === false && (int) Database::scalar('SELECT COUNT(*) FROM anschluesse WHERE objekt_id = ?', [$tankId]) === 0, 'Anschlüsse am Tank abgelehnt');
+        $r = $kabel(['von_objekt_id' => (int) ($mobil['id'] ?? 0), 'zu_objekt_id' => $tankId, 'name' => $kennung . '-zum-tank']);
+        pruefe(($r['ok'] ?? true) === false && str_contains((string) ($r['message'] ?? ''), 'Tank'), 'Karte: Kabel zum Tank abgelehnt – ' . (string) ($r['message'] ?? ''));
+        $stand = json_decode(aufruf($basis, $admin['dose'], 'GET', '/karte/' . $etage . '/stand')['text'], true);
+        $imPlan = array_column($stand['objekte'] ?? [], null, 'id');
+        pruefe(($imPlan[$tankId]['elektrisch'] ?? null) === false && str_contains((string) ($imPlan[$tankId]['kurz'] ?? ''), '3.000 l'), 'Karte: Stand kennt den Tank mit Inhalt');
+        $katalog = aufruf($basis, $admin['dose'], 'GET', '/anlagen/katalog')['text'];
+        pruefe(str_contains($katalog, 'href="/anlagen/neu?art=tank&amp;vorlage=1"'), 'Katalog: Knopf „+ Tank-Typ“');
+        pruefe(str_contains($katalog, 'href="/anlagen?art=tank"'), 'Navigation: Tanks');
+        $siteTank = (int) Database::scalar('SELECT site_id FROM objekte WHERE id = ?', [$tankId]);
+        $bereichForm = aufruf($basis, $admin['dose'], 'GET', '/bereiche/neu?standort=' . $siteTank)['text'];
+        pruefe(str_contains($bereichForm, htmlspecialchars($kennung . '-mobil')) && !str_contains($bereichForm, htmlspecialchars($kennung . '-tank')), 'Bereich: Tank nicht wählbar');
     }
 
     // Georeferenz: GeoJSON, Koordinaten im Anlagenfenster, Speichern prüft

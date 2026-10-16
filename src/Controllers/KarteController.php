@@ -155,6 +155,7 @@ final class KarteController extends Controller
                 'kuerzel'   => $art['kuerzel'],
                 'farbe'     => $art['farbe'],
                 'fest'      => $o['fest'] === 1,
+                'elektrisch' => AnlagenService::elektrisch((string) $o['art']),
                 'art_name'  => $o['art_anzeige'],
                 'name'      => $o['name'],
                 'kennung'   => $o['kennung'],
@@ -303,6 +304,7 @@ final class KarteController extends Controller
             'art'         => $objekt['art'],
             'art_name'    => $objekt['art_anzeige'],
             'fest'        => $objekt['fest'] === 1,
+            'elektrisch'  => AnlagenService::elektrisch((string) $objekt['art']),
             'kennung'     => $objekt['kennung'],
             'modell'      => trim($objekt['hersteller'] . ' ' . $objekt['modell']),
             'status'      => AnlagenService::STATUS[$objekt['status']] ?? $objekt['status'],
@@ -327,7 +329,8 @@ final class KarteController extends Controller
                 'passend' => $i['art'] === 'verteilung' && trim((string) $i['vorlage_modell']) === trim((string) $objekt['modell']),
                 'woanders' => $i['einsatz'] !== null ? (string) ($i['einsatz']['anlage_name'] ?? $i['einsatz']['objekt_name']) : null,
             ], array_filter(InventarService::fuerBetrachter(InventarService::liste()), static fn ($i) => $i['zustand'] !== 'defekt' && (int) ($i['einsatz']['objekt_id'] ?? 0) !== $id
-                && ($i['art'] === 'zwischenstecker' || $objekt['art'] === 'verteilung')))) : [],
+                // Zwischenstecker an jede elektrische Anlage, Verteiler nur in eine Verteilung – in einen Tank keins von beiden.
+                && ($i['art'] === 'zwischenstecker' ? AnlagenService::elektrisch((string) $objekt['art']) : $objekt['art'] === 'verteilung')))) : [],
         ]);
     }
 

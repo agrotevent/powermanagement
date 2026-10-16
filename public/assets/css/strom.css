@@ -11,6 +11,8 @@
     --stufe-bad: #dc2626;
     --stufe-stumm: #94a3b8;
     --stufe-keine: #e2e8f0;
+    --tank-pegel: #0d9488;
+    --schlauch: #92400e;
 }
 
 .sidebar .brand .logo { background: linear-gradient(135deg, #b45309, #f59e0b); }
@@ -240,6 +242,12 @@ tr.live-zeile.stufe-stumm td:first-child { box-shadow: inset 4px 0 0 var(--stufe
     border: 4px solid var(--stufe-keine); box-shadow: 0 1px 4px rgba(15, 23, 42, .45);
 }
 .pm-anlage.art-generator .pm-symbol, .pm-anlage.art-anschluss .pm-symbol { border-radius: 50%; }
+/* Tanks: eckig mit gerundetem Boden; von unten füllt sie der Pegel
+   (--fuellstand in %), der Rand bleibt die Stufe. */
+.pm-anlage.art-tank .pm-symbol {
+    border-radius: 3px 3px 8px 8px;
+    background: linear-gradient(to top, var(--tank-pegel) calc(var(--fuellstand, 0) * 1%), var(--art-farbe, #57534e) 0);
+}
 /* Feststromanschlüsse: eckig mit dunklem Außenrahmen – sie gehören zum
    Gelände. Mobile Anlagen bleiben rund bzw. abgerundet. */
 .pm-anlage.fest .pm-symbol { border-radius: 3px; box-shadow: 0 0 0 2px #fff, 0 0 0 4px #0f172a, 0 1px 5px rgba(15, 23, 42, .5); }

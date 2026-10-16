@@ -180,6 +180,18 @@ try {
     gleich(BereichService::mitgliedSchluessel((int) $b2['id']), ['o:' . $v1], 'gelöschtes Messgerät verschwindet aus dem Bereich');
     $mV2 = $mp($v2, 'shellypro3em-catering', 'em:0', 'einspeisung');
 
+    // Ein Tank zählt in keinem Bereich – weder gewählt noch als Mitglied aus älterer Zeit
+    $tank = $neu(['art' => 'tank', 'name' => $kennung . ' Tank', 'eigenschaften' => ['inhalt_l' => '1000']]);
+    $mTank = Database::insert('messpunkte', ['objekt_id' => $tank, 'geraet' => 'shellypro3em-buehne', 'kanal' => 'em:0', 'rolle' => 'einspeisung',
+        'bezeichnung' => '', 'gueltig_ab' => gmdate('c'), 'created_at' => gmdate('c')]);
+    $bt = $bereich(['o:' . $v1, 'o:' . $tank, 'm:' . $mTank]);
+    gleich(BereichService::mitgliedSchluessel((int) $bt['id']), ['o:' . $v1], 'Tank und sein Messgerät werden kein Mitglied');
+    Database::insert('bereich_mitglieder', ['bereich_id' => (int) $bt['id'], 'objekt_id' => $tank, 'messpunkt_id' => null, 'created_at' => gmdate('c')]);
+    gleich($zaehlt($bt), ['o:' . $v1 => true], 'ein Tank als Mitglied zählt nicht mit');
+    if (Config::isDemo()) {
+        gleich(array_keys(BereichService::live($bt)['mitglieder']), ['o:' . $v1], 'Livewert des Bereichs ohne den Tank');
+    }
+
     // Livewerte und Verläufe (Demo-Messwerte)
     if (Config::isDemo()) {
         $b = $bereich(['o:' . $v1, 'o:' . $v2, 'm:' . $mKaffee, 'm:' . $mGAb1], ['grenze_kw' => '200']);

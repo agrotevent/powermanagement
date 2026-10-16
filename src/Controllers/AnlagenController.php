@@ -18,6 +18,7 @@ use App\Support\Flash;
 use App\Support\Request;
 use App\Support\Response;
 use App\Support\Session;
+use App\Tanks\TankService;
 
 final class AnlagenController extends Controller
 {
@@ -117,7 +118,10 @@ final class AnlagenController extends Controller
                 'status' => 'geplant', 'eigenschaften' => [], 'steuerung_gesperrt' => 0, 'ist_vorlage' => $vorlage ? 1 : 0, 'notizen' => '',
             ],
             'standorte' => Zugriff::standorteFiltern(SiteService::all()),
-            'vorlagen'  => AnlagenService::liste(['vorlagen' => true]),
+            // Ein Tank entsteht nur aus einem Tank-Typ, eine elektrische Anlage
+            // nur aus einem elektrischen Katalog-Typ.
+            'vorlagen'  => array_values(array_filter(AnlagenService::liste(['vorlagen' => true]),
+                static fn (array $v): bool => AnlagenService::elektrisch((string) $v['art']) === AnlagenService::elektrisch($art))),
         ]);
     }
 
@@ -128,8 +132,10 @@ final class AnlagenController extends Controller
             return;
         }
         // Art umstellen: das Formular lädt mit ?art= neu, gespeichert wird erst mit „Speichern“.
+        // Nur zwischen elektrischen Arten – ein Tank bleibt ein Tank.
         $art = $request->str('art');
-        $artNeu = isset(AnlagenService::ARTEN[$art]) && $art !== $objekt['art'] ? $art : null;
+        $artNeu = isset(AnlagenService::ARTEN[$art]) && $art !== $objekt['art']
+            && AnlagenService::elektrisch($art) === AnlagenService::elektrisch((string) $objekt['art']) ? $art : null;
         if ($artNeu !== null) {
             $objekt['art'] = $artNeu;
         }
@@ -189,6 +195,11 @@ final class AnlagenController extends Controller
     {
         $objekt = $this->anlage($params);
         if ($objekt === null) {
+            return;
+        }
+        // Ein Tank hat keine Anschlüsse, Sicherungen und Kabel – er hat seine eigene Seite.
+        if (!AnlagenService::elektrisch((string) $objekt['art'])) {
+            $this->view('anlagen/tank', TankService::seitenDaten($objekt));
             return;
         }
         $id = (int) $objekt['id'];

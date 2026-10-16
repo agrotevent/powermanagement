@@ -334,6 +334,8 @@ final class InventarService
                 return ['ok' => false, 'message' => 'Ein Verteiler aus dem Inventar gehört in eine Verteilung, nicht in „' . $objekt['art_name'] . '“.'];
             }
             $anschlussId = null;
+        } elseif (!AnlagenService::elektrisch((string) $objekt['art'])) {
+            return ['ok' => false, 'message' => 'In einen ' . $objekt['art_name'] . ' gehört kein ' . (self::ARTEN[$item['art']] ?? 'Inventarstück') . '.'];
         } elseif ($anschlussId !== null) {
             $anschluss = Database::first('SELECT a.*, t.name AS typ_name FROM anschluesse a JOIN steckertypen t ON t.id = a.steckertyp_id WHERE a.id = ? AND a.objekt_id = ?', [$anschlussId, $objektId]);
             if ($anschluss === null) {
