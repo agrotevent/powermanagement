@@ -491,6 +491,8 @@ try {
         Zugriff::vergessen();
         $s = PartnerAbgleich::uebernehmen($p, $key, null, null, false);
         $sListe = array_column(PartnerAbgleich::locations($p)['locations'], null, 'schluessel')[$key] ?? [];
+        $sAustragen = PartnerService::loeschen($pid);
+        $sNochDa = PartnerService::find($pid) !== null && (int) Database::scalar('SELECT partner_id FROM sites WHERE id = ?', [$halle]) === $pid;
         Auth::alsBenutzer($zeichner);
         Zugriff::vergessen();
         $zF = PartnerAbgleich::uebernehmen($p, $key, null, null, true);
@@ -501,12 +503,14 @@ try {
         $fremd = PartnerAbgleich::uebernehmen($p, $key, $halle, [$f1Key => (string) $flaeche], false);
         $doppelt = PartnerAbgleich::uebernehmen($p, $key, $halle, [$f1Key => (string) $hf1, $f2Key => (string) $hf1], false);
         $neuTrotz = PartnerAbgleich::uebernehmen($p, $key, 0, null, false);
-        return compact('vorher', 'nachher', 's', 'zF', 'fremd', 'doppelt', 'neuTrotz') + ['sAendern' => $sListe['aendern'] ?? null,
+        return compact('vorher', 'nachher', 's', 'zF', 'fremd', 'doppelt', 'neuTrotz', 'sAustragen', 'sNochDa') + ['sAendern' => $sListe['aendern'] ?? null,
             'zAendern' => $zListe['aendern'] ?? null, 'zFeststrom' => $zListe['feststrom'] ?? null, 'nachFremd' => $bild()];
         PHP, ['pid' => $pid, 'key' => $halleKey, 'halle' => $bHalle, 'bHa' => $bHa, 'seher' => (int) $b['seher'], 'zeichner' => (int) $b['zeichner'],
         'admin' => $bAdmin, 'flaeche' => (int) $b['flaeche'], 'f1Key' => $f1Key, 'f2Key' => $f2Key,
         'hf1' => (int) inBAls(null, 'return (int) Database::scalar("SELECT id FROM floors WHERE site_id = ? ORDER BY sort_order LIMIT 1", [$s]);', ['s' => $bHalle])]);
     pruefe(!$r['s']['ok'] && str_contains($r['s']['message'], 'bearbeiten') && $r['sAendern'] === false, 'nur „sehen“ am Standort → abgelehnt: ' . $r['s']['message']);
+    pruefe(!$r['sAustragen']['ok'] && $r['sNochDa'] && str_contains($r['sAustragen']['message'], '„bearbeiten“'),
+        'nur „sehen“ an einem verknüpften Standort → austragen abgelehnt, die Verknüpfung bleibt: ' . $r['sAustragen']['message']);
     pruefe(!$r['zF']['ok'] && str_contains($r['zF']['message'], 'Anlagen ändern') && $r['zAendern'] === true && $r['zFeststrom'] === false,
         'Feststrom ohne „Anlagen ändern“ → abgelehnt: ' . $r['zF']['message']);
     gleich($r['nachher'], $r['vorher'], '… und nichts geändert');
@@ -898,11 +902,13 @@ try {
     Http::$attrappe = null;
 } finally {
     Http::$attrappe = null;
-    alsBenutzer(null);
     if ($maPartner !== null && $maPartner > 0) {
+        // Austragen löst den verknüpften Standort – als Administrator
+        alsBenutzer($benutzer['admin'] ?? null);
         PartnerService::loeschen($maPartner);
         Database::execute("DELETE FROM audit_log WHERE target_type = 'api_partner' AND target_id = ?", [(string) $maPartner]);
     }
+    alsBenutzer(null);
     $geloescht = ['site' => [], 'floor' => []];
     foreach (array_filter(array_merge(array_values($sites), [(int) $maSite])) as $siteId) {
         $geloescht['site'][] = (string) $siteId;

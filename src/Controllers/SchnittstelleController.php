@@ -52,7 +52,8 @@ final class SchnittstelleController extends Controller
             'darf'       => $alles,
             'standorte'  => $alles ? SiteService::all() : [],
             'benutzer'   => $alles ? self::bindbar() : [],
-            'adresse'    => self::adresse(),
+            'adresse'    => self::adresse() ?? self::adresseAusAnfrage(),
+            'vermutet'   => self::adresse() === null,
             'einmal'     => $alles ? self::einmalAusgeben() : '',
             'eingabe'    => $eingabe + [
                 'name'       => '',

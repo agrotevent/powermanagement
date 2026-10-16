@@ -24,6 +24,10 @@ final class DemoSeed
             foreach (['aufbau_posten', 'aufbauten', 'einsaetze', 'inventar_messgeraete', 'inventar', 'bereich_mitglieder', 'bereiche', 'leitungen', 'messpunkte', 'anschluesse', 'schutzorgane', 'objekte', 'datenquellen', 'freigaben', 'floors', 'sites', 'schaltvorgaenge', 'mqtt_zugaenge'] as $tabelle) {
                 Database::execute('DELETE FROM ' . $tabelle);
             }
+            // Wie SiteService::deleteSite: Standort-Freigaben der Tokens
+            // gehen mit, Vorschläge bleiben – nur ohne Standort.
+            Database::execute('DELETE FROM api_token_standorte');
+            Database::execute('UPDATE api_vorschlaege SET site_id = NULL WHERE site_id IS NOT NULL');
             Database::execute("DELETE FROM user_roles WHERE user_id IN (SELECT id FROM users WHERE username IN ('veranstalter', 'technik'))");
             Database::execute("DELETE FROM users WHERE username IN ('veranstalter', 'technik')");
             @unlink(dirname(__DIR__, 2) . '/storage/demo/schalter.json');

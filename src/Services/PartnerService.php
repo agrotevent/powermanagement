@@ -3,6 +3,7 @@ declare(strict_types=1);
 
 namespace App\Services;
 
+use App\Auth\Zugriff;
 use App\Messung\Http;
 use App\Support\Audit;
 use App\Support\Crypto;
@@ -267,6 +268,9 @@ final class PartnerService
      * Verknüpfungen mit dort gehen mit (sonst hingen Standorte und Anlagen an
      * einer Instanz, die es hier nicht mehr gibt).
      *
+     * Das löst jeden verknüpften Standort wie „Lösen“ – also nur, wer an
+     * allen etwas ändern darf.
+     *
      * @return array{ok:bool,message:string}
      */
     public static function loeschen(int $id): array
@@ -276,6 +280,11 @@ final class PartnerService
             return ['ok' => false, 'message' => 'Diese Instanz ist hier nicht eingetragen.'];
         }
         $sites = array_map('intval', array_column(Database::select('SELECT id FROM sites WHERE partner_id = ?', [$id]), 'id'));
+        $fremd = array_filter($sites, static fn (int $siteId): bool => !Zugriff::darfStandortAendern($siteId));
+        if ($fremd !== []) {
+            return ['ok' => false, 'message' => sprintf('Austragen löst die Verknüpfung aller Standorte mit „%s“ – an %d davon darfst du nichts ändern. '
+                . 'Austragen kann nur, wer an allen verknüpften Standorten „bearbeiten“ hat.', (string) $p['name'], count($fremd))];
+        }
         foreach ($sites as $siteId) {
             self::verknuepfungLoesen($siteId);
         }

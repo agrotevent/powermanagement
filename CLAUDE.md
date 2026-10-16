@@ -46,6 +46,23 @@ keine Build-Schritte. JS-Bibliotheken liegen fertig unter `public/assets/vendor`
   gespeichert (nur der Mosquitto-Hash): Gen2 per `MQTT.SetConfig` ans Gerät
   oder von Hand; Gen1 und jedes neue Kennwort genau einmal angezeigt, nie
   per MQTT. Die App startet nie ein Gerät neu.
+- **Schnittstelle `/api/v1`** läuft vor Sitzung und Router (`ApiController`),
+  antwortet nur JSON und nimmt das Token nur aus
+  `Authorization: Bearer mtma_…`. Was ein Token sieht, bestimmen seine
+  Befugnisse und `api_token_standorte` (`App\Auth\ApiZugang`) – nie
+  `Zugriff`. Hinaus geht nur, was auch über Git geht (Standorte, Etagen,
+  Pläne, Maßstab, Georeferenz, Feststrom) – nie Messpunkte, mobile Planung
+  oder Dosen/Racks/APs, auch nicht der Fremdbestand; `location.format`
+  bleibt 1, fehlender Schlüssel heißt „unbekannt“, leere Liste „keine“. Von
+  außen ändert ein Vorschlag, den hier jemand annimmt – oder mit
+  `plaene.schreiben` direkt, aber nur mit passendem Stand (`basis`) oder
+  ausdrücklichem `erzwingen`; dieselben Schutzregeln: dabei und beim
+  Übernehmen bleiben Namen, Schaltsperre, Messpunkte und Georeferenz hier,
+  gelöscht wird nichts, ein Token legt keine Steckertypen an. Übernommenes
+  wird über `partner_schluessel` innerhalb des Standorts zugeordnet, nie
+  über den `sync_key` anderer Standorte. Alles läuft über
+  `LocationUebertrag`; Anfragen an andere Instanzen nur über
+  `PartnerService::anfrage()` (folgt keiner Umleitung).
 - Neue Tabellen oder Spalten kommen als **neue Migration** dazu
   (`database/migrations/00N_*.sql`). Vorhandene Migrationen nie ändern.
 - Oberfläche **mobil zuerst**: Tabellen mit `tabelle-karten` und
@@ -69,10 +86,10 @@ bash -n deploy/*.sh && shellcheck -S warning -e SC2016,SC1111 deploy/*.sh
 
 | Prüfskript | prüft |
 |------------|-------|
-| `tests/zeitfenster.php` | Freigaben, Gültigkeit, Datenfenster, Schalt-Freigaben |
-| `tests/anschluesse.php` | Anschlüsse, Standard-Verteiler, Schutzorgane, Kabel, Spannungsfall, fest/mobil (Anlagen und Kabel) |
+| `tests/zeitfenster.php` | Freigaben, Gültigkeit, Datenfenster, Schalt-Freigaben, ganzer Standort sichtbar |
+| `tests/anschluesse.php` | Anschlüsse, Standard-Verteiler, Schutzorgane, Kabel, Spannungsfall, fest/mobil (Anlagen und Kabel), Messpunkte und Einsätze bleiben beim Ersetzen der Anschlüsse |
 | `tests/inventar.php` | Inventar, Einsatz/Abbau, Gültigkeit der Messpunkte, Bereiche über wechselnde Geräte, Schalten nach Abbau |
-| `tests/location-abgleich.php` | Git-Location-Abgleich mit MasterAdmin-Format; nur Feststromanschlüsse und feste Kabel, mobile Planung bleibt |
+| `tests/location-abgleich.php` | Git-Location-Abgleich mit MasterAdmin-Format; nur Feststromanschlüsse und feste Kabel, mobile Planung bleibt; fehlende Dosen bleiben, Messpunkte nach erneutem Holen; Übertrag der Schnittstelle (`LocationUebertrag`), freie Schlüssel |
 | `tests/verteiler-abgleich.php` | Verteiler-Abgleich: Standard-Verteiler und Inventar hochladen/übernehmen, hier/dort/beide geändert, Shelly-Tausch im Einsatz, Rechte, Entfernen |
 | `tests/aufbau.php` | Aufbau: Plan festhalten, bestätigen/geändert/entfallen/zusätzlich, fertig, beenden, Abgleich (Versatz, Längen, Material, Last) |
 | `tests/bereiche.php` | Bereiche: Summe ohne Doppelzählung, Live/Verlauf, Aufräumen; Materialliste und Kabelstückelung |
@@ -83,8 +100,11 @@ bash -n deploy/*.sh && shellcheck -S warning -e SC2016,SC1111 deploy/*.sh
 | `tests/mqtt-zugaenge.php` | Eigene MQTT-Zugänge von App bis Broker: Gen2 einrichten/übertragen/prüfen/Neustart/neues Kennwort/entfernen, Gen1, Sperre des gemeinsamen Zugangs, Kontoprobe gegen falsche ACLs, keine Geheimnisse (eigener Mosquitto, Shelly-Attrappen) |
 | `tests/influx.php` | InfluxQL: Livewerte, Verläufe, Datenfenster, Energie je Tag (eigene InfluxDB 1.x) |
 | `tests/cloud.php` | ComAp WebSupervisor, Victron VRM (Http-Attrappe) |
-| `tests/web.php` | alle Seiten ohne PHP-Meldung, 403/404, CSRF, Schalt-Ablehnung, Weiterleitungen, Sitzung nach Kennwortwechsel, Benutzerverwaltung ohne Administration, Ändern nur mit „bearbeiten“ (eigener PHP-Server) |
-| `tests/sicherheit.php` | Rechte vergeben, Anmelde-Bremse ohne Kontoerkennung, Geräte zuordnen, Kanal-Freigaben beim Schalten, Schlüssel aus dem Repository, Line Protocol, CSV, Adressen, app.key, PDF-Werkzeuge |
+| `tests/schnittstelle.php` | API Seite A: Token, 401/403/404/405/413 nur JSON, keine Sitzung, Zuschnitt (nur freigegebene Standorte, nur fest, keine Messpunkte/Dosen/Racks/APs), Plandatei-Whitelist, Stand, Zugänge anlegen/anzeigen/widerrufen, keine Geheimnisse (eigener PHP-Server) |
+| `tests/schnittstelle-vorschlaege.php` | Vorschläge: Prüfungen beim Eingang, MasterAdmin-Form, Unterschiede, annehmen nur mit Rechten, Namen/Schaltsperre/Messpunkte/Georeferenz bleiben, ablehnen; direkt schreiben mit `plaene.schreiben` (passender Stand, 409, `erzwingen`, 422 Steckertypen) (eigener PHP-Server) |
+| `tests/schnittstelle-partner.php` | Andere Instanzen: eintragen, Zustände, übernehmen/zuordnen/verknüpfen/lösen nur am Standort, nichts wandert zwischen Standorten, zurückschicken und annehmen, hochladen (409, `erzwingen`), Verbindungsfehler, MasterAdmin-Format (zweite Instanz, Attrappe) |
+| `tests/web.php` | alle Seiten ohne PHP-Meldung, 403/404, CSRF, Schalt-Ablehnung, Weiterleitungen, Sitzung nach Kennwortwechsel, Benutzerverwaltung ohne Administration, Ändern nur mit „bearbeiten“, Seiten der Schnittstelle (Zugänge, andere Instanzen, Vorschläge) und `/api` ohne Sitzung (eigener PHP-Server) |
+| `tests/sicherheit.php` | Rechte vergeben, Anmelde-Bremse ohne Kontoerkennung, Geräte zuordnen, Kanal-Freigaben beim Schalten, Schlüssel aus dem Repository, Line Protocol, CSV, Adressen, app.key, PDF-Werkzeuge, Zugänge der Schnittstelle vergeben, verfälschtes Token, Meldungen anderer Instanzen maskiert, Ansichten ohne Inline-JS |
 | `tests/nodered-funktionen.mjs` | Node-RED-Funktionen, `flows.json` passt zu den Quellen |
 
 Prüfskripte legen eigene Daten mit eindeutiger Kennung an und löschen sie am
@@ -115,7 +135,11 @@ NPM_ROOT=$(npm root -g) node docs/bilder/aufnehmen.mjs http://127.0.0.1:8080
 Für den Verteiler-Abgleich legt das Skript sich ein eigenes Repository im
 Temp-Ordner an (kein Token, nichts auf GitHub) und stellt Einstellungen und
 Abgleich-Vermerke danach wieder her – der Server muss dafür diese
-Arbeitskopie ausliefern (`php` und `git` im PATH). Nur Bilder mit geänderter
+Arbeitskopie ausliefern (`php` und `git` im PATH). Für die Schnittstelle
+startet es eine zweite Instanz (eigene Datenbank im Temp-Ordner, eigener
+PHP-Server auf einem freien Port) und räumt danach Zugänge, Vorschlag, die
+eigens angelegten Standorte und die Plandateien der zweiten Instanz wieder
+weg. Nur Bilder mit geänderter
 Oberfläche einchecken; die übrigen unterscheiden sich nur in Zeiten und
 Messwerten.
 

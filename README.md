@@ -70,6 +70,13 @@ Mehr Bilder in der [Bedienungsanleitung](docs/bedienung.md).
   Verteiler. Je Verteiler steht, ob er hier, dort oder auf beiden Seiten
   geändert wurde; „Alle übernehmen/hochladen“ überschreibt nie eine
   Änderung der anderen Seite.
+- **Schnittstelle zu anderen Instanzen** (`/api/v1`, dasselbe Protokoll wie
+  MasterAdmin): Standorte mit Grundrissen, Maßstab und Georeferenz – unter
+  PowerManagement-Instanzen auch Feststromanschlüsse und feste Kabel –
+  direkt übernehmen, ohne gemeinsames Repository. Zurück je nach Befugnis
+  als Vorschlag, den hier jemand annimmt, oder direkt, aber nur auf dem
+  zuletzt gesehenen Stand. Tokens je Gegenseite, nur für freigegebene
+  Standorte, nie mit Messgeräten.
 
 ## Schnell ausprobieren (Demo-Modus)
 
@@ -110,8 +117,9 @@ Update: **[docs/installation-debian-lxc.md](docs/installation-debian-lxc.md)**.
 | Datei | Inhalt |
 |-------|--------|
 | [docs/installation-debian-lxc.md](docs/installation-debian-lxc.md) | Installation, Update, Sicherung, Fehlersuche |
-| [docs/bedienung.md](docs/bedienung.md) | Übersicht, Karte, Anlagen, Verteilerplan, Aufbau und Abgleich, Inventar, Auswertung, Bereiche, Materialliste, Schalten |
+| [docs/bedienung.md](docs/bedienung.md) | Übersicht, Karte, Anlagen, Verteilerplan, Aufbau und Abgleich, Inventar, Auswertung, Bereiche, Materialliste, Schalten, Location- und Verteiler-Abgleich, andere Instanzen |
 | [docs/rechte.md](docs/rechte.md) | Rollen, Freigaben, Zeitfenster, Schaltrechte je Gerät |
+| [docs/schnittstelle.md](docs/schnittstelle.md) | Schnittstelle zu anderen Instanzen (PowerManagement, MasterAdmin): Zugänge, Übernehmen, Vorschläge, direktes Schreiben, Endpunkte |
 | [docs/datenquellen.md](docs/datenquellen.md) | MQTT-Format, InfluxDB-Schema, Shelly, Victron, ComAp, WireGuard, Sammler, Node-RED |
 
 ## Kommandozeile
@@ -154,11 +162,11 @@ deploy/                   Installation/Update Debian, nginx, PHP-FPM, systemd, M
 docs/                     Dokumentation
 public/                   Einstieg index.php, CSS, JS (Leaflet, uPlot, pdf.js mitgeliefert)
 resources/views/          Vorlagen (PHP)
-src/Auth/                 Anmeldung, Rechte, Freigaben/Zeitfenster (Zugriff)
-src/Controllers/          Seiten
+src/Auth/                 Anmeldung, Rechte, Freigaben/Zeitfenster (Zugriff), Tokens der Schnittstelle (ApiZugang)
+src/Controllers/          Seiten, Schnittstelle /api/v1 (ApiController)
 src/Messung/              InfluxDB, MQTT, Modbus TCP, ComAp, VRM, Sammler, Steuerung, Demo
-src/Services/             Anlagen, Schutzorgane, Leitungen, Messpunkte, Inventar, Aufbau, Live, Bereiche, Material, Standorte, Location- und Verteiler-Abgleich
+src/Services/             Anlagen, Schutzorgane, Leitungen, Messpunkte, Inventar, Aufbau, Live, Bereiche, Material, Standorte, Location- und Verteiler-Abgleich, Schnittstelle
 src/Support/              Router, Datenbank, Sitzung, CSRF, Verschlüsselung …
-storage/                  Datenbank, Grundrisse, Kacheln, Zwischenspeicher, Protokolle
+storage/                  Datenbank, Grundrisse, Kacheln, Zwischenspeicher, Protokolle, eingegangene Vorschläge
 tests/                    Prüfskripte
 ```

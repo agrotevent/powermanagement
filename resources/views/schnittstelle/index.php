@@ -9,7 +9,8 @@
  * @var bool $darf Zugriff::alles() – anlegen, ändern, anzeigen, löschen
  * @var list<array<string,mixed>> $standorte
  * @var list<array{id:int,username:string,aktiv:bool}> $benutzer
- * @var string|null $adresse
+ * @var string $adresse …/api/v1
+ * @var bool $vermutet app.url fehlt – Adresse aus dieser Anfrage
  * @var string $einmal
  * @var array<string,mixed> $eingabe
  */
@@ -29,9 +30,10 @@ $zustandText = ['aktiv' => 'aktiv', 'abgelaufen' => 'abgelaufen', 'widerrufen' =
             Zurück kommen Änderungen als <strong>Vorschlag</strong>, den hier jemand bestätigt – oder mit „schreiben“ direkt, aber nur auf
             einem Stand, den die andere Seite kennt.</p>
         <p class="small mb0">Adresse für die andere Instanz:
-            <?php if ($adresse !== null): ?><code><?= View::e($adresse) ?></code> (dort ohne <code>/api/v1</code> eintragen)
-            <?php else: ?><span class="badge warn">app.url ist nicht gesetzt</span> – in <code>config/config.php</code> unter
-                <code>app.url</code> die Adresse eintragen, unter der diese Instanz erreichbar ist.<?php endif; ?></p>
+            <code><?= View::e($adresse) ?></code> (dort ohne <code>/api/v1</code> eintragen)
+            <?php if ($vermutet): ?><br><span class="badge warn">app.url ist nicht gesetzt</span> – die Adresse ist aus dieser Anfrage
+                abgeleitet und stimmt hinter einem Proxy oft nicht. In <code>config/config.php</code> unter <code>app.url</code> die
+                Adresse eintragen, unter der andere Instanzen diese erreichen.<?php endif; ?></p>
     </div>
 </div>
 

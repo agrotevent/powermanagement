@@ -534,6 +534,43 @@ PDF (wird serverseitig gerastert und gekachelt), PNG/JPG oder SVG.
 Adresse und Token des Repositorys stehen unter **System → Einstellungen →
 Location- und Verteiler-Abgleich**.
 
+## Andere Instanzen (Schnittstelle)
+
+Ohne gemeinsames Repository geht dasselbe direkt von Installation zu
+Installation – auch mit MasterAdmin. Die Instanz, die einen Standort teilt
+(A), gibt unter **System → Schnittstelle (API)** einen Zugang aus: ein Token
+mit Befugnissen und den Standorten, die es sehen bzw. bearbeiten darf.
+
+![Zugänge für andere Instanzen](bilder/schnittstelle.png)
+
+Die Instanz, die übernimmt (B), trägt A unter **Standorte → Andere
+Instanzen** mit Adresse und Token ein. Ihre Seite zeigt je Location von A
+die Etagen, welche Etage hier dazugehört, und wie es steht – *noch nicht
+hier*, *passt zu …*, *aktuell*, *dort geändert*, *hier geändert*, *beide
+geändert*:
+
+![Locations von A, gesehen von B](bilder/instanz.png)
+
+- **Übernehmen** holt Grundrisse, Maßstab und Georeferenz, zwischen zwei
+  PowerManagement-Instanzen auf Wunsch auch die Feststromanschlüsse und
+  festen Kabel. Namen, Schaltsperren und Messpunkte hier bleiben, gelöscht
+  wird nichts; die mobile Planung der Veranstaltung bleibt unberührt.
+- **Zuordnen …** wählt Standort und Etagen hier einzeln; **Nur
+  verknüpfen** merkt sich die Zuordnung, ohne etwas zu holen; **Lösen**
+  nimmt sie wieder weg.
+- Zurück geht es je nach Befugnis bei A: **Hochladen** (A übernimmt gleich,
+  aber nur, wenn sich dort seit dem letzten Übernehmen nichts geändert hat)
+  oder **Als Vorschlag schicken** (bei A bestätigt es jemand).
+
+Vorschläge prüft A unter **Standorte → Änderungsvorschläge**: je Etage, was
+sich ändern würde, dann **Annehmen** (gewählte Etagen und Teile) oder
+**Ablehnen**.
+
+![Ein Änderungsvorschlag mit den Unterschieden je Etage](bilder/vorschlag.png)
+
+Alles Weitere – Befugnisse, Zustände, Zusammenspiel mit MasterAdmin,
+Endpunkte für Skripte – steht in [schnittstelle.md](schnittstelle.md).
+
 ## Verteiler-Abgleich
 
 Was an Verteilern angelegt ist, gleicht **Verteiler-Abgleich** (*Anlagen →

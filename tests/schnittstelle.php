@@ -28,6 +28,7 @@ use App\Services\PlanGeoService;
 use App\Services\PlanMassstabService;
 use App\Services\SchutzService;
 use App\Services\SiteService;
+use App\Support\Config;
 use App\Support\Crypto;
 use App\Support\Database;
 
@@ -418,6 +419,11 @@ try {
     pruefe(str_contains($seite['text'], 'name="sehen[]"') && str_contains($seite['text'], 'name="einmal"'), 'mit „Alle Standorte …“: Formular mit Standorten');
     pruefe(str_contains($seite['text'], View_e($marke . ' voll')) && !str_contains($seite['text'], $tVoll), 'Liste zeigt den Zugang, nicht das Token');
     pruefe(str_contains($seite['text'], 'name="kennwort"'), 'Anzeigen nur mit Kennwortfeld');
+    $appUrl = rtrim(trim((string) Config::get('app.url', '')), '/');
+    pruefe($appUrl !== ''
+        ? str_contains($seite['text'], View_e($appUrl . '/api/v1')) && !str_contains($seite['text'], 'app.url ist nicht gesetzt')
+        : str_contains($seite['text'], View_e($basis . '/api/v1')) && str_contains($seite['text'], 'app.url ist nicht gesetzt'),
+        'Adresse für die Gegenseite: aus app.url, sonst aus der Anfrage mit Hinweis');
     preg_match('/name="einmal" value="([0-9a-f]+)"/', $seite['text'], $m);
     $einmal = $m[1] ?? '';
     $ohneAlles = ui($basis, $verwalter['dose'], 'GET', '/system/schnittstelle');
