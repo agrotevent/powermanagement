@@ -625,12 +625,15 @@ fi
 find "$ZIEL" -path "$ZIEL/storage" -prune -o ! -path "$ZIEL/config/config.php" \
     -exec chown root:root {} + -exec chmod go+rX,go-w {} +
 install -d -o "$APP_USER" -g "$APP_USER" -m 750 "$ZIEL/storage"
+# Was aus dem Repository kommt (storage/logs, cache, plans … mit .gitkeep),
+# hat git als root angelegt – erst der Anwendung übereignen, sonst darf sie
+# die Rechte daran nicht setzen. -R folgt keinen Verweisen (-P ist die
+# Vorgabe) und ändert nur die Einträge selbst.
+chown -R -P "$APP_USER:$APP_USER" "$ZIEL/storage"
 # mqtt/: Soll und Ergebnis der eigenen MQTT-Zugänge (deploy/mqtt-zugaenge.sh)
-for d in logs plans demo cache sessions backups mqtt mqtt/soll mqtt/ist; do
+for d in logs plans demo cache inventar sessions backups mqtt mqtt/soll mqtt/ist; do
     app_verzeichnis "$ZIEL/storage/$d"
 done
-# -R folgt keinen Verweisen (-P ist die Vorgabe) und ändert nur die Einträge selbst.
-chown -R -P "$APP_USER:$APP_USER" "$ZIEL/storage"
 
 HOST_IP="$(primary_ip)"
 if [[ "$PORT" == "80" ]]; then
