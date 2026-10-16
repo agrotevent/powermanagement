@@ -5,7 +5,7 @@ use App\Support\Settings;
 use App\Support\View;
 
 $title = 'Einstellungen';
-$subtitle = 'InfluxDB, MQTT, Grenzwerte, Location-Abgleich, Eventworx';
+$subtitle = 'InfluxDB, MQTT, Grenzwerte, Location-Abgleich, Firma & Übergabeberichte, Eventworx';
 $feld = static function (string $schluessel, string $typ = 'text', string $platzhalter = '') use ($werte): string {
     $name = str_replace('.', '__', $schluessel);
     $wert = $werte[$schluessel] ?? '';
@@ -76,6 +76,83 @@ $feld = static function (string $schluessel, string $typ = 'text', string $platz
                 placeholder="<?= $geheim['repo'] === 'eingetragen' ? 'hinterlegt – leer lassen zum Behalten' : ($geheim['repo'] === 'umgebung' ? 'kommt aus der Umgebung' : '') ?>">
                 <div class="help">Verschlüsselt abgelegt, nie wieder angezeigt. „-“ entfernt es. Alternativ Umgebungsvariable POWERMANAGEMENT_REPO_TOKEN im PHP-FPM-Pool.</div></div>
         </div>
+    </div>
+    <div class="card-footer"><button class="btn btn-primary" type="submit">Speichern</button></div>
+</form>
+
+<?php
+$bw = $berichte;
+$bname = static fn (string $schluessel): string => str_replace('.', '__', $schluessel);
+$bfeld = static function (string $schluessel, string $label, string $hilfe = '', string $platzhalter = '', int $max = 190) use ($bw, $bname): string {
+    $id = 'f_' . $bname($schluessel);
+    return '<div class="field"><label for="' . $id . '">' . View::e($label) . '</label>'
+        . '<input id="' . $id . '" name="' . $bname($schluessel) . '" maxlength="' . $max . '" value="' . View::e($bw[$schluessel] ?? '') . '"'
+        . ($platzhalter !== '' ? ' placeholder="' . View::e($platzhalter) . '"' : '') . '>'
+        . ($hilfe !== '' ? '<div class="help">' . View::e($hilfe) . '</div>' : '') . '</div>';
+};
+$btext = static function (string $schluessel, string $label, string $hilfe = '', int $zeilen = 3, int $max = 2000) use ($bw, $bname): string {
+    $id = 'f_' . $bname($schluessel);
+    return '<div class="field"><label for="' . $id . '">' . View::e($label) . '</label>'
+        . '<textarea id="' . $id . '" name="' . $bname($schluessel) . '" rows="' . $zeilen . '" maxlength="' . $max . '">' . View::e($bw[$schluessel] ?? '') . '</textarea>'
+        . ($hilfe !== '' ? '<div class="help">' . View::e($hilfe) . '</div>' : '') . '</div>';
+};
+$bwahl = static function (string $schluessel, string $label, array $optionen, string $hilfe = '') use ($bw, $bname): string {
+    $id = 'f_' . $bname($schluessel);
+    $html = '<div class="field"><label for="' . $id . '">' . View::e($label) . '</label><select id="' . $id . '" name="' . $bname($schluessel) . '">';
+    foreach ($optionen as $w => $t) {
+        $html .= '<option value="' . View::e((string) $w) . '"' . ((string) ($bw[$schluessel] ?? '') === (string) $w ? ' selected' : '') . '>' . View::e($t) . '</option>';
+    }
+    return $html . '</select>' . ($hilfe !== '' ? '<div class="help">' . View::e($hilfe) . '</div>' : '') . '</div>';
+};
+$gewaehlteNormen = array_filter(array_map('trim', explode(',', (string) ($bw['berichte.normen'] ?? ''))));
+?>
+<form method="post" action="/system/einstellungen/firma" class="card mt" id="firma">
+    <?= Csrf::field() ?>
+    <div class="card-head"><h2>Firma &amp; Übergabeberichte</h2><span class="hint">Kopf und Fuß der Berichte, Nummern, Vorgaben, Texte</span></div>
+    <div class="card-body grid grid-2">
+        <div>
+            <h3>Firmendaten</h3>
+            <?= $bfeld('firma.name', 'Firmenname', 'Pflicht vor der ersten Prüfer-Unterschrift – steht im Kopf als Auftragnehmer.', '', 120) ?>
+            <?= $bfeld('firma.zusatz', 'Zusatz', 'z. B. „Veranstaltungstechnik“ – unter dem Namen im Kopf.') ?>
+            <?= $btext('firma.anschrift', 'Anschrift', '', 3, 500) ?>
+            <?= $btext('firma.kontakt', 'Kontakt', 'Telefon, E-Mail, Web – im Fuß.', 3, 500) ?>
+            <?= $btext('firma.bank', 'Bankverbindung', 'Optional, im Fuß.', 3, 500) ?>
+            <?= $btext('firma.register', 'Register und Geschäftsführung',
+                'Bei einer GmbH gehören Sitz, Registergericht, Registernummer und Geschäftsführer auf Geschäftsbriefe (§ 35a GmbHG).', 3, 500) ?>
+        </div>
+        <div>
+            <h3>Berichte</h3>
+            <div class="field-row">
+                <?= $bfeld('berichte.praefix', 'Kürzel der Nummer', '1–6 Großbuchstaben: UB-2026-0042.', 'UB', 6) ?>
+                <?= $bfeld('berichte.aufbewahrung_jahre', 'Aufbewahrung (Jahre)', 'bis 31.12. des Jahres Prüfdatum + Jahre', '10', 2) ?>
+            </div>
+            <div class="field-row">
+                <?= $bfeld('berichte.ort', 'Ort (Ersatz)', 'Wenn der Standort keine Anschrift hat.', '', 120) ?>
+                <?= $bfeld('berichte.bereitschaft', 'Bereitschaft (Telefon)', 'In der Einweisung und im Bericht.', '', 120) ?>
+            </div>
+            <fieldset><legend>Prüfung nach (Vorgabe)</legend>
+                <input type="hidden" name="berichte__normen[]" value="">
+                <?php foreach (\App\Berichte\Katalog::normen() as $k => $t): ?>
+                    <label class="check"><input type="checkbox" name="berichte__normen[]" value="<?= View::e($k) ?>"<?= in_array($k, $gewaehlteNormen, true) ? ' checked' : '' ?>> <span><?= View::e($t) ?></span></label>
+                <?php endforeach; ?>
+            </fieldset>
+            <div class="field-row">
+                <?= $bwahl('berichte.riso_u', 'Messspannung R_iso', ['250' => '250 V', '500' => '500 V', '1000' => '1000 V']) ?>
+                <?= $bwahl('berichte.zs_faktor', 'Faktor für Zs', ['1.0' => '1,0', '0.8' => '0,8', '0.67' => '0,67'], 'Zs ≤ f · U0 / Ia') ?>
+                <?= $bwahl('berichte.ul', 'Berührungsspannung U_L', ['50' => '50 V', '25' => '25 V']) ?>
+            </div>
+            <div class="field-row">
+                <?= $bfeld('berichte.erde_generator', 'Erdung Generator (Ω)', 'Grenzwert im TN-System', '50', 12) ?>
+                <?= $bfeld('berichte.rpe_hinweis', 'R_PE Hinweis ab (Ω)', '', '1,0', 12) ?>
+            </div>
+            <p class="help">Neue Berichte übernehmen diese Werte beim Anlegen und behalten sie – eine Änderung hier wirkt nur auf neue Berichte.</p>
+        </div>
+    </div>
+    <div class="card-body grid grid-2">
+        <?= $btext('berichte.text_kunde', 'Text zur Kundenbestätigung', 'Was der Kunde mit der Unterschrift bestätigt (nicht den prüftechnischen Inhalt).', 4, 2000) ?>
+        <?= $btext('berichte.text_einweisung', 'Text zur Einweisung', '{telefon} wird durch die Bereitschaft ersetzt.', 4, 2000) ?>
+        <?= $btext('berichte.text_errichter', 'Text der Errichterbestätigung', 'DGUV Vorschrift 3 § 5 Abs. 4 – nur bei „entspricht: Ja“.', 4, 2000) ?>
+        <?= $btext('berichte.datenschutz', 'Datenschutzhinweis (Art. 13 DSGVO)', 'Steht über der Unterschrift des Kunden.', 4, 3000) ?>
     </div>
     <div class="card-footer"><button class="btn btn-primary" type="submit">Speichern</button></div>
 </form>

@@ -5,10 +5,12 @@ namespace App\Controllers;
 
 use App\Auth\Auth;
 use App\Auth\Zugriff;
+use App\Berichte\BerichtService;
 use App\Services\AnlagenService;
 use App\Services\AufbauService;
 use App\Services\LeitungService;
 use App\Services\SiteService;
+use App\Support\Database;
 use App\Support\Flash;
 use App\Support\Request;
 use App\Support\Response;
@@ -35,6 +37,20 @@ final class AufbauController extends Controller
             return null;
         }
         return $a;
+    }
+
+    /** Die Übergabeberichte des Aufbaus für die Karte in Aufbau und Abgleich. */
+    private function berichte(array $a): array
+    {
+        if (!Auth::can('berichte.view')) {
+            return ['berichte' => null];
+        }
+        $am = Database::scalar('SELECT MAX(am) FROM aufbau_posten WHERE aufbau_id = ?', [(int) $a['id']]);
+        return [
+            'berichte'        => BerichtService::liste(['aufbau_id' => (int) $a['id']]),
+            'berichtNeu'      => Auth::can('berichte.manage') && Zugriff::darfStandortAendern((int) $a['site_id']),
+            'aufbauGeaendert' => is_string($am) ? $am : null,
+        ];
     }
 
     public function index(Request $request): void
@@ -82,7 +98,7 @@ final class AufbauController extends Controller
             'etage'      => $etage,
             'darf'       => Zugriff::darfAufStandortAnlegen((int) $a['site_id']),
             'darfKabel'  => Auth::can('leitungen.manage'),
-        ]);
+        ] + $this->berichte($a));
     }
 
     /** Eine Position bestätigen, ändern, entfallen lassen oder zurücknehmen. */
@@ -153,7 +169,7 @@ final class AufbauController extends Controller
             'aufbau'   => $a,
             'abgleich' => AufbauService::abgleich($a),
             'betrieb'  => AufbauService::betrieb($a),
-        ]);
+        ] + $this->berichte($a));
     }
 
     public function druck(Request $request, array $params): void

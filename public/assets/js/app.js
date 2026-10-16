@@ -22,6 +22,23 @@ document.addEventListener('DOMContentLoaded', function () {
         });
     }
 
+    /*
+     * Abmelden räumt die lokalen Entwürfe der Übergabeberichte weg
+     * (pm-bericht:<id>:<benutzer>): Tablets werden geteilt, und was hier
+     * noch stünde, sähe der Nächste nach seiner Anmeldung nicht – es läge
+     * aber im Speicher des Geräts.
+     */
+    document.querySelectorAll('form[action="/logout"]').forEach(function (formular) {
+        formular.addEventListener('submit', function () {
+            try {
+                for (var i = window.localStorage.length - 1; i >= 0; i--) {
+                    var schluessel = window.localStorage.key(i);
+                    if (schluessel && schluessel.indexOf('pm-bericht:') === 0) { window.localStorage.removeItem(schluessel); }
+                }
+            } catch (e) { /* privater Modus: nichts gespeichert */ }
+        });
+    });
+
     // Port-Kacheln: Klick markiert die Checkbox – oder das Optionsfeld.
     document.querySelectorAll('.port input[type=checkbox], .port input[type=radio]').forEach(function (box) {
         var tile = box.closest('.port');

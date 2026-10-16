@@ -12,6 +12,10 @@ $e = $item['einsatz'];
     <?php elseif ($e !== null): ?><span class="badge info">im Einsatz</span>
     <?php else: ?><span class="badge ok">im Lager</span><?php endif; ?>
     <?php if ($item['seriennummer'] !== ''): ?><span class="small muted">Seriennummer <?= View::e($item['seriennummer']) ?></span><?php endif; ?>
+    <?php if (View::can('berichte.view')): ?>
+        <span class="small">Letzte Prüfung: <?php if (!empty($letztePruefung)): ?><a href="/berichte/<?= (int) $letztePruefung['id'] ?>"><?= View::e((string) ($letztePruefung['nummer'] ?? ('#' . $letztePruefung['id']))) ?></a>
+            am <?= View::e(preg_replace('/^(\d{4})-(\d{2})-(\d{2})$/', '$3.$2.$1', (string) $letztePruefung['pruefdatum'])) ?><?php else: ?><span class="muted">keine</span><?php endif; ?></span>
+    <?php endif; ?>
     <div class="spacer"></div>
     <?php if ($darf): ?>
         <div class="btn-row">

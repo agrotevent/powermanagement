@@ -3,6 +3,7 @@ declare(strict_types=1);
 
 namespace App\Controllers;
 
+use App\Berichte\Einstellungen;
 use App\Messung\Influx;
 use App\Messung\Messdaten;
 use App\Messung\Mqtt;
@@ -26,6 +27,7 @@ final class EinstellungenController extends Controller
                 'repo'    => LocationSync::tokenQuelle(),
             ],
             'eventworx' => Eventworx::zustand(),
+            'berichte'  => Einstellungen::alle(),
         ]);
     }
 
@@ -87,6 +89,26 @@ final class EinstellungenController extends Controller
         Audit::log('einstellungen.location', 'settings', '', ['repo' => $adresse]);
         Flash::success($meldung);
         $this->redirect('/system/einstellungen');
+    }
+
+    /**
+     * Firma & Übergabeberichte: Firmendaten für Kopf und Fuß, Nummernkürzel,
+     * Vorgaben und Texte. Ein ungültiger Wert verwirft die ganze Eingabe.
+     * Namen im Formular: „firma.name“ → „firma__name“ (PHP machte aus dem
+     * Punkt einen Unterstrich).
+     */
+    public function firma(Request $request): void
+    {
+        $daten = [];
+        foreach (array_keys(Einstellungen::VORGABEN) as $schluessel) {
+            $feld = str_replace('.', '__', $schluessel);
+            if (array_key_exists($feld, $_POST)) {
+                $daten[$schluessel] = $_POST[$feld];
+            }
+        }
+        $ergebnis = Einstellungen::speichern($daten);
+        $ergebnis['ok'] ? Flash::success($ergebnis['message']) : Flash::error($ergebnis['message']);
+        $this->redirect('/system/einstellungen#firma');
     }
 
     /** Eventworx: Mandant und API-Token – das Token gilt nur für den Host, für den es eingetragen wird. */

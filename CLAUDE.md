@@ -52,6 +52,9 @@ keine Build-Schritte. JS-Bibliotheken liegen fertig unter `public/assets/vendor`
   (`BerichtSchema`, `Kanon` – nie Gleitkomma); IDs der Stromkreise setzt nur
   der Server. Messwerte nie vorbelegen; bewertet wird nur auf dem Server
   (`Grenzwerte`). Unterschriften nur als Striche, nie Zeit oder Druck.
+  Formulare mit vielen Feldern (Bericht) senden ihren Zustand als **ein
+  JSON-Feld** – `max_input_vars` schnitte sonst still ab; der Zustand steht
+  in den Feldern (`data-feld`), nicht als JSON in der Seite.
 - **Eventworx nur lesend** über `App\Services\Eventworx` (GET, feste
   Pfadliste, Token verschlüsselt und an den Host gebunden). Kundendaten und
   Token nie in Log, Audit oder Antworten. `Http` folgt keiner Umleitung.
@@ -94,7 +97,7 @@ bash -n deploy/*.sh && shellcheck -S warning -e SC2016,SC1111 deploy/*.sh
 | `tests/cloud.php` | ComAp WebSupervisor, Victron VRM (Http-Attrappe) |
 | `tests/berichte.php` | Übergabeberichte: Vorbelegung aus Plan/Schutzorganen/Kabeln/Inventar (Messwerte nie), Grenzwerte (Zs/Ik, R_iso, RCD, TT/IT, Erdung), Speichern (Version/409, 422, IDs nur vom Server, kein Gleitkomma), Abschluss-Prüfung, Kunde aus früherem Bericht, Sichtbarkeit mit Datenfenster, Löschen/Verwerfen, Lösch-Abläufe, Aufbewahrung, Datenschutz |
 | `tests/eventworx.php` | Eventworx nur lesend: Adresse, Token an den Host gebunden, Pfadliste, Anfragen, Aufbereitung ohne Beträge/Notizen, Fehlerantworten, Nachlesen bei `data:null`, Drossel, Demo, keine Geheimnisse in Log/Audit/Meldungen (Http-Attrappe) |
-| `tests/web.php` | alle Seiten ohne PHP-Meldung, 403/404, CSRF (mit `Accept: application/json` 419/401 als JSON), Schalt-Ablehnung, Weiterleitungen, Sitzung nach Kennwortwechsel, Benutzerverwaltung ohne Administration, Ändern nur mit „bearbeiten“ (eigener PHP-Server) |
+| `tests/web.php` | alle Seiten ohne PHP-Meldung, 403/404, CSRF (mit `Accept: application/json` 419/401 als JSON), Schalt-Ablehnung, Weiterleitungen, Sitzung nach Kennwortwechsel, Benutzerverwaltung ohne Administration, Ändern nur mit „bearbeiten“, Übergabeberichte (Seiten, Autosave 200/409/422/423, Eventworx-Demo, Firma-Karte, Prüfer-Qualifikation, Rechte von Kunde und Planer) (eigener PHP-Server) |
 | `tests/sicherheit.php` | Rechte vergeben, Anmelde-Bremse ohne Kontoerkennung, Geräte zuordnen, Kanal-Freigaben beim Schalten, Schlüssel aus dem Repository, Line Protocol, CSV, Adressen, keine Umleitung mit Token (curl und Streams), app.key, PDF-Werkzeuge |
 | `tests/nodered-funktionen.mjs` | Node-RED-Funktionen, `flows.json` passt zu den Quellen |
 

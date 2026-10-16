@@ -8,6 +8,7 @@ use App\Controllers\AuditController;
 use App\Controllers\AufbauController;
 use App\Controllers\AuthController;
 use App\Controllers\BereichController;
+use App\Controllers\BerichtController;
 use App\Controllers\BenutzerController;
 use App\Controllers\DashboardController;
 use App\Controllers\DatenquellenController;
@@ -16,6 +17,7 @@ use App\Controllers\EinstellungenController;
 use App\Controllers\KarteController;
 use App\Controllers\LocationController;
 use App\Controllers\ManifestController;
+use App\Controllers\PruefgeraeteController;
 use App\Controllers\MqttZugaengeController;
 use App\Controllers\StandortController;
 use App\Controllers\StatistikController;
@@ -96,6 +98,23 @@ $router->post('/aufbau/{id}/beenden', [AufbauController::class, 'beenden'], 'anl
 $router->post('/aufbau/{id}/loeschen', [AufbauController::class, 'loeschen'], 'anlagen.manage');
 $router->get('/aufbau/{id}/abgleich', [AufbauController::class, 'abgleich'], 'anlagen.view');
 $router->get('/aufbau/{id}/druck', [AufbauController::class, 'druck'], 'anlagen.view');
+
+// Übergabeberichte – das Recht prüft die Route, „woran“ BerichtService::sichtbar/darf*.
+// Feste Pfade vor /berichte/{id}: {id} passt auf jedes Wort.
+$router->get('/berichte', [BerichtController::class, 'index'], 'berichte.view');
+$router->get('/berichte/neu', [BerichtController::class, 'neu'], 'berichte.manage');
+$router->post('/berichte/anlegen', [BerichtController::class, 'anlegen'], 'berichte.manage');
+$router->get('/berichte/pruefgeraete', [PruefgeraeteController::class, 'index'], 'berichte.view');
+$router->post('/berichte/pruefgeraete/speichern', [PruefgeraeteController::class, 'speichern'], 'berichte.manage');
+$router->get('/berichte/{id}', [BerichtController::class, 'show'], 'berichte.view');
+$router->post('/berichte/{id}/speichern', [BerichtController::class, 'speichern'], 'berichte.manage');
+$router->post('/berichte/{id}/kreise', [BerichtController::class, 'kreise'], 'berichte.manage');
+$router->post('/berichte/{id}/kunde-aus', [BerichtController::class, 'kundeAus'], 'berichte.manage');
+$router->post('/berichte/{id}/eventworx/suche', [BerichtController::class, 'eventworxSuche'], 'berichte.eventworx');
+$router->post('/berichte/{id}/eventworx/vorgang', [BerichtController::class, 'eventworxVorgang'], 'berichte.eventworx');
+$router->post('/berichte/{id}/pruefen', [BerichtController::class, 'pruefen'], 'berichte.manage');
+$router->post('/berichte/{id}/verwerfen', [BerichtController::class, 'verwerfen'], 'berichte.pruefen');
+$router->post('/berichte/{id}/loeschen', [BerichtController::class, 'loeschen'], 'berichte.manage');
 
 // Inventar: Verteiler und Zwischenstecker mit Shellys, Einsatz beim Aufbau.
 $router->get('/inventar', [InventarController::class, 'index'], 'datenquellen.view');
@@ -189,6 +208,8 @@ $router->post('/system/einstellungen/pruefen', [EinstellungenController::class, 
 // Adresse und Zweig des Repositorys: nur mit „Einstellungen ändern“ – wer die
 // Adresse umstellt, lenkt das hinterlegte Token dorthin.
 $router->post('/system/einstellungen/location', [EinstellungenController::class, 'location'], 'settings.manage');
+// Firma & Übergabeberichte: Firmendaten für Kopf und Fuß, Nummernkürzel, Vorgaben, Texte.
+$router->post('/system/einstellungen/firma', [EinstellungenController::class, 'firma'], 'settings.manage');
 // Eventworx (Kundendaten für Übergabeberichte, nur lesend): Mandant, Token, Verbindungstest.
 $router->post('/system/einstellungen/eventworx', [EinstellungenController::class, 'eventworx'], 'settings.manage');
 $router->post('/system/einstellungen/eventworx/pruefen', [EinstellungenController::class, 'eventworxPruefen'], 'settings.manage');
