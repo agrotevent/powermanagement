@@ -167,6 +167,16 @@ Standorten), für das Inventar „Inventar pflegen“. Was jemand nicht pflegen
 darf, wird übergangen und in der Meldung genannt. Hochladen und aus dem
 Repository entfernen braucht „… ins Repository hochladen“.
 
+## Katalog importieren
+
+Einen Katalog importieren (*Standard-Verteiler → Importieren …*) darf, wer
+„Anlagen ändern“ **und** „Alle Standorte, Anlagen und Messdaten“ hat – der
+Katalog gilt für alle Standorte. Bringt die Datei Steckertypen mit, die es
+hier noch nicht gibt, braucht es dazu „Steckverbinder-Katalog pflegen“;
+sonst wird nichts übernommen, und die Meldung nennt die fehlenden
+Steckertypen. Danach gelten für die Typen dieselben Rechte wie für jeden
+Standard-Verteiler.
+
 ## MQTT-Zugänge
 
 Die Liste *Messtechnik → MQTT-Zugänge* sieht, wer „Datenquellen ansehen“

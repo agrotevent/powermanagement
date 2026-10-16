@@ -115,7 +115,7 @@ $zahl = static fn ($v) => $v === null ? '' : rtrim(rtrim(number_format((float) $
                 </div>
                 <?php foreach (AnlagenService::FELDER[$art] as $schluessel => [$beschriftung, $typ, $zusatz]): ?>
                     <div class="field">
-                        <label for="e_<?= $schluessel ?>"><?= View::e($beschriftung) ?><?= $typ === 'zahl' && $zusatz !== '' ? ' (' . View::e($zusatz) . ')' : '' ?></label>
+                        <label for="e_<?= $schluessel ?>"><?= View::e($beschriftung) ?><?= $typ !== 'auswahl' && $zusatz !== '' ? ' (' . View::e($zusatz) . ')' : '' ?></label>
                         <?php $wert = $objekt['eigenschaften'][$schluessel] ?? ''; ?>
                         <?php if ($typ === 'auswahl'): ?>
                             <select id="e_<?= $schluessel ?>" name="eigenschaften[<?= $schluessel ?>]">

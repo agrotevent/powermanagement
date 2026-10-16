@@ -8,6 +8,7 @@ use App\Auth\Zugriff;
 use App\Messung\Messdaten;
 use App\Services\AnlagenService;
 use App\Services\InventarService;
+use App\Services\KatalogImport;
 use App\Services\LeitungService;
 use App\Services\LiveService;
 use App\Services\MesspunktService;
@@ -72,7 +73,14 @@ final class AnlagenController extends Controller
             $v['schutz'] = count(SchutzService::liste((int) $v['id']));
         }
         unset($v);
-        $this->view('anlagen/katalog', ['vorlagen' => $vorlagen]);
+        // Was der letzte Import angelegt oder ersetzt hat – einmal markiert.
+        $importiert = Session::get('katalog_importiert');
+        Session::forget('katalog_importiert');
+        $this->view('anlagen/katalog', [
+            'vorlagen'   => $vorlagen,
+            'importiert' => is_array($importiert) ? $importiert : [],
+            'darfImport' => KatalogImport::erlaubt()['katalog'],
+        ]);
     }
 
     public function baum(Request $request): void

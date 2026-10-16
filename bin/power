@@ -31,6 +31,11 @@ declare(strict_types=1);
  *                                   --alle: was im Repository neu oder neuer ist
  *   bin/power verteiler:hochladen --alle | <typ|inventar> <schlüssel>
  *                                   --alle: was nur hier steht oder hier geändert wurde
+ *   bin/power katalog:import <datei> [--ueberschreiben] [--pruefen]
+ *                                   Standard-Verteiler und Aggregate aus einem Katalog-Paket
+ *                                   (z. B. resources/kataloge/*.json): legt die neuen an; was
+ *                                   hier anders steht (korrigiert), nur mit --ueberschreiben.
+ *                                   --pruefen zeigt nur, was geschähe. Je Typ eine Zeile
  *   bin/power mqtt:zugaenge         Shellys mit gemeinsamem oder eigenem MQTT-Zugang (ohne Geheimnisse)
  *   bin/power mqtt:vorpruefen <präfix> | --alle
  *                                   Gen2, nur lesend: antwortet das Gerät an einen Absender in
@@ -47,7 +52,7 @@ declare(strict_types=1);
  *                                   (als Besitzer von storage/mqtt, z. B. sudo -u www-data)
  *   bin/power demo:seed [--reset]   Demo-Gelände mit Anlagen, Kabeln und Benutzern anlegen
  *   bin/power wartung               Protokolle aufräumen, abgebrochene MQTT-Prüfungen
- *                                   zurücksetzen (täglich per Timer)
+ *                                   zurücksetzen, alte Import-Vorschauen löschen (täglich per Timer)
  */
 
 require dirname(__DIR__) . '/src/bootstrap.php';
@@ -61,10 +66,12 @@ use App\Messung\Sammler;
 use App\Services\AnlagenService;
 use App\Services\BenutzerService;
 use App\Services\DemoSeed;
+use App\Services\KatalogImport;
 use App\Services\LocationSync;
 use App\Services\PlanTileService;
 use App\Services\SiteService;
 use App\Services\VerteilerSync;
+use App\Support\Audit;
 use App\Support\Config;
 use App\Support\Crypto;
 use App\Support\Database;
@@ -346,6 +353,49 @@ switch ($befehl) {
         $ergebnis['ok'] ? $aus($ergebnis['message']) : $fehler($ergebnis['message']);
         break;
 
+    case 'katalog:import':
+        $datei = (string) ($werte[0] ?? '');
+        if ($datei === '' || !is_file($datei) || !is_readable($datei)) {
+            $fehler('Bitte eine lesbare Datei angeben: bin/power katalog:import <datei> [--ueberschreiben] [--pruefen]');
+        }
+        $stand = KatalogImport::lesen((string) file_get_contents($datei));
+        if (!$stand['ok']) {
+            $fehler($stand['message']);
+        }
+        $aus(($stand['quelle'] !== '' ? $stand['quelle'] : basename($datei)) . ': ' . count($stand['typen']) . ' Typen');
+        foreach ($stand['typen'] as $t) {
+            $aus(sprintf('  %-7s %s', $t['zustand'], $t['name'])
+                . ($t['fehler'] !== null ? ' – ' . $t['fehler'] : '')
+                . ($t['unterschiede'] !== [] ? ' – hier anders: ' . implode(', ', $t['unterschiede']) : ''));
+        }
+        foreach ($stand['steckertypen'] as $s) {
+            $aus('  Steckertyp neu: ' . $s['name'] . ' (' . $s['schluessel'] . ')');
+        }
+        $z = $stand['zahlen'];
+        if (isset($optionen['pruefen'])) {
+            $aus(sprintf('Geprüft: %d neu, %d schon da, %d hier anders, %d mit Fehler – nichts geändert.', $z['neu'], $z['gleich'], $z['anders'], $z['fehler']));
+            break;
+        }
+        $neu = $ueber = [];
+        foreach ($stand['typen'] as $t) {
+            if ($t['zustand'] === 'neu') {
+                $neu[] = $t['schluessel'];
+            } elseif ($t['zustand'] === 'anders' && isset($optionen['ueberschreiben'])) {
+                $ueber[] = $t['schluessel'];
+            }
+        }
+        Audit::akteur('cli');
+        $ergebnis = KatalogImport::uebernehmen((array) $stand['paket'], $neu, $ueber, ['katalog' => true, 'stecker' => true]);
+        Audit::akteur(null);
+        if (!$ergebnis['ok']) {
+            $fehler($ergebnis['message']);
+        }
+        $aus($ergebnis['message']);
+        if ($z['anders'] > 0 && !isset($optionen['ueberschreiben'])) {
+            $aus('Hier anders stehende Typen bleiben – mit --ueberschreiben werden sie durch die Datei ersetzt.');
+        }
+        break;
+
     case 'mqtt:zugaenge':
         $fehlerText = null;
         foreach (MqttZugaenge::uebersicht($fehlerText) as $z) {
@@ -461,6 +511,10 @@ switch ($befehl) {
         $aus("Aufgeräumt: {$a} Audit-Einträge, {$s} Schaltvorgänge (älter als 400 Tage).");
         foreach (MqttZugaenge::wartung() as $meldung) {
             $aus($meldung);
+        }
+        $vorschauen = KatalogImport::aufraeumen();
+        if ($vorschauen > 0) {
+            $aus("Aufgeräumt: {$vorschauen} abgelaufene Vorschau(en) des Katalog-Imports.");
         }
         break;
 

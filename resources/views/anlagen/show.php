@@ -150,7 +150,7 @@ $messgeraet = static function (array $m) use ($objekt, $auswertung, $live): stri
                     <dt>Netz</dt><dd><?= (int) $objekt['phasen'] ?>~ <?= (int) $objekt['spannung_v'] ?> V</dd>
                     <?php foreach (AnlagenService::FELDER[$objekt['art']] as $k => [$beschriftung, $typ, $zusatz]): ?>
                         <?php if (isset($objekt['eigenschaften'][$k])): ?>
-                            <dt><?= View::e($beschriftung) ?></dt><dd><?= View::e(is_float($objekt['eigenschaften'][$k]) ? $zahl($objekt['eigenschaften'][$k]) : (string) $objekt['eigenschaften'][$k]) ?><?= $typ === 'zahl' ? ' ' . View::e($zusatz) : '' ?></dd>
+                            <dt><?= View::e($beschriftung) ?></dt><dd><?= View::e(is_float($objekt['eigenschaften'][$k]) ? $zahl($objekt['eigenschaften'][$k]) : (string) $objekt['eigenschaften'][$k]) ?><?= $typ !== 'auswahl' && $zusatz !== '' ? ' ' . View::e($zusatz) : '' ?></dd>
                         <?php endif; ?>
                     <?php endforeach; ?>
                 </dl>

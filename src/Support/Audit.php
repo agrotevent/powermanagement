@@ -8,12 +8,24 @@ use App\Auth\Auth;
 /** Revisionssicheres Protokoll aller administrativen Aktionen. */
 final class Audit
 {
+    /** Wer handelt, wenn niemand angemeldet ist (Vorgabe „system“). */
+    private static ?string $akteur = null;
+
+    /**
+     * Für die Kommandozeile: unter welchem Namen Einträge ohne angemeldeten
+     * Benutzer stehen – etwa „cli“ beim Katalog-Import. null = „system“.
+     */
+    public static function akteur(?string $name): void
+    {
+        self::$akteur = $name !== null && trim($name) !== '' ? mb_substr(trim($name), 0, 64) : null;
+    }
+
     public static function log(string $action, string $targetType = '', string $targetId = '', array $details = []): void
     {
         $user = Auth::user();
         Database::insert('audit_log', [
             'user_id'     => $user['id'] ?? null,
-            'username'    => $user['username'] ?? 'system',
+            'username'    => $user['username'] ?? (self::$akteur ?? 'system'),
             'action'      => $action,
             'target_type' => $targetType,
             'target_id'   => (string) $targetId,

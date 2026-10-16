@@ -54,8 +54,8 @@ final class VerteilerBundle
         'inventar' => ['ordner' => 'verteiler/inventar', 'art' => 'verteiler-inventar', 'inhalt' => 'stueck', 'name' => 'Inventar'],
     ];
 
-    /** Wie die Felder heißen – für „was ist anders“. */
-    private const FELDNAMEN = [
+    /** Wie die Felder heißen – für „was ist anders“ (auch im Katalog-Import). */
+    public const FELDNAMEN = [
         'art' => 'Art', 'fest' => 'fest/mobil', 'name' => 'Name', 'hersteller' => 'Hersteller', 'modell' => 'Modell',
         'nennleistung_kva' => 'Nennleistung', 'nennstrom_a' => 'Nennstrom', 'spannung_v' => 'Spannung', 'phasen' => 'Phasen',
         'eigenschaften' => 'Eigenschaften', 'steuerung_gesperrt' => 'Schaltsperre', 'notizen' => 'Notizen',
@@ -115,30 +115,48 @@ final class VerteilerBundle
     /** Ein Standard-Verteiler als Datei – oder null, wenn es ihn nicht gibt. */
     public static function typLesen(int $vorlageId): ?array
     {
+        $benutzt = [];
+        $typ = self::typInhalt($vorlageId, $benutzt);
+        if ($typ === null) {
+            return null;
+        }
+        return self::kopf('typ', self::typSchluessel($vorlageId)) + [
+            'typ'          => $typ,
+            'steckertypen' => LocationBundle::steckertypenFuerDatei($benutzt),
+        ];
+    }
+
+    /**
+     * Nur der Inhalt eines Standard-Verteilers (`typ` der Datei) – ohne Kopf
+     * und ohne einen Schlüssel zu vergeben. Zum Vergleichen, ohne dabei
+     * etwas zu ändern (der Katalog-Import findet einen Typ ohne Schlüssel
+     * über seinen Namen; ein dabei vergebener Schlüssel ließe ihn doppelt
+     * anlegen).
+     *
+     * @param array<int,array<string,mixed>> $benutzt sammelt die vorkommenden Steckertypen
+     */
+    public static function typInhalt(int $vorlageId, array &$benutzt = []): ?array
+    {
         $v = AnlagenService::find($vorlageId);
         if ($v === null || (int) $v['ist_vorlage'] !== 1) {
             return null;
         }
-        $benutzt = [];
         $belegung = LocationBundle::belegungLesen($vorlageId, AnlagenService::steckertypenNachId(), $benutzt);
-        return self::kopf('typ', self::typSchluessel($vorlageId)) + [
-            'typ' => [
-                'art'                => (string) $v['art'],
-                'fest'               => (int) $v['fest'] === 1,
-                'name'               => (string) $v['name'],
-                'hersteller'         => (string) $v['hersteller'],
-                'modell'             => (string) $v['modell'],
-                'nennleistung_kva'   => $v['nennleistung_kva'] !== null ? (float) $v['nennleistung_kva'] : null,
-                'nennstrom_a'        => $v['nennstrom_a'] !== null ? (float) $v['nennstrom_a'] : null,
-                'spannung_v'         => (int) $v['spannung_v'],
-                'phasen'             => (int) $v['phasen'],
-                'eigenschaften'      => $v['eigenschaften'],
-                'steuerung_gesperrt' => (int) $v['steuerung_gesperrt'] === 1,
-                'notizen'            => (string) ($v['notizen'] ?? ''),
-                'schutzorgane'       => $belegung['schutzorgane'],
-                'anschluesse'        => $belegung['anschluesse'],
-            ],
-            'steckertypen' => LocationBundle::steckertypenFuerDatei($benutzt),
+        return [
+            'art'                => (string) $v['art'],
+            'fest'               => (int) $v['fest'] === 1,
+            'name'               => (string) $v['name'],
+            'hersteller'         => (string) $v['hersteller'],
+            'modell'             => (string) $v['modell'],
+            'nennleistung_kva'   => $v['nennleistung_kva'] !== null ? (float) $v['nennleistung_kva'] : null,
+            'nennstrom_a'        => $v['nennstrom_a'] !== null ? (float) $v['nennstrom_a'] : null,
+            'spannung_v'         => (int) $v['spannung_v'],
+            'phasen'             => (int) $v['phasen'],
+            'eigenschaften'      => $v['eigenschaften'],
+            'steuerung_gesperrt' => (int) $v['steuerung_gesperrt'] === 1,
+            'notizen'            => (string) ($v['notizen'] ?? ''),
+            'schutzorgane'       => $belegung['schutzorgane'],
+            'anschluesse'        => $belegung['anschluesse'],
         ];
     }
 

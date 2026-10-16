@@ -31,6 +31,7 @@ const basis = (process.argv[2] || 'http://127.0.0.1:8080').replace(/\/$/, '');
 const benutzer = process.env.PM_BENUTZER || 'admin';
 const kennwort = process.env.PM_KENNWORT || 'PowerAdmin2026!';
 const ziel = dirname(fileURLToPath(import.meta.url));
+const wurzel = resolve(ziel, '../..');
 
 const DESKTOP = { width: 1280, height: 820 };
 const HANDY = { width: 390, height: 844 };
@@ -79,6 +80,38 @@ async function link(page, text) {
     return page.locator('a', { hasText: text }).first().getAttribute('href');
 }
 
+/*
+ * Ein Katalog-Paket für das Bild der Import-Vorschau: der Demo-Katalog, darin
+ * der PD 63 mit anderem Nennstrom und einer anderen Bezeichnung, davor zwei
+ * neue Typen (einer bringt den Steckertyp Harting mit), dahinter einer, dessen
+ * Steckertyp nirgends beschrieben ist.
+ */
+const BEISPIELPAKET = `require 'src/bootstrap.php';
+use App\\Services\\VerteilerBundle as V; use App\\Support\\Database as D;
+$typen = [];
+foreach (D::select('SELECT id, modell FROM objekte WHERE ist_vorlage = 1 ORDER BY name') as $r) {
+    $t = V::typLesen((int) $r['id']);
+    if ($r['modell'] === 'PD 63/32/16') { $t['typ']['nennstrom_a'] = 50; $t['typ']['anschluesse'][1]['bezeichnung'] = 'Bühne rechts'; }
+    $typen[] = $t;
+}
+$s = fn ($ref, $art, $bez, $a, $vor = null, $mehr = []) => ['ref' => $ref, 'art' => $art, 'bezeichnung' => $bez, 'nennstrom_a' => $a, 'pole' => 3, 'vor' => $vor] + $mehr;
+$an = fn ($richtung, $stecker, $nr, $schutz = null) => ['richtung' => $richtung, 'stecker' => $stecker, 'nr' => $nr, 'bezeichnung' => ($richtung === 'eingang' ? 'E' : 'X') . $nr, 'schutz' => $schutz];
+$typ = fn ($schluessel, $typ, $stecker = []) => ['format' => 1, 'art' => 'verteiler-typ', 'schluessel' => $schluessel, 'typ' => $typ + ['fest' => false, 'spannung_v' => 400, 'phasen' => 3], 'steckertypen' => $stecker];
+$neu = [
+    $typ('bss-pd-32-16-h', ['art' => 'verteilung', 'name' => 'PD 32/16 mit Harting', 'hersteller' => 'BSS', 'modell' => 'PD 32/16 H', 'nennstrom_a' => 32,
+        'eigenschaften' => ['artikelnummer' => '40.032.16', 'gehaeuse' => 'Gummi, gelb', 'schutzart' => 'IP44', 'zuleitung' => '2,0 m 5G6', 'gewicht_kg' => 18.5],
+        'schutzorgane' => [$s('s1', 'hauptschalter', 'Q1', 32), $s('s2', 'rcd', 'F1', 40, 's1', ['fehlerstrom_ma' => 30, 'rcd_typ' => 'A']),
+            $s('s3', 'ls', 'Q2', 16, 's2', ['charakteristik' => 'C']), $s('s4', 'ls', 'Q3', 16, 's2', ['charakteristik' => 'B'])],
+        'anschluesse' => [$an('eingang', 'cee32', 1), $an('abgang', 'cee16', 1, 's3'), $an('abgang', 'harting-16', 2, 's3'), $an('abgang', 'schuko', 3, 's4'), $an('abgang', 'schuko', 4, 's4')]],
+        [['schluessel' => 'harting-16', 'name' => 'Harting 16 A', 'strom_a' => 16, 'phasen' => 3, 'spannung_v' => 400, 'farbe' => '#7c3aed']]),
+    $typ('bss-sg-60', ['art' => 'generator', 'name' => 'Stromaggregat 60 kVA', 'hersteller' => 'BSS', 'modell' => 'SG 60', 'nennleistung_kva' => 60,
+        'eigenschaften' => ['artikelnummer' => '60.060.01', 'kraftstoff' => 'Diesel', 'tank_l' => 160, 'verbrauch_l_h' => 12.5, 'gewicht_kg' => 1450, 'abmessungen' => '2800 × 1100 × 1600'],
+        'schutzorgane' => [$s('s1', 'hauptschalter', 'Q1', 100), $s('s2', 'rcd', 'F1', 63, 's1', ['fehlerstrom_ma' => 300, 'rcd_typ' => 'B'])],
+        'anschluesse' => [$an('abgang', 'powerlock', 1, 's1'), $an('abgang', 'cee63', 2, 's2'), $an('abgang', 'cee32', 3, 's2'), $an('abgang', 'cee16', 4, 's2'), $an('abgang', 'schuko', 5, 's2')]]),
+];
+$fehlt = $typ('bss-pd-32-soca', ['art' => 'verteilung', 'name' => 'PD 32 Socapex', 'modell' => 'PD 32 S', 'anschluesse' => [$an('eingang', 'cee32', 1), $an('abgang', 'socapex-19', 1)]]);
+echo json_encode(['format' => 1, 'art' => 'verteiler-typen', 'quelle' => 'BSS Strombibel (Beispiel)', 'typen' => array_merge($neu, $typen, [$fehlt])], JSON_UNESCAPED_UNICODE);`;
+
 // ------------------------------------------------------------------ Desktop
 {
     const { ctx, page } = await sitzung(DESKTOP);
@@ -109,6 +142,24 @@ async function link(page, text) {
     await element(page, page.locator('.card', { has: page.locator('h2', { hasText: 'Verteilerplan' }) }), 'verteilerplan');
     await oeffnen(page, '/anlagen/katalog');
     await foto(page, 'katalog');
+    // Katalog-Import: Vorschau eines Beispielpakets aus dem Demo-Katalog –
+    // zwei neue Typen, ein hier anderer, einer mit fehlendem Steckertyp.
+    // Übernommen wird nichts, die Vorschau wird danach verworfen.
+    const paket = execFileSync('php', ['-r', BEISPIELPAKET], { cwd: wurzel, encoding: 'utf8' });
+    await oeffnen(page, '/anlagen/katalog/import');
+    await page.setInputFiles('input[name=datei]', { name: 'bss-strombibel-beispiel.json', mimeType: 'application/json', buffer: Buffer.from(paket) });
+    await Promise.all([page.waitForNavigation(), page.locator('form[enctype] button[type=submit]').click()]);
+    await page.waitForTimeout(400);
+    await page.locator('details.import-unterschiede summary').first().click();
+    // Die Knopfleiste klebt am unteren Rand des Fensters – für das ganze Bild
+    // also ein Fenster so hoch wie die Seite, statt fullPage (dort stünde sie
+    // mitten im Bild).
+    await page.evaluate(() => window.scrollTo(0, 0));
+    await page.setViewportSize({ ...DESKTOP, height: await page.evaluate(() => document.documentElement.scrollHeight) });
+    await page.waitForTimeout(300);
+    await foto(page, 'katalog-import');
+    await page.setViewportSize(DESKTOP);
+    await Promise.all([page.waitForNavigation(), page.locator('button', { hasText: 'Vorschau verwerfen' }).click()]);
     await oeffnen(page, '/statistik?anlage=' + hv.split('/').pop(), 2200);
     await oben(page, 'statistik', 1500);
 
@@ -192,7 +243,6 @@ async function link(page, text) {
 
 // ------------------------------------------------------------ Verteiler-Abgleich
 {
-    const wurzel = resolve(ziel, '../..');
     const php = (code, ...argumente) => execFileSync('php', ['-r', `require 'src/bootstrap.php'; ${code}`, ...argumente], { cwd: wurzel, encoding: 'utf8' });
     const tmp = mkdtempSync(join(tmpdir(), 'pm-bilder-'));
     const repo = 'file://' + join(tmp, 'repo.git');

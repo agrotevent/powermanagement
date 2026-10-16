@@ -14,6 +14,7 @@ use App\Controllers\DatenquellenController;
 use App\Controllers\InventarController;
 use App\Controllers\EinstellungenController;
 use App\Controllers\KarteController;
+use App\Controllers\KatalogImportController;
 use App\Controllers\LocationController;
 use App\Controllers\ManifestController;
 use App\Controllers\MqttZugaengeController;
@@ -73,6 +74,12 @@ $router->get('/grundriss/{id}/kachel/{z}/{x}/{y}', [KarteController::class, 'pla
 $router->get('/anlagen', [AnlagenController::class, 'index'], 'anlagen.view');
 $router->get('/anlagen/baum', [AnlagenController::class, 'baum'], 'anlagen.view');
 $router->get('/anlagen/katalog', [AnlagenController::class, 'katalog'], 'anlagen.view');
+// Katalog importieren (Standard-Verteiler und Aggregate aus einer Datei):
+// dazu alle Standorte, für neue Steckertypen „stecker.manage“ – prüft der Controller.
+$router->get('/anlagen/katalog/import', [KatalogImportController::class, 'index'], 'anlagen.manage');
+$router->post('/anlagen/katalog/import/vorschau', [KatalogImportController::class, 'vorschau'], 'anlagen.manage');
+$router->post('/anlagen/katalog/import/uebernehmen', [KatalogImportController::class, 'uebernehmen'], 'anlagen.manage');
+$router->post('/anlagen/katalog/import/verwerfen', [KatalogImportController::class, 'verwerfen'], 'anlagen.manage');
 $router->get('/anlagen/neu', [AnlagenController::class, 'neu'], 'anlagen.manage');
 $router->post('/anlagen/speichern', [AnlagenController::class, 'speichern'], 'anlagen.manage');
 $router->get('/anlagen/{id}', [AnlagenController::class, 'show'], 'anlagen.view');
