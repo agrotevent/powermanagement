@@ -3,21 +3,27 @@ declare(strict_types=1);
 
 /**
  * Übergabeberichte (Service-Ebene): Vorbelegung, Grenzwerte, Speichern,
- * Abschluss-Prüfung, Sichtbarkeit, Lösch-Abläufe und Datenschutz.
+ * Abschluss-Prüfung, Sichtbarkeit, Unterschriften (Einfrieren, Nummer,
+ * Zurückziehen, Kunde, ohne Kunde), Kundenmodus, Integrität, Korrektur,
+ * Lösch-Abläufe und Datenschutz.
  *
- * Abgeschlossene Berichte entstehen hier noch per SQL (Status, Nummer,
- * Zeit) – Unterschrift und PDF prüfen eigene Abschnitte, sobald es sie gibt.
+ * Für Vorbelegung, Sichtbarkeit und Lösch-Abläufe entstehen abgeschlossene
+ * Berichte der Kürze halber per SQL (Status, Nummer, Zeit); den echten Weg
+ * über beide Unterschriften prüft der Abschnitt „Einfrieren“.
  */
 
 require __DIR__ . '/hilfen/pruefung.php';
 
+use App\Auth\Auth;
 use App\Auth\Zugriff;
 use App\Berichte\BerichtSchema;
 use App\Berichte\BerichtService;
 use App\Berichte\Einstellungen;
 use App\Berichte\Grenzwerte;
 use App\Berichte\Kanon;
+use App\Berichte\Kundenmodus;
 use App\Berichte\Pruefgeraete;
+use App\Berichte\Unterschrift;
 use App\Berichte\Vorbelegung;
 use App\Services\AnlagenService;
 use App\Services\AufbauService;
@@ -644,8 +650,291 @@ try {
     gleich(Einstellungen::wert('berichte.ul'), '50', 'ungültiger Wert in der Datenbank ergibt die Vorgabe');
     pruefe((int) Database::scalar('SELECT COUNT(*) FROM audit_log WHERE details LIKE ?', ['%IBAN ' . $kennung . '%']) === 0, 'Bankdaten nicht im Audit');
 
+    // ================================================== Unterschrift: nur Striche aus ganzen Zahlen
+    /** Eine gültige Unterschrift – jedes Mal andere Striche (Kopierschutz). */
+    $striche = static function (): string {
+        $versatz = random_int(0, 400);
+        $s = [];
+        for ($zug = 0; $zug < 3; $zug++) {
+            $linie = [];
+            for ($x = 1000; $x <= 8600; $x += 380) {
+                $linie[] = [$x + $versatz, 2500 + intdiv($x, 380) % 2 * 4000 + $zug * 300];
+            }
+            $s[] = $linie;
+        }
+        return json_encode(['s' => $s]);
+    };
+    $abgelehnt = static fn (string $json): bool => !Unterschrift::pruefen($json)['ok'];
+    pruefe($abgelehnt(''), 'Unterschrift leer → abgelehnt');
+    pruefe($abgelehnt('{"s":[]}'), 'keine Striche → abgelehnt');
+    pruefe($abgelehnt('{"s":[[[5000,5000]]]}'), 'ein Punkt → abgelehnt');
+    pruefe($abgelehnt('{"s":[[[1000,1000],[1600,1300],[1900,1200]]]}'), 'Rahmen zu klein → abgelehnt');
+    gleich(Unterschrift::pruefen('{"s":[[[1000,1000],[1600,1300]]]}')['message'], Unterschrift::ZU_KLEIN, 'Meldung „zu klein oder leer“');
+    $vielePunkte = [];
+    for ($n = 0; $n <= Unterschrift::MAX_PUNKTE; $n++) {
+        $vielePunkte[] = [$n % 10, $n % 7];
+    }
+    $json = json_encode(['s' => [$vielePunkte]]);
+    pruefe(strlen($json) < Unterschrift::MAX_BYTES && $abgelehnt($json), 'über 6000 Punkte → abgelehnt');
+    pruefe($abgelehnt('{"s":[[[1000.5,1000],[9000,9000]]]}'), 'Gleitkommazahl → abgelehnt');
+    pruefe($abgelehnt('{"s":[[[1000,1000],[9000,9000]]],"t":[1,2]}'), 'Schlüssel „t“ → abgelehnt');
+    pruefe($abgelehnt('{"s":[[[1000,1000,1],[9000,9000,1]]]}'), 'Druck als dritter Wert → abgelehnt');
+    pruefe($abgelehnt('{"s":[[{"x":1000,"y":1000,"p":0.5}]]}'), 'Punkt als Objekt mit „p“ → abgelehnt');
+    pruefe($abgelehnt('{"s":[[["1000",1000],[9000,9000]]]}'), 'String im Punkt → abgelehnt');
+    pruefe($abgelehnt('{"s":[[[1000,1000],[99999999999999999999,9000]]]}'), 'riesige Zahl → abgelehnt');
+    pruefe($abgelehnt('{"s":[[[1,1]' . str_repeat(',[1,1]', 11000) . ']]}'), 'über 64 KB → abgelehnt');
+    $gross = Unterschrift::pruefen('{"s":[[[500,1000],[12000,6000],[3000,-200],[9000,9000]]]}');
+    pruefe($gross['ok'] && $gross['striche'][0][1] === [10000, 6000] && $gross['striche'][0][2] === [3000, 0], 'gültige Unterschrift; Werte auf 0..10000 begrenzt');
+    $svg = Unterschrift::svg([[['<script>', '1e9'], [5000, 'onload=x'], [-5, 20000]], 'kaputt', [['"/><a', 7]]]);
+    pruefe(preg_match('/^<svg [^<>]*><path d="[MQLl0-9 ]*" [^<>]*\/><\/svg>$/', $svg) === 1 && !str_contains($svg, 'script') && !str_contains($svg, 'onload'),
+        'SVG aus manipulierten Strichen: nur Zahlen im Pfad');
+
+    // ================================================== Kundenmodus: offene Wege, Kennwort
+    pruefe(Kundenmodus::erlaubt('GET', '/berichte/41/kunde', 41) && Kundenmodus::erlaubt('POST', '/berichte/41/kunde/unterschreiben', 41)
+        && Kundenmodus::erlaubt('POST', '/berichte/41/kunde/beenden', 41) && Kundenmodus::erlaubt('GET', '/berichte/41/pdf', 41)
+        && Kundenmodus::erlaubt('POST', '/logout', 41) && Kundenmodus::erlaubt('GET', '/login', 41), 'Kundenmodus: Kundenseite, PDF, Unterschrift, Entsperren, Abmelden offen');
+    pruefe(!Kundenmodus::erlaubt('GET', '/berichte/42/kunde', 41) && !Kundenmodus::erlaubt('GET', '/berichte/41', 41) && !Kundenmodus::erlaubt('GET', '/dashboard', 41)
+        && !Kundenmodus::erlaubt('POST', '/steuerung/schalten', 41) && !Kundenmodus::erlaubt('POST', '/berichte/41/speichern', 41)
+        && !Kundenmodus::erlaubt('GET', '/berichte/41/kunde/beenden', 41) && !Kundenmodus::erlaubt('POST', '/berichte/041/kunde/beenden', 41),
+        'Kundenmodus: anderer Bericht, Formular, Dashboard und Schalten zu');
+    alsBenutzer($benutzer['technik']);
+    $fehlVorher = (int) Database::scalar('SELECT failed_logins FROM users WHERE id = ?', [$benutzer['technik']]);
+    pruefe(Auth::kennwortBestaetigen($kennwort) && !Auth::kennwortBestaetigen('falsch') && !Auth::kennwortBestaetigen(''), 'Kennwort bestätigen: richtig ja, falsch und leer nein');
+    pruefe((int) Database::scalar('SELECT failed_logins FROM users WHERE id = ?', [$benutzer['technik']]) === $fehlVorher
+        && Database::scalar('SELECT locked_until FROM users WHERE id = ?', [$benutzer['technik']]) === null, 'Fehlversuch zählt nicht gegen das Konto');
+    pruefe((int) Database::scalar("SELECT COUNT(*) FROM audit_log WHERE action = 'auth.kundenmodus_fehlversuch' AND target_id = ?", [(string) $benutzer['technik']]) === 2,
+        'Fehlversuche stehen im Audit');
+
+    // ================================================== Einfrieren und Nummer
+    Settings::put('firma.name', 'Muster Eventstrom ' . $kennung);
+    $praefix = 'T' . implode('', array_map(static fn (): string => chr(random_int(65, 90)), range(1, 5)));
+    Settings::put('berichte.praefix', $praefix);
+    // Ein Jahr ohne Berichte: dann beginnt die laufende Nummer bei 1.
+    $jahrU = 2001;
+    while ((int) Database::scalar('SELECT COUNT(*) FROM berichte WHERE jahr = ?', [$jahrU]) > 0) {
+        $jahrU++;
+    }
+    $bereit = BerichtSchema::leer();
+    $bereit['kopf']['kunde'] = ['firma' => $kundeName, 'email' => $kundeMail] + $bereit['kopf']['kunde'];
+    $bereit['kopf']['pruefdatum'] = $jahrU . '-06-15';
+    $bereit['kopf']['ort'] = 'Musterstadt';
+    $bereit['kopf']['anlage'] = ['bezeichnung' => 'Verteiler Bühne', 'details' => '', 'aufstellort' => 'Wiese'];
+    $bereit['netz']['form'] = 'TN-S';
+    $bereit['grundlage'] = ['normen' => ['0100-600', '0100-711'], 'sonstige' => '', 'grund' => 'aufbau'];
+    $bereit['messung']['geraete'] = [(string) $aktiv];
+    $kreisU = $muster();
+    $kreisU['z'] = 'kunter01';
+    $kreisU['leitung']['querschnitt'] = '';   // ergibt die Warnung „ohne Querschnitt“
+    $bereit['kreise'] = [$kreisU];
+    $bereit['punkte']['besichtigung']['auswahl'] = 'io';
+    $bereit['ergebnis']['entspricht'] = 'ja';
+    $bereitAnlegen = static function () use ($siteId, $vt, $bereit, $speichern): int {
+        $id = (int) BerichtService::anlegen($siteId, null, [$vt])['id'];
+        pruefe($speichern($id, $bereit)['ok'], 'Bericht zum Unterschreiben gespeichert');
+        return $id;
+    };
+    $anfrage = static fn (): string => bin2hex(random_bytes(16));
+    $version = static fn (int $id): int => (int) BerichtService::find($id)['version'];
+    $zeilen = static fn (int $id): int => (int) Database::scalar('SELECT COUNT(*) FROM bericht_unterschriften WHERE bericht_id = ?', [$id]);
+
+    $u1 = $bereitAnlegen();
+    $prueferDaten = ['striche' => $striche(), 'name' => 'Tom Technik', 'ort' => 'Musterstadt', 'anfrage' => $anfrage(), 'geraet_am' => '2026-10-16T09:58:12.123Z'];
+    $r = BerichtService::prueferUnterschreiben($u1, $version($u1), $prueferDaten);
+    pruefe(!$r['ok'] && $r['status'] === 422 && ($r['fehler'] ?? null) === [] && in_array('querschnitt_leer', array_column($r['warnungen'] ?? [], 'code'), true),
+        'Warnungen nicht bestätigt → 422 mit der Liste');
+    $codes = array_column($r['warnungen'] ?? [], 'code');
+    $prueferDaten['warnungen'] = $codes;
+    gleich(BerichtService::prueferUnterschreiben($u1, $version($u1), ['name' => 'T'] + $prueferDaten)['status'], 422, 'Name mit einem Zeichen → 422');
+    gleich(BerichtService::prueferUnterschreiben($u1, $version($u1), ['striche' => '{"s":[[[1,1],[2,2]]]}'] + $prueferDaten)['status'], 422, 'zu kleine Unterschrift → 422');
+    gleich(BerichtService::prueferUnterschreiben($u1, $version($u1), ['anfrage' => 'kurz'] + $prueferDaten)['status'], 422, 'ohne gültigen Idempotenzschlüssel → 422');
+    gleich(BerichtService::prueferUnterschreiben($u1, $version($u1) - 1, $prueferDaten)['status'], 409, 'veraltete Version → 409');
+    alsBenutzer($benutzer['planer']);
+    gleich(BerichtService::prueferUnterschreiben($u1, $version($u1), $prueferDaten)['status'], 404, 'Planer ohne „bearbeiten“: Entwurf nicht da (404)');
+    alsBenutzer($benutzer['admin']);
+    gleich(BerichtService::prueferUnterschreiben($u1, $version($u1), $prueferDaten)['status'], 403, 'ohne Prüfer-Qualifikation → 403');
+    alsBenutzer($benutzer['technik']);
+    $vorFehler = BerichtService::find($u1);
+    $ohneKunde = $bereit;
+    $ohneKunde['kopf']['kunde']['firma'] = '';
+    $speichern($u1, $ohneKunde);
+    $r = BerichtService::prueferUnterschreiben($u1, $version($u1), $prueferDaten);
+    pruefe(!$r['ok'] && $r['status'] === 422 && in_array('kopf.kunde.firma', array_column($r['fehler'], 'feld'), true), 'Fehler der Abschluss-Prüfung → 422 mit Feld');
+    $speichern($u1, $bereit);
+    gleich($zeilen($u1), 0, 'abgelehnte Unterschriften: keine Zeile');
+
+    $r = BerichtService::prueferUnterschreiben($u1, $version($u1), $prueferDaten);
+    $b1 = BerichtService::find($u1);
+    $nummer1 = sprintf('%s-%d-0001', $praefix, $jahrU);
+    pruefe($r['ok'] && $r['status'] === 200 && $b1['status'] === 'geprueft' && $b1['nummer'] === $nummer1 && $r['nummer'] === $nummer1, 'Prüfer unterschreibt: ' . $r['message']);
+    gleich([$b1['jahr'], $b1['laufnr'], $b1['fassung'], $b1['pruefer_id']], [$jahrU, 1, 1, $benutzer['technik']], 'Jahr, laufende Nummer, Fassung, Prüfer');
+    gleich($b1['inhalt_hash'], Kanon::hash($b1['inhalt']), 'inhalt_hash = Kanon::hash(inhalt) nachgerechnet');
+    gleich($b1['inhalt_hash'], hash('sha256', (string) Database::scalar('SELECT inhalt FROM berichte WHERE id = ?', [$u1])), 'gespeicherter Inhalt ist die kanonische Schreibweise');
+    $fest = $b1['inhalt'];
+    pruefe(($fest['nummer'] ?? '') === $nummer1 && ($fest['fassung'] ?? '') === '1' && ($fest['auftragnehmer']['name'] ?? '') === 'Muster Eventstrom ' . $kennung
+        && ($fest['kopf']['pruefer']['name'] ?? '') === 'Tom Technik' && ($fest['kopf']['pruefer']['qualifikation'] ?? '') === 'Elektrofachkraft für Veranstaltungstechnik'
+        && ($fest['messgeraete'][0]['seriennummer'] ?? '') === 'DEMO-1' && isset($fest['labels']['besichtigung']['auswahl'], $fest['labels']['normen']['0100-711'], $fest['texte']['kunde'])
+        && ($fest['bewertung']['kreise']['kunter01']['auto'] ?? '') === 'ok', 'feste Kopien: Nummer, Firma, Prüfer, Messgeräte, Texte, Bewertung');
+    pruefe(array_diff($codes, $fest['abschluss']['warnungen_bestaetigt']) === [], 'bestätigte Warnungen gehören zum eingefrorenen Inhalt');
+    $pz = BerichtService::unterschriften($u1)['pruefer'] ?? [];
+    pruefe(($pz['name'] ?? '') === 'Tom Technik' && $pz['funktion'] === 'Elektrofachkraft für Veranstaltungstechnik' && $pz['inhalt_hash'] === $b1['inhalt_hash']
+        && $pz['vorher_hash'] === null && $pz['geraet_am'] === '2026-10-16T09:58:12+00:00' && $pz['schluessel_id'] === BerichtService::schluesselId()
+        && $pz['siegel'] === hash_hmac('sha256', $pz['kette_hash'], Crypto::ableiten('bericht-siegel-1')), 'Unterschriftszeile: Angaben, Kette, Siegel mit abgeleitetem Schlüssel');
+    $gespeicherteStriche = json_decode((string) Database::scalar("SELECT striche FROM bericht_unterschriften WHERE bericht_id = ? AND rolle = 'pruefer'", [$u1]), true);
+    pruefe(array_keys($gespeicherteStriche) === ['s'] && $pz['striche_hash'] === Kanon::hash($gespeicherteStriche), 'gespeichert nur „s“ – keine Zeit, kein Druck');
+    gleich(BerichtService::integritaet($u1), ['ok' => true, 'eingefroren' => true, 'befunde' => []], 'Integrität nach der Prüfer-Unterschrift');
+    gleich(BerichtService::speichern($u1, $version($u1), json_encode($bereit))['status'], 423, 'eingefroren: speichern → 423');
+    gleich(BerichtService::kreiseVorbelegen($u1, $version($u1), [$vt])['status'], 423, 'eingefroren: Zeilen ergänzen → 423');
+    pruefe(!BerichtService::darfBearbeiten($b1) && BerichtService::kundeAusBericht($u1, $quelle)['status'] === 423, 'eingefroren: nicht bearbeitbar, kein Kunde aus früherem Bericht');
+    $r = BerichtService::prueferUnterschreiben($u1, $version($u1), $prueferDaten);
+    pruefe($r['ok'] && $r['status'] === 200 && $r['unterschrift'] === (int) $pz['id'] && $zeilen($u1) === 1, 'gleiche Anfrage noch einmal → dieselbe Zeile');
+    $r = BerichtService::prueferUnterschreiben($u1, $version($u1), ['anfrage' => $anfrage(), 'striche' => $striche()] + $prueferDaten);
+    pruefe(!$r['ok'] && $r['status'] === 409 && $zeilen($u1) === 1, 'zweite Prüfer-Unterschrift → 409');
+
+    $u2 = $bereitAnlegen();
+    $r = BerichtService::prueferUnterschreiben($u2, $version($u2), ['anfrage' => $prueferDaten['anfrage']] + $prueferDaten);
+    pruefe(!$r['ok'] && $r['status'] === 409, 'dieselbe Anfrage an einem anderen Bericht → 409');
+    $r = BerichtService::prueferUnterschreiben($u2, $version($u2), ['anfrage' => $anfrage()] + $prueferDaten);
+    pruefe(!$r['ok'] && $r['status'] === 422 && str_contains($r['message'], 'neu unterschreiben'), 'gleiche Striche in einem anderen Bericht → abgelehnt');
+    $r = BerichtService::prueferUnterschreiben($u2, $version($u2), ['anfrage' => $anfrage(), 'striche' => $striche()] + $prueferDaten);
+    $nummer2 = sprintf('%s-%d-0002', $praefix, $jahrU);
+    pruefe($r['ok'] && BerichtService::find($u2)['nummer'] === $nummer2, 'zweiter Bericht: laufende Nummer 0002');
+
+    // ================================================== Zurückziehen
+    $b2 = BerichtService::find($u2);
+    $kette2 = (string) Database::scalar("SELECT kette_hash FROM bericht_unterschriften WHERE bericht_id = ? AND rolle = 'pruefer'", [$u2]);
+    pruefe(BerichtService::zurueckziehbar($b2) && !BerichtService::zurueckziehen($u2, '')['ok'], 'Zurückziehen nur mit Grund');
+    alsBenutzer($benutzer['admin']);
+    gleich(BerichtService::zurueckziehen($u2, 'falsch eingetragen')['status'], 403, 'Zurückziehen ohne Qualifikation → 403');
+    alsBenutzer($benutzer['technik']);
+    $r = BerichtService::zurueckziehen($u2, 'Messwert falsch eingetragen');
+    $b2n = BerichtService::find($u2);
+    pruefe($r['ok'] && $b2n['status'] === 'entwurf' && $b2n['nummer'] === $nummer2 && $b2n['inhalt_hash'] === null && $b2n['eingefroren_am'] === null
+        && !isset($b2n['inhalt']['labels'], $b2n['inhalt']['nummer'], $b2n['inhalt']['kopf']['pruefer']) && $zeilen($u2) === 0, 'zurückgezogen: Entwurf, Nummer bleibt, feste Kopien weg');
+    $ereignis = array_values(array_filter(BerichtService::ereignisse($u2), static fn (array $e): bool => $e['ereignis'] === 'zurueckgezogen'))[0] ?? [];
+    gleich([$ereignis['details']['inhalt_hash'] ?? '', $ereignis['details']['kette_hash'] ?? ''], [$b2['inhalt_hash'], $kette2], 'Ereignis hält alten Hash und alte Kette');
+    pruefe(BerichtService::speichern($u2, $version($u2), json_encode($bereit))['ok'], 'zurückgezogen: wieder speicherbar');
+    pruefe(!BerichtService::loeschen($u2)['ok'], 'Entwurf mit Nummer wird nicht gelöscht');
+    $r = BerichtService::prueferUnterschreiben($u2, $version($u2), ['anfrage' => $anfrage(), 'striche' => $striche()] + $prueferDaten);
+    pruefe($r['ok'] && BerichtService::find($u2)['nummer'] === $nummer2, 'neu unterschrieben: dieselbe Nummer');
+    $_SESSION = [];
+    pruefe(BerichtService::kundenmodusStarten($u2)['ok'] && (Kundenmodus::aktiv()['bericht'] ?? 0) === $u2, 'Kundenmodus gestartet');
+    Kundenmodus::beenden();
+    pruefe(!BerichtService::zurueckziehbar(BerichtService::find($u2)) && BerichtService::zurueckziehen($u2, 'zu spät')['status'] === 409, 'nach dem Kundenmodus kein Zurückziehen');
+    $u3 = $bereitAnlegen();
+    BerichtService::prueferUnterschreiben($u3, $version($u3), ['anfrage' => $anfrage(), 'striche' => $striche()] + $prueferDaten);
+    gleich(BerichtService::find($u3)['nummer'], sprintf('%s-%d-0003', $praefix, $jahrU), 'dritter Bericht: 0003');
+    BerichtService::ereignis($u3, 'pdf_abgerufen', ['stufe' => 'vorschau']);
+    gleich(BerichtService::zurueckziehen($u3, 'zu spät')['status'], 409, 'nach Abruf des PDF kein Zurückziehen');
+
+    // ================================================== Kunde
+    $vorbehalte = 'Vorbehalt ' . $kennung . ': Kabelbrücke an Bühne fehlt';
+    $unterzeichner = 'Kim Kunde ' . $kennung;
+    $kundeDaten = ['striche' => $striche(), 'name' => $unterzeichner, 'funktion' => 'Produktionsleitung', 'ort' => 'Musterstadt',
+        'bestaetigungen' => ['erhalten', 'eingewiesen', 'gibtsnicht'], 'vorbehalte' => $vorbehalte, 'anfrage' => $anfrage(), 'geraet_am' => 'gestern'];
+    $u4 = $bereitAnlegen();
+    pruefe(BerichtService::kundeUnterschreiben($u4, $kundeDaten)['status'] === 409 && !BerichtService::kundenmodusStarten($u4)['ok'], 'Kunde vor dem Prüfer → abgelehnt');
+    pruefe(BerichtService::kundeUnterschreiben($u1, ['bestaetigungen' => ['eingewiesen']] + $kundeDaten)['status'] === 422, 'ohne „Bericht erhalten“ → abgelehnt');
+    pruefe(BerichtService::kundeUnterschreiben($u1, ['name' => ' '] + $kundeDaten)['status'] === 422, 'Kunde ohne Namen → abgelehnt');
+    pruefe(BerichtService::kundeUnterschreiben($u1, ['striche' => $prueferDaten['striche']] + $kundeDaten)['status'] === 422, 'Kunde mit den Strichen des Prüfers → abgelehnt');
+    alsBenutzer($benutzer['planer']);
+    gleich(BerichtService::kundeUnterschreiben($u1, $kundeDaten)['status'], 404, 'Planer ohne „bearbeiten“: kein Kundenblock');
+    alsBenutzer($benutzer['technik']);
+    gleich($zeilen($u1), 1, 'abgelehnte Kundenunterschriften: keine Zeile');
+    $r = BerichtService::kundeUnterschreiben($u1, $kundeDaten);
+    $b1 = BerichtService::find($u1);
+    pruefe($r['ok'] && $b1['status'] === 'abgeschlossen' && $b1['abgeschlossen_am'] !== null, 'Kunde unterschreibt → abgeschlossen');
+    gleich($b1['aufbewahren_bis'], sprintf('%04d-12-31', $jahrU + 10), 'aufbewahren bis 31.12.(Jahr + 10)');
+    $alle = BerichtService::unterschriften($u1);
+    $kz = $alle['kunde'] ?? [];
+    pruefe(($kz['vorher_hash'] ?? '') === $alle['pruefer']['kette_hash'] && $kz['inhalt_hash'] === $b1['inhalt_hash'] && $kz['art'] === 'gezeichnet'
+        && $kz['angaben'] === ['bestaetigungen' => ['erhalten', 'eingewiesen'], 'vorbehalte' => $vorbehalte] && $kz['geraet_am'] === null,
+        'Kundenzeile kettet an die des Prüfers; nur bekannte Bestätigungen');
+    $r = BerichtService::kundeUnterschreiben($u1, $kundeDaten);
+    pruefe($r['ok'] && $r['unterschrift'] === (int) $kz['id'] && $zeilen($u1) === 2, 'Kundenunterschrift doppelt gesendet → eine Zeile');
+    $r = BerichtService::kundeUnterschreiben($u1, ['anfrage' => $anfrage(), 'striche' => $striche()] + $kundeDaten);
+    pruefe(!$r['ok'] && $r['status'] === 409 && $zeilen($u1) === 2, 'zweite Kundenunterschrift → abgelehnt');
+    gleich(BerichtService::integritaet($u1), ['ok' => true, 'eingefroren' => true, 'befunde' => []], 'Integrität nach dem Abschluss');
+    pruefe(!BerichtService::ohneKunde($u2, 'abwesend', '')['ok'] && BerichtService::ohneKunde($u2, 'egal', 'Grund genug')['status'] === 422, 'ohne Kunde: Grund und Art sind Pflicht');
+    alsBenutzer($benutzer['admin']);
+    gleich(BerichtService::ohneKunde($u2, 'abwesend', 'Kunde nicht vor Ort')['status'], 403, 'ohne Kunde nur mit Qualifikation');
+    alsBenutzer($benutzer['technik']);
+    $r = BerichtService::ohneKunde($u2, 'abwesend', 'Kunde nicht vor Ort, Bericht per E-Mail');
+    $k2 = BerichtService::unterschriften($u2)['kunde'] ?? [];
+    pruefe($r['ok'] && BerichtService::find($u2)['status'] === 'abgeschlossen' && ($k2['art'] ?? '') === 'abwesend' && $k2['striche'] === []
+        && $k2['angaben'] === ['grund' => 'Kunde nicht vor Ort, Bericht per E-Mail'], 'ohne Kunde abgeschlossen: Art und Grund im Kundenblock');
+    gleich(BerichtService::integritaet($u2)['ok'], true, 'Integrität ohne Kunde');
+    gleich(BerichtService::ohneKunde($u2, 'verweigert', 'noch einmal')['status'], 409, 'ohne Kunde nur einmal');
+
+    // ================================================== Integrität
+    $roherInhalt = (string) Database::scalar('SELECT inhalt FROM berichte WHERE id = ?', [$u1]);
+    $anders = json_decode($roherInhalt, true);
+    $anders['kreise'][0]['w']['zs']['w'] = '0.2';
+    Database::execute('UPDATE berichte SET inhalt = ? WHERE id = ?', [Kanon::json($anders), $u1]);
+    $i = BerichtService::integritaet($u1);
+    pruefe(!$i['ok'] && str_contains(implode(' ', $i['befunde']), 'Inhalt verändert'), 'Inhalt per SQL geändert → Befund „Inhalt verändert“');
+    Database::execute('UPDATE berichte SET inhalt = ? WHERE id = ?', [$roherInhalt, $u1]);
+    Database::execute("UPDATE bericht_unterschriften SET name = ? WHERE bericht_id = ? AND rolle = 'kunde'", ['Jemand anderes', $u1]);
+    $i = BerichtService::integritaet($u1);
+    pruefe(!$i['ok'] && str_contains(implode(' ', $i['befunde']), 'Siegel ungültig'), 'Name der Unterschrift geändert → Befund Siegel');
+    Database::execute("UPDATE bericht_unterschriften SET name = ? WHERE bericht_id = ? AND rolle = 'kunde'", [$unterzeichner, $u1]);
+    $roheStriche = (string) Database::scalar("SELECT striche FROM bericht_unterschriften WHERE bericht_id = ? AND rolle = 'pruefer'", [$u1]);
+    Database::execute("UPDATE bericht_unterschriften SET striche = ? WHERE bericht_id = ? AND rolle = 'pruefer'", [str_replace('[1', '[2', $roheStriche), $u1]);
+    pruefe(str_contains(implode(' ', BerichtService::integritaet($u1)['befunde']), 'Striche wurden verändert'), 'Striche geändert → Befund');
+    Database::execute("UPDATE bericht_unterschriften SET striche = ? WHERE bericht_id = ? AND rolle = 'pruefer'", [$roheStriche, $u1]);
+    $schluesselVorher = (string) Database::scalar("SELECT schluessel_id FROM bericht_unterschriften WHERE bericht_id = ? AND rolle = 'kunde'", [$u1]);
+    Database::execute("UPDATE bericht_unterschriften SET schluessel_id = 'abcdef12' WHERE bericht_id = ? AND rolle = 'kunde'", [$u1]);
+    $i = BerichtService::integritaet($u1);
+    pruefe(str_contains(implode(' ', $i['befunde']), 'anderem Schlüssel') && !str_contains(implode(' ', $i['befunde']), 'Siegel ungültig'), 'anderer Schlüssel: nicht prüfbar statt verfälscht');
+    Database::execute("UPDATE bericht_unterschriften SET schluessel_id = ? WHERE bericht_id = ? AND rolle = 'kunde'", [$schluesselVorher, $u1]);
+    gleich(BerichtService::integritaet($u1)['ok'], true, 'wiederhergestellt: Integrität ok');
+
+    // ================================================== Feste Kopie
+    Settings::put('firma.name', 'Ganz andere Firma ' . $kennung);
+    $b1 = BerichtService::find($u1);
+    pruefe($b1['inhalt']['auftragnehmer']['name'] === 'Muster Eventstrom ' . $kennung && BerichtService::integritaet($u1)['ok'], 'Firmendaten später geändert: der Bericht bleibt, wie er war');
+
+    // ================================================== Korrektur
+    alsBenutzer($benutzer['planer']);
+    gleich(BerichtService::korrektur($u1, 'Querschnitt nachgetragen')['status'], 403, 'Korrektur ohne Prüfer-Recht → 403');
+    alsBenutzer($benutzer['technik']);
+    pruefe(!BerichtService::korrektur($u1, '')['ok'], 'Korrektur nur mit Grund');
+    gleich(BerichtService::korrektur($u3, 'zu früh')['status'], 409, 'Korrektur nur für abgeschlossene Berichte');
+    $r = BerichtService::korrektur($u1, 'Querschnitt nachgetragen');
+    $k1 = (int) ($r['id'] ?? 0);
+    $kb = BerichtService::find($k1);
+    pruefe($r['ok'] && $kb['fassung'] === 2 && $kb['vorgaenger_id'] === $u1 && $kb['status'] === 'entwurf' && $kb['nummer'] === null
+        && [$kb['jahr'], $kb['laufnr']] === [$jahrU, 1] && $kb['korrektur_grund'] === 'Querschnitt nachgetragen', 'Korrektur: Fassung 2 zur selben Nummer');
+    pruefe(!isset($kb['inhalt']['labels'], $kb['inhalt']['nummer'], $kb['inhalt']['kopf']['pruefer']) && $kb['inhalt']['kreise'][0]['z'] === 'kunter01'
+        && $kb['inhalt']['abschluss']['warnungen_bestaetigt'] === [], 'Korrektur: Inhalt ohne feste Kopien, Warnungen neu zu bestätigen');
+    gleich((int) Database::scalar('SELECT COUNT(*) FROM bericht_objekte WHERE bericht_id = ?', [$k1]), (int) Database::scalar('SELECT COUNT(*) FROM bericht_objekte WHERE bericht_id = ?', [$u1]),
+        'Korrektur: dieselben Anlagen');
+    gleich(BerichtService::find($u1)['status'], 'abgeschlossen', 'Vorgänger bleibt abgeschlossen, solange die Korrektur offen ist');
+    gleich(BerichtService::korrektur($u1, 'noch eine')['status'], 409, 'zweite offene Korrektur → abgelehnt');
+    $korr = $kb['inhalt'];
+    $korr['kreise'][0]['leitung']['querschnitt'] = '4';
+    pruefe($speichern($k1, $korr)['ok'], 'Korrektur gespeichert');
+    $r = BerichtService::prueferUnterschreiben($k1, $version($k1), ['anfrage' => $anfrage(), 'striche' => $striche()] + $prueferDaten);
+    $kb = BerichtService::find($k1);
+    pruefe($r['ok'] && $kb['nummer'] === $nummer1 . '-K1' && ($kb['inhalt']['vorgaenger']['nummer'] ?? '') === $nummer1
+        && ($kb['inhalt']['vorgaenger']['inhalt_hash'] ?? '') === BerichtService::find($u1)['inhalt_hash'] && ($kb['inhalt']['vorgaenger']['grund'] ?? '') === 'Querschnitt nachgetragen',
+        'Korrektur unterschrieben: Nummer …-K1, Vorgänger im Inhalt');
+    gleich([BerichtService::find($u1)['status'], BerichtService::korrektur($u1, 'noch eine')['status']], ['abgeschlossen', 409], 'unterschriebene Korrektur: Vorgänger noch gültig, keine zweite');
+    $pdfVorher = Database::select('SELECT * FROM bericht_pdf WHERE bericht_id = ?', [$u1]);
+    $hashVorher = BerichtService::find($u1)['inhalt_hash'];
+    pruefe(BerichtService::kundeUnterschreiben($k1, ['anfrage' => $anfrage(), 'striche' => $striche()] + $kundeDaten)['ok'], 'Kunde unterschreibt die Korrektur');
+    $alt = BerichtService::find($u1);
+    pruefe(BerichtService::find($k1)['status'] === 'abgeschlossen' && $alt['status'] === 'ersetzt' && $alt['ersetzt_durch_id'] === $k1, 'Korrektur abgeschlossen → Vorgänger ersetzt');
+    pruefe($alt['inhalt_hash'] === $hashVorher && Database::select('SELECT * FROM bericht_pdf WHERE bericht_id = ?', [$u1]) === $pdfVorher
+        && BerichtService::integritaet($u1)['ok'], 'ersetzter Bericht unverändert (Inhalt, PDF, Integrität)');
+    gleich(BerichtService::korrektur($u1, 'am alten')['status'], 409, 'ersetzter Bericht: Korrektur nur an der neuesten Fassung');
+    $r = BerichtService::korrektur($k1, 'zweite Korrektur');
+    pruefe($r['ok'] && BerichtService::find((int) $r['id'])['fassung'] === 3, 'Korrektur der Korrektur: Fassung 3');
+    pruefe(BerichtService::loeschen((int) $r['id'])['ok'], 'offene Korrektur ohne Nummer lässt sich verwerfen (löschen)');
+    pruefe(in_array('ersetzt', array_column(BerichtService::ereignisse($u1), 'ereignis'), true)
+        && in_array('korrektur_angelegt', array_column(BerichtService::ereignisse($u1), 'ereignis'), true), 'Ereignisse am Vorgänger: Korrektur angelegt, ersetzt');
+
     // ================================================== Datenschutz
-    foreach ([$kundeName, $kundeMail] as $geheim) {
+    foreach ([$kundeName, $kundeMail, $vorbehalte, $unterzeichner] as $geheim) {
         gleich((int) Database::scalar('SELECT COUNT(*) FROM audit_log WHERE details LIKE ?', ['%' . $geheim . '%']), 0, 'nicht im Audit: ' . $geheim);
         gleich((int) Database::scalar('SELECT COUNT(*) FROM bericht_ereignisse WHERE details LIKE ?', ['%' . $geheim . '%']), 0, 'nicht in den Ereignissen: ' . $geheim);
     }

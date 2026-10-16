@@ -23,7 +23,7 @@ $stand = static function (array $a): array {
 $teil = [
     'bericht' => $b, 'inhalt' => $inhalt, 'bewertung' => $bewertung, 'hinweise' => $hinweise, 'netzVorschlag' => $netzVorschlag,
     'geraete' => $geraete, 'anlagen' => $anlagen, 'quellen' => $quellen, 'eventworx' => $eventworx, 'pruefer' => $pruefer,
-    'texte' => $texte, 'firmaFehlt' => $firmaFehlt, 'darfVerwerfen' => $darfVerwerfen,
+    'texte' => $texte, 'firmaFehlt' => $firmaFehlt, 'darfVerwerfen' => $darfVerwerfen, 'darfUnterschreiben' => $darfUnterschreiben,
 ];
 ?>
 <div class="bericht" data-bericht="<?= $id ?>" data-version="<?= (int) $b['version'] ?>" data-benutzer="<?= (int) ($currentUser['id'] ?? 0) ?>">
@@ -57,6 +57,11 @@ $teil = [
             <button class="btn btn-sm" type="button" data-lokal-verwerfen>Verwerfen</button></span>
     </div>
     <div class="notice" data-hinweise hidden></div>
+    <?php if ((int) $b['fassung'] > 1): ?>
+        <p class="notice warn" data-feld-ziel="korrektur_grund" tabindex="-1">Korrektur (Fassung <?= (int) $b['fassung'] ?>)<?= $vorgaenger !== null
+            ? ' zu <a href="/berichte/' . (int) $vorgaenger['id'] . '">' . View::e((string) $vorgaenger['nummer']) . '</a>' : '' ?> – Grund: <?= View::e((string) $b['korrektur_grund']) ?>.
+            Bis Prüfer und Kunde diese Fassung unterschrieben haben, gilt die vorige.</p>
+    <?php endif; ?>
 
     <?= View::partial('berichte/_kopf', $teil) ?>
     <?= View::partial('berichte/_anlage', $teil) ?>

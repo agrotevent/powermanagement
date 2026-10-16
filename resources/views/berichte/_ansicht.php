@@ -4,8 +4,9 @@
  * und für alle, die einen Entwurf nur sehen. Texte der Prüfpunkte, Normen
  * und Gründe aus den festen Kopien (`labels`), sonst aus dem Katalog.
  *
- * @var array $inhalt vollständig (BerichtController::vollstaendig)
+ * @var array $inhalt vollständig (BerichtSchema::vollstaendig)
  * @var array $bewertung
+ * @var ?array $unterschriften je Rolle (BerichtService::unterschriften) – ohne: kein Block
  */
 use App\Berichte\Felder;
 use App\Berichte\Katalog;
@@ -43,7 +44,7 @@ $zeile = static fn (string $t): string => nl2br(View::e($t !== '' ? $t : '–'))
                 <dt>Aufstellort</dt><dd><?= $zeile($kopf['anlage']['aufstellort']) ?></dd>
                 <dt>Netz</dt><dd><?= View::e(implode(' · ', array_filter([
                     $inhalt['netz']['spannung'] !== '' ? $inhalt['netz']['spannung'] . ' V' : '', $inhalt['netz']['frequenz'] !== '' ? $inhalt['netz']['frequenz'] . ' Hz' : '',
-                    $inhalt['netz']['form'], Katalog::einspeisungen()[$inhalt['netz']['einspeisung']] ?? '', $inhalt['netz']['erder'] !== '' ? 'Erder: ' . $inhalt['netz']['erder'] : '',
+                    $inhalt['netz']['form'], (string) (((array) ($labels['einspeisungen'] ?? Katalog::einspeisungen()))[$inhalt['netz']['einspeisung']] ?? ''), $inhalt['netz']['erder'] !== '' ? 'Erder: ' . $inhalt['netz']['erder'] : '',
                 ])) ?: '–') ?></dd>
                 <dt>Prüfung nach</dt><dd><?= View::e(implode(', ', array_merge(array_map(static fn ($n) => (string) ($normen[$n] ?? $n), $inhalt['grundlage']['normen']),
                     $inhalt['grundlage']['sonstige'] !== '' ? [$inhalt['grundlage']['sonstige']] : [])) ?: '–') ?></dd>
@@ -58,7 +59,7 @@ $zeile = static fn (string $t): string => nl2br(View::e($t !== '' ? $t : '–'))
             <div class="card">
                 <div class="card-head"><h2><?= $name ?></h2></div>
                 <div class="card-body tight">
-                    <?php $antworten = (array) ($inhalt['punkte'][$teil] ?? []); ?>
+                    <?php $antworten = Katalog::inReihenfolge((array) ($inhalt['punkte'][$teil] ?? []), $teil === 'besichtigung' ? Katalog::besichtigung() : Katalog::erprobung()); ?>
                     <?php if ($antworten === []): ?><p class="muted small mb0">Nichts eingetragen.</p><?php endif; ?>
                     <ul class="liste-schlicht">
                         <?php foreach ($antworten as $s => $z): ?>
@@ -75,6 +76,11 @@ $zeile = static fn (string $t): string => nl2br(View::e($t !== '' ? $t : '–'))
     <div class="card">
         <div class="card-head"><h2>Messprotokoll</h2>
             <span class="hint">Erdung <?= View::e($wert((array) $inhalt['messung']['erdung']) ?: '–') ?> Ω · R_iso bei <?= View::e((string) $inhalt['messung']['riso_u']) ?> V</span></div>
+        <?php if (is_array($inhalt['messgeraete'] ?? null) && $inhalt['messgeraete'] !== []): ?>
+            <div class="card-body tight small">Messgeräte: <?= View::e(implode('; ', array_map(static fn (array $g): string => trim($g['fabrikat'] . ' ' . $g['typ'])
+                . ($g['seriennummer'] !== '' ? ', Nr. ' . $g['seriennummer'] : '') . ($g['kalibriert_bis'] !== '' ? ', kalibriert bis ' . $datum($g['kalibriert_bis']) : '')
+                . ($g['norm'] !== '' ? ' (' . $g['norm'] . ')' : ''), $inhalt['messgeraete']))) ?></div>
+        <?php endif; ?>
         <div class="table-wrap">
             <table class="tabelle-karten">
                 <thead><tr><th>Nr.</th><th>Ort / Anlagenteil</th><th>Schutz</th><th class="num">Zs Ω</th><th class="num">R_iso MΩ</th><th class="num">IΔ mA</th>
@@ -111,7 +117,7 @@ $zeile = static fn (string $t): string => nl2br(View::e($t !== '' ? $t : '–'))
                 <?php if ($inhalt['ergebnis']['instand_bis'] !== ''): ?><dt>Instand zu setzen bis</dt><dd><?= View::e($datum($inhalt['ergebnis']['instand_bis'])) ?></dd><?php endif; ?>
                 <dt>Nächster Prüftermin</dt><dd><?= View::e($inhalt['ergebnis']['naechste'] ?: '–') ?></dd>
                 <?php if ($inhalt['ergebnis']['plakette'] === 'ja'): ?><dt>Prüfplakette</dt><dd><?= View::e(trim('ja ' . $inhalt['ergebnis']['plakette_nr'])) ?></dd><?php endif; ?>
-                <?php if ($inhalt['ergebnis']['errichter'] === '1'): ?><dt>Errichterbestätigung</dt><dd>ja</dd><?php endif; ?>
+                <?php if ($inhalt['ergebnis']['errichter'] === '1'): ?><dt>Errichterbestätigung</dt><dd><?= View::e((string) ($inhalt['texte']['errichter'] ?? 'ja')) ?></dd><?php endif; ?>
             </dl>
             <?php if ($inhalt['maengel'] !== []): ?>
                 <h3 class="mt">Mängel</h3>
@@ -125,4 +131,8 @@ $zeile = static fn (string $t): string => nl2br(View::e($t !== '' ? $t : '–'))
             <?php if ($inhalt['bemerkungen'] !== ''): ?><h3 class="mt">Bemerkungen</h3><p><?= nl2br(View::e((string) $inhalt['bemerkungen'])) ?></p><?php endif; ?>
         </div>
     </div>
+
+    <?php if (isset($unterschriften) && is_array($unterschriften) && ($unterschriften !== [] || (string) ($bericht['status'] ?? 'entwurf') !== 'entwurf')): ?>
+        <?= View::partial('berichte/_unterschriften', ['bericht' => $bericht ?? [], 'inhalt' => $inhalt, 'unterschriften' => $unterschriften]) ?>
+    <?php endif; ?>
 </div>

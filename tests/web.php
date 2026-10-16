@@ -781,6 +781,181 @@ try {
     gleich(aufruf($basis, $bplaner['dose'], 'GET', '/berichte/' . $leerId)['status'], 404, 'fremder Bericht ohne Standort unsichtbar');
     $r = aufruf($basis, $admin['dose'], 'POST', '/berichte/' . $leerId . '/loeschen', ['_token' => $admin['token']]);
     pruefe($r['status'] === 302 && $r['ziel'] === '/berichte' && BerichtService::find($leerId) === null, 'Entwurf gelöscht');
+
+    // ---------------------------------------------------- Übergabeberichte: Unterschriften, Kundenmodus, Korrektur
+    Database::update('users', $benutzer['admin'], ['pruefer_qualifikation' => 'Elektrofachkraft ' . $kennung, 'full_name' => 'Pia Prüferin']);
+    /** Eine gültige Unterschrift aus ganzen Zahlen – jedes Mal andere Striche. */
+    $striche = static function (): string {
+        $versatz = random_int(0, 400);
+        $s = [];
+        for ($zug = 0; $zug < 2; $zug++) {
+            $linie = [];
+            for ($x = 1000; $x <= 8600; $x += 380) {
+                $linie[] = [$x + $versatz, 2500 + intdiv($x, 380) % 2 * 4000 + $zug * 300];
+            }
+            $s[] = $linie;
+        }
+        return json_encode(['s' => $s]);
+    };
+    /** Einen Bericht so ausfüllen, dass nur noch die Warnung zur Kalibrierung offen ist; Antwort von „Prüfen“. */
+    $ausfuellen = static function (int $id) use ($basis, &$admin, $json, $kennung, $geraet): array {
+        $b = BerichtService::find($id);
+        $i = $b['inhalt'];
+        $i['kopf']['kunde']['firma'] = $kennung . ' Kunde GmbH';
+        $i['kopf']['ort'] = 'Musterstadt';
+        $i['kopf']['anlage'] = ['bezeichnung' => 'Verteiler Bühne', 'details' => '', 'aufstellort' => 'Wiese'];
+        $i['netz']['form'] = 'TN-S';
+        $i['grundlage'] = ['normen' => ['0100-600'], 'sonstige' => '', 'grund' => 'aufbau'];
+        $i['messung']['geraete'] = [(string) $geraet];
+        foreach ($i['kreise'] as $n => $k) {
+            $i['kreise'][$n]['leitung']['querschnitt'] = '2.5';
+            $i['kreise'][$n]['status'] = 'gemessen';
+            foreach (['zs' => ['', '0.4'], 'riso' => ['>', '550'], 'idelta' => ['', '22'], 'ta' => ['', '25'], 'ub' => ['', '0.8']] as $feld => [$op, $w]) {
+                $i['kreise'][$n]['w'][$feld] = ['op' => $op, 'w' => $w];
+            }
+        }
+        $i['ergebnis']['entspricht'] = 'ja';
+        aufruf($basis, $admin['dose'], 'POST', '/berichte/' . $id . '/speichern', ['version' => $b['version'], 'inhalt' => json_encode($i), '_token' => $admin['token']], $json);
+        return json_decode(aufruf($basis, $admin['dose'], 'POST', '/berichte/' . $id . '/pruefen', ['_token' => $admin['token']], $json)['text'], true) ?? [];
+    };
+    $neuerBericht = static function () use ($basis, &$admin, $bSite, $bVert): int {
+        aufruf($basis, $admin['dose'], 'POST', '/berichte/anlegen', ['site_id' => $bSite, 'objekte' => [$bVert], '_token' => $admin['token']]);
+        return (int) Database::scalar('SELECT id FROM berichte WHERE site_id = ? ORDER BY id DESC LIMIT 1', [$bSite]);
+    };
+    $unterschreiben = static function (int $id, array $felder = []) use ($basis, &$admin, $json, $striche): array {
+        $r = aufruf($basis, $admin['dose'], 'POST', '/berichte/' . $id . '/unterschreiben', $felder + ['version' => BerichtService::find($id)['version'],
+            'striche' => $striche(), 'name' => 'Pia Prüferin', 'ort' => 'Musterstadt', 'anfrage' => bin2hex(random_bytes(16)),
+            'geraet_am' => gmdate('c'), '_token' => $admin['token']], $json);
+        return ['status' => $r['status'], 'j' => json_decode($r['text'], true) ?? []];
+    };
+    $ohneSkript = static function (string $pfad, string $html): void {
+        pruefe(!str_contains($html, 'onclick=') && !str_contains($html, 'javascript:'), $pfad . ' ohne Inline-JavaScript');
+        preg_match_all('/<script\b([^>]*)>/', $html, $skripte);
+        pruefe(array_filter($skripte[1], static fn (string $a): bool => !str_contains($a, 'src=') && !str_contains($a, 'nonce=')) === [], $pfad . ': jedes Inline-<script> mit Nonce');
+    };
+
+    $b3 = $neuerBericht();
+    $p = $ausfuellen($b3);
+    $kalibrierung = 'kalibrierung:' . $geraet;
+    $warnungen = array_column($p['warnungen'] ?? [], 'code');
+    pruefe(($p['fehler'] ?? null) === [] && in_array($kalibrierung, $warnungen, true) && ($p['bereit'] ?? true) === false,
+        'Prüfen: keine Fehler, Warnung Kalibrierung offen ' . json_encode($p['fehler'] ?? null, JSON_UNESCAPED_UNICODE));
+    $form = aufruf($basis, $admin['dose'], 'GET', '/berichte/' . $b3);
+    pruefe(str_contains($form['text'], 'data-unterschrift-auf') && str_contains($form['text'], 'data-unterschrift-dialog') && str_contains($form['text'], '/assets/js/unterschrift.js'),
+        'Formular: „Als Prüfer unterschreiben“ mit Dialog');
+    $u = $unterschreiben($b3);
+    pruefe($u['status'] === 422 && in_array($kalibrierung, array_column($u['j']['warnungen'] ?? [], 'code'), true), 'Unterschrift mit unbestätigter Warnung → 422');
+    $u = $unterschreiben($b3, ['warnungen' => $warnungen, 'striche' => '{"s":[[[1000,1000,0.5],[9000,9000,0.5]]]}']);
+    pruefe($u['status'] === 422 && BerichtService::find($b3)['status'] === 'entwurf', 'Striche mit Druckwerten → 422');
+    $u = $unterschreiben($b3, ['warnungen' => $warnungen]);
+    $b = BerichtService::find($b3);
+    pruefe($u['status'] === 200 && ($u['j']['ok'] ?? false) && $b['status'] === 'geprueft' && (string) $b['nummer'] === (string) ($u['j']['nummer'] ?? '-')
+        && preg_match('/^TB-\d{4}-\d{4}$/', (string) $b['nummer']) === 1, 'Prüfer unterschreibt → eingefroren mit Nummer ' . $b['nummer']);
+    $r = aufruf($basis, $admin['dose'], 'GET', '/berichte/' . $b3);
+    pruefe($r['status'] === 200 && phpMeldung($r['text']) === null && str_contains($r['text'], 'action="/berichte/' . $b3 . '/kundenmodus"')
+        && str_contains($r['text'], 'Prüfnachweis') && str_contains($r['text'], '✓ Integrität geprüft') && str_contains($r['text'], '<svg class="unterschrift-svg"')
+        && str_contains($r['text'], 'action="/berichte/' . $b3 . '/zurueckziehen"'), 'vom Prüfer unterschrieben: Übergabe, Prüfnachweis, Unterschrift als SVG');
+    $ohneSkript('/berichte/' . $b3 . ' (unterschrieben)', $r['text']);
+    gleich(aufruf($basis, $admin['dose'], 'POST', '/berichte/' . $b3 . '/speichern', ['version' => $b['version'], 'inhalt' => '{}', '_token' => $admin['token']], $json)['status'],
+        423, 'unterschrieben: Speichern → 423');
+
+    // Kundenmodus: alles andere gesperrt, Kunde unterschreibt, Prüfer entsperrt
+    $schaltVorher = (int) Database::scalar('SELECT COUNT(*) FROM schaltvorgaenge WHERE user_id = ?', [$benutzer['admin']]);
+    $r = aufruf($basis, $admin['dose'], 'POST', '/berichte/' . $b3 . '/kundenmodus', ['_token' => $admin['token']]);
+    pruefe($r['status'] === 302 && $r['ziel'] === '/berichte/' . $b3 . '/kunde', 'An Kunden übergeben → Kundenseite');
+    $kundeSeite = aufruf($basis, $admin['dose'], 'GET', '/berichte/' . $b3 . '/kunde');
+    pruefe($kundeSeite['status'] === 200 && phpMeldung($kundeSeite['text']) === null && str_contains($kundeSeite['text'], 'data-kunde="' . $b3 . '"')
+        && !str_contains($kundeSeite['text'], 'class="sidebar') && str_contains($kundeSeite['text'], '/assets/js/bericht-kunde.js')
+        && str_contains($kundeSeite['text'], 'es wird nicht der prüftechnische Inhalt bestätigt'), 'Kundenseite ohne Navigation, mit Bestätigung und Unterschrift');
+    $ohneSkript('/berichte/' . $b3 . '/kunde', $kundeSeite['text']);
+    foreach (['/dashboard', '/berichte', '/berichte/' . $b2Id, '/system/einstellungen', '/profil'] as $pfad) {
+        $r = aufruf($basis, $admin['dose'], 'GET', $pfad);
+        pruefe($r['status'] === 302 && $r['ziel'] === '/berichte/' . $b3 . '/kunde', 'Kundenmodus: ' . $pfad . ' → Kundenseite');
+    }
+    $r = aufruf($basis, $admin['dose'], 'POST', '/steuerung/schalten', ['quelle' => 1, 'befehl' => 'aus', 'kanal' => 'switch:0', '_token' => $admin['token']], $json);
+    pruefe($r['status'] === 423 && (json_decode($r['text'], true)['kundenmodus'] ?? false) === true, 'Kundenmodus: Schalten mit JSON → 423');
+    $r = aufruf($basis, $admin['dose'], 'POST', '/steuerung/schalten', ['quelle' => 1, 'befehl' => 'aus', 'kanal' => 'switch:0', '_token' => $admin['token']]);
+    pruefe($r['status'] === 302 && $r['ziel'] === '/berichte/' . $b3 . '/kunde', 'Kundenmodus: Schalten → Kundenseite');
+    gleich((int) Database::scalar('SELECT COUNT(*) FROM schaltvorgaenge WHERE user_id = ?', [$benutzer['admin']]), $schaltVorher, 'Kundenmodus: nichts geschaltet');
+    gleich(aufruf($basis, $admin['dose'], 'POST', '/berichte/' . $b2Id . '/speichern', ['version' => 1, 'inhalt' => '{}', '_token' => $admin['token']], $json)['status'],
+        423, 'Kundenmodus: Autosave eines anderen Berichts → 423');
+    $kundeFelder = ['striche' => $striche(), 'name' => 'Kim Kunde', 'funktion' => 'Produktion', 'ort' => 'Musterstadt', 'vorbehalte' => '',
+        'anfrage' => bin2hex(random_bytes(16)), 'geraet_am' => gmdate('c'), '_token' => $admin['token']];
+    $r = aufruf($basis, $admin['dose'], 'POST', '/berichte/' . $b3 . '/kunde/unterschreiben', $kundeFelder + ['bestaetigungen' => ['eingewiesen']], $json);
+    pruefe($r['status'] === 422 && BerichtService::find($b3)['status'] === 'geprueft', 'Kunde ohne „Bericht erhalten“ → 422');
+    $mit = $kundeFelder + ['bestaetigungen' => ['erhalten', 'uebernommen']];
+    $r1 = aufruf($basis, $admin['dose'], 'POST', '/berichte/' . $b3 . '/kunde/unterschreiben', $mit, $json);
+    $r2 = aufruf($basis, $admin['dose'], 'POST', '/berichte/' . $b3 . '/kunde/unterschreiben', $mit, $json);
+    pruefe($r1['status'] === 200 && $r2['status'] === 200 && BerichtService::find($b3)['status'] === 'abgeschlossen'
+        && (int) Database::scalar("SELECT COUNT(*) FROM bericht_unterschriften WHERE bericht_id = ? AND rolle = 'kunde'", [$b3]) === 1,
+        'Kundenunterschrift doppelt gesendet → eine Zeile, abgeschlossen');
+    $r = aufruf($basis, $admin['dose'], 'GET', '/berichte/' . $b3 . '/kunde');
+    pruefe($r['status'] === 200 && str_contains($r['text'], 'Bitte geben Sie das Gerät an') && str_contains($r['text'], 'Pia Prüferin')
+        && str_contains($r['text'], 'action="/berichte/' . $b3 . '/kunde/beenden"'), 'danach: „Gerät zurückgeben“ mit Kennwortfeld');
+    $fehlVorher = (int) Database::scalar('SELECT failed_logins FROM users WHERE id = ?', [$benutzer['admin']]);
+    $r = aufruf($basis, $admin['dose'], 'POST', '/berichte/' . $b3 . '/kunde/beenden', ['kennwort' => 'falsch', '_token' => $admin['token']]);
+    pruefe($r['status'] === 302 && $r['ziel'] === '/berichte/' . $b3 . '/kunde'
+        && aufruf($basis, $admin['dose'], 'GET', '/dashboard')['ziel'] === '/berichte/' . $b3 . '/kunde', 'falsches Kennwort: Sperre bleibt');
+    pruefe(Database::scalar('SELECT locked_until FROM users WHERE id = ?', [$benutzer['admin']]) === null
+        && (int) Database::scalar('SELECT failed_logins FROM users WHERE id = ?', [$benutzer['admin']]) === $fehlVorher, 'falsches Kennwort: Konto nicht gesperrt');
+    $r = aufruf($basis, $admin['dose'], 'POST', '/berichte/' . $b3 . '/kunde/beenden', ['kennwort' => $kennwort, '_token' => $admin['token']]);
+    pruefe($r['status'] === 302 && $r['ziel'] === '/berichte/' . $b3, 'richtiges Kennwort → zurück zum Bericht');
+    $r = aufruf($basis, $admin['dose'], 'GET', '/dashboard');
+    pruefe($r['status'] === 200, 'entsperrt: Dashboard wieder offen');
+    $alterToken = $admin['token'];
+    $admin['token'] = token($r['text']);
+    pruefe($admin['token'] !== '' && $admin['token'] !== $alterToken, 'entsperrt: neues CSRF-Token');
+    $ereignisse = array_column(BerichtService::ereignisse($b3), 'ereignis');
+    pruefe(in_array('kundenmodus_start', $ereignisse, true) && in_array('kunde_unterschrieben', $ereignisse, true) && in_array('kundenmodus_ende', $ereignisse, true),
+        'Ereignisse: Kundenmodus, Kundenunterschrift, Ende');
+    $r = aufruf($basis, $admin['dose'], 'GET', '/berichte/' . $b3);
+    pruefe($r['status'] === 200 && phpMeldung($r['text']) === null && str_contains($r['text'], 'Kim Kunde') && substr_count($r['text'], '<svg class="unterschrift-svg"') === 2
+        && str_contains($r['text'], 'action="/berichte/' . $b3 . '/korrektur"'), 'abgeschlossen: beide Unterschriften, Korrektur möglich');
+    $ohneSkript('/berichte/' . $b3 . ' (abgeschlossen)', $r['text']);
+    $r = aufruf($basis, $bkunde['dose'], 'GET', '/berichte/' . $b3);
+    pruefe($r['status'] === 200 && str_contains($r['text'], 'Kim Kunde') && !str_contains($r['text'], '/korrektur"') && !str_contains($r['text'], 'Verlauf'),
+        'Kunde mit Freigabe sieht den Bericht mit Unterschriften, ohne Knöpfe und Verlauf');
+    gleich(aufruf($basis, $bkunde['dose'], 'POST', '/berichte/' . $b3 . '/korrektur', ['grund' => 'xyz', '_token' => $bkunde['token']])['status'], 403, 'Kunde: keine Korrektur');
+
+    // Fünf falsche Kennwörter: abgemeldet, das Konto bleibt offen; ohne Kunde abschließen; zurückziehen
+    $b4 = $neuerBericht();
+    $warnungen = array_column($ausfuellen($b4)['warnungen'] ?? [], 'code');
+    pruefe($unterschreiben($b4, ['warnungen' => $warnungen])['status'] === 200, 'zweiter Bericht unterschrieben');
+    $r = aufruf($basis, $admin['dose'], 'POST', '/berichte/' . $b4 . '/zurueckziehen', ['grund' => 'Ort falsch', '_token' => $admin['token']]);
+    $b = BerichtService::find($b4);
+    pruefe($r['status'] === 302 && $b['status'] === 'entwurf' && $b['nummer'] !== null, 'zurückgezogen: Entwurf mit Nummer');
+    $r = aufruf($basis, $admin['dose'], 'GET', '/berichte/' . $b4);
+    pruefe($r['status'] === 200 && str_contains($r['text'], 'data-bericht="' . $b4 . '"') && str_contains($r['text'], 'action="/berichte/' . $b4 . '/verwerfen"')
+        && !str_contains($r['text'], 'action="/berichte/' . $b4 . '/loeschen"'), 'zurückgezogen: wieder Formular, verwerfen statt löschen');
+    pruefe($unterschreiben($b4, ['warnungen' => $warnungen])['status'] === 200 && BerichtService::find($b4)['nummer'] === $b['nummer'], 'neu unterschrieben, gleiche Nummer');
+    aufruf($basis, $admin['dose'], 'POST', '/berichte/' . $b4 . '/kundenmodus', ['_token' => $admin['token']]);
+    gleich(aufruf($basis, $admin['dose'], 'POST', '/berichte/' . $b4 . '/ohne-kunde', ['art' => 'abwesend', 'grund' => 'xyz', '_token' => $admin['token']])['ziel'],
+        '/berichte/' . $b4 . '/kunde', 'Kundenmodus: „ohne Kunde“ gesperrt');
+    for ($n = 1; $n <= 5; $n++) {
+        $r = aufruf($basis, $admin['dose'], 'POST', '/berichte/' . $b4 . '/kunde/beenden', ['kennwort' => 'falsch-' . $n, '_token' => $admin['token']]);
+    }
+    pruefe($r['status'] === 302 && $r['ziel'] === '/login' && str_starts_with((string) aufruf($basis, $admin['dose'], 'GET', '/dashboard')['ziel'], '/login'),
+        'fünf falsche Kennwörter → abgemeldet');
+    pruefe(Database::scalar('SELECT locked_until FROM users WHERE id = ?', [$benutzer['admin']]) === null, 'Konto nach fünf Fehlversuchen nicht gesperrt');
+    pruefe(in_array('kundenmodus_abgemeldet', array_column(BerichtService::ereignisse($b4), 'ereignis'), true), 'Ereignis „kundenmodus_abgemeldet“');
+    $admin = anmelden($basis, $kennung . '-admin', $kennwort);
+    $dosen[] = $admin['dose'];
+    gleich(aufruf($basis, $admin['dose'], 'GET', '/dashboard')['status'], 200, 'neu angemeldet: ohne Kundenmodus');
+    $r = aufruf($basis, $admin['dose'], 'POST', '/berichte/' . $b4 . '/ohne-kunde', ['art' => 'verweigert', 'grund' => 'Kunde verweigert die Unterschrift', '_token' => $admin['token']]);
+    pruefe($r['status'] === 302 && BerichtService::find($b4)['status'] === 'abgeschlossen', 'ohne Kunde abgeschlossen');
+    $r = aufruf($basis, $admin['dose'], 'GET', '/berichte/' . $b4);
+    pruefe(phpMeldung($r['text']) === null && str_contains($r['text'], 'Ohne Unterschrift des Kunden') && str_contains($r['text'], 'Kunde verweigert die Unterschrift'),
+        'Leseansicht: ohne Kunde mit Grund');
+
+    // Korrektur: neue Fassung im Formular, der Vorgänger gilt weiter
+    $r = aufruf($basis, $admin['dose'], 'POST', '/berichte/' . $b3 . '/korrektur', ['grund' => 'Querschnitt nachgetragen', '_token' => $admin['token']]);
+    $k = (int) Database::scalar('SELECT id FROM berichte WHERE vorgaenger_id = ?', [$b3]);
+    pruefe($k > 0 && $r['status'] === 302 && $r['ziel'] === '/berichte/' . $k && BerichtService::find($b3)['status'] === 'abgeschlossen', 'Korrektur angelegt → Formular der neuen Fassung');
+    $r = aufruf($basis, $admin['dose'], 'GET', '/berichte/' . $k);
+    pruefe($r['status'] === 200 && phpMeldung($r['text']) === null && str_contains($r['text'], 'Korrektur (Fassung 2)') && str_contains($r['text'], 'Querschnitt nachgetragen'),
+        'Formular der Korrektur nennt Fassung und Grund');
+    $r = aufruf($basis, $admin['dose'], 'GET', '/berichte/' . $b3);
+    pruefe(str_contains($r['text'], 'Eine Korrektur ist in Arbeit') && !str_contains($r['text'], 'action="/berichte/' . $b3 . '/korrektur"'), 'Vorgänger: Hinweis auf die offene Korrektur');
 } finally {
     Settings::vergessen();
     foreach ($eventworxVorher as $s => $wert) {

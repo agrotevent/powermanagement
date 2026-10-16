@@ -14,6 +14,10 @@
  *
  * Bewertet wird nur auf dem Server – hier wird nur angezeigt, was das
  * Autosave zurückgibt. Texte aus Antworten nur per textContent, nie als HTML.
+ *
+ * „Als Prüfer unterschreiben“ speichert und prüft erst; nur wenn nichts
+ * fehlt, öffnet der Dialog (unterschrift.js). Danach ist der Bericht
+ * eingefroren – die Seite lädt die Leseansicht.
  */
 (function () {
     'use strict';
@@ -872,12 +876,12 @@
         text.className = 'pruef-zusammenfassung';
         text.textContent = 'speichert und prüft …';
         leeren(liste);
-        speichern().then(function (ok) {
+        return speichern().then(function (ok) {
             if (!ok) { text.textContent = 'Erst muss der Bericht gespeichert sein – siehe Meldung oben.'; return null; }
             return anfrage('/pruefen', {});
         }).then(function (r) {
-            if (!r) { return; }
-            if (!r.erg.ok) { text.textContent = r.erg.message || 'Prüfen nicht möglich.'; return; }
+            if (!r) { return null; }
+            if (!r.erg.ok) { text.textContent = r.erg.message || 'Prüfen nicht möglich.'; return null; }
             // Fehler der Stromkreise ab dem sechsten zusammengefasst – bei 80 Kreisen wäre die Liste sonst länger als das Formular.
             var kreise = 0;
             var weitere = null;
@@ -907,6 +911,7 @@
             });
             warnungenZeigen(r.erg.warnungen || []);
             zusammenfassung(r.erg.fehler || []);
+            return r;
         }).finally(function () { knopf.disabled = false; });
     }
 
@@ -985,6 +990,74 @@
                 wurzel.dataset.version = String(version);
             }
         }).finally(function () { knopf.disabled = false; });
+    }
+
+    // ---------------------------------------------------- Prüfer-Unterschrift
+
+    var unterschrift = null;
+
+    /** Erst speichern und prüfen – der Dialog öffnet nur, wenn nichts mehr fehlt. */
+    function unterschriftAuf(knopf) {
+        var dlg = wurzel.querySelector('[data-unterschrift-dialog]');
+        if (!dlg || !window.PMUnterschrift) { return; }
+        if (!unterschrift) { unterschrift = window.PMUnterschrift.dialog(dlg, { senden: unterschreiben }); }
+        knopf.disabled = true;
+        pruefen(knopf).then(function (r) {
+            if (!r || !r.erg.bereit) {
+                wurzel.querySelector('[data-pruef-ergebnis]').scrollIntoView({ block: 'center', behavior: 'smooth' });
+                return;
+            }
+            var ort = dlg.querySelector('[data-unterschrift-feld="ort"]');
+            var kopfOrt = feldIn(wurzel, 'kopf.ort');
+            if (ort && ort.value.trim() === '' && kopfOrt) { ort.value = kopfOrt.value; }
+            unterschrift.oeffnen();
+        });
+    }
+
+    function bestaetigteWarnungen() {
+        return Array.prototype.filter.call(wurzel.querySelectorAll('[data-pruef-warnungen] input[data-liste]'), function (c) { return c.checked; })
+            .map(function (c) { return c.value; });
+    }
+
+    function unterschreiben(werte) {
+        var schluessel = 'pruefer:' + berichtId;
+        unterschrift.laeuft(true);
+        unterschrift.meldung('speichert und unterschreibt …', false);
+        speichern().then(function (ok) {
+            if (!ok) { return { status: 0, erg: { ok: false, message: 'Der Bericht ist nicht gespeichert – siehe Meldung oben.' } }; }
+            return anfrage('/unterschreiben', {
+                version: String(version), striche: unterschrift.daten(), name: werte.name || '', ort: werte.ort || '',
+                anfrage: window.PMUnterschrift.schluessel(schluessel), geraet_am: new Date().toISOString(), warnungen: bestaetigteWarnungen()
+            });
+        }).then(function (r) {
+            if (r.status === 200 && r.erg.ok) {
+                // Eingefroren: nichts mehr speichern, weiter zur Leseansicht.
+                window.PMUnterschrift.schluesselLoeschen(schluessel);
+                gestoppt = true;
+                uebernahme = true;
+                lokalLoeschen();
+                unterschrift.meldung((r.erg.message || 'Unterschrieben.') + ' Lädt …', false);
+                window.location.href = ADRESSE;
+                return;
+            }
+            unterschrift.laeuft(false);
+            if (r.status === 0) {
+                unterschrift.meldung((r.erg.message || 'Keine Verbindung.') + ' Bitte noch einmal „Unterschreiben“ – es wird nichts doppelt angelegt.', true);
+                return;
+            }
+            if (r.status === 409 && !r.erg.konflikt) {
+                unterschrift.meldung((r.erg.message || 'Schon unterschrieben.') + ' Bitte die Seite neu laden.', true);
+                return;
+            }
+            var offen = (r.erg.warnungen || []).filter(function (w) { return !w.bestaetigt; });
+            if ((r.erg.fehler && r.erg.fehler.length > 0) || offen.length > 0) {
+                // Inzwischen fehlt etwas oder eine neue Warnung ist dazugekommen: zurück zu „Prüfen“.
+                unterschrift.schliessen();
+                pruefen(wurzel.querySelector('[data-pruefen]'));
+                return;
+            }
+            unterschrift.meldung(r.erg.message || 'Nicht unterschrieben.', true);
+        });
     }
 
     // ======================================================== Reiter, Abschnitte
@@ -1146,6 +1219,7 @@
             return;
         }
         if (knopf.hasAttribute('data-pruefen')) { pruefen(knopf); return; }
+        if (knopf.hasAttribute('data-unterschrift-auf')) { unterschriftAuf(knopf); return; }
         if (knopf.hasAttribute('data-ewx-suchen')) { ewxSuchen(); return; }
         if (d.ewxVorgang) { ewxVorgang(d.ewxVorgang); return; }
         if (knopf.hasAttribute('data-ewx-neu-laden')) {
@@ -1164,7 +1238,7 @@
             return;
         }
         if (knopf.hasAttribute('data-ewx-uebernehmen')) { ewxUebernehmen(); return; }
-        if (knopf.hasAttribute('data-dialog-zu')) {
+        if (knopf.hasAttribute('data-dialog-zu') && !knopf.closest('[data-unterschrift-dialog]')) {
             var dlg = knopf.closest('dialog');
             if (typeof dlg.close === 'function') { dlg.close(); } else { dlg.removeAttribute('open'); }
             return;

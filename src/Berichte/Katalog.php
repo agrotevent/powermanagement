@@ -140,4 +140,24 @@ final class Katalog
     {
         return self::besichtigung()[$schluessel]['text'] ?? self::erprobung()[$schluessel]['text'] ?? $schluessel;
     }
+
+    /**
+     * Einträge in der Reihenfolge des Katalogs – für die Anzeige. Der
+     * gespeicherte Inhalt ist kanonisch (Schlüssel alphabetisch, Kanon);
+     * was der Katalog nicht (mehr) kennt, kommt dahinter.
+     *
+     * @param array<string,mixed> $eintraege
+     * @param array<string,mixed> $katalog
+     * @return array<string,mixed>
+     */
+    public static function inReihenfolge(array $eintraege, array $katalog): array
+    {
+        $out = [];
+        foreach (array_keys($katalog) as $schluessel) {
+            if (array_key_exists($schluessel, $eintraege)) {
+                $out[$schluessel] = $eintraege[$schluessel];
+            }
+        }
+        return $out + $eintraege;
+    }
 }

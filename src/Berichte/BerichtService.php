@@ -9,6 +9,7 @@ use App\Services\AnlagenService;
 use App\Services\AufbauService;
 use App\Services\SiteService;
 use App\Support\Audit;
+use App\Support\Crypto;
 use App\Support\Database;
 use App\Support\Session;
 use App\Support\Zeit;
@@ -52,6 +53,19 @@ final class BerichtService
     private const GESPEICHERT_TAKT = 600;
 
     private const QUELLEN = ['anschluss', 'generator', 'wechselrichter'];
+
+    /** Was beim Einfrieren dazukommt – und beim Zurückziehen und in der Korrektur wieder geht (dazu kopf.pruefer, kopf.eventworx). */
+    private const FESTE_KOPIEN = ['nummer', 'fassung', 'vorgaenger', 'auftragnehmer', 'messgeraete', 'labels', 'texte', 'bewertung'];
+
+    /** Idempotenzschlüssel des Geräts (crypto.randomUUID oder 32 Hexzeichen). */
+    private const ANFRAGE = '/^[A-Za-z0-9-]{16,64}$/';
+
+    /** Zweck des aus app.key abgeleiteten Siegel-Schlüssels (Crypto::ableiten). */
+    private const SIEGEL_ZWECK = 'bericht-siegel-1';
+
+    public const OHNE_KUNDE = ['abwesend' => 'Kunde nicht anwesend', 'verweigert' => 'Unterschrift verweigert'];
+
+    private const NUR_PRUEFER = 'Als Prüfer handelt nur, wer „als Prüfer unterschreiben“ hat, eine hinterlegte Qualifikation und „bearbeiten“ für den Standort.';
 
     // ------------------------------------------------------------ Lesen
 
@@ -745,6 +759,514 @@ final class BerichtService
         ];
     }
 
+    // ------------------------------------------------------------ Unterschriften
+
+    /**
+     * Die Unterschriften eines Berichts je Rolle (pruefer, kunde) –
+     * Striche als Liste, Angaben als Array.
+     *
+     * @return array<string,array<string,mixed>>
+     */
+    public static function unterschriften(int $id): array
+    {
+        $out = [];
+        foreach (Database::select('SELECT * FROM bericht_unterschriften WHERE bericht_id = ? ORDER BY id', [$id]) as $u) {
+            $u['striche'] = is_string($u['striche']) ? ((json_decode($u['striche'], true)['s'] ?? null) ?: []) : [];
+            $u['angaben'] = is_string($u['angaben']) ? (json_decode($u['angaben'], true) ?: []) : [];
+            $out[(string) $u['rolle']] = $u;
+        }
+        return $out;
+    }
+
+    /**
+     * Als Prüfer unterschreiben. Geprüft wird der gespeicherte Stand
+     * (abschlussPruefen – ohne Fehler, Warnungen bestätigt), dann in einer
+     * Transaktion: Nummer vergeben (falls noch keine), den Inhalt mit den
+     * festen Kopien einfrieren (inhalt_hash) und die erste Unterschrift der
+     * Kette anlegen. Danach ändert sich der Inhalt nur noch als Korrektur.
+     *
+     * $u: striche (JSON), name, ort, anfrage (Idempotenzschlüssel des
+     * Geräts), geraet_am (nur zur Information), warnungen (im Dialog
+     * bestätigte Codes). Dieselbe Anfrage noch einmal (schwaches Netz)
+     * ergibt dieselbe Unterschrift.
+     *
+     * @return array{ok:bool,message:string,status:int,nummer?:string,unterschrift?:int,fehler?:list<array>,warnungen?:list<array>,konflikt?:bool}
+     */
+    public static function prueferUnterschreiben(int $id, int $version, array $u): array
+    {
+        $b = self::find($id);
+        if ($b === null || !self::sichtbar($b)) {
+            return self::nichtDa();
+        }
+        $anfrage = (string) ($u['anfrage'] ?? '');
+        if (preg_match(self::ANFRAGE, $anfrage) !== 1) {
+            return ['ok' => false, 'status' => 422, 'message' => 'Die Kennung der Unterschrift fehlt – bitte die Seite neu laden.'];
+        }
+        if (($wieder = self::wiederholung($id, 'pruefer', $anfrage)) !== null) {
+            return $wieder;
+        }
+        if ($b['status'] !== 'entwurf') {
+            return self::unterschriftDa($id, 'pruefer')
+                ? ['ok' => false, 'status' => 409, 'message' => 'Der Bericht ist schon vom Prüfer unterschrieben.']
+                : ['ok' => false, 'status' => 423, 'message' => $b['status'] === 'verworfen' ? 'Der Bericht ist verworfen.' : self::EINGEFROREN];
+        }
+        if (!self::darfPruefen($b)) {
+            return ['ok' => false, 'status' => 403, 'message' => self::NUR_PRUEFER];
+        }
+        if ($version !== (int) $b['version']) {
+            return self::konflikt($b);
+        }
+
+        // Im Dialog bestätigte Warnungen gehören zum eingefrorenen Inhalt.
+        $b['inhalt']['abschluss']['warnungen_bestaetigt'] = BerichtSchema::codes(array_merge(
+            (array) ($b['inhalt']['abschluss']['warnungen_bestaetigt'] ?? []),
+            is_array($u['warnungen'] ?? null) ? $u['warnungen'] : []
+        ));
+        $pruefung = self::abschlussPruefen($b);
+        if ($pruefung['fehler'] !== []) {
+            return ['ok' => false, 'status' => 422, 'message' => 'Vor der Unterschrift fehlt noch etwas – siehe „Prüfen“.',
+                'fehler' => $pruefung['fehler'], 'warnungen' => $pruefung['warnungen']];
+        }
+        if (array_filter($pruefung['warnungen'], static fn (array $w): bool => !$w['bestaetigt']) !== []) {
+            return ['ok' => false, 'status' => 422, 'message' => 'Bitte die Warnungen ansehen und abhaken.', 'fehler' => [], 'warnungen' => $pruefung['warnungen']];
+        }
+        $name = Unterschrift::text($u['name'] ?? '');
+        $ort = Unterschrift::text($u['ort'] ?? '');
+        if (mb_strlen($name) < 2) {
+            return ['ok' => false, 'status' => 422, 'message' => 'Bitte den Namen in Druckbuchstaben eintragen.'];
+        }
+        if (mb_strlen($ort) < 2) {
+            return ['ok' => false, 'status' => 422, 'message' => 'Bitte den Ort der Unterschrift eintragen.'];
+        }
+        $striche = self::strichePruefen((string) ($u['striche'] ?? ''));
+        if (!$striche['ok']) {
+            return $striche;
+        }
+        $qualifikation = self::qualifikation();
+        $geraetAm = self::geraetAm($u['geraet_am'] ?? null);
+
+        for ($versuch = 1; ; $versuch++) {
+            try {
+                $erg = self::transaktion(static function () use ($b, $id, $version, $name, $ort, $qualifikation, $striche, $anfrage, $geraetAm): ?array {
+                    $jetzt = gmdate('c');
+                    [$nummer, $jahr, $laufnr] = $b['nummer'] !== null
+                        ? [(string) $b['nummer'], (int) $b['jahr'], (int) $b['laufnr']]
+                        : self::nummerVergeben($b);
+                    $b['nummer'] = $nummer;
+                    $inhalt = self::inhaltBauen($b, ['user_id' => (string) Auth::id(), 'name' => $name, 'qualifikation' => $qualifikation]);
+                    $json = Kanon::json($inhalt);
+                    $inhaltHash = hash('sha256', $json);
+                    $n = Database::execute(
+                        "UPDATE berichte SET status = 'geprueft', nummer = ?, jahr = ?, laufnr = ?, inhalt = ?, inhalt_hash = ?, pruefer_id = ?,
+                         eingefroren_am = ?, version = version + 1, geaendert_von = ?, updated_at = ? WHERE id = ? AND version = ? AND status = 'entwurf'",
+                        [$nummer, $jahr, $laufnr, $json, $inhaltHash, Auth::id(), $jetzt, Auth::id(), $jetzt, $id, $version]
+                    );
+                    if ($n !== 1) {
+                        return null;
+                    }
+                    $uid = self::unterschriftAnlegen($id, $nummer, (int) $b['fassung'], [
+                        'rolle' => 'pruefer', 'art' => 'gezeichnet', 'name' => $name, 'funktion' => $qualifikation, 'ort' => $ort,
+                        'striche' => $striche['striche'], 'striche_hash' => $striche['hash'], 'inhalt_hash' => $inhaltHash,
+                        'am' => $jetzt, 'geraet_am' => $geraetAm, 'anfrage' => $anfrage,
+                    ]);
+                    self::ereignis($id, 'pruefer_unterschrieben', ['nummer' => $nummer, 'inhalt_hash' => $inhaltHash]);
+                    return ['nummer' => $nummer, 'unterschrift' => $uid];
+                });
+                break;
+            } catch (\PDOException $e) {
+                if (!self::eindeutigVerletzt($e) || $versuch >= 3) {
+                    throw $e;
+                }
+                // Dieselbe Anfrage von einem zweiten Versuch, ein anderer
+                // Prüfer – oder zwei Tablets haben dieselbe Nummer gezogen:
+                // dann einfach noch einmal.
+                if (($wieder = self::wiederholung($id, 'pruefer', $anfrage)) !== null) {
+                    return $wieder;
+                }
+                if (self::unterschriftDa($id, 'pruefer')) {
+                    return ['ok' => false, 'status' => 409, 'message' => 'Der Bericht ist schon vom Prüfer unterschrieben.'];
+                }
+            }
+        }
+        if ($erg === null) {
+            return self::konflikt(self::find($id) ?? $b);
+        }
+        Audit::log('bericht.unterschrieben', 'bericht', (string) $id, ['nummer' => $erg['nummer'], 'rolle' => 'pruefer']);
+        return ['ok' => true, 'status' => 200, 'message' => $erg['nummer'] . ' unterschrieben – der Bericht ist eingefroren.',
+            'nummer' => $erg['nummer'], 'unterschrift' => $erg['unterschrift']];
+    }
+
+    /**
+     * Darf die Prüfer-Unterschrift zurückgezogen werden? Nur solange der
+     * Bericht nicht beim Kunden war: keine Kundenzeile, und seit der
+     * Unterschrift weder Kundenmodus noch ein abgerufenes PDF.
+     */
+    public static function zurueckziehbar(array $b): bool
+    {
+        if ((string) $b['status'] !== 'geprueft' || self::unterschriftDa((int) $b['id'], 'kunde')) {
+            return false;
+        }
+        $seit = (int) Database::scalar(
+            "SELECT COALESCE(MAX(id), 0) FROM bericht_ereignisse WHERE bericht_id = ? AND ereignis = 'pruefer_unterschrieben'",
+            [(int) $b['id']]
+        );
+        return (int) Database::scalar(
+            "SELECT COUNT(*) FROM bericht_ereignisse WHERE bericht_id = ? AND id > ? AND ereignis IN ('kundenmodus_start', 'pdf_abgerufen')",
+            [(int) $b['id'], $seit]
+        ) === 0;
+    }
+
+    /**
+     * Die Prüfer-Unterschrift zurückziehen: der Bericht wird wieder Entwurf,
+     * die festen Kopien und der Hash gehen, die Nummer bleibt (sie war
+     * vergeben). Das Ereignis hält den alten Hash und die alte Kette fest.
+     *
+     * @return array{ok:bool,message:string,status:int}
+     */
+    public static function zurueckziehen(int $id, string $grund): array
+    {
+        $b = self::find($id);
+        if ($b === null || !self::sichtbar($b)) {
+            return self::nichtDa();
+        }
+        if ($b['status'] !== 'geprueft') {
+            return ['ok' => false, 'status' => 409, 'message' => 'Zurückziehen geht nur nach der Prüfer-Unterschrift und vor dem Abschluss.'];
+        }
+        if (!self::darfPruefen($b)) {
+            return ['ok' => false, 'status' => 403, 'message' => self::NUR_PRUEFER];
+        }
+        $grund = Unterschrift::text($grund, 500);
+        if (mb_strlen($grund) < 3) {
+            return ['ok' => false, 'status' => 422, 'message' => 'Bitte einen Grund angeben.'];
+        }
+        if (!self::zurueckziehbar($b)) {
+            return ['ok' => false, 'status' => 409, 'message' => 'Der Bericht war schon beim Kunden (Kundenmodus oder PDF) – jetzt bitte abschließen und als Korrektur ändern.'];
+        }
+        $inhalt = self::ohneFesteKopien($b['inhalt']);
+        $ok = self::transaktion(static function () use ($id, $b, $grund, $inhalt): bool {
+            $kette = (string) (Database::scalar("SELECT kette_hash FROM bericht_unterschriften WHERE bericht_id = ? AND rolle = 'pruefer'", [$id]) ?: '');
+            $n = Database::execute(
+                "UPDATE berichte SET status = 'entwurf', inhalt = ?, inhalt_hash = NULL, eingefroren_am = NULL, pruefer_id = NULL,
+                 version = version + 1, geaendert_von = ?, updated_at = ? WHERE id = ? AND status = 'geprueft'",
+                [Kanon::json($inhalt), Auth::id(), gmdate('c'), $id]
+            );
+            if ($n !== 1) {
+                return false;
+            }
+            Database::execute("DELETE FROM bericht_unterschriften WHERE bericht_id = ? AND rolle = 'pruefer'", [$id]);
+            self::ereignis($id, 'zurueckgezogen', ['grund' => $grund, 'inhalt_hash' => (string) $b['inhalt_hash'], 'kette_hash' => $kette]);
+            return true;
+        });
+        if (!$ok) {
+            return ['ok' => false, 'status' => 409, 'message' => 'Der Bericht wurde inzwischen geändert – bitte neu laden.'];
+        }
+        Audit::log('bericht.zurueckgezogen', 'bericht', (string) $id, ['nummer' => $b['nummer']]);
+        return ['ok' => true, 'status' => 200, 'message' => 'Unterschrift zurückgezogen – ' . $b['nummer'] . ' ist wieder ein Entwurf, die Nummer bleibt.'];
+    }
+
+    /**
+     * Den Kundenmodus starten: das Gerät wird für alles außer der
+     * Kundenseite dieses Berichts gesperrt (Router), bis der Prüfer sein
+     * Kennwort eingibt. Ab jetzt lässt sich die Unterschrift nicht mehr
+     * zurückziehen – der Kunde hat den Bericht gesehen.
+     *
+     * @return array{ok:bool,message:string,status:int}
+     */
+    public static function kundenmodusStarten(int $id): array
+    {
+        $b = self::find($id);
+        if ($b === null || !self::sichtbar($b)) {
+            return self::nichtDa();
+        }
+        if ($b['status'] !== 'geprueft') {
+            return ['ok' => false, 'status' => 409, 'message' => 'Der Kunde unterschreibt nach dem Prüfer – und nur einmal.'];
+        }
+        if (!self::darfKundenblock($b)) {
+            return ['ok' => false, 'status' => 403, 'message' => 'Für diesen Bericht fehlt eine Freigabe mit „bearbeiten“.'];
+        }
+        Kundenmodus::starten($id);
+        self::ereignis($id, 'kundenmodus_start');
+        return ['ok' => true, 'status' => 200, 'message' => 'Kundenmodus gestartet.'];
+    }
+
+    /**
+     * Die Unterschrift des Kunden (am Gerät des Prüfers). Bestätigt wird die
+     * Übergabe des Dokuments, nicht der prüftechnische Inhalt; „Bericht
+     * erhalten“ ist Pflicht. Die Zeile kettet an die des Prüfers; danach ist
+     * der Bericht abgeschlossen (bei einer Korrektur ist der Vorgänger dann
+     * ersetzt).
+     *
+     * $u: striche (JSON), name, funktion, ort, bestaetigungen (Liste),
+     * vorbehalte, anfrage, geraet_am.
+     *
+     * @return array{ok:bool,message:string,status:int,unterschrift?:int}
+     */
+    public static function kundeUnterschreiben(int $id, array $u): array
+    {
+        $b = self::find($id);
+        if ($b === null || !self::sichtbar($b)) {
+            return self::nichtDa();
+        }
+        $anfrage = (string) ($u['anfrage'] ?? '');
+        if (preg_match(self::ANFRAGE, $anfrage) !== 1) {
+            return ['ok' => false, 'status' => 422, 'message' => 'Die Kennung der Unterschrift fehlt – bitte die Seite neu laden.'];
+        }
+        if (($wieder = self::wiederholung($id, 'kunde', $anfrage)) !== null) {
+            return $wieder;
+        }
+        if (($fehler = self::kundenblockOffen($b)) !== null) {
+            return $fehler;
+        }
+        if (!self::darfKundenblock($b)) {
+            return ['ok' => false, 'status' => 403, 'message' => 'Für diesen Bericht fehlt eine Freigabe mit „bearbeiten“.'];
+        }
+        $erlaubt = array_keys(Katalog::bestaetigungen());
+        $bestaetigungen = array_values(array_intersect($erlaubt, is_array($u['bestaetigungen'] ?? null) ? array_map('strval', $u['bestaetigungen']) : []));
+        foreach (Katalog::bestaetigungen() as $schluessel => $bst) {
+            if ($bst['pflicht'] && !in_array($schluessel, $bestaetigungen, true)) {
+                return ['ok' => false, 'status' => 422, 'message' => 'Bitte „' . $bst['text'] . '“ bestätigen.'];
+            }
+        }
+        $name = Unterschrift::text($u['name'] ?? '');
+        if (mb_strlen($name) < 2) {
+            return ['ok' => false, 'status' => 422, 'message' => 'Bitte den Namen in Druckbuchstaben eintragen.'];
+        }
+        $striche = self::strichePruefen((string) ($u['striche'] ?? ''));
+        if (!$striche['ok']) {
+            return $striche;
+        }
+        $angaben = ['bestaetigungen' => $bestaetigungen, 'vorbehalte' => Unterschrift::absatz($u['vorbehalte'] ?? '', 2000)];
+        $erg = self::kundenblockAnlegen($b, [
+            'art' => 'gezeichnet', 'name' => $name, 'funktion' => Unterschrift::text($u['funktion'] ?? ''), 'ort' => Unterschrift::text($u['ort'] ?? ''),
+            'striche' => $striche['striche'], 'striche_hash' => $striche['hash'], 'angaben' => $angaben,
+            'geraet_am' => self::geraetAm($u['geraet_am'] ?? null), 'anfrage' => $anfrage,
+        ], ['bestaetigungen' => $bestaetigungen]);
+        if ($erg['ok']) {
+            Audit::log('bericht.abgeschlossen', 'bericht', (string) $id, ['nummer' => $b['nummer'], 'kunde' => 'gezeichnet']);
+        }
+        return $erg;
+    }
+
+    /**
+     * Ohne Unterschrift des Kunden abschließen – er ist nicht da oder
+     * verweigert sie. Der Grund ist Pflicht und steht im Kundenblock (nicht
+     * im Lebenslauf); das PDF druckt ihn an der Stelle der Unterschrift.
+     *
+     * @return array{ok:bool,message:string,status:int}
+     */
+    public static function ohneKunde(int $id, string $art, string $grund): array
+    {
+        $b = self::find($id);
+        if ($b === null || !self::sichtbar($b)) {
+            return self::nichtDa();
+        }
+        if (!isset(self::OHNE_KUNDE[$art])) {
+            return ['ok' => false, 'status' => 422, 'message' => 'Bitte wählen: Kunde nicht anwesend oder Unterschrift verweigert.'];
+        }
+        if (($fehler = self::kundenblockOffen($b)) !== null) {
+            return $fehler;
+        }
+        if (!self::darfPruefen($b)) {
+            return ['ok' => false, 'status' => 403, 'message' => self::NUR_PRUEFER];
+        }
+        $grund = Unterschrift::text($grund, 500);
+        if (mb_strlen($grund) < 3) {
+            return ['ok' => false, 'status' => 422, 'message' => 'Bitte einen Grund angeben.'];
+        }
+        $erg = self::kundenblockAnlegen($b, [
+            'art' => $art, 'name' => '', 'funktion' => '', 'ort' => '', 'striche' => null, 'striche_hash' => null,
+            'angaben' => ['grund' => $grund], 'geraet_am' => null, 'anfrage' => bin2hex(random_bytes(16)),
+        ], ['art' => $art]);
+        if ($erg['ok']) {
+            Audit::log('bericht.abgeschlossen', 'bericht', (string) $id, ['nummer' => $b['nummer'], 'kunde' => $art]);
+            $erg['message'] = $b['nummer'] . ' ohne Unterschrift des Kunden abgeschlossen (' . self::OHNE_KUNDE[$art] . ').';
+        }
+        return $erg;
+    }
+
+    /**
+     * Eine Korrektur anlegen: eine neue Fassung mit gleicher Nummer
+     * (jahr/laufnr), Inhalt ohne die festen Kopien, gleichen Verweisen und
+     * Anlagen. Der Vorgänger bleibt abgeschlossen, bis die Korrektur
+     * abgeschlossen ist – dann heißt er „ersetzt“, sein PDF bleibt.
+     *
+     * @return array{ok:bool,message:string,status:int,id?:int}
+     */
+    public static function korrektur(int $id, string $grund): array
+    {
+        $b = self::find($id);
+        if ($b === null || !self::sichtbar($b)) {
+            return self::nichtDa();
+        }
+        if ($b['status'] !== 'abgeschlossen') {
+            return ['ok' => false, 'status' => 409, 'message' => $b['status'] === 'ersetzt'
+                ? 'Dieser Bericht ist schon ersetzt – korrigiert wird die neueste Fassung.'
+                : 'Eine Korrektur gibt es nur für einen abgeschlossenen Bericht.'];
+        }
+        if (!self::darfPruefen($b)) {
+            return ['ok' => false, 'status' => 403, 'message' => self::NUR_PRUEFER];
+        }
+        if ($b['jahr'] === null || $b['laufnr'] === null) {
+            return ['ok' => false, 'status' => 409, 'message' => 'Der Bericht hat keine laufende Nummer – eine Korrektur geht so nicht.'];
+        }
+        $grund = Unterschrift::text($grund, 500);
+        if (mb_strlen($grund) < 3) {
+            return ['ok' => false, 'status' => 422, 'message' => 'Bitte den Grund der Korrektur angeben.'];
+        }
+        $offen = self::offeneKorrektur($b);
+        if ($offen !== null) {
+            return ['ok' => false, 'status' => 409, 'message' => 'Es gibt schon eine offene Korrektur (Fassung ' . $offen['fassung'] . ').', 'id' => (int) $offen['id']];
+        }
+        $fassung = (int) Database::scalar('SELECT MAX(fassung) FROM berichte WHERE jahr = ? AND laufnr = ?', [$b['jahr'], $b['laufnr']]) + 1;
+        $inhalt = self::ohneFesteKopien($b['inhalt']);
+        $inhalt['abschluss']['warnungen_bestaetigt'] = [];
+        try {
+            $neu = self::transaktion(static function () use ($b, $id, $fassung, $grund, $inhalt): int {
+                $jetzt = gmdate('c');
+                $spalten = ['jahr', 'laufnr', 'site_id', 'aufbau_id', 'standort_name', 'titel', 'veranstaltung', 'kunde_name', 'pruefdatum',
+                    'ewx_host', 'ewx_id', 'ewx_art', 'ewx_nummer', 'ewx_am'];
+                $neu = Database::insert('berichte', array_intersect_key($b, array_flip($spalten)) + [
+                    'nummer'          => null,
+                    'fassung'         => $fassung,
+                    'vorgaenger_id'   => $id,
+                    'korrektur_grund' => $grund,
+                    'status'          => 'entwurf',
+                    'version'         => 1,
+                    'inhalt'          => Kanon::json($inhalt),
+                    'erstellt_von'    => (int) Auth::id(),
+                    'geaendert_von'   => Auth::id(),
+                    'created_at'      => $jetzt,
+                    'updated_at'      => $jetzt,
+                ]);
+                foreach (Database::select('SELECT objekt_id, inventar_id FROM bericht_objekte WHERE bericht_id = ?', [$id]) as $o) {
+                    Database::insert('bericht_objekte', ['bericht_id' => $neu, 'objekt_id' => $o['objekt_id'], 'inventar_id' => $o['inventar_id']]);
+                }
+                self::ereignis($neu, 'angelegt', ['korrektur_von' => (string) $b['nummer'], 'fassung' => (string) $fassung]);
+                self::ereignis($id, 'korrektur_angelegt', ['fassung' => (string) $fassung]);
+                return $neu;
+            });
+        } catch (\PDOException $e) {
+            if (!self::eindeutigVerletzt($e)) {
+                throw $e;
+            }
+            return ['ok' => false, 'status' => 409, 'message' => 'Es gibt schon eine offene Korrektur – bitte neu laden.'];
+        }
+        Audit::log('bericht.korrektur', 'bericht', (string) $neu, ['nummer' => $b['nummer'], 'fassung' => $fassung]);
+        return ['ok' => true, 'status' => 200, 'id' => $neu,
+            'message' => 'Korrektur zu ' . $b['nummer'] . ' angelegt (Fassung ' . $fassung . ') – bitte ändern und neu unterschreiben.'];
+    }
+
+    /** Die offene Korrektur (Entwurf oder vom Prüfer unterschrieben) zu derselben Nummer – oder null. */
+    public static function offeneKorrektur(array $b): ?array
+    {
+        if ($b['jahr'] === null || $b['laufnr'] === null) {
+            return null;
+        }
+        $r = Database::first(
+            "SELECT id, fassung, status FROM berichte WHERE jahr = ? AND laufnr = ? AND fassung > 1 AND id <> ? AND status IN ('entwurf', 'geprueft')
+             ORDER BY fassung DESC LIMIT 1",
+            [(int) $b['jahr'], (int) $b['laufnr'], (int) $b['id']]
+        );
+        return $r === null ? null : self::zeile($r);
+    }
+
+    // ------------------------------------------------------------ Integrität
+
+    /**
+     * Ist ein eingefrorener Bericht noch, wie er unterschrieben wurde?
+     * Gerechnet wird alles nach: Prüfsumme des Inhalts, je Unterschrift
+     * Striche, Kette und Siegel, dazu die Prüfsumme des gespeicherten PDF.
+     * Ein Siegel mit einem anderen Schlüssel (app.key gewechselt) ist nicht
+     * prüfbar – das ist ein Befund, aber kein „verfälscht“.
+     *
+     * @return array{ok:bool, eingefroren:bool, befunde:list<string>}
+     */
+    public static function integritaet(int $id): array
+    {
+        $b = Database::first('SELECT * FROM berichte WHERE id = ?', [$id]);
+        if ($b === null) {
+            return ['ok' => false, 'eingefroren' => false, 'befunde' => ['Diesen Bericht gibt es nicht.']];
+        }
+        $b = self::zeile($b);
+        if (!in_array($b['status'], ['geprueft', 'abgeschlossen', 'ersetzt'], true)) {
+            return ['ok' => true, 'eingefroren' => false, 'befunde' => []];
+        }
+        $befunde = [];
+        try {
+            $hash = Kanon::hash(json_decode((string) $b['inhalt'], true, 64, JSON_THROW_ON_ERROR));
+        } catch (\Throwable) {
+            $hash = '';
+        }
+        $inhaltHash = (string) ($b['inhalt_hash'] ?? '');
+        if ($inhaltHash === '' || !hash_equals($inhaltHash, $hash)) {
+            $befunde[] = 'Inhalt verändert – die Prüfsumme des eingefrorenen Inhalts stimmt nicht.';
+        }
+
+        $zeilen = [];
+        foreach (Database::select('SELECT * FROM bericht_unterschriften WHERE bericht_id = ? ORDER BY id', [$id]) as $z) {
+            $zeilen[(string) $z['rolle']] = $z;
+        }
+        if (!isset($zeilen['pruefer'])) {
+            $befunde[] = 'Die Unterschrift des Prüfers fehlt.';
+        }
+        if (in_array($b['status'], ['abgeschlossen', 'ersetzt'], true) && !isset($zeilen['kunde'])) {
+            $befunde[] = 'Der Kundenblock fehlt.';
+        }
+        $schluesselId = self::schluesselId();
+        foreach ($zeilen as $rolle => $z) {
+            $wer = $rolle === 'pruefer' ? 'Unterschrift des Prüfers' : 'Kundenblock';
+            if (!hash_equals($inhaltHash, (string) $z['inhalt_hash'])) {
+                $befunde[] = $wer . ': gehört zu einem anderen Inhalt.';
+            }
+            if ($z['striche'] !== null || $z['striche_hash'] !== null) {
+                try {
+                    $s = json_decode((string) $z['striche'], true, 8, JSON_THROW_ON_ERROR);
+                    $passt = is_array($s) && array_keys($s) === ['s'] && hash_equals((string) $z['striche_hash'], Kanon::hash(['s' => $s['s']]));
+                } catch (\Throwable) {
+                    $passt = false;
+                }
+                if (!$passt) {
+                    $befunde[] = $wer . ': die Striche wurden verändert.';
+                }
+            }
+            $vorher = $rolle === 'kunde' ? (string) ($zeilen['pruefer']['kette_hash'] ?? '') : '';
+            if ((string) ($z['vorher_hash'] ?? '') !== $vorher) {
+                $befunde[] = $wer . ': die Kette zur Unterschrift des Prüfers ist unterbrochen.';
+            }
+            try {
+                $kette = self::kette($z, (string) $b['nummer'], (int) $b['fassung']);
+            } catch (\Throwable) {
+                $kette = '';
+            }
+            if (!hash_equals((string) $z['kette_hash'], $kette)) {
+                $befunde[] = $wer . ': Angaben verändert (die Kette stimmt nicht).';
+            }
+            if ((string) $z['schluessel_id'] !== $schluesselId) {
+                $befunde[] = $wer . ': Siegel mit anderem Schlüssel (' . preg_replace('/[^0-9a-f]/', '', (string) $z['schluessel_id']) . '), nicht prüfbar.';
+            } elseif (!hash_equals(hash_hmac('sha256', $kette, self::siegelSchluessel()), (string) $z['siegel'])) {
+                $befunde[] = $wer . ': Siegel ungültig – Angaben nach der Unterschrift verändert.';
+            }
+        }
+
+        $pdf = Database::first('SELECT sha256, groesse, daten FROM bericht_pdf WHERE bericht_id = ?', [$id]);
+        if ($pdf !== null) {
+            $bytes = base64_decode((string) $pdf['daten'], true);
+            $sha = $bytes === false ? '' : hash('sha256', $bytes);
+            if ($bytes === false || !hash_equals((string) $pdf['sha256'], $sha) || (string) ($b['pdf_hash'] ?? '') !== $sha || strlen($bytes) !== (int) $pdf['groesse']) {
+                $befunde[] = 'PDF verändert – die Prüfsumme der gespeicherten Datei stimmt nicht.';
+            }
+        } elseif ($b['pdf_hash'] !== null) {
+            $befunde[] = 'Das gespeicherte PDF fehlt.';
+        }
+        return ['ok' => $befunde === [], 'eingefroren' => true, 'befunde' => $befunde];
+    }
+
+    /** Kurzkennung des Siegel-Schlüssels (ändert sich mit app.key). */
+    public static function schluesselId(): string
+    {
+        return substr(hash('sha256', self::siegelSchluessel()), 0, 8);
+    }
+
     // ------------------------------------------------------------ Verwerfen, Löschen
 
     /**
@@ -1014,6 +1536,275 @@ final class BerichtService
             Database::execute("DELETE FROM {$tabelle} WHERE bericht_id = ?", [$id]);
         }
         Database::delete('berichte', $id);
+    }
+
+    // ------------------------------------------------------------ intern: Unterschriften
+
+    private static function nichtDa(): array
+    {
+        return ['ok' => false, 'status' => 404, 'message' => 'Diesen Bericht gibt es nicht.'];
+    }
+
+    private static function unterschriftDa(int $id, string $rolle): bool
+    {
+        return Database::scalar('SELECT id FROM bericht_unterschriften WHERE bericht_id = ? AND rolle = ?', [$id, $rolle]) !== false;
+    }
+
+    /**
+     * Dieselbe Anfrage noch einmal (die Antwort ging bei schwachem Netz
+     * verloren): dieselbe Unterschrift, kein zweiter Eintrag. Dieselbe
+     * Kennung in einem anderen Zusammenhang ist ein Fehler (409).
+     */
+    private static function wiederholung(int $id, string $rolle, string $anfrage): ?array
+    {
+        $z = Database::first('SELECT id, bericht_id, rolle FROM bericht_unterschriften WHERE anfrage = ?', [$anfrage]);
+        if ($z === null) {
+            return null;
+        }
+        if ((int) $z['bericht_id'] !== $id || (string) $z['rolle'] !== $rolle) {
+            return ['ok' => false, 'status' => 409, 'message' => 'Diese Kennung gehört zu einer anderen Unterschrift – bitte die Seite neu laden.'];
+        }
+        $nummer = (string) (Database::scalar('SELECT nummer FROM berichte WHERE id = ?', [$id]) ?: '');
+        return ['ok' => true, 'status' => 200, 'wiederholt' => true, 'nummer' => $nummer, 'unterschrift' => (int) $z['id'],
+            'message' => ($nummer !== '' ? $nummer . ': ' : '') . 'schon unterschrieben.'];
+    }
+
+    /** Striche prüfen (Unterschrift::pruefen) und gegen Kopien: dieselben Striche gibt es nur einmal. */
+    private static function strichePruefen(string $json): array
+    {
+        $p = Unterschrift::pruefen($json);
+        if (!$p['ok']) {
+            return ['ok' => false, 'status' => 422, 'message' => $p['message']];
+        }
+        $hash = Kanon::hash(['s' => $p['striche']]);
+        if (Database::scalar('SELECT id FROM bericht_unterschriften WHERE striche_hash = ?', [$hash]) !== false) {
+            return ['ok' => false, 'status' => 422, 'message' => 'Diese Unterschrift gibt es schon – bitte neu unterschreiben.'];
+        }
+        return ['ok' => true, 'striche' => $p['striche'], 'hash' => $hash];
+    }
+
+    /** Die Uhr des Geräts – nur zur Information, nur als ISO-Zeit. */
+    private static function geraetAm(mixed $wert): ?string
+    {
+        if (!is_string($wert) || preg_match('/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d{1,6})?)?(Z|[+-]\d{2}:?\d{2})?$/', $wert) !== 1) {
+            return null;
+        }
+        $ts = Zeit::ts($wert);
+        return $ts === null ? null : gmdate('c', $ts);
+    }
+
+    private static function eindeutigVerletzt(\PDOException $e): bool
+    {
+        return (string) ($e->errorInfo[0] ?? $e->getCode()) === '23000';
+    }
+
+    private static function kundenblockOffen(array $b): ?array
+    {
+        if (self::unterschriftDa((int) $b['id'], 'kunde')) {
+            return ['ok' => false, 'status' => 409, 'message' => 'Der Kundenblock ist schon ausgefüllt.'];
+        }
+        if ($b['status'] !== 'geprueft') {
+            return ['ok' => false, 'status' => 409, 'message' => $b['status'] === 'entwurf'
+                ? 'Erst unterschreibt der Prüfer, dann der Kunde.' : 'Der Bericht ist nicht (mehr) zur Unterschrift offen.'];
+        }
+        return null;
+    }
+
+    /**
+     * Den Kundenblock anlegen und den Bericht abschließen – in einer
+     * Transaktion. Bei einer Korrektur ist der Vorgänger danach ersetzt.
+     */
+    private static function kundenblockAnlegen(array $b, array $z, array $details): array
+    {
+        $id = (int) $b['id'];
+        try {
+            $uid = self::transaktion(static function () use ($b, $id, $z, $details): ?int {
+                $pruefer = Database::first("SELECT kette_hash FROM bericht_unterschriften WHERE bericht_id = ? AND rolle = 'pruefer'", [$id]);
+                if ($pruefer === null) {
+                    return null;
+                }
+                $jetzt = gmdate('c');
+                $n = Database::execute(
+                    "UPDATE berichte SET status = 'abgeschlossen', abgeschlossen_am = ?, aufbewahren_bis = ?, version = version + 1,
+                     geaendert_von = ?, updated_at = ? WHERE id = ? AND status = 'geprueft'",
+                    [$jetzt, self::aufbewahrenBis((string) $b['pruefdatum']), Auth::id(), $jetzt, $id]
+                );
+                if ($n !== 1) {
+                    return null;
+                }
+                $uid = self::unterschriftAnlegen($id, (string) $b['nummer'], (int) $b['fassung'], $z + [
+                    'rolle' => 'kunde', 'inhalt_hash' => (string) $b['inhalt_hash'], 'vorher_hash' => (string) $pruefer['kette_hash'], 'am' => $jetzt,
+                ]);
+                if ((int) $b['fassung'] > 1 && $b['vorgaenger_id'] !== null) {
+                    $ersetzt = Database::execute(
+                        "UPDATE berichte SET status = 'ersetzt', ersetzt_durch_id = ?, updated_at = ? WHERE id = ? AND status = 'abgeschlossen'",
+                        [$id, $jetzt, (int) $b['vorgaenger_id']]
+                    );
+                    if ($ersetzt === 1) {
+                        self::ereignis((int) $b['vorgaenger_id'], 'ersetzt', ['durch' => (string) $b['nummer'], 'fassung' => (string) $b['fassung']]);
+                    }
+                }
+                self::ereignis($id, $z['art'] === 'gezeichnet' ? 'kunde_unterschrieben' : 'ohne_kunde', $details);
+                return $uid;
+            });
+        } catch (\PDOException $e) {
+            if (!self::eindeutigVerletzt($e)) {
+                throw $e;
+            }
+            return self::wiederholung($id, 'kunde', (string) $z['anfrage'])
+                ?? ['ok' => false, 'status' => 409, 'message' => 'Der Kundenblock ist schon ausgefüllt.'];
+        }
+        if ($uid === null) {
+            return ['ok' => false, 'status' => 409, 'message' => 'Der Bericht wurde inzwischen geändert – bitte neu laden.'];
+        }
+        return ['ok' => true, 'status' => 200, 'unterschrift' => $uid, 'message' => $b['nummer'] . ' abgeschlossen – vielen Dank.'];
+    }
+
+    /**
+     * Eine Unterschrift anlegen: Kette über Inhalt, vorige Unterschrift,
+     * Striche, Angaben, Zeit und Konto; das Siegel ist ein HMAC darüber.
+     *
+     * @param array{rolle:string,art:string,name:string,funktion:string,ort:string,striche:?array,striche_hash:?string,angaben?:array,
+     *              inhalt_hash:string,vorher_hash?:string,am:string,geraet_am:?string,anfrage:string} $z
+     */
+    private static function unterschriftAnlegen(int $berichtId, string $nummer, int $fassung, array $z): int
+    {
+        $user = Auth::user();
+        $angaben = $z['angaben'] ?? [];
+        $zeile = [
+            'bericht_id'        => $berichtId,
+            'rolle'             => $z['rolle'],
+            'art'               => $z['art'],
+            'name'              => $z['name'],
+            'funktion'          => $z['funktion'],
+            'ort'               => $z['ort'],
+            'striche'           => $z['striche'] !== null ? Kanon::json(['s' => $z['striche']]) : null,
+            'striche_hash'      => $z['striche_hash'],
+            'angaben'           => $angaben !== [] ? Kanon::json($angaben) : null,
+            'inhalt_hash'       => $z['inhalt_hash'],
+            'vorher_hash'       => ($z['vorher_hash'] ?? '') !== '' ? $z['vorher_hash'] : null,
+            'schluessel_id'     => self::schluesselId(),
+            'user_id'           => $user['id'] ?? null,
+            'username'          => (string) ($user['username'] ?? 'system'),
+            'unterschrieben_am' => $z['am'],
+            'geraet_am'         => $z['geraet_am'],
+            'anfrage'           => $z['anfrage'],
+        ];
+        $zeile['kette_hash'] = self::kette($zeile, $nummer, $fassung);
+        $zeile['siegel'] = hash_hmac('sha256', $zeile['kette_hash'], self::siegelSchluessel());
+        return Database::insert('bericht_unterschriften', $zeile);
+    }
+
+    /** Die Kette einer Unterschrift – aus der Zeile, wie sie in der Datenbank steht. */
+    private static function kette(array $z, string $nummer, int $fassung): string
+    {
+        $angaben = is_string($z['angaben'] ?? null) ? json_decode($z['angaben'], true, 16, JSON_THROW_ON_ERROR) : [];
+        return hash('sha256', implode("\n", [
+            'PM-UB-1', (string) $z['rolle'], (string) $z['art'], (string) $z['bericht_id'], $nummer, (string) $fassung,
+            (string) $z['inhalt_hash'], (string) ($z['vorher_hash'] ?? '') ?: '-', (string) ($z['striche_hash'] ?? '') ?: '-',
+            (string) $z['name'], (string) $z['funktion'], (string) $z['ort'], Kanon::json(is_array($angaben) ? $angaben : []),
+            (string) $z['unterschrieben_am'], (string) ($z['user_id'] ?? ''),
+        ]));
+    }
+
+    private static function siegelSchluessel(): string
+    {
+        return Crypto::ableiten(self::SIEGEL_ZWECK);
+    }
+
+    /**
+     * Nummer, Jahr und laufende Nummer für die erste Prüfer-Unterschrift:
+     * <Kürzel>-<Jahr des Prüfdatums>-<laufend>, bei einer Korrektur die
+     * Nummer des Vorgängers mit -K<n>. Ein Wettlauf zweier Tablets endet am
+     * UNIQUE-Index (jahr, laufnr, fassung) und wird wiederholt.
+     *
+     * @return array{0:string,1:int,2:int}
+     */
+    private static function nummerVergeben(array $b): array
+    {
+        $fassung = (int) $b['fassung'];
+        if ($fassung > 1 && $b['jahr'] !== null && $b['laufnr'] !== null) {
+            $basis = $b['vorgaenger_id'] !== null ? (string) (Database::scalar('SELECT nummer FROM berichte WHERE id = ?', [(int) $b['vorgaenger_id']]) ?: '') : '';
+            $basis = (string) preg_replace('/-K\d+$/', '', $basis);
+            if ($basis === '') {
+                $basis = sprintf('%s-%d-%04d', Einstellungen::wert('berichte.praefix'), (int) $b['jahr'], (int) $b['laufnr']);
+            }
+            return [$basis . '-K' . ($fassung - 1), (int) $b['jahr'], (int) $b['laufnr']];
+        }
+        $jahr = preg_match('/^(\d{4})-/', (string) $b['pruefdatum'], $m) === 1 ? (int) $m[1] : (int) gmdate('Y');
+        $laufnr = (int) Database::scalar('SELECT COALESCE(MAX(laufnr), 0) FROM berichte WHERE jahr = ? AND fassung = 1', [$jahr]) + 1;
+        return [sprintf('%s-%d-%04d', Einstellungen::wert('berichte.praefix'), $jahr, $laufnr), $jahr, $laufnr];
+    }
+
+    /**
+     * Der eingefrorene Inhalt: der gespeicherte Stand mit festen Kopien von
+     * allem, was sich später ändern könnte – Prüfer, Firma, Messgeräte,
+     * Texte des Katalogs und der Einstellungen, die Bewertung. Ein alter
+     * Bericht sieht so nach jeder Änderung an Code oder Einstellungen aus
+     * wie am Tag der Unterschrift.
+     *
+     * @param array{user_id:string,name:string,qualifikation:string} $pruefer
+     */
+    private static function inhaltBauen(array $b, array $pruefer): array
+    {
+        $i = self::ohneFesteKopien(BerichtSchema::vollstaendig($b['inhalt']));
+        $i['bewertung'] = Grenzwerte::alle($i);
+        $fassung = (int) $b['fassung'];
+        $i['nummer'] = (string) $b['nummer'];
+        $i['fassung'] = (string) $fassung;
+        if ($fassung > 1 && $b['vorgaenger_id'] !== null) {
+            $v = Database::first('SELECT nummer, fassung, inhalt_hash, abgeschlossen_am FROM berichte WHERE id = ?', [(int) $b['vorgaenger_id']]);
+            if ($v !== null) {
+                $i['vorgaenger'] = ['nummer' => (string) $v['nummer'], 'fassung' => (string) (int) $v['fassung'], 'inhalt_hash' => (string) $v['inhalt_hash'],
+                    'abgeschlossen_am' => (string) ($v['abgeschlossen_am'] ?? ''), 'grund' => (string) $b['korrektur_grund']];
+            }
+        }
+        $i['kopf']['qualifikation'] = $pruefer['qualifikation'];
+        $i['kopf']['pruefer'] = $pruefer;
+        if ((string) $b['ewx_id'] !== '') {
+            $i['kopf']['eventworx'] = ['host' => (string) $b['ewx_host'], 'id' => (string) $b['ewx_id'], 'art' => (string) $b['ewx_art'],
+                'nummer' => (string) $b['ewx_nummer'], 'abgerufen_am' => (string) ($b['ewx_am'] ?? '')];
+        }
+        $i['auftragnehmer'] = [];
+        foreach (['name', 'zusatz', 'anschrift', 'kontakt', 'bank', 'register'] as $feld) {
+            $i['auftragnehmer'][$feld] = Einstellungen::wert('firma.' . $feld);
+        }
+        $i['messgeraete'] = [];
+        foreach ($i['messung']['geraete'] as $gid) {
+            $g = Pruefgeraete::find((int) $gid);
+            if ($g !== null) {
+                $i['messgeraete'][] = ['id' => (string) (int) $g['id'], 'fabrikat' => (string) $g['fabrikat'], 'typ' => (string) $g['typ'],
+                    'seriennummer' => (string) $g['seriennummer'], 'norm' => (string) $g['norm'], 'kalibriert_bis' => (string) $g['kalibriert_bis']];
+            }
+        }
+        $text = static fn (array $p): string => (string) $p['text'];
+        $i['labels'] = [
+            'besichtigung'   => array_map($text, Katalog::besichtigung()),
+            'erprobung'      => array_map($text, Katalog::erprobung()),
+            'normen'         => Katalog::normen(),
+            'gruende'        => Katalog::gruende(),
+            'einspeisungen'  => Katalog::einspeisungen(),
+            'bestaetigungen' => array_map($text, Katalog::bestaetigungen()),
+        ];
+        $bereitschaft = trim((string) $i['kopf']['bereitschaft']) !== '' ? (string) $i['kopf']['bereitschaft'] : Einstellungen::wert('berichte.bereitschaft');
+        $i['texte'] = [
+            'kunde'        => Einstellungen::wert('berichte.text_kunde'),
+            'einweisung'   => str_replace('{telefon}', $bereitschaft !== '' ? $bereitschaft : '–', Einstellungen::wert('berichte.text_einweisung')),
+            'errichter'    => Einstellungen::wert('berichte.text_errichter'),
+            'datenschutz'  => Einstellungen::wert('berichte.datenschutz'),
+            'bereitschaft' => $bereitschaft,
+        ];
+        return $i;
+    }
+
+    /** Der Inhalt ohne die festen Kopien des Einfrierens – nach dem Zurückziehen und für eine Korrektur. */
+    private static function ohneFesteKopien(array $inhalt): array
+    {
+        foreach (self::FESTE_KOPIEN as $schluessel) {
+            unset($inhalt[$schluessel]);
+        }
+        unset($inhalt['kopf']['pruefer'], $inhalt['kopf']['eventworx']);
+        return $inhalt;
     }
 
     /** Zahlen aus der Datenbank als int (SQLite liefert Text). */

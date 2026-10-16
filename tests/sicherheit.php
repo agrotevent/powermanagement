@@ -62,11 +62,18 @@ try {
     pruefe(!BenutzerService::darfVergeben(['berichte.view']) && !BenutzerService::darfVergeben(['berichte.pruefen']),
         'Rechte der Übergabeberichte nur, wer sie selbst hat');
     // Texte aus Antworten (Eventworx, Bewertung, Prüfen) nur per textContent – nie als HTML.
-    foreach (glob(dirname(__DIR__) . '/public/assets/js/bericht*.js') ?: [] as $datei) {
+    $js = dirname(__DIR__) . '/public/assets/js/';
+    foreach (array_merge(glob($js . 'bericht*.js') ?: [], [$js . 'unterschrift.js']) as $datei) {
         $quelle = (string) file_get_contents($datei);
         pruefe(!str_contains($quelle, 'innerHTML') && !str_contains($quelle, 'insertAdjacentHTML') && !str_contains($quelle, 'outerHTML'),
             basename($datei) . ' setzt kein HTML aus Daten');
     }
+    // Unterschriften nur als Linie: keine Zeit, kein Druck, keine Neigung im Erfassungscode.
+    pruefe(preg_match('/pressure|timeStamp|Date\.now|performance\.now|tiltX|tiltY|twist|tangential/', (string) file_get_contents($js . 'unterschrift.js')) === 0,
+        'unterschrift.js liest weder Zeit noch Druck');
+    $svg = \App\Berichte\Unterschrift::svg([[['"><script>alert(1)</script>', 5], [5000, 'x" onload="y']], [['1e400', [1, 2]]]]);
+    pruefe(!str_contains($svg, 'script') && !str_contains($svg, 'onload') && preg_match('/ d="[MQLl0-9 ]*"/', $svg) === 1,
+        'Unterschrift::svg aus manipulierten Strichen: nur Zahlen');
     pruefe(!BenutzerService::darfVerwalten($benutzer['admin']), 'den Administrator verwaltet nur die Administration');
     pruefe(!BenutzerService::darfVerwalten($benutzer['technik']), 'ein Konto mit mehr Rechten nicht');
     pruefe(BenutzerService::darfVerwalten($benutzer['klein']), 'ein Konto mit weniger Rechten schon');

@@ -9,6 +9,7 @@ use App\Berichte\BerichtSchema;
 use App\Berichte\BerichtService;
 use App\Berichte\Einstellungen;
 use App\Berichte\Grenzwerte;
+use App\Berichte\Kundenmodus;
 use App\Berichte\Pruefgeraete;
 use App\Berichte\Vorbelegung;
 use App\Services\AnlagenService;
@@ -16,13 +17,16 @@ use App\Services\AufbauService;
 use App\Services\Eventworx;
 use App\Services\EventworxFehler;
 use App\Services\SiteService;
+use App\Support\Csrf;
 use App\Support\Database;
 use App\Support\Flash;
 use App\Support\Request;
 use App\Support\Response;
+use App\Support\Session;
 
 /**
- * Übergabeberichte: Liste, Anlegen, Formular mit Autosave, Eventworx.
+ * Übergabeberichte: Liste, Anlegen, Formular mit Autosave, Eventworx,
+ * Unterschriften, Kundenmodus, Korrektur.
  *
  * Das Recht prüft die Route; woran jemand arbeiten darf, BerichtService
  * (sichtbar, darfBearbeiten …). Ein unsichtbarer Bericht ist für den
@@ -54,6 +58,7 @@ final class BerichtController extends Controller
         }
         $erlaubt = match ($zweck) {
             'bearbeiten' => BerichtService::darfBearbeiten($b),
+            'kunde'      => BerichtService::darfKundenblock($b),
             'pruefen'    => BerichtService::darfPruefen($b),
             default      => true,
         };
@@ -197,16 +202,25 @@ final class BerichtController extends Controller
         if ($b === null) {
             return;
         }
-        $inhalt = self::vollstaendig($b['inhalt']);
+        $inhalt = BerichtSchema::vollstaendig($b['inhalt']);
         $bewertung = Grenzwerte::alle($inhalt);
         if ($b['status'] !== 'entwurf' || !BerichtService::darfBearbeiten($b)) {
+            $pruefer = BerichtService::darfPruefen($b);
             $this->view('berichte/show', [
-                'bericht'    => $b,
-                'inhalt'     => $inhalt,
-                'bewertung'  => $inhalt['bewertung'] ?? $bewertung,
-                'ereignisse' => Auth::can('berichte.manage') ? BerichtService::ereignisse((int) $b['id']) : [],
+                'bericht'       => $b,
+                'inhalt'        => $inhalt,
+                'bewertung'     => $inhalt['bewertung'] ?? $bewertung,
+                'unterschriften' => BerichtService::unterschriften((int) $b['id']),
+                'integritaet'   => BerichtService::integritaet((int) $b['id']),
+                'ereignisse'    => Auth::can('berichte.manage') ? BerichtService::ereignisse((int) $b['id']) : [],
                 'darfLoeschen'  => $b['status'] === 'entwurf' && $b['nummer'] === null && BerichtService::darfBearbeiten($b),
-                'darfVerwerfen' => $b['status'] === 'entwurf' && $b['nummer'] !== null && BerichtService::darfPruefen($b),
+                'darfVerwerfen' => $b['status'] === 'entwurf' && $b['nummer'] !== null && $pruefer,
+                'darfKunde'     => BerichtService::darfKundenblock($b),
+                'darfOhneKunde' => $b['status'] === 'geprueft' && $pruefer,
+                'zurueckziehbar' => $pruefer && BerichtService::zurueckziehbar($b),
+                'darfKorrektur' => $b['status'] === 'abgeschlossen' && $pruefer && $b['jahr'] !== null,
+                'offeneKorrektur' => in_array($b['status'], ['abgeschlossen', 'ersetzt'], true) ? BerichtService::offeneKorrektur($b) : null,
+                'vorgaenger'    => $b['vorgaenger_id'] !== null ? BerichtService::find((int) $b['vorgaenger_id']) : null,
             ]);
             return;
         }
@@ -251,7 +265,9 @@ final class BerichtController extends Controller
             'texte'         => ['errichter' => Einstellungen::wert('berichte.text_errichter')],
             'firmaFehlt'    => Einstellungen::wert('firma.name') === '',
             'darfVerwerfen' => $b['nummer'] !== null && BerichtService::darfPruefen($b),
-            'scripts'       => ['/assets/js/bericht.js'],
+            'darfUnterschreiben' => BerichtService::darfPruefen($b),
+            'vorgaenger'    => $b['vorgaenger_id'] !== null ? BerichtService::find((int) $b['vorgaenger_id']) : null,
+            'scripts'       => ['/assets/js/unterschrift.js', '/assets/js/bericht.js'],
         ]);
     }
 
@@ -324,6 +340,160 @@ final class BerichtController extends Controller
         $this->json(['ok' => true, 'verweis' => $v['verweis'] + ['am' => $am], 'gruppen' => $v['gruppen']]);
     }
 
+    // ------------------------------------------------------------ Unterschreiben
+
+    /** Prüfer-Unterschrift: version, striche (JSON), name, ort, anfrage, geraet_am, warnungen[] – Antwort JSON. */
+    public function unterschreiben(Request $request, array $params): void
+    {
+        $id = ctype_digit((string) ($params['id'] ?? '')) ? (int) $params['id'] : 0;
+        $this->ergebnis(BerichtService::prueferUnterschreiben($id, $request->int('version', -1), [
+            'striche'   => is_string($_POST['striche'] ?? null) ? $_POST['striche'] : '',
+            'name'      => $request->str('name'),
+            'ort'       => $request->str('ort'),
+            'anfrage'   => $request->str('anfrage'),
+            'geraet_am' => $request->str('geraet_am'),
+            'warnungen' => $request->arr('warnungen'),
+        ]));
+    }
+
+    public function zurueckziehen(Request $request, array $params): void
+    {
+        $b = $this->bericht($request, $params, 'pruefen');
+        if ($b === null) {
+            return;
+        }
+        $e = BerichtService::zurueckziehen((int) $b['id'], $request->str('grund'));
+        $e['ok'] ? Flash::success($e['message']) : Flash::error($e['message']);
+        $this->redirect('/berichte/' . (int) $b['id']);
+    }
+
+    public function ohneKunde(Request $request, array $params): void
+    {
+        $b = $this->bericht($request, $params, 'pruefen');
+        if ($b === null) {
+            return;
+        }
+        $e = BerichtService::ohneKunde((int) $b['id'], $request->str('art'), $request->str('grund'));
+        $e['ok'] ? Flash::success($e['message']) : Flash::error($e['message']);
+        $this->redirect('/berichte/' . (int) $b['id']);
+    }
+
+    /** Korrektur als neue Fassung – weiter im Formular der neuen Fassung. */
+    public function korrektur(Request $request, array $params): void
+    {
+        $b = $this->bericht($request, $params, 'pruefen');
+        if ($b === null) {
+            return;
+        }
+        $e = BerichtService::korrektur((int) $b['id'], $request->str('grund'));
+        $e['ok'] ? Flash::success($e['message']) : Flash::error($e['message']);
+        $this->redirect('/berichte/' . (int) ($e['id'] ?? $b['id']));
+    }
+
+    // ------------------------------------------------------------ Kundenmodus
+
+    /** „An Kunden übergeben“: Sitzung sperren, weiter zur Kundenseite. */
+    public function kundenmodus(Request $request, array $params): void
+    {
+        $b = $this->bericht($request, $params);
+        if ($b === null) {
+            return;
+        }
+        $e = BerichtService::kundenmodusStarten((int) $b['id']);
+        if (!$e['ok']) {
+            $this->fehler($request, (int) $e['status'], $e['message'], '/berichte/' . (int) $b['id']);
+            return;
+        }
+        $this->redirect('/berichte/' . (int) $b['id'] . '/kunde');
+    }
+
+    /**
+     * Die Kundenseite: der Bericht zum Lesen, Bestätigungen, Unterschrift –
+     * nach dem Absenden „Gerät zurückgeben“ mit dem Kennwortfeld. Eigenes
+     * Layout ohne Navigation; ohne aktiven Kundenmodus geht es zur
+     * Berichtsseite.
+     */
+    public function kunde(Request $request, array $params): void
+    {
+        $b = $this->bericht($request, $params);
+        if ($b === null) {
+            return;
+        }
+        $modus = Kundenmodus::aktiv();
+        if ($modus === null || $modus['bericht'] !== (int) $b['id']) {
+            Flash::info('Der Kundenmodus ist nicht aktiv.');
+            $this->redirect('/berichte/' . (int) $b['id']);
+            return;
+        }
+        $inhalt = BerichtSchema::vollstaendig($b['inhalt']);
+        $user = Auth::user() ?? [];
+        $this->view('berichte/kunde', [
+            'bericht'        => $b,
+            'inhalt'         => $inhalt,
+            'bewertung'      => $inhalt['bewertung'] ?? Grenzwerte::alle($inhalt),
+            'unterschriften' => BerichtService::unterschriften((int) $b['id']),
+            'modus'          => $modus,
+            'prueferName'    => trim((string) (($user['full_name'] ?? '') !== '' ? $user['full_name'] : ($user['username'] ?? ''))),
+            'firma'          => (string) ($inhalt['auftragnehmer']['name'] ?? Einstellungen::wert('firma.name')),
+            'scripts'        => ['/assets/js/unterschrift.js', '/assets/js/bericht-kunde.js'],
+        ], 'layout/kunde');
+    }
+
+    /** Kundenunterschrift (nur im Kundenmodus dieses Berichts) – Antwort JSON. */
+    public function kundeUnterschreiben(Request $request, array $params): void
+    {
+        $id = ctype_digit((string) ($params['id'] ?? '')) ? (int) $params['id'] : 0;
+        $modus = Kundenmodus::aktiv();
+        if ($modus === null || $modus['bericht'] !== $id) {
+            $this->json(['ok' => false, 'message' => 'Der Kundenmodus ist nicht aktiv – bitte den Prüfer fragen.'], 409);
+            return;
+        }
+        $this->ergebnis(BerichtService::kundeUnterschreiben($id, [
+            'striche'        => is_string($_POST['striche'] ?? null) ? $_POST['striche'] : '',
+            'name'           => $request->str('name'),
+            'funktion'       => $request->str('funktion'),
+            'ort'            => $request->str('ort'),
+            'bestaetigungen' => $request->arr('bestaetigungen'),
+            'vorbehalte'     => is_string($_POST['vorbehalte'] ?? null) ? $_POST['vorbehalte'] : '',
+            'anfrage'        => $request->str('anfrage'),
+            'geraet_am'      => $request->str('geraet_am'),
+        ]));
+    }
+
+    /**
+     * Entsperren mit dem Kennwort des Prüfers. Ein Fehler zählt nur in der
+     * Sitzung (das Konto bleibt offen); beim fünften wird abgemeldet.
+     */
+    public function kundeBeenden(Request $request, array $params): void
+    {
+        $id = ctype_digit((string) ($params['id'] ?? '')) ? (int) $params['id'] : 0;
+        $modus = Kundenmodus::aktiv();
+        if ($modus === null || $modus['bericht'] !== $id) {
+            $this->redirect('/berichte/' . $id);
+            return;
+        }
+        if (Auth::kennwortBestaetigen(is_string($_POST['kennwort'] ?? null) ? $_POST['kennwort'] : '')) {
+            BerichtService::ereignis($id, 'kundenmodus_ende');
+            Kundenmodus::beenden();
+            Session::regenerate();
+            Csrf::erneuern();
+            Flash::success('Kundenmodus beendet.');
+            $this->redirect('/berichte/' . $id);
+            return;
+        }
+        $fehl = Kundenmodus::fehlversuch();
+        if ($fehl >= Kundenmodus::HOECHSTENS_FEHL) {
+            BerichtService::ereignis($id, 'kundenmodus_abgemeldet', ['fehlversuche' => (string) $fehl]);
+            Auth::logout();
+            Flash::warning('Zu viele falsche Kennwörter – abgemeldet. Bitte neu anmelden.');
+            $this->redirect('/login');
+            return;
+        }
+        $rest = Kundenmodus::HOECHSTENS_FEHL - $fehl;
+        Flash::error('Kennwort falsch – noch ' . $rest . ($rest === 1 ? ' Versuch' : ' Versuche') . ', dann wird abgemeldet.');
+        $this->redirect('/berichte/' . $id . '/kunde');
+    }
+
     // ------------------------------------------------------------ Verwerfen, Löschen
 
     public function verwerfen(Request $request, array $params): void
@@ -346,25 +516,5 @@ final class BerichtController extends Controller
         $e = BerichtService::loeschen((int) $b['id']);
         $e['ok'] ? Flash::success($e['message']) : Flash::error($e['message']);
         $this->redirect($e['ok'] ? '/berichte' : '/berichte/' . (int) $b['id']);
-    }
-
-    /** Der gespeicherte Inhalt mit allen Schlüsseln des Schemas (Listen bleiben, wie sie sind). */
-    public static function vollstaendig(array $inhalt): array
-    {
-        $voll = array_replace_recursive(BerichtSchema::leer(), $inhalt);
-        foreach (['kreise', 'maengel'] as $liste) {
-            $voll[$liste] = is_array($inhalt[$liste] ?? null) ? array_values($inhalt[$liste]) : [];
-        }
-        foreach (['normen'] as $l) {
-            $voll['grundlage'][$l] = is_array($inhalt['grundlage'][$l] ?? null) ? array_values($inhalt['grundlage'][$l]) : [];
-        }
-        $voll['messung']['geraete'] = is_array($inhalt['messung']['geraete'] ?? null) ? array_values(array_map('strval', $inhalt['messung']['geraete'])) : [];
-        $voll['punkte'] = ['besichtigung' => (array) ($inhalt['punkte']['besichtigung'] ?? []), 'erprobung' => (array) ($inhalt['punkte']['erprobung'] ?? [])];
-        $voll['abschluss']['warnungen_bestaetigt'] = is_array($inhalt['abschluss']['warnungen_bestaetigt'] ?? null) ? $inhalt['abschluss']['warnungen_bestaetigt'] : [];
-        foreach ($voll['kreise'] as $i => $k) {
-            $voll['kreise'][$i] = array_replace_recursive(BerichtSchema::kreisLeer(), is_array($k) ? $k : []);
-            $voll['kreise'][$i]['abgeleitet'] = is_array($k['abgeleitet'] ?? null) ? array_values($k['abgeleitet']) : [];
-        }
-        return $voll;
     }
 }

@@ -113,6 +113,16 @@ $router->post('/berichte/{id}/kunde-aus', [BerichtController::class, 'kundeAus']
 $router->post('/berichte/{id}/eventworx/suche', [BerichtController::class, 'eventworxSuche'], 'berichte.eventworx');
 $router->post('/berichte/{id}/eventworx/vorgang', [BerichtController::class, 'eventworxVorgang'], 'berichte.eventworx');
 $router->post('/berichte/{id}/pruefen', [BerichtController::class, 'pruefen'], 'berichte.manage');
+// Unterschriften: Prüfer friert ein und vergibt die Nummer; der Kunde unterschreibt im
+// Kundenmodus am Gerät des Prüfers (der Router sperrt dann alles andere, siehe Kundenmodus).
+$router->post('/berichte/{id}/unterschreiben', [BerichtController::class, 'unterschreiben'], 'berichte.pruefen');
+$router->post('/berichte/{id}/zurueckziehen', [BerichtController::class, 'zurueckziehen'], 'berichte.pruefen');
+$router->post('/berichte/{id}/kundenmodus', [BerichtController::class, 'kundenmodus'], 'berichte.manage');
+$router->get('/berichte/{id}/kunde', [BerichtController::class, 'kunde'], 'berichte.manage');
+$router->post('/berichte/{id}/kunde/unterschreiben', [BerichtController::class, 'kundeUnterschreiben'], 'berichte.manage');
+$router->post('/berichte/{id}/kunde/beenden', [BerichtController::class, 'kundeBeenden'], 'berichte.manage');
+$router->post('/berichte/{id}/ohne-kunde', [BerichtController::class, 'ohneKunde'], 'berichte.pruefen');
+$router->post('/berichte/{id}/korrektur', [BerichtController::class, 'korrektur'], 'berichte.pruefen');
 $router->post('/berichte/{id}/verwerfen', [BerichtController::class, 'verwerfen'], 'berichte.pruefen');
 $router->post('/berichte/{id}/loeschen', [BerichtController::class, 'loeschen'], 'berichte.manage');
 

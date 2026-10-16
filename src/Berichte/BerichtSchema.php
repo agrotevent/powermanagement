@@ -102,6 +102,29 @@ final class BerichtSchema
     }
 
     /**
+     * Der gespeicherte Inhalt mit allen Schlüsseln des Schemas – für die
+     * Anzeige und zum Einfrieren. Listen bleiben, wie sie sind; was nur ein
+     * eingefrorener Bericht hat (labels, texte, bewertung …), bleibt stehen.
+     */
+    public static function vollstaendig(array $inhalt): array
+    {
+        $voll = array_replace_recursive(self::leer(), $inhalt);
+        foreach (['kreise', 'maengel'] as $liste) {
+            $voll[$liste] = is_array($inhalt[$liste] ?? null) ? array_values($inhalt[$liste]) : [];
+        }
+        $voll['grundlage']['normen'] = is_array($inhalt['grundlage']['normen'] ?? null) ? array_values($inhalt['grundlage']['normen']) : [];
+        $voll['messung']['geraete'] = is_array($inhalt['messung']['geraete'] ?? null) ? array_values(array_map('strval', $inhalt['messung']['geraete'])) : [];
+        $voll['punkte'] = ['besichtigung' => (array) ($inhalt['punkte']['besichtigung'] ?? []), 'erprobung' => (array) ($inhalt['punkte']['erprobung'] ?? [])];
+        $voll['abschluss']['warnungen_bestaetigt'] = is_array($inhalt['abschluss']['warnungen_bestaetigt'] ?? null)
+            ? array_values($inhalt['abschluss']['warnungen_bestaetigt']) : [];
+        foreach ($voll['kreise'] as $i => $k) {
+            $voll['kreise'][$i] = array_replace_recursive(self::kreisLeer(), is_array($k) ? $k : []);
+            $voll['kreise'][$i]['abgeleitet'] = is_array($k['abgeleitet'] ?? null) ? array_values($k['abgeleitet']) : [];
+        }
+        return $voll;
+    }
+
+    /**
      * Rohen Inhalt aus dem Browser auf das Schema bringen.
      *
      * @param array $roh  wie aus json_decode(…, true)
@@ -422,8 +445,8 @@ final class BerichtSchema
         return array_slice($out, 0, $hoechstens);
     }
 
-    /** @return list<string> bestätigte Warnungen (Codes) */
-    private static function codes(mixed $roh): array
+    /** @return list<string> bestätigte Warnungen (Codes): Kleinbuchstaben, Ziffern und _:.-, höchstens 100 */
+    public static function codes(mixed $roh): array
     {
         $out = [];
         foreach (is_array($roh) ? $roh : [] as $w) {

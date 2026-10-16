@@ -4,6 +4,7 @@ declare(strict_types=1);
 namespace App\Support;
 
 use App\Auth\Auth;
+use App\Berichte\Kundenmodus;
 
 /** Minimaler Router mit Rechteprüfung pro Route. */
 final class Router
@@ -89,6 +90,19 @@ final class Router
                 && !in_array($path, self::OHNE_NEUES_KENNWORT, true)) {
                 Flash::warning('Bitte zuerst ein neues Passwort vergeben.');
                 Response::redirect('/profil');
+                return;
+            }
+
+            // Kundenmodus: das Gerät liegt beim Kunden. Offen ist nur, was
+            // er für diesen einen Bericht braucht – kein Schalten, kein
+            // Formular, keine anderen Seiten, auch ohne eigenes Recht der Route.
+            $sperre = Auth::check() ? Kundenmodus::aktiv() : null;
+            if ($sperre !== null && !Kundenmodus::erlaubt($method, $path, $sperre['bericht'])) {
+                if (self::willJson()) {
+                    Response::json(['ok' => false, 'kundenmodus' => true, 'message' => 'Kundenmodus aktiv – erst mit dem Kennwort des Prüfers entsperren.'], 423);
+                    return;
+                }
+                Response::redirect('/berichte/' . $sperre['bericht'] . '/kunde');
                 return;
             }
 
