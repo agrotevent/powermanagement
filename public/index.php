@@ -107,6 +107,7 @@ $router->post('/berichte/anlegen', [BerichtController::class, 'anlegen'], 'beric
 $router->get('/berichte/pruefgeraete', [PruefgeraeteController::class, 'index'], 'berichte.view');
 $router->post('/berichte/pruefgeraete/speichern', [PruefgeraeteController::class, 'speichern'], 'berichte.manage');
 $router->get('/berichte/{id}', [BerichtController::class, 'show'], 'berichte.view');
+$router->get('/berichte/{id}/pdf', [BerichtController::class, 'pdf'], 'berichte.view');
 $router->post('/berichte/{id}/speichern', [BerichtController::class, 'speichern'], 'berichte.manage');
 $router->post('/berichte/{id}/kreise', [BerichtController::class, 'kreise'], 'berichte.manage');
 $router->post('/berichte/{id}/kunde-aus', [BerichtController::class, 'kundeAus'], 'berichte.manage');

@@ -103,6 +103,34 @@ $ereignisNamen = [
     </details>
 <?php endif; ?>
 
+<?php $pdfName = \App\Berichte\BerichtPdf::dateiname($b); $gespeichert = in_array($b['status'], ['abgeschlossen', 'ersetzt'], true); ?>
+<div class="card bericht-pdf">
+    <div class="card-head"><h2><?= $gespeichert ? 'PDF' : 'PDF-Vorschau' ?></h2>
+        <span class="hint"><?= $gespeichert ? 'so, wie der Kunde es bekommen hat' : 'mit Wasserzeichen, nicht gespeichert' ?></span></div>
+    <div class="card-body">
+        <div class="btn-row">
+            <a class="btn<?= $gespeichert ? ' btn-primary' : '' ?>" href="/berichte/<?= $id ?>/pdf" target="_blank" rel="noopener"><?= $gespeichert ? 'PDF ansehen' : 'Vorschau ansehen' ?></a>
+            <?php if ($gespeichert): ?>
+                <a class="btn" href="/berichte/<?= $id ?>/pdf" download="<?= View::e($pdfName) ?>">Herunterladen</a>
+                <button class="btn" type="button" data-teilen="/berichte/<?= $id ?>/pdf" data-name="<?= View::e($pdfName) ?>"
+                        data-titel="Übergabebericht <?= View::e((string) $b['nummer']) ?>" hidden>Teilen</button>
+            <?php endif; ?>
+            <?php if ($ewxLink !== ''): ?>
+                <a class="btn btn-ghost" href="<?= View::e($ewxLink) ?>" target="_blank" rel="noopener noreferrer"
+                   title="Vorgang <?= View::e((string) $b['ewx_nummer']) ?> – dort das PDF von Hand anhängen">In Eventworx öffnen</a>
+            <?php endif; ?>
+        </div>
+        <?php if ($pdfHash !== null): ?>
+            <p class="small muted mt mb0">Prüfsumme der Datei (SHA-256): <span class="mono pruefsumme"><?= View::e($pdfHash) ?></span> – damit lässt sich das Exemplar des Kunden vergleichen.</p>
+        <?php elseif ($gespeichert): ?>
+            <p class="small text-warn mt mb0">Zu diesem Bericht ist kein PDF gespeichert – angezeigt wird eine Neuerzeugung aus dem eingefrorenen Inhalt.</p>
+        <?php elseif ($b['status'] === 'geprueft' && $zurueckziehbar): ?>
+            <p class="small muted mt mb0">Nach dem Ansehen der Vorschau lässt sich die Unterschrift nicht mehr zurückziehen – der Kunde könnte sie gesehen haben.</p>
+        <?php endif; ?>
+        <p class="small muted mb0" data-teilen-meldung role="status" aria-live="polite"></p>
+    </div>
+</div>
+
 <?= View::partial('berichte/_ansicht', ['bericht' => $b, 'inhalt' => $inhalt, 'bewertung' => $bewertung, 'unterschriften' => $unterschriften]) ?>
 
 <?php if ($integritaet['eingefroren']): ?>

@@ -11,6 +11,7 @@ use App\Services\SiteService;
 use App\Support\Audit;
 use App\Support\Crypto;
 use App\Support\Database;
+use App\Support\Logger;
 use App\Support\Session;
 use App\Support\Zeit;
 
@@ -1179,9 +1180,14 @@ final class BerichtService
      * Ein Siegel mit einem anderen Schlüssel (app.key gewechselt) ist nicht
      * prüfbar – das ist ein Befund, aber kein „verfälscht“.
      *
-     * @return array{ok:bool, eingefroren:bool, befunde:list<string>}
+     * Mit $neuErzeugen wird das PDF aus dem eingefrorenen Inhalt noch einmal
+     * erzeugt und Byte für Byte verglichen; weicht es ab, ist das nur ein
+     * Hinweis (Layout oder Programm seither geändert) – maßgeblich bleibt
+     * das gespeicherte.
+     *
+     * @return array{ok:bool, eingefroren:bool, befunde:list<string>, hinweise?:list<string>}
      */
-    public static function integritaet(int $id): array
+    public static function integritaet(int $id, bool $neuErzeugen = false): array
     {
         $b = Database::first('SELECT * FROM berichte WHERE id = ?', [$id]);
         if ($b === null) {
@@ -1249,16 +1255,66 @@ final class BerichtService
         }
 
         $pdf = Database::first('SELECT sha256, groesse, daten FROM bericht_pdf WHERE bericht_id = ?', [$id]);
+        $hinweise = [];
         if ($pdf !== null) {
             $bytes = base64_decode((string) $pdf['daten'], true);
             $sha = $bytes === false ? '' : hash('sha256', $bytes);
             if ($bytes === false || !hash_equals((string) $pdf['sha256'], $sha) || (string) ($b['pdf_hash'] ?? '') !== $sha || strlen($bytes) !== (int) $pdf['groesse']) {
                 $befunde[] = 'PDF verändert – die Prüfsumme der gespeicherten Datei stimmt nicht.';
+            } elseif ($neuErzeugen) {
+                try {
+                    $neu = BerichtPdf::erzeugen((array) self::find($id), self::unterschriften($id), false);
+                } catch (\Throwable) {
+                    $neu = '';
+                }
+                if (!hash_equals($bytes, $neu)) {
+                    $hinweise[] = 'Neu erzeugt weicht das PDF vom gespeicherten ab (Layout oder Programm seither geändert) – maßgeblich ist das gespeicherte.';
+                }
             }
-        } elseif ($b['pdf_hash'] !== null) {
+        } elseif ($b['pdf_hash'] !== null || in_array($b['status'], ['abgeschlossen', 'ersetzt'], true)) {
             $befunde[] = 'Das gespeicherte PDF fehlt.';
         }
-        return ['ok' => $befunde === [], 'eingefroren' => true, 'befunde' => $befunde];
+        $out = ['ok' => $befunde === [], 'eingefroren' => true, 'befunde' => $befunde];
+        return $neuErzeugen ? $out + ['hinweise' => $hinweise] : $out;
+    }
+
+    // ------------------------------------------------------------ PDF
+
+    /**
+     * Das PDF zum Ansehen und Herunterladen. Abgeschlossen oder ersetzt: die
+     * gespeicherten Bytes – genau das, was der Kunde bekommen hat. Vorher
+     * eine Vorschau, jedes Mal neu erzeugt und nicht gespeichert; ein
+     * Entwurf bekommt dafür die festen Kopien wie beim Einfrieren (ohne
+     * Prüfer), ein unterschriebener Bericht hat sie schon.
+     *
+     * @return array{name:string, bytes:string, gespeichert:bool, sha256:string}
+     */
+    public static function pdf(array $b): array
+    {
+        $id = (int) $b['id'];
+        $name = BerichtPdf::dateiname($b);
+        if (in_array((string) $b['status'], ['abgeschlossen', 'ersetzt'], true)) {
+            $z = Database::first('SELECT daten FROM bericht_pdf WHERE bericht_id = ?', [$id]);
+            $bytes = $z !== null ? base64_decode((string) $z['daten'], true) : false;
+            if (is_string($bytes) && $bytes !== '') {
+                return ['name' => $name, 'bytes' => $bytes, 'gespeichert' => true, 'sha256' => hash('sha256', $bytes)];
+            }
+            // Ohne gespeichertes PDF (Integritätsbefund): neu aus dem eingefrorenen Inhalt.
+            $bytes = BerichtPdf::erzeugen($b, self::unterschriften($id), false);
+            return ['name' => $name, 'bytes' => $bytes, 'gespeichert' => false, 'sha256' => hash('sha256', $bytes)];
+        }
+        if ((string) $b['status'] !== 'geprueft') {
+            $b['inhalt'] = self::inhaltBauen($b, ['user_id' => '', 'name' => '', 'qualifikation' => '']);
+        }
+        $bytes = BerichtPdf::erzeugen($b, self::unterschriften($id), true);
+        return ['name' => $name, 'bytes' => $bytes, 'gespeichert' => false, 'sha256' => hash('sha256', $bytes)];
+    }
+
+    /** Prüfsumme des gespeicherten PDF (SHA-256) – oder null. */
+    public static function pdfHash(int $id): ?string
+    {
+        $sha = Database::scalar('SELECT sha256 FROM bericht_pdf WHERE bericht_id = ?', [$id]);
+        return is_string($sha) && $sha !== '' ? $sha : null;
     }
 
     /** Kurzkennung des Siegel-Schlüssels (ändert sich mit app.key). */
@@ -1635,6 +1691,8 @@ final class BerichtService
                 $uid = self::unterschriftAnlegen($id, (string) $b['nummer'], (int) $b['fassung'], $z + [
                     'rolle' => 'kunde', 'inhalt_hash' => (string) $b['inhalt_hash'], 'vorher_hash' => (string) $pruefer['kette_hash'], 'am' => $jetzt,
                 ]);
+                // Das übergebene PDF – in derselben Transaktion: ohne PDF kein Abschluss.
+                $pdf = self::pdfAblegen($id, $jetzt);
                 if ((int) $b['fassung'] > 1 && $b['vorgaenger_id'] !== null) {
                     $ersetzt = Database::execute(
                         "UPDATE berichte SET status = 'ersetzt', ersetzt_durch_id = ?, updated_at = ? WHERE id = ? AND status = 'abgeschlossen'",
@@ -1644,7 +1702,7 @@ final class BerichtService
                         self::ereignis((int) $b['vorgaenger_id'], 'ersetzt', ['durch' => (string) $b['nummer'], 'fassung' => (string) $b['fassung']]);
                     }
                 }
-                self::ereignis($id, $z['art'] === 'gezeichnet' ? 'kunde_unterschrieben' : 'ohne_kunde', $details);
+                self::ereignis($id, $z['art'] === 'gezeichnet' ? 'kunde_unterschrieben' : 'ohne_kunde', $details + ['pdf_sha256' => $pdf]);
                 return $uid;
             });
         } catch (\PDOException $e) {
@@ -1653,11 +1711,43 @@ final class BerichtService
             }
             return self::wiederholung($id, 'kunde', (string) $z['anfrage'])
                 ?? ['ok' => false, 'status' => 409, 'message' => 'Der Kundenblock ist schon ausgefüllt.'];
+        } catch (\RuntimeException | \LogicException $e) {
+            // PDF nicht erzeugt (Schrift fehlt o. Ä.): nichts gespeichert, ein Neuversuch geht.
+            Logger::error('Übergabebericht: PDF nicht erzeugt', ['bericht' => $id, 'fehler' => $e->getMessage()]);
+            return ['ok' => false, 'status' => 500, 'message' => 'Das PDF ließ sich nicht erzeugen – nichts gespeichert, bitte noch einmal versuchen.'];
         }
         if ($uid === null) {
             return ['ok' => false, 'status' => 409, 'message' => 'Der Bericht wurde inzwischen geändert – bitte neu laden.'];
         }
         return ['ok' => true, 'status' => 200, 'unterschrift' => $uid, 'message' => $b['nummer'] . ' abgeschlossen – vielen Dank.'];
+    }
+
+    /**
+     * Das PDF beim Abschluss erzeugen und ablegen (base64 in bericht_pdf,
+     * SHA-256 in berichte.pdf_hash). Läuft in der Transaktion des
+     * Abschlusses; CreationDate ist abgeschlossen_am, die ID kommt aus dem
+     * inhalt_hash – neu erzeugt ergeben sich dieselben Bytes.
+     *
+     * @return string SHA-256 des PDF
+     */
+    private static function pdfAblegen(int $id, string $am): string
+    {
+        $b = self::find($id);
+        if ($b === null) {
+            throw new \LogicException('Bericht verschwunden.');
+        }
+        $bytes = BerichtPdf::erzeugen($b, self::unterschriften($id), false);
+        $sha = hash('sha256', $bytes);
+        Database::insert('bericht_pdf', [
+            'bericht_id' => $id,
+            'sha256'     => $sha,
+            'groesse'    => strlen($bytes),
+            'daten'      => base64_encode($bytes),
+            'erzeuger'   => BerichtPdf::ERZEUGER,
+            'erzeugt_am' => $am,
+        ]);
+        Database::execute('UPDATE berichte SET pdf_hash = ? WHERE id = ?', [$sha, $id]);
+        return $sha;
     }
 
     /**

@@ -29,6 +29,7 @@ $datum = static fn (string $d): string => preg_match('/^(\d{4})-(\d{2})-(\d{2})$
                 <h1>Vielen Dank!</h1>
                 <p class="kunde-gross">Bitte geben Sie das Gerät an <strong><?= View::e($pruefer) ?></strong> zurück.</p>
                 <p class="small muted">Der Bericht <?= View::e((string) $b['nummer']) ?> ist abgeschlossen. Sie erhalten ihn als PDF.</p>
+                <p><a class="btn" href="/berichte/<?= $id ?>/pdf" target="_blank" rel="noopener">Bericht als PDF ansehen</a></p>
             </div>
         </section>
     <?php else: ?>
@@ -37,6 +38,8 @@ $datum = static fn (string $d): string => preg_match('/^(\d{4})-(\d{2})-(\d{2})$
             'Prüfdatum ' . $datum((string) $kopf['pruefdatum'])]))) ?></p>
         <?php if ($offen): ?>
             <p class="notice">Bitte lesen Sie den Bericht. Unten bestätigen Sie den Erhalt mit Ihrer Unterschrift.</p>
+            <p><a class="btn" href="/berichte/<?= $id ?>/pdf" target="_blank" rel="noopener">Als PDF ansehen</a>
+                <span class="small muted">Vorschau – das endgültige PDF entsteht mit Ihrer Bestätigung.</span></p>
         <?php else: ?>
             <p class="notice warn">Dieser Bericht ist nicht zur Unterschrift offen – bitte das Gerät an <?= View::e($pruefer) ?> zurückgeben.</p>
         <?php endif; ?>

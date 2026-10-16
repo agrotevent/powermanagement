@@ -733,6 +733,8 @@ tr.abweichung-zeile td { background: var(--warning-light); }
 .unterschrift-block h3 { margin: 0 0 .3rem; }
 .unterschrift-bild { max-width: 24rem; border-bottom: 1px solid var(--border); margin-bottom: .3rem; color: #1e3a8a; }
 .unterschrift-svg { display: block; width: 100%; height: auto; aspect-ratio: 3 / 1; }
+/* PDF: Prüfsumme der Datei bricht auf dem Telefon um statt die Seite zu verbreitern. */
+.bericht-pdf .pruefsumme { overflow-wrap: anywhere; word-break: break-all; }
 .bericht-aktionen > summary { cursor: pointer; list-style: none; }
 .bericht-aktionen > summary::-webkit-details-marker { display: none; }
 .bericht-aktionen details > summary { cursor: pointer; color: var(--primary); font-weight: 600; min-height: 44px; display: flex; align-items: center; }

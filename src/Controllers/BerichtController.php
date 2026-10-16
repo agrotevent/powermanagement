@@ -221,6 +221,9 @@ final class BerichtController extends Controller
                 'darfKorrektur' => $b['status'] === 'abgeschlossen' && $pruefer && $b['jahr'] !== null,
                 'offeneKorrektur' => in_array($b['status'], ['abgeschlossen', 'ersetzt'], true) ? BerichtService::offeneKorrektur($b) : null,
                 'vorgaenger'    => $b['vorgaenger_id'] !== null ? BerichtService::find((int) $b['vorgaenger_id']) : null,
+                'pdfHash'       => in_array($b['status'], ['abgeschlossen', 'ersetzt'], true) ? BerichtService::pdfHash((int) $b['id']) : null,
+                'ewxLink'       => (string) $b['ewx_id'] !== '' && Auth::can('berichte.eventworx') ? Eventworx::link((string) $b['ewx_art'], (string) $b['ewx_id']) : '',
+                'scripts'       => ['/assets/js/bericht-pdf.js'],
             ]);
             return;
         }
@@ -269,6 +272,35 @@ final class BerichtController extends Controller
             'vorgaenger'    => $b['vorgaenger_id'] !== null ? BerichtService::find((int) $b['vorgaenger_id']) : null,
             'scripts'       => ['/assets/js/unterschrift.js', '/assets/js/bericht.js'],
         ]);
+    }
+
+    /**
+     * Das PDF: abgeschlossen oder ersetzt die gespeicherten Bytes, sonst
+     * eine Vorschau mit Wasserzeichen. Der Abruf der Vorschau eines vom
+     * Prüfer unterschriebenen Berichts steht im Lebenslauf – danach lässt
+     * sich die Unterschrift nicht mehr zurückziehen (der Kunde kann es
+     * gesehen haben). Kopfzeilen von Hand: inline, nicht zwischenspeichern,
+     * kein Referrer; keine CSP mit sandbox (die PDF-Ansicht von Chrome
+     * verweigert sonst).
+     */
+    public function pdf(Request $request, array $params): void
+    {
+        $b = $this->bericht($request, $params);
+        if ($b === null) {
+            return;
+        }
+        $pdf = BerichtService::pdf($b);
+        if ($b['status'] === 'geprueft') {
+            BerichtService::ereignis((int) $b['id'], 'pdf_abgerufen', ['stufe' => 'vorschau']);
+        }
+        http_response_code(200);
+        header('Content-Type: application/pdf');
+        header('Content-Disposition: inline; filename="' . $pdf['name'] . '"');
+        header('Content-Length: ' . strlen($pdf['bytes']));
+        header('X-Content-Type-Options: nosniff');
+        header('Cache-Control: private, no-store');
+        header('Referrer-Policy: no-referrer');
+        echo $pdf['bytes'];
     }
 
     /** Autosave: `version`, `inhalt` (JSON), optional `ewx` – Antwort mit Bewertung. */

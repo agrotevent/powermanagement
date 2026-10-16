@@ -607,6 +607,7 @@ try {
     pruefe($form['status'] === 200 && str_contains($form['text'], 'data-bericht="' . $bId . '"') && phpMeldung($form['text']) === null, 'Formular des Entwurfs');
     gleich(substr_count($form['text'], 'data-zeile="k'), 3, 'je Abgang ein Stromkreis im Formular');
     pruefe(str_contains($form['text'], 'data-feld="kopf.kunde.firma"') && str_contains($form['text'], 'id="kreis-vorlage"'), 'Felder mit data-feld, Vorlage für neue Zeilen');
+    pruefe(str_contains($form['text'], 'href="/berichte/' . $bId . '/pdf"'), 'Formular: Link zur PDF-Vorschau');
     foreach (['/berichte', '/berichte?status=entwurf&suche=' . rawurlencode($kennung), '/berichte/neu', '/berichte/neu?site=' . $bSite,
         '/berichte/neu?anlage=' . $bVert, '/berichte/pruefgeraete', '/berichte/pruefgeraete?neu=1', '/aufbau/' . $bAufbau, '/aufbau/' . $bAufbau . '/abgleich'] as $pfad) {
         $r = aufruf($basis, $admin['dose'], 'GET', $pfad);
@@ -685,8 +686,23 @@ try {
         'abgeschlossener Bericht: Leseansicht statt Formular');
     $r = aufruf($basis, $admin['dose'], 'POST', '/berichte/' . $bId . '/speichern', ['version' => 1, 'inhalt' => '{}', '_token' => $admin['token']], $json);
     gleich($r['status'], 423, 'abgeschlossen: Speichern → 423');
+    /** Kopfzeilen und Rumpf einer PDF-Antwort prüfen. */
+    $pdfAntwort = static function (array $r, string $datei): bool {
+        return $r['status'] === 200 && str_starts_with($r['text'], '%PDF-') && str_ends_with($r['text'], "%%EOF\n")
+            && preg_match('/^Content-Type: application\/pdf\r?$/mi', $r['kopf']) === 1
+            && preg_match('/^Content-Disposition: inline; filename="' . preg_quote($datei, '/') . '"\r?$/mi', $r['kopf']) === 1
+            && preg_match('/^X-Content-Type-Options: nosniff\r?$/mi', $r['kopf']) === 1
+            && preg_match('/^Cache-Control: private, no-store\r?$/mi', $r['kopf']) === 1
+            && preg_match('/^Referrer-Policy: no-referrer\r?$/mi', $r['kopf']) === 1
+            && stripos($r['kopf'], 'sandbox') === false;
+    };
+    $r = aufruf($basis, $admin['dose'], 'GET', '/berichte/' . $bId . '/pdf');
+    pruefe($pdfAntwort($r, 'T-' . $kennung . '.pdf'), 'PDF: 200, application/pdf, inline mit Nummer, nosniff, no-store, kein Referrer, keine Sandbox-CSP');
+    pruefe(str_contains(aufruf($basis, $admin['dose'], 'GET', '/berichte/' . $bId)['text'], 'kein PDF gespeichert'), 'abgeschlossen ohne gespeichertes PDF: Hinweis');
     $r = aufruf($basis, $admin['dose'], 'GET', '/anlagen/' . $bVert);
     pruefe(str_contains($r['text'], 'T-' . $kennung), 'Anlage: „Letzte Prüfung“ nennt den abgeschlossenen Bericht');
+    pruefe($pdfAntwort(aufruf($basis, $admin['dose'], 'GET', '/berichte/' . $b2Id . '/pdf'), 'Entwurf-' . $b2Id . '.pdf'), 'Entwurf: PDF-Vorschau');
+    gleich(aufruf($basis, $admin['dose'], 'GET', '/berichte/999999999/pdf')['status'], 404, 'PDF eines unbekannten Berichts → 404');
     $r = aufruf($basis, $admin['dose'], 'POST', '/berichte/' . $b2Id . '/kunde-aus', ['quelle' => $bId, '_token' => $admin['token']], $json);
     $j = json_decode($r['text'], true) ?? [];
     pruefe($r['status'] === 200 && ($j['kunde']['firma'] ?? '') === $kennung . ' Kunde GmbH' && ($j['kunde']['quelle'] ?? '') === 'bericht',
@@ -734,7 +750,7 @@ try {
     pruefe($r['status'] === 302 && str_starts_with((string) $r['ziel'], '/login'), 'ohne Accept → wie bisher Weiterleitung');
 
     // Kunde ohne „Übergabeberichte ansehen“
-    foreach (['/berichte', '/berichte/' . $bId, '/berichte/pruefgeraete', '/berichte/neu'] as $pfad) {
+    foreach (['/berichte', '/berichte/' . $bId, '/berichte/' . $bId . '/pdf', '/berichte/pruefgeraete', '/berichte/neu'] as $pfad) {
         gleich(aufruf($basis, $kunde['dose'], 'GET', $pfad)['status'], 403, 'Kunde ohne Recht ' . $pfad);
     }
     gleich(aufruf($basis, $kunde['dose'], 'POST', '/berichte/' . $b2Id . '/speichern', ['version' => 1, 'inhalt' => '{}', '_token' => $kunde['token']], $json)['status'], 403,
@@ -748,6 +764,8 @@ try {
     $r = aufruf($basis, $bkunde['dose'], 'GET', '/berichte/' . $bId);
     pruefe($r['status'] === 200 && phpMeldung($r['text']) === null && !str_contains($r['text'], 'data-bericht='), 'Kunde sieht den abgeschlossenen Bericht (nur lesen)');
     gleich(aufruf($basis, $bkunde['dose'], 'GET', '/berichte/' . $b2Id)['status'], 404, 'Kunde sieht keinen Entwurf');
+    pruefe($pdfAntwort(aufruf($basis, $bkunde['dose'], 'GET', '/berichte/' . $bId . '/pdf'), 'T-' . $kennung . '.pdf'), 'Kunde lädt das PDF des abgeschlossenen Berichts');
+    gleich(aufruf($basis, $bkunde['dose'], 'GET', '/berichte/' . $b2Id . '/pdf')['status'], 404, 'Kunde: kein PDF eines Entwurfs');
     $r = aufruf($basis, $bkunde['dose'], 'GET', '/berichte');
     pruefe($r['status'] === 200 && str_contains($r['text'], 'href="/berichte/' . $bId . '"') && !str_contains($r['text'], 'href="/berichte/' . $b2Id . '"'),
         'Liste des Kunden: abgeschlossen ja, Entwurf nein');
@@ -856,6 +874,13 @@ try {
         && str_contains($r['text'], 'Prüfnachweis') && str_contains($r['text'], '✓ Integrität geprüft') && str_contains($r['text'], '<svg class="unterschrift-svg"')
         && str_contains($r['text'], 'action="/berichte/' . $b3 . '/zurueckziehen"'), 'vom Prüfer unterschrieben: Übergabe, Prüfnachweis, Unterschrift als SVG');
     $ohneSkript('/berichte/' . $b3 . ' (unterschrieben)', $r['text']);
+    pruefe(str_contains($r['text'], 'href="/berichte/' . $b3 . '/pdf"') && str_contains($r['text'], 'Vorschau ansehen') && !str_contains($r['text'], 'data-teilen='),
+        'unterschrieben: Link zur PDF-Vorschau, noch kein Teilen');
+    pruefe($pdfAntwort(aufruf($basis, $admin['dose'], 'GET', '/berichte/' . $b3 . '/pdf'), $b['nummer'] . '.pdf'), 'unterschrieben: PDF-Vorschau');
+    pruefe(in_array('pdf_abgerufen', array_column(BerichtService::ereignisse($b3), 'ereignis'), true)
+        && !str_contains(aufruf($basis, $admin['dose'], 'GET', '/berichte/' . $b3)['text'], 'action="/berichte/' . $b3 . '/zurueckziehen"'),
+        'Vorschau abgerufen: im Lebenslauf, Zurückziehen nicht mehr angeboten');
+    pruefe(BerichtService::pdfHash($b3) === null, 'Vorschau wird nicht gespeichert');
     gleich(aufruf($basis, $admin['dose'], 'POST', '/berichte/' . $b3 . '/speichern', ['version' => $b['version'], 'inhalt' => '{}', '_token' => $admin['token']], $json)['status'],
         423, 'unterschrieben: Speichern → 423');
 
@@ -868,6 +893,11 @@ try {
         && !str_contains($kundeSeite['text'], 'class="sidebar') && str_contains($kundeSeite['text'], '/assets/js/bericht-kunde.js')
         && str_contains($kundeSeite['text'], 'es wird nicht der prüftechnische Inhalt bestätigt'), 'Kundenseite ohne Navigation, mit Bestätigung und Unterschrift');
     $ohneSkript('/berichte/' . $b3 . '/kunde', $kundeSeite['text']);
+    pruefe(str_contains($kundeSeite['text'], 'href="/berichte/' . $b3 . '/pdf"'), 'Kundenseite: „Als PDF ansehen“');
+    $r = aufruf($basis, $admin['dose'], 'GET', '/berichte/' . $b3 . '/pdf');
+    pruefe($r['status'] === 200 && str_starts_with($r['text'], '%PDF-'), 'Kundenmodus: PDF dieses Berichts offen');
+    $r = aufruf($basis, $admin['dose'], 'GET', '/berichte/' . $bId . '/pdf');
+    pruefe($r['status'] === 302 && $r['ziel'] === '/berichte/' . $b3 . '/kunde', 'Kundenmodus: PDF eines anderen Berichts gesperrt');
     foreach (['/dashboard', '/berichte', '/berichte/' . $b2Id, '/system/einstellungen', '/profil'] as $pfad) {
         $r = aufruf($basis, $admin['dose'], 'GET', $pfad);
         pruefe($r['status'] === 302 && $r['ziel'] === '/berichte/' . $b3 . '/kunde', 'Kundenmodus: ' . $pfad . ' → Kundenseite');
@@ -912,6 +942,14 @@ try {
     pruefe($r['status'] === 200 && phpMeldung($r['text']) === null && str_contains($r['text'], 'Kim Kunde') && substr_count($r['text'], '<svg class="unterschrift-svg"') === 2
         && str_contains($r['text'], 'action="/berichte/' . $b3 . '/korrektur"'), 'abgeschlossen: beide Unterschriften, Korrektur möglich');
     $ohneSkript('/berichte/' . $b3 . ' (abgeschlossen)', $r['text']);
+    $pdfB3 = (string) BerichtService::pdfHash($b3);
+    pruefe($pdfB3 !== '' && $pdfB3 === (string) BerichtService::find($b3)['pdf_hash'] && str_contains($r['text'], $pdfB3) && str_contains($r['text'], 'data-teilen="/berichte/' . $b3 . '/pdf"')
+        && str_contains($r['text'], '/assets/js/bericht-pdf.js') && str_contains($r['text'], 'download="' . BerichtService::find($b3)['nummer'] . '.pdf"'),
+        'abgeschlossen: PDF ansehen, herunterladen, teilen, Prüfsumme der Datei');
+    $r = aufruf($basis, $admin['dose'], 'GET', '/berichte/' . $b3 . '/pdf');
+    pruefe($pdfAntwort($r, BerichtService::find($b3)['nummer'] . '.pdf') && hash('sha256', $r['text']) === $pdfB3, 'abgeschlossen: ausgeliefert werden die gespeicherten Bytes');
+    $r2 = aufruf($basis, $bkunde['dose'], 'GET', '/berichte/' . $b3 . '/pdf');
+    pruefe($r2['status'] === 200 && $r2['text'] === $r['text'], 'Kunde mit Freigabe bekommt dieselbe Datei');
     $r = aufruf($basis, $bkunde['dose'], 'GET', '/berichte/' . $b3);
     pruefe($r['status'] === 200 && str_contains($r['text'], 'Kim Kunde') && !str_contains($r['text'], '/korrektur"') && !str_contains($r['text'], 'Verlauf'),
         'Kunde mit Freigabe sieht den Bericht mit Unterschriften, ohne Knöpfe und Verlauf');
@@ -946,6 +984,7 @@ try {
     $r = aufruf($basis, $admin['dose'], 'GET', '/berichte/' . $b4);
     pruefe(phpMeldung($r['text']) === null && str_contains($r['text'], 'Ohne Unterschrift des Kunden') && str_contains($r['text'], 'Kunde verweigert die Unterschrift'),
         'Leseansicht: ohne Kunde mit Grund');
+    pruefe(BerichtService::pdfHash($b4) !== null && str_contains($r['text'], (string) BerichtService::pdfHash($b4)), 'ohne Kunde: PDF gespeichert und auf der Seite');
 
     // Korrektur: neue Fassung im Formular, der Vorgänger gilt weiter
     $r = aufruf($basis, $admin['dose'], 'POST', '/berichte/' . $b3 . '/korrektur', ['grund' => 'Querschnitt nachgetragen', '_token' => $admin['token']]);

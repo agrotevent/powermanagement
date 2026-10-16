@@ -32,6 +32,7 @@ $teil = [
         <span class="small muted">angelegt <?= View::e(Zeit::anzeige((string) $b['created_at'])) ?><?= $b['updated_at'] && (string) ($b['geaendert_von_name'] ?? '') !== ''
             ? ' · zuletzt geändert ' . View::e(Zeit::anzeige((string) $b['updated_at'])) . ' von ' . View::e((string) $b['geaendert_von_name']) : '' ?></span>
         <div class="spacer"></div>
+        <a class="btn btn-sm btn-ghost" href="/berichte/<?= $id ?>/pdf" target="_blank" rel="noopener" title="zeigt den zuletzt gespeicherten Stand">PDF-Vorschau</a>
         <a class="btn btn-sm btn-ghost" href="/berichte">Alle Berichte</a>
     </div>
 

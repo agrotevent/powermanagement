@@ -5,7 +5,8 @@ declare(strict_types=1);
  * Übergabeberichte (Service-Ebene): Vorbelegung, Grenzwerte, Speichern,
  * Abschluss-Prüfung, Sichtbarkeit, Unterschriften (Einfrieren, Nummer,
  * Zurückziehen, Kunde, ohne Kunde), Kundenmodus, Integrität, Korrektur,
- * Lösch-Abläufe und Datenschutz.
+ * PDF (Ablage beim Abschluss, Vorschau, Neuerzeugung), Lösch-Abläufe und
+ * Datenschutz. Das Layout des PDF prüft tests/bericht-pdf.php.
  *
  * Für Vorbelegung, Sichtbarkeit und Lösch-Abläufe entstehen abgeschlossene
  * Berichte der Kürze halber per SQL (Status, Nummer, Zeit); den echten Weg
@@ -16,6 +17,7 @@ require __DIR__ . '/hilfen/pruefung.php';
 
 use App\Auth\Auth;
 use App\Auth\Zugriff;
+use App\Berichte\BerichtPdf;
 use App\Berichte\BerichtSchema;
 use App\Berichte\BerichtService;
 use App\Berichte\Einstellungen;
@@ -826,6 +828,16 @@ try {
     BerichtService::ereignis($u3, 'pdf_abgerufen', ['stufe' => 'vorschau']);
     gleich(BerichtService::zurueckziehen($u3, 'zu spät')['status'], 409, 'nach Abruf des PDF kein Zurückziehen');
 
+    // ================================================== PDF-Vorschau
+    $vEntwurf = BerichtService::pdf(BerichtService::find($bereitAnlegen()));
+    pruefe(!$vEntwurf['gespeichert'] && str_starts_with($vEntwurf['bytes'], '%PDF-') && preg_match('/^Entwurf-\d+\.pdf$/', $vEntwurf['name']) === 1,
+        'Vorschau eines Entwurfs: erzeugt, nicht gespeichert, „Entwurf-<id>.pdf“');
+    $b3 = BerichtService::find($u3);
+    $v3 = BerichtService::pdf($b3);
+    pruefe(!$v3['gespeichert'] && $v3['name'] === $b3['nummer'] . '.pdf' && BerichtService::pdfHash($u3) === null && $b3['pdf_hash'] === null,
+        'Vorschau nach der Prüfer-Unterschrift: nicht gespeichert');
+    gleich(BerichtService::pdf($b3)['bytes'], $v3['bytes'], 'Vorschau ist reproduzierbar (feste Zeit und ID)');
+
     // ================================================== Kunde
     $vorbehalte = 'Vorbehalt ' . $kennung . ': Kabelbrücke an Bühne fehlt';
     $unterzeichner = 'Kim Kunde ' . $kennung;
@@ -844,6 +856,18 @@ try {
     $b1 = BerichtService::find($u1);
     pruefe($r['ok'] && $b1['status'] === 'abgeschlossen' && $b1['abgeschlossen_am'] !== null, 'Kunde unterschreibt → abgeschlossen');
     gleich($b1['aufbewahren_bis'], sprintf('%04d-12-31', $jahrU + 10), 'aufbewahren bis 31.12.(Jahr + 10)');
+    $pdfZeile = Database::first('SELECT * FROM bericht_pdf WHERE bericht_id = ?', [$u1]) ?? [];
+    $pdfBytes = (string) base64_decode((string) ($pdfZeile['daten'] ?? ''), true);
+    pruefe(str_starts_with($pdfBytes, '%PDF-') && str_ends_with($pdfBytes, "%%EOF\n"), 'Abschluss: PDF gespeichert (%PDF- … %%EOF)');
+    pruefe(($pdfZeile['sha256'] ?? '') === hash('sha256', $pdfBytes) && $b1['pdf_hash'] === $pdfZeile['sha256'] && (int) $pdfZeile['groesse'] === strlen($pdfBytes)
+        && $pdfZeile['erzeuger'] === BerichtPdf::ERZEUGER && $pdfZeile['erzeugt_am'] === $b1['abgeschlossen_am'], 'PDF: sha256 = pdf_hash, Größe, Erzeuger, Zeit des Abschlusses');
+    $geliefert = BerichtService::pdf($b1);
+    pruefe($geliefert['gespeichert'] && $geliefert['bytes'] === $pdfBytes && $geliefert['name'] === $nummer1 . '.pdf' && $geliefert['sha256'] === $b1['pdf_hash'],
+        'pdf(): abgeschlossen → die gespeicherten Bytes, Dateiname nur mit Nummer');
+    gleich(BerichtService::pdfHash($u1), $b1['pdf_hash'], 'pdfHash() für die Berichtsseite');
+    pruefe(str_contains($pdfBytes, '/CreationDate (D:' . gmdate('YmdHis', (int) Zeit::ts($b1['abgeschlossen_am'])) . 'Z)')
+        && str_contains($pdfBytes, '/ID [<' . substr((string) $b1['inhalt_hash'], 0, 32) . '>'), 'PDF: CreationDate = Abschluss, ID aus dem inhalt_hash');
+    gleich(BerichtPdf::erzeugen($b1, BerichtService::unterschriften($u1), false), $pdfBytes, 'PDF aus dem eingefrorenen Inhalt neu erzeugt: dieselben Bytes');
     $alle = BerichtService::unterschriften($u1);
     $kz = $alle['kunde'] ?? [];
     pruefe(($kz['vorher_hash'] ?? '') === $alle['pruefer']['kette_hash'] && $kz['inhalt_hash'] === $b1['inhalt_hash'] && $kz['art'] === 'gezeichnet'
@@ -863,6 +887,7 @@ try {
     pruefe($r['ok'] && BerichtService::find($u2)['status'] === 'abgeschlossen' && ($k2['art'] ?? '') === 'abwesend' && $k2['striche'] === []
         && $k2['angaben'] === ['grund' => 'Kunde nicht vor Ort, Bericht per E-Mail'], 'ohne Kunde abgeschlossen: Art und Grund im Kundenblock');
     gleich(BerichtService::integritaet($u2)['ok'], true, 'Integrität ohne Kunde');
+    pruefe(BerichtService::pdfHash($u2) !== null && BerichtService::pdfHash($u2) === BerichtService::find($u2)['pdf_hash'], 'ohne Kunde: PDF gespeichert');
     gleich(BerichtService::ohneKunde($u2, 'verweigert', 'noch einmal')['status'], 409, 'ohne Kunde nur einmal');
 
     // ================================================== Integrität
@@ -887,11 +912,36 @@ try {
     pruefe(str_contains(implode(' ', $i['befunde']), 'anderem Schlüssel') && !str_contains(implode(' ', $i['befunde']), 'Siegel ungültig'), 'anderer Schlüssel: nicht prüfbar statt verfälscht');
     Database::execute("UPDATE bericht_unterschriften SET schluessel_id = ? WHERE bericht_id = ? AND rolle = 'kunde'", [$schluesselVorher, $u1]);
     gleich(BerichtService::integritaet($u1)['ok'], true, 'wiederhergestellt: Integrität ok');
+    $rohPdf = (string) Database::scalar('SELECT daten FROM bericht_pdf WHERE bericht_id = ?', [$u1]);
+    $anderesPdf = (string) base64_decode($rohPdf, true);
+    $anderesPdf[300] = $anderesPdf[300] === 'x' ? 'y' : 'x';
+    Database::execute('UPDATE bericht_pdf SET daten = ? WHERE bericht_id = ?', [base64_encode($anderesPdf), $u1]);
+    $i = BerichtService::integritaet($u1);
+    pruefe(!$i['ok'] && str_contains(implode(' ', $i['befunde']), 'PDF verändert'), 'ein PDF-Byte geändert → Befund PDF');
+    Database::execute('UPDATE bericht_pdf SET daten = ? WHERE bericht_id = ?', [$rohPdf, $u1]);
+    gleich(BerichtService::integritaet($u1, true), ['ok' => true, 'eingefroren' => true, 'befunde' => [], 'hinweise' => []],
+        'mit Neuerzeugung: dieselben Bytes, kein Hinweis');
+    Database::execute('UPDATE bericht_pdf SET daten = ? WHERE bericht_id = ?', [base64_encode('%PDF-1.4 anders'), $u1]);
+    Database::execute('UPDATE bericht_pdf SET sha256 = ?, groesse = ? WHERE bericht_id = ?', [hash('sha256', '%PDF-1.4 anders'), 15, $u1]);
+    Database::execute('UPDATE berichte SET pdf_hash = ? WHERE id = ?', [hash('sha256', '%PDF-1.4 anders'), $u1]);
+    $i = BerichtService::integritaet($u1, true);
+    pruefe($i['ok'] && count($i['hinweise']) === 1 && str_contains($i['hinweise'][0], 'weicht'), 'stimmiges, aber anderes PDF: nur ein Hinweis bei der Neuerzeugung');
+    Database::execute('UPDATE bericht_pdf SET daten = ?, sha256 = ?, groesse = ? WHERE bericht_id = ?', [$rohPdf, $pdfZeile['sha256'], $pdfZeile['groesse'], $u1]);
+    Database::execute('UPDATE berichte SET pdf_hash = ? WHERE id = ?', [$pdfZeile['sha256'], $u1]);
+    Database::execute('DELETE FROM bericht_pdf WHERE bericht_id = ?', [$u2]);
+    pruefe(str_contains(implode(' ', BerichtService::integritaet($u2)['befunde']), 'PDF fehlt'), 'gespeichertes PDF gelöscht → Befund');
+    $neuU2 = BerichtService::pdf(BerichtService::find($u2));
+    pruefe(!$neuU2['gespeichert'] && $neuU2['sha256'] === BerichtService::find($u2)['pdf_hash'], 'ohne gespeichertes PDF: Neuerzeugung mit derselben Prüfsumme');
+    Database::insert('bericht_pdf', ['bericht_id' => $u2, 'sha256' => $neuU2['sha256'], 'groesse' => strlen($neuU2['bytes']), 'daten' => base64_encode($neuU2['bytes']),
+        'erzeuger' => BerichtPdf::ERZEUGER, 'erzeugt_am' => (string) BerichtService::find($u2)['abgeschlossen_am']]);
+    gleich(BerichtService::integritaet($u2)['ok'], true, 'PDF wieder abgelegt: Integrität ok');
 
     // ================================================== Feste Kopie
     Settings::put('firma.name', 'Ganz andere Firma ' . $kennung);
     $b1 = BerichtService::find($u1);
     pruefe($b1['inhalt']['auftragnehmer']['name'] === 'Muster Eventstrom ' . $kennung && BerichtService::integritaet($u1)['ok'], 'Firmendaten später geändert: der Bericht bleibt, wie er war');
+    pruefe(BerichtService::pdf($b1)['bytes'] === $pdfBytes && BerichtPdf::erzeugen($b1, BerichtService::unterschriften($u1), false) === $pdfBytes
+        && BerichtService::integritaet($u1, true)['hinweise'] === [], 'Firmendaten später geändert: pdf() und die Neuerzeugung ergeben dieselben Bytes');
 
     // ================================================== Korrektur
     alsBenutzer($benutzer['planer']);
