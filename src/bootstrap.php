@@ -21,9 +21,17 @@ spl_autoload_register(static function (string $class): void {
 });
 
 $configFile = APP_ROOT . '/config/config.php';
-if (!is_file($configFile)) {
+// Eine zweite Instanz aus derselben Arbeitskopie (Prüfskripte der
+// Schnittstelle) bekommt ihre Konfiguration über die Umgebung – nur auf der
+// Kommandozeile und im eingebauten Server, nie unter FPM oder Apache.
+$eigeneKonfiguration = getenv('POWERMANAGEMENT_CONFIG');
+if (in_array(PHP_SAPI, ['cli', 'cli-server'], true) && is_string($eigeneKonfiguration)
+    && $eigeneKonfiguration !== '' && is_file($eigeneKonfiguration)) {
+    $configFile = $eigeneKonfiguration;
+} elseif (!is_file($configFile)) {
     $configFile = APP_ROOT . '/config/config.example.php';
 }
+unset($eigeneKonfiguration);
 Config::load($configFile);
 
 date_default_timezone_set((string) Config::get('app.timezone', 'Europe/Berlin'));
@@ -39,13 +47,34 @@ if (Config::get('app.debug')) {
 Logger::setFile(APP_ROOT . '/storage/logs/app.log');
 View::setBase(APP_ROOT . '/resources/views');
 
-set_exception_handler(static function (\Throwable $e): void {
+/*
+ * Eine Anfrage an die Schnittstelle (/api) bekommt auch im Fehlerfall JSON –
+ * nie die HTML-Fehlerseite und nie Einzelheiten, auch nicht mit app.debug.
+ * Ohne geladenen ApiController (jede andere Seite) bleibt alles wie gehabt.
+ */
+$schnittstelleAntwortet = static function (): bool {
+    if (!class_exists(\App\Controllers\ApiController::class, false) || !\App\Controllers\ApiController::$aktiv) {
+        return false;
+    }
+    if (!headers_sent()) {
+        header('Content-Type: application/json; charset=utf-8');
+        header('Cache-Control: no-store');
+        header('X-Content-Type-Options: nosniff');
+    }
+    echo json_encode(['ok' => false, 'message' => 'Unerwarteter Fehler. Details stehen im Log.'], JSON_UNESCAPED_UNICODE);
+    return true;
+};
+
+set_exception_handler(static function (\Throwable $e) use ($schnittstelleAntwortet): void {
     Logger::error($e->getMessage(), ['file' => $e->getFile(), 'line' => $e->getLine()]);
     if (php_sapi_name() === 'cli') {
         fwrite(STDERR, 'Fehler: ' . $e->getMessage() . PHP_EOL);
         exit(1);
     }
     http_response_code(500);
+    if ($schnittstelleAntwortet()) {
+        return;
+    }
     if (Config::get('app.debug')) {
         echo '<pre>' . htmlspecialchars((string) $e, ENT_QUOTES) . '</pre>';
         return;
@@ -55,7 +84,7 @@ set_exception_handler(static function (\Throwable $e): void {
 
 // Fatale Fehler (Zeitlimit, Speichergrenze) erreichen den Handler oben
 // nicht und enden sonst als weiße Seite ohne Eintrag im Log.
-register_shutdown_function(static function (): void {
+register_shutdown_function(static function () use ($schnittstelleAntwortet): void {
     $error = error_get_last();
     if ($error === null || !in_array($error['type'], [E_ERROR, E_PARSE, E_CORE_ERROR, E_COMPILE_ERROR], true)) {
         return;
@@ -66,9 +95,13 @@ register_shutdown_function(static function (): void {
     ]);
     if (php_sapi_name() !== 'cli' && !headers_sent()) {
         http_response_code(500);
+        if ($schnittstelleAntwortet()) {
+            return;
+        }
         echo View::render('errors/error', ['code' => 500, 'message' => 'Unerwarteter Fehler. Details stehen im Log.']);
     }
 });
+unset($schnittstelleAntwortet);
 
 // Datenbankverbindung früh herstellen, damit Konfigurationsfehler sofort auffallen.
 Database::pdo();

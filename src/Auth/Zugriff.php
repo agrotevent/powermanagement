@@ -142,6 +142,24 @@ final class Zugriff
 
     public static function siehtStandort(int $siteId): bool
     {
+        if (self::siehtGanzenStandort($siteId)) {
+            return true;
+        }
+        // Wer nur eine einzelne Anlage sieht, sieht auch den Standort, auf
+        // dem sie steht – sonst fände er sie auf der Karte nicht.
+        return in_array($siteId, self::standorteEinzelnerObjekte(), true);
+    }
+
+    /**
+     * Sieht der Benutzer den ganzen Standort – mit allem darauf?
+     *
+     * Ja mit „alles“ oder einer Freigabe für alles bzw. diesen Standort.
+     * Nicht über eine einzeln freigegebene Anlage: die zeigt den Standort nur,
+     * damit man sie findet. Wo ganze Etagen zu sehen sind (Änderungsvorschläge
+     * einer anderen Instanz), genügt das nicht.
+     */
+    public static function siehtGanzenStandort(int $siteId): bool
+    {
         if (self::alles()) {
             return true;
         }
@@ -151,9 +169,7 @@ final class Zugriff
                 return true;
             }
         }
-        // Wer nur eine einzelne Anlage sieht, sieht auch den Standort, auf
-        // dem sie steht – sonst fände er sie auf der Karte nicht.
-        return in_array($siteId, self::standorteEinzelnerObjekte(), true);
+        return false;
     }
 
     /** @return list<int> Standorte, auf denen einzeln freigegebene Anlagen stehen */

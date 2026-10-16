@@ -8,12 +8,27 @@ use App\Auth\Auth;
 /** Revisionssicheres Protokoll aller administrativen Aktionen. */
 final class Audit
 {
+    /** Wer handelt, wenn niemand angemeldet ist – etwa „api:<Token>“. */
+    private static ?string $akteur = null;
+
+    /**
+     * Den Handelnden ohne Anmeldung setzen (null: wieder „system“).
+     *
+     * Die Schnittstelle meldet niemanden an; ihre Einträge sollen trotzdem
+     * zeigen, welches Token es war – nie das Token selbst, nur seinen Namen.
+     */
+    public static function akteur(?string $name): void
+    {
+        $name = $name === null ? '' : trim((string) preg_replace('/[\x00-\x1F\x7F]+/u', ' ', $name));
+        self::$akteur = $name === '' ? null : mb_substr($name, 0, 64);
+    }
+
     public static function log(string $action, string $targetType = '', string $targetId = '', array $details = []): void
     {
         $user = Auth::user();
         Database::insert('audit_log', [
             'user_id'     => $user['id'] ?? null,
-            'username'    => $user['username'] ?? 'system',
+            'username'    => mb_substr((string) ($user['username'] ?? self::$akteur ?? 'system'), 0, 64),
             'action'      => $action,
             'target_type' => $targetType,
             'target_id'   => (string) $targetId,
