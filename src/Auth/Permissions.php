@@ -24,6 +24,12 @@ final class Permissions
             'stecker.manage'     => 'Steckverbinder-Katalog pflegen (Powerlock, CEE, Schuko …)',
             'inventar.manage'    => 'Inventar pflegen: Verteiler und Zwischenstecker mit ihren Shellys (ansehen: „Datenquellen ansehen“)',
         ],
+        'Übergabeberichte' => [
+            'berichte.view'      => 'Übergabeberichte ansehen und als PDF laden (ohne „ausfüllen“ nur abgeschlossene, nur mit Freigabe für den Standort und im freigegebenen Datenzeitraum)',
+            'berichte.manage'    => 'Übergabeberichte anlegen, ausfüllen und vom Kunden unterschreiben lassen; Prüfgeräte pflegen (nur Standorte mit „bearbeiten“)',
+            'berichte.pruefen'   => 'Als Prüfer unterschreiben, ohne Kunde abschließen, zurückziehen, Korrektur anlegen (nur mit hinterlegter Qualifikation)',
+            'berichte.eventworx' => 'Kundendaten aus Eventworx suchen und übernehmen (Eventworx zeigt dort alle Vorgänge)',
+        ],
         'Karte & Standorte' => [
             'karte.view'         => 'Karte mit Grundriss ansehen',
             'plans.manage'       => 'Standorte, Etagen und Grundrisse pflegen, Maßstab setzen',
@@ -102,6 +108,7 @@ final class Permissions
                     'dashboard.view', 'anlagen.view', 'anlagen.manage', 'anlagen.scope.all', 'stecker.manage',
                     'karte.view', 'plans.manage', 'leitungen.manage', 'statistik.view', 'statistik.export',
                     'datenquellen.view', 'inventory.pull', 'inventar.manage',
+                    'berichte.view', 'berichte.manage', 'berichte.eventworx',
                 ],
             ],
             'technik' => [
@@ -110,8 +117,12 @@ final class Permissions
                 'permissions' => [
                     'dashboard.view', 'anlagen.view', 'anlagen.manage', 'karte.view', 'leitungen.manage',
                     'statistik.view', 'datenquellen.view', 'steuern', 'steuern.protokoll',
+                    'berichte.view', 'berichte.manage', 'berichte.eventworx', 'berichte.pruefen',
                 ],
             ],
+            // Keine Übergabeberichte: ein Gelände hat mehrere Veranstalter,
+            // und Berichte enthalten Kundendaten. Wer sie sehen soll, bekommt
+            // „berichte.view“ einzeln – mit Freigabe und Datenzeitraum.
             'kunde' => [
                 'name'        => 'Kunde / Veranstalter',
                 'description' => 'Sieht Anlagen und Statistiken der freigegebenen Standorte im freigegebenen Zeitraum.',

@@ -190,6 +190,11 @@
             fetch(liveQuelle.dataset.liveUrl, { headers: { 'Accept': 'application/json' }, credentials: 'same-origin' })
                 .then(function (a) { return a.json(); })
                 .then(function (daten) {
+                    // Sitzung abgelaufen: der Server antwortet 401 mit Meldung (JSON).
+                    if (daten && daten.ok === false) {
+                        liveStand.textContent = daten.message || 'Livewerte gerade nicht erreichbar – neuer Versuch in 5 Sekunden.';
+                        return;
+                    }
                     Object.keys(daten.objekte || {}).forEach(function (id) {
                         document.querySelectorAll('[data-objekt-id="' + id + '"]').forEach(function (kachel) {
                             kachelSetzen(kachel, daten.objekte[id]);

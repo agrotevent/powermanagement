@@ -67,6 +67,13 @@ final class Router
 
             if ($route['permission'] !== null) {
                 if (!Auth::check()) {
+                    // Wer JSON erwartet (Autosave eines Berichts, PM.post),
+                    // bekommt eine lesbare Antwort statt der Anmeldeseite –
+                    // die Eingaben bleiben dann auf dem Gerät.
+                    if (self::willJson()) {
+                        Response::json(['ok' => false, 'anmelden' => true, 'message' => 'Sitzung abgelaufen – bitte neu anmelden.'], 401);
+                        return;
+                    }
                     Response::redirect('/login?next=' . rawurlencode($path));
                     return;
                 }
@@ -89,6 +96,10 @@ final class Router
             // Protokollen, im Verlauf und im Referer landen würde.
             $token = $_POST['_token'] ?? null;
             if ($method === 'POST' && !Csrf::check(is_string($token) ? $token : null)) {
+                if (self::willJson()) {
+                    Response::json(['ok' => false, 'token' => true, 'message' => 'Sicherheitstoken abgelaufen – Seite neu laden.'], 419);
+                    return;
+                }
                 Flash::error('Sicherheitstoken ungültig oder abgelaufen. Bitte erneut versuchen.');
                 Response::redirect(Response::zurueckZiel('/'));
                 return;
@@ -106,5 +117,15 @@ final class Router
         }
 
         Response::notFound($methodMismatch ? 'Methode nicht erlaubt.' : 'Seite nicht gefunden.');
+    }
+
+    /**
+     * Erwartet die Anfrage JSON? Nur der Accept-Kopf zählt – nicht
+     * X-Requested-With: damit schickt `data-laeuft` in app.js Formulare ab,
+     * und die sollen weiter wie bisher mit Meldung und Weiterleitung enden.
+     */
+    private static function willJson(): bool
+    {
+        return str_contains((string) ($_SERVER['HTTP_ACCEPT'] ?? ''), 'application/json');
     }
 }

@@ -4,6 +4,7 @@ declare(strict_types=1);
 namespace App\Services;
 
 use App\Auth\Auth;
+use App\Berichte\BerichtService;
 use App\Support\Audit;
 use App\Support\Database;
 
@@ -84,6 +85,8 @@ final class SiteService
         // ein Generator verschwindet nicht, weil sein Einsatzort gelöscht wird.
         BereichService::standortEntfernt($id);
         AufbauService::standortEntfernt($id);
+        // Übergabeberichte bleiben (mit dem Namen des Standorts), nur Entwürfe ohne Nummer gehen mit.
+        BerichtService::standortEntfernt($id);
         Database::execute('UPDATE objekte SET site_id = NULL, floor_id = NULL, plan_x = NULL, plan_y = NULL WHERE site_id = ?', [$id]);
         foreach (Database::select('SELECT id FROM floors WHERE site_id = ?', [$id]) as $etage) {
             Database::execute('DELETE FROM leitungen WHERE floor_id = ?', [(int) $etage['id']]);

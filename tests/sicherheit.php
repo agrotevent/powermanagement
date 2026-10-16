@@ -59,6 +59,8 @@ try {
     pruefe(!BenutzerService::darfVergeben(['*']), 'ohne Administration kein „*“');
     pruefe(!BenutzerService::darfVergeben(['anlagen.scope.all']), 'kein Recht, das man selbst nicht hat');
     pruefe(BenutzerService::darfVergeben(['dashboard.view', 'system.users.manage']), 'eigene Rechte darf man vergeben');
+    pruefe(!BenutzerService::darfVergeben(['berichte.view']) && !BenutzerService::darfVergeben(['berichte.pruefen']),
+        'Rechte der Übergabeberichte nur, wer sie selbst hat');
     pruefe(!BenutzerService::darfVerwalten($benutzer['admin']), 'den Administrator verwaltet nur die Administration');
     pruefe(!BenutzerService::darfVerwalten($benutzer['technik']), 'ein Konto mit mehr Rechten nicht');
     pruefe(BenutzerService::darfVerwalten($benutzer['klein']), 'ein Konto mit weniger Rechten schon');

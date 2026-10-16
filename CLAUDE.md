@@ -46,6 +46,12 @@ keine Build-Schritte. JS-Bibliotheken liegen fertig unter `public/assets/vendor`
   gespeichert (nur der Mosquitto-Hash): Gen2 per `MQTT.SetConfig` ans Gerät
   oder von Hand; Gen1 und jedes neue Kennwort genau einmal angezeigt, nie
   per MQTT. Die App startet nie ein Gerät neu.
+- **Übergabeberichte ändern nur über `App\Berichte\BerichtService`.** Nach
+  der Prüfer-Unterschrift ist der Inhalt eingefroren, eine Korrektur ist eine
+  neue Fassung. Der Inhalt ist ein JSON-Dokument nur aus Strings
+  (`BerichtSchema`, `Kanon` – nie Gleitkomma); IDs der Stromkreise setzt nur
+  der Server. Messwerte nie vorbelegen; bewertet wird nur auf dem Server
+  (`Grenzwerte`). Unterschriften nur als Striche, nie Zeit oder Druck.
 - **Eventworx nur lesend** über `App\Services\Eventworx` (GET, feste
   Pfadliste, Token verschlüsselt und an den Host gebunden). Kundendaten und
   Token nie in Log, Audit oder Antworten. `Http` folgt keiner Umleitung.
@@ -86,8 +92,9 @@ bash -n deploy/*.sh && shellcheck -S warning -e SC2016,SC1111 deploy/*.sh
 | `tests/mqtt-zugaenge.php` | Eigene MQTT-Zugänge von App bis Broker: Gen2 einrichten/übertragen/prüfen/Neustart/neues Kennwort/entfernen, Gen1, Sperre des gemeinsamen Zugangs, Kontoprobe gegen falsche ACLs, keine Geheimnisse (eigener Mosquitto, Shelly-Attrappen) |
 | `tests/influx.php` | InfluxQL: Livewerte, Verläufe, Datenfenster, Energie je Tag (eigene InfluxDB 1.x) |
 | `tests/cloud.php` | ComAp WebSupervisor, Victron VRM (Http-Attrappe) |
+| `tests/berichte.php` | Übergabeberichte: Vorbelegung aus Plan/Schutzorganen/Kabeln/Inventar (Messwerte nie), Grenzwerte (Zs/Ik, R_iso, RCD, TT/IT, Erdung), Speichern (Version/409, 422, IDs nur vom Server, kein Gleitkomma), Abschluss-Prüfung, Kunde aus früherem Bericht, Sichtbarkeit mit Datenfenster, Löschen/Verwerfen, Lösch-Abläufe, Aufbewahrung, Datenschutz |
 | `tests/eventworx.php` | Eventworx nur lesend: Adresse, Token an den Host gebunden, Pfadliste, Anfragen, Aufbereitung ohne Beträge/Notizen, Fehlerantworten, Nachlesen bei `data:null`, Drossel, Demo, keine Geheimnisse in Log/Audit/Meldungen (Http-Attrappe) |
-| `tests/web.php` | alle Seiten ohne PHP-Meldung, 403/404, CSRF, Schalt-Ablehnung, Weiterleitungen, Sitzung nach Kennwortwechsel, Benutzerverwaltung ohne Administration, Ändern nur mit „bearbeiten“ (eigener PHP-Server) |
+| `tests/web.php` | alle Seiten ohne PHP-Meldung, 403/404, CSRF (mit `Accept: application/json` 419/401 als JSON), Schalt-Ablehnung, Weiterleitungen, Sitzung nach Kennwortwechsel, Benutzerverwaltung ohne Administration, Ändern nur mit „bearbeiten“ (eigener PHP-Server) |
 | `tests/sicherheit.php` | Rechte vergeben, Anmelde-Bremse ohne Kontoerkennung, Geräte zuordnen, Kanal-Freigaben beim Schalten, Schlüssel aus dem Repository, Line Protocol, CSV, Adressen, keine Umleitung mit Token (curl und Streams), app.key, PDF-Werkzeuge |
 | `tests/nodered-funktionen.mjs` | Node-RED-Funktionen, `flows.json` passt zu den Quellen |
 

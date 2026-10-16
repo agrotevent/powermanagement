@@ -354,6 +354,19 @@ try {
     $r = aufruf($basis, $admin['dose'], 'POST', '/stecker/speichern', ['name' => $kennung, '_token' => 'falsch']);
     pruefe($r['status'] === 302, 'POST mit falschem Token → Weiterleitung');
     gleich((int) Database::scalar('SELECT COUNT(*) FROM steckertypen'), $vorher, 'POST mit falschem Token ändert nichts');
+    // Wer JSON erwartet (Autosave, PM.post), bekommt 419 bzw. 401 als JSON statt Weiterleitung.
+    $r = aufruf($basis, $admin['dose'], 'POST', '/stecker/speichern', ['name' => $kennung, '_token' => 'falsch'], ['Accept: application/json']);
+    $j = json_decode($r['text'], true);
+    pruefe($r['status'] === 419 && ($j['token'] ?? false) === true && ($j['ok'] ?? true) === false && str_contains((string) ($j['message'] ?? ''), 'Seite neu laden'),
+        'falsches Token mit Accept JSON → 419 JSON');
+    gleich((int) Database::scalar('SELECT COUNT(*) FROM steckertypen'), $vorher, '419 ändert nichts');
+    $r = aufruf($basis, $leer, 'POST', '/stecker/speichern', ['name' => $kennung], ['Accept: application/json']);
+    $j = json_decode($r['text'], true);
+    pruefe($r['status'] === 401 && ($j['anmelden'] ?? false) === true && str_contains((string) ($j['message'] ?? ''), 'neu anmelden'), 'ohne Anmeldung mit Accept JSON → 401 JSON');
+    $r = aufruf($basis, $leer, 'GET', '/dashboard/live', [], ['Accept: application/json']);
+    gleich($r['status'], 401, 'Livewerte ohne Anmeldung → 401');
+    $r = aufruf($basis, $leer, 'POST', '/stecker/speichern', ['name' => $kennung], ['X-Requested-With: XMLHttpRequest']);
+    pruefe($r['status'] === 302 && str_starts_with((string) $r['ziel'], '/login'), 'nur X-Requested-With → wie bisher Weiterleitung');
 
     // ---------------------------------------------------- Kunde ohne Freigabe
     $kunde = anmelden($basis, $kennung . '-kunde', $kennwort);

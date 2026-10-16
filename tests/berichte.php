@@ -1,0 +1,697 @@
+<?php
+declare(strict_types=1);
+
+/**
+ * Übergabeberichte (Service-Ebene): Vorbelegung, Grenzwerte, Speichern,
+ * Abschluss-Prüfung, Sichtbarkeit, Lösch-Abläufe und Datenschutz.
+ *
+ * Abgeschlossene Berichte entstehen hier noch per SQL (Status, Nummer,
+ * Zeit) – Unterschrift und PDF prüfen eigene Abschnitte, sobald es sie gibt.
+ */
+
+require __DIR__ . '/hilfen/pruefung.php';
+
+use App\Auth\Zugriff;
+use App\Berichte\BerichtSchema;
+use App\Berichte\BerichtService;
+use App\Berichte\Einstellungen;
+use App\Berichte\Grenzwerte;
+use App\Berichte\Kanon;
+use App\Berichte\Pruefgeraete;
+use App\Berichte\Vorbelegung;
+use App\Services\AnlagenService;
+use App\Services\AufbauService;
+use App\Services\BenutzerService;
+use App\Services\InventarService;
+use App\Services\LeitungService;
+use App\Services\SchutzService;
+use App\Services\SiteService;
+use App\Support\Crypto;
+use App\Support\Database;
+use App\Support\Settings;
+use App\Support\Zeit;
+
+AnlagenService::grundbestand();
+$typ = [];
+foreach (AnlagenService::steckertypen() as $t) {
+    $typ[(string) $t['schluessel']] = (int) $t['id'];
+}
+$kennung = 'pm-ber-' . bin2hex(random_bytes(3));
+$kennwort = 'Pruefung-' . bin2hex(random_bytes(6));
+$heute = (new DateTimeImmutable('now', Zeit::zone()))->format('Y-m-d');
+$einstellungenVorher = [];
+foreach (array_keys(Einstellungen::VORGABEN) as $s) {
+    $einstellungenVorher[$s] = Settings::get($s);
+}
+$benutzer = [];
+$rollen = [];
+$sites = [];
+$anlagen = [];
+$inventar = [];
+
+/** Einen Bericht als abgeschlossen ausgeben (bis Unterschrift und PDF eigene Prüfungen haben). */
+$abschliessen = static function (int $id, string $nummer, ?string $pruefdatum = null): void {
+    $felder = ['status' => 'abgeschlossen', 'nummer' => $nummer, 'abgeschlossen_am' => gmdate('c'), 'eingefroren_am' => gmdate('c')];
+    if ($pruefdatum !== null) {
+        $felder['pruefdatum'] = $pruefdatum;
+    }
+    Database::update('berichte', $id, $felder);
+};
+/** Inhalt als Browser-JSON speichern. */
+$speichern = static function (int $id, array $inhalt, string $ewx = ''): array {
+    $b = BerichtService::find($id);
+    return BerichtService::speichern($id, (int) $b['version'], json_encode($inhalt, JSON_UNESCAPED_UNICODE), $ewx);
+};
+$kreisNach = static function (array $inhalt, string $feld, string $wert): ?array {
+    foreach ($inhalt['kreise'] as $k) {
+        if ((string) $k[$feld] === $wert) {
+            return $k;
+        }
+    }
+    return null;
+};
+
+try {
+    // ================================================== Aufbau des Testfalls
+    $benutzer['admin'] = BenutzerService::anlegen($kennung . '-admin', $kennwort, 'admin', false);
+    alsBenutzer($benutzer['admin']);
+    $rolle = static function (string $name, array $rechte) use (&$rollen, $kennung): string {
+        $id = (int) BenutzerService::rolleSpeichern(null, $kennung . ' ' . $name, '', $rechte)['id'];
+        $rollen[] = $id;
+        return (string) Database::scalar('SELECT role_key FROM roles WHERE id = ?', [$id]);
+    };
+    $benutzer['technik'] = BenutzerService::anlegen($kennung . '-technik', $kennwort, 'technik', false);
+    $benutzer['planer'] = BenutzerService::anlegen($kennung . '-planer', $kennwort, $rolle('planer', ['berichte.view', 'berichte.manage', 'anlagen.view']), false);
+    $benutzer['kunde'] = BenutzerService::anlegen($kennung . '-kunde', $kennwort, $rolle('kunde', ['berichte.view', 'anlagen.view']), false);
+    $benutzer['kunde2'] = BenutzerService::anlegen($kennung . '-kunde2', $kennwort, $rolle('kunde2', ['berichte.view', 'anlagen.view']), false);
+    Database::update('users', $benutzer['technik'], ['pruefer_qualifikation' => 'Elektrofachkraft für Veranstaltungstechnik', 'full_name' => 'Tom Technik']);
+
+    $siteId = SiteService::saveSite(null, ['name' => 'Prüfung Bericht ' . $kennung, 'address' => 'Nordwiese 1, 12345 Musterstadt']);
+    $sites[] = $siteId;
+    $floorId = SiteService::saveFloor(null, ['site_id' => $siteId, 'name' => 'Wiese']);
+    $fremdSite = SiteService::saveSite(null, ['name' => 'Prüfung fremd ' . $kennung]);
+    $sites[] = $fremdSite;
+
+    $neu = static function (array $d) use (&$anlagen): int {
+        $e = AnlagenService::speichern(null, $d);
+        pruefe($e['ok'], 'Anlage angelegt: ' . $e['message']);
+        $anlagen[] = (int) $e['id'];
+        return (int) $e['id'];
+    };
+    $verteiler = static function (string $name, int $site, ?int $floor = null) use ($neu, $typ): int {
+        $id = $neu(['art' => 'verteilung', 'name' => $name, 'site_id' => $site, 'floor_id' => $floor, 'ohne_anschluesse' => true]);
+        AnlagenService::anzahlSetzen($id, ['eingang' => [$typ['cee63'] => 1], 'abgang' => [$typ['cee32'] => 2, $typ['schuko'] => 2]]);
+        SchutzService::vorschlagen($id);
+        return $id;
+    };
+    $gen = $neu(['art' => 'generator', 'name' => $kennung . ' Aggregat', 'floor_id' => $floorId, 'hersteller' => 'Muster', 'modell' => 'MG 100',
+        'nennleistung_kva' => 100, 'spannung_v' => 400, 'kennung' => 'G-' . $kennung]);
+    $vt = $verteiler($kennung . ' Bühne', $siteId, $floorId);
+    $fremdV = $verteiler($kennung . ' fremd', $fremdSite);
+    $genCee63 = (int) Database::scalar('SELECT id FROM anschluesse WHERE objekt_id = ? AND richtung = ? AND steckertyp_id = ? ORDER BY nr LIMIT 1', [$gen, 'abgang', $typ['cee63']]);
+    $vtEingang = (int) Database::scalar("SELECT id FROM anschluesse WHERE objekt_id = ? AND richtung = 'eingang'", [$vt]);
+    $kabel = LeitungService::speichern(null, ['art' => 'kabel', 'name' => $kennung . ' G-V', 'floor_id' => $floorId, 'von_objekt_id' => $gen,
+        'von_anschluss_id' => $genCee63, 'zu_objekt_id' => $vt, 'zu_anschluss_id' => $vtEingang, 'kabeltyp' => 'H07RN-F', 'adern' => 5,
+        'querschnitt_mm2' => 16, 'laenge_m' => 25, 'punkte' => [[10.0, 10.0], [20.0, 10.0]]]);
+    pruefe($kabel['ok'], 'Kabel Generator → Verteiler: ' . $kabel['message']);
+    $stueck = (int) InventarService::speichern(null, ['art' => 'verteilung', 'kennung' => $kennung . '-PD', 'seriennummer' => 'SN-' . $kennung])['id'];
+    $inventar[] = $stueck;
+    pruefe(InventarService::einsetzen($stueck, $vt, null, false)['ok'], 'Inventarstück in den Verteiler eingesetzt');
+    $aufbau = AufbauService::starten($siteId, $kennung . ' Sommerfest');
+    pruefe($aufbau['ok'], 'Aufbau gestartet');
+    $aufbauId = (int) $aufbau['id'];
+    $fremdAufbau = (int) AufbauService::starten($fremdSite, $kennung . ' fremd')['id'];
+
+    BenutzerService::freigabeSpeichern(['subject_type' => 'user', 'subject_id' => $benutzer['technik'], 'ziel_art' => 'site', 'ziel_id' => $siteId, 'darf_bearbeiten' => 1]);
+    BenutzerService::freigabeSpeichern(['subject_type' => 'user', 'subject_id' => $benutzer['planer'], 'ziel_art' => 'site', 'ziel_id' => $siteId]);
+    $gestern = (new DateTimeImmutable('-1 day', Zeit::zone()))->format('Y-m-d');
+    $morgen = (new DateTimeImmutable('+1 day', Zeit::zone()))->format('Y-m-d');
+    BenutzerService::freigabeSpeichern(['subject_type' => 'user', 'subject_id' => $benutzer['kunde'], 'ziel_art' => 'site', 'ziel_id' => $siteId,
+        'daten_ab' => $gestern, 'daten_bis' => $morgen]);
+    BenutzerService::freigabeSpeichern(['subject_type' => 'user', 'subject_id' => $benutzer['kunde2'], 'ziel_art' => 'objekt', 'ziel_id' => $vt]);
+
+    Einstellungen::speichern(['firma.name' => '', 'berichte.zs_faktor' => '1.0', 'berichte.ul' => '50', 'berichte.riso_u' => '500',
+        'berichte.normen' => '0100-600,0100-711,dguv-v3', 'berichte.aufbewahrung_jahre' => '10']);
+
+    // ================================================== Kanon
+    gleich(Kanon::json(['b' => '1', 'a' => ['y' => '2', 'x' => '3'], 'l' => ['z', 'a']]), '{"a":{"x":"3","y":"2"},"b":"1","l":["z","a"]}',
+        'Kanon: Objekte sortiert, Listen in Reihenfolge');
+    gleich(Kanon::json(['t' => 'Ω ≤ 1,44 / IΔn']), '{"t":"Ω ≤ 1,44 / IΔn"}', 'Kanon: Unicode und Schrägstrich unverändert');
+    $geworfen = false;
+    try {
+        Kanon::json(['w' => 0.42]);
+    } catch (InvalidArgumentException) {
+        $geworfen = true;
+    }
+    pruefe($geworfen, 'Kanon: Gleitkommazahl wird abgelehnt');
+    gleich(Kanon::hash(['a' => '1']), hash('sha256', '{"a":"1"}'), 'Kanon: Hash = sha256 der Schreibweise');
+    pruefe(strlen(Crypto::ableiten('bericht-siegel-1')) === 32 && Crypto::ableiten('bericht-siegel-1') === Crypto::ableiten('bericht-siegel-1')
+        && Crypto::ableiten('bericht-siegel-1') !== Crypto::ableiten('anderer-zweck'), 'Crypto::ableiten: 32 Byte, fest je Zweck, verschieden je Zweck');
+
+    // ================================================== Überstromschutz in der Kette
+    $schutz = SchutzService::nachId($vt);
+    $abgangX1 = (int) Database::scalar("SELECT schutzorgan_id FROM anschluesse WHERE objekt_id = ? AND bezeichnung = 'X1'", [$vt]);
+    $rcdId = (int) (SchutzService::rcd($abgangX1, $schutz)['id'] ?? 0);
+    gleich(SchutzService::ueberstrom($abgangX1, $schutz)['art'] ?? null, 'ls', 'Überstromschutz des Abgangs: das LS');
+    gleich(SchutzService::ueberstrom($rcdId, $schutz), null, 'direkt am RCD: kein Überstromschutz');
+
+    // ================================================== Grenzwerte
+    $p = Grenzwerte::parameter();
+    $p['zs_faktor'] = '1.0';
+    $p['ul'] = '50';
+    nahe(Grenzwerte::zsMax('C', '16', $p), 1.4375, 1e-9, 'Zs_max C16');
+    nahe(Grenzwerte::zsMax('B', '16', $p), 2.875, 1e-9, 'Zs_max B16');
+    nahe(Grenzwerte::zsMax('K', '16', $p), 1.0268, 1e-4, 'Zs_max K16 (14·In)');
+    nahe(Grenzwerte::zsMax('D', '10', $p), 1.15, 1e-9, 'Zs_max D10');
+    nahe(Grenzwerte::zsMax('C', '16', ['zs_faktor' => '0.67'] + $p), 0.963, 1e-3, 'Zs_max C16 mit Faktor 0,67');
+    gleich(Grenzwerte::zsMax('gG', '63', $p), null, 'gG: kein Rechenwert');
+    gleich(Grenzwerte::messwert('0,42'), ['op' => '', 'w' => '0.42'], 'Messwert „0,42“');
+    gleich(Grenzwerte::messwert('> 550'), ['op' => '>', 'w' => '550'], 'Messwert „> 550“');
+    gleich(Grenzwerte::messwert('≥1'), ['op' => '>', 'w' => '1'], 'Messwert „≥1“');
+    gleich(Grenzwerte::messwert('≤0,1'), ['op' => '<', 'w' => '0.1'], 'Messwert „≤0,1“');
+    gleich(Grenzwerte::messwert('abc'), null, 'Messwert „abc“ → null');
+    gleich(Grenzwerte::messwert(',5'), ['op' => '', 'w' => '0.5'], 'Messwert „,5“');
+
+    $muster = static function (array $aend = []): array {
+        $k = BerichtSchema::kreisLeer();
+        $k['nr'] = '1';
+        $k['ueb'] = ['art' => 'LS', 'char' => 'C', 'in' => '16', 'grenze_hand' => ''];
+        $k['rcd'] = ['bez' => 'F1', 'in' => '40', 'typ' => 'A', 'idn' => '30', 's' => '0'];
+        $k['leitung'] = ['art' => 'Schuko', 'leiter' => '3', 'querschnitt' => '2.5'];
+        $k['w']['zs'] = ['op' => '', 'w' => '0.5'];
+        $k['w']['riso'] = ['op' => '>', 'w' => '550'];
+        $k['w']['idelta'] = ['op' => '', 'w' => '22'];
+        $k['w']['ta'] = ['op' => '', 'w' => '25'];
+        $k['w']['ub'] = ['op' => '', 'w' => '0.8'];
+        $k['status'] = 'gemessen';
+        return array_replace_recursive($k, $aend);
+    };
+    $tn = ['form' => 'TN-S'];
+    $messung = ['riso_u' => '500'];
+    $bew = static fn (array $k, array $netz = ['form' => 'TN-S'], array $nachZ = [], array $m = ['riso_u' => '500']): array => Grenzwerte::kreis($k, $nachZ, $netz, $p, $m);
+    $codes = static fn (array $e): array => array_column($e['meldungen'], 'code');
+
+    $e = $bew($muster());
+    gleich([$e['auto'], $e['abschaltung']], ['ok', 'LS'], 'gute Zeile: ok, Abschaltung durch LS');
+    gleich($e['grenzen']['zs_max'] ?? null, '1.4375', 'Grenze Zs ungerundet im Ergebnis');
+    $e = $bew($muster(['w' => ['zs' => ['w' => '2.0']]]));
+    pruefe($e['auto'] === 'hinweis' && $e['abschaltung'] === 'RCD' && in_array('zs_rcd', $codes($e), true), 'Zs 2,0 an C16 mit RCD 30 mA → Hinweis, Abschaltung durch RCD');
+    // Ohne RCD: Verteilerkreis (keine RCD-Pflicht), keine RCD-Werte.
+    $ohneRcd = ['art' => 'verteiler', 'rcd' => ['bez' => '', 'in' => '', 'typ' => '', 'idn' => ''],
+        'w' => ['idelta' => ['w' => ''], 'ta' => ['w' => ''], 'ub' => ['w' => '']]];
+    $e = $bew($muster(array_replace_recursive($ohneRcd, ['w' => ['zs' => ['w' => '2.0']]])));
+    pruefe($e['auto'] === 'mangel' && in_array('zs_hoch', $codes($e), true), 'Zs 2,0 an C16 ohne RCD → Mangel');
+    $e = $bew($muster(array_replace_recursive($ohneRcd, ['w' => ['zs' => ['w' => ''], 'ik' => ['w' => '150']]])));
+    pruefe($e['auto'] === 'mangel' && ($e['grenzen']['ik_min'] ?? '') === '160', 'Ik 150 A an C16 → Mangel (Grenze 160 A)');
+    $e = $bew($muster(array_replace_recursive($ohneRcd, ['w' => ['zs' => ['w' => ''], 'ik' => ['w' => '200']]])));
+    gleich($e['auto'], 'ok', 'Ik 200 A an C16 → ok');
+    $e = $bew($muster(array_replace_recursive($ohneRcd, ['ueb' => ['art' => 'NH', 'char' => 'gG', 'in' => '63']])));
+    pruefe($e['auto'] === 'manuell' && in_array('zs_manuell', $codes($e), true), 'NH ohne Grenzwert von Hand → manuell');
+    $e = $bew($muster(array_replace_recursive($ohneRcd, ['ueb' => ['art' => 'NH', 'char' => 'gG', 'in' => '63', 'grenze_hand' => '0.6'], 'leitung' => ['querschnitt' => '16']])));
+    gleich($e['auto'], 'ok', 'NH mit Grenzwert von Hand → ok');
+    $e = $bew($muster(['ueb' => ['art' => 'NH', 'char' => 'gG', 'in' => '63']]));
+    pruefe($e['auto'] === 'hinweis' && $e['abschaltung'] === 'RCD', 'NH ohne Rechenwert, aber RCD: Abschaltung durch RCD');
+    $e = $bew($muster(['w' => ['riso' => ['op' => '', 'w' => '0.8']]]));
+    pruefe($e['auto'] === 'mangel' && in_array('riso_klein', $codes($e), true), 'R_iso 0,8 MΩ bei 500 V → Mangel');
+    gleich($bew($muster(['w' => ['riso' => ['op' => '', 'w' => '0.6'], 'riso_u' => '250']]))['auto'], 'ok', 'R_iso 0,6 MΩ bei 250 V → ok');
+    $e = $bew($muster(), $tn, [], ['riso_u' => '']);
+    pruefe($e['auto'] === 'fehlt' && in_array('riso_u_fehlt', $codes($e), true), 'R_iso ohne Messspannung → fehlt');
+    foreach (['15' => 'mangel', '22' => 'ok', '31' => 'mangel'] as $wert => $soll) {
+        gleich($bew($muster(['w' => ['idelta' => ['w' => (string) $wert]]]))['auto'], $soll, 'IΔ ' . $wert . ' mA bei 30 mA');
+    }
+    gleich($bew($muster(['w' => ['ta' => ['w' => '280']]]))['auto'], 'ok', 't_A 280 ms → ok');
+    gleich($bew($muster(['w' => ['ta' => ['w' => '320']]]))['auto'], 'mangel', 't_A 320 ms → Mangel');
+    gleich($bew($muster(['rcd' => ['s' => '1'], 'w' => ['ta' => ['w' => '200']]]))['auto'], 'ok', 'Typ S: t_A 200 ms → ok');
+    gleich($bew($muster(['rcd' => ['s' => '1'], 'w' => ['ta' => ['w' => '100']]]))['auto'], 'mangel', 'Typ S: t_A 100 ms → Mangel');
+    gleich($bew($muster(['w' => ['ub' => ['w' => '51']]]))['auto'], 'mangel', 'U_B 51 V → Mangel');
+    $e = $bew($muster(['rcd' => ['idn' => '300']]));
+    pruefe($e['auto'] === 'mangel' && in_array('rcd_pflicht', $codes($e), true), 'Endstromkreis 16 A ohne 30-mA-RCD → Mangel');
+    gleich($bew($muster(['drehfeld' => 'links']))['auto'], 'mangel', 'Linksdrehfeld → Mangel');
+    $e = $bew($muster(['w' => ['zs' => ['w' => '']]]), ['form' => 'TT']);
+    pruefe($e['auto'] === 'ok' && !in_array('zs_fehlt', $codes($e), true), 'TT: Zs je Zeile entfällt');
+    $e = $bew($muster(['w' => ['zs' => ['w' => '']]]), ['form' => 'IT']);
+    gleich($e['auto'], 'ok', 'IT: Zs entfällt');
+    pruefe(in_array('it_imd', array_column(Grenzwerte::netz(['form' => 'IT'], [], $p)['meldungen'], 'code'), true), 'IT: Hinweis Isolationsüberwachung');
+    $tt = static fn (string $w): string => Grenzwerte::erdung(['erdung' => ['op' => '', 'w' => $w, 'basis' => '']], ['form' => 'TT'], [$muster()], $p)['auto'];
+    gleich([$tt('1700'), $tt('1600')], ['mangel', 'ok'], 'TT: Erdung 1700 Ω bei 30 mA → Mangel, 1600 Ω → ok');
+    $gen50 = Grenzwerte::erdung(['erdung' => ['op' => '', 'w' => '12.4', 'basis' => '']], ['form' => 'TN-S', 'einspeisung' => 'generator'], [], $p);
+    gleich([$gen50['auto'], $gen50['basis'], $gen50['grenze']], ['ok', 'generator', '50'], 'Generator: Erdung 12,4 Ω gegen 50 Ω');
+    $bezug = $muster();
+    $bezug['z'] = 'kbezug01';
+    $ohne = $muster(['w' => ['idelta' => ['w' => ''], 'ta' => ['w' => ''], 'ub' => ['w' => '']]]);
+    $ohne['z'] = 'kohne001';
+    $e = $bew(array_replace($ohne, ['rcd_von' => 'kbezug01']), $tn, ['kbezug01' => $bezug]);
+    pruefe($e['auto'] === 'ok' && in_array('rcd_von', $codes($e), true), 'rcd_von übernimmt die RCD-Werte der Bezugszeile');
+    $e = $bew($ohne);
+    pruefe($e['auto'] === 'fehlt' && in_array('rcd_fehlt', $codes($e), true), 'ohne RCD-Werte und ohne Bezug → fehlt');
+    $e = $bew(array_replace($ohne, ['rcd_von' => 'kbezug01']), $tn, ['kbezug01' => $ohne]);
+    pruefe($e['auto'] === 'fehlt' && in_array('rcd_von_leer', $codes($e), true), 'Bezugszeile ohne RCD-Werte → fehlt');
+    gleich($bew(BerichtSchema::kreisLeer())['auto'], '', 'Zeile ohne Wert ist offen');
+    gleich($bew($muster(['status' => 'nicht_gemessen', 'grund' => 'nicht zugänglich']))['auto'], 'entf', 'nicht gemessen mit Grund → entf');
+    gleich($bew($muster(['status' => 'nicht_gemessen']))['auto'], 'fehlt', 'nicht gemessen ohne Grund → fehlt');
+    gleich($bew($muster(['status' => 'nicht_gemessen', 'grund' => 'x', 'rcd' => ['idn' => '300']]))['auto'], 'mangel', 'nicht gemessen, aber ohne 30-mA-RCD → Mangel');
+    $e = $bew($muster(['w' => ['zs' => ['w' => 'abc']]]));
+    pruefe($e['auto'] === 'fehlt' && in_array('unlesbar_zs', $codes($e), true), 'unlesbarer Wert → fehlt');
+    $e = $bew($muster(['ueb' => ['in' => '32'], 'leitung' => ['querschnitt' => '1.5'], 'w' => ['zs' => ['w' => '0.3']]]));
+    pruefe(in_array('querschnitt', $codes($e), true), 'Querschnitt 1,5 mm² an 32 A → Hinweis');
+    gleich([Grenzwerte::netz(['u_ln' => '250'], [], $p)['auto'], Grenzwerte::netz(['u_ln' => '255'], [], $p)['auto']], ['ok', 'hinweis'],
+        'Netzspannung 250 V im Band, 255 V → Hinweis');
+
+    // ================================================== Vorbelegung und Anlegen
+    alsBenutzer($benutzer['technik']);
+    $e = BerichtService::anlegen(null, $aufbauId, [$vt, $gen]);
+    pruefe($e['ok'], 'Bericht aus dem Aufbau angelegt: ' . $e['message']);
+    $id = (int) ($e['id'] ?? 0);
+    $b = BerichtService::find($id);
+    $i = $b['inhalt'];
+    $abgaengeGen = (int) Database::scalar("SELECT COUNT(*) FROM anschluesse WHERE objekt_id = ? AND richtung = 'abgang'", [$gen]);
+    gleich(count($i['kreise']), $abgaengeGen + 4, 'je Abgang von Generator und Verteiler eine Zeile');
+    gleich((string) $i['kreise'][0]['objekt_id'], (string) $gen, 'Einspeisung zuerst');
+    gleich([$b['status'], $b['version'], $b['site_id'], $b['aufbau_id'], $b['nummer']], ['entwurf', 1, $siteId, $aufbauId, null], 'Entwurf ohne Nummer');
+    $x1 = null;
+    foreach ($i['kreise'] as $k) {
+        if ((string) $k['objekt_id'] === (string) $vt && $k['abgang'] === 'X1') {
+            $x1 = $k;
+        }
+    }
+    pruefe($x1 !== null, 'Verteiler: Zeile für X1');
+    gleich($x1['leitung'], ['art' => 'CEE 32 A', 'leiter' => '5', 'querschnitt' => ''], 'CEE 32: Art, Leiter 5, Querschnitt leer');
+    pruefe(in_array('leitung.leiter', $x1['abgeleitet'], true), 'Leiterzahl als „aus Plan“ markiert');
+    gleich([$x1['ueb']['art'], $x1['ueb']['char'], $x1['ueb']['in']], ['LS', 'C', '32'], 'Überstromschutz LS C32');
+    gleich([$x1['rcd']['bez'], $x1['rcd']['in'], $x1['rcd']['typ'], $x1['rcd']['idn']], ['F1', '40', 'A', '30'], 'RCD F1 40 A Typ A 30 mA');
+    gleich((string) $x1['inventar_id'], (string) $stueck, 'Inventarstück an der Zeile');
+    pruefe(str_contains($x1['ort'], 'X1 · CEE 32 A · F1'), 'Ort/Anlagenteil: ' . $x1['ort']);
+    $schuko = $kreisNach(['kreise' => array_values(array_filter($i['kreise'], static fn ($k) => (string) $k['objekt_id'] === (string) $vt))], 'abgang', 'X3');
+    gleich($schuko['leitung']['leiter'] ?? null, '3', 'Schuko: Leiter 3');
+    $genX = $kreisNach($i, 'anschluss_id', (string) $genCee63);
+    pruefe($genX !== null && $genX['art'] === 'verteiler' && str_contains($genX['kabel'], 'H07RN-F 5G16, 25 m → ' . $kennung . ' Bühne'),
+        'Abgang mit Kabel zum Verteiler: ' . ($genX['kabel'] ?? '?'));
+    pruefe($genX !== null && $genX['leitung']['leiter'] === '5' && !in_array('leitung.leiter', $genX['abgeleitet'], true), 'Leiter aus dem Kabel – nicht abgeleitet');
+    $werte = [];
+    foreach ($i['kreise'] as $k) {
+        foreach (Grenzwerte::MESSWERTE as $f) {
+            $werte[] = $k['w'][$f]['w'];
+        }
+    }
+    gleich(array_unique($werte), [''], 'Messwerte nie vorbelegt');
+    gleich($i['kopf']['veranstaltung'], $kennung . ' Sommerfest', 'Veranstaltung = Name des Aufbaus');
+    gleich([$i['netz']['spannung'], $i['netz']['form'], $i['netz']['einspeisung'], $i['grundlage']['grund']], ['400', '', 'generator', 'aufbau'],
+        'Netz 400 V, Netzform leer, Einspeisung Generator, Grund Aufbau');
+    gleich($i['kopf']['ort'], 'Musterstadt', 'Ort aus der Adresse');
+    pruefe(str_contains($i['kopf']['anlage']['bezeichnung'], 'Muster MG 100, 100 kVA'), 'Bezeichnung der Anlage: ' . $i['kopf']['anlage']['bezeichnung']);
+    pruefe(str_contains($i['kopf']['anlage']['details'], $kennung . '-PD') && str_contains($i['kopf']['anlage']['details'], 'SN-' . $kennung), 'Details nennen das Inventarstück');
+    pruefe(str_starts_with($i['kopf']['anlage']['aufstellort'], 'Prüfung Bericht ' . $kennung), 'Aufstellort aus dem Standort');
+    gleich([$i['kopf']['qualifikation'], $i['kopf']['projektleiter_montage']], ['Elektrofachkraft für Veranstaltungstechnik', 'Tom Technik'], 'Prüfer aus dem Konto');
+    gleich([$i['grenzwerte']['k']['C'] ?? null, $i['grenzwerte']['zs_faktor'] ?? null], ['10', '1.0'], 'Grenzwerte beim Anlegen festgehalten');
+    gleich($i['grundlage']['normen'], ['0100-600', '0100-711', 'dguv-v3'], 'Normen aus den Einstellungen');
+    gleich((int) Database::scalar('SELECT COUNT(*) FROM bericht_objekte WHERE bericht_id = ?', [$id]), 2, 'bericht_objekte: Generator und Verteiler');
+    gleich((int) Database::scalar('SELECT inventar_id FROM bericht_objekte WHERE bericht_id = ? AND objekt_id = ?', [$id, $vt]), $stueck, 'bericht_objekte merkt das Inventarstück');
+    gleich(array_column(BerichtService::ereignisse($id), 'ereignis'), ['angelegt'], 'Ereignis „angelegt“');
+    $hinweise = Vorbelegung::hinweise($i, $siteId, $aufbauId);
+    pruefe(isset($hinweise['dokumentation']) && !isset($hinweise['rcd30']), 'Hinweis am Prüfpunkt: Aufbau offen; alle Kreise ≤ 32 A mit 30-mA-RCD');
+    $ohne30 = $i;
+    $ohne30['kreise'][] = $muster(['rcd' => ['idn' => '300'], 'nr' => '77']);
+    pruefe(isset(Vorbelegung::hinweise($ohne30, $siteId, null)['rcd30']), 'Hinweis am Prüfpunkt: Kreis ohne 30-mA-RCD');
+
+    $r = BerichtService::kreiseVorbelegen($id, 1, [$vt]);
+    pruefe($r['ok'] && $r['neu'] === 0 && count(BerichtService::find($id)['inhalt']['kreise']) === count($i['kreise']), 'Zeilen ergänzen legt keine Doppelten an');
+    AnlagenService::anzahlSetzen($vt, ['abgang' => [$typ['schuko'] => 3]]);
+    $r = BerichtService::kreiseVorbelegen($id, (int) BerichtService::find($id)['version'], [$vt]);
+    $i2 = BerichtService::find($id)['inhalt'];
+    pruefe($r['ok'] && $r['neu'] === 1 && end($i2['kreise'])['abgang'] === 'X5' && end($i2['kreise'])['nr'] === (string) (count($i['kreise']) + 1),
+        'neuer Abgang → eine Zeile mehr, laufende Nummer: ' . $r['message']);
+    gleich(BerichtService::kreiseVorbelegen($id, 1, [$vt])['status'], 409, 'Zeilen ergänzen mit altem Stand → 409');
+    gleich(BerichtService::kreiseVorbelegen($id, (int) BerichtService::find($id)['version'], [$fremdV])['status'], 403, 'Verteiler eines anderen Standorts → abgelehnt');
+    pruefe(!BerichtService::anlegen($siteId, null, [$fremdV])['ok'], 'Anlegen mit fremdem Verteiler abgelehnt');
+    pruefe(!BerichtService::anlegen($siteId, $fremdAufbau, [])['ok'], 'Aufbau eines anderen Standorts abgelehnt');
+    pruefe(!BerichtService::anlegen($fremdSite, null, [])['ok'], 'Standort ohne „bearbeiten“ abgelehnt');
+    pruefe(!BerichtService::anlegen(null, null, [$vt])['ok'], 'ohne Standort keine Anlagen');
+    $leer = BerichtService::anlegen(null, null, []);
+    pruefe($leer['ok'], 'leerer Bericht ohne Standort');
+    $leerId = (int) $leer['id'];
+    gleich([BerichtService::find($leerId)['site_id'], BerichtService::find($leerId)['inhalt']['kreise']], [null, []], 'ohne Standort, ohne Kreise');
+    alsBenutzer($benutzer['planer']);
+    pruefe(!BerichtService::anlegen($siteId, null, [$vt])['ok'], 'Planer ohne „bearbeiten“ legt keinen Bericht an');
+    alsBenutzer($benutzer['kunde']);
+    pruefe(!BerichtService::anlegen($siteId, null, [])['ok'], 'Kunde ohne „ausfüllen“ legt keinen Bericht an');
+
+    // ================================================== Speichern
+    alsBenutzer($benutzer['technik']);
+    $b = BerichtService::find($id);
+    $v = (int) $b['version'];
+    $kundeName = 'Musterfilm ' . $kennung . ' GmbH';
+    $kundeMail = $kennung . '@example.org';
+    $roh = $b['inhalt'];
+    $roh['kopf']['kunde']['firma'] = $kundeName;
+    $roh['kopf']['kunde']['email'] = $kundeMail;
+    $roh['kopf']['qualifikation'] = 'selbst ernannt';
+    $roh['boese'] = 'weg damit';
+    $roh['grenzwerte']['k']['C'] = '1';
+    $erste = $roh['kreise'][0];
+    $roh['kreise'][0]['objekt_id'] = (string) $fremdV;
+    $roh['kreise'][0]['anschluss_id'] = '999999';
+    $roh['kreise'][0]['unbekannt'] = 'x';
+    foreach ($roh['kreise'] as $n => $k) {
+        if ($k['z'] === $x1['z']) {
+            $roh['kreise'][$n]['leitung']['querschnitt'] = 4.0;
+            $roh['kreise'][$n]['w']['zs'] = ['op' => '', 'w' => 0.42];
+            $roh['kreise'][$n]['leitung']['leiter'] = '4';
+            $roh['kreise'][$n]['rcd_von'] = 'kgibtsnicht';
+        }
+    }
+    $roh['kreise'][] = ['z' => 'X!', 'nr' => '99', 'objekt_id' => (string) $vt, 'ort' => 'Neue Zeile ' . $kennung];
+    $r = BerichtService::speichern($id, $v, json_encode($roh, JSON_UNESCAPED_UNICODE));
+    pruefe($r['ok'] && $r['version'] === $v + 1, 'gespeichert, Version + 1: ' . $r['message']);
+    pruefe(isset($r['bewertung']['kreise'][$x1['z']], $r['abschnitte']['messung']), 'Antwort mit Bewertung und Abschnitten');
+    $b = BerichtService::find($id);
+    $s = $b['inhalt'];
+    pruefe(!array_key_exists('boese', $s) && !array_key_exists('unbekannt', $s['kreise'][0]), 'unbekannte Schlüssel verschwinden');
+    gleich([$s['kreise'][0]['objekt_id'], $s['kreise'][0]['anschluss_id']], [$erste['objekt_id'], $erste['anschluss_id']], 'IDs aus dem gespeicherten Stand, nicht aus dem Browser');
+    gleich($s['kopf']['qualifikation'], 'Elektrofachkraft für Veranstaltungstechnik', 'Qualifikation nicht vom Browser');
+    gleich($s['grenzwerte']['k']['C'], '10', 'Grenzwerte nicht vom Browser');
+    $sx1 = $kreisNach($s, 'z', $x1['z']);
+    gleich([$sx1['leitung']['querschnitt'], $sx1['w']['zs']['w'], $sx1['status']], ['4', '0.42', 'gemessen'], 'Gleitkomma aus dem Browser als Dezimaltext');
+    gleich([$sx1['abgeleitet'], $sx1['rcd_von']], [[], ''], 'geänderter Wert verliert „aus Plan“, unbekannter Bezug fällt weg');
+    $neueZeile = end($s['kreise']);
+    pruefe(preg_match(BerichtSchema::ZEILE, $neueZeile['z']) === 1 && $neueZeile['objekt_id'] === '' && in_array('Zeile ' . count($s['kreise']) . ' hat einen neuen Zeilenschlüssel bekommen.', $r['hinweise'], true),
+        'Zeile aus dem Browser: neuer Schlüssel, keine IDs');
+    $geworfen = false;
+    try {
+        Kanon::json($s);
+    } catch (Throwable) {
+        $geworfen = true;
+    }
+    pruefe(!$geworfen, 'gespeicherter Inhalt ohne Gleitkomma (Kanon wirft nicht)');
+    gleich([$b['kunde_name'], $b['standort_name'], $b['veranstaltung']], [$kundeName, 'Prüfung Bericht ' . $kennung, $kennung . ' Sommerfest'], 'Spalten der Liste');
+    $vorher = Database::scalar('SELECT inhalt FROM berichte WHERE id = ?', [$id]);
+    $r = BerichtService::speichern($id, $v, json_encode($roh));
+    pruefe(!$r['ok'] && $r['status'] === 409 && $r['konflikt'] === true && $r['version'] === $v + 1 && $r['geaendert_von'] === $kennung . '-technik', 'veraltete Version → 409 mit Stand');
+    gleich(Database::scalar('SELECT inhalt FROM berichte WHERE id = ?', [$id]), $vorher, '409 ändert nichts');
+    gleich(BerichtService::speichern($id, $v + 1, str_repeat(' ', BerichtSchema::MAX_BYTES + 1))['status'], 422, 'über 512 KB → 422');
+    gleich(BerichtService::speichern($id, $v + 1, '{kaputt')['status'], 422, 'unlesbares JSON → 422');
+    // abgeleitet bleibt, wenn nichts angefasst wird
+    $x3 = $kreisNach($s, 'abgang', 'X3');
+    gleich($x3['abgeleitet'] ?? null, ['leitung.leiter'], '„aus Plan“ bleibt ohne Änderung');
+
+    // 80 Zeilen kommen vollständig an
+    $viele = BerichtSchema::leer();
+    for ($n = 1; $n <= 80; $n++) {
+        $k = BerichtSchema::kreisLeer();
+        $k['nr'] = (string) $n;
+        $k['ort'] = 'Kreis ' . $n . ' ' . $kennung;
+        $k['w']['zs'] = ['op' => '', 'w' => '0,' . str_pad((string) $n, 2, '0', STR_PAD_LEFT)];
+        $viele['kreise'][] = $k;
+    }
+    $r = $speichern($leerId, $viele);
+    $gespeichert = BerichtService::find($leerId)['inhalt']['kreise'];
+    pruefe($r['ok'] && count($gespeichert) === 80 && $gespeichert[79]['w']['zs']['w'] === '0.80' && count($r['bewertung']['kreise']) === 80, '80 Zeilen vollständig gespeichert');
+    $sehrViele = $viele;
+    $sehrViele['kreise'] = array_merge($viele['kreise'], array_map(static function (array $k): array {
+        $k['z'] = BerichtSchema::neueZeile();
+        return $k;
+    }, array_fill(0, 230, BerichtSchema::kreisLeer())));
+    $r = BerichtSchema::bereinigen($sehrViele, []);
+    pruefe(count($r['inhalt']['kreise']) === BerichtSchema::MAX_KREISE && $r['hinweise'] !== [], 'höchstens 300 Kreise, mit Hinweis');
+
+    // Bereinigung im Einzelnen
+    $r = BerichtSchema::bereinigen(['kopf' => ['pruefdatum' => '31.02.2026', 'kunde' => ['firma' => "A\u{202E}B\nC", 'quelle' => 'hacker']],
+        'netz' => ['spannung' => '230 V', 'form' => 'tn-s'], 'grundlage' => ['normen' => ['0100-600', 'xyz', '0100-600']],
+        'punkte' => ['besichtigung' => ['auswahl' => 'io', 'maengelfrei' => 'kaputt', 'gibtsnicht' => 'io']], 'ergebnis' => ['errichter' => true]],
+        ['kopf' => ['pruefdatum' => '2026-05-01']]);
+    $ri = $r['inhalt'];
+    gleich([$ri['kopf']['pruefdatum'], $ri['kopf']['kunde']['firma'], $ri['kopf']['kunde']['quelle']], ['2026-05-01', 'AB C', 'freitext'],
+        'Datum geprüft, Steuer- und Richtungszeichen weg, Auswahl begrenzt');
+    gleich([$ri['netz']['spannung'], $ri['netz']['form'], $ri['grundlage']['normen'], $ri['punkte']['besichtigung'], $ri['ergebnis']['errichter']],
+        ['230', 'TN-S', ['0100-600'], ['auswahl' => 'io'], '1'], 'Zahl ohne Einheit, Netzform, Normen, Prüfpunkte, Wahrheitswert');
+
+    // Prüfgeräte: nur aktive
+    alsBenutzer($benutzer['admin']);
+    pruefe(!Pruefgeraete::speichern(null, ['fabrikat' => '', 'typ' => 'x'])['ok'], 'Prüfgerät ohne Fabrikat abgelehnt');
+    pruefe(!Pruefgeraete::speichern(null, ['fabrikat' => $kennung, 'typ' => 'x', 'kalibriert_bis' => '2026-13-01'])['ok'], 'Prüfgerät mit unmöglichem Datum abgelehnt');
+    $aktiv = (int) Pruefgeraete::speichern(null, ['fabrikat' => $kennung . ' Fluke', 'typ' => '1664 FC', 'seriennummer' => 'DEMO-1', 'kalibriert_bis' => $morgen, 'aktiv' => 1])['id'];
+    $alt = (int) Pruefgeraete::speichern(null, ['fabrikat' => $kennung . ' Alt', 'typ' => 'X', 'kalibriert_bis' => $gestern, 'aktiv' => 1])['id'];
+    $still = (int) Pruefgeraete::speichern(null, ['fabrikat' => $kennung . ' Still', 'typ' => 'Y', 'aktiv' => 0])['id'];
+    gleich(Pruefgeraete::find($aktiv)['norm'], Pruefgeraete::NORM, 'Norm vorbelegt');
+    pruefe(Pruefgeraete::abgelaufen(Pruefgeraete::find($alt), $heute) && !Pruefgeraete::abgelaufen(Pruefgeraete::find($aktiv), $heute), 'Kalibrierung abgelaufen erkannt');
+    alsBenutzer($benutzer['technik']);
+    $roh = BerichtService::find($id)['inhalt'];
+    $roh['messung']['geraete'] = [(string) $aktiv, (string) $still, 'abc'];
+    $r = $speichern($id, $roh);
+    pruefe($r['ok'] && BerichtService::find($id)['inhalt']['messung']['geraete'] === [(string) $aktiv] && $r['hinweise'] !== [], 'inaktives Prüfgerät verworfen, mit Hinweis');
+
+    // ================================================== Abschluss-Prüfung
+    $felder = static fn (array $erg): array => array_column($erg['fehler'], 'feld');
+    $erg = BerichtService::abschlussPruefen(BerichtService::find($leerId));
+    foreach (['kopf.kunde.firma', 'firma', 'netz.form', 'grundlage.grund', 'ergebnis.entspricht', 'kopf.anlage.aufstellort'] as $feld) {
+        pruefe(in_array($feld, $felder($erg), true), 'Abschluss-Prüfung meldet ' . $feld);
+    }
+    pruefe(!in_array('kopf.qualifikation', $felder($erg), true), 'Prüfer mit Qualifikation');
+    pruefe(in_array('messung.geraete', $felder($erg), true), 'Messwerte ohne Gerät → Fehler');
+    alsBenutzer($benutzer['planer']);
+    pruefe(in_array('kopf.qualifikation', $felder(BerichtService::abschlussPruefen(BerichtService::find($leerId))), true), 'Prüfer ohne Qualifikation → Fehler');
+    alsBenutzer($benutzer['technik']);
+    Settings::put('firma.name', 'Muster Eventstrom ' . $kennung);
+
+    $fertig = BerichtSchema::leer();
+    $fertig['kopf']['kunde']['firma'] = $kundeName;
+    $fertig['kopf']['ort'] = 'Musterstadt';
+    $fertig['kopf']['anlage'] = ['bezeichnung' => 'Aggregat', 'details' => '', 'aufstellort' => 'Wiese'];
+    $fertig['netz']['form'] = 'TN-S';
+    $fertig['grundlage'] = ['normen' => ['0100-600'], 'sonstige' => '', 'grund' => 'aufbau'];
+    $fertig['messung']['geraete'] = [(string) $aktiv];
+    $gut = $muster();
+    $gut['z'] = 'kgut0001';
+    $schlecht = $muster(['art' => 'verteiler', 'rcd' => ['idn' => ''], 'w' => ['zs' => ['w' => '3.0']]]);
+    $schlecht['z'] = 'kschlech';
+    $schlecht['nr'] = '2';
+    $fertig['kreise'] = [$gut, $schlecht];
+    $fertig['ergebnis']['entspricht'] = 'ja';
+    $speichern($leerId, $fertig);
+    $erg = BerichtService::abschlussPruefen(BerichtService::find($leerId));
+    gleich($felder($erg), ['ergebnis.entspricht'], '„ja“ bei einer Mangel-Zeile → Fehler');
+    $fertig['kreise'][1]['pruefer'] = 'io';
+    $speichern($leerId, $fertig);
+    gleich($felder(BerichtService::abschlussPruefen(BerichtService::find($leerId))), ['kreise.kschlech.begruendung'], 'Übersteuerung ohne Begründung → Fehler');
+    $fertig['kreise'][1]['begruendung'] = 'Zs am Kabelende gemessen, Kreis durch Vorsicherung geschützt';
+    $speichern($leerId, $fertig);
+    gleich($felder(BerichtService::abschlussPruefen(BerichtService::find($leerId))), [], 'mit Begründung keine Fehler mehr');
+    $fertig['kreise'][1]['pruefer'] = 'auto';
+    $fertig['ergebnis']['entspricht'] = 'nein';
+    $speichern($leerId, $fertig);
+    gleich($felder(BerichtService::abschlussPruefen(BerichtService::find($leerId))), ['ergebnis.instand_bis'], '„nein“ ohne Frist und ohne Mangel → Fehler');
+    $fertig['ergebnis']['instand_bis'] = $morgen;
+    $fertig['ergebnis']['errichter'] = '1';
+    $speichern($leerId, $fertig);
+    gleich($felder(BerichtService::abschlussPruefen(BerichtService::find($leerId))), ['ergebnis.errichter'], 'Errichterbestätigung bei „nein“ → Fehler');
+    $fertig['ergebnis']['errichter'] = '0';
+    $fertig['messung']['geraete'] = [(string) $alt];
+    $speichern($leerId, $fertig);
+    $erg = BerichtService::abschlussPruefen(BerichtService::find($leerId));
+    $kal = array_values(array_filter($erg['warnungen'], static fn ($w) => $w['code'] === 'kalibrierung:' . $alt))[0] ?? null;
+    pruefe($erg['fehler'] === [] && $kal !== null && $kal['bestaetigt'] === false, 'Warnung „Kalibrierung abgelaufen“, noch nicht bestätigt');
+    $fertig['abschluss']['warnungen_bestaetigt'] = ['kalibrierung:' . $alt];
+    $speichern($leerId, $fertig);
+    $kal = array_values(array_filter(BerichtService::abschlussPruefen(BerichtService::find($leerId))['warnungen'], static fn ($w) => $w['code'] === 'kalibrierung:' . $alt))[0] ?? null;
+    pruefe($kal !== null && $kal['bestaetigt'] === true, 'Warnung bestätigt');
+    Settings::put('firma.name', '');
+
+    // ================================================== Kunde aus früherem Bericht, Eventworx-Verweis
+    $quelle = (int) BerichtService::anlegen($siteId, null, [])['id'];
+    $qi = BerichtService::find($quelle)['inhalt'];
+    $qi['kopf']['kunde']['firma'] = 'Vorkunde ' . $kennung;
+    $qi['kopf']['projektleiter_kunde'] = 'Erika Musterfrau';
+    $speichern($quelle, $qi);
+    pruefe(!BerichtService::kundeAusBericht($id, $quelle)['ok'], 'Entwurf taugt nicht als Quelle');
+    $abschliessen($quelle, $kennung . '-Q');
+    Database::update('berichte', $quelle, ['ewx_host' => 'firma.eventworx.biz', 'ewx_id' => '64f0c0de00000000000a1042', 'ewx_art' => 'order', 'ewx_nummer' => 'AU-1042', 'ewx_am' => gmdate('c')]);
+    $_SESSION = [];
+    $r = BerichtService::kundeAusBericht($id, $quelle);
+    pruefe($r['ok'] && $r['kunde']['firma'] === 'Vorkunde ' . $kennung && $r['kunde']['quelle'] === 'bericht' && $r['projektleiter_kunde'] === 'Erika Musterfrau'
+        && ($r['eventworx']['nummer'] ?? '') === 'AU-1042', 'Kundendaten aus früherem Bericht');
+    gleich(array_keys(BerichtService::eventworxGeladen($id)), ['64f0c0de00000000000a1042'], 'Eventworx-Verweis in der Sitzung vorgemerkt');
+    pruefe(!array_key_exists('firma', BerichtService::eventworxGeladen($id)['64f0c0de00000000000a1042']), 'Sitzung ohne Kundendaten');
+    $r = $speichern($id, BerichtService::find($id)['inhalt'], '64f0c0de00000000000a1042');
+    $b = BerichtService::find($id);
+    pruefe($r['ok'] && $b['ewx_nummer'] === 'AU-1042' && $b['ewx_host'] === 'firma.eventworx.biz', 'Autosave übernimmt den vorgemerkten Verweis');
+    pruefe(in_array('eventworx_uebernommen', array_column(BerichtService::ereignisse($id), 'ereignis'), true), 'Ereignis „eventworx_uebernommen“');
+    $r = $speichern($id, $b['inhalt'], 'AAAAAAAAAAAAAAAAAAAA');
+    pruefe($r['ok'] && BerichtService::find($id)['ewx_nummer'] === 'AU-1042' && $r['hinweise'] !== [], 'nicht geladener Vorgang wird nicht übernommen');
+    $speichern($id, $b['inhalt'], '-');
+    gleich(BerichtService::find($id)['ewx_id'], '', '„-“ entfernt den Verweis');
+    $fremdBericht = (int) BerichtService::anlegen(null, null, [])['id'];
+    $abschliessen($fremdBericht, $kennung . '-F');
+    pruefe(!BerichtService::kundeAusBericht($id, $fremdBericht)['ok'], 'Quelle von einem anderen Standort abgelehnt');
+    pruefe(count(BerichtService::kundenQuellen(BerichtService::find($id))) === 1, 'Liste der Quellen am Standort');
+
+    // ================================================== zuletzt: Querschnitt aus dem letzten Bericht
+    $roh = BerichtService::find($id)['inhalt'];
+    $abschliessen($id, $kennung . '-1');
+    $vt2 = $verteiler($kennung . ' Catering', $siteId, $floorId);
+    pruefe(InventarService::einsetzen($stueck, $vt2, null, false)['ok'], 'dasselbe Inventarstück in einen anderen Verteiler');
+    gleich(Vorbelegung::zuletzt($stueck, 0, 'X1'), ['leiter' => '4', 'querschnitt' => '4'], 'zuletzt: über Inventarstück und Abgang');
+    $zweit = BerichtService::anlegen($siteId, null, [$vt2]);
+    $zx1 = $kreisNach(BerichtService::find((int) $zweit['id'])['inhalt'], 'abgang', 'X1');
+    gleich([$zx1['leitung']['querschnitt'] ?? null, $zx1['leitung']['leiter'] ?? null, $zx1['abgeleitet'] ?? null], ['4', '4', []], 'neuer Bericht: X1 hat Querschnitt 4 aus Bericht 1');
+    gleich(Vorbelegung::netzVorschlag([$vt]), null, 'ohne Netzform im alten Bericht kein Vorschlag');
+    $mitNetz = BerichtService::find($id)['inhalt'];
+    $mitNetz['netz']['form'] = 'TN-S';
+    Database::update('berichte', $id, ['inhalt' => Kanon::json($mitNetz)]);
+    gleich(Vorbelegung::netzVorschlag([$vt])['form'] ?? null, 'TN-S', 'Netzform des letzten Berichts als Vorschlag');
+    gleich(BerichtService::letzteAnObjekt($vt)['id'] ?? null, $id, 'letzte Prüfung an der Anlage');
+    gleich(BerichtService::letzteAnInventar($stueck)['id'] ?? null, $id, 'letzte Prüfung am Inventarstück');
+
+    // ================================================== eingefroren: 423
+    gleich(BerichtService::speichern($id, (int) BerichtService::find($id)['version'], json_encode($roh))['status'], 423, 'abgeschlossener Bericht: speichern → 423');
+    gleich(BerichtService::kreiseVorbelegen($id, (int) BerichtService::find($id)['version'], [$vt])['status'], 423, 'abgeschlossener Bericht: Zeilen ergänzen → 423');
+    pruefe(!BerichtService::darfBearbeiten(BerichtService::find($id)), 'abgeschlossener Bericht: nicht bearbeitbar');
+
+    // ================================================== Sichtbarkeit
+    $draussen = (int) BerichtService::anlegen($siteId, null, [])['id'];
+    $abschliessen($draussen, $kennung . '-2020', '2020-06-15');
+    $entwurf = (int) $zweit['id'];
+    alsBenutzer($benutzer['kunde']);
+    pruefe(BerichtService::sichtbar(BerichtService::find($id)), 'Kunde mit Freigabe und Datenfenster sieht den abgeschlossenen Bericht');
+    pruefe(!BerichtService::sichtbar(BerichtService::find($entwurf)), 'Kunde sieht keinen Entwurf');
+    pruefe(!BerichtService::sichtbar(BerichtService::find($draussen)), 'Kunde sieht keinen Bericht außerhalb seines Datenfensters');
+    $liste = array_column(BerichtService::liste(['site_id' => $siteId]), 'id');
+    pruefe(in_array($id, $liste, true) && !in_array($entwurf, $liste, true) && !in_array($draussen, $liste, true), 'Liste des Kunden gefiltert');
+    pruefe(!BerichtService::darfBearbeiten(BerichtService::find($entwurf)), 'Kunde bearbeitet nicht');
+    pruefe(!BerichtService::sichtbar(BerichtService::find($leerId)), 'Kunde sieht keinen Bericht ohne Standort');
+    alsBenutzer($benutzer['kunde2']);
+    pruefe(!BerichtService::sichtbar(BerichtService::find($id)), 'Freigabe nur für eine Anlage → kein Bericht');
+    alsBenutzer($benutzer['planer']);
+    pruefe(BerichtService::sichtbar(BerichtService::find($id)) && BerichtService::sichtbar(BerichtService::find($draussen)), 'Planer mit Standort-Freigabe ohne Datenfenster sieht abgeschlossene');
+    pruefe(!BerichtService::sichtbar(BerichtService::find($entwurf)) && !BerichtService::darfBearbeiten(BerichtService::find($entwurf)), 'Planer ohne „bearbeiten“: Entwurf weder sichtbar noch bearbeitbar');
+    pruefe(!BerichtService::sichtbar(BerichtService::find($leerId)), 'Bericht ohne Standort: anderer Benutzer sieht ihn nicht');
+    gleich(BerichtService::speichern($leerId, 1, '{}')['status'], 404, 'fremder Bericht ohne Standort: speichern → 404');
+    alsBenutzer($benutzer['admin']);
+    pruefe(BerichtService::sichtbar(BerichtService::find($leerId)) && BerichtService::darfBearbeiten(BerichtService::find($leerId)), 'alle Standorte: sieht und bearbeitet den Bericht ohne Standort');
+    alsBenutzer($benutzer['technik']);
+    pruefe(BerichtService::sichtbar(BerichtService::find($leerId)) && BerichtService::darfBearbeiten(BerichtService::find($leerId)), 'Ersteller sieht seinen Bericht ohne Standort');
+    pruefe(BerichtService::sichtbar(BerichtService::find($entwurf)) && BerichtService::darfBearbeiten(BerichtService::find($entwurf)), 'Technik mit „bearbeiten“ sieht und bearbeitet Entwürfe');
+    pruefe(BerichtService::darfPruefen(BerichtService::find($entwurf)), 'Technik mit Qualifikation darf prüfen');
+    Database::update('users', $benutzer['technik'], ['pruefer_qualifikation' => '']);
+    alsBenutzer($benutzer['technik']);
+    pruefe(!BerichtService::darfPruefen(BerichtService::find($entwurf)), 'ohne Qualifikation kein Prüfen');
+    Database::update('users', $benutzer['technik'], ['pruefer_qualifikation' => 'Elektrofachkraft für Veranstaltungstechnik']);
+    alsBenutzer($benutzer['technik']);
+    pruefe(Zugriff::imFenster(Zugriff::datenFensterStandort($siteId), 0, 1), 'datenFensterStandort: Technik ohne Datengrenze');
+
+    // ================================================== Löschen und Verwerfen
+    $weg = (int) BerichtService::anlegen($siteId, null, [$vt2])['id'];
+    $r = BerichtService::loeschen($weg);
+    pruefe($r['ok'] && BerichtService::find($weg) === null && (int) Database::scalar('SELECT COUNT(*) FROM bericht_ereignisse WHERE bericht_id = ?', [$weg]) === 0
+        && (int) Database::scalar('SELECT COUNT(*) FROM bericht_objekte WHERE bericht_id = ?', [$weg]) === 0, 'Entwurf ohne Nummer gelöscht – samt Objekten und Ereignissen');
+    pruefe(!BerichtService::loeschen($id)['ok'], 'abgeschlossener Bericht wird nicht gelöscht');
+    $mitNummer = (int) BerichtService::anlegen($siteId, null, [])['id'];
+    Database::update('berichte', $mitNummer, ['nummer' => $kennung . '-N']);
+    pruefe(!BerichtService::loeschen($mitNummer)['ok'], 'Entwurf mit Nummer wird nicht gelöscht');
+    pruefe(!BerichtService::verwerfen($mitNummer, '')['ok'], 'Verwerfen nur mit Grund');
+    $r = BerichtService::verwerfen($mitNummer, 'Prüfung abgebrochen');
+    $vb = BerichtService::find($mitNummer);
+    pruefe($r['ok'] && $vb['status'] === 'verworfen' && $vb['aufbewahren_bis'] === sprintf('%04d-12-31', (int) substr($heute, 0, 4) + 10), 'verworfen, Aufbewahrung bis 31.12.(Jahr + 10)');
+    pruefe(!BerichtService::verwerfen($entwurf, 'x y z')['ok'], 'Entwurf ohne Nummer wird nicht verworfen');
+
+    // ================================================== Aufbewahrung
+    Database::update('berichte', $mitNummer, ['aufbewahren_bis' => '2000-12-31']);
+    pruefe(in_array($mitNummer, array_map('intval', array_column(BerichtService::faellig(), 'id')), true), 'fällig nach vorgezogener Frist');
+    BerichtService::aufbewahrungLoeschen($mitNummer);
+    pruefe(BerichtService::find($mitNummer) === null && (int) Database::scalar('SELECT COUNT(*) FROM bericht_ereignisse WHERE bericht_id = ?', [$mitNummer]) === 0,
+        'nach der Frist gelöscht – samt Ereignissen');
+
+    // ================================================== Lösch-Abläufe
+    alsBenutzer($benutzer['admin']);
+    $loeschSite = SiteService::saveSite(null, ['name' => 'Prüfung Löschen ' . $kennung]);
+    $sites[] = $loeschSite;
+    BenutzerService::freigabeSpeichern(['subject_type' => 'user', 'subject_id' => $benutzer['technik'], 'ziel_art' => 'site', 'ziel_id' => $loeschSite, 'darf_bearbeiten' => 1]);
+    $lv = $verteiler($kennung . ' Lösch', $loeschSite);
+    $lStueck = (int) InventarService::speichern(null, ['art' => 'verteilung', 'kennung' => $kennung . '-LD'])['id'];
+    $inventar[] = $lStueck;
+    InventarService::einsetzen($lStueck, $lv, null, false);
+    $la = (int) AufbauService::starten($loeschSite, $kennung . ' Lösch')['id'];
+    alsBenutzer($benutzer['technik']);
+    $d1 = (int) BerichtService::anlegen(null, $la, [$lv])['id'];
+    $d2 = (int) BerichtService::anlegen(null, $la, [$lv])['id'];
+    $abschliessen($d2, $kennung . '-D2');
+    alsBenutzer($benutzer['admin']);
+    AufbauService::loeschen($la);
+    gleich([BerichtService::find($d1)['aufbau_id'], BerichtService::find($d2)['aufbau_id']], [null, null], 'Aufbau gelöscht → aufbau_id NULL');
+    AnlagenService::loeschen($lv);
+    gleich(Database::scalar('SELECT COUNT(*) FROM bericht_objekte WHERE bericht_id = ? AND objekt_id IS NULL', [$d2]), 1, 'Anlage gelöscht → bericht_objekte.objekt_id NULL');
+    pruefe(InventarService::loeschen($lStueck)['ok'], 'Inventarstück gelöscht');
+    gleich(Database::scalar('SELECT COUNT(*) FROM bericht_objekte WHERE bericht_id = ? AND inventar_id IS NOT NULL', [$d2]), 0, 'Inventar gelöscht → inventar_id NULL');
+    pruefe(BerichtService::find($d2)['inhalt']['kreise'] !== [], 'der Inhalt nennt die Anlage weiter');
+    SiteService::deleteSite($loeschSite);
+    $d2b = BerichtService::find($d2);
+    pruefe(BerichtService::find($d1) === null && (int) Database::scalar('SELECT COUNT(*) FROM bericht_objekte WHERE bericht_id = ?', [$d1]) === 0, 'Standort gelöscht → Entwurf ohne Nummer weg');
+    gleich([$d2b['site_id'], $d2b['standort_name'], $d2b['status']], [null, 'Prüfung Löschen ' . $kennung, 'abgeschlossen'], 'abgeschlossener Bericht bleibt mit Namen des Standorts');
+    pruefe(BerichtService::sichtbar($d2b), 'ohne Standort sichtbar mit „alle Standorte“');
+    // Ohne Standort gilt Regel 2: der Ersteller (mit „ausfüllen“) und „alle Standorte“.
+    alsBenutzer($benutzer['planer']);
+    pruefe(!BerichtService::sichtbar(BerichtService::find($d2)), 'ohne Standort für andere nicht mehr sichtbar');
+    alsBenutzer($benutzer['kunde']);
+    pruefe(!BerichtService::sichtbar(BerichtService::find($d2)), 'ohne Standort für den Kunden nicht mehr sichtbar');
+
+    // ================================================== Einstellungen
+    alsBenutzer($benutzer['admin']);
+    pruefe(Einstellungen::speichern(['berichte.zs_faktor' => '0,67', 'firma.bank' => 'IBAN ' . $kennung])['ok'], 'Einstellungen gespeichert');
+    gleich([Einstellungen::wert('berichte.zs_faktor'), Grenzwerte::parameter()['zs_faktor']], ['0.67', '0.67'], 'Faktor 0,67 in den Parametern');
+    pruefe(!Einstellungen::speichern(['berichte.praefix' => 'ub1'])['ok'] && Einstellungen::wert('berichte.praefix') !== 'UB1', 'Kürzel nur aus Großbuchstaben');
+    pruefe(!Einstellungen::speichern(['berichte.zs_faktor' => '0.5'])['ok'], 'Faktor nur 1,0, 0,8 oder 0,67');
+    Einstellungen::speichern(['berichte.normen' => ['0100-711', 'xyz']]);
+    gleich(Einstellungen::normen(), ['0100-711'], 'Normen nur aus dem Katalog');
+    Settings::put('berichte.ul', '42');
+    gleich(Einstellungen::wert('berichte.ul'), '50', 'ungültiger Wert in der Datenbank ergibt die Vorgabe');
+    pruefe((int) Database::scalar('SELECT COUNT(*) FROM audit_log WHERE details LIKE ?', ['%IBAN ' . $kennung . '%']) === 0, 'Bankdaten nicht im Audit');
+
+    // ================================================== Datenschutz
+    foreach ([$kundeName, $kundeMail] as $geheim) {
+        gleich((int) Database::scalar('SELECT COUNT(*) FROM audit_log WHERE details LIKE ?', ['%' . $geheim . '%']), 0, 'nicht im Audit: ' . $geheim);
+        gleich((int) Database::scalar('SELECT COUNT(*) FROM bericht_ereignisse WHERE details LIKE ?', ['%' . $geheim . '%']), 0, 'nicht in den Ereignissen: ' . $geheim);
+    }
+    $gespeichertAm = array_column(array_filter(BerichtService::ereignisse($leerId), static fn ($e) => $e['ereignis'] === 'gespeichert'), 'am');
+    gleich(count($gespeichertAm), 1, 'höchstens ein „gespeichert“ je zehn Minuten');
+} finally {
+    alsBenutzer(null);
+    $_SESSION = [];
+    $ids = $benutzer === [] ? [] : array_map('intval', array_column(Database::select(
+        'SELECT id FROM berichte WHERE erstellt_von IN (' . implode(',', array_map('intval', $benutzer)) . ')'
+    ), 'id'));
+    foreach ($ids as $bid) {
+        foreach (['bericht_unterschriften', 'bericht_pdf', 'bericht_objekte', 'bericht_ereignisse'] as $tabelle) {
+            Database::execute("DELETE FROM {$tabelle} WHERE bericht_id = ?", [$bid]);
+        }
+        Database::delete('berichte', $bid);
+    }
+    Database::execute('DELETE FROM pruefgeraete WHERE fabrikat LIKE ?', [$kennung . '%']);
+    foreach ($inventar as $iid) {
+        Database::execute('UPDATE einsaetze SET bis = ? WHERE inventar_id = ? AND bis IS NULL', [gmdate('c'), $iid]);
+        InventarService::loeschen($iid);
+    }
+    Database::execute('DELETE FROM leitungen WHERE name LIKE ?', [$kennung . '%']);
+    foreach ($anlagen as $aid) {
+        AnlagenService::loeschen($aid);
+    }
+    foreach ($sites as $sid) {
+        if (SiteService::find($sid) !== null) {
+            SiteService::deleteSite($sid);
+        }
+    }
+    foreach ($benutzer as $uid) {
+        Database::execute("DELETE FROM freigaben WHERE subject_type = 'user' AND subject_id = ?", [$uid]);
+        Database::execute('DELETE FROM user_roles WHERE user_id = ?', [$uid]);
+        Database::execute('DELETE FROM users WHERE id = ?', [$uid]);
+    }
+    foreach ($rollen as $rid) {
+        Database::execute('DELETE FROM role_permissions WHERE role_id = ?', [$rid]);
+        Database::execute('DELETE FROM roles WHERE id = ?', [$rid]);
+    }
+    foreach ($einstellungenVorher as $s => $w) {
+        $w === null ? Settings::forget($s) : Settings::put($s, $w);
+    }
+    Database::execute('DELETE FROM audit_log WHERE username LIKE ? OR details LIKE ?', [$kennung . '%', '%' . $kennung . '%']);
+    gleich((int) Database::scalar('SELECT COUNT(*) FROM berichte WHERE titel LIKE ? OR kunde_name LIKE ? OR nummer LIKE ?', ['%' . $kennung . '%', '%' . $kennung . '%', $kennung . '%']), 0,
+        'aufgeräumt: keine Berichte der Prüfung');
+}
+
+ende('berichte');
