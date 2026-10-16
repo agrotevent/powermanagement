@@ -189,6 +189,9 @@ $router->post('/system/einstellungen/pruefen', [EinstellungenController::class, 
 // Adresse und Zweig des Repositorys: nur mit „Einstellungen ändern“ – wer die
 // Adresse umstellt, lenkt das hinterlegte Token dorthin.
 $router->post('/system/einstellungen/location', [EinstellungenController::class, 'location'], 'settings.manage');
+// Eventworx (Kundendaten für Übergabeberichte, nur lesend): Mandant, Token, Verbindungstest.
+$router->post('/system/einstellungen/eventworx', [EinstellungenController::class, 'eventworx'], 'settings.manage');
+$router->post('/system/einstellungen/eventworx/pruefen', [EinstellungenController::class, 'eventworxPruefen'], 'settings.manage');
 
 $router->get('/audit', [AuditController::class, 'index'], 'audit.view');
 

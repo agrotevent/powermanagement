@@ -5,7 +5,7 @@ use App\Support\Settings;
 use App\Support\View;
 
 $title = 'Einstellungen';
-$subtitle = 'InfluxDB, MQTT, Grenzwerte, Location-Abgleich';
+$subtitle = 'InfluxDB, MQTT, Grenzwerte, Location-Abgleich, Eventworx';
 $feld = static function (string $schluessel, string $typ = 'text', string $platzhalter = '') use ($werte): string {
     $name = str_replace('.', '__', $schluessel);
     $wert = $werte[$schluessel] ?? '';
@@ -79,4 +79,49 @@ $feld = static function (string $schluessel, string $typ = 'text', string $platz
     </div>
     <div class="card-footer"><button class="btn btn-primary" type="submit">Speichern</button></div>
 </form>
+
+<?php
+$ewx = $eventworx;
+$ewxFremd = $ewx['token'] && $ewx['token_host'] !== $ewx['host'];
+?>
+<div class="card mt" id="eventworx">
+    <div class="card-head"><h2>Eventworx</h2><span class="hint">Kundendaten für Übergabeberichte – nur lesend</span></div>
+    <form method="post" action="/system/einstellungen/eventworx">
+        <?= Csrf::field() ?>
+        <div class="card-body grid grid-2">
+            <div>
+                <div class="field"><label for="eventworx_adresse">Mandant</label>
+                    <input id="eventworx_adresse" name="eventworx_adresse" value="<?= View::e($ewx['adresse']) ?>" placeholder="firma oder firma.eventworx.biz"
+                        autocomplete="off" autocapitalize="off" spellcheck="false">
+                    <div class="help">Nur die eigene Adresse https://&lt;mandant&gt;.eventworx.biz – ein eingefügter Link aus Eventworx geht auch. Leer entfernt die Anbindung.</div></div>
+                <p class="btn-row">
+                    <?php if ($ewx['demo']): ?>
+                        <span class="badge info">Demo</span> <span class="help">Eventworx wird nicht gefragt, die Suche liefert Beispielvorgänge.</span>
+                    <?php elseif ($ewx['eingerichtet']): ?>
+                        <span class="badge ok">eingerichtet</span> <span class="help">Token hinterlegt für <?= View::e($ewx['host']) ?></span>
+                    <?php elseif ($ewxFremd): ?>
+                        <span class="badge bad">Token für andere Adresse</span> <span class="help">Bitte für <?= View::e($ewx['host']) ?> ein Token eintragen.</span>
+                    <?php elseif ($ewx['host'] !== ''): ?>
+                        <span class="badge warn">ohne Token</span> <span class="help">Ohne Token bleibt es bei Freitext.</span>
+                    <?php else: ?>
+                        <span class="badge">nicht eingerichtet</span> <span class="help">Kundendaten werden dann als Freitext eingetragen.</span>
+                    <?php endif; ?>
+                </p>
+            </div>
+            <div>
+                <div class="field"><label for="eventworx_token">API-Token</label>
+                    <input id="eventworx_token" name="eventworx_token" type="password" autocomplete="new-password"
+                        placeholder="<?= $ewx['token'] && !$ewxFremd ? View::e('hinterlegt für ' . $ewx['token_host'] . ' – leer lassen zum Behalten') : '' ?>">
+                    <div class="help">Verschlüsselt abgelegt, nie wieder angezeigt, gilt nur für diese Adresse. „-“ entfernt es.</div></div>
+                <p class="help">Ein Token „REST API Lesen“ genügt – PowerManagement liest nur Aufträge und Angebote.
+                    Anlegen in Eventworx unter <em>Setup → Programmeinstellungen → API</em> (REST-Modul).</p>
+            </div>
+        </div>
+        <div class="card-footer btn-row">
+            <button class="btn btn-primary" type="submit">Speichern</button>
+            <button class="btn" type="submit" form="eventworx-pruefen">Verbindung prüfen</button>
+        </div>
+    </form>
+    <form method="post" action="/system/einstellungen/eventworx/pruefen" id="eventworx-pruefen"><?= Csrf::field() ?></form>
+</div>
 <?php endif; ?>

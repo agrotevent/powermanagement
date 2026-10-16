@@ -15,7 +15,9 @@ require __DIR__ . '/hilfen/pruefung.php';
 
 use App\Services\BenutzerService;
 use App\Services\BereichService;
+use App\Services\Eventworx;
 use App\Support\Database;
+use App\Support\Settings;
 
 $port = freierPort();
 hintergrund(['php', '-S', '127.0.0.1:' . $port, '-t', dirname(__DIR__) . '/public']);
@@ -79,6 +81,10 @@ $kennung = 'pm-web-' . bin2hex(random_bytes(3));
 $kennwort = 'Pruefung-' . bin2hex(random_bytes(6));
 $benutzer = [];
 $dosen = [];
+$eventworxVorher = [];
+foreach ([Eventworx::EINSTELLUNG_HOST, Eventworx::EINSTELLUNG_TOKEN_HOST, Settings::GEHEIM_EVENTWORX_TOKEN] as $s) {
+    $eventworxVorher[$s] = Settings::get($s);
+}
 
 try {
     $benutzer['admin'] = BenutzerService::anlegen($kennung . '-admin', $kennwort, 'admin', false);
@@ -183,6 +189,30 @@ try {
     pruefe($csv['status'] === 200 && str_contains($csv['kopf'], 'text/csv'), 'CSV-Export');
     gleich(aufruf($basis, $admin['dose'], 'GET', '/gibt-es-nicht')['status'], 404, 'unbekannte Adresse → 404');
     gleich(aufruf($basis, $admin['dose'], 'GET', '/system/freigaben?id=0')['status'], 404, 'Freigaben ohne Benutzer → 404');
+
+    // Eventworx-Karte: Token verschlüsselt, an den Host gebunden, nie in der Seite
+    $ewxToken = 'tok-' . $kennung . '-' . bin2hex(random_bytes(6));
+    $r = aufruf($basis, $admin['dose'], 'POST', '/system/einstellungen/eventworx', ['eventworx_adresse' => $kennung, 'eventworx_token' => $ewxToken, '_token' => $admin['token']]);
+    Settings::vergessen();
+    pruefe($r['status'] === 302 && Settings::get(Eventworx::EINSTELLUNG_TOKEN_HOST) === $kennung . '.eventworx.biz'
+        && !str_contains((string) Settings::get(Settings::GEHEIM_EVENTWORX_TOKEN), $ewxToken), 'Eventworx: Mandant und Token (verschlüsselt) gespeichert');
+    $r = aufruf($basis, $admin['dose'], 'GET', '/system/einstellungen');
+    pruefe($r['status'] === 200 && str_contains($r['text'], 'hinterlegt für ' . $kennung . '.eventworx.biz') && !str_contains($r['text'], $ewxToken)
+        && phpMeldung($r['text']) === null, 'Eventworx-Karte zeigt den Host, nie das Token');
+    pruefe(!str_contains($r['text'], 'onclick=') && !str_contains($r['text'], 'javascript:'), 'Einstellungen ohne Inline-JavaScript');
+    $r = aufruf($basis, $admin['dose'], 'POST', '/system/einstellungen/eventworx/pruefen', ['_token' => $admin['token']]);
+    gleich($r['status'], 302, 'Eventworx: Verbindung prüfen (Demo: ohne Netz)');
+    $r = aufruf($basis, $admin['dose'], 'POST', '/system/einstellungen/eventworx', ['eventworx_adresse' => 'https://evil.example', 'eventworx_token' => '', '_token' => $admin['token']]);
+    Settings::vergessen();
+    gleich(Settings::get(Eventworx::EINSTELLUNG_HOST), $kennung . '.eventworx.biz', 'Eventworx: fremde Adresse abgelehnt');
+    $r = aufruf($basis, $admin['dose'], 'POST', '/system/einstellungen/eventworx', ['eventworx_adresse' => $kennung . '-neu', 'eventworx_token' => '', '_token' => $admin['token']]);
+    Settings::vergessen();
+    pruefe(!Settings::geheimnisHinterlegt(Settings::GEHEIM_EVENTWORX_TOKEN) && Settings::get(Eventworx::EINSTELLUNG_TOKEN_HOST) === null,
+        'Eventworx: neue Adresse ohne neues Token entfernt das alte');
+    $r = aufruf($basis, $admin['dose'], 'POST', '/system/einstellungen/eventworx', ['eventworx_adresse' => $kennung, 'eventworx_token' => $ewxToken]);
+    Settings::vergessen();
+    pruefe($r['status'] === 302 && !Settings::geheimnisHinterlegt(Settings::GEHEIM_EVENTWORX_TOKEN), 'Eventworx ohne CSRF-Token → abgelehnt');
+    gleich((int) Database::scalar('SELECT COUNT(*) FROM audit_log WHERE details LIKE ?', ['%' . $ewxToken . '%']), 0, 'Eventworx-Token nicht im Audit');
 
     // Livewerte der Karte: je Phase Spannung, Strom, Leistung (Detail beim Antippen des Werts)
     if ($etage > 0) {
@@ -427,6 +457,10 @@ try {
     // Die Repository-Adresse (und damit, wohin das Token geht) nur mit „Einstellungen ändern“
     $r = aufruf($basis, $technik['dose'], 'POST', '/system/einstellungen/location', ['repo_url' => 'https://evil.example/x.git', '_token' => $technik['token']]);
     gleich($r['status'], 403, 'Repository-Adresse nur mit „Einstellungen ändern“');
+    $r = aufruf($basis, $technik['dose'], 'POST', '/system/einstellungen/eventworx', ['eventworx_adresse' => 'firma', 'eventworx_token' => 'tok-' . $kennung, '_token' => $technik['token']]);
+    gleich($r['status'], 403, 'Eventworx-Adresse und -Token nur mit „Einstellungen ändern“');
+    gleich(aufruf($basis, $technik['dose'], 'POST', '/system/einstellungen/eventworx/pruefen', ['_token' => $technik['token']])['status'], 403,
+        'Eventworx-Verbindungstest nur mit „Einstellungen ändern“');
 
     // ---------------------------------------------------- Anmeldung und Sitzung
     // Nach der Anmeldung nur auf eigene Pfade – „/\\evil“ machen Browser zu „//evil“
@@ -519,6 +553,10 @@ try {
         \App\Services\SiteService::deleteSite($werk);
     }
 } finally {
+    Settings::vergessen();
+    foreach ($eventworxVorher as $s => $wert) {
+        $wert === null ? Settings::forget($s) : Settings::put($s, $wert);
+    }
     Database::execute('DELETE FROM steckertypen WHERE name LIKE ?', [$kennung . '%']);
     foreach (Database::select('SELECT id FROM roles WHERE name LIKE ?', [$kennung . '%']) as $rolle) {
         BenutzerService::rolleLoeschen((int) $rolle['id']);

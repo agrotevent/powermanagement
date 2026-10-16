@@ -9,7 +9,9 @@ declare(strict_types=1);
  * ohne fremde Vorgeschichte; Schalt-Freigaben für einen Kanal gelten nur für
  * ihn; am Standort ändern braucht „bearbeiten“; Schlüssel aus dem Repository
  * werden keine Pfade; Namen brechen kein Line Protocol; CSV ohne Formeln;
- * nur http(s); kein öffentlicher Schlüssel; PDF-Werkzeuge hängen nicht.
+ * nur http(s); Umleitungen nehmen keine Kopfzeilen (Tokens) mit, auf
+ * beiden Wegen von Http; kein öffentlicher Schlüssel; PDF-Werkzeuge hängen
+ * nicht.
  *
  * Die Prüfungen über HTTP (Weiterleitungen, Sitzung, Token, Benutzer-
  * verwaltung) stehen in web.php.
@@ -41,6 +43,7 @@ $rollen = [];
 $sites = [];
 $quellen = [];
 $alterSchluessel = Config::get('app.key');
+$umleitung = sys_get_temp_dir() . '/' . $k . '-umleitung';
 
 try {
     // ------------------------------------------------ Rechte vergeben
@@ -159,6 +162,27 @@ try {
     gleich([StatistikController::csvFeld('=HYPERLINK(1)'), StatistikController::csvFeld('-5.2'), StatistikController::csvFeld('Name')],
         ['"\'=HYPERLINK(1)"', '"-5.2"', '"Name"'], 'CSV: Formeln werden Text, Zahlen bleiben');
     pruefe(!Http::anfrage('GET', 'file:///etc/passwd')['ok'] && !Http::anfrage('GET', 'gopher://127.0.0.1:1/')['ok'], 'Anfragen nur über http(s)');
+    // Eine Umleitung wird nicht verfolgt – sonst ginge das Token (S-API-TOKEN,
+    // X-Authorization …) an das neue Ziel. Beide Wege: curl und PHP-Streams.
+    mkdir($umleitung, 0700);
+    file_put_contents($umleitung . '/index.php', '<?php if ($_SERVER["REQUEST_URI"] === "/ziel") { file_put_contents(__DIR__ . "/gerufen", '
+        . '(string) ($_SERVER["HTTP_X_PRUEF_TOKEN"] ?? "-")); echo "ziel"; return; } header("Location: /ziel", true, 302); echo "weiter";');
+    $port = freierPort();
+    hintergrund(['php', '-S', '127.0.0.1:' . $port, '-t', $umleitung]);
+    for ($i = 0; $i < 50 && !erreichbar('127.0.0.1', $port); $i++) {
+        usleep(100_000);
+    }
+    foreach (['curl' => false, 'PHP-Streams' => true] as $weg => $ohneCurl) {
+        Http::$ohneCurl = $ohneCurl;
+        @unlink($umleitung . '/gerufen');
+        $a = Http::anfrage('GET', 'http://127.0.0.1:' . $port . '/', ['kopf' => ['X-Pruef-Token' => 'geheim-' . $k], 'zeit' => 5]);
+        pruefe($a['ok'] && $a['status'] === 302 && $a['rumpf'] === 'weiter' && !is_file($umleitung . '/gerufen'),
+            $weg . ': eine Umleitung wird nicht verfolgt, das Token geht nicht ans Ziel (Status ' . $a['status'] . ')');
+    }
+    Http::$ohneCurl = false;
+    pruefe(!Http::anfrage('GET', 'http://127.0.0.1:' . $port . '/', ['kopf' => ['X-Pruef' => "a\r\nX-Eingeschleust: 1"]])['ok']
+        && !Http::anfrage('GET', 'http://127.0.0.1:' . $port . '/', ['kopf' => ["X-Pruef: a\r\nB" => '1']])['ok'], 'kein Umbruch in einer Kopfzeile');
+
     $ziel = new ReflectionMethod(\App\Support\Markdown::class, 'ziel');
     gleich([$ziel->invoke(null, 'JavaScript:alert(1)'), $ziel->invoke(null, 'data:text/html,x'), $ziel->invoke(null, 'https://example.org')],
         ['#', '#', 'https://example.org'], 'Links im Handbuch nur zu http(s), mailto und eigenen Seiten');
@@ -183,6 +207,11 @@ try {
     @unlink($pdf);
 } finally {
     alsBenutzer(null);
+    Http::$ohneCurl = false;
+    foreach (['index.php', 'gerufen'] as $datei) {
+        @unlink($umleitung . '/' . $datei);
+    }
+    @rmdir($umleitung);
     Config::set('app.key', $alterSchluessel);
     foreach ($sites as $siteId) {
         foreach (Database::select('SELECT id FROM objekte WHERE site_id = ?', [$siteId]) as $o) {

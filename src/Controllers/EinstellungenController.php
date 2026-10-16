@@ -6,6 +6,7 @@ namespace App\Controllers;
 use App\Messung\Influx;
 use App\Messung\Messdaten;
 use App\Messung\Mqtt;
+use App\Services\Eventworx;
 use App\Services\LocationSync;
 use App\Support\Audit;
 use App\Support\Config;
@@ -24,6 +25,7 @@ final class EinstellungenController extends Controller
                 'mqtt'    => Settings::geheimnisHinterlegt(Settings::GEHEIM_MQTT_KENNWORT),
                 'repo'    => LocationSync::tokenQuelle(),
             ],
+            'eventworx' => Eventworx::zustand(),
         ]);
     }
 
@@ -84,6 +86,27 @@ final class EinstellungenController extends Controller
         }
         Audit::log('einstellungen.location', 'settings', '', ['repo' => $adresse]);
         Flash::success($meldung);
+        $this->redirect('/system/einstellungen');
+    }
+
+    /** Eventworx: Mandant und API-Token – das Token gilt nur für den Host, für den es eingetragen wird. */
+    public function eventworx(Request $request): void
+    {
+        $ergebnis = Eventworx::einstellungenSpeichern($request->str('eventworx_adresse'), $request->str('eventworx_token'));
+        if (!$ergebnis['ok']) {
+            Flash::error($ergebnis['message']);
+        } elseif (!empty($ergebnis['warnung'])) {
+            Flash::warning($ergebnis['message']);
+        } else {
+            Flash::success($ergebnis['message']);
+        }
+        $this->redirect('/system/einstellungen');
+    }
+
+    public function eventworxPruefen(Request $request): void
+    {
+        $ergebnis = Eventworx::verbindungTesten();
+        $ergebnis['ok'] ? Flash::success($ergebnis['message']) : Flash::error($ergebnis['message']);
         $this->redirect('/system/einstellungen');
     }
 

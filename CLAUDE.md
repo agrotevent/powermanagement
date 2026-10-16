@@ -46,6 +46,9 @@ keine Build-Schritte. JS-Bibliotheken liegen fertig unter `public/assets/vendor`
   gespeichert (nur der Mosquitto-Hash): Gen2 per `MQTT.SetConfig` ans Gerät
   oder von Hand; Gen1 und jedes neue Kennwort genau einmal angezeigt, nie
   per MQTT. Die App startet nie ein Gerät neu.
+- **Eventworx nur lesend** über `App\Services\Eventworx` (GET, feste
+  Pfadliste, Token verschlüsselt und an den Host gebunden). Kundendaten und
+  Token nie in Log, Audit oder Antworten. `Http` folgt keiner Umleitung.
 - Neue Tabellen oder Spalten kommen als **neue Migration** dazu
   (`database/migrations/00N_*.sql`). Vorhandene Migrationen nie ändern.
 - Oberfläche **mobil zuerst**: Tabellen mit `tabelle-karten` und
@@ -83,8 +86,9 @@ bash -n deploy/*.sh && shellcheck -S warning -e SC2016,SC1111 deploy/*.sh
 | `tests/mqtt-zugaenge.php` | Eigene MQTT-Zugänge von App bis Broker: Gen2 einrichten/übertragen/prüfen/Neustart/neues Kennwort/entfernen, Gen1, Sperre des gemeinsamen Zugangs, Kontoprobe gegen falsche ACLs, keine Geheimnisse (eigener Mosquitto, Shelly-Attrappen) |
 | `tests/influx.php` | InfluxQL: Livewerte, Verläufe, Datenfenster, Energie je Tag (eigene InfluxDB 1.x) |
 | `tests/cloud.php` | ComAp WebSupervisor, Victron VRM (Http-Attrappe) |
+| `tests/eventworx.php` | Eventworx nur lesend: Adresse, Token an den Host gebunden, Pfadliste, Anfragen, Aufbereitung ohne Beträge/Notizen, Fehlerantworten, Nachlesen bei `data:null`, Drossel, Demo, keine Geheimnisse in Log/Audit/Meldungen (Http-Attrappe) |
 | `tests/web.php` | alle Seiten ohne PHP-Meldung, 403/404, CSRF, Schalt-Ablehnung, Weiterleitungen, Sitzung nach Kennwortwechsel, Benutzerverwaltung ohne Administration, Ändern nur mit „bearbeiten“ (eigener PHP-Server) |
-| `tests/sicherheit.php` | Rechte vergeben, Anmelde-Bremse ohne Kontoerkennung, Geräte zuordnen, Kanal-Freigaben beim Schalten, Schlüssel aus dem Repository, Line Protocol, CSV, Adressen, app.key, PDF-Werkzeuge |
+| `tests/sicherheit.php` | Rechte vergeben, Anmelde-Bremse ohne Kontoerkennung, Geräte zuordnen, Kanal-Freigaben beim Schalten, Schlüssel aus dem Repository, Line Protocol, CSV, Adressen, keine Umleitung mit Token (curl und Streams), app.key, PDF-Werkzeuge |
 | `tests/nodered-funktionen.mjs` | Node-RED-Funktionen, `flows.json` passt zu den Quellen |
 
 Prüfskripte legen eigene Daten mit eindeutiger Kennung an und löschen sie am

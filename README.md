@@ -113,6 +113,7 @@ Update: **[docs/installation-debian-lxc.md](docs/installation-debian-lxc.md)**.
 | [docs/bedienung.md](docs/bedienung.md) | Übersicht, Karte, Anlagen, Verteilerplan, Aufbau und Abgleich, Inventar, Auswertung, Bereiche, Materialliste, Schalten |
 | [docs/rechte.md](docs/rechte.md) | Rollen, Freigaben, Zeitfenster, Schaltrechte je Gerät |
 | [docs/datenquellen.md](docs/datenquellen.md) | MQTT-Format, InfluxDB-Schema, Shelly, Victron, ComAp, WireGuard, Sammler, Node-RED |
+| [docs/eventworx.md](docs/eventworx.md) | Kundendaten aus Eventworx (nur lesend): Token, was gelesen wird, Fehlermeldungen, Datenschutz |
 
 ## Kommandozeile
 
