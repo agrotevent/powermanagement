@@ -185,9 +185,16 @@
         }
     }
     if (liveQuelle) {
+        // Immer nur eine Abfrage zugleich: Antwortet die InfluxDB langsamer
+        // als alle 5 s, stauten sich sonst die Abfragen beim Server – und mit
+        // ihnen alles, was der Browser sonst noch schickt.
+        var liveLaeuft = false;
         PM.liveNeu = function () {
-            if (document.hidden) { return; }
-            fetch(liveQuelle.dataset.liveUrl, { headers: { 'Accept': 'application/json' }, credentials: 'same-origin' })
+            if (document.hidden || liveLaeuft) { return; }
+            liveLaeuft = true;
+            var abbruch = window.AbortController ? new AbortController() : null;
+            var frist = abbruch ? setTimeout(function () { abbruch.abort(); }, 15000) : null;
+            fetch(liveQuelle.dataset.liveUrl, { headers: { 'Accept': 'application/json' }, credentials: 'same-origin', signal: abbruch ? abbruch.signal : undefined })
                 .then(function (a) { return a.json(); })
                 .then(function (daten) {
                     // Sitzung abgelaufen: der Server antwortet 401 mit Meldung (JSON).
@@ -223,6 +230,10 @@
                 })
                 .catch(function () {
                     liveStand.textContent = 'Livewerte gerade nicht erreichbar – neuer Versuch in 5 Sekunden.';
+                })
+                .then(function () {
+                    if (frist) { clearTimeout(frist); }
+                    liveLaeuft = false;
                 });
         };
         setInterval(PM.liveNeu, 5000);

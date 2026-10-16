@@ -21,9 +21,17 @@ spl_autoload_register(static function (string $class): void {
 });
 
 $configFile = APP_ROOT . '/config/config.php';
-if (!is_file($configFile)) {
+// Eine zweite Instanz aus derselben Arbeitskopie (Prüfskripte der
+// Schnittstelle) bekommt ihre Konfiguration über die Umgebung – nur auf der
+// Kommandozeile und im eingebauten Server, nie unter FPM oder Apache.
+$eigeneKonfiguration = getenv('POWERMANAGEMENT_CONFIG');
+if (in_array(PHP_SAPI, ['cli', 'cli-server'], true) && is_string($eigeneKonfiguration)
+    && $eigeneKonfiguration !== '' && is_file($eigeneKonfiguration)) {
+    $configFile = $eigeneKonfiguration;
+} elseif (!is_file($configFile)) {
     $configFile = APP_ROOT . '/config/config.example.php';
 }
+unset($eigeneKonfiguration);
 Config::load($configFile);
 
 date_default_timezone_set((string) Config::get('app.timezone', 'Europe/Berlin'));

@@ -221,14 +221,24 @@ function fremdZeichnen() {
 
 // ------------------------------------------------------------------ Live
 
+// Immer nur eine Abfrage zugleich – wie in live.js: eine langsame InfluxDB
+// soll keinen Stau beim Server erzeugen, hinter dem das Speichern wartet.
+let liveLaeuft = false;
+
 async function liveLaden() {
-    if (document.hidden) { return; }
+    if (document.hidden || liveLaeuft) { return; }
+    liveLaeuft = true;
+    const abbruch = new AbortController();
+    const frist = setTimeout(() => abbruch.abort(), 15000);
     try {
-        const antwort = await fetch(`/karte/${etage}/live`, { headers: { Accept: 'application/json' }, credentials: 'same-origin' });
+        const antwort = await fetch(`/karte/${etage}/live`, { headers: { Accept: 'application/json' }, credentials: 'same-origin', signal: abbruch.signal });
         live = (await antwort.json()).objekte || {};
         liveAnwenden();
         if (auswahl && auswahl.art === 'objekt') { panelLiveSetzen(auswahl.id); }
-    } catch (e) { /* nächster Versuch in 5 Sekunden */ }
+    } catch (e) { /* nächster Versuch in 5 Sekunden */ } finally {
+        clearTimeout(frist);
+        liveLaeuft = false;
+    }
 }
 
 function liveAnwenden() {

@@ -29,6 +29,11 @@ keine Build-Schritte. JS-Bibliotheken liegen fertig unter `public/assets/vendor`
   kein `onclick="…"`, kein `javascript:`. Verhalten über `data-`-Attribute
   in `app.js`; ein unvermeidbares `<script>` bekommt `nonce="<?= View::e(View::nonce()) ?>"`.
   Texte aus Antworten per `textContent`, nie per `innerHTML`.
+- **Nichts hält die Sitzung, während es wartet.** PHP sperrt die
+  Sitzungsdatei für die ganze Anfrage. Endpunkte, die regelmäßig abgefragt
+  werden oder auf InfluxDB, Geräte oder Clouds warten, rufen vorher
+  `Session::freigeben()` (danach nur noch lesen). Abfragen im Browser
+  starten erst, wenn die vorige fertig ist (`live.js`, `karte.js`).
 - **Weiterleitungen** nur auf eigene Pfade: `Response::sichererPfad()`,
   `Response::zurueckZiel()` statt `$_SERVER['HTTP_REFERER']` oder `next`.
 - **Zeiten** werden in UTC gespeichert (ISO 8601) und in der Zeitzone der
@@ -76,10 +81,11 @@ php bin/power demo:seed
 # alle Prüfskripte – vor jedem Commit
 for t in tests/*.php; do php "$t" || break; done
 node tests/nodered-funktionen.mjs
+bash tests/installation-debian.sh   # nur mit Docker – sonst übernimmt das die CI
 
 # Syntax
 find . -name '*.php' -not -path './.git/*' -print0 | xargs -0 -n1 php -l > /dev/null
-bash -n deploy/*.sh && shellcheck -S warning -e SC2016,SC1111 deploy/*.sh
+bash -n deploy/*.sh tests/*.sh && shellcheck -S warning -e SC2016,SC1111 deploy/*.sh tests/*.sh
 ```
 
 | Prüfskript | prüft |
@@ -102,8 +108,10 @@ bash -n deploy/*.sh && shellcheck -S warning -e SC2016,SC1111 deploy/*.sh
 | `tests/bericht-pdf.php` | PDF der Übergabeberichte: eigener Schreiber, Schrift als Teilmenge (Prüfsumme, Glyphen, kein .notdef), Layout mit poppler (A4, Schriften eingebettet, Texte, Tabellenkopf je Seite, keine Bilder, Fuß „Blatt x von y“), zweimal erzeugt gleiche Bytes, Vorschau, ohne Kunde, Korrektur, 300 Kreise (ohne poppler übersprungen) |
 | `tests/eventworx.php` | Eventworx nur lesend: Adresse, Token an den Host gebunden, Pfadliste, Anfragen, Aufbereitung ohne Beträge/Notizen, Fehlerantworten, Nachlesen bei `data:null`, Drossel, Demo, keine Geheimnisse in Log/Audit/Meldungen (Http-Attrappe) |
 | `tests/web.php` | alle Seiten ohne PHP-Meldung, 403/404, CSRF (mit `Accept: application/json` 419/401 als JSON), Schalt-Ablehnung, Weiterleitungen, Sitzung nach Kennwortwechsel, Benutzerverwaltung ohne Administration, Ändern nur mit „bearbeiten“, Übergabeberichte (Seiten, PDF mit Kopfzeilen/Vorschau/gespeicherten Bytes, Autosave 200/409/422/423, Eventworx-Demo, Firma-Karte, Prüfer-Qualifikation, Rechte von Kunde und Planer, Unterschreiben, Kundenmodus-Sperre und Entsperren, ohne Kunde, Korrektur) (eigener PHP-Server) |
+| `tests/sitzung.php` | Sitzungssperre: Live-Endpunkte (Anlage, Dashboard, Karte, Bereiche) geben die Sitzung frei – Speichern und Seiten kommen bei träger InfluxDB durch (eigene Instanz, InfluxDB-Attrappe) |
 | `tests/sicherheit.php` | Rechte vergeben, Anmelde-Bremse ohne Kontoerkennung, Geräte zuordnen, Kanal-Freigaben beim Schalten, Schlüssel aus dem Repository, Line Protocol, CSV, Adressen, keine Umleitung mit Token (curl und Streams), app.key, PDF-Werkzeuge, Bericht-JS ohne HTML aus Daten, Unterschrift ohne Zeit/Druck und als SVG nur Zahlen |
 | `tests/nodered-funktionen.mjs` | Node-RED-Funktionen, `flows.json` passt zu den Quellen |
+| `tests/installation-debian.sh` | `deploy/install-debian.sh` auf frischem Debian 13 mit systemd (Docker): Erstinstallation, zweiter Lauf (Kennwörter, app.key bleiben), Update mit neuem Ordner in `storage/`; Rechte (Code root, `storage/` www-data), Dienste, Anmeldung, Broker, `bin/power pruefen` |
 
 Prüfskripte legen eigene Daten mit eindeutiger Kennung an und löschen sie am
 Ende. Sie wählen Datensätze über Eigenschaften, nie über die kleinste ID.

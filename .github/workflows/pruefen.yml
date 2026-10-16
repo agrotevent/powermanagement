@@ -38,8 +38,8 @@ jobs:
           php -l bin/power > /dev/null
           for f in public/assets/js/*.js; do node --check "$f"; done
           for f in public/assets/js/module/*.js; do node --experimental-default-type=module --check "$f"; done
-          bash -n deploy/*.sh
-          shellcheck -S warning -e SC2016,SC1111 deploy/*.sh
+          bash -n deploy/*.sh tests/*.sh
+          shellcheck -S warning -e SC2016,SC1111 deploy/*.sh tests/*.sh
           node -e 'JSON.parse(require("fs").readFileSync("deploy/node-red/flows.json", "utf8"))'
 
       - name: Einrichten (Demo-Modus)
@@ -57,3 +57,16 @@ jobs:
             echo "::endgroup::"
           done
           node tests/nodered-funktionen.mjs
+
+  # Das Installationsskript einmal wirklich laufen lassen: frisches Debian 13
+  # mit systemd (Docker, wie ein Proxmox-LXC), dann ein zweiter Lauf und ein
+  # Update. Holt Pakete aus Debian, InfluxData und npm.
+  installation:
+    name: Installation (Debian 13)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Installation, zweiter Lauf und Update
+        run: bash tests/installation-debian.sh

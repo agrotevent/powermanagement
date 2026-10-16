@@ -72,10 +72,19 @@ function erreichbar(string $host, int $port): bool
     return true;
 }
 
-/** Einen Kindprozess starten; wird beim Beenden des Skripts gestoppt. */
-function hintergrund(array $befehl): mixed
+/**
+ * Einen Kindprozess starten; wird beim Beenden des Skripts gestoppt.
+ *
+ * $umgebung ergänzt die Umgebung dieses Skripts oder überschreibt einzelne
+ * Werte – etwa POWERMANAGEMENT_CONFIG für eine zweite Instanz oder
+ * PHP_CLI_SERVER_WORKERS, damit der eingebaute Server sich selbst aufrufen kann.
+ *
+ * @param array<string,string>|null $umgebung
+ */
+function hintergrund(array $befehl, ?array $umgebung = null): mixed
 {
-    $p = proc_open($befehl, [1 => ['file', '/dev/null', 'w'], 2 => ['file', '/dev/null', 'w']], $rohre);
+    $p = proc_open($befehl, [1 => ['file', '/dev/null', 'w'], 2 => ['file', '/dev/null', 'w']], $rohre, null,
+        $umgebung === null ? null : $umgebung + getenv());
     register_shutdown_function(static function () use ($p): void {
         if (is_resource($p)) {
             proc_terminate($p);

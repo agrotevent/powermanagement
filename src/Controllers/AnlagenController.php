@@ -17,6 +17,7 @@ use App\Services\SiteService;
 use App\Support\Flash;
 use App\Support\Request;
 use App\Support\Response;
+use App\Support\Session;
 
 final class AnlagenController extends Controller
 {
@@ -243,6 +244,9 @@ final class AnlagenController extends Controller
         if ($objekt === null) {
             return;
         }
+        // Die Seite fragt alle 5 s – wartet die InfluxDB, darf das nicht das
+        // Speichern auf derselben Seite aufhalten.
+        Session::freigeben();
         $this->json(['ts' => time(), 'objekte' => LiveService::fuerObjekte([$objekt])]);
     }
 
