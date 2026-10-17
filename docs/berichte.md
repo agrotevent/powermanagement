@@ -349,10 +349,6 @@ Nach einem Wechsel von `app.key` heißt es „Siegel mit anderem Schlüssel,
 nicht prüfbar“, nicht „verfälscht“. Exitcode 1 bei einem Befund; die Ausgabe
 enthält keine Kundendaten.
 
-PDFs, die vor dem PDF-Siegel (Migration 016) gespeichert wurden, melden
-„Das gespeicherte PDF hat kein Siegel“ – im Demo-Modus legt
-`demo:seed --reset` sie neu an.
-
 `berichte:pdf` schreibt die gespeicherten Bytes eines abgeschlossenen
 Berichts heraus (nie über eine vorhandene Datei) und nennt die Prüfsumme.
 

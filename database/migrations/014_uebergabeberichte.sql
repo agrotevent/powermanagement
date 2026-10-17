@@ -10,6 +10,9 @@
 -- status: entwurf | geprueft | abgeschlossen | ersetzt | verworfen
 -- ewx_*: Verweis auf den Eventworx-Vorgang (Kennung, Nummer, Host); die
 --        übernommenen Kundendaten selbst stehen im inhalt.
+-- standort_entfernt: der Standort des Berichts wurde gelöscht – sichtbar
+--        dann nur noch mit „alle Standorte“, anders als ein Bericht, der nie
+--        einen Standort hatte (den sieht auch sein Ersteller).
 CREATE TABLE berichte (
     id {{PK}},
     nummer VARCHAR(40) NULL,
@@ -24,6 +27,7 @@ CREATE TABLE berichte (
     site_id INT NULL,
     aufbau_id INT NULL,
     standort_name VARCHAR(190) NOT NULL DEFAULT '',
+    standort_entfernt {{BOOL}} NOT NULL DEFAULT 0,
     titel VARCHAR(255) NOT NULL DEFAULT '',
     veranstaltung VARCHAR(255) NOT NULL DEFAULT '',
     kunde_name VARCHAR(255) NOT NULL DEFAULT '',
@@ -53,6 +57,14 @@ CREATE INDEX idx_berichte_site ON berichte (site_id, status)
 CREATE INDEX idx_berichte_aufbau ON berichte (aufbau_id)
 ;--split
 CREATE INDEX idx_berichte_vorgaenger ON berichte (vorgaenger_id)
+;--split
+-- Die höchste je vergebene laufende Nummer eines Jahres: eine Nummer wird
+-- nie wieder vergeben, auch nicht, nachdem ein Bericht nach Ablauf der
+-- Aufbewahrungsfrist gelöscht wurde.
+CREATE TABLE bericht_nummern (
+    jahr INT NOT NULL PRIMARY KEY,
+    laufnr INT NOT NULL
+){{ENGINE}}
 ;--split
 -- Welche Anlagen ein Bericht abdeckt: „Letzte Prüfung“ an Anlage und
 -- Inventar, Querschnitt aus dem letzten Bericht, Aufräumen beim Löschen.
@@ -107,6 +119,11 @@ CREATE INDEX idx_bericht_unterschrift_striche ON bericht_unterschriften (striche
 ;--split
 -- Das übergebene PDF Byte für Byte (base64). In der Datenbank, weil die
 -- Sicherung vor einem Update nur config.php und die Datenbank enthält.
+-- siegel: HMAC über Bericht, Nummer, Fassung, Kette der Kundenzeile und
+-- SHA-256 der Datei, mit demselben aus app.key abgeleiteten Schlüssel wie
+-- die Unterschriften. Ohne den Schlüssel lässt sich ein ausgetauschtes PDF
+-- nicht stimmig nachsiegeln – die Prüfsummen allein stehen nebeneinander in
+-- derselben Datenbank und ließen sich mit austauschen.
 CREATE TABLE bericht_pdf (
     id {{PK}},
     bericht_id INT NOT NULL,
@@ -114,7 +131,9 @@ CREATE TABLE bericht_pdf (
     groesse INT NOT NULL,
     daten {{JSON}} NOT NULL,
     erzeuger VARCHAR(16) NOT NULL,
-    erzeugt_am {{TS}} NOT NULL
+    erzeugt_am {{TS}} NOT NULL,
+    siegel CHAR(64) NOT NULL,
+    schluessel_id VARCHAR(16) NOT NULL
 ){{ENGINE}}
 ;--split
 CREATE UNIQUE INDEX idx_bericht_pdf ON bericht_pdf (bericht_id)
@@ -136,6 +155,21 @@ CREATE TABLE bericht_ereignisse (
 ){{ENGINE}}
 ;--split
 CREATE INDEX idx_bericht_ereignisse ON bericht_ereignisse (bericht_id, id)
+;--split
+-- Kundenmodus am Gerät: ein HttpOnly-Cookie mit Zufallswert, hier nur sein
+-- Hash. Die Sperre überdauert so Ablauf der Sitzung und neue Anmeldung in
+-- diesem Browser – ein im Browser gespeichertes Kennwort entsperrt nichts.
+CREATE TABLE kundenmodus_geraete (
+    id {{PK}},
+    token_hash CHAR(64) NOT NULL,
+    bericht_id INT NOT NULL,
+    user_id INT NOT NULL,
+    seit {{TS}} NOT NULL
+){{ENGINE}}
+;--split
+CREATE UNIQUE INDEX idx_kundenmodus_geraete ON kundenmodus_geraete (token_hash)
+;--split
+CREATE INDEX idx_kundenmodus_geraete_user ON kundenmodus_geraete (user_id, bericht_id)
 ;--split
 -- Prüf- und Messgeräte der Firma (Installationstester, Erdungsmesser) –
 -- nicht die Messgeräte (Shellys) im Inventar.
