@@ -217,8 +217,8 @@ Hand in der Shelly-App oder der Weboberfläche des Geräts:
   einrichten (Kanal `voltmeter:100`). Als *Analog-Eingang* meldet er
   Prozent (`input:100`). Beim Gen1 Uni heißt der Kanal `adc:0`.
 - **MQTT:** *Generic status update over MQTT* einschalten (Gen2+).
-- **Meldeschwelle** `report_thr` klein stellen: Voltmeter 0,05 V,
-  Analog-Eingang 1 %.
+- **Meldeschwelle** `report_thr` so klein, wie das Gerät erlaubt:
+  Voltmeter 0,02–0,05 V, Analog-Eingang 1 %.
 - **ECO-Modus aus**, sonst springt der Wert.
 
 **Melderhythmus:** Ein Gen2+-Shelly meldet nur, wenn sich der Wert um mehr
@@ -228,28 +228,48 @@ Alter; „stumm“ gilt erst ohne Lebenszeichen des Geräts (`online`).
 
 ### 4–20-mA-Sonde am Plus Uni
 
-- **Verdrahtung:** eine 24-V-DC-Versorgung für Plus Uni, Wandler und
-  Stromschleife, Masse gemeinsam. Die Sonde liegt in Reihe in der Schleife,
-  der Ausgang des Wandlers („0/4–20 mA → 0–10 V“) am Analogeingang.
-- **Wandler auf 0–20 mA → 0–10 V stellen:** 0 mA = 0 V, 4 mA = 2,00 V,
-  20 mA = 10 V. Ein Leitungsbruch (0 mA) ergibt dann 0 V und fällt unter
-  4 mA auf – die App meldet ihn als Sensorfehler. Im Modus
-  „4–20 mA → 0–10 V“ gäbe der Wandler bei 4 mA *und* bei Leitungsbruch 0 V
-  aus: **Leitungsbruch wird so nicht erkannt – der Tank zeigt dann leer.**
-  Mit 3,3 V bzw. 5 V Endwert liegen 4 mA bei 0,66 V bzw. 1,0 V.
-- **Abgleich:** Die Steigung der Kennlinie folgt aus Wandler und
-  Messbereich der Sonde; eine Peilung mit dem Peilstab setzt in der App nur
-  den Anker. Deshalb den Wandler mit dem Multimeter in der Schleife prüfen,
-  bei 10 V Endwert U = I · 0,5 V/mA (z. B. 4,02 mA → 2,01 V). Die Sonde an
-  der Luft liefert etwa 4,0 mA, also 2,00 V.
-- **Ohne Wandler:** Präzisionswiderstand 499 Ω / 0,1 % als Bürde am
-  Analogeingang (2–10 V). Die Spannung reicht: 24 V − 10 V am Widerstand
-  lassen 14 V für die Sonde. Am Plus Add-on (0–10 V) 470 Ω.
-- **Sonde:** Messbereich passend zur Tankhöhe wählen. 0–2 mWS reichen für
-  etwa 2,4 m Diesel; ein voller QUADRO-AG steht bei etwa 1,25 mWS, 0–1 mWS
-  reicht dort nicht. Für Diesel müssen Membran und Kabelmantel
-  dieselbeständig sein (etwa PUR- oder FEP-Kabel, FKM-Dichtung) – viele
-  „Wasserstandssensoren“ haben PVC-Kabel, Datenblatt prüfen.
+- **Versorgung:** ein eigenes 24-V-SELV-Netzteil, fest auf 24,0 V – nie die
+  Starterbatterie oder das Bordnetz des Generators. Der Plus Uni verträgt
+  9–28 V DC (8–24 V AC, 5 V stabilisiert; die 12–36 V gelten für den
+  alten Gen1 Uni). Bei DC: + an VAC1, − an **GND** (Masse der Sensoren),
+  VAC2 frei. Bürde bzw. Masse des Wandlers an dieselbe GND-Klemme. Die
+  Sonde liegt in Reihe in der Stromschleife.
+- **Mit Bürde (der einfachere Weg):** 499 Ω (oder 2 × 1 kΩ parallel),
+  Metallschicht ≤ 25 ppm/K, vom Analogeingang nach GND: 4 mA ≈ 2,0 V,
+  20 mA ≈ 10 V. Für einen Kurzschluss der Sondenleitung auslegen
+  (24 V / 499 Ω = 48 mA, 1,15 W – also ≥ 2 W) oder die Schleife begrenzen.
+  In der App: Signal „4–20 mA (an einer Bürde)“, Bürde 499 Ω. Am Plus
+  Add-on (0–10 V) 470 Ω.
+- **Mit Wandler „0/4–20 mA → 0–10 V“:** auf **0–20 mA → 0–10 V**
+  abgleichen – ZERO bei 4,00 mA auf 2,00 V, SPAN bei 20,00 mA auf 10,00 V.
+  Dafür braucht es eine Stromquelle, die Sonde liefert 20 mA nie.
+  Steckbrücken nach dem Aufdruck der eigenen Platine setzen, danach prüfen:
+  0 mA unter 1,8 V, 21 mA ≈ 10,5 V. Trimmer sichern und nach jedem
+  Transport den Wert bei 4 mA prüfen; das Modul braucht 7–36 V. Im Modus
+  „4–20 mA → 0–10 V“ (4 mA = 0 V) ergäbe ein Leitungsbruch ebenfalls 0 V:
+  **Leitungsbruch wird so nicht erkannt – der Tank zeigt dann leer.** In
+  der App: Signal „4–20 mA über Spannungswandler“, Vorgabe 2,0 V bei 4 mA
+  und 10,0 V bei 20 mA (bei 3,3 V bzw. 5 V Endwert 0,66 / 1,0 V).
+- **Spannung bei 4 und 20 mA** so eintragen, wie der Shelly sie meldet –
+  nicht ausrechnen. Der Eingang des Shelly ist vermutlich ungenauer als
+  die Sonde: Voltmeter im Messbereich 0 (0–15 V) lassen und nie
+  umschalten, den Uni in den Schatten (Umgebung höchstens 40 °C).
+- **Kalibrieren:** Eine Peilung mit dem Peilstab setzt nur den Anker, die
+  Steigung bleibt. Zwei Peilungen im selben Einbau mit mindestens 300 mm
+  Höhenunterschied (etwa vor und nach dem Betanken) können auch die
+  Steigung setzen; weicht sie um mehr als 15 % von den Sensordaten ab,
+  warnt die App („Messbereich, Dichte oder Wandler prüfen“).
+- **Spannung an der Sonde:** Ob 24 V minus 10 V an der Bürde reichen, ist
+  nicht belegt – die Klemmenspannung der Sonde bei hohem Strom messen.
+- **Sonde:** Messbereich passend zur Tankhöhe. Ein voller QUADRO-AG steht
+  nach den Außenmaßen nur etwa 1,1 m hoch (≈ 0,9 mWS): 0–2 mWS ist die
+  sichere Wahl, 0–1 mWS (doppelt so genau) nur, wenn die gemessene volle
+  Füllhöhe unter 1,15 m liegt. Nutzt eine Sonde weniger als 40 % ihres
+  Messbereichs, sagt die App das – eine 0–5-mWS-Sonde im 1,55 m hohen Tank
+  nutzt etwa 26 %, 0,5 % vom Messbereich sind dort ≈ 30 mm Diesel. Für
+  Diesel müssen Membran und Kabelmantel dieselbeständig sein (etwa PUR-
+  oder FEP-Kabel, FKM-Dichtung) – viele „Wasserstandssensoren“ haben
+  PVC-Kabel, Datenblatt prüfen.
 
 Die App warnt nur. Grenzwertgeber und Leckanzeiger am Tank bleiben Pflicht.
 

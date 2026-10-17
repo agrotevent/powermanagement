@@ -44,11 +44,19 @@ final class Messdaten
         'oeldruck_bar'    => ['Öldruck', 'bar'],
         'kuehlmittel_c'   => ['Kühlmittel', '°C'],
         'tank_prozent'    => ['Tank', '%'],
+        'tank_liter'      => ['Tankinhalt', 'l'],
         'u_batterie'      => ['Starterbatterie', 'V'],
         'betriebsstunden' => ['Betriebsstunden', 'h'],
         'starts'          => ['Starts', ''],
         'online'          => ['online', ''],
         'restlaufzeit_s'  => ['Restlaufzeit', 's'],
+        // Rohwerte der Tanksensoren (Liter rechnet App\Tanks\TankRechnung)
+        'eingang'         => ['Eingang', '%'],
+        'x'               => ['Wert laut Gerät', ''],
+        'sensorfehler'    => ['Sensorfehler', ''],
+        'i_ma'            => ['Strom', 'mA'],
+        'abstand_mm'      => ['Abstand', 'mm'],
+        'fuellhoehe_mm'   => ['Füllhöhe', 'mm'],
     ];
 
     private static function demo(): bool

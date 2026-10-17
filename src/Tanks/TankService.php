@@ -7,7 +7,6 @@ use App\Auth\Auth;
 use App\Auth\Zugriff;
 use App\Services\AnlagenService;
 use App\Services\PlanGeoService;
-use App\Support\View;
 
 /**
  * Tanks: Anlagen der Art „tank“.
@@ -57,9 +56,7 @@ final class TankService
     /** Eine Zahl mit Tausenderpunkt und nur so vielen Stellen, wie sie hat: „3.000“, „2,78“. */
     public static function zahl(float $wert): string
     {
-        $text = View::zahlFeld($wert);
-        $komma = strpos($text, ',');
-        return number_format($wert, $komma === false ? 0 : strlen($text) - $komma - 1, ',', '.');
+        return TankRechnung::zahl($wert);
     }
 
     /** Die Beschriftung eines Felds ohne den Hinweis fürs Formular: „Füllgrenze (leer = 95 %)“ → „Füllgrenze“. */
