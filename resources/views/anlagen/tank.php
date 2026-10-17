@@ -12,11 +12,17 @@
  * @var array<string,list<array{beschriftung:string,wert:string,einheit:string}>> $gruppen
  * @var ?array{lat:float,lon:float} $lage
  * @var bool $darfAendern
+ * @var ?array<string,mixed> $sensor laufender Tanksensor (nur für wer bearbeiten darf)
+ * @var ?array<string,mixed> $fassung die jetzt geltende Kennlinie
+ * @var list<string> $hinweise
+ * @var list<array<string,mixed>> $sensorFrei Tanksensoren, die sich hier einbauen ließen
  */
 use App\Services\AnlagenService;
 use App\Services\PlanGeoService;
 use App\Support\Csrf;
 use App\Support\View;
+use App\Support\Zeit;
+use App\Tanks\TankService;
 
 $id = (int) $objekt['id'];
 $art = AnlagenService::ARTEN[$objekt['art']];
@@ -64,6 +70,59 @@ $subtitle = ($vorlage ? $art['name'] . '-Typ im Katalog' . ((int) $objekt['fest'
         </div>
     </div>
     <div>
+        <?php if (!$vorlage && $darfAendern): ?>
+            <?php $einbau = (array) ($fassung['rechnung']['herkunft']['einbau'] ?? []); ?>
+            <div class="card">
+                <div class="card-head"><h2>Tanksensor</h2><span class="hint">misst den Füllstand</span></div>
+                <div class="card-body">
+                    <?php if ($sensor === null): ?>
+                        <p class="small muted">Kein Tanksensor eingebaut.</p>
+                    <?php else: ?>
+                        <p><strong><?= View::can('datenquellen.view') && $sensor['inventar_id'] !== null
+                            ? '<a href="/inventar/' . (int) $sensor['inventar_id'] . '">' . View::e((string) $sensor['kennung']) . '</a>'
+                            : View::e((string) ($sensor['kennung'] ?? $sensor['bezeichnung'])) ?></strong>
+                            <span class="small"><?= View::e($sensor['sensor_kurz']) ?></span></p>
+                        <dl class="kv small">
+                            <dt>Messkanal</dt><dd class="mono"><?= View::e($sensor['geraet'] . ' · ' . $sensor['kanal']) ?></dd>
+                            <dt>Eingebaut</dt><dd><?= View::e(Zeit::anzeige((string) $sensor['gueltig_ab'], 'd.m.Y H:i')) ?></dd>
+                            <?php if (isset($einbau['offset_mm'])): ?><dt>Über dem Boden</dt><dd><?= View::e(TankService::zahl((float) $einbau['offset_mm'])) ?> mm</dd><?php endif; ?>
+                            <?php if (isset($einbau['d_leer_mm'])): ?><dt>Sensorfläche</dt><dd><?= View::e(TankService::zahl((float) $einbau['d_leer_mm'])) ?> mm über dem Boden</dd><?php endif; ?>
+                            <dt>Kennlinie</dt><dd><?= View::e($fassung === null ? 'keine – nur Rohwert'
+                                : (TankService::ANLAESSE[$fassung['anlass']] ?? $fassung['anlass']) . ' ' . Zeit::anzeige($fassung['ab'], 'd.m.Y H:i')
+                                . ($fassung['geprueft'] ? ' · geprüft' : ($fassung['anlass'] === 'einsatz' ? ' · seit Einbau nicht gepeilt' : ' · ungeprüft – bitte peilen'))) ?></dd>
+                        </dl>
+                        <?php foreach ($hinweise as $h): ?><div class="notice warn mt small"><?= View::e($h) ?></div><?php endforeach; ?>
+                        <?php if ($sensor['einsatz_id'] !== null): ?>
+                            <form method="post" action="/einsatz/<?= (int) $sensor['einsatz_id'] ?>/beenden" class="mt" data-confirm="<?= View::e((string) $sensor['kennung']) ?> ausbauen? Der Sensor misst dann nicht mehr hier.">
+                                <?= Csrf::field() ?><button class="btn btn-sm" type="submit">Ausbauen</button></form>
+                        <?php endif; ?>
+                    <?php endif; ?>
+                    <?php if ($sensorFrei !== []): ?>
+                        <form method="post" action="/anlagen/<?= $id ?>/einsetzen" class="mt">
+                            <?= Csrf::field() ?>
+                            <div class="field"><label for="ts_inventar"><?= $sensor === null ? 'Tanksensor einbauen' : 'Anderen Tanksensor einbauen' ?></label>
+                                <select id="ts_inventar" name="inventar_id" required>
+                                    <option value="">– Sensor wählen –</option>
+                                    <?php foreach ($sensorFrei as $i): ?>
+                                        <option value="<?= (int) $i['id'] ?>"><?= View::e($i['kennung'] . ' – ' . $i['typ']
+                                            . ($i['einsatz'] !== null ? ' (jetzt: ' . ($i['einsatz']['anlage_name'] ?? $i['einsatz']['objekt_name']) . ')' : '')) ?></option>
+                                    <?php endforeach; ?>
+                                </select></div>
+                            <div class="field-row">
+                                <div class="field"><label for="ts_offset">Sondenspitze über dem Boden (mm)</label>
+                                    <input id="ts_offset" name="einbau[offset_mm]" inputmode="decimal" placeholder="20"></div>
+                                <div class="field"><label for="ts_dleer">Ultraschall: Sensorfläche über dem Boden (mm)</label>
+                                    <input id="ts_dleer" name="einbau[d_leer_mm]" inputmode="decimal" placeholder="nur Ultraschall"></div>
+                            </div>
+                            <button class="btn btn-primary btn-sm" type="submit">Einbauen</button>
+                            <p class="help">Ab jetzt misst der Sensor hier; ein Sensor, der schon im Tank steckt, wird ersetzt. Danach peilen – die Einbautiefe ändert sich mit jedem Einbau.</p>
+                        </form>
+                    <?php elseif ($sensor === null): ?>
+                        <p class="small muted">Kein freier Tanksensor im Inventar<?= View::can('inventar.manage') ? ' – <a href="/inventar/neu?art=tanksensor">Tanksensor anlegen</a>' : '' ?>.</p>
+                    <?php endif; ?>
+                </div>
+            </div>
+        <?php endif; ?>
         <?php if ($darfAendern): ?>
             <div class="card">
                 <div class="card-head"><h2>Aktionen</h2></div>

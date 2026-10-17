@@ -329,8 +329,12 @@ final class KarteController extends Controller
                 'passend' => $i['art'] === 'verteilung' && trim((string) $i['vorlage_modell']) === trim((string) $objekt['modell']),
                 'woanders' => $i['einsatz'] !== null ? (string) ($i['einsatz']['anlage_name'] ?? $i['einsatz']['objekt_name']) : null,
             ], array_filter(InventarService::fuerBetrachter(InventarService::liste()), static fn ($i) => $i['zustand'] !== 'defekt' && (int) ($i['einsatz']['objekt_id'] ?? 0) !== $id
-                // Zwischenstecker an jede elektrische Anlage, Verteiler nur in eine Verteilung – in einen Tank keins von beiden.
-                && ($i['art'] === 'zwischenstecker' ? AnlagenService::elektrisch((string) $objekt['art']) : $objekt['art'] === 'verteilung')))) : [],
+                // Zwischenstecker an jede elektrische Anlage, Verteiler nur in eine Verteilung, Tanksensoren nur in einen Tank.
+                && match ($i['art']) {
+                    'zwischenstecker' => AnlagenService::elektrisch((string) $objekt['art']),
+                    'tanksensor'      => $objekt['art'] === 'tank',
+                    default           => $objekt['art'] === 'verteilung',
+                }))) : [],
         ]);
     }
 

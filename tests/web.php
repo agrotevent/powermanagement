@@ -184,7 +184,8 @@ try {
         $seiten[] = '/karte?etage=' . $etage . '&modus=aufbau';
     }
     // Inventar: Liste, Formulare, jedes Stück
-    array_push($seiten, '/inventar', '/inventar?art=zwischenstecker', '/inventar?suche=PD', '/inventar/neu?art=verteilung', '/inventar/neu?art=zwischenstecker');
+    array_push($seiten, '/inventar', '/inventar?art=zwischenstecker', '/inventar?art=tanksensor', '/inventar?suche=PD', '/inventar/neu?art=verteilung',
+        '/inventar/neu?art=zwischenstecker', '/inventar/neu?art=tanksensor');
     foreach (array_map('intval', array_column(Database::select('SELECT id FROM inventar ORDER BY id LIMIT 10'), 'id')) as $id) {
         array_push($seiten, '/inventar/' . $id, '/inventar/' . $id . '/bearbeiten');
     }
@@ -295,6 +296,44 @@ try {
         $siteTank = (int) Database::scalar('SELECT site_id FROM objekte WHERE id = ?', [$tankId]);
         $bereichForm = aufruf($basis, $admin['dose'], 'GET', '/bereiche/neu?standort=' . $siteTank)['text'];
         pruefe(str_contains($bereichForm, htmlspecialchars($kennung . '-mobil')) && !str_contains($bereichForm, htmlspecialchars($kennung . '-tank')), 'Bereich: Tank nicht wählbar');
+
+        // Tanksensor: über das Formular anlegen, in den Tank einbauen (mit Einbaumaß), ausbauen
+        $neuTs = aufruf($basis, $admin['dose'], 'GET', '/inventar/neu?art=tanksensor');
+        pruefe($neuTs['status'] === 200 && phpMeldung($neuTs['text']) === null && str_contains($neuTs['text'], 'Neuer Tanksensor')
+            && str_contains($neuTs['text'], 'name="eigenschaften[prinzip]"') && str_contains($neuTs['text'], 'value="4-20mA-wandler" selected')
+            && !str_contains($neuTs['text'], 'name="steckertyp_id"') && !str_contains($neuTs['text'], 'data-zeile-dazu'),
+            'Formular „Neuer Tanksensor“: Sensordaten mit Vorgabe Wandler, ohne Stecker und ohne weitere Shellys');
+        $r = aufruf($basis, $admin['dose'], 'POST', '/inventar/speichern', ['id' => '', 'art' => 'tanksensor', 'kennung' => $kennung . '-TS',
+            'geraet[]' => $kennung . '-uni', 'kanal[]' => 'voltmeter:100', 'stelle[]' => 'fuellstand', 'bezeichnung[]' => '',
+            'eigenschaften' => ['prinzip' => 'hydrostatisch', 'feld' => 'u', 'signal' => '4-20mA-wandler', 'u_bei_4ma' => '2,0', 'u_bei_20ma' => '10',
+                'bereich_von' => '0', 'bereich_bis' => '2', 'bereich_einheit' => 'mWS', 'schritt_roh' => ''], '_token' => $admin['token']]);
+        $ts = (int) Database::scalar('SELECT id FROM inventar WHERE kennung = ?', [$kennung . '-TS']);
+        pruefe($r['status'] === 302 && $r['ziel'] === '/inventar/' . $ts, 'Tanksensor per Formular angelegt → ' . $r['ziel']);
+        foreach (['/inventar/' . $ts => 'Hydrostatisch 0–2 mWS', '/inventar?art=tanksensor' => 'Hydrostatisch 0–2 mWS', '/inventar/' . $ts . '/bearbeiten' => 'value="mWS" selected'] as $pfad => $text) {
+            $r = aufruf($basis, $admin['dose'], 'GET', $pfad);
+            pruefe($r['status'] === 200 && phpMeldung($r['text']) === null && str_contains($r['text'], $text), 'Admin ' . $pfad . ' → ' . $r['status'] . ' mit „' . $text . '“');
+        }
+        $karteTank = json_decode(aufruf($basis, $admin['dose'], 'GET', '/karte/objekt/' . $tankId)['text'], true);
+        $karteMobil = json_decode(aufruf($basis, $admin['dose'], 'GET', '/karte/objekt/' . (int) ($mobil['id'] ?? 0))['text'], true);
+        pruefe(in_array($ts, array_column($karteTank['inventar_frei'] ?? [], 'id'), true) && array_diff(array_column($karteTank['inventar_frei'] ?? [], 'art'), ['tanksensor']) === []
+            && !in_array($ts, array_column($karteMobil['inventar_frei'] ?? [], 'id'), true), 'Karte: am Tank nur Tanksensoren zum Einsetzen, an der Verteilung keine');
+        $verteilerSeite = aufruf($basis, $admin['dose'], 'GET', '/anlagen/' . (int) ($mobil['id'] ?? 0) . '?reiter=messung')['text'];
+        pruefe(!str_contains($verteilerSeite, $kennung . '-TS'), 'Verteilung bietet keinen Tanksensor zum Einsetzen an');
+        $seite = aufruf($basis, $admin['dose'], 'GET', '/anlagen/' . $tankId)['text'];
+        pruefe(str_contains($seite, 'Tanksensor einbauen') && str_contains($seite, $kennung . '-TS') && str_contains($seite, 'name="einbau[offset_mm]"'), 'Tankseite: Tanksensor einbauen');
+        $r = aufruf($basis, $admin['dose'], 'POST', '/anlagen/' . $tankId . '/einsetzen', ['inventar_id' => $ts, 'einbau' => ['offset_mm' => '25'], '_token' => $admin['token']]);
+        $mpTs = Database::first("SELECT * FROM messpunkte WHERE objekt_id = ? AND rolle = 'fuellstand' AND gueltig_bis IS NULL", [$tankId]);
+        $fTs = $mpTs !== null ? json_decode((string) Database::scalar('SELECT rechnung FROM tank_kennlinien WHERE messpunkt_id = ? ORDER BY id DESC LIMIT 1', [(int) $mpTs['id']]), true) : null;
+        pruefe($r['status'] === 302 && ($mpTs['geraet'] ?? '') === $kennung . '-uni' && ($fTs['herkunft']['einbau']['offset_mm'] ?? null) == 25,
+            'Tanksensor über das Formular eingebaut, Einbaumaß in der Kennlinie');
+        $seite = aufruf($basis, $admin['dose'], 'GET', '/anlagen/' . $tankId);
+        pruefe($seite['status'] === 200 && phpMeldung($seite['text']) === null && str_contains($seite['text'], 'seit Einbau nicht gepeilt') && str_contains($seite['text'], 'Ausbauen'),
+            'Tankseite: eingebauter Sensor, ungeprüft, mit „Ausbauen“');
+        $r = aufruf($basis, $admin['dose'], 'POST', '/anlagen/' . $tankId . '/messpunkt', ['geraet' => $kennung . '-hand', 'kanal' => 'voltmeter:100', '_token' => $admin['token']], $json);
+        pruefe(Database::scalar('SELECT id FROM messpunkte WHERE geraet = ?', [$kennung . '-hand']) === false, 'kein Messpunkt von Hand am Tank (' . $r['status'] . ')');
+        $r = aufruf($basis, $admin['dose'], 'POST', '/einsatz/' . (int) ($mpTs['einsatz_id'] ?? 0) . '/beenden', ['_token' => $admin['token']]);
+        pruefe($r['status'] === 302 && Database::scalar("SELECT id FROM messpunkte WHERE objekt_id = ? AND rolle = 'fuellstand' AND gueltig_bis IS NULL", [$tankId]) === false,
+            'Tanksensor ausgebaut');
     }
 
     // Georeferenz: GeoJSON, Koordinaten im Anlagenfenster, Speichern prüft

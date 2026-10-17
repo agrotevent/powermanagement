@@ -228,7 +228,9 @@ final class AnlagenController extends Controller
             'kennzahlen'   => $kennzahlen,
             'einsaetze'    => (int) $objekt['ist_vorlage'] === 1 ? [] : InventarService::einsaetzeAnObjekt($id, true),
             'inventar'     => (int) $objekt['ist_vorlage'] === 0 && Zugriff::darfBearbeiten($objekt) && Auth::can('datenquellen.view')
-                ? array_values(array_filter(InventarService::fuerBetrachter(InventarService::liste()), static fn ($i) => $i['zustand'] !== 'defekt' && (int) ($i['einsatz']['objekt_id'] ?? 0) !== $id))
+                // Ein Tanksensor gehört in einen Tank – hier stehen nur Verteiler und Zwischenstecker zur Wahl.
+                ? array_values(array_filter(InventarService::fuerBetrachter(InventarService::liste()), static fn ($i) => $i['zustand'] !== 'defekt'
+                    && $i['art'] !== 'tanksensor' && (int) ($i['einsatz']['objekt_id'] ?? 0) !== $id))
                 : [],
             'auswertung'   => MesspunktService::auswertung(),
             'reiter'       => $request->str('reiter', 'uebersicht'),

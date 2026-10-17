@@ -87,6 +87,11 @@ final class LiveService
             $erg['hinweis'] = 'kein Messgerät zugeordnet';
             return $erg;
         }
+        // Ein Tank hat keine Leistung – im Tank misst ein Tanksensor den Füllstand.
+        if (!AnlagenService::elektrisch((string) $objekt['art'])) {
+            $erg['hinweis'] = 'Tanksensor eingebaut';
+            return $erg;
+        }
         if (!Zugriff::liveErlaubt(Zugriff::datenFenster($objekt))) {
             $erg['stufe'] = 'gesperrt';
             $erg['hinweis'] = 'Livewerte außerhalb des freigegebenen Zeitraums';

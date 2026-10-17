@@ -12,10 +12,11 @@ use App\Support\Database;
 use App\Support\Flash;
 use App\Support\Request;
 use App\Support\Response;
+use App\Tanks\TankRechnung;
 
 /**
- * Inventar: Verteiler und Zwischenstecker mit ihren Shellys – anlegen im
- * Vorfeld, einsetzen beim Aufbau, abbauen danach.
+ * Inventar: Verteiler, Zwischenstecker und Tanksensoren mit ihren Shellys –
+ * anlegen im Vorfeld, einsetzen beim Aufbau, abbauen danach.
  *
  * Ansehen darf, wer Datenquellen sehen darf (Planung, Technik); pflegen,
  * wer „Inventar pflegen“ hat. Einsetzen und Abbauen gehören zur Anlage:
@@ -61,8 +62,11 @@ final class InventarController extends Controller
     public function neu(Request $request): void
     {
         $art = isset(InventarService::ARTEN[$request->str('art')]) ? $request->str('art') : 'verteilung';
+        // Ein neuer Tanksensor beginnt mit der üblichen Sonde: hydrostatisch,
+        // 4–20 mA über einen Wandler 2–10 V. Den Messbereich trägt man ein –
+        // er steht auf der Sonde.
         $this->formular(['id' => 0, 'art' => $art, 'kennung' => '', 'name' => '', 'vorlage_id' => null, 'steckertyp_id' => null,
-            'seriennummer' => '', 'defekt' => 0, 'notizen' => ''], []);
+            'seriennummer' => '', 'defekt' => 0, 'notizen' => '', 'eigenschaften' => $art === 'tanksensor' ? TankRechnung::SENSOR_VORGABE : []], []);
     }
 
     public function bearbeiten(Request $request, array $params): void
@@ -121,6 +125,7 @@ final class InventarController extends Controller
             'vorlage_id' => $request->int('vorlage_id'), 'steckertyp_id' => $request->int('steckertyp_id'),
             'seriennummer' => $request->str('seriennummer'), 'defekt' => $request->bool('defekt'), 'notizen' => $request->str('notizen'),
             'messgeraete' => $zeilen,
+            'eigenschaften' => is_array($_POST['eigenschaften'] ?? null) ? $_POST['eigenschaften'] : [],
         ]);
         if (!$ergebnis['ok']) {
             Flash::error($ergebnis['message']);
@@ -155,8 +160,10 @@ final class InventarController extends Controller
             return;
         }
         $anschluss = $request->int('anschluss_id');
+        // Tanksensor: wie hoch über dem Boden die Sonde bzw. die Sensorfläche sitzt.
+        $einbau = is_array($_POST['einbau'] ?? null) ? $_POST['einbau'] : [];
         $ergebnis = InventarService::einsetzen($request->int('inventar_id'), (int) $objekt['id'], $anschluss > 0 ? $anschluss : null,
-            $request->input('typ_uebernehmen') === null || $request->bool('typ_uebernehmen'));
+            $request->input('typ_uebernehmen') === null || $request->bool('typ_uebernehmen'), $einbau);
         $this->antwort($request, $ergebnis, '/anlagen/' . (int) $objekt['id'] . '?reiter=messung');
     }
 

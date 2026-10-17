@@ -15,6 +15,13 @@ declare(strict_types=1);
  * Fassungen, Abschnitte der Fassungen, Peilung (auch zwei mit dem
  * Peilstab), Betankung und ihr Sprung, Verbrauch je Last, Stufen. Dazu
  * Migration 018 und die Beschriftungen der Rohwerte.
+ *
+ * C – Tanksensor im Inventar: Sensordaten und genau ein Messkanal, Einbau nur
+ * in einen Tank (Messpunkt „Füllstand“, erste Fassung ab Einbau, ungeprüft),
+ * ein neuer ersetzt den alten, Abbau, Wiedereinsatz woanders; neue Fassungen
+ * bei Shelly-Tausch, geänderten Sensordaten und Tankdaten (sonst keine);
+ * ältere Fassungen bleiben unverändert; Messpunkte am Tank nur aus dem
+ * Inventar; Löschen von Messpunkt und Tank räumt Fassungen und Ereignisse weg.
  */
 
 require __DIR__ . '/hilfen/pruefung.php';
@@ -30,9 +37,11 @@ use App\Services\InventarService;
 use App\Services\LeitungService;
 use App\Services\LiveService;
 use App\Services\LocationBundle;
+use App\Services\MesspunktService;
 use App\Services\SchutzService;
 use App\Services\SiteService;
 use App\Support\Database;
+use App\Support\Zeit;
 use App\Tanks\TankRechnung;
 use App\Tanks\TankService;
 
@@ -593,5 +602,252 @@ foreach (array_keys(TankRechnung::ROHFELDER) as $feld) {
 }
 gleich([Messdaten::feldName('sensorfehler'), Messdaten::einheit('i_ma'), Messdaten::feldName('tank_liter'), Messdaten::einheit('tank_liter'), Messdaten::einheit('x')],
     ['Sensorfehler', 'mA', 'Tankinhalt', 'l', ''], 'Zustandsfelder der Tanksensoren');
+
+// ------------------------------------------------ C – Tanksensor im Inventar, Einbau und Fassungen
+$kennungC = 'pm-tank-' . bin2hex(random_bytes(3));
+$siteC = SiteService::saveSite(null, ['name' => 'Prüfung Tanksensoren ' . $kennungC]);
+$floorC = SiteService::saveFloor(null, ['site_id' => $siteC, 'name' => 'Wiese']);
+$benutzerC = BenutzerService::anlegen($kennungC, 'Pruefung2026!!', 'admin', false);
+$tsDaten = ['prinzip' => 'hydrostatisch', 'feld' => 'u', 'signal' => '4-20mA', 'buerde_ohm' => '500', 'bereich_von' => '0', 'bereich_bis' => '100',
+    'bereich_einheit' => 'mbar', 'schritt_roh' => '0,1'];
+$fassungenVon = static fn (int $objekt): array => Database::select('SELECT id, messpunkt_id, ab, rechnung, anlass, geprueft FROM tank_kennlinien WHERE objekt_id = ? ORDER BY id', [$objekt]);
+$laufend = static fn (int $objekt): array => Database::select("SELECT * FROM messpunkte WHERE objekt_id = ? AND rolle = 'fuellstand' AND gueltig_bis IS NULL ORDER BY id", [$objekt]);
+
+try {
+    alsBenutzer($benutzerC);
+    $tankC = static function (string $name, array $eig) use ($floorC): int {
+        return (int) AnlagenService::speichern(null, ['art' => 'tank', 'name' => $name, 'floor_id' => $floorC, 'plan_x' => 20.0, 'plan_y' => 20.0, 'eigenschaften' => $eig])['id'];
+    };
+    $tankA = $tankC($kennungC . ' Tank A', ['inhalt_l' => '3000', 'kraftstoff' => 'Diesel', 'bauform' => 'Quader', 'liter_je_mm' => '2,78', 'sumpf_l' => '140']);
+    $tankB = $tankC($kennungC . ' Tank B', ['inhalt_l' => '1000', 'kraftstoff' => 'Diesel']);
+    $vtC = (int) AnlagenService::speichern(null, ['art' => 'verteilung', 'name' => $kennungC . ' Verteilung', 'floor_id' => $floorC])['id'];
+    $sensor = static fn (string $nr, array $daten = [], ?array $kanaele = null) => InventarService::speichern(null, [
+        'art' => 'tanksensor', 'kennung' => $kennungC . '-' . $nr, 'eigenschaften' => $daten,
+        'messgeraete' => $kanaele ?? [['geraet' => $kennungC . '-uni-' . $nr, 'kanal' => 'voltmeter:100', 'stelle' => 'einspeisung']],
+    ]);
+
+    // ------------------------------------------------ Speichern
+    $e = $sensor('TS1', $tsDaten);
+    pruefe($e['ok'], 'Tanksensor ohne Typ und Stecker gespeichert: ' . $e['message']);
+    $ts1 = (int) ($e['id'] ?? 0);
+    $item = InventarService::find($ts1);
+    gleich([$item['art_name'], $item['typ'], $item['vorlage_id'], $item['steckertyp_id']], ['Tanksensor', 'Hydrostatisch 0–100 mbar, 4–20 mA an 500 Ω', null, null],
+        'Art und Typ aus den Sensordaten');
+    gleich($item['eigenschaften'], TankRechnung::sensorNormal($tsDaten), 'Sensordaten normalisiert gespeichert');
+    $roh = (string) Database::scalar('SELECT eigenschaften FROM inventar WHERE id = ?', [$ts1]);
+    pruefe(str_contains($roh, '"buerde_ohm":500.0') && str_contains($roh, '"schritt_roh":0.1') && str_contains($roh, '"u_bei_4ma":null'), 'Sensordaten als JSON mit Floats: ' . $roh);
+    gleich(array_column(InventarService::messgeraete($ts1), 'stelle'), ['fuellstand'], 'der Messkanal sitzt am Füllstand, was das Formular auch sagt');
+    gleich(InventarService::stellen($item), ['fuellstand' => 'Füllstand'], 'Stellen eines Tanksensors');
+    pruefe(in_array($ts1, array_column(InventarService::liste(['art' => 'tanksensor']), 'id'), true), 'Liste nach Art');
+    $e = $sensor('TS9', $tsDaten, [['geraet' => $kennungC . '-a', 'kanal' => 'voltmeter:100'], ['geraet' => $kennungC . '-a', 'kanal' => 'voltmeter:101']]);
+    gleich([$e['ok'], $e['message']], [false, 'Ein Tanksensor hat genau einen Messkanal.'], 'zwei Messkanäle abgelehnt');
+    $e = $sensor('TS9', $tsDaten, []);
+    gleich([$e['ok'], $e['message']], [false, 'Ein Tanksensor hat genau einen Messkanal.'], 'ohne Messkanal abgelehnt');
+    $e = $sensor('TS9', ['buerde_ohm' => ''] + $tsDaten);
+    pruefe(!$e['ok'] && $e['message'] === TankRechnung::sensorPruefen(['buerde_ohm' => ''] + $tsDaten), 'ungültige Sensordaten: Meldung aus sensorPruefen – ' . $e['message']);
+    $e = $sensor('TS9', ['prinzip' => ['hydrostatisch'], 'bereich_bis' => ['x' => 1]] + $tsDaten);
+    pruefe(!$e['ok'] && $e['message'] === 'Bitte das Messprinzip wählen.', 'Listen statt Werten fallen weg (keine PHP-Meldung)');
+    pruefe(Database::scalar('SELECT id FROM inventar WHERE kennung = ?', [$kennungC . '-TS9']) === false, 'nichts Ungültiges gespeichert');
+    $zsC = (int) InventarService::speichern(null, ['art' => 'zwischenstecker', 'kennung' => $kennungC . '-ZS', 'steckertyp_id' => $typ['cee16'],
+        'eigenschaften' => $tsDaten, 'messgeraete' => [['geraet' => $kennungC . '-zs', 'kanal' => 'switch:0']]])['id'];
+    gleich(Database::scalar('SELECT eigenschaften FROM inventar WHERE id = ?', [$zsC]), null, 'ein Zwischenstecker hat keine Sensordaten');
+    $e = InventarService::speichern($zsC, ['art' => 'tanksensor', 'kennung' => $kennungC . '-ZS', 'eigenschaften' => $tsDaten,
+        'messgeraete' => [['geraet' => $kennungC . '-zs', 'kanal' => 'switch:0']]]);
+    $e2 = InventarService::speichern($ts1, ['art' => 'verteilung', 'kennung' => $kennungC . '-TS1', 'messgeraete' => [['geraet' => $kennungC . '-uni-TS1', 'kanal' => 'voltmeter:100']]]);
+    pruefe(!$e['ok'] && !$e2['ok'] && InventarService::find($zsC)['art'] === 'zwischenstecker' && InventarService::find($ts1)['art'] === 'tanksensor',
+        'kein Wechsel zwischen Tanksensor und Verteiler/Zwischenstecker – ' . $e['message']);
+
+    // ------------------------------------------------ Einsetzen
+    $e = InventarService::einsetzen($ts1, $vtC);
+    gleich([$e['ok'], $e['message']], [false, 'Ein Tanksensor gehört in einen Tank.'], 'Tanksensor in eine Verteilung abgelehnt');
+    $e = InventarService::einsetzen($ts1, $tankA, null, true, ['offset_mm' => 'tief']);
+    pruefe(!$e['ok'] && str_contains($e['message'], 'Einbautiefe') && InventarService::einsaetzeAnObjekt($tankA) === [], 'unlesbares Einbaumaß abgelehnt, kein Einsatz');
+    $e = InventarService::einsetzen($ts1, $tankA, 999999, true, ['offset_mm' => '20', 'fremd' => 'x']);
+    pruefe($e['ok'] && str_contains($e['message'], 'Kennlinie ab dem Einbau'), 'Tanksensor in den Tank: ' . $e['message']);
+    $einsatz1 = InventarService::einsaetzeAnObjekt($tankA)[0] ?? [];
+    $mp = $laufend($tankA);
+    gleich(count($mp), 1, 'ein Messpunkt am Tank');
+    $mp1 = $mp[0] ?? [];
+    gleich([$mp1['rolle'] ?? null, array_key_exists('anschluss_id', $mp1) ? $mp1['anschluss_id'] : 'x', $mp1['gueltig_ab'] ?? null, $mp1['bezeichnung'] ?? null,
+        (int) ($mp1['einsatz_id'] ?? 0), array_key_exists('anschluss_id', $einsatz1) ? $einsatz1['anschluss_id'] : 'x'],
+        ['fuellstand', null, $einsatz1['ab'] ?? '', $kennungC . '-TS1', (int) ($einsatz1['id'] ?? -1), null], 'Messpunkt „Füllstand“ ohne Anschluss, gültig ab dem Einsatz, mit der Kennung');
+    $f = $fassungenVon($tankA);
+    gleich([count($f), $f[0]['anlass'] ?? null, (int) ($f[0]['geprueft'] ?? 1), $f[0]['ab'] ?? null, (int) ($f[0]['messpunkt_id'] ?? 0)],
+        [1, 'einsatz', 0, $mp1['gueltig_ab'] ?? '', (int) ($mp1['id'] ?? -1)], 'Fassung „einsatz“ ab dem Einbau, ungeprüft');
+    $r1 = json_decode((string) ($f[0]['rechnung'] ?? ''), true);
+    $soll = TankRechnung::rechnung($tsDaten, ['offset_mm' => 20], AnlagenService::find($tankA)['eigenschaften'], [])['rechnung'];
+    gleich([TankRechnung::pruefen($r1), $r1['feld'] ?? null, $r1['sensor'] ?? null, $r1['tank'] ?? null], [null, 'u', $soll['sensor'], $soll['tank']],
+        'die Fassung rechnet aus Sensordaten, Einbau und Tank');
+    nahe($r1['sensor']['mm_je_roh'] ?? null, 152.6497, 0.001, 'Steigung der Fassung wie in den Prüfwerten');
+    nahe(TankRechnung::umrechnen($r1, 7.5)['liter'], 2389.61, 0.5, 'Liter bei 7,5 V aus der gespeicherten Fassung');
+    gleich([$r1['herkunft']['sensor']['kennung'] ?? null, $r1['herkunft']['einbau'] ?? null, $r1['herkunft']['tank']['name'] ?? null],
+        [$kennungC . '-TS1', ['offset_mm' => 20.0], $kennungC . ' Tank A'], 'Herkunft: Sensor, Einbau, Tank');
+    $s = TankService::sensor($tankA);
+    gleich([(int) ($s['id'] ?? 0), $s['kennung'] ?? null, (int) ($s['inventar_id'] ?? 0)], [(int) $mp1['id'], $kennungC . '-TS1', $ts1], 'TankService::sensor: der laufende Tanksensor');
+    gleich((int) (TankService::fassungJetzt((int) $mp1['id'])['id'] ?? 0), (int) $f[0]['id'], 'jetzt gilt die Fassung des Einbaus');
+    gleich(TankService::fassungJetzt((int) $mp1['id'], (int) Zeit::ts((string) $mp1['gueltig_ab']) - 60), null, 'vor dem Einbau gilt keine');
+    $audit = Database::first("SELECT details FROM audit_log WHERE action = 'tank.kennlinie' AND target_id = ? ORDER BY id DESC LIMIT 1", [(string) $tankA]);
+    gleich(json_decode((string) ($audit['details'] ?? ''), true), ['messpunkt' => (int) $mp1['id'], 'anlass' => 'einsatz', 'rueckwirkend' => false], 'Audit der Fassung');
+    $seite = TankService::seitenDaten(AnlagenService::find($tankA));
+    pruefe(($seite['sensor']['kennung'] ?? null) === $kennungC . '-TS1' && ($seite['fassung']['anlass'] ?? null) === 'einsatz', 'Tankseite kennt Sensor und Fassung');
+    $vorher = $fassungenVon($tankA);
+
+    // Messpunkte am Tank gibt es nur aus dem Inventar
+    $e = MesspunktService::speichern($tankA, null, ['geraet' => $kennungC . '-hand', 'kanal' => 'voltmeter:100']);
+    gleich([$e['ok'], $e['message']], [false, 'Am Tank misst ein Tanksensor aus dem Inventar.'], 'kein Messpunkt von Hand am Tank');
+    $e = MesspunktService::speichern($vtC, null, ['geraet' => $kennungC . '-hand', 'kanal' => 'voltmeter:100', 'rolle' => 'fuellstand']);
+    pruefe(!$e['ok'] && Database::scalar('SELECT COUNT(*) FROM messpunkte WHERE geraet = ?', [$kennungC . '-hand']) == 0, 'die Rolle „Füllstand“ gibt es von Hand nicht');
+    gleich(MesspunktService::haupt([['id' => 1, 'rolle' => 'fuellstand', 'anschluss_id' => null]]), null, 'ein Füllstand steht nie für die ganze Anlage');
+    LocationBundle::belegungErsetzen($tankA, ['messpunkte' => [['geraet' => $kennungC . '-datei', 'kanal' => 'voltmeter:100', 'rolle' => 'fuellstand']]], []);
+    gleich([count($laufend($tankA)), (int) Database::scalar('SELECT COUNT(*) FROM messpunkte WHERE geraet = ?', [$kennungC . '-datei'])], [1, 0],
+        'aus einer Datei kein Messpunkt am Tank – der eingesetzte bleibt');
+    LocationBundle::belegungErsetzen($vtC, ['messpunkte' => [['geraet' => $kennungC . '-datei', 'kanal' => 'em:0', 'rolle' => 'fuellstand']]], []);
+    gleich(Database::scalar('SELECT rolle FROM messpunkte WHERE geraet = ?', [$kennungC . '-datei']), 'einspeisung', 'die Rolle „Füllstand“ kommt nicht aus einer Datei');
+
+    // ------------------------------------------------ Änderungen im Einsatz
+    // Shelly getauscht: neuer Messpunkt, dieselbe Rechnung als Fassung „shelly“
+    $e = InventarService::speichern($ts1, ['art' => 'tanksensor', 'kennung' => $kennungC . '-TS1', 'eigenschaften' => $tsDaten,
+        'messgeraete' => [['geraet' => $kennungC . '-uni-TS1b', 'kanal' => 'voltmeter:100']]]);
+    pruefe($e['ok'], 'Shelly im Tanksensor getauscht: ' . $e['message']);
+    $mp = $laufend($tankA);
+    $mp2 = $mp[0] ?? [];
+    pruefe(count($mp) === 1 && ($mp2['geraet'] ?? '') === $kennungC . '-uni-TS1b' && (int) $mp2['id'] !== (int) $mp1['id'], 'ein neuer laufender Messpunkt mit dem neuen Shelly');
+    gleich(Database::scalar('SELECT gueltig_bis FROM messpunkte WHERE id = ?', [(int) $mp1['id']]), $mp2['gueltig_ab'] ?? 'x', 'der alte endet, wo der neue beginnt');
+    $f2 = TankService::fassungJetzt((int) $mp2['id']);
+    gleich([$f2['anlass'] ?? null, $f2['ab'] ?? null, $f2['geprueft'] ?? null, $f2['rechnung'] ?? null], ['shelly', $mp2['gueltig_ab'] ?? '', false, $r1],
+        'Fassung „shelly“: dieselbe Rechnung wie zuvor, ungeprüft');
+
+    // Sensordaten im Einsatz geändert: Bürde 500 → 470 Ω
+    $e = InventarService::speichern($ts1, ['art' => 'tanksensor', 'kennung' => $kennungC . '-TS1', 'eigenschaften' => ['buerde_ohm' => '470'] + $tsDaten,
+        'messgeraete' => [['geraet' => $kennungC . '-uni-TS1b', 'kanal' => 'voltmeter:100']]]);
+    pruefe($e['ok'] && str_contains($e['message'], 'neuen Sensordaten'), 'Bürde geändert: ' . $e['message']);
+    $f3 = TankService::fassungJetzt((int) $mp2['id']);
+    [$teil470] = TankRechnung::sensorTeil(['buerde_ohm' => 470] + $tsDaten, ['offset_mm' => 20], 0.835);
+    gleich([$f3['anlass'] ?? null, $f3['geprueft'] ?? null, $f3['rechnung']['sensor'] ?? null, $f3['rechnung']['tank'] ?? null, $f3['rechnung']['herkunft']['sensor']['buerde_ohm'] ?? null],
+        ['sensor', false, $teil470, $r1['tank'], 470.0], 'Fassung „sensor“: neue Steigung aus 470 Ω, Tankteil und Einbau bleiben');
+    pruefe(abs((float) $f3['rechnung']['sensor']['mm_je_roh'] - 152.6497) > 1, 'die Steigung hat sich geändert');
+    $n = count($fassungenVon($tankA));
+    $e = InventarService::speichern($ts1, ['art' => 'tanksensor', 'kennung' => $kennungC . '-TS1', 'name' => 'neu', 'eigenschaften' => ['buerde_ohm' => '470', 'hinweis' => 'PUR-Kabel'] + $tsDaten,
+        'messgeraete' => [['geraet' => $kennungC . '-uni-TS1b', 'kanal' => 'voltmeter:100']]]);
+    gleich([$e['ok'], count($fassungenVon($tankA)), count($laufend($tankA)), (int) $laufend($tankA)[0]['id']], [true, $n, 1, (int) $mp2['id']],
+        'nur Name und Hinweis geändert: keine neue Fassung, kein neuer Messpunkt');
+
+    // Tankdaten geändert
+    $speichernA = static fn (array $eig, string $name = '') => AnlagenService::speichern($tankA, ['art' => 'tank', 'name' => $name !== '' ? $name : $kennungC . ' Tank A',
+        'floor_id' => $floorC, 'eigenschaften' => $eig]);
+    $eigA = ['inhalt_l' => '3000', 'kraftstoff' => 'Diesel', 'bauform' => 'Quader', 'liter_je_mm' => '2,78', 'sumpf_l' => '140'];
+    $e = $speichernA(['inhalt_l' => '2850'] + $eigA);
+    $f4 = TankService::fassungJetzt((int) $mp2['id']);
+    pruefe($e['ok'] && str_contains($e['message'], 'neuen Tankdaten'), 'Nennvolumen geändert: ' . $e['message']);
+    gleich([$f4['anlass'] ?? null, $f4['rechnung']['sensor'] ?? null, $f4['rechnung']['tank']['nenn_l'] ?? null, $f4['rechnung']['tank']['liter_je_mm'] ?? null],
+        ['tank', $teil470, 2850.0, 2.78], 'Fassung „tank“: Sensorteil unverändert, neues Nennvolumen');
+    $n = count($fassungenVon($tankA));
+    $e = $speichernA(['inhalt_l' => '2850', 'zulassung' => 'Z-38.12-223'] + $eigA, $kennungC . ' Tank A neu');
+    pruefe($e['ok'] && !str_contains($e['message'], 'Tankdaten') && count($fassungenVon($tankA)) === $n, 'nur Name und Zulassung geändert: keine Fassung');
+    $e = $speichernA(['inhalt_l' => '2850', 'kraftstoff' => 'HVO'] + $eigA);
+    $f5 = TankService::fassungJetzt((int) $mp2['id']);
+    [$teilHvo] = TankRechnung::sensorTeil(['buerde_ohm' => 470] + $tsDaten, ['offset_mm' => 20], 0.78);
+    gleich([$f5['anlass'] ?? null, $f5['geprueft'] ?? null, $f5['rechnung']['sensor'] ?? null, $f5['rechnung']['herkunft']['tank']['dichte_kg_l'] ?? null],
+        ['tank', false, $teilHvo, 0.78], 'Kraftstoff HVO: Sensorteil neu mit der Dichte von HVO');
+    // Was die Liter je mm nicht berührt, bleibt geprüft; eine andere Dichte nicht
+    TankService::fassungAnlegen($mp2, $f5['rechnung'], 'peilung', gmdate('c'), true);
+    $speichernA(['inhalt_l' => '2850', 'kraftstoff' => 'HVO', 'sumpf_l' => '100'] + $eigA);
+    $fg = TankService::fassungJetzt((int) $mp2['id']);
+    gleich([$fg['anlass'] ?? null, $fg['geprueft'] ?? null, $fg['rechnung']['tank']['sumpf_l'] ?? null, $fg['rechnung']['sensor'] ?? null], ['tank', true, 100.0, $teilHvo],
+        'nur der Sumpf geändert: bleibt geprüft');
+    $speichernA(['inhalt_l' => '2850', 'kraftstoff' => 'Diesel', 'sumpf_l' => '100'] + $eigA);
+    $fg = TankService::fassungJetzt((int) $mp2['id']);
+    gleich([$fg['anlass'] ?? null, $fg['geprueft'] ?? null, $fg['rechnung']['sensor'] ?? null], ['tank', false, $teil470], 'zurück auf Diesel: Sensorteil neu, ungeprüft');
+    TankService::fassungAnlegen($mp2, $fg['rechnung'], 'peilung', gmdate('c'), true);
+    $speichernA(['inhalt_l' => '2850', 'kraftstoff' => 'Diesel', 'sumpf_l' => '100', 'liter_je_mm' => '2,75'] + $eigA);
+    gleich(TankService::fassungJetzt((int) $mp2['id'])['geprueft'] ?? null, false, 'Inhalt je mm von Hand geändert: ungeprüft');
+    $n = count($fassungenVon($tankA));
+    AnlagenService::eigenschaftSetzen($tankA, ['liter_je_mm' => 2.8, 'liter_je_mm_herkunft' => 'Betankung'], true);
+    gleich(count($fassungenVon($tankA)), $n, 'eigenschaftSetzen ohne Fassung (Peilung, Betankung legen ihre eigene an)');
+    AnlagenService::eigenschaftSetzen($tankA, ['liter_je_mm' => 2.9]);
+    $f6 = TankService::fassungJetzt((int) $mp2['id']);
+    gleich([count($fassungenVon($tankA)), $f6['anlass'] ?? null, $f6['rechnung']['tank']['liter_je_mm'] ?? null], [$n + 1, 'tank', 2.9], 'eigenschaftSetzen sonst mit Fassung');
+
+    // ------------------------------------------------ Ein zweiter Sensor ersetzt den ersten; Abbau; Wiedereinsatz woanders
+    $ts2 = (int) $sensor('TS2', ['prinzip' => 'ultraschall', 'feld' => 'abstand_mm', 'signal' => 'direkt', 'totzone_mm' => '200'])['id'];
+    $e = InventarService::einsetzen($ts2, $tankA);
+    pruefe($e['ok'] && str_contains($e['message'], $kennungC . '-TS1 ersetzt') && str_contains($e['message'], TankRechnung::HINWEIS_NUR_ROH),
+        'zweiter Sensor im Tank: ersetzt den ersten; Ultraschall ohne Einbaumaß nur Rohwert – ' . $e['message']);
+    gleich(InventarService::find($ts1)['zustand'], 'lager', 'der erste ist wieder im Lager');
+    $s = TankService::sensor($tankA);
+    $fRoh = $s !== null ? TankService::fassungJetzt((int) $s['id']) : null;
+    gleich([$s['kennung'] ?? null, $fRoh['rechnung']['sensor']['art'] ?? null, count($laufend($tankA))], [$kennungC . '-TS2', 'roh', 1], 'jetzt misst TS2, ohne Einbaumaß als Rohwert');
+    $e = InventarService::einsetzen($ts2, $tankA, null, true, ['d_leer_mm' => '1300']);
+    $s = TankService::sensor($tankA);
+    $fUs = $s !== null ? TankService::fassungJetzt((int) $s['id']) : null;
+    pruefe($e['ok'] && ($fUs['rechnung']['sensor']['art'] ?? '') === 'linear' && TankRechnung::hoehe($fUs['rechnung'], 300.0) == 1000.0,
+        'mit Sensorfläche 1300 mm: Abstand 300 → 1000 mm');
+    $e = InventarService::beenden((int) $s['einsatz_id']);
+    pruefe($e['ok'] && TankService::sensor($tankA) === null && $laufend($tankA) === [], 'Abbau: kein laufender Tanksensor mehr');
+    gleich(Database::scalar('SELECT gueltig_bis FROM messpunkte WHERE id = ?', [(int) $s['id']]) !== null, true, '… sein Messpunkt endet');
+    $nA = count($fassungenVon($tankA));
+    $e = InventarService::einsetzen($ts1, $tankB, null, true, ['offset_mm' => '0']);
+    pruefe($e['ok'], 'TS1 in Tank B: ' . $e['message']);
+    $sB = TankService::sensor($tankB);
+    $fB = $fassungenVon($tankB);
+    gleich([count($fB), $fB[0]['anlass'] ?? null, $fB[0]['ab'] ?? null], [1, 'einsatz', $sB['gueltig_ab'] ?? ''], 'Tank B: eine neue Fassung ab dem Einbau');
+    $rB = json_decode((string) ($fB[0]['rechnung'] ?? ''), true);
+    gleich([$rB['tank']['form'] ?? null, $rB['sensor']['mm_anker'] ?? null, $rB['herkunft']['sensor']['buerde_ohm'] ?? null], ['unbekannt', 0.0, 470.0],
+        '… aus den Sensordaten von jetzt, Einbau und Tank B (Inhalt je mm noch unbekannt)');
+    pruefe(str_contains($e['message'], TankRechnung::HINWEIS_INHALT), 'Hinweis „peilen“ beim Tank ohne Inhalt je mm');
+    gleich(count($fassungenVon($tankA)), $nA, 'Tank A behält seine Fassungen');
+    gleich(count(TankService::sensoren($tankA)), 4, 'Tank A kennt seine früheren Sensoren');
+
+    // ------------------------------------------------ Fassungen ändern sich nie
+    $danach = array_column($fassungenVon($tankA), null, 'id');
+    $gleich = true;
+    foreach ($vorher as $alt) {
+        $gleich = $gleich && isset($danach[$alt['id']]) && $danach[$alt['id']] == $alt;
+    }
+    pruefe($gleich && count($danach) > count($vorher), 'ältere Fassungen unverändert, nur neue Zeilen');
+    pruefe(array_filter(array_merge($fassungenVon($tankA), $fassungenVon($tankB)), static fn ($f) => TankRechnung::pruefen(json_decode((string) $f['rechnung'], true)) !== null) === [],
+        'jede gespeicherte Fassung besteht pruefen()');
+    $kaputt = Database::insert('tank_kennlinien', ['messpunkt_id' => (int) $sB['id'], 'objekt_id' => $tankB, 'ab' => gmdate('c'), 'rechnung' => '{"v":1}',
+        'anlass' => 'hand', 'created_at' => gmdate('c')]);
+    gleich((int) (TankService::fassungJetzt((int) $sB['id'])['id'] ?? 0), (int) $fB[0]['id'], 'eine kaputte Zeile rechnet nicht mit');
+    Database::execute('DELETE FROM tank_kennlinien WHERE id = ?', [$kaputt]);
+    $abgelehnt = false;
+    try {
+        TankService::fassungAnlegen($sB, ['v' => 1, 'feld' => 'u'], 'hand', gmdate('c'), false);
+    } catch (\InvalidArgumentException) {
+        $abgelehnt = true;
+    }
+    pruefe($abgelehnt && count($fassungenVon($tankB)) === 1, 'fassungAnlegen nimmt keine ungültige Rechnung');
+
+    // ------------------------------------------------ Löschen
+    MesspunktService::loeschen($tankA, (int) $mp1['id']);
+    gleich((int) Database::scalar('SELECT COUNT(*) FROM tank_kennlinien WHERE messpunkt_id = ?', [(int) $mp1['id']]), 0, 'Messpunkt gelöscht: seine Fassungen weg');
+    $ereignis = Database::insert('tank_ereignisse', ['objekt_id' => $tankA, 'messpunkt_id' => (int) $mp2['id'], 'art' => 'peilung', 'zeit' => gmdate('c'), 'prozent' => 60.0,
+        'created_at' => gmdate('c')]);
+    MesspunktService::loeschen($tankA, (int) $mp2['id']);
+    gleich(Database::first('SELECT objekt_id, messpunkt_id FROM tank_ereignisse WHERE id = ?', [$ereignis]), ['objekt_id' => $tankA, 'messpunkt_id' => null],
+        '… eine Peilung bleibt im Protokoll des Tanks');
+    AnlagenService::loeschen($tankA);
+    gleich([(int) Database::scalar('SELECT COUNT(*) FROM tank_kennlinien WHERE objekt_id = ?', [$tankA]),
+        (int) Database::scalar('SELECT COUNT(*) FROM tank_ereignisse WHERE objekt_id = ?', [$tankA])], [0, 0], 'Tank gelöscht: Fassungen und Ereignisse weg');
+} finally {
+    alsBenutzer(null);
+    foreach (Database::select('SELECT id FROM inventar WHERE kennung LIKE ?', [$kennungC . '%']) as $i) {
+        Database::execute('UPDATE einsaetze SET bis = ? WHERE inventar_id = ? AND bis IS NULL', [gmdate('c'), (int) $i['id']]);
+        InventarService::loeschen((int) $i['id']);
+    }
+    foreach (Database::select('SELECT id FROM objekte WHERE name LIKE ?', [$kennungC . '%']) as $o) {
+        AnlagenService::loeschen((int) $o['id']);
+    }
+    // Auch wenn ein Löschen oben versagt hat: nichts von dieser Prüfung bleibt stehen.
+    foreach ([$tankA ?? 0, $tankB ?? 0] as $id) {
+        Database::execute('DELETE FROM tank_kennlinien WHERE objekt_id = ?', [(int) $id]);
+        Database::execute('DELETE FROM tank_ereignisse WHERE objekt_id = ?', [(int) $id]);
+    }
+    SiteService::deleteSite($siteC);
+    Database::execute('DELETE FROM user_roles WHERE user_id = ?', [$benutzerC]);
+    Database::execute('DELETE FROM users WHERE id = ?', [$benutzerC]);
+    Database::execute('DELETE FROM audit_log WHERE username = ? OR details LIKE ?', [$kennungC, '%' . $kennungC . '%']);
+}
 
 ende('tanks');

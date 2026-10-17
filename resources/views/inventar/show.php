@@ -2,10 +2,48 @@
 use App\Services\InventarService;
 use App\Support\Csrf;
 use App\Support\View;
+use App\Tanks\TankRechnung;
 
 $title = $item['kennung'];
 $subtitle = $item['art_name'] . ' · ' . $item['typ'] . ($item['name'] !== '' ? ' · ' . $item['name'] : '');
 $e = $item['einsatz'];
+$ts = $item['art'] === 'tanksensor';
+// Sensordaten eines Tanksensors als Zeilen „Beschriftung – Wert“.
+$sensorZeilen = [];
+$sensorHinweise = [];
+if ($ts && $item['eigenschaften'] !== []) {
+    $s = TankRechnung::sensorNormal($item['eigenschaften']);
+    $z = static fn (mixed $w): string => TankRechnung::zahl((float) $w);
+    $einheit = TankRechnung::ROHFELDER[$s['feld']][1] ?? '';
+    $sensorZeilen['Messprinzip'] = TankRechnung::PRINZIPIEN[$s['prinzip']] ?? $s['prinzip'];
+    $sensorZeilen['Wert des Geräts'] = (TankRechnung::ROHFELDER[$s['feld']][0] ?? $s['feld']) . ($einheit !== '' ? ' in ' . $einheit : '') . ' (' . $s['feld'] . ')';
+    $sensorZeilen['Signal'] = TankRechnung::SIGNALE[$s['signal']] ?? $s['signal'];
+    if ($s['buerde_ohm'] !== null) {
+        $sensorZeilen['Bürde'] = $z($s['buerde_ohm']) . ' Ω';
+    }
+    if ($s['u_bei_4ma'] !== null && $s['u_bei_20ma'] !== null) {
+        $sensorZeilen['Wandler'] = '4 mA = ' . $z($s['u_bei_4ma']) . ' V, 20 mA = ' . $z($s['u_bei_20ma']) . ' V';
+    }
+    if ($s['bereich_bis'] !== null) {
+        $sensorZeilen['Messbereich'] = $z($s['bereich_von']) . '–' . $z($s['bereich_bis']) . ' ' . (TankRechnung::BEREICHSEINHEITEN[$s['bereich_einheit'] ?? ''] ?? '');
+    }
+    if ($s['direkt_einheit'] !== null) {
+        $sensorZeilen['Liefert'] = ['prozent' => 'Füllstand in %', 'liter' => 'Inhalt in Litern', 'mm' => 'Füllhöhe in mm'][$s['direkt_einheit']];
+    }
+    if ($s['totzone_mm'] !== null) {
+        $sensorZeilen['Totzone'] = $z($s['totzone_mm']) . ' mm';
+    }
+    $sensorZeilen['Meldeschritt'] = $z($s['schritt_roh']) . ($einheit !== '' ? ' ' . $einheit : '');
+    if ($s['hinweis'] !== '') {
+        $sensorZeilen['Hinweis'] = $s['hinweis'];
+    }
+    if ($s['signal'] === '4-20mA-wandler' && (float) $s['u_bei_4ma'] < 0.5) {
+        $sensorHinweise[] = TankRechnung::HINWEIS_LEITUNGSBRUCH;
+    }
+    if ($s['signal'] === '0-10V') {
+        $sensorHinweise[] = TankRechnung::HINWEIS_0_10V;
+    }
+}
 ?>
 <div class="toolbar-zeile">
     <?php if ($item['zustand'] === 'defekt'): ?><span class="badge bad">defekt</span>
@@ -25,8 +63,21 @@ $e = $item['einsatz'];
 </div>
 
 <div class="grid grid-sidebar">
+    <div>
+    <?php if ($ts): ?>
+        <div class="card">
+            <div class="card-head"><h2>Sensordaten</h2><span class="hint">daraus wird beim Einbau die Kennlinie</span></div>
+            <div class="card-body">
+                <?php if ($sensorZeilen === []): ?><p class="small muted">Noch keine Sensordaten – ohne sie gibt es im Tank nur den Rohwert.</p><?php endif; ?>
+                <dl class="kv">
+                    <?php foreach ($sensorZeilen as $beschriftung => $wert): ?><dt><?= View::e($beschriftung) ?></dt><dd><?= View::e($wert) ?></dd><?php endforeach; ?>
+                </dl>
+                <?php foreach ($sensorHinweise as $h): ?><div class="notice warn mt"><?= View::e($h) ?></div><?php endforeach; ?>
+            </div>
+        </div>
+    <?php endif; ?>
     <div class="card">
-        <div class="card-head"><h2>Shellys in diesem Stück</h2><span class="hint">messen dort, wo das Stück eingesetzt ist</span></div>
+        <div class="card-head"><h2><?= $ts ? 'Messkanal' : 'Shellys in diesem Stück' ?></h2><span class="hint"><?= $ts ? 'misst im Tank, in dem der Sensor eingebaut ist' : 'messen dort, wo das Stück eingesetzt ist' ?></span></div>
         <div class="table-wrap">
             <table class="tabelle-karten">
                 <thead><tr><th>Gerät · Kanal</th><th>Sitzt an</th><th>Bezeichnung</th></tr></thead>
@@ -42,10 +93,13 @@ $e = $item['einsatz'];
         </div>
         <?php if ((string) $item['notizen'] !== ''): ?><div class="card-body small"><?= nl2br(View::e((string) $item['notizen'])) ?></div><?php endif; ?>
     </div>
+    </div>
     <div class="card">
         <div class="card-head"><h2>Einsätze</h2></div>
         <div class="card-body">
-            <?php if ($geschichte === []): ?><p class="muted small">Noch nie eingesetzt. Eingesetzt wird an der Anlage (Reiter „Messung“) oder in der Karte.</p><?php endif; ?>
+            <?php if ($geschichte === []): ?><p class="muted small"><?= $ts
+                ? 'Noch nie eingebaut. Eingebaut wird auf der Seite des Tanks oder in der Karte (Aufbau).'
+                : 'Noch nie eingesetzt. Eingesetzt wird an der Anlage (Reiter „Messung“) oder in der Karte.' ?></p><?php endif; ?>
             <ul class="liste-schlicht einsatz-liste">
                 <?php foreach ($geschichte as $g): ?>
                     <li>

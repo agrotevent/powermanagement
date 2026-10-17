@@ -21,7 +21,7 @@ final class DemoSeed
     public static function anlegen(bool $zuruecksetzen): string
     {
         if ($zuruecksetzen) {
-            foreach (['aufbau_posten', 'aufbauten', 'einsaetze', 'inventar_messgeraete', 'inventar', 'bereich_mitglieder', 'bereiche', 'leitungen', 'messpunkte', 'anschluesse', 'schutzorgane', 'objekte', 'datenquellen', 'freigaben', 'floors', 'sites', 'schaltvorgaenge', 'mqtt_zugaenge'] as $tabelle) {
+            foreach (['tank_ereignisse', 'tank_kennlinien', 'aufbau_posten', 'aufbauten', 'einsaetze', 'inventar_messgeraete', 'inventar', 'bereich_mitglieder', 'bereiche', 'leitungen', 'messpunkte', 'anschluesse', 'schutzorgane', 'objekte', 'datenquellen', 'freigaben', 'floors', 'sites', 'schaltvorgaenge', 'mqtt_zugaenge'] as $tabelle) {
                 Database::execute('DELETE FROM ' . $tabelle);
             }
             Database::execute("DELETE FROM user_roles WHERE user_id IN (SELECT id FROM users WHERE username IN ('veranstalter', 'technik'))");

@@ -514,6 +514,11 @@ final class AnlagenService
             if ($alt['art'] !== $art) {
                 $meldung .= ' Die Art ist jetzt „' . self::ARTEN[$art]['name'] . '“.';
             }
+            // Ein eingebauter Tanksensor rechnet ab jetzt mit den neuen Tankdaten.
+            if (!$elektrisch) {
+                $hinweis = TankService::tankGeaendert($id, (array) $alt['eigenschaften'], (array) json_decode((string) $felder['eigenschaften'], true));
+                $meldung .= $hinweis !== '' ? ' ' . $hinweis : '';
+            }
             return ['ok' => true, 'message' => $meldung, 'id' => $id];
         }
 
@@ -542,9 +547,13 @@ final class AnlagenService
      * mm, den eine Betankung ergeben hat. Was nicht in FELDER steht, fällt
      * weg; leer oder null nimmt eine Eigenschaft heraus.
      *
+     * Am Tank folgt wie beim Speichern eine neue Fassung des Tanksensors –
+     * außer mit $ohneFassung: wenn die Fassung schon da ist (Peilung,
+     * Betankung) und der Wert nur für den nächsten Sensor in den Tank geht.
+     *
      * @param array<string,mixed> $werte Schlüssel => Wert
      */
-    public static function eigenschaftSetzen(int $id, array $werte): void
+    public static function eigenschaftSetzen(int $id, array $werte, bool $ohneFassung = false): void
     {
         $objekt = self::find($id);
         if ($objekt === null || $werte === []) {
@@ -555,6 +564,9 @@ final class AnlagenService
             static fn (mixed $w): mixed => $w ?? '', $werte)));
         Database::update('objekte', $id, ['eigenschaften' => json_encode($eigenschaften, JSON_UNESCAPED_UNICODE), 'updated_at' => gmdate('c')]);
         Audit::log('anlage.eigenschaft', 'objekt', (string) $id, ['schluessel' => array_values(array_intersect(array_keys($werte), array_keys(self::FELDER[$art] ?? [])))]);
+        if (!$ohneFassung && !self::elektrisch($art)) {
+            TankService::tankGeaendert($id, (array) $objekt['eigenschaften'], $eigenschaften);
+        }
     }
 
     public static function loeschen(int $id): array
@@ -569,6 +581,7 @@ final class AnlagenService
         Database::execute('UPDATE leitungen SET zu_objekt_id = NULL, zu_anschluss_id = NULL WHERE zu_objekt_id = ?', [$id]);
         BereichService::objektEntfernt($id);
         InventarService::objektEntfernt($id);
+        TankService::objektEntfernt($id);
         Database::execute('DELETE FROM anschluesse WHERE objekt_id = ?', [$id]);
         Database::execute('DELETE FROM schutzorgane WHERE objekt_id = ?', [$id]);
         Database::execute('DELETE FROM messpunkte WHERE objekt_id = ?', [$id]);

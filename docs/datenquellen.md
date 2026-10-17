@@ -83,7 +83,9 @@ ein) und 3.x. Geschrieben wird über `/write?precision=ms`.
 Shellys brauchen **keine Datenquelle**. Sie melden sich über MQTT und
 erscheinen unter **Messtechnik → Datenquellen → Geräte in der InfluxDB**.
 Dort ordnet man sie einer Anlage zu, als **Messpunkt** (Einspeisung, Abgang
-oder einzelner Anschluss).
+oder einzelner Anschluss). Ein Shelly mit einer Füllstandsonde kommt
+stattdessen als **Tanksensor** ins Inventar und wird in einen Tank
+eingebaut ([Tanksensoren](#tanksensoren-rohwerte-statt-liter)).
 
 | Generation | Themen | Node-RED macht daraus |
 |------------|--------|-----------------------|
@@ -162,6 +164,13 @@ Plus Uni – meldet keinen Füllstand, sondern eine Spannung oder einen
 Prozentwert. In die InfluxDB kommen nur diese **Rohwerte**; Node-RED rechnet
 nichts um. Füllhöhe, Liter und Prozent rechnet PowerManagement beim Lesen,
 mit der Kennlinie des Einbaus (Sonde, Messbereich, Einbaumaß, Tank).
+
+Die Sonde mit ihrem Shelly legt man unter **Inventar → + Tanksensor** an:
+Messkanal (Gerät und Kanal, etwa `voltmeter:100`) und Sensordaten
+(Messprinzip, Signal, Wandler bzw. Bürde, Messbereich laut Sonde). Auf der
+Seite des Tanks wird sie mit dem Einbaumaß (Sondenspitze über dem Boden)
+eingebaut; daraus entsteht die erste Fassung der Kennlinie. Sie gilt als
+ungeprüft, bis gepeilt ist – die Einbautiefe ändert sich mit jedem Einbau.
 
 Warum nicht gleich Liter:
 

@@ -5,6 +5,8 @@ namespace App\Services;
 
 use App\Support\Config;
 use App\Support\Database;
+use App\Tanks\TankRechnung;
+use App\Tanks\TankService;
 
 /**
  * Verteiler als Dateien – für den Abgleich über das gemeinsame Repository.
@@ -15,8 +17,8 @@ use App\Support\Database;
  *                                          Katalog mit Nennwerten,
  *                                          Anschlüssen und Schutzorganen
  *   verteiler/inventar/<schlüssel>.json   ein Stück aus dem Inventar
- *                                          (Verteiler oder Zwischenstecker)
- *                                          mit seinen Shellys
+ *                                          (Verteiler, Zwischenstecker oder
+ *                                          Tanksensor) mit seinen Shellys
  *
  *   { format: 1, art: "verteiler-typ", schluessel, stand, von,
  *     typ: {art, fest, name, hersteller, modell, nennleistung_kva, nennstrom_a,
@@ -27,7 +29,8 @@ use App\Support\Database;
  *   { format: 1, art: "verteiler-inventar", schluessel, stand, von,
  *     stueck: {art, kennung, name, typ (Schlüssel des Standard-Verteilers),
  *              stecker (Zwischenstecker), seriennummer, defekt, notizen,
- *              messgeraete: [{geraet, kanal, stelle, bezeichnung}]},
+ *              messgeraete: [{geraet, kanal, stelle, bezeichnung}],
+ *              eigenschaften (nur Tanksensor: Sensordaten)},
  *     steckertypen: […] }
  *
  * Eine Datei je Verteiler, damit die Geschichte im Repository zeigt, wann an
@@ -36,7 +39,8 @@ use App\Support\Database;
  *
  * Nicht in den Dateien steht, wo ein Stück gerade eingesetzt ist, und welche
  * Anlagen aus einem Typ entstanden sind: das gehört zur Veranstaltung und
- * bleibt in der Installation, die sie plant.
+ * bleibt in der Installation, die sie plant. Ebenso die Kennlinien und
+ * Peilungen eines Tanksensors – sie gehören zu seinem Einbau.
  *
  * Ob sich etwas geändert hat, sagt ein Fingerabdruck des Inhalts (`typ`
  * bzw. `stueck`, ohne Stand und Absender). Beim Abgleich wird er je
@@ -170,7 +174,10 @@ final class VerteilerBundle
         $stecker = AnlagenService::steckertypenNachId();
         $typ = $i['steckertyp_id'] !== null ? ($stecker[(int) $i['steckertyp_id']] ?? null) : null;
         $vorlage = $i['vorlage_id'] !== null ? self::typSchluessel((int) $i['vorlage_id']) : '';
-        return self::kopf('inventar', self::stueckSchluessel($inventarId)) + [
+        // Sensordaten nur, wo es welche gibt: Verteiler und Zwischenstecker
+        // behalten so ihren Fingerabdruck aus der Zeit vor den Tanksensoren.
+        $eigenschaften = TankService::sensordaten($i['eigenschaften'] ?? null);
+        $stueck = [
             'stueck' => [
                 'art'          => (string) $i['art'],
                 'kennung'      => (string) $i['kennung'],
@@ -189,6 +196,10 @@ final class VerteilerBundle
             ],
             'steckertypen' => LocationBundle::steckertypenFuerDatei($typ !== null ? [(int) $typ['id'] => $typ] : []),
         ];
+        if ($eigenschaften !== []) {
+            $stueck['stueck']['eigenschaften'] = $eigenschaften;
+        }
+        return self::kopf('inventar', self::stueckSchluessel($inventarId)) + $stueck;
     }
 
     /** @return array{format:int,art:string,schluessel:string,stand:string,von:string} */
@@ -334,7 +345,9 @@ final class VerteilerBundle
         }
         $shellys = count((array) ($inhalt['messgeraete'] ?? []));
         $typ = '';
-        if (is_string($inhalt['typ'] ?? null) && $inhalt['typ'] !== '') {
+        if (($inhalt['art'] ?? '') === 'tanksensor' && is_array($inhalt['eigenschaften'] ?? null) && $inhalt['eigenschaften'] !== []) {
+            $typ = TankRechnung::sensorKurz(TankService::sensordaten($inhalt['eigenschaften']));
+        } elseif (is_string($inhalt['typ'] ?? null) && $inhalt['typ'] !== '') {
             $typ = $typNamen[$inhalt['typ']] ?? $inhalt['typ'];
         } elseif (is_string($inhalt['stecker'] ?? null)) {
             $typ = $inhalt['stecker'];
@@ -450,6 +463,7 @@ final class VerteilerBundle
             'steckertyp_id' => is_string($s['stecker'] ?? null) ? ($stecker[$s['stecker']] ?? 0) : 0,
             'seriennummer' => (string) ($s['seriennummer'] ?? ''), 'defekt' => !empty($s['defekt']),
             'notizen' => (string) ($s['notizen'] ?? ''), 'messgeraete' => array_values((array) ($s['messgeraete'] ?? [])),
+            'eigenschaften' => is_array($s['eigenschaften'] ?? null) ? $s['eigenschaften'] : [],
         ]);
         if (!$ergebnis['ok']) {
             return ['ok' => false, 'message' => $kennung . ': ' . $ergebnis['message'], 'hinweis' => ''];

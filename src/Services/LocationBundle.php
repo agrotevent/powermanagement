@@ -711,9 +711,13 @@ final class LocationBundle
      */
     public static function belegungErsetzen(int $objektId, array $a, array $stecker): array
     {
-        // Ein Tank hat keine Anschlüsse und Schutzorgane – auch nicht aus einer Datei.
+        // Ein Tank hat keine Anschlüsse und Schutzorgane – auch nicht aus einer
+        // Datei. Gemessen wird an ihm nur mit einem Tanksensor aus dem Inventar.
         if (!AnlagenService::elektrisch((string) Database::scalar('SELECT art FROM objekte WHERE id = ?', [$objektId]))) {
             $a['schutzorgane'] = $a['anschluesse'] = [];
+            if (array_key_exists('messpunkte', $a)) {
+                $a['messpunkte'] = [];
+            }
         }
         $alt = [];
         foreach (Database::select('SELECT id, richtung, nr FROM anschluesse WHERE objekt_id = ?', [$objektId]) as $r) {
@@ -776,7 +780,7 @@ final class LocationBundle
                     'anschluss_id' => !empty($m['anschluss']) ? ($neu[(string) $m['anschluss']] ?? null) : null,
                     'schutzorgan_id' => !empty($m['schutz']) ? ($schutzIds[(string) $m['schutz']] ?? null) : null,
                     'geraet' => mb_substr((string) $m['geraet'], 0, 128), 'kanal' => mb_substr((string) ($m['kanal'] ?? ''), 0, 64),
-                    'rolle' => isset(MesspunktService::ROLLEN[$m['rolle'] ?? '']) ? $m['rolle'] : 'einspeisung',
+                    'rolle' => isset(MesspunktService::ROLLEN[$m['rolle'] ?? '']) && !in_array($m['rolle'], MesspunktService::NUR_INVENTAR, true) ? $m['rolle'] : 'einspeisung',
                     'bezeichnung' => mb_substr((string) ($m['bezeichnung'] ?? ''), 0, 190), 'created_at' => gmdate('c'),
                 ]);
             }

@@ -454,7 +454,7 @@ $messgeraet = static function (array $m) use ($objekt, $auswertung, $live): stri
             <div class="field">
                 <label for="mp_rolle">Misst</label>
                 <select id="mp_rolle" name="rolle">
-                    <?php foreach (MesspunktService::ROLLEN as $k => $r): ?><option value="<?= $k ?>"><?= View::e($r) ?></option><?php endforeach; ?>
+                    <?php foreach (array_diff_key(MesspunktService::ROLLEN, array_flip(MesspunktService::NUR_INVENTAR)) as $k => $r): ?><option value="<?= $k ?>"><?= View::e($r) ?></option><?php endforeach; ?>
                 </select>
             </div>
             <div class="field">
