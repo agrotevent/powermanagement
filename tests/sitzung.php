@@ -8,8 +8,8 @@ declare(strict_types=1);
  * stehen alle weiteren Anfragen desselben Browsers an – auch das Speichern
  * der Anschlüsse, das dann im Timeout endet, ohne je beim Audit anzukommen.
  *
- * Geprüft wird, dass die Live-Endpunkte (Anlage, Dashboard, Karte, Bereiche)
- * die Sitzung freigeben, bevor sie warten: Speichern und Seitenaufrufe
+ * Geprüft wird, dass die Live-Endpunkte (Anlage, Dashboard, Karte, Bereiche,
+ * Tank live und Tankverlauf) die Sitzung freigeben, bevor sie warten: Speichern und Seitenaufrufe
  * kommen durch, während mehrere langsame Live-Abfragen laufen, und die
  * Live-Abfragen liefern trotzdem ihre Antwort.
  *
@@ -19,6 +19,8 @@ declare(strict_types=1);
  */
 
 require __DIR__ . '/hilfen/pruefung.php';
+
+use App\Tanks\TankRechnung;
 
 $wurzel = dirname(__DIR__);
 $kennung = 'pm-sitzung-' . bin2hex(random_bytes(4));
@@ -214,6 +216,31 @@ foreach ([
     pruefe($lauf['dauer'] < 2.0, sprintf('%s: Live-Abfrage hält die Sitzung nicht (%.1f s)', $name, $lauf['dauer']));
     foreach ($lauf['live'] as $l) {
         pruefe($l['status'] === 200 && is_array($l['json']), $name . ': Live-Abfrage liefert trotzdem ihre Antwort');
+    }
+}
+
+// ------------------------------------------------------------ Tank: Live und Verlauf
+// Ein Tank mit Tanksensor und Kennlinie – direkt in die Datenbank der zweiten Instanz.
+$jetztIso = gmdate('c');
+$db->prepare("INSERT INTO objekte (art, name, site_id, floor_id, plan_x, plan_y, eigenschaften, created_at) VALUES ('tank', ?, ?, ?, 50, 50, ?, ?)")
+    ->execute([$kennung . ' Tank', (int) ($abfrage('SELECT site_id FROM floors WHERE id = ?', [$etage])[0]['site_id'] ?? 0), $etage,
+        '{"inhalt_l":3000.0,"liter_je_mm":2.78}', $jetztIso]);
+$tank = (int) $db->lastInsertId();
+$db->prepare("INSERT INTO messpunkte (objekt_id, geraet, kanal, rolle, bezeichnung, gueltig_ab, created_at) VALUES (?, 'pruef-uni', 'voltmeter:100', 'fuellstand', 'TS', ?, ?)")
+    ->execute([$tank, gmdate('c', time() - 86400), $jetztIso]);
+$rechnung = TankRechnung::rechnung(['prinzip' => 'hydrostatisch', 'feld' => 'u', 'signal' => '4-20mA', 'buerde_ohm' => 500, 'bereich_von' => 0, 'bereich_bis' => 100,
+    'bereich_einheit' => 'mbar'], ['offset_mm' => 20], ['inhalt_l' => 3000, 'liter_je_mm' => 2.78], [])['rechnung'];
+$db->prepare("INSERT INTO tank_kennlinien (messpunkt_id, objekt_id, ab, rechnung, anlass, geprueft, von, created_at) VALUES (?, ?, ?, ?, 'einsatz', 0, 'pruefung', ?)")
+    ->execute([(int) $db->lastInsertId(), $tank, gmdate('c', time() - 86400), json_encode($rechnung), $jetztIso]);
+foreach ([
+    'Tank live'   => $basis . '/anlagen/' . $tank . '/live',
+    'Tankverlauf' => $basis . '/anlagen/' . $tank . '/tank/verlauf?zeitraum=24h',
+] as $name => $liveUrl) {
+    $lauf = waehrendLive([$liveUrl, $liveUrl], $basis . '/profil', $dose);
+    gleich($lauf['antwort']['status'], 200, $name . ': andere Seite während der Abfragen');
+    pruefe($lauf['dauer'] < 2.0, sprintf('%s: Abfrage hält die Sitzung nicht (%.1f s)', $name, $lauf['dauer']));
+    foreach ($lauf['live'] as $l) {
+        pruefe($l['status'] === 200 && is_array($l['json']), $name . ': Abfrage liefert trotzdem ihre Antwort');
     }
 }
 

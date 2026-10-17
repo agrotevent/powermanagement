@@ -18,6 +18,7 @@ use App\Support\Flash;
 use App\Support\Request;
 use App\Support\Response;
 use App\Support\Session;
+use App\Support\Zeitraum;
 use App\Tanks\TankService;
 
 final class AnlagenController extends Controller
@@ -199,7 +200,14 @@ final class AnlagenController extends Controller
         }
         // Ein Tank hat keine Anschlüsse, Sicherungen und Kabel – er hat seine eigene Seite.
         if (!AnlagenService::elektrisch((string) $objekt['art'])) {
-            $this->view('anlagen/tank', TankService::seitenDaten($objekt));
+            [$von, $bis, $vorgabe] = Zeitraum::ausAnfrage($request);
+            $groesse = $request->str('groesse', 'liter');
+            $this->view('anlagen/tank', TankService::seitenDaten($objekt) + [
+                'von' => $von, 'bis' => $bis, 'vorgabe' => $vorgabe,
+                'groesse' => isset(TankService::GROESSEN[$groesse]) ? $groesse : 'liter',
+                'stylesheets' => ['/assets/vendor/uplot/uPlot.min.css'],
+                'scripts' => ['/assets/vendor/uplot/uPlot.iife.min.js', '/assets/js/live.js', '/assets/js/statistik.js'],
+            ]);
             return;
         }
         $id = (int) $objekt['id'];

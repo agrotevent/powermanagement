@@ -14,7 +14,9 @@ use App\Support\Zeit;
  *
  * Die Geräte entsprechen dem, was `bin/power demo:seed` anlegt: ein
  * Festivalgelände mit Einspeisung, Bühne, Catering, Licht (schaltbar),
- * einem Generator mit ComAp-Steuerung und einem Victron-Speicher.
+ * einem Generator mit ComAp-Steuerung, einem Victron-Speicher und einem
+ * Tanksensor (Plus Uni am Tank des Aggregats): Er meldet wie ein echter
+ * Gen2 nur Rohwerte – die Spannung in Schritten von 0,1 V, nur bei Änderung.
  */
 final class Demo
 {
@@ -42,7 +44,19 @@ final class Demo
             'generator' => ['drehstrom', 12000, 64000, 'gesamt'],
             'motor'     => ['motor', 0, 0, ''],
         ]],
+        'shellyplusuni-tank1'      => ['shelly', 'SNSN-0043X', 'Tanksensor TS-01', ['voltmeter:100' => ['tankpegel', 0, 0, '']]],
     ];
+
+    /*
+     * Der Demo-Tank (QUADRO-AG 3000, HVO): um 06:00 Ortszeit auf 2.700 l
+     * betankt, dann 22 l/h. Die Sonde (0–100 mbar, 4–20 mA an 500 Ω, 20 mm
+     * über dem Boden) liefert u = 2,0 V + (h − 20 mm) / 163,4135 mm/V bei
+     * 2,78 l/mm – gerundet auf 0,1 V wie ein echter Meldeschritt.
+     */
+    private const TANK_VOLL_L = 2700.0;
+    private const TANK_L_JE_H = 22.0;
+    private const TANK_L_JE_MM = 2.78;
+    private const TANK_MM_JE_V = 163.4135;
 
     private static function zustandDatei(): string
     {
@@ -117,6 +131,9 @@ final class Demo
         if ($messung === 'zustand') {
             return self::zustandsWert($geraet, $kanal, $art, $feld, $t);
         }
+        if ($art === 'tankpegel') {
+            return null;    // ein Tanksensor misst keinen Strom
+        }
         $p = self::leistung($geraet, $kanal, $t);
         $anteil = $art === 'einphasig' ? ($phase === 'sum' ? 1.0 : 0.0) : ($phase === 'sum' ? 1.0 : (self::ANTEIL[$phase] ?? 0.0));
         if ($art === 'einphasig' && $phase !== 'sum') {
@@ -142,6 +159,13 @@ final class Demo
 
     private static function zustandsWert(string $geraet, string $kanal, string $art, string $feld, int $t): float|string|null
     {
+        if ($art === 'tankpegel') {
+            return match ($feld) {
+                'u'            => self::tankSpannung($t),
+                'sensorfehler' => 0.0,
+                default        => null,
+            };
+        }
         if ($art === 'einphasig') {
             return match ($feld) {
                 'schalter'   => self::aus($geraet, $kanal) ? 0.0 : 1.0,
@@ -198,8 +222,74 @@ final class Demo
             'batterie'  => ['soc', 'u', 'i', 'p', 'restlaufzeit_s'],
             'vebus'     => ['zustand', 'zustand_text', 'schalterstellung', 'schalterstellung_text'],
             'motor'     => ['drehzahl', 'tank_prozent', 'kuehlmittel_c', 'oeldruck_bar', 'u_batterie', 'betriebsstunden', 'starts', 'nennleistung_w', 'motorzustand', 'modus'],
+            'tankpegel' => ['u', 'sensorfehler'],
             default     => [],
         };
+    }
+
+    /** Inhalt des Demo-Tanks in l: seit dem letzten 06:00 (Ortszeit) 22 l/h aus 2.700 l. */
+    private static function tankLiter(int $t): float
+    {
+        return self::TANK_VOLL_L - self::TANK_L_JE_H * ($t - self::tankBetankt($t)) / 3600;
+    }
+
+    /** Wann der Demo-Tank zuletzt betankt wurde: das letzte 06:00 Ortszeit. */
+    private static function tankBetankt(int $t): int
+    {
+        $lokal = (new \DateTimeImmutable('@' . $t))->setTimezone(Zeit::zone());
+        $sechs = $lokal->setTime(6, 0);
+        if ($sechs > $lokal) {
+            $sechs = $sechs->modify('-1 day');
+        }
+        return $sechs->getTimestamp();
+    }
+
+    /** Spannung der Demo-Sonde – auf 0,1 V gerundet wie der Meldeschritt, ungerundet für die Rechnung. */
+    private static function tankSpannung(int $t, bool $gerundet = true): float
+    {
+        $u = 2.0 + (self::tankLiter($t) / self::TANK_L_JE_MM - 20.0) / self::TANK_MM_JE_V;
+        return $gerundet ? round($u, 1) : $u;
+    }
+
+    /**
+     * Wann die Demo-Sonde ihren jetzigen Wert gemeldet hat: Der Rohwert fällt
+     * gleichmäßig, die gerundete Spannung springt etwa alle zwei Stunden um
+     * 0,1 V – oder um 06:00 nach oben (Betankung).
+     */
+    private static function tankGemeldet(int $t): int
+    {
+        $u = self::tankSpannung($t, false);
+        $proSekunde = self::TANK_L_JE_H / self::TANK_L_JE_MM / self::TANK_MM_JE_V / 3600;
+        $seit = $t - (int) floor((round($u, 1) + 0.05 - $u) / $proSekunde);
+        return min($t, max($seit, self::tankBetankt($t)));
+    }
+
+    /**
+     * Wie Messdaten::tankLetzte: der letzte Rohwert seit `ab`, kein
+     * Sensorfehler, Gerät online. Vor dem letzten Meldeschritt gibt es
+     * nichts – ein eben eingebauter Sensor hat dann noch keinen Wert.
+     */
+    public static function tankLetzte(array $abfragen): array
+    {
+        $t = time();
+        $out = [];
+        foreach ($abfragen as $a) {
+            $def = self::GERAETE[$a['geraet']][3][$a['kanal']] ?? null;
+            if ($def === null || $def[0] !== 'tankpegel') {
+                continue;
+            }
+            $gemeldet = self::tankGemeldet($t);
+            $da = $a['feld'] === 'u' && $gemeldet >= (int) $a['ab'];
+            $out[$a['geraet'] . '|' . $a['kanal']] = [
+                'zeit'        => $da ? $gemeldet * 1000 : null,
+                'roh'         => $da ? self::tankSpannung($gemeldet) : null,
+                'fehler'      => false,
+                'fehler_zeit' => $da ? $gemeldet * 1000 : null,
+                'online'      => true,
+                'online_zeit' => max((int) $a['ab_online'], $t - 60) * 1000,
+            ];
+        }
+        return $out;
     }
 
     public static function letzte(array $paare): array
@@ -286,7 +376,7 @@ final class Demo
                     'zuletzt' => ($t - 2) * 1000,
                     'modell'  => $modell,
                     'name'    => $name,
-                    'p'       => self::wert('strom', $geraet, $kanal, 'sum', 'p', $t),
+                    'p'       => ($p = self::wert('strom', $geraet, $kanal, 'sum', 'p', $t)) !== null ? (float) $p : null,
                 ];
             }
         }

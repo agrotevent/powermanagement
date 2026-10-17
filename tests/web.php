@@ -329,11 +329,62 @@ try {
         $seite = aufruf($basis, $admin['dose'], 'GET', '/anlagen/' . $tankId);
         pruefe($seite['status'] === 200 && phpMeldung($seite['text']) === null && str_contains($seite['text'], 'seit Einbau nicht gepeilt') && str_contains($seite['text'], 'Ausbauen'),
             'Tankseite: eingebauter Sensor, ungeprüft, mit „Ausbauen“');
+        pruefe(str_contains($seite['text'], 'data-quelle="/anlagen/' . $tankId . '/tank/verlauf"') && str_contains($seite['text'], 'Fassungen der Kennlinie')
+            && str_contains($seite['text'], 'data-tank="roh"') && str_contains($seite['text'], 'data-live-url="/anlagen/' . $tankId . '/live"')
+            && str_contains($seite['text'], 'id="statistik-daten"'), 'Tankseite: Jetzt (live), Verlauf, Fassungen');
+        foreach (['?zeitraum=7d&groesse=roh', '?zeitraum=frei&von=2026-01-01&bis=2026-01-02&groesse=prozent', '?groesse=unsinn'] as $zusatz) {
+            $r = aufruf($basis, $admin['dose'], 'GET', '/anlagen/' . $tankId . $zusatz);
+            pruefe($r['status'] === 200 && phpMeldung($r['text']) === null, 'Tankseite ' . $zusatz . ' → ' . $r['status']);
+        }
+        $live = json_decode(aufruf($basis, $admin['dose'], 'GET', '/anlagen/' . $tankId . '/live')['text'], true);
+        $lt = $live['objekte'][$tankId] ?? [];
+        pruefe(($lt['tank']['sensor'] ?? null) === true && ($lt['tank']['messpunkt'] ?? 0) === (int) ($mpTs['id'] ?? -1) && ($lt['stufe'] ?? '') === 'stumm'
+            && str_contains((string) ($lt['hinweis'] ?? ''), 'seit dem Einbau'), 'Tank live: Sensor eingebaut, noch kein Wert seit dem Einbau – ' . (string) ($lt['hinweis'] ?? ''));
+        // Eingebaut vor einem Augenblick – im Zeitraum der Statistik läge sonst nichts.
+        Database::execute('UPDATE messpunkte SET gueltig_ab = ? WHERE id = ?', [gmdate('c', time() - 600), (int) ($mpTs['id'] ?? 0)]);
+        $r = aufruf($basis, $admin['dose'], 'GET', '/statistik?mp[]=' . (int) ($mpTs['id'] ?? 0));
+        pruefe($r['status'] === 200 && phpMeldung($r['text']) === null && str_contains($r['text'], 'data-quelle="/anlagen/' . $tankId . '/tank/verlauf?mp=' . (int) ($mpTs['id'] ?? 0) . '"')
+            && !str_contains($r['text'], 'Spitzenleistung') && str_contains($r['text'], 'Tankseite'), 'Statistik: Tanksensor mit dem Verlauf des Tanks, ohne Leistungskennzahlen');
+        $karteTank = json_decode(aufruf($basis, $admin['dose'], 'GET', '/karte/objekt/' . $tankId)['text'], true);
+        pruefe(($karteTank['tank']['sensor']['kennung'] ?? '') === $kennung . '-TS' && ($karteTank['tank']['darf']['einsetzen'] ?? false) === true
+            && is_int($karteTank['tank']['sensor']['einsatz_id'] ?? null) && array_key_exists('tank', $karteTank['live'] ?? []), 'Karte: Tank-Panel mit Sensor, Ausbau und Livewerten');
         $r = aufruf($basis, $admin['dose'], 'POST', '/anlagen/' . $tankId . '/messpunkt', ['geraet' => $kennung . '-hand', 'kanal' => 'voltmeter:100', '_token' => $admin['token']], $json);
         pruefe(Database::scalar('SELECT id FROM messpunkte WHERE geraet = ?', [$kennung . '-hand']) === false, 'kein Messpunkt von Hand am Tank (' . $r['status'] . ')');
         $r = aufruf($basis, $admin['dose'], 'POST', '/einsatz/' . (int) ($mpTs['einsatz_id'] ?? 0) . '/beenden', ['_token' => $admin['token']]);
         pruefe($r['status'] === 302 && Database::scalar("SELECT id FROM messpunkte WHERE objekt_id = ? AND rolle = 'fuellstand' AND gueltig_bis IS NULL", [$tankId]) === false,
             'Tanksensor ausgebaut');
+
+        // Füllstand: Live, Verlauf, CSV, Statistik, Karte, Übersicht, Einstellungen
+        $mpAlt = (int) ($mpTs['id'] ?? 0);
+        $live = json_decode(aufruf($basis, $admin['dose'], 'GET', '/anlagen/' . $tankId . '/live')['text'], true);
+        pruefe(($live['objekte'][$tankId]['stufe'] ?? '') === 'keine' && ($live['objekte'][$tankId]['tank']['sensor'] ?? null) === false, 'Tank live nach dem Ausbau: kein Sensor');
+        $r = aufruf($basis, $admin['dose'], 'GET', '/anlagen/' . $tankId . '/tank/verlauf?zeitraum=7d&feld=roh');
+        $v = json_decode($r['text'], true);
+        pruefe($r['status'] === 200 && str_contains($r['kopf'], 'application/json') && ($v['ok'] ?? false) === true && ($v['feld'] ?? '') === 'roh'
+            && isset($v['zeiten'], $v['serien'], $v['marken'], $v['teile'], $v['schritt']), 'Tankverlauf als JSON (früherer Sensor zählt mit)');
+        $r = aufruf($basis, $admin['dose'], 'GET', '/anlagen/' . $tankId . '/tank/verlauf?mp=' . $mpAlt . '&groesse=liter');
+        pruefe($r['status'] === 200 && (json_decode($r['text'], true)['feld'] ?? '') === 'liter', 'Tankverlauf eines Sensors');
+        $r = aufruf($basis, $admin['dose'], 'GET', '/anlagen/' . $tankId . '/tank/verlauf?mp=' . ($mpAlt + 999999));
+        pruefe($r['status'] === 404 && (json_decode($r['text'], true)['ok'] ?? true) === false, 'Tankverlauf: fremder Messpunkt → 404 (JSON)');
+        gleich(aufruf($basis, $admin['dose'], 'GET', '/anlagen/' . (int) ($mobil['id'] ?? 0) . '/tank/verlauf')['status'], 404, 'Tankverlauf einer Verteilung → 404');
+        $r = aufruf($basis, $admin['dose'], 'GET', '/anlagen/' . $tankId . '/tank/csv?zeitraum=24h&mp=' . $mpAlt);
+        pruefe($r['status'] === 200 && str_contains($r['kopf'], 'text/csv') && str_contains($r['text'], '"Zeit";"Sensor";"Rohwert') && str_contains($r['text'], '"Inhalt [l]";"Füllstand [%]"'),
+            'Tank-CSV mit Kopfzeile');
+        pruefe((int) Database::scalar("SELECT COUNT(*) FROM audit_log WHERE action = 'tank.csv' AND target_id = ?", [(string) $tankId]) > 0, 'Tank-CSV steht im Audit');
+        $csv = aufruf($basis, $admin['dose'], 'GET', '/statistik/csv?zeitraum=24h&mp[]=' . $mpAlt)['text'];
+        pruefe(!str_contains($csv, $kennung . '-TS'), 'Statistik-CSV übergeht den Tanksensor');
+        $stand = json_decode(aufruf($basis, $admin['dose'], 'GET', '/karte/' . $etage . '/stand')['text'], true);
+        $imPlan = array_column($stand['objekte'] ?? [], null, 'id');
+        gleich($imPlan[$tankId]['tank'] ?? null, ['nenn_l' => 3000.0, 'sensor' => false], 'Karte: Stand mit Nennvolumen und Sensor des Tanks');
+        pruefe(array_key_exists('tank', $imPlan[(int) ($mobil['id'] ?? 0)] ?? []) && $imPlan[(int) ($mobil['id'] ?? 0)]['tank'] === null, 'Karte: eine Verteilung hat keinen Tankteil');
+        pruefe(str_contains(aufruf($basis, $admin['dose'], 'GET', '/dashboard')['text'], 'data-art="tank"'), 'Übersicht: Tank-Kachel');
+        pruefe(str_contains(aufruf($basis, $admin['dose'], 'GET', '/anlagen?art=tank')['text'], 'data-tank="menge"'), 'Anlagenliste: Inhalt des Tanks statt Leistung');
+        $einst = aufruf($basis, $admin['dose'], 'GET', '/system/einstellungen')['text'];
+        pruefe(str_contains($einst, 'name="grenzen__tank_warnung"') && str_contains($einst, 'name="grenzen__tank_stumm_h"'), 'Einstellungen: Grenzen der Tanks');
+        $r = aufruf($basis, $admin['dose'], 'POST', '/system/einstellungen/speichern', ['grenzen__tank_warnung' => '30', '_token' => $admin['token']]);
+        pruefe($r['status'] === 302 && Database::scalar("SELECT setting_value FROM settings WHERE setting_key = 'grenzen.tank_warnung'") === '30', 'Einstellungen: Tank-Warngrenze gespeichert');
+        aufruf($basis, $admin['dose'], 'POST', '/system/einstellungen/speichern', ['grenzen__tank_warnung' => '', '_token' => $admin['token']]);
+        \App\Support\Settings::forget('grenzen.tank_warnung');
     }
 
     // Georeferenz: GeoJSON, Koordinaten im Anlagenfenster, Speichern prüft
@@ -552,6 +603,11 @@ try {
         '/inventar', '/inventar/neu', '/verteiler-abgleich', '/location', '/anlagen/katalog/import'] as $pfad) {
         gleich(aufruf($basis, $kunde['dose'], 'GET', $pfad)['status'], 403, 'Kunde ' . $pfad);
     }
+    if (($tankId ?? 0) > 0) {
+        $r = aufruf($basis, $kunde['dose'], 'GET', '/anlagen/' . $tankId . '/tank/verlauf');
+        pruefe($r['status'] === 404 && (json_decode($r['text'], true)['ok'] ?? true) === false, 'Kunde ohne Freigabe: fremder Tank, Verlauf → 404');
+        gleich(aufruf($basis, $kunde['dose'], 'GET', '/anlagen/' . $tankId . '/tank/csv')['status'], 404, 'Kunde ohne Freigabe: fremder Tank, CSV → 404');
+    }
     if ($etage > 0) {
         gleich(aufruf($basis, $kunde['dose'], 'GET', '/karte/' . $etage . '/geojson')['status'], 403, 'Kunde ohne Freigabe: kein GeoJSON');
         $r = aufruf($basis, $kunde['dose'], 'POST', '/karte/georeferenz', ['floor_id' => $etage, 'entfernen' => 1, '_token' => $kunde['token']], ['Accept: application/json']);
@@ -722,6 +778,10 @@ try {
         BenutzerService::freigabeSpeichern(['subject_type' => 'user', 'subject_id' => $benutzer['planer'], 'ziel_art' => 'site', 'ziel_id' => (int) $fremd['site_id']]);
         $planer = anmelden($basis, $kennung . '-planer', $kennwort);
         $dosen[] = $planer['dose'];
+        if (($tankId ?? 0) > 0) {
+            gleich(aufruf($basis, $planer['dose'], 'GET', '/anlagen/' . $tankId . '/tank/verlauf')['status'], 403, 'Planer ohne „statistik.view“: Tankverlauf → 403');
+            gleich(aufruf($basis, $planer['dose'], 'GET', '/anlagen/' . $tankId . '/tank/csv')['status'], 403, 'Planer ohne „statistik.export“: Tank-CSV → 403');
+        }
         $json = ['Accept: application/json'];
         aufruf($basis, $planer['dose'], 'POST', '/standorte/etage', ['site_id' => $werk, 'id' => (int) $fremd['floor_id'], 'name' => $kennung . ' gekapert', '_token' => $planer['token']]);
         gleich(Database::first('SELECT name, site_id FROM floors WHERE id = ?', [(int) $fremd['floor_id']]), ['name' => $fremd['etage'], 'site_id' => $fremd['site_id']],

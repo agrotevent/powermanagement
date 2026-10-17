@@ -68,6 +68,16 @@ final class StatistikController extends Controller
         foreach ($gewaehlt as $id) {
             $m = $alle[$id];
             $fenster = MesspunktService::fenster($m, $m['objekt']);
+            if ($m['rolle'] === 'fuellstand') {
+                // Ein Tanksensor misst keinen Strom: sein Verlauf kommt in Litern
+                // (mit der jeweiligen Kennlinie) von der Tankseite.
+                $auswahl[] = [
+                    'id' => $id, 'titel' => $m['titel'], 'geraet' => $m['geraet'], 'kanal' => $m['kanal'], 'rolle' => $m['rolle'],
+                    'objekt' => $m['objekt'], 'fenster' => Zugriff::beschreiben($fenster),
+                    'teile' => Zugriff::begrenzen($fenster, $von, min($bis, time())), 'kennzahlen' => null, 'energie' => [],
+                ];
+                continue;
+            }
             $auswahl[] = [
                 'id'       => $id,
                 'titel'    => $m['titel'],
@@ -142,7 +152,8 @@ final class StatistikController extends Controller
         $daten = [];
         foreach (array_map('intval', $request->arr('mp')) as $id) {
             $m = $alle[$id] ?? null;
-            if ($m === null) {
+            // Ein Tanksensor hat seine eigene CSV (Tankseite) – Strom misst er nicht.
+            if ($m === null || $m['rolle'] === 'fuellstand') {
                 continue;
             }
             $fenster = MesspunktService::fenster($m, $m['objekt']);

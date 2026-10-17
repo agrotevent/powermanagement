@@ -8,6 +8,7 @@ use App\Messung\Datenquellen;
 use App\Messung\Steuerung;
 use App\Support\Config;
 use App\Support\Database;
+use App\Tanks\TankService;
 
 /**
  * Livewerte je Anlage – für Übersicht, Karte und Anlagenseite gleich.
@@ -18,6 +19,9 @@ use App\Support\Database;
  * Motor) aus den übrigen Messpunkten. Wer für eine Anlage jetzt keine
  * Daten sehen darf (Datenzeitraum vorbei), bekommt „keine Freigabe“ statt
  * Zahlen.
+ *
+ * Tanks haben keine Leistung: Ihren Füllstand liest TankService::live() –
+ * in derselben Form, mit Stufe und Hinweis, dazu „tank“.
  */
 final class LiveService
 {
@@ -39,6 +43,19 @@ final class LiveService
      * @return array<int,array<string,mixed>> objekt_id => Zusammenfassung
      */
     public static function fuerObjekte(array $objekte): array
+    {
+        $tanks = array_values(array_filter($objekte, static fn (array $o): bool => !AnlagenService::elektrisch((string) $o['art'])));
+        $out = self::elektrische(array_values(array_filter($objekte, static fn (array $o): bool => AnlagenService::elektrisch((string) $o['art']))));
+        // Zweiter Durchgang: die Tanks – mit den Livewerten der elektrischen
+        // Anlagen (Generatoren am Kraftstoffschlauch).
+        return $tanks === [] ? $out : $out + TankService::live($tanks, $out);
+    }
+
+    /**
+     * @param list<array<string,mixed>> $objekte elektrische Anlagen
+     * @return array<int,array<string,mixed>>
+     */
+    private static function elektrische(array $objekte): array
     {
         if ($objekte === []) {
             return [];
@@ -85,11 +102,6 @@ final class LiveService
         ];
         if ($mps === []) {
             $erg['hinweis'] = 'kein Messgerät zugeordnet';
-            return $erg;
-        }
-        // Ein Tank hat keine Leistung – im Tank misst ein Tanksensor den Füllstand.
-        if (!AnlagenService::elektrisch((string) $objekt['art'])) {
-            $erg['hinweis'] = 'Tanksensor eingebaut';
             return $erg;
         }
         if (!Zugriff::liveErlaubt(Zugriff::datenFenster($objekt))) {

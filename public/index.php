@@ -22,6 +22,7 @@ use App\Controllers\StandortController;
 use App\Controllers\StatistikController;
 use App\Controllers\SteckerController;
 use App\Controllers\SteuerungController;
+use App\Controllers\TankController;
 use App\Controllers\VerteilerAbgleichController;
 use App\Support\Request;
 use App\Support\Router;
@@ -93,6 +94,10 @@ $router->post('/anlagen/{id}/anschluesse/details', [AnlagenController::class, 'a
 $router->post('/anlagen/{id}/schutz', [AnlagenController::class, 'schutzSpeichern'], 'anlagen.manage');
 $router->post('/anlagen/{id}/schutz/loeschen', [AnlagenController::class, 'schutzLoeschen'], 'anlagen.manage');
 $router->post('/anlagen/{id}/schutz/vorschlag', [AnlagenController::class, 'schutzVorschlag'], 'anlagen.manage');
+// Tanks: Verlauf und CSV des Füllstands. Den Tank (sichtbar) und den
+// Messpunkt (Füllstand dieses Tanks) prüft der Controller.
+$router->get('/anlagen/{id}/tank/verlauf', [TankController::class, 'verlauf'], 'statistik.view');
+$router->get('/anlagen/{id}/tank/csv', [TankController::class, 'csv'], 'statistik.export');
 // Aufbau-Modus: Plan festhalten, vor Ort bestätigen, danach abgleichen.
 $router->get('/aufbau', [AufbauController::class, 'index'], 'anlagen.view');
 $router->post('/aufbau/starten', [AufbauController::class, 'starten'], 'anlagen.manage');

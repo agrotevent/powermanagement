@@ -46,7 +46,8 @@ $neuText = $fest === true && ($filter['art'] === '' || $filter['art'] === 'ansch
     <div class="table-wrap">
         <table class="tabelle-karten">
             <thead>
-            <tr><th>Anlage</th><th>Standort</th><th><?= $filter['art'] === 'tank' ? 'Inhalt' : 'Anschlüsse' ?></th><th>Status</th><th class="num">Leistung</th><th class="num">Auslastung</th></tr>
+            <?php $nurTanks = $filter['art'] === 'tank'; ?>
+            <tr><th>Anlage</th><th>Standort</th><th><?= $nurTanks ? 'Inhalt' : 'Anschlüsse' ?></th><th>Status</th><th class="num"><?= $nurTanks ? 'Inhalt jetzt' : 'Leistung' ?></th><th class="num"><?= $nurTanks ? 'Füllstand' : 'Auslastung' ?></th></tr>
             </thead>
             <tbody>
             <?php if ($objekte === []): ?>
@@ -65,8 +66,15 @@ $neuText = $fest === true && ($filter['art'] === '' || $filter['art'] === 'ansch
                     <td data-label="Standort"><?= View::e($o['site_name'] ?? '–') ?><?= $o['floor_name'] ? '<div class="small muted">' . View::e($o['floor_name']) . '</div>' : '' ?></td>
                     <td data-label="<?= AnlagenService::elektrisch((string) $o['art']) ? 'Anschlüsse' : 'Inhalt' ?>" class="small"><?= View::e($o['kurzform']) ?></td>
                     <td data-label="Status"><span class="badge status-<?= View::e($o['status']) ?>"><?= View::e(AnlagenService::STATUS[$o['status']] ?? $o['status']) ?></span></td>
-                    <td data-label="Leistung" class="num" data-feld="p"><?= View::e(Messdaten::format($l['p'] ?? null, 'W')) ?></td>
-                    <td data-label="Auslastung" class="num" data-feld="auslastung"><?= ($l['auslastung'] ?? null) !== null ? (int) round((float) $l['auslastung']) . ' %' : '' ?></td>
+                    <?php if (AnlagenService::elektrisch((string) $o['art'])): ?>
+                        <td data-label="Leistung" class="num" data-feld="p"><?= View::e(Messdaten::format($l['p'] ?? null, 'W')) ?></td>
+                        <td data-label="Auslastung" class="num" data-feld="auslastung"><?= ($l['auslastung'] ?? null) !== null ? (int) round((float) $l['auslastung']) . ' %' : '' ?></td>
+                    <?php else: ?>
+                        <?php $t = is_array($l['tank'] ?? null) ? $l['tank'] : []; ?>
+                        <td data-label="Inhalt jetzt" class="num" data-tank="menge"><?= is_numeric($t['liter'] ?? null) ? View::e(\App\Tanks\TankService::zahl(round((float) $t['liter']))) . ' l'
+                            : (is_numeric($t['hoehe_mm'] ?? null) ? View::e(\App\Tanks\TankService::zahl(round((float) $t['hoehe_mm']))) . ' mm' : '–') ?></td>
+                        <td data-label="Füllstand" class="num" data-tank="prozent"><?= is_numeric($t['prozent'] ?? null) ? View::e(\App\Tanks\TankService::zahl(round((float) $t['prozent']))) . ' %' : '' ?></td>
+                    <?php endif; ?>
                 </tr>
             <?php endforeach; ?>
             </tbody>

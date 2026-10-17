@@ -22,6 +22,12 @@ declare(strict_types=1);
  * bei Shelly-Tausch, geänderten Sensordaten und Tankdaten (sonst keine);
  * ältere Fassungen bleiben unverändert; Messpunkte am Tank nur aus dem
  * Inventar; Löschen von Messpunkt und Tank räumt Fassungen und Ereignisse weg.
+ *
+ * D – Live und Verlauf (Demo-Modus, Demo-Sonde shellyplusuni-tank1): Füllstand
+ * live ab Einbau mit der jetzigen Fassung, Stufe, Grenzen aus den
+ * Einstellungen; Verlauf je Fassung (Liter erst mit Inhalt je mm, Rohwert
+ * durchgehend), Kunde mit Datenfenster (Live gesperrt, Verlauf, Fassungen und
+ * Ereignisse nur im Fenster); Tank ohne Sensor mit letzter Peilung.
  */
 
 require __DIR__ . '/hilfen/pruefung.php';
@@ -40,6 +46,8 @@ use App\Services\LocationBundle;
 use App\Services\MesspunktService;
 use App\Services\SchutzService;
 use App\Services\SiteService;
+use App\Messung\Demo;
+use App\Support\Config;
 use App\Support\Database;
 use App\Support\Zeit;
 use App\Tanks\TankRechnung;
@@ -848,6 +856,175 @@ try {
     Database::execute('DELETE FROM user_roles WHERE user_id = ?', [$benutzerC]);
     Database::execute('DELETE FROM users WHERE id = ?', [$benutzerC]);
     Database::execute('DELETE FROM audit_log WHERE username = ? OR details LIKE ?', [$kennungC, '%' . $kennungC . '%']);
+}
+
+// ------------------------------------------------ D – Live und Verlauf (Demo-Modus)
+Config::set('app.demo', true);
+$kennungD = 'pm-tank-' . bin2hex(random_bytes(3));
+$siteD = SiteService::saveSite(null, ['name' => 'Prüfung Tankstand ' . $kennungD]);
+$floorD = SiteService::saveFloor(null, ['site_id' => $siteD, 'name' => 'Wiese']);
+$adminD = BenutzerService::anlegen($kennungD, 'Pruefung2026!!', 'admin', false);
+$kundeD = BenutzerService::anlegen($kennungD . '-kunde', 'Pruefung2026!!', 'kunde', false);
+$demo = ['geraet' => 'shellyplusuni-tank1', 'kanal' => 'voltmeter:100'];
+$warnungVorher = Config::get('grenzen.tank_warnung');
+
+try {
+    alsBenutzer($adminD);
+    $jetzt = time();
+    $eigD = ['inhalt_l' => '3000', 'kraftstoff' => 'HVO', 'bauform' => 'Quader', 'sumpf_l' => '140'];
+    $tankD = (int) AnlagenService::speichern(null, ['art' => 'tank', 'name' => $kennungD . ' Tank', 'floor_id' => $floorD, 'plan_x' => 30.0, 'plan_y' => 30.0,
+        'eigenschaften' => $eigD])['id'];
+    // Eingebaut vor drei Tagen – den Messpunkt direkt anlegen, sonst ließe sich die Zeit des Einbaus nicht zurückstellen.
+    $mpD = Database::insert('messpunkte', ['objekt_id' => $tankD, 'geraet' => $demo['geraet'], 'kanal' => $demo['kanal'], 'rolle' => 'fuellstand',
+        'bezeichnung' => $kennungD . '-TS', 'gueltig_ab' => Zeit::iso($jetzt - 3 * 86400), 'created_at' => gmdate('c')]);
+    $mD = Database::first('SELECT * FROM messpunkte WHERE id = ?', [$mpD]);
+    $sensorD = ['prinzip' => 'hydrostatisch', 'feld' => 'u', 'signal' => '4-20mA', 'buerde_ohm' => 500, 'bereich_von' => 0, 'bereich_bis' => 100,
+        'bereich_einheit' => 'mbar', 'schritt_roh' => 0.1];
+    // k1 beim Einbau (Inhalt je mm unbekannt), kX 36 h zurück (ebenso), k2 vor 12 h aus einer Betankung (2,78 l/mm)
+    $k1 = TankRechnung::rechnung($sensorD, ['offset_mm' => 20], $eigD, ['kennung' => $kennungD . '-TS', 'name' => $kennungD . ' Tank', 'text' => 'Einbau'])['rechnung'];
+    gleich($k1['tank']['form'], 'unbekannt', 'Prüfbestand: Fassung beim Einbau ohne Inhalt je mm');
+    $idK1 = TankService::fassungAnlegen($mD, $k1, 'einsatz', Zeit::iso($jetzt - 3 * 86400), false);
+    $idKx = TankService::fassungAnlegen($mD, $k1, 'sensor', Zeit::iso($jetzt - 36 * 3600), false);
+    $k2 = TankRechnung::mitTank($k1, TankRechnung::tankTeil(['liter_je_mm' => '2,78'] + $eigD));
+    $tK2 = $jetzt - 12 * 3600;
+    $idK2 = TankService::fassungAnlegen($mD, $k2, 'betankung', Zeit::iso($tK2), true);
+    $tankObj = static fn () => AnlagenService::find($tankD);
+
+    // ------------------------------------------------ Live
+    $l = LiveService::fuerObjekte([$tankObj()])[$tankD] ?? [];
+    $t = $l['tank'] ?? [];
+    $w = Demo::tankLetzte([$demo + ['feld' => 'u', 'ab' => $jetzt - 3 * 86400, 'ab_online' => $jetzt - 86400]])[$demo['geraet'] . '|' . $demo['kanal']];
+    pruefe(($t['liter'] ?? 0) > 0 && isset($l['zustand']['tank_prozent']) && ($l['alter_s'] ?? -1) >= 0 && ($l['stufe'] ?? 'keine') !== 'keine',
+        'Demo-Tank mit Sensor: Liter, Füllstand, Alter, Stufe ' . ($l['stufe'] ?? '?') . ' – ' . ($l['hinweis'] ?? ''));
+    nahe($t['liter'] ?? null, (float) TankRechnung::umrechnen($k2, $w['roh'])['liter'], 0.1, 'Live rechnet mit der jetzigen Fassung (k2)');
+    nahe($t['liter'] ?? null, 2700 - 22 * ((int) $w['zeit'] / 1000 - (new DateTimeImmutable('@' . ((int) $w['zeit'] / 1000)))->setTimezone(Zeit::zone())->setTime(6, 0)
+        ->modify((int) (new DateTimeImmutable('@' . ((int) $w['zeit'] / 1000)))->setTimezone(Zeit::zone())->format('G') < 6 ? '-1 day' : '+0 day')->getTimestamp()) / 3600,
+        60.0, 'Demo-Sonde und Kennlinie passen zum Demo-Tank (2.700 l um 06:00, 22 l/h, ± Meldeschritt)');
+    gleich([$t['sensor'] ?? null, $t['messpunkt'] ?? null, $t['roh_feld'] ?? null, $t['roh_einheit'] ?? null, $t['zeit'] ?? null, $t['online'] ?? null, $t['geprueft'] ?? null,
+        $t['kalibriert'] ?? null, array_key_exists('fehler', $t) ? $t['fehler'] : 'x', array_key_exists('p', $l) ? $l['p'] : 'x', $l['messpunkte'] ?? 'x'],
+        [true, $mpD, 'u', 'V', $w['zeit'], true, true, true, null, null, []], 'Antwort je Tank: Sensor, Rohwert mit echter Zeit, online, geprüft – ohne Leistung');
+    pruefe(str_contains((string) ($t['kennlinie'] ?? ''), '2,78 l/mm') && str_contains((string) ($t['kennlinie'] ?? ''), 'geprüft'), 'Kennlinie im Klartext: ' . ($t['kennlinie'] ?? ''));
+    pruefe(str_contains((string) ($l['hinweis'] ?? ''), 'Stand ') && is_string($t['stand'] ?? null), 'Hinweis nennt den Stand mit Alter: ' . ($l['hinweis'] ?? ''));
+    nahe($t['schritt_l'] ?? null, 0.1 * 163.4135 * 2.78, 0.05, 'Liter je Meldeschritt (HVO, 0,1 V)');
+    gleich(array_keys(TankService::live([$tankObj()])), [$tankD], 'TankService::live je Tank');
+
+    // Grenzen aus den Einstellungen (grenzen.tank_*); Warnung des Tanks geht vor
+    Config::set('grenzen.tank_warnung', '99');
+    $s = LiveService::fuerObjekte([$tankObj()])[$tankD];
+    pruefe($s['stufe'] === 'warn' && str_contains($s['hinweis'], 'nur noch'), 'Warngrenze 99 % aus den Einstellungen: gelb – ' . $s['hinweis']);
+    Config::set('grenzen.tank_warnung', $warnungVorher);
+    AnlagenService::eigenschaftSetzen($tankD, ['alarm_prozent' => 99], true);
+    gleich(LiveService::fuerObjekte([$tankObj()])[$tankD]['stufe'], 'bad', 'Alarm am Tank (99 %) geht vor: rot');
+    AnlagenService::eigenschaftSetzen($tankD, ['alarm_prozent' => null], true);
+    gleich(LiveService::fuerObjekte([$tankObj()])[$tankD]['stufe'], 'ok', '… ohne wieder grün');
+
+    // Nie ein Wert von vor dem Einbau: ein eben eingebauter Sensor am selben Shelly hat noch keinen
+    $tankNeu = (int) AnlagenService::speichern(null, ['art' => 'tank', 'name' => $kennungD . ' Tank neu', 'floor_id' => $floorD, 'eigenschaften' => $eigD])['id'];
+    Database::insert('messpunkte', ['objekt_id' => $tankNeu, 'geraet' => $demo['geraet'], 'kanal' => $demo['kanal'], 'rolle' => 'fuellstand',
+        'bezeichnung' => $kennungD . '-TS2', 'gueltig_ab' => Zeit::iso(min(time(), intdiv((int) $w['zeit'], 1000) + 1)), 'created_at' => gmdate('c')]);
+    $mNeu = Database::first("SELECT * FROM messpunkte WHERE objekt_id = ? AND rolle = 'fuellstand'", [$tankNeu]);
+    TankService::fassungAnlegen($mNeu, $k2, 'einsatz', (string) $mNeu['gueltig_ab'], false);
+    $l = LiveService::fuerObjekte([AnlagenService::find($tankNeu)])[$tankNeu];
+    pruefe($l['stufe'] === 'stumm' && array_key_exists('roh', $l['tank']) && $l['tank']['roh'] === null && $l['tank']['liter'] === null && str_contains($l['hinweis'], 'seit dem Einbau'),
+        'eben eingebaut: kein Wert von vor dem Einbau – „' . $l['hinweis'] . '“');
+    gleich(TankService::rohJetzt(AnlagenService::find($tankNeu), $mNeu), null, 'rohJetzt: kein Rohwert von vor dem Einbau');
+    $roh = TankService::rohJetzt($tankObj(), $mD);
+    gleich([$roh['roh'] ?? null, $roh['zeit'] ?? null, $roh['feld'] ?? null], [$w['roh'], $w['zeit'], 'u'], 'rohJetzt: der letzte Rohwert vom Server');
+
+    // ------------------------------------------------ Verlauf je Fassung
+    $r = TankService::reihe($tankObj(), null, $jetzt - 86400, $jetzt, 'liter');
+    $zeiten = $r['zeiten'];
+    $sortiert = $zeiten;
+    sort($sortiert);
+    pruefe(count($zeiten) > 100 && $zeiten === $sortiert, 'Verlauf 24 h: Zeiten aufsteigend (' . count($zeiten) . ')');
+    gleich([$r['groesse'], $r['einheit'], $r['name'], array_keys($r['serien'])], ['liter', 'l', 'Inhalt', ['liter']], 'Verlauf: Größe, Einheit, Name');
+    $liter = $r['serien']['liter'];
+    $vor = $nach = [];
+    foreach ($zeiten as $i => $ms) {
+        if ($ms < $tK2 * 1000 - 600_000) {
+            $vor[] = $liter[$i];
+        } elseif ($ms >= $tK2 * 1000 + 600_000 && $ms <= ($jetzt - 600) * 1000) {
+            $nach[] = $liter[$i];
+        }
+    }
+    pruefe($vor !== [] && array_filter($vor, static fn ($v) => $v !== null) === [], 'vor k2 (Inhalt je mm unbekannt): keine Liter');
+    pruefe($nach !== [] && array_filter($nach, static fn ($v) => $v === null || $v <= 0) === [], 'nach k2: Liter (' . count($nach) . ' Punkte)');
+    $rr = TankService::reihe($tankObj(), null, $jetzt - 86400, $jetzt, 'roh');
+    $rohWerte = array_slice($rr['serien']['roh'], 0, -1);   // der letzte Punkt ist die Lücke am Ende
+    pruefe($rr['zeiten'] === $zeiten && array_filter($rohWerte, static fn ($v) => $v === null) === [] && $rr['einheit'] === 'V' && $rr['name'] === 'Rohwert (Spannung)',
+        'Rohwert durchgehend, auch über die Grenze der Fassungen');
+    $i = array_key_last(array_filter($liter, static fn ($v) => $v !== null));
+    nahe($liter[$i], (float) TankRechnung::umrechnen($k2, (float) $rr['serien']['roh'][$i])['liter'], 0.1, 'ein Punkt nach k2 rechnet mit k2');
+    $h = TankService::reihe($tankObj(), null, $jetzt - 86400, $jetzt, 'hoehe_mm');
+    $j = array_key_first(array_filter($h['serien']['hoehe_mm'], static fn ($v) => $v !== null));
+    nahe($h['serien']['hoehe_mm'][$j], (float) TankRechnung::hoehe($k1, (float) $rr['serien']['roh'][$j]), 0.1, 'Füllhöhe vor k2 aus kX');
+    gleich(TankService::reihe($tankObj(), $mpD + 999999, $jetzt - 86400, $jetzt, 'liter')['zeiten'], [], 'ein fremder Messpunkt liefert nichts');
+    gleich(TankService::reihe($tankObj(), null, $jetzt - 3600, $jetzt, 'unsinn')['groesse'], 'liter', 'unbekannte Größe: Liter');
+
+    // ------------------------------------------------ Ereignisse, Fassungen und der Kunde mit Datenfenster
+    $idK3 = TankService::fassungAnlegen($mD, $k2, 'hand', Zeit::iso($jetzt - 1800), true);
+    $peilungAlt = Database::insert('tank_ereignisse', ['objekt_id' => $tankD, 'messpunkt_id' => $mpD, 'art' => 'peilung', 'zeit' => Zeit::iso($jetzt - 2 * 3600),
+        'prozent' => 60.0, 'von' => $kennungD, 'created_at' => gmdate('c')]);
+    $peilungNeu = Database::insert('tank_ereignisse', ['objekt_id' => $tankD, 'messpunkt_id' => $mpD, 'art' => 'peilung', 'zeit' => Zeit::iso($jetzt - 1800),
+        'hoehe_mm' => 650.0, 'von' => $kennungD, 'created_at' => gmdate('c')]);
+    gleich(array_column(TankService::ereignisse($tankObj()), 'id'), [$peilungNeu, $peilungAlt], 'Ereignisse jüngste zuerst');
+    gleich(array_column(TankService::ereignisse($tankObj()), 'text'), ['Peilstab 650 mm', 'Peilung 60 %'], 'Ereignisse als Text');
+    gleich(array_column(TankService::fassungenSichtbar($tankObj()), 'id'), [$idK3, $idK2, $idKx, $idK1], 'ohne Grenze: alle Fassungen, jüngste zuerst');
+    gleich(count(TankService::reihe($tankObj(), null, $jetzt - 86400, $jetzt, 'liter')['marken']), 2, 'Verlauf: Peilungen als Marken');
+    $freigabe = (int) Database::insert('freigaben', ['subject_type' => 'user', 'subject_id' => $kundeD, 'ziel_art' => 'site', 'ziel_id' => $siteD,
+        'darf_bearbeiten' => 0, 'darf_steuern' => 0, 'gueltig_ab' => null, 'gueltig_bis' => null,
+        'daten_ab' => Zeit::iso($jetzt - 86400), 'daten_bis' => Zeit::iso($jetzt - 3600), 'notiz' => '', 'created_by' => 'test', 'created_at' => gmdate('c')]);
+    alsBenutzer($kundeD);
+    pruefe(Zugriff::siehtObjekt($tankObj()), 'Kunde sieht den Tank');
+    $l = LiveService::fuerObjekte([$tankObj()])[$tankD];
+    gleich([$l['stufe'], $l['tank'], $l['zustand'], $l['alter_s']], ['gesperrt', null, [], null], 'Kunde (Datenfenster endete vor 1 h): Live gesperrt, keine Zahl');
+    gleich(TankService::rohJetzt($tankObj(), $mD), null, 'Kunde: kein Rohwert für jetzt');
+    $r = TankService::reihe($tankObj(), null, $jetzt - 2 * 86400, $jetzt, 'roh');
+    $mit = array_keys(array_filter(array_combine($r['zeiten'], $r['serien']['roh']), static fn ($v) => $v !== null));
+    pruefe($mit !== [] && min($mit) >= ($jetzt - 86400 - 300) * 1000 && max($mit) <= ($jetzt - 3600) * 1000, 'Kunde: Verlauf nur im Datenfenster');
+    gleich($r['teile'], [[$jetzt - 86400, $jetzt - 3600]], 'Kunde: Teile des Verlaufs = Datenfenster');
+    gleich(array_column(TankService::fassungenSichtbar($tankObj()), 'id'), [$idK2, $idKx], 'Kunde: nur Fassungen, die im Datenfenster galten');
+    gleich(array_column(TankService::ereignisse($tankObj()), 'id'), [$peilungAlt], 'Kunde: nur Ereignisse im Datenfenster');
+    gleich(array_column(TankService::reihe($tankObj(), null, $jetzt - 86400, $jetzt, 'liter')['marken'], 'zeit'), [($jetzt - 2 * 3600) * 1000], 'Kunde: Marken nur im Fenster');
+    $seite = TankService::seitenDaten($tankObj());
+    gleich([$seite['fassung'], $seite['kennlinie'], $seite['darfAendern'], $seite['sensorFrei']], [null, 'keine – nur Rohwert', false, []],
+        'Kunde: die jetzige Fassung (außerhalb des Fensters) nicht, nichts zu ändern');
+    alsBenutzer($adminD);
+
+    // ------------------------------------------------ Tank ohne Sensor: letzte Peilung
+    $ohne = (int) AnlagenService::speichern(null, ['art' => 'tank', 'name' => $kennungD . ' Reserve', 'floor_id' => $floorD, 'eigenschaften' => ['inhalt_l' => '1000']])['id'];
+    $l = LiveService::fuerObjekte([AnlagenService::find($ohne)])[$ohne];
+    gleich([$l['stufe'], $l['hinweis'], $l['tank']['sensor'] ?? null], ['keine', 'kein Tanksensor eingesetzt', false], 'Tank ohne Sensor: keine Stufe');
+    Database::insert('tank_ereignisse', ['objekt_id' => $ohne, 'art' => 'peilung', 'zeit' => Zeit::iso($jetzt - 3 * 3600), 'prozent' => 60.0, 'liter' => 600.0,
+        'von' => $kennungD, 'created_at' => gmdate('c')]);
+    $l = LiveService::fuerObjekte([AnlagenService::find($ohne)])[$ohne];
+    pruefe($l['stufe'] === 'keine' && str_contains($l['hinweis'], 'Peilung') && str_contains($l['hinweis'], '60 %') && ($l['tank']['peilung']['prozent'] ?? null) == 60.0,
+        'Tank ohne Sensor nennt die letzte Peilung: ' . $l['hinweis']);
+    // Ein Messpunkt ohne Kennlinie und ohne Sensordaten: nichts zu lesen – kein Schein-Wert
+    $leer = (int) AnlagenService::speichern(null, ['art' => 'tank', 'name' => $kennungD . ' ohne Daten', 'floor_id' => $floorD, 'eigenschaften' => $eigD])['id'];
+    Database::insert('messpunkte', ['objekt_id' => $leer, 'geraet' => $demo['geraet'], 'kanal' => $demo['kanal'], 'rolle' => 'fuellstand',
+        'bezeichnung' => $kennungD . '-TS3', 'gueltig_ab' => Zeit::iso($jetzt - 86400), 'created_at' => gmdate('c')]);
+    $l = LiveService::fuerObjekte([AnlagenService::find($leer)])[$leer];
+    pruefe($l['stufe'] === 'stumm' && str_contains($l['hinweis'], 'Sensordaten unvollständig') && $l['tank']['roh'] === null, 'Sensor ohne Kennlinie und Sensordaten: ' . $l['hinweis']);
+    $roh = TankService::reihe(AnlagenService::find($leer), null, $jetzt - 3600, $jetzt, 'roh');
+    $lit = TankService::reihe(AnlagenService::find($leer), null, $jetzt - 3600, $jetzt, 'liter');
+    pruefe(array_filter($roh['serien']['roh'] ?? [], static fn ($v) => $v !== null) !== [] && array_filter($lit['serien']['liter'] ?? [], static fn ($v) => $v !== null) === [],
+        '… im Verlauf nur der Rohwert (Vorgabe Spannung), keine Liter');
+    $alle = LiveService::fuerObjekte([AnlagenService::find($ohne), $tankObj()]);
+    gleich(array_keys($alle), [$ohne, $tankD], 'mehrere Tanks in einem Aufruf');
+} finally {
+    alsBenutzer(null);
+    Config::set('grenzen.tank_warnung', $warnungVorher);
+    foreach (Database::select('SELECT id FROM objekte WHERE name LIKE ?', [$kennungD . '%']) as $o) {
+        AnlagenService::loeschen((int) $o['id']);
+    }
+    SiteService::deleteSite($siteD);
+    foreach ([$adminD, $kundeD] as $u) {
+        Database::execute("DELETE FROM freigaben WHERE subject_type = 'user' AND subject_id = ?", [$u]);
+        Database::execute('DELETE FROM user_roles WHERE user_id = ?', [$u]);
+        Database::execute('DELETE FROM users WHERE id = ?', [$u]);
+    }
+    Database::execute('DELETE FROM audit_log WHERE username LIKE ? OR details LIKE ?', [$kennungD . '%', '%' . $kennungD . '%']);
 }
 
 ende('tanks');

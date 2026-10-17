@@ -5,7 +5,7 @@ use App\Support\Settings;
 use App\Support\View;
 
 $title = 'Einstellungen';
-$subtitle = 'InfluxDB, MQTT, Grenzwerte, Location-Abgleich';
+$subtitle = 'InfluxDB, MQTT, Grenzwerte, Tanks, Location-Abgleich';
 $feld = static function (string $schluessel, string $typ = 'text', string $platzhalter = '') use ($werte): string {
     $name = str_replace('.', '__', $schluessel);
     $wert = $werte[$schluessel] ?? '';
@@ -31,6 +31,26 @@ $feld = static function (string $schluessel, string $typ = 'text', string $platz
                 <?= $feld('material.reserve', 'number', '10') ?>
                 <p class="help">Auslastung = höchster Phasenstrom durch Nennstrom der Anlage. Der Spannungsfall gilt für die Planungshinweise an Kabeln.
                     Die Kabelreserve kommt in der Materialliste auf die Länge im Plan (Durchhang, Weg zur Dose), bevor in Stücke geteilt wird.</p>
+            </div>
+        </div>
+        <div class="card">
+            <div class="card-head"><h2>Tanks</h2></div>
+            <div class="card-body">
+                <?php $vorgabe = \App\Tanks\TankRechnung::GRENZEN; ?>
+                <div class="field-row">
+                    <?= $feld('grenzen.tank_warnung', 'text', \App\Tanks\TankRechnung::zahl($vorgabe['tank_warnung'])) ?>
+                    <?= $feld('grenzen.tank_alarm', 'text', \App\Tanks\TankRechnung::zahl($vorgabe['tank_alarm'])) ?>
+                </div>
+                <div class="field-row">
+                    <?= $feld('grenzen.tank_rest_warnung_h', 'text', \App\Tanks\TankRechnung::zahl($vorgabe['tank_rest_warnung_h'])) ?>
+                    <?= $feld('grenzen.tank_rest_alarm_h', 'text', \App\Tanks\TankRechnung::zahl($vorgabe['tank_rest_alarm_h'])) ?>
+                </div>
+                <div class="field-row">
+                    <?= $feld('grenzen.tank_stumm_h', 'text', \App\Tanks\TankRechnung::zahl($vorgabe['tank_stumm_h'])) ?>
+                    <?= $feld('grenzen.tank_vorlauf_h', 'text', \App\Tanks\TankRechnung::zahl($vorgabe['tank_vorlauf_h'])) ?>
+                </div>
+                <p class="help">Warnung und Alarm am Tank selbst (Eigenschaften) gehen vor. Ein Sensorfehler ist immer rot – nie „leer“.
+                    Ein Shelly meldet nur bei Änderung: Stumm ist ein Tanksensor erst, wenn das Gerät offline ist oder so lange nichts kam.</p>
             </div>
         </div>
         <div class="card">

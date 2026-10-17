@@ -7,6 +7,8 @@
  *
  *   Anlagen        Anschlüsse, Generatoren, Wechselrichter, Verteilungen –
  *                  Rand in der Farbe der Auslastung, daneben die Leistung.
+ *                  Tanks: Pegel im Zeichen, daneben Füllstand und Inhalt
+ *                  (karte-tank.js).
  *   Kabel          Linienzug von einer Anlage zur anderen, mit Anschluss an
  *                  beiden Enden; Länge aus dem Maßstab.
  *   Kabelwege      Trassen ohne feste Enden (gestrichelt).
@@ -22,6 +24,8 @@
 
 const kennung = new URL(import.meta.url).search;
 const { planKarte } = await import('./plan-karte.js' + kennung);
+// Tanks: Pegel am Zeichen, eigene Seitenleiste, Tanksensor einsetzen.
+const tankModul = await import('./karte-tank.js' + kennung);
 
 const el = document.getElementById('karte');
 const seite = document.getElementById('seite-inhalt');
@@ -248,6 +252,11 @@ function liveAnwenden() {
         const knoten = m.getElement();
         if (!knoten) { return; }
         knoten.className = knoten.className.replace(/\bstufe-\S+/g, '') + ' stufe-' + (l ? l.stufe : 'keine');
+        const o = objektNachId(id);
+        if (o && o.elektrisch === false) {
+            tankModul.tankMarkerSetzen(knoten, l, o.name);
+            return;
+        }
         const wert = knoten.querySelector('[data-wert]');
         if (wert) {
             wert.textContent = l && l.p !== null && l.p !== undefined
@@ -380,7 +389,8 @@ function entwurfVerwerfen() {
 function objektKlick(o, e = null) {
     // Tipp auf den Wert neben der Anlage: die Werte je Phase direkt im Plan.
     const ziel = e && e.originalEvent && e.originalEvent.target;
-    if ((modus === 'ansehen' || modus === 'verschieben') && ziel && ziel.closest && ziel.closest('[data-wert]')) {
+    // (Ein Tank hat keine Phasen – dort öffnet der Wert die Seitenleiste.)
+    if ((modus === 'ansehen' || modus === 'verschieben') && o.elektrisch !== false && ziel && ziel.closest && ziel.closest('[data-wert]')) {
         detailZeigen(o);
         return;
     }
@@ -503,6 +513,24 @@ async function objektPanel(id) {
     const o = await antwort.json();
     if (!o.ok) { seite.innerHTML = `<p class="muted">${esc(o.message)}</p>`; return; }
     const art = daten.arten[o.art];
+    if (o.elektrisch === false) {
+        tankModul.tankPanel(seite, o, {
+            art,
+            koordinate,
+            neuLaden: async () => { await laden(); await liveLaden(); objektPanel(id); },
+            ausPlan: async () => {
+                if (!window.confirm('„' + o.name + '“ aus dem Plan nehmen? Der Tank bleibt erhalten.')) { return; }
+                const erg = await PM.post('/karte/objekt/entfernen', { id: o.id });
+                PM.melden(erg.message, !!erg.ok);
+                await laden();
+                seite.innerHTML = '<p class="muted">Aus dem Plan genommen.</p>';
+            },
+        });
+        if (window.matchMedia('(max-width: 1100px)').matches) {
+            seite.closest('.karte-seite').scrollIntoView({ behavior: 'smooth', block: 'start' });
+        }
+        return;
+    }
     const abgaenge = o.anschluesse.filter((a) => a.richtung === 'abgang');
     const eingaenge = o.anschluesse.filter((a) => a.richtung === 'eingang');
     const anschlussZeile = (a) => `<li><span class="stecker" style="--stecker-farbe:${esc(a.farbe)}"></span>
@@ -560,6 +588,7 @@ async function objektPanel(id) {
 }
 
 function panelLiveSetzen(id, vorgabe) {
+    if (seite.querySelector('[data-tank-live]')) { tankModul.tankPanelLive(seite, vorgabe || live[id]); return; }
     const ziel = seite.querySelector('[data-seite-live]');
     const l = vorgabe || live[id];
     if (!ziel || !l) { return; }
@@ -1117,6 +1146,18 @@ async function aufbauPanel(art, id) {
         if (!d.ok) { return; }
         const drin = (d.inventar || []).map((i) => `<strong>${esc(i.kennung)}</strong>${i.anschluss ? ' (' + esc(i.anschluss) + ')' : ''}`).join(', ');
         const frei = d.inventar_frei || [];
+        if (d.elektrisch === false) {
+            // Tank: welcher Tanksensor steckt drin – statt des Orts das Einbaumaß.
+            inv.innerHTML = `<h3>Tanksensor</h3><p class="small">${drin ? 'Steckt hier: ' + drin : 'Noch kein Tanksensor eingesetzt.'}</p><div data-tank-einsetzen></div>`;
+            const ziel = inv.querySelector('[data-tank-einsetzen]');
+            if (frei.length) {
+                tankModul.einsetzenFormular(ziel, frei, id, { nachher: async () => { await laden(); aufbauPanel(art, id); } });
+            } else {
+                ziel.textContent = 'Kein freier Tanksensor im Inventar.';
+                ziel.className = 'small muted';
+            }
+            return;
+        }
         inv.innerHTML = `<h3>Aus dem Inventar</h3>
             <p class="small">${drin ? 'Steckt hier: ' + drin : 'Noch nichts aus dem Inventar.'}</p>
             ${frei.length ? `<div class="field"><label for="aufbau-stueck">Welches Stück steht hier?</label>

@@ -84,14 +84,38 @@ ksort($jeObjekt);
                 <?php endif; ?>
                 <span class="small muted">Alle Werte nur im freigegebenen Datenzeitraum; Lücken in den Kurven sind Zeiten ohne Freigabe oder ohne Messwerte.</span>
             </div>
-            <?php if (count($auswahl) > 1): ?>
+            <?php $strom = array_values(array_filter($auswahl, static fn ($a) => $a['rolle'] !== 'fuellstand')); ?>
+            <?php if (count($strom) > 1): ?>
                 <div class="card diagramm-karte">
                     <div class="card-head"><h2>Vergleich: Wirkleistung</h2></div>
-                    <div class="card-body"><div class="diagramm" data-vergleich="<?= View::e(implode(',', array_column($auswahl, 'id'))) ?>"
-                         data-titel="<?= View::e(json_encode(array_column($auswahl, 'titel', 'id'), JSON_UNESCAPED_UNICODE)) ?>"></div></div>
+                    <div class="card-body"><div class="diagramm" data-vergleich="<?= View::e(implode(',', array_column($strom, 'id'))) ?>"
+                         data-titel="<?= View::e(json_encode(array_column($strom, 'titel', 'id'), JSON_UNESCAPED_UNICODE)) ?>"></div></div>
                 </div>
             <?php endif; ?>
             <?php foreach ($auswahl as $a): ?>
+                <?php if ($a['rolle'] === 'fuellstand'): ?>
+                    <div class="card">
+                        <div class="card-head">
+                            <h2><?= View::e($a['titel']) ?></h2>
+                            <span class="spacer"></span>
+                            <span class="hint mono"><?= View::e($a['geraet'] . ' · ' . $a['kanal']) ?></span>
+                            <?php if (View::can('statistik.export')): ?>
+                                <a class="btn btn-sm" href="/anlagen/<?= (int) $a['objekt']['id'] ?>/tank/csv?<?= View::e(http_build_query(['mp' => (int) $a['id'], 'zeitraum' => $vorgabe]
+                                    + ($vorgabe === 'frei' ? ['von' => Zeit::fuerEingabe(Zeit::iso($von)), 'bis' => Zeit::fuerEingabe(Zeit::iso($bis))] : []))) ?>">CSV</a>
+                            <?php endif; ?>
+                            <a class="btn btn-sm" href="/anlagen/<?= (int) $a['objekt']['id'] ?>">Tankseite</a>
+                        </div>
+                        <div class="card-body">
+                            <p class="fenster-hinweis muted">Datenzeitraum: <?= View::e($a['fenster']) ?><?= $a['teile'] === [] ? ' – im gewählten Zeitraum ist nichts freigegeben.' : '' ?></p>
+                            <?php if ($a['teile'] !== []): ?>
+                                <h3 class="mt">Inhalt</h3>
+                                <div class="diagramm" data-mp="" data-quelle="/anlagen/<?= (int) $a['objekt']['id'] ?>/tank/verlauf?mp=<?= (int) $a['id'] ?>" data-feld="liter" data-messung="zustand"></div>
+                                <p class="help">Liter aus dem Rohwert des Sensors, je Zeitpunkt mit der Kennlinie, die damals galt. Ohne Kennlinie: auf der Tankseite den Rohwert ansehen.</p>
+                            <?php endif; ?>
+                        </div>
+                    </div>
+                    <?php continue; ?>
+                <?php endif; ?>
                 <?php $k = $a['kennzahlen']; $maxE = max([1.0, ...array_values($a['energie'])]); ?>
                 <div class="card">
                     <div class="card-head">

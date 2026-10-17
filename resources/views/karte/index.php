@@ -99,6 +99,7 @@ $darfSetzen = $darfAnlegen;
                 <span class="legende-form fest" aria-hidden="true"></span> fest
                 <span class="legende-form mobil" aria-hidden="true"></span> mobil
                 <span class="legende-linie fest" aria-hidden="true"></span> fest verlegt
+                <span class="legende-form tank" aria-hidden="true"></span> Tank: Pegel = Füllstand, Rand = Stufe
                 <?php if ($massstab !== null && ($massstab['quelle'] ?? '') !== 'georeferenz'): ?><span class="muted">· Maßstab gesetzt (<?= View::e(number_format((float) $massstab['meter'], 0, ',', '.')) ?> m)</span><?php endif; ?>
                 <?php if ($geo !== null): ?><span class="muted">· georeferenziert<?= ($massstab['quelle'] ?? '') === 'georeferenz' ? ' (Längen daraus)' : '' ?> ·
                     <a href="/karte/<?= (int) $etage['id'] ?>/geojson">GeoJSON</a></span><?php endif; ?>

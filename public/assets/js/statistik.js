@@ -36,7 +36,8 @@
         if (einstellung.zeitraum === 'frei') { p.set('von', einstellung.von); p.set('bis', einstellung.bis); }
         (phasen || []).forEach(function (ph) { p.append('phase[]', ph); });
         if (agg) { p.set('agg', agg); }
-        return (quelle || '/statistik/daten') + '?' + p.toString();
+        // Die Quelle kann schon Parameter tragen (etwa ?mp= am Tankverlauf).
+        return (quelle || '/statistik/daten') + (quelle && quelle.indexOf('?') !== -1 ? '&' : '?') + p.toString();
     }
 
     function breite(el) { return Math.max(280, el.clientWidth); }

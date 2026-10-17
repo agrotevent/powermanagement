@@ -20,6 +20,8 @@ use App\Support\Database;
 use App\Support\Request;
 use App\Support\Response;
 use App\Support\Session;
+use App\Tanks\TankRechnung;
+use App\Tanks\TankService;
 
 /**
  * Die Karte: Grundriss (wie in MasterAdmin) mit Anlagen, Kabeln,
@@ -149,13 +151,19 @@ final class KarteController extends Controller
                 continue;
             }
             $art = AnlagenService::ARTEN[$o['art']];
+            $elektrisch = AnlagenService::elektrisch((string) $o['art']);
             $liste[] = [
                 'id'        => (int) $o['id'],
                 'art'       => $o['art'],
                 'kuerzel'   => $art['kuerzel'],
                 'farbe'     => $art['farbe'],
                 'fest'      => $o['fest'] === 1,
-                'elektrisch' => AnlagenService::elektrisch((string) $o['art']),
+                'elektrisch' => $elektrisch,
+                // Tanks: Nennvolumen und ob ein Tanksensor misst (Pegel im Zeichen).
+                'tank'      => $elektrisch ? null : [
+                    'nenn_l' => TankRechnung::zahlLesen($o['eigenschaften']['inhalt_l'] ?? null),
+                    'sensor' => array_filter($mpJe[(int) $o['id']] ?? [], static fn ($m) => $m['rolle'] === 'fuellstand') !== [],
+                ],
                 'art_name'  => $o['art_anzeige'],
                 'name'      => $o['name'],
                 'kennung'   => $o['kennung'],
@@ -317,6 +325,8 @@ final class KarteController extends Controller
                 'in_auswertung' => in_array((int) $m['id'], $auswertung, true),
             ], MesspunktService::fuerObjekt($id)),
             'live'        => LiveService::fuerObjekte([$objekt])[$id] ?? null,
+            // Tank: Sensor, letzte Peilungen und Betankungen, was der Betrachter darf.
+            'tank'        => AnlagenService::elektrisch((string) $objekt['art']) ? null : TankService::panelDaten($objekt),
             'schaltbar'   => LiveService::schaltbar([$objekt]),
             'darf'        => Zugriff::darfBearbeiten($objekt),
             'darf_statistik' => Auth::can('statistik.view'),
@@ -326,6 +336,8 @@ final class KarteController extends Controller
             // Was sich hier einsetzen ließe – für den Aufbau-Modus.
             'inventar_frei' => Zugriff::darfBearbeiten($objekt) && Auth::can('datenquellen.view') ? array_values(array_map(static fn ($i) => [
                 'id' => (int) $i['id'], 'kennung' => $i['kennung'], 'typ' => $i['typ'], 'art' => $i['art'],
+                // Tanksensor: das Messprinzip entscheidet, welches Einbaumaß gefragt ist.
+                'prinzip' => $i['art'] === 'tanksensor' ? (string) ($i['eigenschaften']['prinzip'] ?? '') : null,
                 'passend' => $i['art'] === 'verteilung' && trim((string) $i['vorlage_modell']) === trim((string) $objekt['modell']),
                 'woanders' => $i['einsatz'] !== null ? (string) ($i['einsatz']['anlage_name'] ?? $i['einsatz']['objekt_name']) : null,
             ], array_filter(InventarService::fuerBetrachter(InventarService::liste()), static fn ($i) => $i['zustand'] !== 'defekt' && (int) ($i['einsatz']['objekt_id'] ?? 0) !== $id
