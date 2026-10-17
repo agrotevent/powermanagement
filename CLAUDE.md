@@ -32,7 +32,8 @@ keine Build-Schritte. JS-Bibliotheken liegen fertig unter `public/assets/vendor`
 - **Nichts hält die Sitzung, während es wartet.** PHP sperrt die
   Sitzungsdatei für die ganze Anfrage. Endpunkte, die regelmäßig abgefragt
   werden oder auf InfluxDB, Geräte oder Clouds warten, rufen vorher
-  `Session::freigeben()` (danach nur noch lesen). Abfragen im Browser
+  `Session::freigeben()` (danach nur noch lesen; was nach dem Warten noch
+  in die Sitzung muss, über `Session::nachtragen()`). Abfragen im Browser
   starten erst, wenn die vorige fertig ist (`live.js`, `karte.js`).
 - **Weiterleitungen** nur auf eigene Pfade: `Response::sichererPfad()`,
   `Response::zurueckZiel()` statt `$_SERVER['HTTP_REFERER']` oder `next`.
@@ -113,7 +114,7 @@ bash -n deploy/*.sh tests/*.sh && shellcheck -S warning -e SC2016,SC1111 deploy/
 | `tests/bericht-pdf.php` | PDF der Übergabeberichte: eigener Schreiber, Schrift als Teilmenge (Prüfsumme, Glyphen, kein .notdef), Layout mit poppler (A4, Schriften eingebettet, Texte, Tabellenkopf je Seite, keine Bilder, Fuß „Blatt x von y“), zweimal erzeugt gleiche Bytes, Vorschau, ohne Kunde, Korrektur, 300 Kreise (ohne poppler übersprungen) |
 | `tests/eventworx.php` | Eventworx nur lesend: Adresse, Token an den Host gebunden, Pfadliste, Anfragen, Aufbereitung ohne Beträge/Notizen, Fehlerantworten, Nachlesen bei `data:null`, Drossel, Demo, keine Geheimnisse in Log/Audit/Meldungen (Http-Attrappe) |
 | `tests/web.php` | alle Seiten ohne PHP-Meldung (auch im Fehlerprotokoll des Servers), 403/404 als eigene Seite ohne Navigation, CSRF (mit `Accept: application/json` 419/401 als JSON), Schalt-Ablehnung, Weiterleitungen, Sitzung nach Kennwortwechsel, Benutzerverwaltung ohne Administration, Ändern nur mit „bearbeiten“, Übergabeberichte (Seiten, PDF mit Kopfzeilen/Vorschau/gespeicherten Bytes, Autosave 200/409/422/423, Eventworx-Demo, Firma-Karte, Prüfer-Qualifikation, Rechte von Kunde und Planer, Unterschreiben, Kundenmodus-Sperre auch für unbekannte/verbotene Adressen und Abmelden, Sperre am Gerät nach neuer Anmeldung, Bremse statt Abmelden nach fünf Fehlversuchen, Entsperren, ohne Kunde, Korrektur) (eigener PHP-Server) |
-| `tests/sitzung.php` | Sitzungssperre: Live-Endpunkte (Anlage, Dashboard, Karte, Bereiche) geben die Sitzung frei – Speichern und Seiten kommen bei träger InfluxDB durch (eigene Instanz, InfluxDB-Attrappe) |
+| `tests/sitzung.php` | Sitzungssperre: Live-Endpunkte (Anlage, Dashboard, Karte, Bereiche) und Eventworx-Suche/-Vorgang im Bericht geben die Sitzung frei – Speichern, Bericht-Autosave und Seiten kommen bei träger InfluxDB bzw. trägem Eventworx durch, der geladene Vorgang bleibt vorgemerkt, nach dem Abmelden 401 ohne Kundendaten (eigene Instanz, Attrappen für InfluxDB und Eventworx über `eventworx.basis`) |
 | `tests/sicherheit.php` | Rechte vergeben, Anmelde-Bremse ohne Kontoerkennung, Geräte zuordnen, Kanal-Freigaben beim Schalten, Schlüssel aus dem Repository, Line Protocol, CSV, Adressen, keine Umleitung mit Token (curl und Streams), app.key, PDF-Werkzeuge, Bericht-JS ohne HTML aus Daten, nur mit Zeitgrenze, Abmelden ohne Rückschreiben des Entwurfs, andere Tabs im Kundenmodus, Unterschrift ohne Zeit/Druck, Handballen und Bytegrenze der Fläche (Node), als SVG nur Zahlen |
 | `tests/nodered-funktionen.mjs` | Node-RED-Funktionen, `flows.json` passt zu den Quellen |
 | `tests/installation-debian.sh` | `deploy/install-debian.sh` auf frischem Debian 13 mit systemd (Docker): Erstinstallation, zweiter Lauf (Kennwörter, app.key bleiben), Update mit neuem Ordner in `storage/`; Rechte (Code root, `storage/` www-data), Dienste, Anmeldung, Broker, `bin/power pruefen` |

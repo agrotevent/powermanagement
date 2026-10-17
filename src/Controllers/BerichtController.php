@@ -340,6 +340,12 @@ final class BerichtController extends Controller
     }
 
     // ------------------------------------------------------------ Eventworx (nur lesen)
+    //
+    // Beide Wege warten auf Eventworx (bis zu 12 s je Versuch, dazu Drossel
+    // und Nachlesen) und werden beim Tippen laufend abgefragt. Nach der
+    // Prüfung des Berichts geben sie die Sitzung frei – sonst stünden das
+    // Autosave und jede andere Anfrage dieses Browsers so lange an. Danach
+    // wird nur noch gelesen; den Verweis trägt Session::nachtragen() ein.
 
     public function eventworxSuche(Request $request, array $params): void
     {
@@ -347,6 +353,7 @@ final class BerichtController extends Controller
         if ($b === null) {
             return;
         }
+        Session::freigeben();
         try {
             $this->json(['ok' => true, 'treffer' => Eventworx::suchen($request->str('q'))]);
         } catch (EventworxFehler $e) {
@@ -361,6 +368,7 @@ final class BerichtController extends Controller
         if ($b === null) {
             return;
         }
+        Session::freigeben();
         try {
             $v = Eventworx::vorgang($request->str('vorgang_id'));
         } catch (EventworxFehler $e) {
@@ -368,7 +376,12 @@ final class BerichtController extends Controller
             return;
         }
         $am = gmdate('c');
-        BerichtService::eventworxMerken((int) $b['id'], $v['verweis'], $am);
+        // Die Vormerkung steht in der Sitzung: dafür kurz wieder öffnen. Ist
+        // sie inzwischen beendet (abgemeldet), gehen auch keine Kundendaten hinaus.
+        if (!Session::nachtragen(static fn () => BerichtService::eventworxMerken((int) $b['id'], $v['verweis'], $am))) {
+            $this->json(['ok' => false, 'anmelden' => true, 'message' => 'Sitzung abgelaufen – bitte neu anmelden.'], 401);
+            return;
+        }
         $this->json(['ok' => true, 'verweis' => $v['verweis'] + ['am' => $am], 'gruppen' => $v['gruppen']]);
     }
 
