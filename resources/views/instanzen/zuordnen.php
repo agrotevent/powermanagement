@@ -74,7 +74,8 @@ $basis = '/instanzen/' . (int) $partner['id'];
     </div>
 </div>
 
-<form method="post" action="<?= View::e($basis) ?>/uebernehmen" class="card">
+<form method="post" action="<?= View::e($basis) ?>/uebernehmen" class="card" data-laeuft="läuft …" data-laeuft-oben
+      data-laeuft-hinweis="Holt die Location von dort. Mit Grundrissen kann das einige Minuten dauern. Bitte nicht noch einmal klicken.">
     <?= Csrf::field() ?>
     <input type="hidden" name="schluessel" value="<?= View::e($location['schluessel']) ?>">
     <input type="hidden" name="ziel" value="<?= $ziel === 0 ? 'neu' : (int) $ziel ?>">
@@ -132,9 +133,9 @@ $basis = '/instanzen/' . (int) $partner['id'];
             und Etagen hier bleiben, ein fehlender Maßstab oder eine fehlende Georeferenz dort löscht hier nichts, gelöscht wird nichts.</p>
         <?php if ($darf_planen): ?>
             <div class="btn-row">
-                <button class="btn btn-primary" type="submit" name="aktion" value="uebernehmen"<?= $rueckfrage !== '' ? ' data-confirm="' . View::e($rueckfrage) . '"' : '' ?>>Übernehmen</button>
+                <button class="btn btn-primary" type="submit" name="aktion" value="uebernehmen"<?= $rueckfrage !== '' ? ' data-confirm="' . View::e($rueckfrage) . '"' : '' ?> data-laeuft="übernimmt …">Übernehmen</button>
                 <?php if ($ziel > 0): ?>
-                    <button class="btn" type="submit" name="aktion" value="verknuepfen">Nur verknüpfen</button>
+                    <button class="btn" type="submit" name="aktion" value="verknuepfen" data-laeuft="verknüpft …">Nur verknüpfen</button>
                     <span class="small muted">verknüpft die zugeordneten Etagen, ohne etwas zu holen – danach lassen sie sich zurückschicken
                         oder später auf den Stand von dort bringen.</span>
                 <?php endif; ?>

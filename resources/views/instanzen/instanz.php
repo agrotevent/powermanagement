@@ -137,7 +137,8 @@ $vorschlagen = PartnerService::darfDort($partner, 'plaene.vorschlagen');
                         <td class="right">
                             <div class="btn-row api-aktionen">
                                 <?php if ($l['aendern'] && $l['sichtbar']): ?>
-                                    <form method="post" action="<?= View::e($basis) ?>/uebernehmen"<?= $uebernehmenFrage !== '' ? ' data-confirm="' . View::e($uebernehmenFrage) . '"' : '' ?>>
+                                    <form method="post" action="<?= View::e($basis) ?>/uebernehmen" data-laeuft="übernimmt …" data-laeuft-oben
+                                          data-laeuft-hinweis="Holt die Location von dort. Mit Grundrissen kann das einige Minuten dauern. Bitte nicht noch einmal klicken."<?= $uebernehmenFrage !== '' ? ' data-confirm="' . View::e($uebernehmenFrage) . '"' : '' ?>>
                                         <?= Csrf::field() ?>
                                         <input type="hidden" name="schluessel" value="<?= View::e((string) $l['schluessel']) ?>">
                                         <input type="hidden" name="aktion" value="uebernehmen">
@@ -152,7 +153,8 @@ $vorschlagen = PartnerService::darfDort($partner, 'plaene.vorschlagen');
                                 <?php endif; ?>
                                 <?php if ($zurueckBereit && $schreiben): ?>
                                     <?php $erzwingen = $z !== 'hier'; ?>
-                                    <form method="post" action="<?= View::e($basis) ?>/zurueck"<?= $erzwingen ? ' data-confirm="' . View::e($z === 'beide'
+                                    <form method="post" action="<?= View::e($basis) ?>/zurueck" data-laeuft="lädt hoch …" data-laeuft-oben
+                                          data-laeuft-hinweis="Schickt die Änderungen nach dort. Mit Grundrissen kann das einige Minuten dauern. Bitte nicht noch einmal klicken."<?= $erzwingen ? ' data-confirm="' . View::e($z === 'beide'
                                         ? 'Dort hat sich seit dem letzten Übernehmen auch etwas geändert. Hochladen überschreibt die Änderungen dort.'
                                         : 'Hier wurde noch nichts von dort übernommen. Hochladen überschreibt den Stand dort auf den verknüpften Etagen.') . '"' : '' ?>>
                                         <?= Csrf::field() ?>
@@ -164,7 +166,8 @@ $vorschlagen = PartnerService::darfDort($partner, 'plaene.vorschlagen');
                                 <?php elseif ($zurueckBereit && $vorschlagen): ?>
                                     <details class="api-zurueck">
                                         <summary class="btn btn-sm">Änderungen zurückschicken</summary>
-                                        <form method="post" action="<?= View::e($basis) ?>/zurueck">
+                                        <form method="post" action="<?= View::e($basis) ?>/zurueck" data-laeuft="schickt …" data-laeuft-oben
+                                              data-laeuft-hinweis="Schickt den Vorschlag nach dort. Mit Grundrissen kann das einige Minuten dauern. Bitte nicht noch einmal klicken.">
                                             <?= Csrf::field() ?>
                                             <input type="hidden" name="site_id" value="<?= $siteId ?>">
                                             <input type="hidden" name="weise" value="vorschlag">

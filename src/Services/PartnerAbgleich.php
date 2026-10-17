@@ -307,19 +307,30 @@ final class PartnerAbgleich
      * Etage kommt nicht über die Hintertür wieder), eine passende geht an den
      * vorgeschlagenen Standort, sonst an einen neuen, mit allen Etagen.
      *
+     * Läuft unter der Sperre der Location (gesperrt()): Ein zweites
+     * Übernehmen derselben Location – Doppelklick, zweiter Reiter – legte
+     * sonst, während beide auf dort warten, einen zweiten Standort an.
+     *
      * @param int|null $ziel Standort hier; 0 = neu; null = automatisch
      * @param array<string,string|int>|null $etagenWahl je Etage dort: '' (nicht übernehmen), 'neu' oder eine Etage hier (ID)
      * @return array{ok:bool,message:string,site_id?:int,neu?:bool,etagen?:array<string,int>,plaene?:int,anlagen?:int,leitungen?:int,downloads?:int}
      */
     public static function uebernehmen(array $partner, string $schluessel, ?int $ziel, ?array $etagenWahl, bool $feststrom, bool $nurVerknuepfen = false): array
     {
-        $nein = static fn (string $meldung): array => ['ok' => false, 'message' => $meldung];
         if (preg_match(self::SCHLUESSEL, $schluessel) !== 1) {
-            return $nein('Diese Location gibt es dort nicht.');
+            return ['ok' => false, 'message' => 'Diese Location gibt es dort nicht.'];
         }
         if (!Auth::can('plans.manage')) {
-            return $nein('Übernehmen und verknüpfen braucht das Recht „Standorte, Etagen und Grundrisse pflegen“.');
+            return ['ok' => false, 'message' => 'Übernehmen und verknüpfen braucht das Recht „Standorte, Etagen und Grundrisse pflegen“.'];
         }
+        return self::gesperrt((int) $partner['id'], $schluessel,
+            static fn (): array => self::uebernehmenGesperrt($partner, $schluessel, $ziel, $etagenWahl, $feststrom, $nurVerknuepfen));
+    }
+
+    /** uebernehmen() unter der Sperre der Location – vom Holen bis zum Verknüpfen. */
+    private static function uebernehmenGesperrt(array $partner, string $schluessel, ?int $ziel, ?array $etagenWahl, bool $feststrom, bool $nurVerknuepfen): array
+    {
+        $nein = static fn (string $meldung): array => ['ok' => false, 'message' => $meldung];
         $geholt = self::holen($partner, $schluessel);
         if (!$geholt['ok']) {
             return $nein($geholt['message']);
@@ -653,17 +664,34 @@ final class PartnerAbgleich
      *   - was dort aus einer früheren Sendung angelegt wurde („gesendet_als“),
      *     wird vorher verknüpft – es geht unter dem Schlüssel dort hinüber.
      *
+     * Läuft wie uebernehmen() unter der Sperre der Location: zweimal
+     * „Hochladen“ oder ein Übernehmen daneben warteten sonst gleichzeitig
+     * auf dort, auf demselben Stand.
+     *
      * @param string|null $weise was die Seite angeboten hat (null: nicht prüfen)
      * @return array{ok:bool,message:string,uebernommen?:bool,id?:int}
      */
     public static function zurueckschicken(int $siteId, string $notiz, bool $erzwingen = false, ?string $weise = null): array
     {
-        $nein = static fn (string $meldung): array => ['ok' => false, 'message' => $meldung];
         $site = SiteService::find($siteId);
         if ($site === null || $site['partner_id'] === null || (string) $site['partner_schluessel'] === '') {
+            return ['ok' => false, 'message' => 'Dieser Standort ist mit keiner anderen Instanz verknüpft.'];
+        }
+        $partnerId = (int) $site['partner_id'];
+        $dortKey = (string) $site['partner_schluessel'];
+        return self::gesperrt($partnerId, $dortKey,
+            static fn (): array => self::zurueckschickenGesperrt($siteId, $partnerId, $dortKey, $notiz, $erzwingen, $weise));
+    }
+
+    /** zurueckschicken() unter der Sperre der Location – der Standort frisch gelesen. */
+    private static function zurueckschickenGesperrt(int $siteId, int $partnerId, string $dortKey, string $notiz, bool $erzwingen, ?string $weise): array
+    {
+        $nein = static fn (string $meldung): array => ['ok' => false, 'message' => $meldung];
+        $site = SiteService::find($siteId);
+        if ($site === null || (int) ($site['partner_id'] ?? 0) !== $partnerId || (string) $site['partner_schluessel'] !== $dortKey) {
             return $nein('Dieser Standort ist mit keiner anderen Instanz verknüpft.');
         }
-        $partner = PartnerService::find((int) $site['partner_id']);
+        $partner = PartnerService::find($partnerId);
         if ($partner === null) {
             return $nein('Die Instanz, mit der dieser Standort verknüpft ist, ist hier nicht mehr eingetragen.');
         }
@@ -683,7 +711,6 @@ final class PartnerAbgleich
         if (($weise === 'hochladen' && !$schreiben) || ($weise === 'vorschlag' && $schreiben)) {
             return $nein('Die Befugnisse dort haben sich geändert – Seite neu laden. Nichts geschickt.');
         }
-        $dortKey = (string) $site['partner_schluessel'];
         $geholt = self::holen($partner, $dortKey);
         if (!$geholt['ok']) {
             return $nein($geholt['message']);
@@ -1257,6 +1284,72 @@ final class PartnerAbgleich
     private static function darfFeststrom(?int $siteId): bool
     {
         return Auth::can('anlagen.manage') && Auth::can('leitungen.manage') && Zugriff::darfAufStandortAnlegen($siteId);
+    }
+
+    /**
+     * $arbeit unter der Sperre einer Location dort (Instanz, Schlüssel):
+     * Übernehmen, Verknüpfen und Zurückschicken laufen je Location nur
+     * einmal zur Zeit. Sie warten Sekunden bis Minuten auf dort – ohne
+     * Sitzungssperre (Session::ohneSperre()), also auch nebeneinander aus
+     * demselben Browser.
+     *
+     * Nicht blockierend: Wer die Sperre nicht bekommt, hört mit einer
+     * Meldung auf. Warten ginge nicht – die zweite Anfrage hielte dabei die
+     * Sitzung, und die erste bekäme sie nach der Antwort von dort nie
+     * wieder.
+     *
+     * Die Datei in storage/cache gilt für diese Datenbank. Wer freigibt,
+     * löscht sie vorher; wer sie danach noch über den alten Eintrag sperrt,
+     * merkt das am Inode und gilt als „belegt“. So bleibt nichts liegen, und
+     * zwei halten nie zugleich eine Sperre.
+     *
+     * @param callable():array{ok:bool,message:string} $arbeit
+     * @return array{ok:bool,message:string}
+     */
+    private static function gesperrt(int $partnerId, string $schluessel, callable $arbeit): array
+    {
+        $pfad = self::sperrDatei($partnerId, $schluessel);
+        if (!is_dir(dirname($pfad))) {
+            @mkdir(dirname($pfad), 0775, true);
+        }
+        $griff = @fopen($pfad, 'c');
+        if ($griff === false) {
+            Logger::error('Andere Instanz: Sperrdatei ließ sich nicht anlegen: ' . $pfad);
+            return ['ok' => false, 'message' => 'storage/cache ist nicht beschreibbar – nichts übernommen oder geschickt.'];
+        }
+        $frei = flock($griff, LOCK_EX | LOCK_NB);
+        if ($frei) {
+            // Noch dieselbe Datei? Sonst hat sie der Vorgänger schon gelöscht.
+            clearstatcache(true, $pfad);
+            $jetzt = @stat($pfad);
+            $meine = fstat($griff);
+            $frei = $jetzt !== false && $meine !== false && $jetzt['ino'] === $meine['ino'] && $jetzt['dev'] === $meine['dev'];
+            if (!$frei) {
+                flock($griff, LOCK_UN);
+            }
+        }
+        if (!$frei) {
+            fclose($griff);
+            return ['ok' => false, 'message' => 'Diese Location wird gerade schon übernommen oder zurückgeschickt – nichts doppelt gemacht. Gleich die Seite neu laden.'];
+        }
+        try {
+            return $arbeit();
+        } finally {
+            @unlink($pfad);
+            flock($griff, LOCK_UN);
+            fclose($griff);
+        }
+    }
+
+    /** Die Sperrdatei einer Location dort – je Datenbank: Prüfskripte betreiben eigene Instanzen mit demselben Code, deren Instanz 1 ist nicht die hier. */
+    private static function sperrDatei(int $partnerId, string $schluessel): string
+    {
+        $datenbank = [];
+        foreach (['driver', 'path', 'host', 'port', 'database'] as $k) {
+            $datenbank[$k] = Config::get('database.' . $k);
+        }
+        return dirname(__DIR__, 2) . '/storage/cache/partner-'
+            . substr(hash('sha256', json_encode($datenbank) . '|' . $partnerId . '|' . $schluessel), 0, 40) . '.sperre';
     }
 
     private static function tempOrdner(): string

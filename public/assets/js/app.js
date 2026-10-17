@@ -119,14 +119,24 @@ document.addEventListener('DOMContentLoaded', function () {
              */
             if (ereignis.defaultPrevented) { return; }
 
-            var knopf = formular.querySelector('button:not([type=button])');
+            /*
+             * Der gedrückte Knopf – ein Formular kann mehrere haben
+             * („Übernehmen“ und „Nur verknüpfen“). FormData nimmt seinen
+             * Namen und Wert nicht mit; ohne sie käme beim Server die
+             * falsche Aktion an. Gesperrt werden alle, sonst ginge der
+             * andere Knopf während der Wartezeit noch hinaus.
+             */
+            var knoepfe = formular.querySelectorAll('button:not([type=button])');
+            var knopf = ereignis.submitter && ereignis.submitter.form === formular ? ereignis.submitter : knoepfe[0];
             if (!knopf || knopf.disabled) { return; }
 
             ereignis.preventDefault();
 
-            knopf.disabled = true;
+            var daten = new FormData(formular);
+            if (knopf.name) { daten.append(knopf.name, knopf.value); }
+            knoepfe.forEach(function (k) { k.disabled = true; });
             var vorher = knopf.textContent;
-            knopf.textContent = formular.dataset.laeuft || 'läuft …';
+            knopf.textContent = knopf.dataset.laeuft || formular.dataset.laeuft || 'läuft …';
 
             var anzeige = document.createElement('div');
             anzeige.className = 'knopf-laeuft';
@@ -158,7 +168,7 @@ document.addEventListener('DOMContentLoaded', function () {
             fetch(formular.action, {
                 method: (formular.method || 'post').toUpperCase(),
                 headers: { 'X-Requested-With': 'XMLHttpRequest' },
-                body: new FormData(formular),
+                body: daten,
                 /*
                  * Der Umleitung wird hier NICHT gefolgt. Täte sie es,
                  * holte der Browser die Zielseite im Hintergrund – und
@@ -188,7 +198,7 @@ document.addEventListener('DOMContentLoaded', function () {
                 }
                 window.location.reload();
             }).catch(function (fehler) {
-                knopf.disabled = false;
+                knoepfe.forEach(function (k) { k.disabled = false; });
                 knopf.textContent = vorher;
                 if (hilfe) { hilfe.hidden = false; }
                 balken.remove();
