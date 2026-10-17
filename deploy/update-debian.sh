@@ -25,6 +25,16 @@
 # scheitert – sonst bliebe ein halb eingespieltes Update stehen.
 set -Eeuo pipefail
 
+# Unbeaufsichtigt (systemd-Dienst, Zeitplan, systemd-run) gibt es weder HOME
+# noch ein Terminal. Ohne HOME brach das Update bei git ab (Befund 24). Die
+# umask des Aufrufers gilt nie: Einheiten, Vorlagen und Code, die hier
+# entstehen, müssen für andere lesbar sein.
+: "${HOME:=/root}"
+export HOME
+umask 022
+# git fragt nie nach (niemand tippt), und ein hängender Abruf bricht ab.
+export GIT_TERMINAL_PROMPT=0 GIT_HTTP_LOW_SPEED_LIMIT=1000 GIT_HTTP_LOW_SPEED_TIME=60
+
 ETC="/etc/powermanagement"
 INSTALLATION_CONF="$ETC/installation.conf"
 VORLAGEN="/var/lib/powermanagement/vorlagen"
@@ -124,8 +134,15 @@ if [[ ! -d /run/systemd/system ]] || ! command -v systemctl >/dev/null 2>&1; the
     exit 1
 fi
 
-schritt() { printf '\n\033[1;34m==> %s\033[0m\n' "$1"; }
-hinweis() { printf '\033[1;33m    %s\033[0m\n' "$1" >&2; }
+# Farben nur am Terminal – im Journal und in Protokolldateien stünden sonst
+# Steuerzeichen (journalctl zeigt solche Zeilen ohne -a als „blob data“).
+if [[ -t 1 && -z "${NO_COLOR:-}" ]]; then
+    F_S=$'\033[1;34m'; F_H=$'\033[1;33m'; F_0=$'\033[0m'
+else
+    F_S=""; F_H=""; F_0=""
+fi
+schritt() { printf '\n%s==> %s%s\n' "$F_S" "$1" "$F_0"; }
+hinweis() { printf '%s    %s%s\n' "$F_H" "$1" "$F_0" >&2; }
 
 # Ein Verzeichnis in storage/ anlegen – als Anwendungsbenutzer, nicht als
 # root (siehe install-debian.sh: ein Verweis in storage/ soll root nicht dazu
@@ -135,17 +152,49 @@ app_verzeichnis() {
     as_app chmod "${2:-750}" -- "$1"
 }
 
+# Die Sperren (fd 8, fd 9) bekommt der Anwendungsbenutzer nicht mit: ein
+# Prozess, der den Deskriptor erbt und weiterläuft, hielte sie fest.
 as_app() {
-    (cd "$ZIEL" && runuser -u "$APP_USER" -- "$@")
+    (cd "$ZIEL" && runuser -u "$APP_USER" -- "$@") 8>&- 9>&-
+}
+
+# git als root im Checkout: safe.directory gilt nur für diesen Aufruf (keine
+# globale Einstellung – ohne HOME bräche „git config --global“ ab), und
+# Hooks aus .git laufen nie (core.hooksPath=/dev/null).
+g() {
+    git -c safe.directory="$ZIEL" -c core.hooksPath=/dev/null -C "$ZIEL" "$@"
+}
+
+# Ausgaben von git ohne Benutzerteil in Adressen – stünden Zugangsdaten in
+# einer Remote-Adresse, kämen sie sonst ins Protokoll.
+ohne_zugangsdaten() { sed -E 's#(://)[^/@[:space:]]+@#\1#g'; }
+
+# apt unbeaufsichtigt: auf die dpkg-Sperre warten (apt-daily und
+# unattended-upgrades laufen im Hintergrund), bei geänderten Conffiles nie
+# fragen, sondern die vorhandene Fassung behalten. „apt-get update“ wartet
+# trotz Lock::Timeout nicht auf die Sperre der Paketlisten – daher die Schleife.
+APT=(apt-get -o DPkg::Lock::Timeout=600 -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold)
+apt_holen() {
+    local n=0
+    until "${APT[@]}" update -qq; do
+        if (( ++n >= 20 )); then
+            hinweis "apt-get update scheitert weiter – Netz und Paketquellen prüfen."
+            return 1
+        fi
+        hinweis "apt ist belegt oder nicht erreichbar – neuer Versuch in 15 s"
+        sleep 15
+    done
 }
 
 # Zwei Läufe gleichzeitig (etwa von Hand und aus einem Zeitplan) würden
 # sich gegenseitig die Datenbank zurückrollen. Die Sperrdatei liegt in
 # /etc/powermanagement (nur root), nicht im für alle beschreibbaren
 # /run/lock: Dort könnte ein anderer Benutzer vorher einen Verweis unter
-# diesem Namen anlegen, dessen Ziel root dann beim Öffnen leert.
+# diesem Namen anlegen, dessen Ziel root dann beim Öffnen leert. Dieselbe
+# Sperre nimmt deploy/install-debian.sh.
 install -d -m 750 "$ETC"
 exec 9>>"$ETC/update.lock"
+chmod 600 "$ETC/update.lock"
 if ! flock -n 9; then
     echo "Ein anderes Update läuft gerade." >&2
     exit 1
@@ -167,7 +216,11 @@ vorlage_uebernehmen() {
     elif cmp -s "$quelle" "$ziel"; then
         VORLAGE_ERGEBNIS="gleich"
     elif [[ "$erzwingen" == "ja" ]]; then
-        cp -p "$ziel" "$ziel.vor-$(date +%Y%m%d-%H%M%S)"
+        # Umbenennen statt „cp -p“: cp folgte als root einem Verweis, den der
+        # Besitzer des Ordners (nodered) unter dem Namen der Sicherung angelegt
+        # hat, und überschriebe dessen Ziel (Befund 8). rename folgt keinem
+        # Verweis; install legt die Datei unten neu an.
+        mv -fT -- "$ziel" "$ziel.vor-$(date +%Y%m%d-%H%M%S)"
         VORLAGE_ERGEBNIS="ersetzt"
     elif [[ -f "$merk" ]] && cmp -s "$merk" "$ziel"; then
         VORLAGE_ERGEBNIS="ersetzt"
@@ -281,19 +334,17 @@ if [[ ! -f "$ZIEL/bin/power" ]]; then
     echo "In $ZIEL steckt keine PowerManagement-Installation." >&2
     exit 1
 fi
-git config --global --get-all safe.directory 2>/dev/null | grep -qxF "$ZIEL" \
-    || git config --global --add safe.directory "$ZIEL"
 
-AKTUELLER_ZWEIG="$(git -C "$ZIEL" rev-parse --abbrev-ref HEAD)"
+AKTUELLER_ZWEIG="$(g rev-parse --abbrev-ref HEAD)"
 [[ -z "$ZWEIG" ]] && ZWEIG="$AKTUELLER_ZWEIG"
-ALT="$(git -C "$ZIEL" rev-parse HEAD)"
+ALT="$(g rev-parse HEAD)"
 
 schritt "Stand prüfen"
 echo "    Verzeichnis: $ZIEL"
 echo "    Zweig:       $ZWEIG"
-echo "    Aktuell:     $(git -C "$ZIEL" log -1 --format='%h %s')"
+echo "    Aktuell:     $(g log -1 --format='%h %s')"
 
-LOKAL="$(git -C "$ZIEL" status --porcelain --untracked-files=no)"
+LOKAL="$(g status --porcelain --untracked-files=no)"
 if [[ -n "$LOKAL" ]]; then
     hinweis "In $ZIEL gibt es lokale Änderungen:"
     printf '%s\n' "$LOKAL" | sed 's/^/      /' >&2
@@ -310,17 +361,26 @@ if [[ -z "$GIT_CRED_FILE" ]]; then
 fi
 if [[ -n "$GIT_CRED_FILE" ]]; then
     zugangsdaten_lesen "$GIT_CRED_FILE"
-    git_zugang_ablegen "$(git -C "$ZIEL" remote get-url origin 2>/dev/null || true)"
+    git_zugang_ablegen "$(g remote get-url origin 2>/dev/null || true)"
 fi
 if [[ -f "$GIT_STORE" ]]; then
-    git -C "$ZIEL" config credential.helper "store --file=$GIT_STORE"
+    g config credential.helper "store --file=$GIT_STORE"
 fi
 
-# GIT_TERMINAL_PROMPT=0: ohne gültiges Token mit einer Meldung abbrechen,
-# statt auf eine Eingabe zu warten, die niemand tippt.
-if ! GIT_TERMINAL_PROMPT=0 git -C "$ZIEL" fetch --quiet origin "$ZWEIG"; then
-    REMOTE_URL="$(git -C "$ZIEL" remote get-url origin 2>/dev/null || echo '?')"
-    hinweis "Die Änderungen ließen sich nicht holen (Remote: $REMOTE_URL)."
+# GIT_TERMINAL_PROMPT=0 (oben): ohne gültiges Token mit einer Meldung
+# abbrechen, statt auf eine Eingabe zu warten, die niemand tippt. timeout:
+# ein hängender Abruf hielte sonst die Sperre (und den Update-Dienst) fest.
+# Ausgegeben wird ohne Benutzerteil in Adressen (ohne_zugangsdaten).
+ABRUF_RC=0
+ABRUF_MELDUNG="$(LC_ALL=C timeout 600 git -c safe.directory="$ZIEL" -c core.hooksPath=/dev/null -C "$ZIEL" \
+    fetch --quiet origin "$ZWEIG" 2>&1 >/dev/null)" || ABRUF_RC=$?
+if [[ "$ABRUF_RC" -ne 0 ]]; then
+    if [[ -n "$ABRUF_MELDUNG" ]]; then
+        printf '%s\n' "$ABRUF_MELDUNG" | ohne_zugangsdaten | sed 's/^/      /' >&2
+    fi
+    [[ "$ABRUF_RC" -eq 124 ]] && hinweis "Der Abruf brach nach 600 s ab."
+    REMOTE_URL="$(g remote get-url origin 2>/dev/null | ohne_zugangsdaten || echo '?')"
+    hinweis "Die Änderungen ließen sich nicht holen (Remote: ${REMOTE_URL:-?})."
     if [[ "$REMOTE_URL" == http* ]]; then
         if [[ -f "$GIT_STORE" ]]; then
             hinweis "Ein Token liegt vor – es passt offenbar nicht mehr (abgelaufen, ohne Leserecht?)."
@@ -334,7 +394,7 @@ if ! GIT_TERMINAL_PROMPT=0 git -C "$ZIEL" fetch --quiet origin "$ZWEIG"; then
     hinweis "Verändert wurde nichts."
     exit 1
 fi
-NEU="$(git -C "$ZIEL" rev-parse "origin/$ZWEIG")"
+NEU="$(g rev-parse "origin/$ZWEIG")"
 
 # Eigene MQTT-Zugänge noch nicht eingerichtet (wirksame ACL oder Einheiten
 # fehlen)? Das kommt vor, wenn der Code schon neu ist, aber ein älteres
@@ -359,7 +419,7 @@ fi
 CODE_NEU="ja"
 if [[ "$ALT" == "$NEU" ]]; then
     CODE_NEU="nein"
-    echo "    Bereits auf dem neuesten Stand ($(git -C "$ZIEL" log -1 --format='%h %s'))."
+    echo "    Bereits auf dem neuesten Stand ($(g log -1 --format='%h %s'))."
     if [[ "$FLOWS_ERSETZEN" != "ja" && "$MQTT_NACHHOLEN" != "ja" ]]; then
         exit 0
     fi
@@ -370,16 +430,16 @@ if [[ "$ALT" == "$NEU" ]]; then
         echo "    Eigene MQTT-Zugänge sind noch nicht eingerichtet – wird nachgeholt."
     fi
 else
-    echo "    Neu:         $(git -C "$ZIEL" log -1 --format='%h %s' "$NEU")"
+    echo "    Neu:         $(g log -1 --format='%h %s' "$NEU")"
     echo
-    git -C "$ZIEL" log --oneline --no-decorate "$ALT..$NEU" | sed 's/^/      /'
-    MIGRATIONEN="$(git -C "$ZIEL" diff --name-only "$ALT" "$NEU" -- database/migrations || true)"
+    g log --oneline --no-decorate "$ALT..$NEU" | sed 's/^/      /'
+    MIGRATIONEN="$(g diff --name-only "$ALT" "$NEU" -- database/migrations || true)"
     if [[ -n "$MIGRATIONEN" ]]; then
         echo
         echo "    Neue Migrationen:"
         printf '%s\n' "$MIGRATIONEN" | sed 's/^/      /'
     fi
-    if ! git -C "$ZIEL" diff --quiet "$ALT" "$NEU" -- deploy/node-red/flows.json; then
+    if ! g diff --quiet "$ALT" "$NEU" -- deploy/node-red/flows.json; then
         echo
         echo "    Die Node-RED-Flows haben sich geändert."
     fi
@@ -465,7 +525,7 @@ zurueckrollen() {
     trap - ERR
     hinweis "Das Update ist fehlgeschlagen – der alte Stand wird wiederhergestellt."
     systemctl stop powermanagement-sammler.service >/dev/null 2>&1 || true
-    git -C "$ZIEL" reset --hard --quiet "$ALT" || true
+    g reset --hard --quiet "$ALT" || true
     if [[ "$MIGRIERT" == "ja" && -n "${SCHNAPPSCHUSS:-}" && -f "$SCHNAPPSCHUSS" ]]; then
         # Migrationen haben die Datenbank womöglich halb umgebaut – die
         # Kopie von vorher zurücklegen.
@@ -500,7 +560,7 @@ zurueckrollen() {
         systemctl restart "php$FPM-fpm" >/dev/null 2>&1 || true
     fi
     systemctl start powermanagement-sammler.service >/dev/null 2>&1 || true
-    hinweis "Wiederhergestellt auf $(git -C "$ZIEL" log -1 --format='%h %s')."
+    hinweis "Wiederhergestellt auf $(g log -1 --format='%h %s')."
     [[ -n "$SICHERUNG" ]] && hinweis "Sicherung: $SICHERUNG"
     exit 1
 }
@@ -511,13 +571,13 @@ if [[ "$CODE_NEU" == "ja" ]]; then
     schritt "Sammler anhalten und Quellcode aktualisieren"
     systemctl stop powermanagement-sammler.service >/dev/null 2>&1 || true
     if [[ "$ERZWINGEN" == "ja" ]]; then
-        git -C "$ZIEL" reset --hard --quiet
-        git -C "$ZIEL" checkout --quiet -B "$ZWEIG" "origin/$ZWEIG"
+        g reset --hard --quiet
+        g checkout --quiet -B "$ZWEIG" "origin/$ZWEIG"
     else
-        git -C "$ZIEL" checkout --quiet "$ZWEIG"
-        git -C "$ZIEL" merge --ff-only --quiet "origin/$ZWEIG"
+        g checkout --quiet "$ZWEIG"
+        g merge --ff-only --quiet "origin/$ZWEIG"
     fi
-    echo "    Jetzt auf $(git -C "$ZIEL" log -1 --format='%h %s')"
+    echo "    Jetzt auf $(g log -1 --format='%h %s')"
 
     # Rechte wie bei der Installation: Code gehört root, storage/ der
     # Anwendung. storage/ und config.php bleiben dabei außen vor – die
@@ -557,8 +617,8 @@ if [[ "$CODE_NEU" == "ja" ]]; then
     if [[ ${#FEHLT[@]} -gt 0 ]]; then
         echo "    Nachinstallieren: ${FEHLT[*]}"
         export DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=l NEEDRESTART_SUSPEND=1
-        apt-get update -qq
-        apt-get install -y --no-install-recommends "${FEHLT[@]}" >/dev/null
+        apt_holen
+        "${APT[@]}" install -y --no-install-recommends "${FEHLT[@]}" >/dev/null
     else
         echo "    Alles vorhanden."
     fi
@@ -792,8 +852,8 @@ fi
 schritt "Fertig"
 cat <<ZUSAMMENFASSUNG
 
-  Vorher:    $(git -C "$ZIEL" log -1 --format='%h' "$ALT")
-  Jetzt:     $(git -C "$ZIEL" log -1 --format='%h %s')
+  Vorher:    $(g log -1 --format='%h' "$ALT")
+  Jetzt:     $(g log -1 --format='%h %s')
 ZUSAMMENFASSUNG
 if [[ -n "$SICHERUNG" ]]; then
     cat <<ZUSAMMENFASSUNG

@@ -11,10 +11,14 @@
 #   1. Erstinstallation: Code gehört root, storage/ der Anwendung, alle
 #      Dienste laufen, die Oberfläche antwortet, Anmeldung mit dem
 #      Erstkennwort, bin/power pruefen ohne Fehler, Broker nur mit Kennwort
-#   2. derselbe Aufruf noch einmal: app.key, Kennwörter und Administrator
+#   2. derselbe Aufruf noch einmal, inzwischen mit einer neuen Fassung des
+#      Installationsskripts im Repository: das Skript holt sie und startet
+#      sie (einmal), der Zweig bleibt; app.key, Kennwörter und Administrator
 #      bleiben, alles läuft weiter
 #   3. Update auf einen neuen Stand, der einen Ordner in storage/ mitbringt,
 #      danach ein Update ohne Neues
+#   3b. Update ohne HOME und ohne Terminal (systemd-run, wie ein Dienst):
+#      läuft durch, Ausgabe ohne Farben, kein globales safe.directory
 #
 # Aufruf:  tests/installation-debian.sh
 #          PM_BEHALTEN=1 tests/installation-debian.sh   Container bleibt stehen
@@ -122,6 +126,16 @@ einchecken() {
     GIT_COMMITTER_NAME=Prüfung GIT_COMMITTER_EMAIL=pruefung@example.invalid \
         git -C "$QUELLE" commit -q -m "$1"
 }
+# neuer_stand <betreff> <bash-befehl>: den Befehl in $QUELLE ausführen,
+# einchecken, nach $REMOTE schieben; gibt den neuen Commit aus.
+neuer_stand() {
+    (cd "$QUELLE" && bash -euo pipefail -c "$2") >&2
+    git -C "$QUELLE" add -A -f
+    einchecken "$1"
+    git -C "$QUELLE" push -q origin main
+    git -C "$QUELLE" rev-parse HEAD
+}
+ohne_esc() { ! grep -q $'\033' "$1"; }
 
 # Erst den Stand der Anwendung abwarten, dann prüfen, was ein Betreiber
 # nach der Installation vorfinden muss.
@@ -239,9 +253,13 @@ pruefe_installation
 abschluss "Erstinstallation"
 
 # ------------------------------------------------------------ 2
-schritt "2 · Derselbe Aufruf noch einmal"
+schritt "2 · Derselbe Aufruf noch einmal (das Repository hat inzwischen ein neues Installationsskript)"
 KONFIG_VORHER="$(sha256sum "$ZIEL/config/config.php")"
 ZUGAENGE_VORHER="$(grep -E '^[A-Z0-9_]+=' "$ZUGAENGE" | sort)"
+# Nur die neue Fassung gibt diese Zeile aus – die laufende alte sieht sie nie.
+MARKE="Prüfung: neue Fassung des Installationsskripts"
+NEU="$(neuer_stand "Neue Fassung des Installationsskripts" \
+    "sed -i '/^PM_ARGS=/a echo \"    $MARKE\"' deploy/install-debian.sh")"
 if ! "$ZIEL/deploy/install-debian.sh" --name="Prüfung Installation" > "$LAUF" 2>&1; then
     cat "$LAUF"
     fehler "deploy/install-debian.sh bricht beim zweiten Lauf ab"
@@ -249,6 +267,11 @@ if ! "$ZIEL/deploy/install-debian.sh" --name="Prüfung Installation" > "$LAUF" 2
 fi
 sed 's/^/  | /' "$LAUF"
 ok "deploy/install-debian.sh läuft auch ein zweites Mal durch"
+pruefe "auf dem neuen Stand" test "$(git -C "$ZIEL" rev-parse HEAD)" = "$NEU"
+pruefe "Zweig bleibt main" test "$(git -C "$ZIEL" symbolic-ref --short HEAD)" = main
+pruefe "neue Fassung des Skripts neu gestartet" grep -q 'Neue Fassung des Installationsskripts – neu gestartet' "$LAUF"
+pruefe "neue Fassung läuft genau einmal" test "$(grep -c "$MARKE" "$LAUF")" = 1
+pruefe "Ausgabe ohne Farben (kein Terminal)" ohne_esc "$LAUF"
 pruefe "config/config.php (app.key) unverändert" test "$(sha256sum "$ZIEL/config/config.php")" = "$KONFIG_VORHER"
 pruefe "Kennwörter und Tokens unverändert" test "$(grep -E '^[A-Z0-9_]+=' "$ZUGAENGE" | sort)" = "$ZUGAENGE_VORHER"
 pruefe "Administrator nicht neu angelegt" grep -q 'Administrator bestand schon' "$LAUF"
@@ -284,5 +307,23 @@ else
 fi
 abschluss "Update"
 
+# ------------------------------------------------------------ 3b
+schritt "3b · Update ohne HOME und ohne Terminal (systemd-run, wie ein Dienst)"
+NEU="$(neuer_stand "Stand für ein Update ohne HOME" "printf '\n' >> README.md")"
+# Eine Einheit ohne User= bekommt von systemd kein HOME und kein Terminal.
+RC=0
+systemd-run --quiet --wait --collect --unit=pm-pruefung-ohne-home \
+    "$ZIEL/deploy/update-debian.sh" || RC=$?
+journalctl --sync 2>/dev/null || true
+journalctl -a -u pm-pruefung-ohne-home --no-pager -o cat > "$LAUF" 2>&1 || true
+sed 's/^/  | /' "$LAUF"
+pruefe "update-debian.sh ohne HOME endet mit 0 (kam: $RC)" test "$RC" = 0
+pruefe "auf dem neuen Stand" test "$(git -C "$ZIEL" rev-parse HEAD)" = "$NEU"
+pruefe "Ausgabe ohne Farben (kein Terminal)" ohne_esc "$LAUF"
+pruefe "kein globales safe.directory (git config --global)" \
+    bash -c '! git config --global --get-all safe.directory >/dev/null'
+pruefe_installation
+abschluss "Update ohne HOME"
+
 echo
-echo "Installation, zweiter Lauf und Update in Ordnung."
+echo "Installation, zweiter Lauf, Update und Update ohne HOME in Ordnung."
