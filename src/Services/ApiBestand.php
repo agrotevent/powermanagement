@@ -27,6 +27,11 @@ use App\Support\Fingerabdruck;
  * „stand“ ist ein Fingerabdruck über genau das, was das Token bekommt: er
  * ändert sich mit dem Inhalt, mit den Befugnissen und mit „bearbeiten“, nicht
  * mit der Uhrzeit.
+ *
+ * Hat das Token selbst Anlagen oder Kabel geschickt, die hier neu angelegt
+ * wurden (oft unter einem anderen Schlüssel), trägt jeder davon
+ * „gesendet_als“ – den Schlüssel, unter dem es ihn geschickt hat. So erkennt
+ * die Gegenseite ihn beim Übernehmen wieder, statt ihn doppelt anzulegen.
  */
 final class ApiBestand
 {
@@ -90,7 +95,9 @@ final class ApiBestand
      */
     public static function location(array $token, string $schluessel): ?array
     {
-        if (!LocationBundle::schluesselGueltig($schluessel)) {
+        // Das Format der Adresse – auch Schlüssel, die ältere Fassungen mit
+        // „-“ am Ende oder länger als 64 Zeichen vergeben haben.
+        if (!LocationBundle::schluesselFormat($schluessel)) {
             return null;
         }
         foreach (Database::select('SELECT id FROM sites WHERE sync_key = ? ORDER BY id', [$schluessel]) as $site) {
@@ -107,7 +114,7 @@ final class ApiBestand
         if (!ApiZugang::sieht($token, $siteId) || SiteService::find($siteId) === null) {
             return null;
         }
-        $daten = self::zusammenstellen($siteId, ApiZugang::darf($token, 'feststrom'), ApiZugang::bearbeitet($token, $siteId));
+        $daten = self::zusammenstellen($siteId, ApiZugang::darf($token, 'feststrom'), ApiZugang::bearbeitet($token, $siteId), (int) ($token['id'] ?? 0));
         $daten['stand'] = self::stand($daten);
         $daten['site_id'] = $siteId;
         return $daten;
@@ -133,7 +140,7 @@ final class ApiBestand
     /**
      * @return array{location:array<string,mixed>,strom:array<string,mixed>,dateien:array<string,string>}
      */
-    private static function zusammenstellen(int $siteId, bool $mitFeststrom, bool $bearbeiten): array
+    private static function zusammenstellen(int $siteId, bool $mitFeststrom, bool $bearbeiten, int $tokenId = 0): array
     {
         $site = SiteService::find($siteId);
         if ($site === null) {
@@ -205,13 +212,24 @@ final class ApiBestand
         $geo = (array) ($strom['georeferenz'] ?? []);
         ksort($geo);
         if ($mitFeststrom) {
+            $gesendet = $tokenId > 0 ? self::gesendet($tokenId, $siteId) : ['objekte' => [], 'leitungen' => []];
             $anlagen = [];
             foreach ((array) ($strom['anlagen'] ?? []) as $a) {
                 unset($a['messpunkte']);
+                if (isset($gesendet['objekte'][(string) $a['schluessel']])) {
+                    $a['gesendet_als'] = $gesendet['objekte'][(string) $a['schluessel']];
+                }
                 $anlagen[] = $a;
             }
+            $leitungen = [];
+            foreach ((array) ($strom['leitungen'] ?? []) as $l) {
+                if (isset($gesendet['leitungen'][(string) $l['schluessel']])) {
+                    $l['gesendet_als'] = $gesendet['leitungen'][(string) $l['schluessel']];
+                }
+                $leitungen[] = $l;
+            }
             $strom['anlagen'] = self::nachSchluessel($anlagen);
-            $strom['leitungen'] = self::nachSchluessel((array) ($strom['leitungen'] ?? []));
+            $strom['leitungen'] = self::nachSchluessel($leitungen);
             $strom['steckertypen'] = self::nachSchluessel((array) ($strom['steckertypen'] ?? []));
         } else {
             unset($strom['anlagen'], $strom['leitungen'], $strom['steckertypen']);
@@ -220,6 +238,26 @@ final class ApiBestand
         $strom['georeferenz'] = $geo === [] ? new \stdClass() : $geo;
 
         return ['location' => $location, 'strom' => $strom, 'dateien' => $dateien];
+    }
+
+    /**
+     * Was dieses Token selbst geschickt hat und hier neu angelegt wurde:
+     * Schlüssel hier → Schlüssel, unter dem es kam (api_zuordnungen).
+     *
+     * @return array{objekte:array<string,string>,leitungen:array<string,string>}
+     */
+    private static function gesendet(int $tokenId, int $siteId): array
+    {
+        $out = ['objekte' => [], 'leitungen' => []];
+        foreach (Database::select("SELECT z.fremd_schluessel, o.sync_key FROM api_zuordnungen z JOIN objekte o ON o.id = z.ziel_id
+            WHERE z.token_id = ? AND z.tabelle = 'objekte' AND o.site_id = ? ORDER BY z.id", [$tokenId, $siteId]) as $z) {
+            $out['objekte'][(string) $z['sync_key']] = (string) $z['fremd_schluessel'];
+        }
+        foreach (Database::select("SELECT z.fremd_schluessel, l.sync_key FROM api_zuordnungen z JOIN leitungen l ON l.id = z.ziel_id
+            JOIN floors f ON f.id = l.floor_id WHERE z.token_id = ? AND z.tabelle = 'leitungen' AND f.site_id = ? ORDER BY z.id", [$tokenId, $siteId]) as $z) {
+            $out['leitungen'][(string) $z['sync_key']] = (string) $z['fremd_schluessel'];
+        }
+        return $out;
     }
 
     /**

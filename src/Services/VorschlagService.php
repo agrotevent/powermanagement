@@ -48,6 +48,14 @@ final class VorschlagService
     /** Offene Vorschläge je Token (je Standort ersetzt ein neuer den alten). */
     public const MAX_OFFEN = 10;
 
+    /**
+     * Sendungen je Token in der letzten Stunde – alle, die hier eine Zeile
+     * hinterlassen (offen, ersetzt, direkt geschrieben). Ersetzte und direkt
+     * geschriebene behalten nur ihre Eckdaten, aber auch die sollen nicht
+     * unbegrenzt anwachsen.
+     */
+    public const MAX_JE_STUNDE = 60;
+
     public const MAX_ETAGEN = 200;
     public const MAX_ANLAGEN = 500;
     public const MAX_LEITUNGEN = 2000;
@@ -75,8 +83,8 @@ final class VorschlagService
         'feststrom' => 'Feststromanschlüsse und fest verlegte Kabel',
     ];
 
-    /** Name einer mitgeschickten Datei – wie MasterAdmin sie schickt, ohne webp. */
-    private const DATEI = '#^plaene/[a-z0-9-]{1,64}\.(pdf|png|jpe?g|svg)$#';
+    /** Name einer mitgeschickten Datei – wie MasterAdmin sie schickt (Schlüssel bis 190 Zeichen), ohne webp. */
+    private const DATEI = '#^plaene/[a-z0-9-]{1,190}\.(pdf|png|jpe?g|svg)$#';
 
     /** Was in plan.datei stehen darf – nur ein Verweis (MasterAdmin nennt auch webp). */
     private const PLAN_DATEI = '#^plaene/[a-z0-9-]{1,190}\.(pdf|png|jpe?g|svg|webp)$#';
@@ -115,6 +123,11 @@ final class VorschlagService
         if (!ApiZugang::bearbeitet($token, $siteId)) {
             return self::nein(403, 'Dieser Standort ist für das Token nur zum Lesen freigegeben.');
         }
+        $zuletzt = (int) Database::scalar('SELECT COUNT(*) FROM api_vorschlaege WHERE token_id = ? AND created_at >= ?',
+            [(int) $token['id'], gmdate('c', time() - 3600)]);
+        if ($zuletzt >= self::MAX_JE_STUNDE) {
+            return self::nein(429, sprintf('Von diesem Token kamen in der letzten Stunde schon %d Sendungen – bitte später erneut.', $zuletzt));
+        }
         try {
             $v = self::pruefen($token, $siteId, $schluessel, $koerper);
         } catch (\UnexpectedValueException $e) {
@@ -129,7 +142,7 @@ final class VorschlagService
     /** Der Standort mit diesem Schlüssel, den das Token sieht – sonst null (für die Gegenseite: 404). */
     private static function standortFuer(array $token, string $schluessel): ?int
     {
-        if (!LocationBundle::schluesselGueltig($schluessel)) {
+        if (!LocationBundle::schluesselFormat($schluessel)) {
             return null;
         }
         foreach (Database::select('SELECT id FROM sites WHERE sync_key = ? ORDER BY id', [$schluessel]) as $s) {
@@ -170,7 +183,7 @@ final class VorschlagService
                 self::ab('Eine Etage im Vorschlag ist kein Objekt.');
             }
             $key = is_string($e['schluessel'] ?? null) ? $e['schluessel'] : '';
-            if (!LocationBundle::schluesselGueltig($key)) {
+            if (!LocationBundle::schluesselFormat($key)) {
                 self::ab('Eine Etage im Vorschlag hat keinen gültigen Schlüssel.');
             }
             if (isset($paare[$key])) {
@@ -435,8 +448,8 @@ final class VorschlagService
                 self::ab('Eine Anlage im Vorschlag ist kein Objekt.');
             }
             $key = is_string($a['schluessel'] ?? null) ? $a['schluessel'] : '';
-            if (!LocationBundle::schluesselGueltig($key)) {
-                self::ab('Eine Anlage im Vorschlag hat keinen gültigen Schlüssel (a–z, 0–9, Bindestrich, höchstens 64 Zeichen).');
+            if (!LocationBundle::schluesselFormat($key)) {
+                self::ab('Eine Anlage im Vorschlag hat keinen gültigen Schlüssel (a–z, 0–9, Bindestrich, höchstens 190 Zeichen).');
             }
             if (isset($schon[$key])) {
                 self::ab(sprintf('Die Anlage „%s“ steht zweimal im Vorschlag.', $key));
@@ -456,13 +469,20 @@ final class VorschlagService
                 self::ab(sprintf('Anlage „%s“ steht auf der Etage „%s“, die nicht im Vorschlag steht.', $key, mb_substr($etage, 0, 64)));
             }
             $was = 'Anlage „' . $key . '“';
+            // Ein fehlender Name hieße hier „wie der Schlüssel“ – lieber ablehnen.
+            if (!is_string($a['name'] ?? null) || trim($a['name']) === '') {
+                self::ab(sprintf('%s: „name“ fehlt.', $was));
+            }
             $anlage = self::skalare($a, self::ANLAGE_FELDER, $was);
             if (($a['eigenschaften'] ?? null) !== null) {
                 $anlage['eigenschaften'] = self::skalarMap($a['eigenschaften'], 100, $was . ': „eigenschaften“');
             }
+            // Anschlüsse und Schutzorgane werden ersetzt – ein fehlender
+            // Schlüssel hieße sonst „keine“ und löschte sie hier samt den
+            // Verweisen von Kabeln, Messpunkten und Einsätzen.
             foreach (['schutzorgane' => 100, 'anschluesse' => 400] as $feld => $max) {
-                if (($a[$feld] ?? null) === null) {
-                    continue;
+                if (!array_key_exists($feld, $a) || $a[$feld] === null) {
+                    self::ab(sprintf('%s: „%s“ fehlt – eine leere Liste heißt „keine“.', $was, $feld));
                 }
                 if (!is_array($a[$feld]) || !array_is_list($a[$feld]) || count($a[$feld]) > $max) {
                     self::ab(sprintf('%s: „%s“ ist keine Liste mit höchstens %d Einträgen.', $was, $feld, $max));
@@ -492,8 +512,8 @@ final class VorschlagService
                 self::ab('Eine Leitung im Vorschlag ist kein Objekt.');
             }
             $key = is_string($l['schluessel'] ?? null) ? $l['schluessel'] : '';
-            if (!LocationBundle::schluesselGueltig($key)) {
-                self::ab('Eine Leitung im Vorschlag hat keinen gültigen Schlüssel (a–z, 0–9, Bindestrich, höchstens 64 Zeichen).');
+            if (!LocationBundle::schluesselFormat($key)) {
+                self::ab('Eine Leitung im Vorschlag hat keinen gültigen Schlüssel (a–z, 0–9, Bindestrich, höchstens 190 Zeichen).');
             }
             if (isset($schon[$key])) {
                 self::ab(sprintf('Die Leitung „%s“ steht zweimal im Vorschlag.', $key));
@@ -510,7 +530,11 @@ final class VorschlagService
                 self::ab(sprintf('Leitung „%s“ liegt auf keiner Etage des Vorschlags.', $key));
             }
             $leitung = self::skalare($l, self::LEITUNG_FELDER, 'Leitung „' . $key . '“');
-            $punkte = $l['punkte'] ?? [];
+            // Wie bei Anlagen: fehlt der Verlauf, hieße das „keiner“.
+            if (!array_key_exists('punkte', $l) || $l['punkte'] === null) {
+                self::ab(sprintf('Leitung „%s“: „punkte“ fehlt – eine leere Liste heißt „keine“.', $key));
+            }
+            $punkte = $l['punkte'];
             if (!is_array($punkte) || !array_is_list($punkte) || count($punkte) > self::MAX_PUNKTE) {
                 self::ab(sprintf('Leitung „%s“: „punkte“ ist keine Liste mit höchstens %d Punkten.', $key, self::MAX_PUNKTE));
             }
@@ -570,51 +594,86 @@ final class VorschlagService
      * „plaene.schreiben“ mit Stand: gleich anwenden – aber nur auf dem Stand,
      * den die Gegenseite kennt, oder ausdrücklich darüber hinweg.
      *
+     * Erst die Schreibsperre, dann der Vergleich mit „basis“: sonst schriebe
+     * ein zweiter Schreiber im Fenster zwischen Prüfen und Anwenden – und der
+     * erste überschriebe dessen Änderungen ohne 409. Prüfen, Anwenden, die
+     * Zeile in api_vorschlaege und der neue Stand für die Antwort laufen in
+     * einer Transaktion; Kacheln entstehen erst danach.
+     *
      * Die Rechte kommen aus den Befugnissen und der Standort-Freigabe des
      * Tokens (geprüft in einreichen()), nicht aus einem Benutzer hier. Neue
      * Steckertypen legt ein Token nie an.
      */
     private static function direkt(array $token, int $siteId, string $schluessel, array $v): array
     {
-        $aktuell = (string) (ApiBestand::location($token, $schluessel)['stand'] ?? '');
-        if (!$v['erzwingen'] && !hash_equals($aktuell, (string) $v['basis'])) {
-            return self::nein(409, 'Hier hat sich seit dem Abruf etwas geändert – erst übernehmen oder ausdrücklich überschreiben.', ['stand' => $aktuell]);
-        }
-        $teile = ['grundriss'];
-        if ($v['feststrom']) {
-            $fehlen = LocationUebertrag::fehlendeSteckertypen((array) $v['strom']);
-            if ($fehlen !== []) {
-                return self::nein(422, 'Diese Steckertypen gibt es hier nicht: ' . implode(', ', $fehlen)
-                    . ' – ein Token legt keine an. Erst hier im Katalog anlegen, dann erneut schicken. Nichts übernommen.', ['stecker' => $fehlen]);
-            }
-            $teile[] = 'feststrom';
-        }
+        $teile = $v['feststrom'] ? ['grundriss', 'feststrom'] : ['grundriss'];
         $ordner = self::wurzel() . '/direkt-' . bin2hex(random_bytes(6)) . '.neu';
+        $pdo = Database::pdo();
+        $ersetzt = [];
         try {
+            // Die Dateien vor der Sperre – sie liegen in einem eigenen Ordner.
             $abgelegt = self::dateienSchreiben($ordner, $v['dateien']);
-            $r = LocationUebertrag::anwenden($siteId, $v['location'], $v['strom'], $v['paare'],
-                self::aufloeser($siteId, $v['location'], $ordner, $abgelegt, array_keys($v['paare'])), [
-                    'teile'        => $teile,
-                    'zuordnung'    => 'standort',
-                    'plan_praefix' => 'vorschlag',
-                    'fremdbestand' => false,
-                    'neue_etagen'  => false,
+            $aufloeser = self::aufloeser($siteId, $v['location'], $ordner, $abgelegt, array_keys($v['paare']));
+            $pdo->beginTransaction();
+            try {
+                self::sperren($siteId);
+                $aktuell = (string) (ApiBestand::location($token, $schluessel)['stand'] ?? '');
+                $basisPasst = hash_equals($aktuell, (string) $v['basis']);
+                if (!$v['erzwingen'] && !$basisPasst) {
+                    $pdo->rollBack();
+                    return self::nein(409, 'Hier hat sich seit dem Abruf etwas geändert – erst übernehmen oder ausdrücklich überschreiben.', ['stand' => $aktuell]);
+                }
+                if ($v['feststrom']) {
+                    $fehlen = LocationUebertrag::fehlendeSteckertypen((array) $v['strom']);
+                    if ($fehlen !== []) {
+                        $pdo->rollBack();
+                        return self::nein(422, 'Diese Steckertypen gibt es hier nicht: ' . implode(', ', $fehlen)
+                            . ' – ein Token legt keine an. Erst hier im Katalog anlegen, dann erneut schicken. Nichts übernommen.', ['stecker' => $fehlen]);
+                    }
+                }
+                $r = LocationUebertrag::anwenden($siteId, $v['location'], $v['strom'], $v['paare'], $aufloeser, [
+                    'teile'           => $teile,
+                    'zuordnung'       => 'standort',
+                    'plan_praefix'    => 'vorschlag',
+                    'fremdbestand'    => false,
+                    'neue_etagen'     => false,
+                    'stecker_anlegen' => false,
+                    'kacheln'         => false,
+                    'token_id'        => (int) $token['id'],
                 ]);
+                if (!$r['ok']) {
+                    $pdo->rollBack();
+                    return self::nein(422, $r['message']);
+                }
+                $name = 'api:' . mb_substr((string) $token['name'], 0, 60);
+                $etagen = array_keys($v['paare']);
+                // Angewandt ist angewandt – die Zeile behält nur ihre Eckdaten,
+                // keinen zweiten Bestand (und keine Dateien).
+                $kurz = self::kurzfassung($schluessel, $etagen, ['anlagen' => (int) $r['anlagen'], 'leitungen' => (int) $r['leitungen']]);
+                $id = Database::insert('api_vorschlaege', array_merge(self::zeile($token, $siteId, $schluessel, $v, [], $kurz), [
+                    'bytes'           => array_sum(array_map(static fn (array $d): int => (int) $d['bytes'], $v['dateien'])),
+                    'status'          => self::ANGENOMMEN,
+                    'entschieden_von' => mb_substr($name, 0, 64),
+                    'entschieden_at'  => gmdate('c'),
+                    'entscheidung'    => self::json(['direkt' => true, 'etagen' => $etagen, 'teile' => $teile]),
+                ]));
+                $ersetzt = self::aeltereErsetzen($token, $siteId, $id);
+                // Der neue Stand genau zu dem, was gerade geschrieben wurde.
+                $neuerStand = (string) (ApiBestand::location($token, $schluessel)['stand'] ?? '');
+                $pdo->commit();
+            } catch (\Throwable $e) {
+                if ($pdo->inTransaction()) {
+                    $pdo->rollBack();
+                }
+                throw $e;
+            }
         } finally {
             self::wegraeumen($ordner);
         }
-        if (!$r['ok']) {
-            return self::nein(422, $r['message']);
+        foreach ($ersetzt as $alt) {
+            self::wegraeumen(self::ordner($alt));
         }
-        $name = 'api:' . mb_substr((string) $token['name'], 0, 60);
-        $etagen = array_keys($v['paare']);
-        $id = Database::insert('api_vorschlaege', self::zeile($token, $siteId, $schluessel, $v, $abgelegt) + [
-            'status'          => self::ANGENOMMEN,
-            'entschieden_von' => mb_substr($name, 0, 64),
-            'entschieden_at'  => gmdate('c'),
-            'entscheidung'    => self::json(['direkt' => true, 'etagen' => $etagen, 'teile' => $teile]),
-        ]);
-        $ersetzt = self::aeltereErsetzen($token, $siteId, $id);
+        LocationBundle::kachelnBauen($r['kacheln']);
         Audit::log('api.schreiben', 'site', (string) $siteId, [
             'location'  => $schluessel,
             'etagen'    => $etagen,
@@ -623,15 +682,40 @@ final class VorschlagService
             'leitungen' => (int) $r['leitungen'],
             'token'     => (int) $token['id'],
             'vorschlag' => $id,
-        ] + ($ersetzt !== [] ? ['ersetzt' => $ersetzt] : []));
+        ] + ($ersetzt !== [] ? ['ersetzt' => $ersetzt] : []) + ($basisPasst ? [] : ['erzwungen' => true]));
+        $objekt = static fn (array $m): array|\stdClass => $m === [] ? new \stdClass() : $m;
         return [
             'ok'          => true,
             'status'      => 201,
             'id'          => $id,
             'uebernommen' => true,
-            'stand'       => (string) (ApiBestand::location($token, $schluessel)['stand'] ?? ''),
+            'stand'       => $neuerStand,
+            // false: mit „erzwingen“ über einen anderen Stand geschrieben – hier
+            // gibt es dann mehr, als die Gegenseite kennt.
+            'basis_passte' => $basisPasst,
+            // Unter welchem Schlüssel hier steht, was die Gegenseite geschickt
+            // hat – ein neuer Eintrag bekommt hier oft einen anderen.
+            'schluessel'  => ['anlagen' => $objekt($r['schluessel']['anlagen']), 'leitungen' => $objekt($r['schluessel']['leitungen'])],
             'message'     => 'Übernommen.',
         ];
+    }
+
+    /**
+     * Die Schreibsperre für einen Standort holen – als erste Anweisung der
+     * Transaktion. Unter SQLite sperrt jedes Schreiben die ganze Datenbank,
+     * unter MySQL die Zeile des Standorts; ein zweiter Schreiber wartet, bis
+     * der erste fertig ist, und vergleicht erst dann.
+     */
+    private static function sperren(int $siteId): void
+    {
+        Database::execute('UPDATE sites SET id = id WHERE id = ?', [$siteId]);
+    }
+
+    /** Was von einer entschiedenen Zeile bleibt: Schlüssel, Etagen, Zahlen – kein Bestand. */
+    private static function kurzfassung(string $schluessel, array $etagen = [], array $zahlen = []): string
+    {
+        return self::json(['location' => ['schluessel' => $schluessel, 'etagen' => array_map(static fn ($k): array => ['schluessel' => (string) $k], array_values($etagen))],
+            'gekuerzt' => true] + $zahlen);
     }
 
     // ---------------------------------------------------------------- als Vorschlag ablegen
@@ -667,6 +751,9 @@ final class VorschlagService
             }
         }
         $ersetzt = self::aeltereErsetzen($token, $siteId, $id);
+        foreach ($ersetzt as $alt) {
+            self::wegraeumen(self::ordner($alt));
+        }
         Audit::log('api.vorschlag.eingang', 'api_vorschlag', (string) $id, [
             'location'  => $schluessel,
             'etagen'    => count($v['paare']),
@@ -684,10 +771,14 @@ final class VorschlagService
         ];
     }
 
-    /** Die Spalten einer neuen Zeile (ohne Zustand und Entscheidung). */
-    private static function zeile(array $token, int $siteId, string $schluessel, array $v, array $meta): array
+    /**
+     * Die Spalten einer neuen Zeile (ohne Zustand und Entscheidung).
+     *
+     * @param string|null $daten schon fertig (Kurzfassung) – sonst der ganze Vorschlag
+     */
+    private static function zeile(array $token, int $siteId, string $schluessel, array $v, array $meta, ?string $daten = null): array
     {
-        $daten = ['location' => $v['location']] + ($v['strom'] !== null ? ['strom' => $v['strom']] : []);
+        $daten ??= self::json(['location' => $v['location']] + ($v['strom'] !== null ? ['strom' => $v['strom']] : []));
         return [
             'token_id'    => (int) $token['id'],
             'token_name'  => mb_substr((string) $token['name'], 0, 190),
@@ -695,7 +786,7 @@ final class VorschlagService
             'site_id'     => $siteId,
             'site_key'    => $schluessel,
             'basis_stand' => (string) ($v['basis'] ?? ''),
-            'daten'       => self::json($daten),
+            'daten'       => $daten,
             'dateien'     => self::json($meta === [] ? new \stdClass() : $meta),
             'bytes'       => array_sum(array_map(static fn (array $m): int => (int) $m['bytes'], $meta)),
             'notiz'       => $v['notiz'],
@@ -705,24 +796,34 @@ final class VorschlagService
 
     /**
      * Ältere offene Vorschläge desselben Tokens für denselben Standort sind
-     * überholt – der neue bringt den ganzen Stand.
+     * überholt – der neue bringt den ganzen Stand. Sie behalten nur ihre
+     * Eckdaten: wer in Folge schickt, füllt sonst mit jeder Sendung die
+     * Platte, bis die Wartung nach AUFBEWAHREN_TAGE aufräumt.
+     *
+     * Nur, was in diesem Moment noch offen ist (gleichzeitig angenommen
+     * oder abgelehnt bleibt es). Die Ordner räumt der Aufrufer danach.
      *
      * @return list<int>
      */
     private static function aeltereErsetzen(array $token, int $siteId, int $neuId): array
     {
         $ids = [];
-        foreach (Database::select("SELECT id FROM api_vorschlaege WHERE token_id = ? AND site_id = ? AND status = 'offen' AND id <> ?",
+        foreach (Database::select("SELECT id, site_key FROM api_vorschlaege WHERE token_id = ? AND site_id = ? AND status = 'offen' AND id <> ?",
             [(int) $token['id'], $siteId, $neuId]) as $z) {
             $id = (int) $z['id'];
-            Database::update('api_vorschlaege', $id, [
-                'status'          => self::ERSETZT,
-                'entschieden_von' => mb_substr('api:' . mb_substr((string) $token['name'], 0, 60), 0, 64),
-                'entschieden_at'  => gmdate('c'),
-                'entscheidung'    => self::json(['ersetzt_durch' => $neuId]),
+            $geaendert = Database::execute("UPDATE api_vorschlaege SET status = ?, entschieden_von = ?, entschieden_at = ?, entscheidung = ?,
+                daten = ?, dateien = ? WHERE id = ? AND status = 'offen'", [
+                self::ERSETZT,
+                mb_substr('api:' . mb_substr((string) $token['name'], 0, 60), 0, 64),
+                gmdate('c'),
+                self::json(['ersetzt_durch' => $neuId]),
+                self::kurzfassung((string) $z['site_key']),
+                '{}',
+                $id,
             ]);
-            self::wegraeumen(self::ordner($id));
-            $ids[] = $id;
+            if ($geaendert === 1) {
+                $ids[] = $id;
+            }
         }
         return $ids;
     }
@@ -840,11 +941,14 @@ final class VorschlagService
             foreach ((array) $hierStrom['leitungen'] as $l) {
                 $hierLeitungen[(string) $l['schluessel']] = $l;
             }
+            // Was dieses Token schon einmal neu angelegt hat, steht hier unter
+            // einem eigenen Schlüssel – verglichen wird mit dem (wie beim Annehmen).
+            $hierKey = self::zuordnungHier((int) $vorschlag['token_id'], $siteId);
             foreach ((array) ($strom['anlagen'] ?? []) as $a) {
-                $dortAnlagen[(string) $a['schluessel']] = $a;
+                $dortAnlagen[$hierKey['objekte'][(string) $a['schluessel']] ?? (string) $a['schluessel']] = $a;
             }
             foreach ((array) ($strom['leitungen'] ?? []) as $l) {
-                $dortLeitungen[(string) $l['schluessel']] = $l;
+                $dortLeitungen[$hierKey['leitungen'][(string) $l['schluessel']] ?? (string) $l['schluessel']] = $l;
             }
         }
 
@@ -921,6 +1025,26 @@ final class VorschlagService
             'feststrom'   => $mitFeststrom,
             'standort'    => true,
         ];
+    }
+
+    /**
+     * Schlüssel, unter denen ein Token Einträge geschickt hat, die hier neu
+     * angelegt wurden → ihr Schlüssel hier (nur auf diesem Standort).
+     *
+     * @return array{objekte:array<string,string>,leitungen:array<string,string>}
+     */
+    private static function zuordnungHier(int $tokenId, int $siteId): array
+    {
+        $out = ['objekte' => [], 'leitungen' => []];
+        foreach (Database::select("SELECT z.fremd_schluessel, o.sync_key FROM api_zuordnungen z JOIN objekte o ON o.id = z.ziel_id
+            WHERE z.token_id = ? AND z.tabelle = 'objekte' AND o.site_id = ?", [$tokenId, $siteId]) as $z) {
+            $out['objekte'][(string) $z['fremd_schluessel']] = (string) $z['sync_key'];
+        }
+        foreach (Database::select("SELECT z.fremd_schluessel, l.sync_key FROM api_zuordnungen z JOIN leitungen l ON l.id = z.ziel_id
+            JOIN floors f ON f.id = l.floor_id WHERE z.token_id = ? AND z.tabelle = 'leitungen' AND f.site_id = ?", [$tokenId, $siteId]) as $z) {
+            $out['leitungen'][(string) $z['fremd_schluessel']] = (string) $z['sync_key'];
+        }
+        return $out;
     }
 
     /** Warnungen zum ganzen Vorschlag: Stand veraltet, Zugang widerrufen oder abgelaufen. */
@@ -1027,6 +1151,12 @@ final class VorschlagService
     /**
      * Einen Vorschlag für die gewählten Etagen annehmen.
      *
+     * Der Vorschlag wird als Erstes beansprucht (offen → angenommen, nur wenn
+     * er noch offen ist) – in derselben Transaktion wie das Anwenden. Nehmen
+     * zwei gleichzeitig an, oder lehnt einer ab, während der andere annimmt,
+     * gewinnt genau einer; der andere hört „schon entschieden“, und nichts
+     * wird doppelt angewandt. Scheitert das Anwenden, bleibt er offen.
+     *
      * @param list<string> $etagen Schlüssel der Etagen
      * @param list<string> $teile ⊆ TEILE
      * @return array{ok:bool,message:string}
@@ -1093,31 +1223,58 @@ final class VorschlagService
             }
             $paare[$key] = $floorId;
         }
-        $r = LocationUebertrag::anwenden($siteId, $location, $strom, $paare,
-            self::aufloeser($siteId, $location, self::ordner($id), (array) $v['dateien'], $etagen), [
-                'teile'        => $teile,
-                'zuordnung'    => 'standort',
-                'plan_praefix' => 'vorschlag',
-                'fremdbestand' => false,
-                'neue_etagen'  => false,
+        $aufloeser = self::aufloeser($siteId, $location, self::ordner($id), (array) $v['dateien'], $etagen);
+
+        $pdo = Database::pdo();
+        $pdo->beginTransaction();
+        try {
+            // Beanspruchen – als erste Anweisung, damit sie die Schreibsperre holt.
+            $beansprucht = Database::execute("UPDATE api_vorschlaege SET status = ?, entschieden_von = ?, entschieden_at = ?, entscheidung = ?
+                WHERE id = ? AND status = 'offen'", [
+                self::ANGENOMMEN, mb_substr(Auth::name(), 0, 64), gmdate('c'), self::json(['etagen' => $etagen, 'teile' => $teile]), $id,
             ]);
-        if (!$r['ok']) {
-            return $nein($r['message']);
+            if ($beansprucht !== 1) {
+                $pdo->rollBack();
+                return $nein('Dieser Vorschlag ist schon entschieden.');
+            }
+            self::sperren($siteId);
+            $r = LocationUebertrag::anwenden($siteId, $location, $strom, $paare, $aufloeser, [
+                'teile'           => $teile,
+                'zuordnung'       => 'standort',
+                'plan_praefix'    => 'vorschlag',
+                'fremdbestand'    => false,
+                'neue_etagen'     => false,
+                // Fehlende, benutzte Typen nur mit dem Recht dazu (sonst schon oben abgelehnt).
+                'stecker_anlegen' => Auth::can('stecker.manage'),
+                'kacheln'         => false,
+                'token_id'        => (int) $v['token_id'],
+            ]);
+            if (!$r['ok']) {
+                $pdo->rollBack();
+                return $nein($r['message']);
+            }
+            $pdo->commit();
+        } catch (\Throwable $e) {
+            if ($pdo->inTransaction()) {
+                $pdo->rollBack();
+            }
+            Logger::error('Vorschlag annehmen: ' . $e->getMessage(), ['file' => $e->getFile(), 'line' => $e->getLine()]);
+            return $nein('Annehmen ist fehlgeschlagen – es wurde nichts geändert, der Vorschlag bleibt offen. Details stehen im Log.');
         }
-        Database::update('api_vorschlaege', $id, [
-            'status'          => self::ANGENOMMEN,
-            'entschieden_von' => mb_substr(Auth::name(), 0, 64),
-            'entschieden_at'  => gmdate('c'),
-            'entscheidung'    => self::json(['etagen' => $etagen, 'teile' => $teile]),
-        ]);
         self::wegraeumen(self::ordner($id));
+        LocationBundle::kachelnBauen($r['kacheln']);
         Audit::log('api.vorschlag.angenommen', 'api_vorschlag', (string) $id, [
             'location' => (string) $v['site_key'], 'etagen' => $etagen, 'teile' => $teile, 'token' => (int) $v['token_id'],
         ]);
         return ['ok' => true, 'message' => sprintf('Vorschlag Nr. %d angenommen. ', $id) . $r['message']];
     }
 
-    /** @return array{ok:bool,message:string} */
+    /**
+     * Ablehnen – nur, solange er noch offen ist (sonst „schon entschieden“,
+     * auch wenn ihn gerade jemand anderes angenommen hat).
+     *
+     * @return array{ok:bool,message:string}
+     */
     public static function ablehnen(int $id, string $grund): array
     {
         $v = self::find($id);
@@ -1134,12 +1291,13 @@ final class VorschlagService
             return ['ok' => false, 'message' => 'Ablehnen braucht eine Freigabe mit „bearbeiten“ an diesem Standort.'];
         }
         $grund = mb_substr(trim((string) preg_replace('/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]+/u', ' ', $grund)), 0, 500);
-        Database::update('api_vorschlaege', $id, [
-            'status'          => self::ABGELEHNT,
-            'entschieden_von' => mb_substr(Auth::name(), 0, 64),
-            'entschieden_at'  => gmdate('c'),
-            'entscheidung'    => self::json(['grund' => $grund]),
+        $geaendert = Database::execute("UPDATE api_vorschlaege SET status = ?, entschieden_von = ?, entschieden_at = ?, entscheidung = ?
+            WHERE id = ? AND status = 'offen'", [
+            self::ABGELEHNT, mb_substr(Auth::name(), 0, 64), gmdate('c'), self::json(['grund' => $grund]), $id,
         ]);
+        if ($geaendert !== 1) {
+            return ['ok' => false, 'message' => 'Dieser Vorschlag ist schon entschieden.'];
+        }
         self::wegraeumen(self::ordner($id));
         Audit::log('api.vorschlag.abgelehnt', 'api_vorschlag', (string) $id, [
             'location' => (string) $v['site_key'], 'grund' => mb_substr($grund, 0, 200), 'token' => (int) $v['token_id'],

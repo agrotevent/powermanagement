@@ -230,6 +230,7 @@ try {
     $tOhneFest = $token('ohne-feststrom', ['plaene.vorschlagen'], [$sites['halle']], [$sites['halle']]);
     $tMa = $token('masteradmin', ['plaene.vorschlagen'], [$sites['halle']], [$sites['halle']]);
     $tSchreib = $token('schreiben', ['plaene.schreiben', 'feststrom'], [$sites['halle'], $sites['lager']], [$sites['halle']]);
+    $tFlut = $token('flut', ['plaene.vorschlagen'], [$sites['halle']], [$sites['halle']]);
     alsBenutzer(null);
 
     $detail = static fn (array $tok, ?string $key = null): array => (array) api($basis, 'GET', '/api/v1/locations/' . ($key ?? $halleKey), $tok['token'])['json'];
@@ -573,6 +574,260 @@ try {
         'unbekannter Steckertyp beim Schreiben: 422 mit dem Namen, nichts gespeichert – ' . ($r['json']['message'] ?? ''));
     pruefe($zeilen() > $vorDirekt, 'direkt Geschriebenes steht in der Liste der Vorschläge');
 
+    // ================================================= Steckertypen nur, wenn ein Anschluss sie nutzt
+    $unbenutzt = 'pm-unbenutzt-' . $marke;
+    $mitUnbenutzt = static function (array $d) use ($unbenutzt): array {
+        $d['strom']['steckertypen'][] = ['schluessel' => $unbenutzt, 'name' => 'Vom Token angelegt', 'strom_a' => 9999, 'phasen' => 3, 'spannung_v' => 400, 'farbe' => '#000000'];
+        return $d;
+    };
+    $katalog = static fn (): int => (int) Database::scalar('SELECT COUNT(*) FROM steckertypen WHERE schluessel = ?', [$unbenutzt]);
+    $d = $detail($tSchreib);
+    $r = $senden($tSchreib, $mitUnbenutzt(['location' => $d['location'], 'strom' => $d['strom'], 'basis' => (string) $d['stand']]));
+    pruefe($r['status'] === 201 && ($r['json']['uebernommen'] ?? null) === true && $katalog() === 0,
+        'direkt: ein unbenutzter Steckertyp im Körper landet nicht im Katalog – ' . ($r['json']['message'] ?? $r['status']));
+    $d = $detail($tVor);
+    $r = $senden($tVor, $mitUnbenutzt(['location' => $d['location'], 'strom' => $d['strom'], 'basis' => (string) $d['stand']]));
+    $sid = (int) ($r['json']['id'] ?? 0);
+    alsBenutzer($benutzer['admin']);
+    Zugriff::vergessen();
+    gleich(VorschlagService::unterschiede(VorschlagService::find($sid))['stecker_neu'], [], 'Unterschiede: ein unbenutzter Typ ist kein neuer');
+    $a = VorschlagService::annehmen($sid, [$f1Key], ['grundriss', 'feststrom']);
+    pruefe($a['ok'] && $katalog() === 0, 'annehmen (mit Recht auf den Katalog): der unbenutzte Typ wird nicht angelegt – ' . $a['message']);
+    alsBenutzer(null);
+
+    // ================================================= Mobil gewordenes bleibt mobil
+    $d = $detail($tSchreib);
+    $wandKey = (string) Database::scalar('SELECT sync_key FROM objekte WHERE id = ?', [$wand]);
+    $weg = LeitungService::speichern(null, ['art' => 'kabelweg', 'fest' => 1, 'floor_id' => $f1, 'name' => $marke . ' Trasse', 'punkte' => [[1, 1], [9, 9]]]);
+    pruefe($weg['ok'], 'A: fester Kabelweg');
+    $wegId = (int) $weg['id'];
+    $d = $detail($tSchreib);
+    $wegKey = (string) Database::scalar('SELECT sync_key FROM leitungen WHERE id = ?', [$wegId]);
+    pruefe($wegKey !== '' && $wandKey !== '', 'A: Wandverteiler und Kabelweg haben Schlüssel (ausgegeben)');
+    Database::update('objekte', $wand, ['fest' => 0]);
+    Database::update('leitungen', $wegId, ['fest' => 0]);
+    $mobilVorher = [Database::first('SELECT name, art, fest, floor_id, plan_x, plan_y FROM objekte WHERE id = ?', [$wand]),
+        (int) Database::scalar('SELECT COUNT(*) FROM anschluesse WHERE objekt_id = ?', [$wand]), Database::first('SELECT fest, punkte, name FROM leitungen WHERE id = ?', [$wegId])];
+    $d = $detail($tSchreib);
+    $b = ['location' => $d['location'], 'strom' => $d['strom'], 'basis' => (string) $d['stand']];
+    $b['strom']['anlagen'][] = ['schluessel' => $wandKey, 'art' => 'anschluss', 'fest' => true, 'name' => 'Ueberschrieben', 'etage' => $f1Key, 'x' => 80.0, 'y' => 80.0,
+        'anschluesse' => [], 'schutzorgane' => []];
+    $b['strom']['leitungen'][] = ['schluessel' => $wegKey, 'art' => 'kabelweg', 'fest' => true, 'etage' => $f1Key, 'name' => 'Ueberschrieben', 'punkte' => [[2.0, 2.0], [8.0, 8.0]]];
+    $r = $senden($tSchreib, $b);
+    $mobilNachher = [Database::first('SELECT name, art, fest, floor_id, plan_x, plan_y FROM objekte WHERE id = ?', [$wand]),
+        (int) Database::scalar('SELECT COUNT(*) FROM anschluesse WHERE objekt_id = ?', [$wand]), Database::first('SELECT fest, punkte, name FROM leitungen WHERE id = ?', [$wegId])];
+    pruefe($r['status'] === 201 && $mobilNachher === $mobilVorher, 'eine mobil gewordene Anlage und ein mobiler Kabelweg mit Schlüssel von dort bleiben, wie sie sind');
+    gleich([(int) Database::scalar("SELECT COUNT(*) FROM objekte WHERE site_id = ? AND name = 'Ueberschrieben'", [$sites['halle']]),
+        (int) Database::scalar("SELECT COUNT(*) FROM leitungen WHERE name = 'Ueberschrieben'")], [0, 0], '… und es kommt auch kein zweiter Eintrag dazu');
+
+    // ================================================= Kabelenden an Anlagen, die nicht mitkommen
+    $abgang2 = (int) Database::scalar("SELECT id FROM anschluesse WHERE objekt_id = ? AND richtung = 'abgang' AND nr = 2", [$ha]);
+    $saeule2 = (int) AnlagenService::speichern(null, ['art' => 'anschluss', 'fest' => 1, 'name' => $marke . ' Säule OG', 'floor_id' => $f2, 'plan_x' => 50, 'plan_y' => 50])['id'];
+    $saeule2Ein = AnlagenService::anschlussAnlegen($saeule2, 'eingang', $cee32);
+    $ohneEtage = (int) AnlagenService::speichern(null, ['art' => 'anschluss', 'fest' => 1, 'name' => $marke . ' ohne Etage', 'site_id' => $sites['halle']])['id'];
+    $ohneEtageAb = AnlagenService::anschlussAnlegen($ohneEtage, 'abgang', $cee32);
+    $k2 = LeitungService::speichern(null, ['art' => 'kabel', 'fest' => 1, 'floor_id' => $f1, 'name' => $marke . ' nach oben', 'von_objekt_id' => $ha,
+        'von_anschluss_id' => $abgang2, 'zu_objekt_id' => $saeule2, 'zu_anschluss_id' => $saeule2Ein, 'punkte' => [[10, 10], [12, 40]]]);
+    $k3 = LeitungService::speichern(null, ['art' => 'kabel', 'fest' => 1, 'floor_id' => $f1, 'name' => $marke . ' vom Hof', 'von_objekt_id' => $ohneEtage,
+        'von_anschluss_id' => $ohneEtageAb, 'zu_objekt_id' => $saeule, 'punkte' => [[5, 5], [40, 10]]]);
+    pruefe($k2['ok'] && $k3['ok'] && (int) Database::scalar('SELECT site_id FROM objekte WHERE id = ?', [$ohneEtage]) === $sites['halle'],
+        'A: Kabel zu einer Säule im OG und von einer Anlage ohne Etage');
+    // Enden als Anlage und „richtung:nr“ – Anschlüsse einer angewandten Anlage bekommen neue IDs.
+    $enden = static function (int $id): array {
+        $l = (array) Database::first('SELECT von_objekt_id, von_anschluss_id, zu_objekt_id, zu_anschluss_id FROM leitungen WHERE id = ?', [$id]);
+        $ref = static function (mixed $a): string {
+            $z = $a === null ? null : Database::first('SELECT richtung, nr FROM anschluesse WHERE id = ?', [(int) $a]);
+            return $z === null ? '' : $z['richtung'] . ':' . $z['nr'];
+        };
+        return [(int) $l['von_objekt_id'], $ref($l['von_anschluss_id']), (int) $l['zu_objekt_id'], $ref($l['zu_anschluss_id'])];
+    };
+    $k2Soll = [$ha, 'abgang:2', $saeule2, 'eingang:1'];
+    $k3Soll = [$ohneEtage, 'abgang:' . (int) Database::scalar('SELECT nr FROM anschluesse WHERE id = ?', [$ohneEtageAb]), $saeule, ''];
+    gleich([$enden((int) $k2['id']), $enden((int) $k3['id'])], [$k2Soll, $k3Soll], 'A: Enden wie eingezeichnet');
+    // nur das Erdgeschoss: die Säule im OG und die Anlage ohne Etage kommen nicht mit
+    $d = $detail($tSchreib);
+    $nurEg = ['location' => $d['location'], 'strom' => $d['strom'], 'basis' => (string) $d['stand']];
+    $nurEg['location']['etagen'] = array_values(array_filter($nurEg['location']['etagen'], static fn (array $e): bool => $e['schluessel'] === $f1Key));
+    $nurEg['strom']['anlagen'] = array_values(array_filter($nurEg['strom']['anlagen'], static fn (array $a): bool => ($a['etage'] ?? null) === $f1Key));
+    $nurEg['strom']['leitungen'] = array_values(array_filter($nurEg['strom']['leitungen'], static fn (array $l): bool => ($l['etage'] ?? null) === $f1Key));
+    $nurEg['strom']['georeferenz'] = array_intersect_key((array) $nurEg['strom']['georeferenz'], [$f1Key => true]) ?: new stdClass();
+    $r = $senden($tSchreib, $nurEg);
+    pruefe($r['status'] === 201, 'direkt nur das Erdgeschoss: ' . ($r['json']['message'] ?? $r['status']));
+    gleich([$enden((int) $k2['id']), $enden((int) $k3['id'])], [$k2Soll, $k3Soll],
+        'direkt nur EG: das Kabel behält sein Ende an der Säule im OG und das an der Anlage ohne Etage');
+    // Vorschlag mit EG und OG, nur das EG angenommen
+    $d = $detail($tVor);
+    $beide = ['location' => $d['location'], 'strom' => $d['strom'], 'basis' => (string) $d['stand']];
+    $beide['strom']['anlagen'] = array_values(array_filter($beide['strom']['anlagen'], static fn (array $a): bool => ($a['etage'] ?? null) !== null));
+    $r = $senden($tVor, $beide);
+    $tid = (int) ($r['json']['id'] ?? 0);
+    alsBenutzer($benutzer['admin']);
+    Zugriff::vergessen();
+    $a = VorschlagService::annehmen($tid, [$f1Key], ['grundriss', 'feststrom']);
+    alsBenutzer(null);
+    pruefe($r['status'] === 201 && $a['ok'], 'Vorschlag mit EG und OG, nur EG angenommen: ' . $a['message']);
+    gleich([$enden((int) $k2['id']), $enden((int) $k3['id'])], [$k2Soll, $k3Soll], 'Teilannahme: die Kabelenden bleiben');
+
+    // ================================================= Anlage ohne Listen, ohne Namen; Leitung ohne Punkte
+    // (eine Anlage ohne Etage nimmt die Schnittstelle nicht an – wie B lässt man sie weg)
+    $ohneLose = static function (array $d): array {
+        $d['strom']['anlagen'] = array_values(array_filter((array) ($d['strom']['anlagen'] ?? []), static fn (array $a): bool => ($a['etage'] ?? null) !== null));
+        return $d;
+    };
+    $vorher = $bildA();
+    $zahl = $zeilen();
+    $d = $ohneLose($detail($tSchreib));
+    $iHaJetzt = $index($d['strom']['anlagen'], $haKey);
+    foreach ([['anschluesse', 'anlagen'], ['schutzorgane', 'anlagen'], ['name', 'anlagen'], ['punkte', 'leitungen']] as [$feld, $liste]) {
+        $b = ['location' => $d['location'], 'strom' => $d['strom'], 'basis' => (string) $d['stand']];
+        $i = $liste === 'anlagen' ? $iHaJetzt : $index($b['strom']['leitungen'], (string) Database::scalar('SELECT sync_key FROM leitungen WHERE id = ?', [$kabelId]));
+        unset($b['strom'][$liste][$i][$feld]);
+        $r = $senden($tSchreib, $b);
+        pruefe($r['status'] === 422 && str_contains((string) ($r['json']['message'] ?? ''), '„' . $feld . '“'), 'ohne „' . $feld . '“: 422 – ' . ($r['json']['message'] ?? $r['status']));
+    }
+    pruefe($bildA() === $vorher && $zeilen() === $zahl && (int) Database::scalar('SELECT COUNT(*) FROM anschluesse WHERE objekt_id = ?', [$ha]) === 2,
+        '… und der Hausanschluss behält seine Anschlüsse');
+
+    // ================================================= Viele Sendungen hintereinander füllen nichts
+    $d = $detail($tFlut);
+    for ($i = 0; $i < 12; $i++) {
+        $r = $senden($tFlut, ['location' => $d['location'], 'notiz' => 'Nr. ' . $i]);
+        if ($r['status'] !== 201) {
+            pruefe(false, 'Sendung ' . $i . ': ' . $r['status']);
+        }
+    }
+    $flut = Database::select('SELECT status, daten, dateien FROM api_vorschlaege WHERE token_id = ? ORDER BY id', [$tFlut['id']]);
+    $voll = array_filter($flut, static fn (array $z): bool => !str_contains((string) $z['daten'], '"gekuerzt":true'));
+    gleich([count($flut), count($voll), array_count_values(array_column($flut, 'status'))], [12, 1, ['ersetzt' => 11, 'offen' => 1]],
+        '12 Vorschläge an denselben Standort: nur der offene behält seinen Inhalt');
+    pruefe(array_filter($flut, static fn (array $z): bool => $z['status'] === 'ersetzt' && (string) $z['dateien'] !== '{}') === [], '… die ersetzten ohne Dateien');
+    $direktVoll = Database::select("SELECT id FROM api_vorschlaege WHERE token_id = ? AND entscheidung LIKE '%direkt%' AND daten NOT LIKE '%\"gekuerzt\":true%'", [$tSchreib['id']]);
+    gleich($direktVoll, [], 'direkt Geschriebenes behält nur die Eckdaten');
+    for ($i = count($flut); $i < VorschlagService::MAX_JE_STUNDE; $i++) {
+        Database::insert('api_vorschlaege', ['token_id' => $tFlut['id'], 'token_name' => $tFlut['name'], 'site_id' => null, 'site_key' => 'fuellung',
+            'daten' => '{}', 'status' => 'ersetzt', 'created_at' => gmdate('c')]);
+    }
+    $r = $senden($tFlut, ['location' => $d['location']]);
+    pruefe($r['status'] === 429 && str_contains((string) ($r['json']['message'] ?? ''), 'letzten Stunde'), 'mehr als ' . VorschlagService::MAX_JE_STUNDE . ' Sendungen in der Stunde: 429');
+    Database::execute("DELETE FROM api_vorschlaege WHERE token_id = ? AND site_key = 'fuellung'", [$tFlut['id']]);
+
+    // ================================================= Gleichzeitig entscheiden
+    /** Ein zweiter Prozess hält eine Schreibtransaktion offen – wie ein zweiter Benutzer mitten im Speichern. */
+    $sperre = static function (string $sql, array $werte, float $sekunden) use ($tmp, $wurzel): array {
+        $n = bin2hex(random_bytes(4));
+        $marker = $tmp . '/sperre-' . $n . '.da';
+        $skript = $tmp . '/sperre-' . $n . '.php';
+        file_put_contents($skript, "<?php\nrequire " . var_export($wurzel . '/src/bootstrap.php', true) . ";\n"
+            . "\$pdo = App\\Support\\Database::pdo();\n\$pdo->beginTransaction();\n"
+            . 'App\\Support\\Database::execute(' . var_export($sql, true) . ', ' . var_export($werte, true) . ");\n"
+            . 'file_put_contents(' . var_export($marker, true) . ", 'x');\n"
+            . 'usleep(' . (int) ($sekunden * 1e6) . ");\n\$pdo->commit();\n");
+        $p = proc_open([PHP_BINARY, $skript], [1 => ['file', '/dev/null', 'w'], 2 => ['file', '/dev/null', 'w']], $rohre);
+        for ($i = 0; $i < 200 && !is_file($marker); $i++) {
+            usleep(25_000);
+        }
+        return ['p' => $p, 'dateien' => [$skript, $marker], 'bereit' => is_file($marker)];
+    };
+    $fertig = static function (array $s): void {
+        if (is_resource($s['p'])) {
+            proc_close($s['p']);
+        }
+        foreach ($s['dateien'] as $f) {
+            @unlink($f);
+        }
+    };
+    $d = $detail($tVor);
+    $r = $senden($tVor, ['location' => $d['location'], 'notiz' => 'gleichzeitig']);
+    $gid = (int) ($r['json']['id'] ?? 0);
+    alsBenutzer($benutzer['admin']);
+    Zugriff::vergessen();
+    $s = $sperre("UPDATE api_vorschlaege SET status = 'angenommen', entschieden_von = 'nebenan' WHERE id = ?", [$gid], 1.5);
+    $ab = VorschlagService::ablehnen($gid, 'zu spät');
+    $fertig($s);
+    pruefe($s['bereit'] && !$ab['ok'] && str_contains($ab['message'], 'schon entschieden') && VorschlagService::find($gid)['status'] === 'angenommen',
+        'ablehnen, während nebenan angenommen wird: „schon entschieden“, angenommen bleibt angenommen – ' . $ab['message']);
+    $r = $senden($tVor, ['location' => $d['location'], 'notiz' => 'gleichzeitig 2']);
+    $gid = (int) ($r['json']['id'] ?? 0);
+    $vorher = $bildA();
+    $s = $sperre("UPDATE api_vorschlaege SET status = 'abgelehnt', entschieden_von = 'nebenan' WHERE id = ?", [$gid], 1.5);
+    $an = VorschlagService::annehmen($gid, [$f1Key], ['grundriss']);
+    $fertig($s);
+    pruefe($s['bereit'] && !$an['ok'] && str_contains($an['message'], 'schon entschieden') && VorschlagService::find($gid)['status'] === 'abgelehnt' && $bildA() === $vorher,
+        'annehmen, während nebenan abgelehnt wird: „schon entschieden“, nichts angewandt – ' . $an['message']);
+    pruefe(Database::first("SELECT id FROM audit_log WHERE action = 'api.vorschlag.angenommen' AND target_id = ?", [(string) $gid]) === null, '… kein Audit „angenommen“');
+    alsBenutzer(null);
+    // Direkt schreiben, während nebenan jemand den Standort ändert: erst die Sperre, dann der Vergleich
+    $d = $ohneLose($detail($tSchreib));
+    $b = ['location' => $d['location'], 'strom' => $d['strom'], 'basis' => (string) $d['stand']];
+    $b['location']['etagen'][$index($b['location']['etagen'], $f1Key)]['massstab'] = '1:999';
+    $s = $sperre('UPDATE objekte SET plan_x = 33 WHERE id = ?', [$ha], 1.5);
+    $r = $senden($tSchreib, $b);
+    $fertig($s);
+    pruefe($s['bereit'] && $r['status'] === 409 && (float) AnlagenService::find($ha)['plan_x'] === 33.0 && (string) SiteService::floor($f1)['scale_note'] !== '1:999',
+        'direkt schreiben, während nebenan geändert wird: 409, die Änderung nebenan bleibt – ' . ($r['json']['message'] ?? $r['status']));
+
+    // ================================================= Schlüssel, die ältere Fassungen (und MasterAdmin) vergeben
+    $lang = 'Messegelände Nord mit Parkplatz, Zufahrt und Bühnenbereich Ost und West ' . $marke;
+    // 63 Zeichen, dann ein Trennzeichen: nach dem Kürzen auf 64 bliebe sonst „-“ am Ende
+    $gekuerzt = LocationBundle::schluessel(str_repeat('x', 63) . ' yy');
+    pruefe(strlen($gekuerzt) <= 64 && !str_ends_with($gekuerzt, '-') && LocationBundle::schluesselGueltig($gekuerzt), 'neue Schlüssel: gekürzt ohne „-“ am Ende');
+    alsBenutzer($benutzer['admin']);
+    $sites['lang1'] = SiteService::saveSite(null, ['name' => $lang]);
+    $sites['lang2'] = SiteService::saveSite(null, ['name' => $lang]);
+    $k1 = LocationBundle::schluesselSichern('sites', $sites['lang1'], $lang);
+    $k2s = LocationBundle::schluesselSichern('sites', $sites['lang2'], $lang);
+    pruefe($k1 !== $k2s && strlen($k2s) <= 64 && str_ends_with($k2s, '-2') && LocationBundle::schluesselGueltig($k2s), 'der zweite gleichnamige: „-2“ innerhalb von 64 Zeichen – ' . $k2s);
+    // So hat eine ältere Fassung sie vergeben: „-“ am Ende, „-2“ hinter 64 Zeichen
+    $altSite = substr(str_replace('-', '', $marke) . str_repeat('s', 70), 0, 63) . '-';
+    $altEtage = substr(str_replace('-', '', $marke) . str_repeat('e', 70), 0, 64) . '-2';
+    $altAnlage = substr(str_replace('-', '', $marke) . str_repeat('a', 70), 0, 64) . '-2';
+    $langEtage = SiteService::saveFloor(null, ['site_id' => $sites['lang1'], 'name' => 'Halle']);
+    $langAnlage = (int) AnlagenService::speichern(null, ['art' => 'anschluss', 'fest' => 1, 'name' => $marke . ' lang', 'floor_id' => $langEtage, 'plan_x' => 5, 'plan_y' => 5])['id'];
+    Database::update('sites', $sites['lang1'], ['sync_key' => $altSite]);
+    Database::update('floors', $langEtage, ['sync_key' => $altEtage]);
+    Database::update('objekte', $langAnlage, ['sync_key' => $altAnlage]);
+    $tLang = $token('lang', ['plaene.schreiben', 'feststrom'], [$sites['lang1']], [$sites['lang1']]);
+    alsBenutzer(null);
+    pruefe(LocationBundle::schluesselSichern('sites', $sites['lang1'], 'umbenannt') === $altSite, 'ein vergebener Schlüssel bleibt, auch nach einer Umbenennung');
+    $liste = (array) (api($basis, 'GET', '/api/v1/locations', $tLang['token'])['json']['locations'] ?? []);
+    $d = $detail($tLang, $altSite);
+    pruefe(in_array($altSite, array_column($liste, 'schluessel'), true) && ($d['ok'] ?? false) === true
+        && ($d['location']['etagen'][0]['schluessel'] ?? '') === $altEtage && ($d['strom']['anlagen'][0]['schluessel'] ?? '') === $altAnlage,
+        'gelistet und abrufbar: Standort mit „-“ am Ende, Etage und Anlage mit „-2“ hinter 64 Zeichen');
+    $b = ['location' => $d['location'], 'strom' => $d['strom'], 'basis' => (string) ($d['stand'] ?? '')];
+    $b['strom']['anlagen'][0]['x'] = 44.0;
+    $r = $senden($tLang, $b, $altSite);
+    pruefe($r['status'] === 201 && ($r['json']['uebernommen'] ?? null) === true && (float) AnlagenService::find($langAnlage)['plan_x'] === 44.0,
+        '… und direkt beschreibbar – ' . ($r['json']['message'] ?? $r['status']));
+    unset($b['basis']);
+    $r = $senden($tLang, $b, $altSite);
+    pruefe($r['status'] === 201 && ($r['json']['uebernommen'] ?? null) === false, '… und als Vorschlag – ' . ($r['json']['message'] ?? $r['status']));
+
+    // ================================================= Wer was sieht und ablehnen darf
+    alsBenutzer($benutzer['admin']);
+    $benutzer['anlage'] = BenutzerService::anlegen($marke . '-anlage', $kennwort, $rolle('anlage', $grund), false);
+    BenutzerService::freigabeSpeichern(['subject_type' => 'user', 'subject_id' => $benutzer['anlage'], 'ziel_art' => 'objekt', 'ziel_id' => $ha]);
+    alsBenutzer($benutzer['anlage']);
+    Zugriff::vergessen();
+    pruefe(Zugriff::siehtStandort($sites['halle']) && !VorschlagService::sichtbar(VorschlagService::find($vid)), 'Freigabe nur für eine Anlage: Standort sichtbar, Vorschlag nicht');
+    alsBenutzer(null);
+    $nurAnlage = anmelden($basis, $marke . '-anlage', $kennwort, $tmp);
+    $dosen[] = $nurAnlage['dose'];
+    gleich(ui($basis, $nurAnlage['dose'], 'GET', '/vorschlaege/' . $vid)['status'], 404, 'Freigabe nur für eine Anlage: Vorschlag → 404');
+    pruefe(!str_contains(ui($basis, $nurAnlage['dose'], 'GET', '/vorschlaege')['text'], '/vorschlaege/' . $vid . '"'), '… und nicht in der Liste');
+    $d = $detail($tVor);
+    $r = $senden($tVor, ['location' => $d['location'], 'notiz' => 'zum Ablehnen']);
+    $lid = (int) ($r['json']['id'] ?? 0);
+    alsBenutzer($benutzer['leser']);
+    Zugriff::vergessen();
+    $ab = VorschlagService::ablehnen($lid, 'nur gesehen');
+    alsBenutzer(null);
+    pruefe(!$ab['ok'] && VorschlagService::find($lid)['status'] === 'offen', 'nur „sehen“ am Standort: ablehnen geht nicht – ' . $ab['message']);
+    $seite = ui($basis, $leser['dose'], 'GET', '/vorschlaege/' . $lid);
+    pruefe($seite['status'] === 200 && !str_contains($seite['text'], 'action="/vorschlaege/' . $lid . '/ablehnen"'), '… die Seite bietet kein Ablehnen an');
+    $r = ui($basis, $leser['dose'], 'POST', '/vorschlaege/' . $lid . '/ablehnen', ['grund' => 'trotzdem', '_token' => $leser['token']]);
+    pruefe($r['status'] === 302 && VorschlagService::find($lid)['status'] === 'offen', '… und auch per Formular mit CSRF-Token bleibt er offen');
+
     // ================================================= Aufräumen (bin/power wartung)
     alsBenutzer($benutzer['admin']);
     $altId = Database::insert('api_vorschlaege', ['token_id' => $tVor['id'], 'token_name' => $tVor['name'], 'site_id' => $sites['halle'], 'site_key' => $halleKey,
@@ -627,6 +882,7 @@ try {
         Database::execute("DELETE FROM audit_log WHERE target_type = 'api_vorschlag' AND target_id = ?", [(string) $id]);
     }
     foreach ($tokenIds as $id) {
+        Database::execute('DELETE FROM api_zuordnungen WHERE token_id = ?', [$id]);
         Database::execute('DELETE FROM api_token_standorte WHERE token_id = ?', [$id]);
         Database::execute('DELETE FROM api_tokens WHERE id = ?', [$id]);
         Database::execute("DELETE FROM audit_log WHERE target_type = 'api_token' AND target_id = ?", [(string) $id]);
@@ -643,7 +899,7 @@ try {
         SiteService::deleteSite($siteId);
     }
     Database::execute('DELETE FROM messpunkte WHERE geraet LIKE ?', [$marke . '%']);
-    Database::execute('DELETE FROM steckertypen WHERE schluessel = ?', [$stecker]);
+    Database::execute('DELETE FROM steckertypen WHERE schluessel = ? OR schluessel = ?', [$stecker, 'pm-unbenutzt-' . $marke]);
     foreach ($benutzer as $id) {
         BenutzerService::loeschen($id);
     }

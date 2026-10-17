@@ -47,6 +47,9 @@ final class PartnerAbgleich
         'dort'       => ['dort geändert', 'info'],
         'hier'       => ['hier geändert', 'warn'],
         'beide'      => ['beide geändert', 'bad'],
+        // Verknüpft mit einem Standort, den der Benutzer nicht sieht – ohne
+        // Vergleich: der Zustand verriete etwas über den Standort.
+        'verborgen'  => ['verknüpft', ''],
     ];
 
     /** Woran eine Etage oder ein Standort hier als passend erkannt wurde. */
@@ -90,7 +93,7 @@ final class PartnerAbgleich
             $etagen = [];
             foreach ((array) ($l['etagen'] ?? []) as $e) {
                 $ek = is_array($e) && is_string($e['schluessel'] ?? null) ? $e['schluessel'] : '';
-                if (!LocationBundle::schluesselGueltig($ek) || isset($etagen[$ek])) {
+                if (!LocationBundle::schluesselFormat($ek) || isset($etagen[$ek])) {
                     continue;
                 }
                 $etagen[$ek] = [
@@ -107,6 +110,22 @@ final class PartnerAbgleich
             $stand = is_string($l['stand'] ?? null) && preg_match('/^[0-9a-f]{1,64}$/', $l['stand']) === 1 ? $l['stand'] : '';
 
             $hier = self::verknuepft((int) $partner['id'], $key);
+            if ($hier !== null && !Zugriff::siehtStandort((int) $hier['id'])) {
+                // Verknüpft mit einem Standort, den der Benutzer nicht sieht:
+                // weder dessen Etagen noch sein Zustand – nur, welche Etage
+                // dort überhaupt verknüpft ist.
+                $verknuepft = array_flip(array_map('strval', array_column(Database::select(
+                    "SELECT partner_schluessel FROM floors WHERE site_id = ? AND partner_schluessel <> ''", [(int) $hier['id']]), 'partner_schluessel')));
+                foreach ($etagen as $i => $e) {
+                    $etagen[$i]['ziel'] = isset($verknuepft[$e['schluessel']]) ? ['grund' => 'verknuepft'] : null;
+                }
+                $liste[] = [
+                    'schluessel' => $key, 'name' => $name, 'stand' => $stand, 'etagen' => $etagen,
+                    'hier' => ['id' => 0, 'name' => ''], 'sichtbar' => false, 'vorschlag' => null, 'zustand' => 'verborgen',
+                    'aendern' => false, 'loesen' => false, 'bearbeitbar' => 0, 'git' => false, 'feststrom' => false,
+                ];
+                continue;
+            }
             $vorschlag = $hier === null ? self::vorschlagStandort($key, $name) : null;
             $zielId = (int) ($hier['id'] ?? $vorschlag['id'] ?? 0);
             $ziele = self::etagenVorschlag($etagen, $zielId);
@@ -118,17 +137,7 @@ final class PartnerAbgleich
                 }
             }
 
-            if ($hier !== null) {
-                if ((string) $hier['partner_stand'] === '') {
-                    $zustand = 'verknuepft';
-                } else {
-                    $dort = $stand !== (string) $hier['partner_stand'];
-                    $hiesig = self::hierStand((int) $hier['id']) !== (string) $hier['partner_hash'];
-                    $zustand = $dort && $hiesig ? 'beide' : ($dort ? 'dort' : ($hiesig ? 'hier' : 'aktuell'));
-                }
-            } else {
-                $zustand = $vorschlag !== null ? 'passt' : 'neu';
-            }
+            $zustand = self::zustandVon($hier, $stand, $vorschlag);
             $aendern = Auth::can('plans.manage') && ($zielId > 0 ? Zugriff::darfStandortAendern($zielId) : true);
             $liste[] = [
                 'schluessel'  => $key,
@@ -136,7 +145,7 @@ final class PartnerAbgleich
                 'stand'       => $stand,
                 'etagen'      => $etagen,
                 'hier'        => $hier,
-                'sichtbar'    => $hier === null || Zugriff::siehtStandort((int) $hier['id']),
+                'sichtbar'    => true,
                 'vorschlag'   => $vorschlag,
                 'zustand'     => $zustand,
                 'aendern'     => $aendern,
@@ -147,6 +156,45 @@ final class PartnerAbgleich
             ];
         }
         return ['ok' => true, 'message' => '', 'locations' => $liste, 'uebergangen' => $uebergangen];
+    }
+
+    /**
+     * Der Zustand einer Location dort – aus ihrem Stand dort und dem
+     * Fingerabdruck hier (wie in locations() und auf „Zuordnen“).
+     */
+    private static function zustandVon(?array $hier, string $stand, ?array $vorschlag): string
+    {
+        if ($hier === null) {
+            return $vorschlag !== null ? 'passt' : 'neu';
+        }
+        if ((string) $hier['partner_stand'] === '') {
+            return 'verknuepft';
+        }
+        $dort = $stand !== (string) $hier['partner_stand'];
+        $hiesig = self::hierStand((int) $hier['id']) !== (string) $hier['partner_hash'];
+        return $dort && $hiesig ? 'beide' : ($dort ? 'dort' : ($hiesig ? 'hier' : 'aktuell'));
+    }
+
+    /**
+     * Die Rückfrage vor „Übernehmen“ – in der Liste und auf „Zuordnen“
+     * dieselbe. '' = keine (noch nicht hier, dort geändert, aktuell).
+     *
+     * @param bool $feststrom ob Feststrom mitkommen kann (Kästchen)
+     * @param string $zielName der passende Standort hier (Zustand „passt“)
+     * @param bool $zurueckBereit ob es einen Weg zurück gibt
+     */
+    public static function rueckfrage(string $zustand, bool $feststrom, string $zielName = '', bool $zurueckBereit = false): string
+    {
+        $was = 'Plan, Maßstab und Georeferenz' . ($feststrom ? ' – mit „Feststrom“ auch Feststromanschlüsse und feste Kabel' : '');
+        return match ($zustand) {
+            'hier', 'beide' => 'Änderungen hier auf den verknüpften Etagen werden überschrieben'
+                . ($zurueckBereit ? ' – vorher zurückschicken, wenn sie dort ankommen sollen.' : '.')
+                . ($feststrom ? ' Anlagen und Kabel, die es nur hier gibt, bleiben.' : ''),
+            'verknuepft'    => 'Die verknüpften Etagen hier bekommen den Stand von dort (' . $was . ').',
+            'passt'         => 'Mit „' . $zielName . '“ hier verknüpfen und den Stand von dort übernehmen? Etagen mit gleichem Schlüssel oder Namen bekommen '
+                . $was . ' von dort, die übrigen kommen neu dazu; Namen hier bleiben.',
+            default         => '',
+        };
     }
 
     /**
@@ -218,10 +266,23 @@ final class PartnerAbgleich
             ];
         }
         $feststrom = $mitFeststrom && self::darfFeststrom($ziel > 0 ? $ziel : null);
+        // Dieselbe Rückfrage wie in der Liste – auch dieser Weg überschreibt.
+        $zustand = self::zustandVon($hier, (string) $geholt['stand'], $vorschlag);
+        if ($hier !== null) {
+            $rueckfrage = self::rueckfrage($zustand, $feststrom);
+        } elseif ($ziel > 0) {
+            $rueckfrage = 'Plan, Maßstab und Georeferenz der gewählten Etagen hier werden durch die von dort ersetzt'
+                . ($feststrom ? ' – mit „Feststrom übernehmen“ auch Feststromanschlüsse und feste Kabel' : '')
+                . '. Namen hier bleiben, gelöscht wird nichts. Übernehmen?';
+        } else {
+            $rueckfrage = '';
+        }
         return [
             'ok'             => true,
             'message'        => '',
             'location'       => ['schluessel' => $schluessel, 'name' => self::text($dort['name'] ?? '', 190) ?: $schluessel],
+            'zustand'        => $zustand,
+            'rueckfrage'     => $rueckfrage,
             'hier'           => $hier,
             'vorschlag'      => $vorschlag,
             'ziel'           => $ziel,
@@ -459,11 +520,13 @@ final class PartnerAbgleich
             };
             $ergebnis = LocationUebertrag::anwenden($site !== null ? $ziel : null, $dort,
                 PartnerService::istPowerManagement($partner) ? $geholt['strom'] : null, $paare, $aufloesen, [
-                    'teile'        => $teile,
-                    'zuordnung'    => 'partner',
-                    'plan_praefix' => 'sync',
-                    'fremdbestand' => true,
-                    'neue_etagen'  => true,
+                    'teile'           => $teile,
+                    'zuordnung'       => 'partner',
+                    'plan_praefix'    => 'sync',
+                    'fremdbestand'    => true,
+                    'neue_etagen'     => true,
+                    // Fehlende, benutzte Typen nur mit dem Recht dazu (sonst schon oben abgelehnt).
+                    'stecker_anlegen' => Auth::can('stecker.manage'),
                 ]);
         } finally {
             if ($ordner !== null) {
@@ -484,7 +547,9 @@ final class PartnerAbgleich
         foreach ($ergebnis['etagen'] as $dortKey => $floorId) {
             Database::execute('UPDATE floors SET partner_schluessel = ? WHERE id = ? AND site_id = ?', [(string) $dortKey, (int) $floorId, $siteId]);
         }
-        Database::execute('UPDATE sites SET partner_hash = ? WHERE id = ?', [self::hierStand($siteId), $siteId]);
+        // Ohne das, was es nur hier gibt: das kennt die Gegenseite nicht – bis
+        // es dort ankommt, bleibt der Zustand „hier geändert“.
+        Database::execute('UPDATE sites SET partner_hash = ? WHERE id = ?', [self::hierStand($siteId, true), $siteId]);
         Zugriff::vergessen();
         Audit::log('api.partner.location', 'site', (string) $siteId, [
             'partner'    => (int) $partner['id'],
@@ -566,17 +631,32 @@ final class PartnerAbgleich
      * schreibt ausdrücklich darüber hinweg. Mit nur „plaene.vorschlagen“
      * kommt es dort als Vorschlag an, den jemand bestätigt.
      *
+     * Vor dem Senden werden die Befugnisse dort neu geholt (GET /info): die
+     * Seite bot an, was beim letzten Prüfen galt. Passt die gewählte Weise
+     * ($weise: 'hochladen' | 'vorschlag') nicht mehr dazu – etwa weil dort
+     * inzwischen „schreiben“ dazukam und ein „Vorschlag“ gleich übernommen
+     * würde –, geht nichts hinaus.
+     *
      * Geschickt werden nur verknüpfte Etagen, die dort bearbeitet werden
      * dürfen – mit den Schlüsseln, Namen, Ebenen und der Reihenfolge von dort
      * (die bleiben dort ohnehin), dem Plan, Maßstab, Maßstab-Text, Notizen
      * und der Georeferenz von hier. Eine Plandatei nur, wenn sie sich von der
      * dort unterscheidet. Nie Dosen, Racks, APs, Messpunkte oder Mobiles.
      * Feststrom nur zu einer PowerManagement-Instanz, deren Token ihn liest,
-     * und nur mit „Anlagen ansehen“ hier.
+     * und nur mit „Anlagen ansehen“ hier:
      *
+     *   - verknüpfte Anlagen und Kabel unter ihrem Schlüssel dort – aber nur,
+     *     solange es sie dort noch gibt (dort Gelöschtes kommt nicht still
+     *     zurück; hier bleibt es);
+     *   - eigene unter ihrem Schlüssel hier oder, wenn der dort schon etwas
+     *     anderes meint, unter einem freien (partner_gesendet merkt ihn sich);
+     *   - was dort aus einer früheren Sendung angelegt wurde („gesendet_als“),
+     *     wird vorher verknüpft – es geht unter dem Schlüssel dort hinüber.
+     *
+     * @param string|null $weise was die Seite angeboten hat (null: nicht prüfen)
      * @return array{ok:bool,message:string,uebernommen?:bool,id?:int}
      */
-    public static function zurueckschicken(int $siteId, string $notiz, bool $erzwingen = false): array
+    public static function zurueckschicken(int $siteId, string $notiz, bool $erzwingen = false, ?string $weise = null): array
     {
         $nein = static fn (string $meldung): array => ['ok' => false, 'message' => $meldung];
         $site = SiteService::find($siteId);
@@ -590,9 +670,18 @@ final class PartnerAbgleich
         if (!Auth::can('api.partner') || !Auth::can('plans.manage') || !Zugriff::darfStandortAendern($siteId)) {
             return $nein('Zurückschicken braucht das Recht „Standorte, Etagen und Grundrisse pflegen“ und eine Freigabe mit „bearbeiten“ an diesem Standort.');
         }
+        // Was das Token dort jetzt darf – nicht, was beim letzten Prüfen galt.
+        $frisch = PartnerService::pruefen((int) $partner['id']);
+        if (!$frisch['ok']) {
+            return $nein($frisch['message']);
+        }
+        $partner = PartnerService::find((int) $partner['id']) ?? $partner;
         $schreiben = PartnerService::darfDort($partner, 'plaene.schreiben');
         if (!$schreiben && !PartnerService::darfDort($partner, 'plaene.vorschlagen')) {
-            return $nein('Das Token darf dort weder schreiben noch Änderungen vorschlagen – „Verbindung prüfen“ holt die aktuellen Befugnisse.');
+            return $nein('Das Token darf dort weder schreiben noch Änderungen vorschlagen – nichts geschickt.');
+        }
+        if (($weise === 'hochladen' && !$schreiben) || ($weise === 'vorschlag' && $schreiben)) {
+            return $nein('Die Befugnisse dort haben sich geändert – Seite neu laden. Nichts geschickt.');
         }
         $dortKey = (string) $site['partner_schluessel'];
         $geholt = self::holen($partner, $dortKey);
@@ -680,6 +769,8 @@ final class PartnerAbgleich
 
         $strom = null;
         $anlagenZahl = $leitungenZahl = 0;
+        $dortEntfernt = 0;
+        $eigene = ['objekte' => [], 'leitungen' => []];
         if ($pm) {
             $geo = [];
             foreach ((array) $hier['strom']['georeferenz'] as $hk => $g) {
@@ -689,40 +780,60 @@ final class PartnerAbgleich
             }
             $strom = ['format' => LocationBundle::FORMAT_STROM, 'art' => 'strom', 'schluessel' => $dortKey, 'georeferenz' => $geo === [] ? new \stdClass() : $geo];
             if ($mitFeststrom) {
-                // Schlüssel dort: der verknüpfte, sonst der eigene („neu dort“).
-                $anlageKey = [];
-                foreach (Database::select('SELECT sync_key, partner_schluessel FROM objekte WHERE site_id = ?', [$siteId]) as $o) {
-                    $anlageKey[(string) $o['sync_key']] = (string) $o['partner_schluessel'] !== '' ? (string) $o['partner_schluessel'] : (string) $o['sync_key'];
+                // Was dort aus einer früheren Sendung entstand, erst verknüpfen.
+                self::bekannteVerknuepfen($siteId, (array) $geholt['strom']);
+                $dortHat = ['objekte' => [], 'leitungen' => []];
+                foreach (['objekte' => 'anlagen', 'leitungen' => 'leitungen'] as $tabelle => $liste) {
+                    foreach ((array) ($geholt['strom'][$liste] ?? []) as $x) {
+                        if (is_array($x) && is_string($x['schluessel'] ?? null)) {
+                            $dortHat[$tabelle][$x['schluessel']] = true;
+                        }
+                    }
                 }
-                $leitungKey = [];
-                foreach (Database::select('SELECT l.sync_key, l.partner_schluessel FROM leitungen l JOIN floors f ON f.id = l.floor_id WHERE f.site_id = ?', [$siteId]) as $l) {
-                    $leitungKey[(string) $l['sync_key']] = (string) $l['partner_schluessel'] !== '' ? (string) $l['partner_schluessel'] : (string) $l['sync_key'];
-                }
+                $anlageKey = self::sendeSchluessel($siteId, 'objekte', $dortHat['objekte']);
+                $leitungKey = self::sendeSchluessel($siteId, 'leitungen', $dortHat['leitungen']);
                 $anlagen = [];
                 foreach ((array) $hier['strom']['anlagen'] as $a) {
                     $hk = (string) ($a['etage'] ?? '');
-                    if (!isset($gesendet[$hk])) {
+                    $s = $anlageKey[(string) $a['schluessel']] ?? null;
+                    if (!isset($gesendet[$hk]) || $s === null) {
+                        continue;
+                    }
+                    if (!$s['eigen'] && !isset($dortHat['objekte'][$s['key']])) {
+                        // Dort entfernt: kommt nicht wieder – hier bleibt es.
+                        $dortEntfernt++;
                         continue;
                     }
                     unset($a['messpunkte']);
-                    $a['schluessel'] = $anlageKey[(string) $a['schluessel']] ?? (string) $a['schluessel'];
+                    $a['schluessel'] = $s['key'];
                     $a['etage'] = $gesendet[$hk];
                     $anlagen[] = $a;
+                    if ($s['eigen']) {
+                        $eigene['objekte'][$s['key']] = $s['id'];
+                    }
                 }
                 $leitungen = [];
                 foreach ((array) $hier['strom']['leitungen'] as $l) {
                     $hk = (string) ($l['etage'] ?? '');
-                    if (!isset($gesendet[$hk])) {
+                    $s = $leitungKey[(string) $l['schluessel']] ?? null;
+                    if (!isset($gesendet[$hk]) || $s === null) {
                         continue;
                     }
-                    $l['schluessel'] = $leitungKey[(string) $l['schluessel']] ?? (string) $l['schluessel'];
+                    if (!$s['eigen'] && !isset($dortHat['leitungen'][$s['key']])) {
+                        $dortEntfernt++;
+                        continue;
+                    }
+                    $l['schluessel'] = $s['key'];
                     $l['etage'] = $gesendet[$hk];
                     foreach (['von', 'zu'] as $ende) {
                         if (is_string($l[$ende] ?? null)) {
-                            $l[$ende] = $anlageKey[$l[$ende]] ?? $l[$ende];
+                            $l[$ende] = $anlageKey[$l[$ende]]['key'] ?? $l[$ende];
                         }
                     }
                     $leitungen[] = $l;
+                    if ($s['eigen']) {
+                        $eigene['leitungen'][$s['key']] = $s['id'];
+                    }
                 }
                 $strom['steckertypen'] = array_values((array) $hier['strom']['steckertypen']);
                 $strom['anlagen'] = $anlagen;
@@ -763,6 +874,22 @@ final class PartnerAbgleich
             return $nein($r['message']);
         }
         $id = is_int($r['daten']['id'] ?? null) ? (int) $r['daten']['id'] : 0;
+        $uebernommen = ($r['daten']['uebernommen'] ?? false) === true;
+        // Eigene Einträge: unter welchem Schlüssel sie dort stehen (direkt
+        // übernommen) – sonst merken, unter welchem sie hinübergingen.
+        $zuordnung = $uebernommen && is_array($r['daten']['schluessel'] ?? null) ? $r['daten']['schluessel'] : [];
+        foreach (['objekte' => 'anlagen', 'leitungen' => 'leitungen'] as $tabelle => $art) {
+            $dortSagt = is_array($zuordnung[$art] ?? null) ? $zuordnung[$art] : [];
+            foreach ($eigene[$tabelle] as $gesendetAls => $eintragId) {
+                $dortKeyNeu = $dortSagt[(string) $gesendetAls] ?? null;
+                if (is_string($dortKeyNeu) && LocationBundle::schluesselFormat($dortKeyNeu)) {
+                    Database::execute('UPDATE ' . $tabelle . " SET partner_schluessel = ?, partner_gesendet = '' WHERE id = ? AND partner_schluessel = ''",
+                        [$dortKeyNeu, (int) $eintragId]);
+                } else {
+                    Database::execute('UPDATE ' . $tabelle . " SET partner_gesendet = ? WHERE id = ? AND partner_schluessel = ''", [(string) $gesendetAls, (int) $eintragId]);
+                }
+            }
+        }
         $details = [
             'partner'    => (int) $partner['id'],
             'schluessel' => $dortKey,
@@ -773,18 +900,110 @@ final class PartnerAbgleich
             'id'         => $id,
         ];
         $was = sprintf('%d Etage(n)%s', count($etagen), $mitFeststrom ? sprintf(', %d Feststromanschluss/-anschlüsse, %d feste(s) Kabel', $anlagenZahl, $leitungenZahl) : '');
-        if (($r['daten']['uebernommen'] ?? false) === true) {
+        $hinweis = $dortEntfernt > 0 ? sprintf(' %d Eintrag/Einträge, die es dort nicht mehr gibt, blieben hier und gingen nicht mit.', $dortEntfernt) : '';
+        if ($uebernommen) {
+            // Den Stand von dort nur übernehmen, wenn er auf dem aufsetzte, den
+            // hier zuletzt geholt wurde – nach „erzwingen“ kann es dort mehr
+            // geben, als hier bekannt ist (dann „dort geändert“: übernehmen).
+            $passte = is_bool($r['daten']['basis_passte'] ?? null) ? $r['daten']['basis_passte'] : !$erzwingen;
             $stand = $r['daten']['stand'] ?? null;
-            if (is_string($stand) && preg_match('/^[0-9a-f]{1,64}$/', $stand) === 1) {
+            if ($passte && is_string($stand) && preg_match('/^[0-9a-f]{1,64}$/', $stand) === 1) {
                 Database::execute('UPDATE sites SET partner_stand = ?, partner_at = ? WHERE id = ?', [$stand, gmdate('c'), $siteId]);
-                Database::execute('UPDATE sites SET partner_hash = ? WHERE id = ?', [self::hierStand($siteId), $siteId]);
             }
-            Audit::log('api.partner.hochgeladen', 'site', (string) $siteId, $details);
+            Database::execute('UPDATE sites SET partner_hash = ? WHERE id = ?', [self::hierStand($siteId, true), $siteId]);
+            Audit::log('api.partner.hochgeladen', 'site', (string) $siteId, $details + ($passte ? [] : ['erzwungen' => true]));
             return ['ok' => true, 'uebernommen' => true, 'id' => $id,
-                'message' => sprintf('Bei „%s“ übernommen (%s).', (string) $partner['name'], $was)];
+                'message' => sprintf('Bei „%s“ übernommen (%s).', (string) $partner['name'], $was)
+                    . ($passte ? '' : ' Dort gibt es mehr, als hier bekannt ist – erst übernehmen.') . $hinweis];
         }
         Audit::log('api.partner.vorschlag', 'site', (string) $siteId, $details);
-        return ['ok' => true, 'uebernommen' => false, 'id' => $id, 'message' => sprintf('Vorschlag Nr. %d ist dort eingegangen.', $id)];
+        return ['ok' => true, 'uebernommen' => false, 'id' => $id, 'message' => sprintf('Vorschlag Nr. %d ist dort eingegangen.', $id) . $hinweis];
+    }
+
+    /**
+     * Was dort aus einer früheren Sendung von hier angelegt wurde, trägt dort
+     * „gesendet_als“ – den Schlüssel, unter dem es von hier kam. Der eigene
+     * Eintrag hier wird damit verknüpft (partner_schluessel), bevor er wieder
+     * hinübergeht; sonst legte die nächste Sendung ihn dort noch einmal an.
+     */
+    private static function bekannteVerknuepfen(int $siteId, array $strom): void
+    {
+        foreach (['objekte' => 'anlagen', 'leitungen' => 'leitungen'] as $tabelle => $liste) {
+            foreach ((array) ($strom[$liste] ?? []) as $x) {
+                $dk = is_array($x) && is_string($x['schluessel'] ?? null) ? $x['schluessel'] : '';
+                $als = is_array($x) && is_string($x['gesendet_als'] ?? null) ? $x['gesendet_als'] : '';
+                if (!LocationBundle::schluesselFormat($dk) || !LocationBundle::schluesselFormat($als)) {
+                    continue;
+                }
+                $schon = $tabelle === 'objekte'
+                    ? Database::scalar('SELECT COUNT(*) FROM objekte WHERE site_id = ? AND partner_schluessel = ?', [$siteId, $dk])
+                    : Database::scalar('SELECT COUNT(*) FROM leitungen l JOIN floors f ON f.id = l.floor_id WHERE f.site_id = ? AND l.partner_schluessel = ?', [$siteId, $dk]);
+                if ((int) $schon > 0) {
+                    continue;
+                }
+                $treffer = $tabelle === 'objekte'
+                    ? Database::scalar("SELECT id FROM objekte WHERE site_id = ? AND fest = 1 AND ist_vorlage = 0 AND partner_schluessel = ''
+                        AND (partner_gesendet = ? OR (partner_gesendet = '' AND sync_key = ?)) ORDER BY id LIMIT 1", [$siteId, $als, $als])
+                    : Database::scalar("SELECT l.id FROM leitungen l JOIN floors f ON f.id = l.floor_id WHERE f.site_id = ? AND l.fest = 1
+                        AND l.partner_schluessel = '' AND (l.partner_gesendet = ? OR (l.partner_gesendet = '' AND l.sync_key = ?)) ORDER BY l.id LIMIT 1",
+                        [$siteId, $als, $als]);
+                if ($treffer !== false && $treffer !== null) {
+                    Database::execute('UPDATE ' . $tabelle . " SET partner_schluessel = ?, partner_gesendet = '' WHERE id = ?", [$dk, (int) $treffer]);
+                }
+            }
+        }
+    }
+
+    /**
+     * Unter welchem Schlüssel jeder Eintrag des Standorts hinübergeht – je
+     * eigener sync_key → {key, id, eigen}.
+     *
+     * Verknüpfte unter ihrem Schlüssel dort. Eigene (ohne partner_schluessel)
+     * unter dem, unter dem sie zuletzt hinübergingen (partner_gesendet), sonst
+     * unter ihrem eigenen – es sei denn, der meint dort schon etwas anderes
+     * (ein verknüpfter Eintrag hier, ein Eintrag dort) oder ein anderer hier
+     * schickt ihn: dann ein freier, „-2“, „-3“ …, geprüft gegen alle Schlüssel
+     * hier und dort. Jeder Schlüssel kommt so genau einmal vor.
+     *
+     * @param array<string,bool> $dortHat Schlüssel, die es dort gibt
+     * @return array<string,array{key:string,id:int,eigen:bool}>
+     */
+    private static function sendeSchluessel(int $siteId, string $tabelle, array $dortHat): array
+    {
+        $zeilen = $tabelle === 'objekte'
+            ? Database::select('SELECT id, sync_key, partner_schluessel, partner_gesendet FROM objekte WHERE site_id = ? AND ist_vorlage = 0 ORDER BY id', [$siteId])
+            : Database::select('SELECT l.id, l.sync_key, l.partner_schluessel, l.partner_gesendet FROM leitungen l JOIN floors f ON f.id = l.floor_id
+                WHERE f.site_id = ? ORDER BY l.id', [$siteId]);
+        $out = [];
+        $vergeben = [];
+        $eigeneKeys = [];
+        foreach ($zeilen as $z) {
+            if ((string) $z['sync_key'] !== '') {
+                $eigeneKeys[(string) $z['sync_key']] = true;
+            }
+            if ((string) $z['partner_schluessel'] !== '') {
+                $vergeben[(string) $z['partner_schluessel']] = true;
+                $out[(string) $z['sync_key']] = ['key' => (string) $z['partner_schluessel'], 'id' => (int) $z['id'], 'eigen' => false];
+            }
+        }
+        foreach ($zeilen as $z) {
+            $eigen = (string) $z['sync_key'];
+            if ((string) $z['partner_schluessel'] !== '' || $eigen === '') {
+                continue;
+            }
+            $frei = static fn (string $k): bool => LocationBundle::schluesselFormat($k) && !isset($vergeben[$k]) && !isset($dortHat[$k])
+                && ($k === $eigen || !isset($eigeneKeys[$k]));
+            $wunsch = (string) $z['partner_gesendet'] !== '' ? (string) $z['partner_gesendet'] : $eigen;
+            if (!$frei($wunsch)) {
+                $wunsch = $eigen;
+                for ($i = 2; !$frei($wunsch); $i++) {
+                    $wunsch = LocationBundle::mitNummer($eigen, $i);
+                }
+            }
+            $vergeben[$wunsch] = true;
+            $out[$eigen] = ['key' => $wunsch, 'id' => (int) $z['id'], 'eigen' => true];
+        }
+        return $out;
     }
 
     /**
@@ -830,8 +1049,13 @@ final class PartnerAbgleich
      * Instanz dazu die Feststromanschlüsse auf diesen Etagen oder mit
      * Schlüssel von dort und die festen Kabel dort – ohne Messpunkte. Namen
      * zählen nicht: sie bleiben ohnehin hier.
+     *
+     * $ohneNurHier: ohne die Anlagen und Kabel, die es nur hier gibt (ohne
+     * partner_schluessel) – so wird partner_hash nach dem Übernehmen und
+     * Hochladen gespeichert. Verglichen wird mit dem vollen Stand: solange
+     * hier etwas ist, das dort fehlt, steht „hier geändert“ da.
      */
-    public static function hierStand(int $siteId): string
+    public static function hierStand(int $siteId, bool $ohneNurHier = false): string
     {
         $site = SiteService::find($siteId);
         if ($site === null) {
@@ -869,15 +1093,19 @@ final class PartnerAbgleich
                 'SELECT sync_key FROM floors WHERE id IN (' . implode(',', $ids) . ')'), 'sync_key'));
             $vonDort = array_map('strval', array_column(Database::select(
                 "SELECT sync_key FROM objekte WHERE site_id = ? AND partner_schluessel <> ''", [$siteId]), 'sync_key'));
+            $leitungenVonDort = array_map('strval', array_column(Database::select(
+                "SELECT l.sync_key FROM leitungen l JOIN floors f ON f.id = l.floor_id WHERE f.site_id = ? AND l.partner_schluessel <> ''", [$siteId]), 'sync_key'));
             $anlagen = [];
             foreach ((array) $strom['anlagen'] as $a) {
-                if (in_array((string) ($a['etage'] ?? ''), $etagenKeys, true) || in_array((string) $a['schluessel'], $vonDort, true)) {
+                $verknuepft = in_array((string) $a['schluessel'], $vonDort, true);
+                if ($ohneNurHier ? $verknuepft : (in_array((string) ($a['etage'] ?? ''), $etagenKeys, true) || $verknuepft)) {
                     unset($a['messpunkte']);
                     $anlagen[] = $a;
                 }
             }
             $leitungen = array_values(array_filter((array) $strom['leitungen'],
-                static fn (array $l): bool => in_array((string) ($l['etage'] ?? ''), $etagenKeys, true)));
+                static fn (array $l): bool => in_array((string) ($l['etage'] ?? ''), $etagenKeys, true)
+                    && (!$ohneNurHier || in_array((string) $l['schluessel'], $leitungenVonDort, true))));
             $nachSchluessel = static fn (array $a, array $b): int => strcmp((string) $a['schluessel'], (string) $b['schluessel']);
             usort($anlagen, $nachSchluessel);
             usort($leitungen, $nachSchluessel);
@@ -927,7 +1155,7 @@ final class PartnerAbgleich
         $etagen = [];
         foreach ((array) ($loc['etagen'] ?? []) as $e) {
             $k = is_array($e) && is_string($e['schluessel'] ?? null) ? $e['schluessel'] : '';
-            if (!LocationBundle::schluesselGueltig($k) || isset($etagen[$k])) {
+            if (!LocationBundle::schluesselFormat($k) || isset($etagen[$k])) {
                 return ['ok' => false, 'message' => 'Die Gegenseite nennt eine Etage mit ungültigem oder doppeltem Schlüssel.'];
             }
             $etagen[$k] = $e;

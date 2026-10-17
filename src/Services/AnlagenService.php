@@ -413,6 +413,7 @@ final class AnlagenService
         Database::execute('DELETE FROM schutzorgane WHERE objekt_id = ?', [$id]);
         Database::execute('DELETE FROM messpunkte WHERE objekt_id = ?', [$id]);
         Database::execute("DELETE FROM freigaben WHERE ziel_art = 'objekt' AND ziel_id = ?", [$id]);
+        Database::execute("DELETE FROM api_zuordnungen WHERE tabelle = 'objekte' AND ziel_id = ?", [$id]);
         Database::delete('objekte', $id);
         Audit::log('anlage.delete', 'objekt', (string) $id, ['name' => $objekt['name']]);
         return ['ok' => true, 'message' => $objekt['art_name'] . ' „' . $objekt['name'] . '“ gelöscht.'];

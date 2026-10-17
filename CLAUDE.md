@@ -57,12 +57,19 @@ keine Build-Schritte. JS-Bibliotheken liegen fertig unter `public/assets/vendor`
   außen ändert ein Vorschlag, den hier jemand annimmt – oder mit
   `plaene.schreiben` direkt, aber nur mit passendem Stand (`basis`) oder
   ausdrücklichem `erzwingen`; dieselben Schutzregeln: dabei und beim
-  Übernehmen bleiben Namen, Schaltsperre, Messpunkte und Georeferenz hier,
-  gelöscht wird nichts, ein Token legt keine Steckertypen an. Übernommenes
-  wird über `partner_schluessel` innerhalb des Standorts zugeordnet, nie
-  über den `sync_key` anderer Standorte. Alles läuft über
-  `LocationUebertrag`; Anfragen an andere Instanzen nur über
-  `PartnerService::anfrage()` (folgt keiner Umleitung).
+  Übernehmen bleiben Namen, Schaltsperre und Messpunkte hier, ein Maßstab
+  oder eine Georeferenz hier wird nie gelöscht, gelöscht wird nichts, ein
+  Token legt keine Steckertypen an (und niemand einen, den kein Anschluss
+  der Sendung nutzt). Zugeordnet werden nur
+  feste Anlagen und Kabel, innerhalb des Standorts – über
+  `partner_schluessel` (B) bzw. `sync_key` und `api_zuordnungen` je Token
+  (A), nie über den `sync_key` anderer Standorte; mobil Gewordenes bleibt
+  mobil. Schlüssel an der Schnittstelle prüft
+  `LocationBundle::schluesselFormat()` (wie die Adresse), nicht
+  `schluesselGueltig()`. Annehmen, Ablehnen und direktes Schreiben holen
+  zuerst die Schreibsperre (Zustand bzw. Standort), dann wird geprüft.
+  Alles läuft über `LocationUebertrag`; Anfragen an andere Instanzen nur
+  über `PartnerService::anfrage()` (folgt keiner Umleitung).
 - Neue Tabellen oder Spalten kommen als **neue Migration** dazu
   (`database/migrations/00N_*.sql`). Vorhandene Migrationen nie ändern.
 - Oberfläche **mobil zuerst**: Tabellen mit `tabelle-karten` und
@@ -101,10 +108,10 @@ bash -n deploy/*.sh && shellcheck -S warning -e SC2016,SC1111 deploy/*.sh
 | `tests/influx.php` | InfluxQL: Livewerte, Verläufe, Datenfenster, Energie je Tag (eigene InfluxDB 1.x) |
 | `tests/cloud.php` | ComAp WebSupervisor, Victron VRM (Http-Attrappe) |
 | `tests/schnittstelle.php` | API Seite A: Token, 401/403/404/405/413 nur JSON, keine Sitzung, Zuschnitt (nur freigegebene Standorte, nur fest, keine Messpunkte/Dosen/Racks/APs), Plandatei-Whitelist, Stand, Zugänge anlegen/anzeigen/widerrufen, keine Geheimnisse (eigener PHP-Server) |
-| `tests/schnittstelle-vorschlaege.php` | Vorschläge: Prüfungen beim Eingang, MasterAdmin-Form, Unterschiede, annehmen nur mit Rechten, Namen/Schaltsperre/Messpunkte/Georeferenz bleiben, ablehnen; direkt schreiben mit `plaene.schreiben` (passender Stand, 409, `erzwingen`, 422 Steckertypen) (eigener PHP-Server) |
-| `tests/schnittstelle-partner.php` | Andere Instanzen: eintragen, Zustände, übernehmen/zuordnen/verknüpfen/lösen nur am Standort, nichts wandert zwischen Standorten, zurückschicken und annehmen, hochladen (409, `erzwingen`), Verbindungsfehler, MasterAdmin-Format (zweite Instanz, Attrappe) |
-| `tests/web.php` | alle Seiten ohne PHP-Meldung, 403/404, CSRF, Schalt-Ablehnung, Weiterleitungen, Sitzung nach Kennwortwechsel, Benutzerverwaltung ohne Administration, Ändern nur mit „bearbeiten“, Seiten der Schnittstelle (Zugänge, andere Instanzen, Vorschläge) und `/api` ohne Sitzung (eigener PHP-Server) |
-| `tests/sicherheit.php` | Rechte vergeben, Anmelde-Bremse ohne Kontoerkennung, Geräte zuordnen, Kanal-Freigaben beim Schalten, Schlüssel aus dem Repository, Line Protocol, CSV, Adressen, app.key, PDF-Werkzeuge, Zugänge der Schnittstelle vergeben, verfälschtes Token, Meldungen anderer Instanzen maskiert, Ansichten ohne Inline-JS |
+| `tests/schnittstelle-vorschlaege.php` | Vorschläge: Prüfungen beim Eingang (auch Anlage ohne Anschlüsse/Schutzorgane/Namen, Leitung ohne Punkte), MasterAdmin-Form, Unterschiede, annehmen nur mit Rechten, Namen/Schaltsperre/Messpunkte bleiben, Georeferenz bleibt, wenn sie fehlt, ablehnen nur mit „bearbeiten“, sehen nur mit dem ganzen Standort; direkt schreiben mit `plaene.schreiben` (passender Stand, 409, `erzwingen`, 422 Steckertypen); unbenutzte Steckertypen nie im Katalog, mobil Gewordenes bleibt mobil, Kabelenden an Anlagen, die nicht mitkommen, bleiben; ersetzte/direkte Zeilen nur mit Eckdaten, 60 Sendungen je Stunde; gleichzeitig entscheiden und schreiben (zweiter Prozess); Schlüssel älterer Fassungen (`-` am Ende, `-2` hinter 64 Zeichen) (eigener PHP-Server) |
+| `tests/schnittstelle-partner.php` | Andere Instanzen: eintragen, Zustände, übernehmen/zuordnen/verknüpfen/lösen nur am Standort (Zuordnen nur mit „bearbeiten“, mit Rückfrage), nichts wandert zwischen Standorten, zurückschicken und annehmen, hochladen (409, `erzwingen` → „dort geändert“), Befugnisse vor dem Senden frisch, eigene Einträge nie doppelt (Schlüssel aus der Antwort, `gesendet_als`, freie Schlüssel), dort Gelöschtes kommt nicht zurück, nur hier Vorhandenes hält „hier geändert“, mobil Gemachtes bleibt mobil, lange Schlüssel PM ↔ PM und von MasterAdmin, Verbindungsfehler, MasterAdmin-Format (zweite Instanz, Attrappe) |
+| `tests/web.php` | alle Seiten ohne PHP-Meldung, 403/404, CSRF, Schalt-Ablehnung, Weiterleitungen, Sitzung nach Kennwortwechsel, Benutzerverwaltung ohne Administration, Ändern nur mit „bearbeiten“, Seiten der Schnittstelle (Zugänge, andere Instanzen, Vorschläge; Standortnamen in der Liste der Zugänge nur, wo man hinsieht; CSRF bei Anlegen und Löschen) und `/api` ohne Sitzung (eigener PHP-Server) |
+| `tests/sicherheit.php` | Rechte vergeben, Anmelde-Bremse ohne Kontoerkennung, Geräte zuordnen, Kanal-Freigaben beim Schalten, Schlüssel aus dem Repository, Line Protocol, CSV, Adressen, app.key, PDF-Werkzeuge, Zugänge der Schnittstelle vergeben, anzeigen nur mit den Rechten dahinter, Bindung lösen nur mit Verwaltungsrecht, verfälschtes Token, Meldungen anderer Instanzen maskiert, Instanzseite ohne Etagen eines verborgenen Standorts, Ansichten ohne Inline-JS |
 | `tests/nodered-funktionen.mjs` | Node-RED-Funktionen, `flows.json` passt zu den Quellen |
 
 Prüfskripte legen eigene Daten mit eindeutiger Kennung an und löschen sie am

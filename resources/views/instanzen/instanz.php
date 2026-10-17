@@ -4,11 +4,16 @@
  * beide Richtungen.
  *
  * Übernehmen gibt es immer (mit „plaene.lesen“); bei „hier geändert“ und
- * „beide geändert“ mit Rückfrage. Hochladen nur, wenn das Token dort
- * „plaene.schreiben“ hat und mindestens eine verknüpfte Etage dort
- * bearbeitet werden darf – bei „hier geändert“, bei „beide geändert“ nur
- * mit Rückfrage (überschreibt dort). Mit nur „plaene.vorschlagen“: als
- * Vorschlag schicken, den dort jemand bestätigt.
+ * „beide geändert“ mit Rückfrage, Feststrom nur mit dem Kästchen daneben.
+ * Hochladen nur, wenn das Token dort „plaene.schreiben“ hat und mindestens
+ * eine verknüpfte Etage dort bearbeitet werden darf – bei „hier geändert“,
+ * bei „beide geändert“ nur mit Rückfrage (überschreibt dort). Mit nur
+ * „plaene.vorschlagen“: als Vorschlag schicken, den dort jemand bestätigt.
+ * Beide Formulare nennen die angebotene Weise – haben sich die Befugnisse
+ * dort inzwischen geändert, geht nichts hinaus.
+ *
+ * Ist die Location mit einem Standort verknüpft, den der Benutzer nicht
+ * sieht, steht dort nur „verknüpft“ – weder Etagennamen noch Zustand hier.
  *
  * Alles von der Gegenseite (Namen, Schlüssel, Meldungen) geht durch View::e().
  *
@@ -92,15 +97,7 @@ $vorschlagen = PartnerService::darfDort($partner, 'plaene.vorschlagen');
                     $zuordnen = $basis . '/zuordnen?schluessel=' . rawurlencode((string) $l['schluessel']);
                     $zurueckBereit = $hier !== null && $l['sichtbar'] && $l['aendern'] && (int) $l['bearbeitbar'] > 0
                         && in_array($z, ['hier', 'beide', 'verknuepft'], true);
-                    $uebernehmenFrage = match ($z) {
-                        'hier', 'beide' => 'Änderungen hier auf den verknüpften Etagen werden überschrieben'
-                            . ($zurueckBereit ? ' – vorher zurückschicken, wenn sie dort ankommen sollen.' : '.'),
-                        'verknuepft'    => 'Die verknüpften Etagen hier bekommen den Stand von dort (Plan, Maßstab, Georeferenz'
-                            . ($l['feststrom'] ? ', Feststrom' : '') . ').',
-                        'passt'         => 'Mit „' . (string) ($l['vorschlag']['name'] ?? '') . '“ hier verknüpfen und den Stand von dort übernehmen? '
-                            . 'Etagen mit gleichem Schlüssel oder Namen bekommen Plan, Maßstab und Georeferenz von dort, die übrigen kommen neu dazu; Namen hier bleiben.',
-                        default         => '',
-                    };
+                    $uebernehmenFrage = PartnerAbgleich::rueckfrage($z, (bool) $l['feststrom'], (string) ($l['vorschlag']['name'] ?? ''), $zurueckBereit);
                     ?>
                     <tr>
                         <td data-label="Location dort"><strong><?= View::e((string) $l['name']) ?></strong>
@@ -112,7 +109,9 @@ $vorschlagen = PartnerService::darfDort($partner, 'plaene.vorschlagen');
                                     <span><?= View::e((string) $e['name']) ?><?= $e['bearbeiten'] ? ' <span class="badge">bearbeiten</span>' : '' ?></span>
                                     <span class="muted"><?= $e['plan'] ? 'Plan' : 'ohne Plan' ?><?= $e['anlagen'] !== null ? ' · ' . View::e(PartnerAbgleich::feststromText((int) $e['anlagen'], (int) $e['leitungen'])) : '' ?></span>
                                     <span class="api-ziel">→
-                                        <?php if ($ziel === null): ?>
+                                        <?php if (!$l['sichtbar']): ?>
+                                            <span class="muted"><?= $ziel !== null ? 'verknüpft' : 'nicht verknüpft' ?></span>
+                                        <?php elseif ($ziel === null): ?>
                                             <span class="muted"><?= $hier !== null ? 'noch nicht hier – über Zuordnen' : 'neue Etage' ?></span>
                                         <?php else: ?>
                                             <?= View::e((string) $ziel['name']) ?> <span class="muted">(<?= View::e(PartnerAbgleich::GRUENDE[$ziel['grund']] ?? '') ?>)</span>
@@ -142,12 +141,13 @@ $vorschlagen = PartnerService::darfDort($partner, 'plaene.vorschlagen');
                                         <?= Csrf::field() ?>
                                         <input type="hidden" name="schluessel" value="<?= View::e((string) $l['schluessel']) ?>">
                                         <input type="hidden" name="aktion" value="uebernehmen">
-                                        <?php if ($l['feststrom']): ?><input type="hidden" name="feststrom" value="1"><?php endif; ?>
-                                        <button class="btn btn-sm<?= in_array($z, ['neu', 'passt', 'dort'], true) ? ' btn-primary' : '' ?>" type="submit"
-                                                title="<?= View::e($l['feststrom'] ? 'Grundrisse, Maßstab, Georeferenz und Feststrom' : 'Grundrisse, Maßstab und Georeferenz') ?>">Übernehmen</button>
+                                        <?php if ($l['feststrom']): ?>
+                                            <label class="check small"><input type="checkbox" name="feststrom" value="1" checked> Feststrom</label>
+                                        <?php endif; ?>
+                                        <button class="btn btn-sm<?= in_array($z, ['neu', 'passt', 'dort'], true) ? ' btn-primary' : '' ?>" type="submit">Übernehmen</button>
                                     </form>
                                 <?php endif; ?>
-                                <?php if ($planen && $l['sichtbar']): ?>
+                                <?php if ($l['aendern'] && $l['sichtbar']): ?>
                                     <a class="btn btn-sm" href="<?= View::e($zuordnen) ?>">Zuordnen …</a>
                                 <?php endif; ?>
                                 <?php if ($zurueckBereit && $schreiben): ?>
@@ -157,9 +157,9 @@ $vorschlagen = PartnerService::darfDort($partner, 'plaene.vorschlagen');
                                         : 'Hier wurde noch nichts von dort übernommen. Hochladen überschreibt den Stand dort auf den verknüpften Etagen.') . '"' : '' ?>>
                                         <?= Csrf::field() ?>
                                         <input type="hidden" name="site_id" value="<?= $siteId ?>">
+                                        <input type="hidden" name="weise" value="hochladen">
                                         <?php if ($erzwingen): ?><input type="hidden" name="erzwingen" value="1"><?php endif; ?>
-                                        <button class="btn btn-sm<?= $z === 'hier' ? ' btn-primary' : '' ?>" type="submit"
-                                                title="Geht für <?= (int) $l['bearbeitbar'] ?> verknüpfte Etage(n), die dort bearbeitet werden dürfen – ohne Bestätigung dort">Hochladen</button>
+                                        <button class="btn btn-sm<?= $z === 'hier' ? ' btn-primary' : '' ?>" type="submit">Hochladen</button>
                                     </form>
                                 <?php elseif ($zurueckBereit && $vorschlagen): ?>
                                     <details class="api-zurueck">
@@ -167,6 +167,7 @@ $vorschlagen = PartnerService::darfDort($partner, 'plaene.vorschlagen');
                                         <form method="post" action="<?= View::e($basis) ?>/zurueck">
                                             <?= Csrf::field() ?>
                                             <input type="hidden" name="site_id" value="<?= $siteId ?>">
+                                            <input type="hidden" name="weise" value="vorschlag">
                                             <label class="small" for="zurueck-notiz-<?= $siteId ?>">Was geändert wurde und warum</label>
                                             <textarea id="zurueck-notiz-<?= $siteId ?>" name="notiz" rows="2" maxlength="2000"></textarea>
                                             <button class="btn btn-sm btn-primary" type="submit">Als Vorschlag schicken</button>
@@ -183,6 +184,9 @@ $vorschlagen = PartnerService::darfDort($partner, 'plaene.vorschlagen');
                                     </form>
                                 <?php endif; ?>
                             </div>
+                            <?php if ($zurueckBereit && $schreiben): ?>
+                                <div class="small muted">Hochladen übernimmt dort ohne Bestätigung – für <?= (int) $l['bearbeitbar'] ?> verknüpfte Etage(n), die dort bearbeitet werden dürfen.</div>
+                            <?php endif; ?>
                             <?php if (!$l['aendern'] && $l['sichtbar']): ?>
                                 <div class="small muted">Übernehmen nur mit „bearbeiten“ am Standort<?= $planen ? '' : ' und dem Recht, Standorte zu pflegen' ?>.</div>
                             <?php endif; ?>

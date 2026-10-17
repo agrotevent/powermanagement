@@ -28,7 +28,15 @@ use App\Support\Logger;
  *
  * Alles oder nichts: die Änderungen laufen in einer Transaktion (Kacheln
  * neuer Pläne entstehen erst danach, damit die Datenbank nicht so lange
- * gesperrt ist). Rechte prüft der Aufrufer – hier wird nur angewandt.
+ * gesperrt ist). Läuft schon eine Transaktion des Aufrufers, geht alles in
+ * dieser – dann entscheidet er über Commit oder Rollback und baut die
+ * Kacheln danach selbst (Option „kacheln“: false). Rechte prüft der
+ * Aufrufer – hier wird nur angewandt.
+ *
+ * Steckertypen legt dieser Weg nur an, wenn der Aufrufer es ausdrücklich
+ * erlaubt („stecker_anlegen“), und nur solche, die ein Anschluss der Datei
+ * wirklich verwendet – eine Liste mit unbenutzten Typen füllt den Katalog
+ * hier nicht.
  */
 final class LocationUebertrag
 {
@@ -39,10 +47,13 @@ final class LocationUebertrag
      * @param ?int $siteId  Ziel; null = neuer Standort (nur mit „grundriss“)
      * @param array<string,int> $paare  Etagen-Schlüssel dort → floor_id hier (0 = neue Etage, nur mit neue_etagen)
      * @param callable(string):?string $datei  plan.datei → geprüfte Datei auf der Platte, null = Plan bleibt
-     * @param array{teile:list<string>,zuordnung:string,plan_praefix:string,fremdbestand:bool,neue_etagen:bool} $optionen
+     * @param array{teile:list<string>,zuordnung:string,plan_praefix:string,fremdbestand:bool,neue_etagen:bool,stecker_anlegen?:bool,kacheln?:bool,token_id?:int} $optionen
      *        teile ⊆ TEILE; zuordnung 'partner' (B übernimmt) | 'standort' (A nimmt an);
-     *        plan_praefix 'sync' | 'vorschlag'; fremdbestand: Dosen/Racks/APs übernehmen
-     * @return array{ok:bool,message:string,site_id:int,etagen:array<string,int>,plaene:int,anlagen:int,leitungen:int,uebergangen:int}
+     *        plan_praefix 'sync' | 'vorschlag'; fremdbestand: Dosen/Racks/APs übernehmen;
+     *        stecker_anlegen: benutzte, hier fehlende Steckertypen anlegen (Vorgabe nein);
+     *        kacheln: false – nicht selbst bauen, sondern in 'kacheln' zurückgeben;
+     *        token_id: bei 'standort' das Token, von dem die Location kommt
+     * @return array{ok:bool,message:string,site_id:int,etagen:array<string,int>,plaene:int,anlagen:int,leitungen:int,uebergangen:int,kacheln:list<int>,schluessel:array{anlagen:array<string,string>,leitungen:array<string,string>}}
      */
     public static function anwenden(?int $siteId, array $location, ?array $strom, array $paare, callable $datei, array $optionen): array
     {
@@ -52,9 +63,13 @@ final class LocationUebertrag
         $praefix = ($optionen['plan_praefix'] ?? '') === 'vorschlag' ? 'vorschlag' : 'sync';
         $fremdbestand = (bool) ($optionen['fremdbestand'] ?? false);
         $neueEtagen = (bool) ($optionen['neue_etagen'] ?? false) && $mitGrundriss;
+        $steckerAnlegen = ($optionen['stecker_anlegen'] ?? false) === true;
+        $kachelnSelbst = ($optionen['kacheln'] ?? true) !== false;
+        $tokenId = (int) ($optionen['token_id'] ?? 0);
         $fehler = static fn (string $meldung): array => [
             'ok' => false, 'message' => $meldung, 'site_id' => $siteId ?? 0, 'etagen' => [],
-            'plaene' => 0, 'anlagen' => 0, 'leitungen' => 0, 'uebergangen' => 0,
+            'plaene' => 0, 'anlagen' => 0, 'leitungen' => 0, 'uebergangen' => 0, 'kacheln' => [],
+            'schluessel' => ['anlagen' => [], 'leitungen' => []],
         ];
 
         if ($teile === []) {
@@ -86,7 +101,7 @@ final class LocationUebertrag
         foreach ($paare as $dortKey => $floorId) {
             $dortKey = (string) $dortKey;
             $floorId = (int) $floorId;
-            if (!LocationBundle::schluesselGueltig($dortKey)) {
+            if (!LocationBundle::schluesselFormat($dortKey)) {
                 return $fehler('Der Schlüssel einer Etage ist ungültig: ' . mb_substr($dortKey, 0, 40));
             }
             if ($floorId > 0) {
@@ -136,6 +151,7 @@ final class LocationUebertrag
         $plaene = 0;
         $kacheln = [];
         $anlagen = $leitungen = $uebergangen = 0;
+        $schluessel = ['anlagen' => [], 'leitungen' => []];
         $feststromMeldung = '';
         try {
             // ---------------------------------------------------- übersetzen
@@ -209,7 +225,7 @@ final class LocationUebertrag
 
             if ($mitGrundriss) {
                 $r = LocationBundle::locationAnwenden($uebersetzt, $datei, [
-                    'plan_praefix' => $praefix, 'fremdbestand' => $fremdbestand, 'kacheln' => false,
+                    'plan_praefix' => $praefix, 'fremdbestand' => $fremdbestand, 'kacheln' => false, 'schluessel_format' => true,
                 ]);
                 if (!$r['ok']) {
                     return $abbrechen($r['message']);
@@ -243,16 +259,20 @@ final class LocationUebertrag
                 && (array_key_exists('anlagen', $strom) || array_key_exists('leitungen', $strom))) {
                 $s = $strom;
                 unset($s['georeferenz']);
+                // Nur Steckertypen, die ein Anschluss hier verwendet – was die
+                // Liste sonst noch nennt, landet nicht im Katalog.
+                $s['steckertypen'] = self::benutzteSteckertypen($s);
                 $r = LocationBundle::stromAnwenden((int) $siteId, $s, [
                     'etagen' => $etagenIds, 'zuordnung' => $zuordnung, 'georeferenz_leeren' => false,
-                    'sperre_behalten' => true, 'ohne_messpunkte' => true, 'stecker_anlegen' => true,
-                ]);
+                    'sperre_behalten' => true, 'ohne_messpunkte' => true, 'stecker_anlegen' => $steckerAnlegen,
+                ] + ($tokenId > 0 ? ['token_id' => $tokenId] : []));
                 if (!$r['ok']) {
                     return $abbrechen($r['message']);
                 }
                 $anlagen = (int) $r['anlagen'];
                 $leitungen = (int) $r['leitungen'];
                 $uebergangen = (int) $r['uebergangen'];
+                $schluessel = $r['schluessel'];
                 $feststromMeldung = ' ' . $r['message'];
             }
             if ($eigeneTransaktion) {
@@ -263,7 +283,9 @@ final class LocationUebertrag
             return $abbrechen('Übernehmen ist fehlgeschlagen – es wurde nichts geändert. Details stehen im Log.');
         }
         Zugriff::vergessen();
-        LocationBundle::kachelnBauen($kacheln);
+        if ($kachelnSelbst) {
+            LocationBundle::kachelnBauen($kacheln);
+        }
 
         $wo = $site !== null ? (string) $site['name'] : (string) $uebersetzt['name'];
         $meldung = sprintf('„%s“: %d Etage(n), %d Grundriss(e) übernommen.', $wo, count($etagenIds), $plaene) . $feststromMeldung;
@@ -273,7 +295,32 @@ final class LocationUebertrag
         return [
             'ok' => true, 'message' => $meldung, 'site_id' => (int) $siteId, 'etagen' => $etagenIds,
             'plaene' => $plaene, 'anlagen' => $anlagen, 'leitungen' => $leitungen, 'uebergangen' => $uebergangen,
+            'kacheln' => $kachelnSelbst ? [] : array_values(array_map('intval', $kacheln)), 'schluessel' => $schluessel,
         ];
+    }
+
+    /**
+     * Die Steckertypen aus $strom, die ein Anschluss eines Feststromanschlusses
+     * darin verwendet – gezählt wie in fehlendeSteckertypen() (CEE63 ist cee63).
+     *
+     * @return list<array<string,mixed>>
+     */
+    public static function benutzteSteckertypen(array $strom): array
+    {
+        $roh = $sauber = [];
+        foreach (LocationBundle::festeAnlagen($strom) as $a) {
+            foreach ((array) ($a['anschluesse'] ?? []) as $an) {
+                $k = is_array($an) && is_scalar($an['stecker'] ?? null) ? (string) $an['stecker'] : '';
+                if ($k !== '') {
+                    $roh[$k] = true;
+                    $sauber[LocationBundle::schluessel($k, 'stecker')] = true;
+                }
+            }
+        }
+        return array_values(array_filter((array) ($strom['steckertypen'] ?? []), static function (mixed $t) use ($roh, $sauber): bool {
+            $k = is_array($t) && is_scalar($t['schluessel'] ?? null) ? (string) $t['schluessel'] : '';
+            return $k !== '' && (isset($roh[$k]) || isset($sauber[LocationBundle::schluessel($k, 'stecker')]));
+        }));
     }
 
     /**

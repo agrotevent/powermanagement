@@ -2,9 +2,11 @@
 -- (/api/v1, Token „mtma_…“). Als 015 geplant (014: Übergabeberichte);
 -- umbenennen nur, solange sie noch nirgends eingespielt ist.
 --
--- Seite A (teilt): api_tokens, api_token_standorte, api_vorschlaege und die
---   Prüfsumme der Plandatei je Etage (floors.plan_sha256/plan_sha_marke).
--- Seite B (übernimmt): api_partner und die partner_*-Spalten. Der eigene
+-- Seite A (teilt): api_tokens, api_token_standorte, api_vorschlaege,
+--   api_zuordnungen und die Prüfsumme der Plandatei je Etage
+--   (floors.plan_sha256/plan_sha_marke).
+-- Seite B (übernimmt): api_partner und die partner_*-Spalten (auch
+--   partner_gesendet an Anlagen und Leitungen). Der eigene
 --   sync_key bleibt dabei unangetastet: an ihm hängt der Location-Abgleich
 --   über Git und alles, was diese Instanz selbst weitergibt.
 --
@@ -122,3 +124,38 @@ CREATE INDEX idx_objekte_partner ON objekte (site_id, partner_schluessel)
 ALTER TABLE leitungen ADD COLUMN partner_schluessel VARCHAR(190) NOT NULL DEFAULT ''
 ;--split
 CREATE INDEX idx_leitungen_partner ON leitungen (floor_id, partner_schluessel)
+;--split
+-- Seite A: unter welchem Schlüssel eine andere Instanz eine Anlage oder
+-- Leitung geschickt hat, die hier neu angelegt wurde.
+--
+-- Ein neuer Eintrag bekommt hier einen freien Schlüssel (freierSchluessel –
+-- der der Gegenseite kann instanzweit schon vergeben sein). Ohne diese
+-- Zuordnung legte jedes weitere Hochladen oder Annehmen eine Dublette an,
+-- weil die Gegenseite den Eintrag weiter unter ihrem Schlüssel schickt.
+-- Je Token: zwei Instanzen mit zufällig gleichem Schlüssel meinen nicht
+-- dasselbe.
+--
+-- tabelle           objekte | leitungen
+-- fremd_schluessel  der Schlüssel, wie das Token ihn geschickt hat
+-- ziel_id           die Zeile hier (objekte.id bzw. leitungen.id)
+CREATE TABLE api_zuordnungen (
+    id {{PK}},
+    token_id INTEGER NOT NULL,
+    tabelle VARCHAR(16) NOT NULL,
+    fremd_schluessel VARCHAR(190) NOT NULL,
+    ziel_id INTEGER NOT NULL,
+    created_at {{TS}} NOT NULL
+){{ENGINE}}
+;--split
+CREATE UNIQUE INDEX idx_api_zuordnungen ON api_zuordnungen (token_id, tabelle, fremd_schluessel)
+;--split
+CREATE INDEX idx_api_zuordnungen_ziel ON api_zuordnungen (tabelle, ziel_id)
+;--split
+-- Seite B: unter welchem Schlüssel ein eigener Eintrag (noch ohne
+-- partner_schluessel) zuletzt an die verknüpfte Instanz ging. Meist der
+-- eigene sync_key; kollidiert der mit dem Schlüssel eines anderen Eintrags
+-- dort, ein freier. Daran erkennt das nächste Übernehmen den Eintrag wieder
+-- („gesendet_als“), statt ihn ein zweites Mal anzulegen.
+ALTER TABLE objekte ADD COLUMN partner_gesendet VARCHAR(190) NOT NULL DEFAULT ''
+;--split
+ALTER TABLE leitungen ADD COLUMN partner_gesendet VARCHAR(190) NOT NULL DEFAULT ''

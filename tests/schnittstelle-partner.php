@@ -566,6 +566,14 @@ try {
         gleich(ui($basisB, $kundeDose, 'GET', $pfad)['status'], 403, 'B: Kunde ohne „api.partner“ ' . $pfad . ' → 403');
     }
     gleich(ui($basisB, $kundeDose, 'POST', '/instanzen/' . $pid . '/loeschen', ['_token' => $kundeCsrf])['status'], 403, 'B: Kunde kann nicht austragen');
+    // Nur „sehen“ am verknüpften Standort: weder Übernehmen noch Zuordnen
+    $seherDose = (string) tempnam($tmp, 'dose-');
+    $dosen[] = $seherDose;
+    $seite = ui($basisB, $seherDose, 'GET', '/login');
+    ui($basisB, $seherDose, 'POST', '/login', ['username' => $marke . '-b-seher', 'password' => $kennwort, '_token' => csrf($seite['text'])]);
+    $s = ui($basisB, $seherDose, 'GET', '/instanzen/' . $pid);
+    pruefe($s['status'] === 200 && !str_contains($s['text'], '/zuordnen?schluessel=' . $halleKey) && str_contains($s['text'], 'Übernehmen nur mit „bearbeiten“'),
+        'B: Planer mit nur „sehen“ am verknüpften Standort – kein „Zuordnen …“');
 
     // Wege zurück je nach Befugnis dort: mit „schreiben“ Hochladen (bei „beide
     // geändert“ nur mit Rückfrage und erzwingen), mit nur „vorschlagen“ ein Vorschlag
@@ -587,6 +595,12 @@ try {
     pruefe(str_contains($zeile, 'hier geändert') && str_contains($zeile, '>Hochladen</button>') && !str_contains($zeile, 'name="erzwingen"')
         && !str_contains($zeile, 'Als Vorschlag schicken'), 'mit „schreiben“ dort: bei „hier geändert“ Hochladen, ohne Überschreiben');
     pruefe(str_contains($zeile, 'data-confirm="Änderungen hier auf den verknüpften Etagen werden überschrieben'), '… und Übernehmen mit Rückfrage');
+    pruefe(str_contains($zeile, 'name="feststrom" value="1" checked') && str_contains($zeile, 'Hochladen übernimmt dort ohne Bestätigung'),
+        'Feststrom als sichtbares Kästchen, beim Hochladen ein sichtbarer Hinweis');
+    $z = ui($basisB, $dose, 'GET', '/instanzen/' . $pid . '/zuordnen?schluessel=' . $halleKey);
+    pruefe(str_contains($z['text'], 'value="uebernehmen" data-confirm="Änderungen hier auf den verknüpften Etagen werden überschrieben')
+        && preg_match('#value="verknuepfen"[^>]*data-confirm#', $z['text']) !== 1 && str_contains($z['text'], 'hier geändert'),
+        'Zuordnen bei „hier geändert“: Übernehmen mit derselben Rückfrage wie in der Liste, „Nur verknüpfen“ ohne');
     $mitBefugnis(['plaene.vorschlagen', 'feststrom']);
     $zeile = $halleZeile();
     pruefe(str_contains($zeile, 'hier geändert') && str_contains($zeile, 'Als Vorschlag schicken') && !str_contains($zeile, '>Hochladen</button>'),
@@ -650,6 +664,16 @@ try {
     // keinen Abruf): dort ist etwas neu, hier weicht vom letzten Abruf ab.
     gleich($zustand($halleKey), 'beide', 'B: danach „beide geändert“ – dort neu, hier noch nicht abgeglichen');
 
+    // A gibt jetzt „schreiben“, B hat noch nicht neu geprüft: „Als Vorschlag“ würde dort direkt übernommen
+    $e = ApiZugaenge::speichern($tokenIds[0], ['name' => $marke . ' für B', 'befugnisse' => ['plaene.schreiben', 'feststrom'],
+        'sehen' => [$sites['halle'], $sites['buehne']], 'bearbeiten' => [$sites['halle'], $sites['buehne']]]);
+    $zeilenA = static fn (): int => (int) Database::scalar('SELECT COUNT(*) FROM api_vorschlaege WHERE token_id = ?', [$tokenIds[0]]);
+    $vorher = [$zeilenA(), $aBild()];
+    $r = inBAls($bAdmin, 'return [PartnerAbgleich::zurueckschicken($halle, "", false, "vorschlag"), PartnerService::find($pid)["befugnisse"]];',
+        ['halle' => $bHalle, 'pid' => $pid]);
+    pruefe($e['ok'] && !$r[0]['ok'] && str_contains($r[0]['message'], 'Befugnisse dort haben sich geändert') && [$zeilenA(), $aBild()] === $vorher
+        && in_array('plaene.schreiben', (array) $r[1], true), 'Befugnisse dort geändert: „Als Vorschlag“ schickt nichts, B kennt danach „schreiben“ – ' . $r[0]['message']);
+
     // ================================================= „plaene.schreiben“: Hochladen
     $mitBefugnis(['plaene.schreiben', 'feststrom']);
     $r = inBAls($bAdmin, <<<'PHP'
@@ -671,7 +695,11 @@ try {
     gleich($zustand($halleKey), 'hier', 'B verschiebt seine Kopie → hier geändert');
     $zeile = $halleZeile();
     pruefe(str_contains($zeile, '>Hochladen</button>') && !str_contains($zeile, 'name="erzwingen"'), 'B: Hochladen angeboten');
-    $r = ui($basisB, $dose, 'POST', '/instanzen/' . $pid . '/zurueck', ['site_id' => (string) $bHalle, '_token' => $csrf]);
+    $aJetzt = static fn (): array => [(float) AnlagenService::find($ha)['plan_x'], (int) Database::scalar('SELECT COUNT(*) FROM api_vorschlaege WHERE token_id = ?', [$tokenIds[0]])];
+    $aVorher = $aJetzt();
+    $r = ui($basisB, $dose, 'POST', '/instanzen/' . $pid . '/zurueck', ['site_id' => (string) $bHalle, 'weise' => 'hochladen']);
+    pruefe($r['status'] === 302 && $r['ziel'] === '/' && $aJetzt() === $aVorher, 'B: Hochladen ohne CSRF-Token → abgelehnt, bei A kommt nichts an');
+    $r = ui($basisB, $dose, 'POST', '/instanzen/' . $pid . '/zurueck', ['site_id' => (string) $bHalle, 'weise' => 'hochladen', '_token' => $csrf]);
     $seite = ui($basisB, $dose, 'GET', '/instanzen/' . $pid);
     pruefe($r['status'] === 302 && $r['ziel'] === '/instanzen/' . $pid && str_contains($seite['text'], 'Bei „' . htmlspecialchars((string) \App\Support\Config::get('app.name')) . '“ übernommen'),
         'B: Hochladen über das Formular → Meldung „Bei … übernommen“');
@@ -692,8 +720,149 @@ try {
     $zeile = $halleZeile();
     pruefe(str_contains($zeile, 'name="erzwingen" value="1"'), 'B: Hochladen bietet jetzt nur das Überschreiben an');
     $r = inBAls($bAdmin, 'return PartnerAbgleich::zurueckschicken($halle, "", true);', ['halle' => $bHalle]);
-    pruefe($r['ok'] && ($r['uebernommen'] ?? false) && (float) AnlagenService::find($ha)['plan_x'] === 83.0, 'mit „erzwingen“: dort übernommen – ' . $r['message']);
-    gleich($zustand($halleKey), 'aktuell', '… danach wieder aktuell');
+    pruefe($r['ok'] && ($r['uebernommen'] ?? false) && (float) AnlagenService::find($ha)['plan_x'] === 83.0 && str_contains($r['message'], 'erst übernehmen'),
+        'mit „erzwingen“: dort übernommen – ' . $r['message']);
+    gleich($zustand($halleKey), 'dort', '… danach „dort geändert“: was A über den Stand von B hinaus hat, kennt B noch nicht');
+    inBAls($bAdmin, 'return PartnerAbgleich::uebernehmen(PartnerService::find($pid), $key, null, null, true);', ['pid' => $pid, 'key' => $halleKey]);
+    gleich($zustand($halleKey), 'aktuell', '… nach dem Übernehmen aktuell');
+
+    // ================================================= Eigene Einträge von B: dort genau einmal
+    // In A trägt eine Anlage an einem anderen Standort schon den Schlüssel, den B für seine neue hat.
+    $neuInB = static fn (string $name): array => inBAls(null, 'return Database::select("SELECT id, sync_key, partner_schluessel, partner_gesendet, plan_x FROM objekte WHERE name = ?", [$n]);', ['n' => $name]);
+    $inA = static fn (string $name): array => Database::select('SELECT id, sync_key, plan_x FROM objekte WHERE site_id = ? AND name = ?', [$sites['halle'], $name]);
+    $bF1 = (int) inBAls(null, 'return (int) Database::scalar("SELECT id FROM floors WHERE site_id = ? AND partner_schluessel = ?", [$s, $k]);', ['s' => $bHalle, 'k' => $f1Key]);
+    $neuAnlage = static function (string $name, float $x) use ($bAdmin, $bF1): array {
+        return inBAls($bAdmin, <<<'PHP'
+            $id = (int) AnlagenService::speichern(null, ['art' => 'verteilung', 'fest' => 1, 'name' => $name, 'floor_id' => $f, 'plan_x' => $x, 'plan_y' => 70])['id'];
+            return ['id' => $id, 'key' => LocationBundle::schluesselSichern('objekte', $id, $name)];
+            PHP, ['name' => $name, 'f' => $bF1, 'x' => $x]);
+    };
+    $hochladen = static fn (): array => inBAls($bAdmin, 'return PartnerAbgleich::zurueckschicken($halle, "", false, "hochladen");', ['halle' => $bHalle]);
+    $verschieben = static fn (int $id, float $x): mixed => inBAls($bAdmin, 'return AnlagenService::position($id, (int) AnlagenService::find($id)["floor_id"], $x, 70.0);',
+        ['id' => $id, 'x' => $x]);
+    $eins = $neuAnlage($marke . ' Neu in B', 20.0);
+    $platzhalter = (int) AnlagenService::speichern(null, ['art' => 'verteilung', 'fest' => 1, 'name' => $marke . ' Platzhalter', 'floor_id' => $fFlaeche, 'plan_x' => 1, 'plan_y' => 1])['id'];
+    Database::update('objekte', $platzhalter, ['sync_key' => $eins['key']]);
+    gleich($zustand($halleKey), 'hier', 'B legt eine eigene Anlage an → hier geändert');
+    inBAls($bAdmin, 'return PartnerAbgleich::uebernehmen(PartnerService::find($pid), $key, null, null, true);', ['pid' => $pid, 'key' => $halleKey]);
+    gleich($zustand($halleKey), 'hier', 'nach dem Übernehmen weiter „hier geändert“ – die eigene Anlage kennt A noch nicht');
+    $r = $hochladen();
+    $a1 = $inA($marke . ' Neu in B');
+    $b1 = $neuInB($marke . ' Neu in B');
+    pruefe($r['ok'] && count($a1) === 1 && (string) $a1[0]['sync_key'] !== $eins['key'] && count($b1) === 1 && (string) $b1[0]['partner_schluessel'] === (string) $a1[0]['sync_key'],
+        'Hochladen: A legt sie unter einem freien Schlüssel an, B kennt ihn aus der Antwort – ' . $r['message']);
+    gleich($zustand($halleKey), 'aktuell', '… danach aktuell');
+    $verschieben((int) $eins['id'], 25.0);
+    $r = $hochladen();
+    pruefe($r['ok'] && count($inA($marke . ' Neu in B')) === 1 && (float) $inA($marke . ' Neu in B')[0]['plan_x'] === 25.0, 'noch einmal hochgeladen: dieselbe Anlage in A');
+    // Auch ohne die Antwort (B hat die Zuordnung verloren) findet A sie über das Token wieder
+    inBAls($bAdmin, "return Database::execute(\"UPDATE objekte SET partner_schluessel = '', partner_gesendet = '' WHERE id = ?\", [\$id]);", ['id' => (int) $eins['id']]);
+    $verschieben((int) $eins['id'], 30.0);
+    $r = $hochladen();
+    pruefe($r['ok'] && count($inA($marke . ' Neu in B')) === 1 && (float) $inA($marke . ' Neu in B')[0]['plan_x'] === 30.0
+        && (string) $neuInB($marke . ' Neu in B')[0]['partner_schluessel'] === (string) $a1[0]['sync_key'], 'ohne Zuordnung in B: A erkennt die Anlage am Token wieder');
+
+    // Als Vorschlag: A nimmt an, B erkennt sie beim Übernehmen über „gesendet_als“
+    $mitBefugnis(['plaene.vorschlagen', 'feststrom']);
+    $zwei = $neuAnlage($marke . ' Neu2 in B', 40.0);
+    $platzhalter2 = (int) AnlagenService::speichern(null, ['art' => 'verteilung', 'fest' => 1, 'name' => $marke . ' Platzhalter 2', 'floor_id' => $fFlaeche, 'plan_x' => 2, 'plan_y' => 2])['id'];
+    Database::update('objekte', $platzhalter2, ['sync_key' => $zwei['key']]);
+    $r = inBAls($bAdmin, 'return PartnerAbgleich::zurueckschicken($halle, "zwei", false, "vorschlag");', ['halle' => $bHalle]);
+    $a = \App\Services\VorschlagService::annehmen((int) ($r['id'] ?? 0), [$f1Key, $f2Key], ['grundriss', 'feststrom']);
+    $a2 = $inA($marke . ' Neu2 in B');
+    pruefe($r['ok'] && $a['ok'] && count($a2) === 1 && (string) $a2[0]['sync_key'] !== $zwei['key'], 'Vorschlag angenommen: in A unter einem freien Schlüssel – ' . $a['message']);
+    $detailB = (array) (api($basisA, 'GET', '/api/v1/locations/' . $halleKey, $token)['json']['strom']['anlagen'] ?? []);
+    $mitAls = array_values(array_filter($detailB, static fn (array $x): bool => ($x['schluessel'] ?? '') === (string) $a2[0]['sync_key']))[0] ?? [];
+    gleich($mitAls['gesendet_als'] ?? null, $zwei['key'], 'A meldet dem Token, unter welchem Schlüssel es die Anlage geschickt hat');
+    inBAls($bAdmin, 'return PartnerAbgleich::uebernehmen(PartnerService::find($pid), $key, null, null, true);', ['pid' => $pid, 'key' => $halleKey]);
+    $b2 = $neuInB($marke . ' Neu2 in B');
+    pruefe(count($b2) === 1 && (string) $b2[0]['partner_schluessel'] === (string) $a2[0]['sync_key'], 'B übernimmt: die eigene Anlage ist verknüpft, keine zweite');
+    gleich($zustand($halleKey), 'aktuell', '… danach aktuell');
+
+    // Ein eigener Schlüssel, der dort schon ein anderes Kabel meint, geht unter einem freien hinüber
+    $mitBefugnis(['plaene.schreiben', 'feststrom']);
+    $r = inBAls($bAdmin, <<<'PHP'
+        $kopie = (int) Database::scalar('SELECT id FROM leitungen WHERE floor_id = ? AND partner_schluessel = ?', [$f, $erdKey]);
+        Database::update('leitungen', $kopie, ['sync_key' => $marke . '-erdkabel-kopie']);
+        $k = LeitungService::speichern(null, ['art' => 'kabelweg', 'fest' => 1, 'floor_id' => $f, 'name' => $marke . ' Zweitweg', 'punkte' => [[60, 60], [70, 70]]]);
+        Database::update('leitungen', (int) $k['id'], ['sync_key' => $erdKey]);
+        $z = PartnerAbgleich::zurueckschicken($halle, '', false, 'hochladen');
+        return ['z' => $z, 'kopie' => $kopie, 'partner' => (string) Database::scalar('SELECT partner_schluessel FROM leitungen WHERE id = ?', [(int) $k['id']])];
+        PHP, ['f' => $bF1, 'erdKey' => $erdKey, 'marke' => $marke, 'halle' => $bHalle]);
+    $zweit = Database::select('SELECT l.id, l.sync_key FROM leitungen l JOIN floors f ON f.id = l.floor_id WHERE f.site_id = ? AND l.name = ?', [$sites['halle'], $marke . ' Zweitweg']);
+    pruefe($r['z']['ok'] && count($zweit) === 1 && (string) $zweit[0]['sync_key'] !== $erdKey && $r['partner'] === (string) $zweit[0]['sync_key']
+        && (string) LeitungService::find((int) $erd['id'])['name'] === $marke . ' Erdkabel',
+        'eigener Schlüssel = Schlüssel des Erdkabels dort: der neue Kabelweg kommt daneben an, das Erdkabel bleibt – ' . $r['z']['message']);
+
+    // In A Gelöschtes kommt nicht still zurück
+    $abriss = LeitungService::speichern(null, ['art' => 'kabelweg', 'fest' => 1, 'floor_id' => $f1, 'name' => $marke . ' Abriss', 'punkte' => [[80, 5], [90, 5]]]);
+    inBAls($bAdmin, 'return PartnerAbgleich::uebernehmen(PartnerService::find($pid), $key, null, null, true);', ['pid' => $pid, 'key' => $halleKey]);
+    LeitungService::loeschen((int) $abriss['id']);
+    gleich($zustand($halleKey), 'dort', 'A löscht einen festen Kabelweg → dort geändert');
+    inBAls($bAdmin, 'return PartnerAbgleich::uebernehmen(PartnerService::find($pid), $key, null, null, true);', ['pid' => $pid, 'key' => $halleKey]);
+    $bAbriss = (int) inBAls(null, 'return (int) Database::scalar("SELECT COUNT(*) FROM leitungen WHERE name = ?", [$n]);', ['n' => $marke . ' Abriss']);
+    gleich([$bAbriss, $zustand($halleKey)], [1, 'aktuell'], 'B übernimmt: der Kabelweg bleibt in B (gelöscht wird nichts), aktuell');
+    $verschieben($bHa, 61.0);
+    $r = $hochladen();
+    $aAbriss = (int) Database::scalar('SELECT COUNT(*) FROM leitungen WHERE name = ?', [$marke . ' Abriss']);
+    pruefe($r['ok'] && $aAbriss === 0 && (float) AnlagenService::find($ha)['plan_x'] === 61.0 && str_contains($r['message'], 'nicht mehr'),
+        'B lädt hoch: der in A gelöschte Kabelweg kommt nicht zurück – ' . $r['message']);
+
+    // Was B mobil gemacht hat, bleibt beim Übernehmen mobil
+    $wirdMobil = (int) AnlagenService::speichern(null, ['art' => 'verteilung', 'fest' => 1, 'name' => $marke . ' wird mobil', 'floor_id' => $f1, 'plan_x' => 90, 'plan_y' => 90])['id'];
+    inBAls($bAdmin, 'return PartnerAbgleich::uebernehmen(PartnerService::find($pid), $key, null, null, true);', ['pid' => $pid, 'key' => $halleKey]);
+    $r = inBAls($bAdmin, <<<'PHP'
+        $id = (int) Database::scalar('SELECT id FROM objekte WHERE name = ?', [$name]);
+        Database::update('objekte', $id, ['fest' => 0, 'plan_x' => 5.0]);
+        $vorher = Database::first('SELECT fest, plan_x, name, art FROM objekte WHERE id = ?', [$id]);
+        $u = PartnerAbgleich::uebernehmen(PartnerService::find($pid), $key, null, null, true);
+        return ['u' => $u, 'vorher' => $vorher, 'nachher' => Database::first('SELECT fest, plan_x, name, art FROM objekte WHERE id = ?', [$id]),
+            'zahl' => (int) Database::scalar('SELECT COUNT(*) FROM objekte WHERE name = ?', [$name])];
+        PHP, ['name' => $marke . ' wird mobil', 'pid' => $pid, 'key' => $halleKey]);
+    pruefe($r['u']['ok'] && $r['nachher'] === $r['vorher'] && $r['zahl'] === 1, 'B hat die Anlage mobil gemacht: Übernehmen macht sie nicht wieder fest und legt keine zweite an');
+
+    // Ein Steckertyp, den kein Anschluss nutzt, landet nicht im Katalog von B
+    $unbenutzt = 'pm-unbenutzt-' . $marke;
+    $r = inBAls($bAdmin, <<<'PHP'
+        $innen = Http::$attrappe;
+        Http::$attrappe = static function (string $m, string $url, array $o) use ($innen, $unbenutzt): array {
+            $a = $innen($m, $url, $o);
+            if ($m === 'GET' && preg_match('#/api/v1/locations/[a-z0-9-]+$#', $url) === 1 && ($a['ok'] ?? false)) {
+                $j = json_decode((string) $a['rumpf'], true);
+                $j['strom']['steckertypen'][] = ['schluessel' => $unbenutzt, 'name' => 'Untergeschoben', 'strom_a' => 9999, 'phasen' => 3, 'spannung_v' => 400, 'farbe' => '#000000'];
+                $a['rumpf'] = (string) json_encode($j);
+            }
+            return $a;
+        };
+        $u = PartnerAbgleich::uebernehmen(PartnerService::find($pid), $key, null, null, true);
+        return [$u, (int) Database::scalar('SELECT COUNT(*) FROM steckertypen WHERE schluessel = ?', [$unbenutzt])];
+        PHP, ['unbenutzt' => $unbenutzt, 'pid' => $pid, 'key' => $halleKey]);
+    pruefe($r[0]['ok'] && $r[1] === 0, 'B übernimmt eine Steckertyp-Liste mit einem unbenutzten Typ: er landet nicht im Katalog – ' . $r[0]['message']);
+
+    // Schlüssel, wie ältere Fassungen sie vergaben: „-“ am Ende, „-2“ hinter 64 Zeichen
+    $altSite = substr(str_replace('-', '', $marke) . str_repeat('s', 70), 0, 63) . '-';
+    $altEtage = substr(str_replace('-', '', $marke) . str_repeat('e', 70), 0, 64) . '-2';
+    $altAnlage = substr(str_replace('-', '', $marke) . str_repeat('a', 70), 0, 64) . '-2';
+    $sites['lang'] = SiteService::saveSite(null, ['name' => $marke . ' Lang']);
+    $langEtage = SiteService::saveFloor(null, ['site_id' => $sites['lang'], 'name' => 'Halle']);
+    $langAnlage = (int) AnlagenService::speichern(null, ['art' => 'anschluss', 'fest' => 1, 'name' => $marke . ' lang', 'floor_id' => $langEtage, 'plan_x' => 5, 'plan_y' => 5])['id'];
+    Database::update('sites', $sites['lang'], ['sync_key' => $altSite]);
+    Database::update('floors', $langEtage, ['sync_key' => $altEtage]);
+    Database::update('objekte', $langAnlage, ['sync_key' => $altAnlage]);
+    $e = ApiZugaenge::speichern($tokenIds[0], ['name' => $marke . ' für B', 'befugnisse' => ['plaene.schreiben', 'feststrom'],
+        'sehen' => [$sites['halle'], $sites['buehne'], $sites['lang']], 'bearbeiten' => [$sites['halle'], $sites['buehne'], $sites['lang']]]);
+    $r = inBAls($bAdmin, <<<'PHP'
+        $p = PartnerService::find($pid);
+        $liste = array_column(PartnerAbgleich::locations($p)['locations'], null, 'schluessel');
+        $u = PartnerAbgleich::uebernehmen($p, $key, null, null, true);
+        $site = (int) ($u['site_id'] ?? 0);
+        return ['gelistet' => isset($liste[$key]), 'u' => $u,
+            'etagen' => array_column(Database::select('SELECT partner_schluessel FROM floors WHERE site_id = ?', [$site]), 'partner_schluessel'),
+            'anlagen' => array_column(Database::select('SELECT partner_schluessel FROM objekte WHERE site_id = ?', [$site]), 'partner_schluessel')];
+        PHP, ['pid' => $pid, 'key' => $altSite]);
+    pruefe($e['ok'] && $r['gelistet'] && $r['u']['ok'] && $r['etagen'] === [$altEtage] && $r['anlagen'] === [$altAnlage],
+        'PM ↔ PM: Location mit „-“ am Ende, Etage und Anlage mit „-2“ hinter 64 Zeichen kommen samt Feststrom an – ' . ($r['u']['message'] ?? ''));
+    gleich($zustand($altSite), 'aktuell', '… danach aktuell');
     $mitBefugnis(['plaene.lesen', 'feststrom']);
 
     // ================================================= Lösen, Widerrufen, neues Token
@@ -714,8 +883,8 @@ try {
     pruefe($r['l']['ok'] && !$r['nochmal']['ok'], 'Lösen: ' . $r['l']['message']);
     gleich($r['site'], ['partner_id' => null, 'partner_schluessel' => '', 'partner_stand' => '', 'partner_hash' => '', 'partner_at' => null], 'Lösen leert die Verknüpfung am Standort');
     pruefe(array_unique(array_merge($r['floors'], $r['objekte'], $r['leitungen'])) === [''], '… an Etagen, Anlagen und Kabeln');
-    // Hausanschluss, Säule und die Anlage, die B selbst dazugelegt hat
-    pruefe($r['zahl'][0] === $r['zahl'][1] && $r['zahl'][0] === 3, '… die Daten bleiben');
+    // Hausanschluss, Säule, die drei Anlagen, die B selbst dazugelegt hat, und die mobil gemachte
+    pruefe($r['zahl'][0] === $r['zahl'][1] && $r['zahl'][0] === 6, '… die Daten bleiben');
     gleich($r['zustand'], 'passt', 'danach passt die Location wieder zum Standort (gleicher Name)');
 
     ApiZugaenge::widerrufen($tokenIds[0]);
@@ -804,10 +973,12 @@ try {
     $maKey = 'lager-' . bin2hex(random_bytes(3));
     $maToken = 'mtma_' . str_repeat('M', 43);
     $mitDosen = true;
+    $maLang = false;
+    $maLangKey = substr('lager' . str_repeat('x', 70), 0, 64) . '-2';
     $maDatei = 0;
     $aussenBearbeiten = false;
     $maGesendet = null;
-    $maLocation = static function () use ($fixture, $svg, $maKey, $marke, &$mitDosen, &$aussenBearbeiten): array {
+    $maLocation = static function () use ($fixture, $svg, $maKey, $marke, &$mitDosen, &$aussenBearbeiten, &$maLang, $maLangKey): array {
         $loc = $fixture;
         $loc['schluessel'] = $maKey;
         $loc['name'] = $marke . ' MA Lager';
@@ -821,6 +992,11 @@ try {
         $loc['etagen'][] = ['schluessel' => 'aussen', 'name' => 'Außen', 'ebene' => 0, 'reihenfolge' => 1, 'massstab' => '', 'notizen' => '',
             'plan' => ['datei' => 'plaene/aussen.webp', 'typ' => 'image', 'seite' => 1, 'originalname' => 'a.webp', 'sha256' => str_repeat('0', 64)],
             'referenz' => null, 'bearbeiten' => $aussenBearbeiten, 'dosen' => [], 'racks' => [], 'aps' => []];
+        if ($maLang) {
+            // So vergibt MasterAdmin den zweiten Schlüssel zu einem langen Namen: „-2“ hinter 64 Zeichen.
+            $loc['etagen'][] = ['schluessel' => $maLangKey, 'name' => 'Lang', 'ebene' => 0, 'reihenfolge' => 2, 'massstab' => '', 'notizen' => '',
+                'plan' => null, 'referenz' => null, 'bearbeiten' => false, 'dosen' => [], 'racks' => [], 'aps' => []];
+        }
         return $loc;
     };
     Http::$attrappe = static function (string $m, string $url, array $o) use ($maKey, $maToken, $maLocation, $svg, &$maDatei, &$maGesendet): array {
@@ -899,6 +1075,11 @@ try {
     pruefe(($gesendet['dateien'] ?? null) === [] && ($gEtagen[$fixKey]['plan']['sha256'] ?? '') === hash('sha256', $svg)
         && ($gesendet['basis'] ?? null) === (string) Database::scalar('SELECT partner_stand FROM sites WHERE id = ?', [$maSite]),
         'an MasterAdmin: der unveränderte Plan nur mit Prüfsumme, ohne Datei; der Stand des letzten Abrufs');
+    $maLang = true;
+    $etagenDort = count(PartnerAbgleich::locations($ma)['locations'][0]['etagen'] ?? []);
+    $r = PartnerAbgleich::uebernehmen($ma, $maKey, $maSite, [$fixKey => (string) $maHaupt, 'aussen' => (string) $maFloors[1]['id'], $maLangKey => 'neu'], false);
+    $lange = Database::first('SELECT id FROM floors WHERE site_id = ? AND partner_schluessel = ?', [$maSite, $maLangKey]);
+    pruefe($etagenDort === 3 && $r['ok'] && $lange !== null, 'MasterAdmin als A: eine Etage mit „-2“ hinter 64 Zeichen wird gelistet und übernommen – ' . $r['message']);
     Http::$attrappe = null;
 } finally {
     Http::$attrappe = null;
@@ -929,6 +1110,7 @@ try {
             Database::execute('DELETE FROM api_vorschlaege WHERE id = ?', [(int) $vz['id']]);
             Database::execute("DELETE FROM audit_log WHERE target_type = 'api_vorschlag' AND target_id = ?", [(string) $vz['id']]);
         }
+        Database::execute('DELETE FROM api_zuordnungen WHERE token_id = ?', [$id]);
         Database::execute('DELETE FROM api_token_standorte WHERE token_id = ?', [$id]);
         Database::execute('DELETE FROM api_tokens WHERE id = ?', [$id]);
         Database::execute("DELETE FROM audit_log WHERE target_type = 'api_token' AND target_id = ?", [(string) $id]);

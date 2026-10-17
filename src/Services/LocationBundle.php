@@ -61,14 +61,40 @@ final class LocationBundle
             'í' => 'i', 'ó' => 'o', 'ô' => 'o', 'ú' => 'u', 'ç' => 'c', 'ñ' => 'n',
         ]);
         $wert = (string) preg_replace('/[^a-z0-9]+/', '-', $wert);
-        $wert = trim($wert, '-');
-        return $wert !== '' ? substr($wert, 0, 64) : $ersatz;
+        // Erst kürzen, dann die Bindestriche am Rand – sonst endete ein
+        // langer Name auf „-“ (und wäre selbst kein gültiger Schlüssel).
+        $wert = trim(substr(trim($wert, '-'), 0, 64), '-');
+        return $wert !== '' ? $wert : $ersatz;
     }
 
-    /** Sieht der Text aus wie ein Schlüssel – nur a–z, 0–9 und Bindestriche? */
+    /**
+     * Sieht der Text aus wie ein Schlüssel, den diese Instanz selbst so
+     * erzeugt – nur a–z, 0–9 und einzelne Bindestriche, höchstens 64 Zeichen?
+     * Für den Location-Abgleich über Git (Ordner- und Dateinamen).
+     */
     public static function schluesselGueltig(string $schluessel): bool
     {
         return $schluessel !== '' && self::schluessel($schluessel, '') === $schluessel;
+    }
+
+    /**
+     * Das Format eines Schlüssels an der Schnittstelle: a–z, 0–9 und
+     * Bindestriche, 1 bis 190 Zeichen – wie in Adressen (/api/v1/locations/…)
+     * und bei MasterAdmin. Weiter als schluesselGueltig(): MasterAdmin hängt
+     * „-2“ an einen schon 64 Zeichen langen Schlüssel, und ältere Fassungen
+     * von hier ließen einen Bindestrich am Ende stehen. Weder „/“ noch „.“ –
+     * als Ordner- oder Dateiname taugt jeder solche Schlüssel.
+     */
+    public static function schluesselFormat(string $schluessel): bool
+    {
+        return preg_match('/^[a-z0-9-]{1,190}$/', $schluessel) === 1;
+    }
+
+    /** „basis-2“, „basis-3“ … – gekürzt, damit es mit der Nummer 64 Zeichen bleiben. */
+    public static function mitNummer(string $basis, int $nummer): string
+    {
+        $endung = '-' . $nummer;
+        return rtrim(substr($basis, 0, 64 - strlen($endung)), '-') . $endung;
     }
 
     /** Schlüssel einer Zeile holen oder einmalig vergeben und festschreiben. */
@@ -80,14 +106,16 @@ final class LocationBundle
         $zeile = Database::first('SELECT sync_key FROM ' . $tabelle . ' WHERE id = ?', [$id]);
         $vorhanden = (string) ($zeile['sync_key'] ?? '');
         // Ein Schlüssel wird zum Ordner- oder Dateinamen im Repository: was
-        // nicht wie ein Schlüssel aussieht („../..“), wird neu vergeben.
-        if ($vorhanden !== '' && self::schluesselGueltig($vorhanden)) {
+        // nicht wie ein Schlüssel aussieht („../..“), wird neu vergeben. Ein
+        // vergebener bleibt – auch einer, den eine ältere Fassung mit „-“ am
+        // Ende erzeugt hat: die Gegenseite kennt ihn unter genau diesem.
+        if ($vorhanden !== '' && self::schluesselFormat($vorhanden)) {
             return $vorhanden;
         }
         $basis = self::schluessel($name, $ersatz !== '' ? $ersatz : 'eintrag-' . $id);
         $neu = $basis;
         for ($i = 2; (int) Database::scalar('SELECT COUNT(*) FROM ' . $tabelle . ' WHERE sync_key = ? AND id <> ?', [$neu, $id]) > 0; $i++) {
-            $neu = $basis . '-' . $i;
+            $neu = self::mitNummer($basis, $i);
         }
         Database::execute('UPDATE ' . $tabelle . ' SET sync_key = ? WHERE id = ?', [$neu, $id]);
         return $neu;
@@ -113,8 +141,7 @@ final class LocationBundle
             || (int) Database::scalar('SELECT COUNT(*) FROM ' . $tabelle . ' WHERE sync_key = ?', [$k]) > 0;
         $kandidat = $basis;
         for ($i = 2; $belegt($kandidat); $i++) {
-            $endung = '-' . $i;
-            $kandidat = rtrim(substr($basis, 0, 64 - strlen($endung)), '-') . $endung;
+            $kandidat = self::mitNummer($basis, $i);
         }
         return $kandidat;
     }
@@ -131,9 +158,12 @@ final class LocationBundle
      *   kacheln       true: Kacheln geänderter Pläne gleich bauen; false: der
      *                 Aufrufer baut sie selbst (Liste in 'kacheln'), etwa erst
      *                 nach dem Ende seiner Transaktion
+     *   schluessel_format  false: Schlüssel wie im Repository (schluesselGueltig);
+     *                 true: wie an der Schnittstelle (schluesselFormat) – für
+     *                 LocationUebertrag, das nur Schlüssel von hier einsetzt
      *
      * @param callable(string):?string $datei Pfad im Repository → Pfad auf der Platte
-     * @param array{plan_praefix?:string,fremdbestand?:bool,kacheln?:bool} $optionen
+     * @param array{plan_praefix?:string,fremdbestand?:bool,kacheln?:bool,schluessel_format?:bool} $optionen
      * @return array{ok:bool,message:string,site_id:int,etagen:array<string,int>,plaene:int,kacheln:list<int>}
      */
     public static function locationAnwenden(array $daten, callable $datei, array $optionen = []): array
@@ -141,6 +171,9 @@ final class LocationBundle
         $praefix = ($optionen['plan_praefix'] ?? 'sync') === 'vorschlag' ? 'vorschlag' : 'sync';
         $mitFremdbestand = (bool) ($optionen['fremdbestand'] ?? true);
         $kachelnJetzt = (bool) ($optionen['kacheln'] ?? true);
+        $passt = ($optionen['schluessel_format'] ?? false) === true
+            ? static fn (string $k): bool => self::schluesselFormat($k)
+            : static fn (string $k): bool => self::schluesselGueltig($k);
         $fehler = static fn (string $meldung): array => ['ok' => false, 'message' => $meldung, 'site_id' => 0, 'etagen' => [], 'plaene' => 0, 'kacheln' => []];
         if ((string) ($daten['art'] ?? '') !== 'location') {
             return $fehler('Das ist keine Location.');
@@ -154,12 +187,12 @@ final class LocationBundle
         }
         // Die Schlüssel werden später Ordner- und Dateinamen beim Hochladen –
         // was von außen kommt, muss wie ein Schlüssel aussehen.
-        if (!self::schluesselGueltig($schluessel)) {
+        if (!$passt($schluessel)) {
             return $fehler('Der Schlüssel der Location ist ungültig.');
         }
         foreach ((array) ($daten['etagen'] ?? []) as $etage) {
             $etageKey = (string) ($etage['schluessel'] ?? '');
-            if ($etageKey !== '' && !self::schluesselGueltig($etageKey)) {
+            if ($etageKey !== '' && !$passt($etageKey)) {
                 return $fehler('Der Schlüssel einer Etage ist ungültig: ' . mb_substr($etageKey, 0, 40));
             }
         }
@@ -704,12 +737,21 @@ final class LocationBundle
      *                       wird übergangen.
      *   zuordnung           'git': über den (instanzweiten) sync_key, wie
      *                       bisher. 'partner': innerhalb des Standorts über
-     *                       partner_schluessel, sonst über einen noch nicht
-     *                       verknüpften sync_key; schreibt partner_schluessel,
-     *                       nie sync_key. 'standort': innerhalb des Standorts
-     *                       über sync_key, Neues bekommt einen freien.
-     *                       Ohne Etage („etage“: null) gibt es bei 'standort'
-     *                       nicht – übergangen.
+     *                       partner_schluessel, dann über den Schlüssel, unter
+     *                       dem dieser Eintrag dorthin geschickt wurde
+     *                       („gesendet_als“ ↔ partner_gesendet), sonst über
+     *                       einen noch nicht verknüpften sync_key; schreibt
+     *                       partner_schluessel, nie sync_key. 'standort':
+     *                       innerhalb des Standorts über die Zuordnung des
+     *                       Tokens (api_zuordnungen), sonst über sync_key; Neues
+     *                       bekommt einen freien und wird für das Token
+     *                       vermerkt. Ohne Etage („etage“: null) gibt es bei
+     *                       'standort' nicht – übergangen. Bei beiden zählen
+     *                       nur feste Anlagen und feste Kabel/Kabelwege: trifft
+     *                       ein Schlüssel einen mobilen Eintrag (oder eine
+     *                       Kabelbrücke), wird er übergangen – die mobile
+     *                       Planung hier bleibt, wie sie ist.
+     *   token_id            bei 'standort': das Token, von dem die Datei kommt
      *   georeferenz_leeren  true: Georeferenz aus der Datei, eine dort
      *                       fehlende wird hier entfernt (wie bisher); false:
      *                       Georeferenz hier unberührt
@@ -719,21 +761,35 @@ final class LocationBundle
      *   stecker_anlegen     false: fehlende Steckertypen nicht anlegen (deren
      *                       Anschlüsse fallen weg – vorher prüfen)
      *
-     * @param array{etagen?:array<string,int>,zuordnung?:string,georeferenz_leeren?:bool,sperre_behalten?:bool,ohne_messpunkte?:bool,stecker_anlegen?:bool} $optionen
-     * @return array{ok:bool,message:string,anlagen:int,leitungen:int,uebergangen:int}
+     * Kabelenden bei 'partner' und 'standort': ein Ende an einer Anlage, die
+     * dieser Lauf nicht anwendet (andere Etage, ohne Etage, nicht gewählt),
+     * wird über ihren Schlüssel auf dem Standort gesucht und ihr Anschluss
+     * über „richtung:nr“. Findet sich nichts, behält ein vorhandenes Kabel
+     * sein bisheriges Ende; geleert wird es nur, wenn die Anlage dieses Endes
+     * in diesem Lauf angewandt wurde und den Anschluss nicht mehr hat.
+     *
+     * @param array{etagen?:array<string,int>,zuordnung?:string,token_id?:int,georeferenz_leeren?:bool,sperre_behalten?:bool,ohne_messpunkte?:bool,stecker_anlegen?:bool} $optionen
+     * @return array{ok:bool,message:string,anlagen:int,leitungen:int,uebergangen:int,schluessel:array{anlagen:array<string,string>,leitungen:array<string,string>}}
+     *         schluessel: je angewandtem Eintrag Schlüssel in der Datei → Schlüssel hier (nur bei 'standort')
      */
     public static function stromAnwenden(int $siteId, array $daten, array $optionen = []): array
     {
+        $leer = ['anlagen' => 0, 'leitungen' => 0, 'uebergangen' => 0, 'schluessel' => ['anlagen' => [], 'leitungen' => []]];
         if ((string) ($daten['art'] ?? '') !== 'strom') {
-            return ['ok' => false, 'message' => 'strom.json ist ungültig.', 'anlagen' => 0, 'leitungen' => 0, 'uebergangen' => 0];
+            return ['ok' => false, 'message' => 'strom.json ist ungültig.'] + $leer;
         }
         if ((int) ($daten['format'] ?? 0) > self::FORMAT_STROM) {
-            return ['ok' => false, 'message' => 'Die Feststromanschlüsse stammen aus einer neueren PowerManagement-Fassung.', 'anlagen' => 0, 'leitungen' => 0, 'uebergangen' => 0];
+            return ['ok' => false, 'message' => 'Die Feststromanschlüsse stammen aus einer neueren PowerManagement-Fassung.'] + $leer;
         }
         $zuordnung = in_array($optionen['zuordnung'] ?? 'git', ['git', 'partner', 'standort'], true) ? (string) ($optionen['zuordnung'] ?? 'git') : 'git';
+        $tokenId = $zuordnung === 'standort' && (int) ($optionen['token_id'] ?? 0) > 0 ? (int) $optionen['token_id'] : null;
         $sperreBehalten = (bool) ($optionen['sperre_behalten'] ?? false);
         $ohneMesspunkte = (bool) ($optionen['ohne_messpunkte'] ?? false);
         $stecker = self::steckertypenSichern((array) ($daten['steckertypen'] ?? []), (bool) ($optionen['stecker_anlegen'] ?? true));
+        // Schlüssel von außen: bei Git wie bisher, sonst im Format der Schnittstelle.
+        $schluesselOk = static fn (string $k): bool => $k !== '' && ($zuordnung === 'git' || self::schluesselFormat($k));
+        $gesendetAls = static fn (array $eintrag): ?string => $zuordnung === 'partner' && is_string($eintrag['gesendet_als'] ?? null)
+            && self::schluesselFormat($eintrag['gesendet_als']) ? $eintrag['gesendet_als'] : null;
 
         $nurEtagen = is_array($optionen['etagen'] ?? null);
         $etagen = [];
@@ -766,10 +822,10 @@ final class LocationBundle
         $anschlussIds = [];
         $anlagenZahl = 0;
         $uebergangen = 0;
+        $zuordnungAnlagen = $zuordnungLeitungen = [];
         foreach (self::festeAnlagen($daten) as $a) {
             $key = (string) ($a['schluessel'] ?? '');
-            if ($key === '' || !isset(AnlagenService::ARTEN[$a['art'] ?? ''])
-                || ($zuordnung !== 'git' && !self::schluesselGueltig($key))) {
+            if (!$schluesselOk($key) || !isset(AnlagenService::ARTEN[$a['art'] ?? ''])) {
                 $uebergangen++;
                 continue;
             }
@@ -779,7 +835,13 @@ final class LocationBundle
                 $uebergangen++;
                 continue;
             }
-            $vorhanden = self::anlageFinden($siteId, $key, $zuordnung);
+            $vorhanden = self::anlageFinden($siteId, $key, $zuordnung, $tokenId, $gesendetAls($a));
+            if ($vorhanden !== null && $zuordnung !== 'git' && (int) $vorhanden['fest'] !== 1) {
+                // Hier inzwischen mobil: gehört zur Planung der Veranstaltung –
+                // weder wird er wieder fest noch kommt ein zweiter dazu.
+                $uebergangen++;
+                continue;
+            }
             $gesperrt = !empty($a['steuerung_gesperrt'])
                 || ($sperreBehalten && $vorhanden !== null && (int) $vorhanden['steuerung_gesperrt'] === 1);
             $ergebnis = AnlagenService::speichern($vorhanden !== null ? (int) $vorhanden['id'] : null, [
@@ -807,10 +869,17 @@ final class LocationBundle
                 $felder['sync_key'] = $key;
             } elseif ($zuordnung === 'partner') {
                 $felder['partner_schluessel'] = $key;
+                $felder['partner_gesendet'] = '';
             } elseif ($vorhanden === null) {
                 $felder['sync_key'] = self::freierSchluessel('objekte', $key);
             }
             Database::update('objekte', $id, $felder);
+            if ($zuordnung === 'standort') {
+                if ($vorhanden === null && $tokenId !== null) {
+                    self::zuordnungMerken($tokenId, 'objekte', $key, $id);
+                }
+                $zuordnungAnlagen[$key] = (string) ($felder['sync_key'] ?? $vorhanden['sync_key'] ?? '');
+            }
             $objektIds[$key] = $id;
             if ($ohneMesspunkte) {
                 unset($a['messpunkte']);
@@ -818,26 +887,56 @@ final class LocationBundle
             $anschlussIds[$key] = self::belegungErsetzen($id, $a, $stecker);
             $anlagenZahl++;
         }
+        $angewandt = array_flip(array_values($objektIds));
 
         $leitungenZahl = 0;
         foreach (self::festeLeitungen($daten) as $l) {
             $key = (string) ($l['schluessel'] ?? '');
             $floorId = $etagen[(string) ($l['etage'] ?? '')] ?? null;
-            if ($key === '' || $floorId === null || ($zuordnung !== 'git' && !self::schluesselGueltig($key))) {
+            if (!$schluesselOk($key) || $floorId === null) {
                 $uebergangen++;
                 continue;
             }
-            $ende = static function (?string $objekt, ?string $anschluss) use ($objektIds, $anschlussIds): array {
-                if ($objekt === null || !isset($objektIds[$objekt])) {
+            $vorhanden = self::leitungFinden($siteId, $key, $zuordnung, $tokenId, $gesendetAls($l));
+            if ($vorhanden !== null && $zuordnung !== 'git' && ((int) $vorhanden['fest'] !== 1 || (string) $vorhanden['art'] === 'kabelbruecke')) {
+                $uebergangen++;
+                continue;
+            }
+            $vorhandenId = $vorhanden !== null ? (int) $vorhanden['id'] : null;
+            $text = static fn (mixed $wert): ?string => is_string($wert) ? $wert : null;
+            $ende = function (?string $objekt, ?string $anschluss, string $seite) use ($objektIds, $anschlussIds, $angewandt, $vorhanden, $zuordnung, $siteId, $tokenId): array {
+                $bisher = $vorhanden !== null && $vorhanden[$seite . '_objekt_id'] !== null
+                    ? [(int) $vorhanden[$seite . '_objekt_id'], $vorhanden[$seite . '_anschluss_id'] !== null ? (int) $vorhanden[$seite . '_anschluss_id'] : null]
+                    : null;
+                if ($objekt !== null && isset($objektIds[$objekt])) {
+                    // In diesem Lauf angewandt: der Anschluss kommt aus der Datei – fehlt er dort, ist das Ende offen.
+                    return [$objektIds[$objekt], $anschluss !== null ? ($anschlussIds[$objekt][$anschluss] ?? null) : null];
+                }
+                if ($zuordnung === 'git') {
                     return [null, null];
                 }
-                return [$objektIds[$objekt], $anschluss !== null ? ($anschlussIds[$objekt][$anschluss] ?? null) : null];
+                if ($objekt === null) {
+                    // Offen in der Datei. Hängt das Kabel hier an etwas, das dieser
+                    // Lauf nicht anfasst (eine mobile Anlage, eine andere Etage), bleibt das.
+                    return $bisher !== null && !isset($angewandt[$bisher[0]]) ? $bisher : [null, null];
+                }
+                $gefunden = self::anlageFinden($siteId, $objekt, $zuordnung, $tokenId, null);
+                if ($gefunden === null || (int) $gefunden['fest'] !== 1) {
+                    return $bisher ?? [null, null];
+                }
+                $oid = (int) $gefunden['id'];
+                if ($anschluss === null) {
+                    return [$oid, null];
+                }
+                $aid = self::anschlussNach($oid, $anschluss);
+                if ($aid !== null) {
+                    return [$oid, $aid];
+                }
+                // Die Anlage hat hier keinen solchen Anschluss – ein vorhandenes Ende bleibt.
+                return $bisher !== null && $bisher[0] === $oid ? $bisher : [$oid, null];
             };
-            $text = static fn (mixed $wert): ?string => is_string($wert) ? $wert : null;
-            [$vonO, $vonA] = $ende($text($l['von'] ?? null), $text($l['von_anschluss'] ?? null));
-            [$zuO, $zuA] = $ende($text($l['zu'] ?? null), $text($l['zu_anschluss'] ?? null));
-            $vorhanden = self::leitungFinden($siteId, $key, $zuordnung);
-            $vorhandenId = $vorhanden !== null ? (int) $vorhanden['id'] : null;
+            [$vonO, $vonA] = $ende($text($l['von'] ?? null), $text($l['von_anschluss'] ?? null), 'von');
+            [$zuO, $zuA] = $ende($text($l['zu'] ?? null), $text($l['zu_anschluss'] ?? null), 'zu');
             // Vorher von den Anschlüssen lösen, damit die Prüfung „Anschluss
             // schon belegt“ nicht am eigenen alten Stand scheitert.
             if ($vorhandenId !== null) {
@@ -858,13 +957,20 @@ final class LocationBundle
                 $ergebnis = LeitungService::speichern($vorhandenId, ['von_anschluss_id' => null, 'zu_anschluss_id' => null] + $felder);
             }
             if ($ergebnis['ok']) {
+                $lid = (int) $ergebnis['id'];
                 $felder = match (true) {
                     $zuordnung === 'git'      => ['sync_key' => $key],
-                    $zuordnung === 'partner'  => ['partner_schluessel' => $key],
+                    $zuordnung === 'partner'  => ['partner_schluessel' => $key, 'partner_gesendet' => ''],
                     $vorhandenId === null     => ['sync_key' => self::freierSchluessel('leitungen', $key)],
                     default                   => [],
                 };
-                Database::update('leitungen', (int) $ergebnis['id'], $felder);
+                Database::update('leitungen', $lid, $felder);
+                if ($zuordnung === 'standort') {
+                    if ($vorhandenId === null && $tokenId !== null) {
+                        self::zuordnungMerken($tokenId, 'leitungen', $key, $lid);
+                    }
+                    $zuordnungLeitungen[$key] = (string) ($felder['sync_key'] ?? $vorhanden['sync_key'] ?? '');
+                }
                 $leitungenZahl++;
             } else {
                 $uebergangen++;
@@ -875,7 +981,31 @@ final class LocationBundle
         if ($leitungenZahl > 0) {
             $meldung .= ' und ' . ($leitungenZahl === 1 ? '1 fest verlegte Leitung' : $leitungenZahl . ' fest verlegte Leitungen');
         }
-        return ['ok' => true, 'message' => $meldung . ' übernommen.', 'anlagen' => $anlagenZahl, 'leitungen' => $leitungenZahl, 'uebergangen' => $uebergangen];
+        return ['ok' => true, 'message' => $meldung . ' übernommen.', 'anlagen' => $anlagenZahl, 'leitungen' => $leitungenZahl, 'uebergangen' => $uebergangen,
+            'schluessel' => ['anlagen' => $zuordnungAnlagen, 'leitungen' => $zuordnungLeitungen]];
+    }
+
+    /** Der Anschluss „richtung:nr“ einer Anlage hier – oder null. */
+    private static function anschlussNach(int $objektId, string $ref): ?int
+    {
+        if (preg_match('/^(eingang|abgang):(\d{1,6})$/', $ref, $m) !== 1) {
+            return null;
+        }
+        $id = Database::scalar('SELECT id FROM anschluesse WHERE objekt_id = ? AND richtung = ? AND nr = ? ORDER BY id LIMIT 1', [$objektId, $m[1], (int) $m[2]]);
+        return $id !== false && $id !== null ? (int) $id : null;
+    }
+
+    /**
+     * Vermerken, unter welchem Schlüssel ein Token einen Eintrag geschickt
+     * hat, der hier neu angelegt wurde – beim nächsten Mal wird er darüber
+     * wiedergefunden, auch wenn er hier einen anderen Schlüssel bekam.
+     */
+    private static function zuordnungMerken(int $tokenId, string $tabelle, string $fremd, int $zielId): void
+    {
+        Database::execute('DELETE FROM api_zuordnungen WHERE token_id = ? AND tabelle = ? AND fremd_schluessel = ?', [$tokenId, $tabelle, $fremd]);
+        Database::insert('api_zuordnungen', [
+            'token_id' => $tokenId, 'tabelle' => $tabelle, 'fremd_schluessel' => mb_substr($fremd, 0, 190), 'ziel_id' => $zielId, 'created_at' => gmdate('c'),
+        ]);
     }
 
     /**
@@ -887,28 +1017,74 @@ final class LocationBundle
      * Katalog-Typen führen ihre Schlüssel für den Verteiler-Abgleich – ein
      * Feststromanschluss mit demselben Schlüssel ist etwas anderes.
      *
-     * @return array{id:int,steuerung_gesperrt:int}|null
+     * Bei 'partner' und 'standort' gilt der erste Schritt, der etwas findet;
+     * innerhalb eines Schritts geht ein fester Eintrag vor. Ist der Treffer
+     * mobil, übergeht der Aufrufer ihn (Spalte fest).
+     *
+     * @return array{id:int,steuerung_gesperrt:int,fest:int,sync_key:string}|null
      */
-    private static function anlageFinden(int $siteId, string $key, string $zuordnung): ?array
+    private static function anlageFinden(int $siteId, string $key, string $zuordnung, ?int $tokenId = null, ?string $gesendetAls = null): ?array
     {
-        return match ($zuordnung) {
-            'partner' => Database::first('SELECT id, steuerung_gesperrt FROM objekte WHERE site_id = ? AND partner_schluessel = ? AND ist_vorlage = 0 ORDER BY id LIMIT 1', [$siteId, $key])
-                ?? Database::first("SELECT id, steuerung_gesperrt FROM objekte WHERE site_id = ? AND sync_key = ? AND partner_schluessel = '' AND ist_vorlage = 0 ORDER BY id LIMIT 1", [$siteId, $key]),
-            'standort' => Database::first('SELECT id, steuerung_gesperrt FROM objekte WHERE site_id = ? AND sync_key = ? AND ist_vorlage = 0 ORDER BY id LIMIT 1', [$siteId, $key]),
-            default => Database::first('SELECT id, steuerung_gesperrt FROM objekte WHERE sync_key = ? AND ist_vorlage = 0', [$key]),
-        };
+        $spalten = 'SELECT id, steuerung_gesperrt, fest, sync_key FROM objekte WHERE ';
+        if ($zuordnung === 'git') {
+            return Database::first($spalten . 'sync_key = ? AND ist_vorlage = 0', [$key]);
+        }
+        $schritte = [];
+        if ($zuordnung === 'partner') {
+            $schritte[] = ['partner_schluessel = ?', [$key]];
+            if ($gesendetAls !== null) {
+                $schritte[] = ["partner_schluessel = '' AND (partner_gesendet = ? OR (partner_gesendet = '' AND sync_key = ?))", [$gesendetAls, $gesendetAls]];
+            }
+            $schritte[] = ["sync_key = ? AND partner_schluessel = '' AND partner_gesendet = ''", [$key]];
+        } else {
+            if ($tokenId !== null) {
+                $schritte[] = ["id IN (SELECT ziel_id FROM api_zuordnungen WHERE token_id = ? AND tabelle = 'objekte' AND fremd_schluessel = ?)", [$tokenId, $key]];
+            }
+            $schritte[] = ['sync_key = ?', [$key]];
+        }
+        foreach ($schritte as [$bedingung, $werte]) {
+            $z = Database::first($spalten . 'site_id = ? AND ist_vorlage = 0 AND ' . $bedingung . ' ORDER BY fest DESC, id LIMIT 1', [$siteId, ...$werte]);
+            if ($z !== null) {
+                return $z;
+            }
+        }
+        return null;
     }
 
-    /** Die Leitung hier zu einem Schlüssel aus einer Datei – Regeln wie bei anlageFinden(). */
-    private static function leitungFinden(int $siteId, string $key, string $zuordnung): ?array
+    /**
+     * Die Leitung hier zu einem Schlüssel aus einer Datei – Regeln wie bei
+     * anlageFinden(); innerhalb eines Schritts geht ein festes Kabel oder ein
+     * fester Kabelweg vor (Spalten fest, art für den Aufrufer).
+     *
+     * @return array<string,mixed>|null id, fest, art, sync_key und die Enden
+     */
+    private static function leitungFinden(int $siteId, string $key, string $zuordnung, ?int $tokenId = null, ?string $gesendetAls = null): ?array
     {
-        $aufStandort = 'SELECT l.id FROM leitungen l JOIN floors f ON f.id = l.floor_id WHERE f.site_id = ? AND ';
-        return match ($zuordnung) {
-            'partner' => Database::first($aufStandort . 'l.partner_schluessel = ? ORDER BY l.id LIMIT 1', [$siteId, $key])
-                ?? Database::first($aufStandort . "l.sync_key = ? AND l.partner_schluessel = '' ORDER BY l.id LIMIT 1", [$siteId, $key]),
-            'standort' => Database::first($aufStandort . 'l.sync_key = ? ORDER BY l.id LIMIT 1', [$siteId, $key]),
-            default => Database::first('SELECT id FROM leitungen WHERE sync_key = ?', [$key]),
-        };
+        $spalten = 'SELECT l.id, l.fest, l.art, l.sync_key, l.von_objekt_id, l.von_anschluss_id, l.zu_objekt_id, l.zu_anschluss_id FROM leitungen l ';
+        if ($zuordnung === 'git') {
+            return Database::first($spalten . 'WHERE l.sync_key = ?', [$key]);
+        }
+        $schritte = [];
+        if ($zuordnung === 'partner') {
+            $schritte[] = ['l.partner_schluessel = ?', [$key]];
+            if ($gesendetAls !== null) {
+                $schritte[] = ["l.partner_schluessel = '' AND (l.partner_gesendet = ? OR (l.partner_gesendet = '' AND l.sync_key = ?))", [$gesendetAls, $gesendetAls]];
+            }
+            $schritte[] = ["l.sync_key = ? AND l.partner_schluessel = '' AND l.partner_gesendet = ''", [$key]];
+        } else {
+            if ($tokenId !== null) {
+                $schritte[] = ["l.id IN (SELECT ziel_id FROM api_zuordnungen WHERE token_id = ? AND tabelle = 'leitungen' AND fremd_schluessel = ?)", [$tokenId, $key]];
+            }
+            $schritte[] = ['l.sync_key = ?', [$key]];
+        }
+        foreach ($schritte as [$bedingung, $werte]) {
+            $z = Database::first($spalten . 'JOIN floors f ON f.id = l.floor_id WHERE f.site_id = ? AND ' . $bedingung
+                . " ORDER BY CASE WHEN l.fest = 1 AND l.art <> 'kabelbruecke' THEN 0 ELSE 1 END, l.id LIMIT 1", [$siteId, ...$werte]);
+            if ($z !== null) {
+                return $z;
+            }
+        }
+        return null;
     }
 
     /**

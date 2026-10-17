@@ -184,7 +184,10 @@ final class InstanzenController extends Controller
             return;
         }
         $notiz = is_string($_POST['notiz'] ?? null) ? mb_substr(trim((string) $_POST['notiz']), 0, 2000) : '';
-        $r = PartnerAbgleich::zurueckschicken($siteId, $notiz, ($_POST['erzwingen'] ?? '') === '1');
+        // Was die Seite angeboten hat – passt es nicht mehr zu den Befugnissen
+        // dort, geht nichts hinaus (PartnerAbgleich prüft frisch).
+        $weise = in_array($_POST['weise'] ?? null, ['hochladen', 'vorschlag'], true) ? (string) $_POST['weise'] : null;
+        $r = PartnerAbgleich::zurueckschicken($siteId, $notiz, ($_POST['erzwingen'] ?? '') === '1', $weise);
         $r['ok'] ? Flash::success($r['message']) : Flash::error($r['message']);
         $this->redirect($basis);
     }

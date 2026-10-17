@@ -552,7 +552,8 @@ geändert*:
 ![Locations von A, gesehen von B](bilder/instanz.png)
 
 - **Übernehmen** holt Grundrisse, Maßstab und Georeferenz, zwischen zwei
-  PowerManagement-Instanzen auf Wunsch auch die Feststromanschlüsse und
+  PowerManagement-Instanzen mit dem Kästchen *Feststrom* daneben (in der
+  Liste und beim Zuordnen, vorgewählt) auch die Feststromanschlüsse und
   festen Kabel. Namen, Schaltsperren und Messpunkte hier bleiben, gelöscht
   wird nichts; die mobile Planung der Veranstaltung bleibt unberührt.
 - **Zuordnen …** wählt Standort und Etagen hier einzeln; **Nur

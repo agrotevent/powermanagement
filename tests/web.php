@@ -353,6 +353,48 @@ try {
     }
     gleich([(int) Database::scalar('SELECT COUNT(*) FROM api_tokens'), Database::first('SELECT name, revoked_at FROM api_tokens WHERE id = ?', [$zugangId])],
         [$tokensVorher, ['name' => $kennung . ' Zugang', 'revoked_at' => null]], 'ohne CSRF-Token ändert sich an den Zugängen nichts');
+    // Die Ablehnung ohne CSRF-Token verbraucht die Einmal-Marke nicht: dieselbe
+    // Marke mit Token legt den Zugang an – ohne Token entsteht keiner.
+    $seite = aufruf($basis, $admin['dose'], 'GET', '/system/schnittstelle');
+    preg_match('/name="einmal" value="([0-9a-f]+)"/', $seite['text'], $m);
+    $einmal = $m[1] ?? '';
+    $felder = ['name' => $kennung . ' mit Marke', 'befugnisse' => ['plaene.lesen'], 'einmal' => $einmal];
+    $r = aufruf($basis, $admin['dose'], 'POST', '/system/schnittstelle/anlegen', $felder);
+    pruefe($einmal !== '' && $r['status'] === 302 && !str_contains($r['text'], 'mtma_')
+        && (int) Database::scalar('SELECT COUNT(*) FROM api_tokens WHERE name = ?', [$kennung . ' mit Marke']) === 0,
+        'anlegen mit gültiger Einmal-Marke, aber ohne CSRF-Token → kein Zugang');
+    $r = aufruf($basis, $admin['dose'], 'POST', '/system/schnittstelle/anlegen', $felder + ['_token' => $admin['token']]);
+    pruefe($r['status'] === 200 && str_contains($r['text'], 'mtma_') && (int) Database::scalar('SELECT COUNT(*) FROM api_tokens WHERE name = ?', [$kennung . ' mit Marke']) === 1,
+        '… mit CSRF-Token legt dieselbe Marke ihn an');
+    alsBenutzer($benutzer['admin']);
+    $widerrufen = \App\Services\ApiZugaenge::anlegen(['name' => $kennung . ' widerrufen', 'befugnisse' => ['plaene.lesen']]);
+    \App\Services\ApiZugaenge::widerrufen((int) $widerrufen['id']);
+    alsBenutzer(null);
+    $r = aufruf($basis, $admin['dose'], 'POST', '/system/schnittstelle/' . (int) $widerrufen['id'] . '/loeschen', []);
+    pruefe($r['status'] === 302 && Database::first('SELECT id FROM api_tokens WHERE id = ?', [(int) $widerrufen['id']]) !== null,
+        'einen widerrufenen Zugang ohne CSRF-Token löschen → er bleibt');
+    $r = aufruf($basis, $admin['dose'], 'POST', '/system/schnittstelle/' . (int) $widerrufen['id'] . '/loeschen', ['_token' => $admin['token']]);
+    pruefe($r['status'] === 302 && Database::first('SELECT id FROM api_tokens WHERE id = ?', [(int) $widerrufen['id']]) === null, '… mit CSRF-Token gelöscht');
+
+    // Die Liste der Zugänge nennt nur Standorte, die man selbst sieht
+    alsBenutzer($benutzer['admin']);
+    $sichtbar = \App\Services\SiteService::saveSite(null, ['name' => $kennung . ' Sichtbar']);
+    $unsichtbarName = $kennung . ' Unsichtbar ' . bin2hex(random_bytes(3));
+    $unsichtbar = \App\Services\SiteService::saveSite(null, ['name' => $unsichtbarName]);
+    $listenRolle = (int) BenutzerService::rolleSpeichern(null, $kennung . ' apiliste', '', ['api.manage', 'karte.view', 'dashboard.view'])['id'];
+    $benutzer['apiliste'] = BenutzerService::anlegen($kennung . '-apiliste', $kennwort,
+        (string) Database::scalar('SELECT role_key FROM roles WHERE id = ?', [$listenRolle]), false);
+    BenutzerService::freigabeSpeichern(['subject_type' => 'user', 'subject_id' => $benutzer['apiliste'], 'ziel_art' => 'site', 'ziel_id' => $sichtbar]);
+    $zweiOrte = \App\Services\ApiZugaenge::anlegen(['name' => $kennung . ' zwei Orte', 'befugnisse' => ['plaene.lesen'], 'sehen' => [$sichtbar, $unsichtbar]]);
+    alsBenutzer(null);
+    pruefe($zweiOrte['ok'], 'Zugang für zwei Standorte angelegt');
+    $apiliste = anmelden($basis, $kennung . '-apiliste', $kennwort);
+    $dosen[] = $apiliste['dose'];
+    $r = aufruf($basis, $apiliste['dose'], 'GET', '/system/schnittstelle');
+    pruefe($r['status'] === 200 && str_contains($r['text'], htmlspecialchars($kennung . ' Sichtbar')) && !str_contains($r['text'], $unsichtbarName)
+        && str_contains($r['text'], '1 weiterer, den du nicht siehst'), 'api.manage mit Freigabe nur für einen Standort: der andere nur als Anzahl');
+    $r = aufruf($basis, $admin['dose'], 'GET', '/system/schnittstelle');
+    pruefe(str_contains($r['text'], $unsichtbarName), '… der Admin sieht beide Namen');
     $r = aufruf($basis, $leer, 'GET', '/api/v1/info');
     pruefe($r['status'] === 401 && (json_decode($r['text'], true)['ok'] ?? true) === false && $r['ziel'] === null
         && stripos($r['kopf'], 'application/json') !== false && stripos($r['kopf'], 'Set-Cookie') === false, '/api/v1/info ohne Token → 401 JSON, keine Anmeldeseite, kein Cookie');

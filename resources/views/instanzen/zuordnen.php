@@ -8,8 +8,14 @@
  * ist, und lässt sich später auf den Stand von dort bringen oder
  * zurückschicken.
  *
+ * „Übernehmen“ fragt wie in der Liste nach, wenn es hier etwas überschreibt
+ * (hier oder beide geändert, ein vorhandener Standort) – „Nur verknüpfen“
+ * ändert nichts und fragt nicht.
+ *
  * @var array<string,mixed> $partner
  * @var array{schluessel:string,name:string} $location
+ * @var string $zustand                      PartnerAbgleich::ZUSTAENDE
+ * @var string $rueckfrage                   vor „Übernehmen“ ('' = keine)
  * @var array<string,mixed>|null $hier       verknüpfter Standort
  * @var array<string,mixed>|null $vorschlag  passender Standort
  * @var int $ziel                            gewählter Standort hier, 0 = neu
@@ -33,7 +39,11 @@ $basis = '/instanzen/' . (int) $partner['id'];
 <p><a href="<?= View::e($basis) ?>">← zurück zu <?= View::e((string) $partner['name']) ?></a></p>
 
 <div class="card">
-    <div class="card-head"><h2>Standort hier</h2></div>
+    <div class="card-head"><h2>Standort hier</h2>
+        <?php if ($hier !== null): ?>
+            <?php [$zText, $zKlasse] = PartnerAbgleich::ZUSTAENDE[$zustand] ?? [$zustand, '']; ?>
+            <span class="badge <?= View::e($zKlasse) ?>"><?= View::e($zText) ?></span>
+        <?php endif; ?></div>
     <div class="card-body">
         <form method="get" action="<?= View::e($basis) ?>/zuordnen">
             <input type="hidden" name="schluessel" value="<?= View::e($location['schluessel']) ?>">
@@ -122,7 +132,7 @@ $basis = '/instanzen/' . (int) $partner['id'];
             und Etagen hier bleiben, ein fehlender Maßstab oder eine fehlende Georeferenz dort löscht hier nichts, gelöscht wird nichts.</p>
         <?php if ($darf_planen): ?>
             <div class="btn-row">
-                <button class="btn btn-primary" type="submit" name="aktion" value="uebernehmen">Übernehmen</button>
+                <button class="btn btn-primary" type="submit" name="aktion" value="uebernehmen"<?= $rueckfrage !== '' ? ' data-confirm="' . View::e($rueckfrage) . '"' : '' ?>>Übernehmen</button>
                 <?php if ($ziel > 0): ?>
                     <button class="btn" type="submit" name="aktion" value="verknuepfen">Nur verknüpfen</button>
                     <span class="small muted">verknüpft die zugeordneten Etagen, ohne etwas zu holen – danach lassen sie sich zurückschicken

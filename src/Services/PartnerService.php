@@ -302,8 +302,8 @@ final class PartnerService
     {
         Database::execute("UPDATE sites SET partner_id = NULL, partner_schluessel = '', partner_stand = '', partner_hash = '', partner_at = NULL WHERE id = ?", [$siteId]);
         Database::execute("UPDATE floors SET partner_schluessel = '' WHERE site_id = ?", [$siteId]);
-        Database::execute("UPDATE objekte SET partner_schluessel = '' WHERE site_id = ?", [$siteId]);
-        Database::execute("UPDATE leitungen SET partner_schluessel = '' WHERE floor_id IN (SELECT id FROM floors WHERE site_id = ?)", [$siteId]);
+        Database::execute("UPDATE objekte SET partner_schluessel = '', partner_gesendet = '' WHERE site_id = ?", [$siteId]);
+        Database::execute("UPDATE leitungen SET partner_schluessel = '', partner_gesendet = '' WHERE floor_id IN (SELECT id FROM floors WHERE site_id = ?)", [$siteId]);
     }
 
     /**

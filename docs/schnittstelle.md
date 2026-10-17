@@ -89,7 +89,7 @@ die eigenen Freigaben.
 | *Name*, *Notiz* | wofür der Zugang ist, etwa „Planungsbüro Süd“. Der Name steht im Audit-Log als Akteur `api:<Name>`. |
 | *Befugnisse* | siehe oben. Eine Befugnis vergibt nur, wer die Rechte dahinter selbst hat (`plaene.lesen`: Karte ansehen; `vorschlagen`/`schreiben`: dazu Grundrisse pflegen; `feststrom`: Anlagen ansehen; `schreiben` mit `feststrom`: dazu Anlagen ändern und Kabel zeichnen). |
 | *Standorte* | je Standort **sehen** (lesen, übernehmen) und **bearbeiten** (zurückschicken, hochladen). Gilt für alle Etagen, auch künftige. Ohne Standort sieht das Token nichts. |
-| *An Benutzer binden* | optional. Ist es gesperrt, gelöscht oder außerhalb seines Gültigkeitszeitraums, ruht das Token. Angemeldet wird damit niemand – was das Token sieht, kommt nur aus seinen Befugnissen und Standorten. |
+| *An Benutzer binden* | optional. Ist es gesperrt, gelöscht oder außerhalb seines Gültigkeitszeitraums, ruht das Token. Angemeldet wird damit niemand – was das Token sieht, kommt nur aus seinen Befugnissen und Standorten. Binden, lösen oder umbinden nur, wer den (bisher) gebundenen Benutzer verwalten darf. |
 | *Gültig bis* | bis zum Ende dieses Tages; vorgeschlagen ist ein Jahr, leer heißt unbefristet |
 
 Nach dem Anlegen steht das Token **genau einmal** im Klartext da, zum
@@ -99,11 +99,14 @@ Kopieren, mit einem Prüfbefehl:
 curl -i -H 'Authorization: Bearer mtma_…' https://strom.example/api/v1/info
 ```
 
-- **Anzeigen** holt es später wieder hervor – nur mit dem eigenen Kennwort,
-  jeder Abruf steht im Audit-Log (`api.token.angezeigt`, ein falsches
-  Kennwort als `api.token.anzeigen_abgelehnt`). Gespeichert ist es als
-  SHA-256 (darüber wird angemeldet) und mit `app.key` verschlüsselt, nie im
-  Klartext.
+- **Anzeigen** holt es später wieder hervor – nur mit dem eigenen Kennwort
+  und nur, wer das Token genau so selbst anlegen dürfte: jede seiner
+  Befugnisse vergeben und – ist es gebunden – den Benutzer verwalten. Sonst
+  bekäme er Befugnisse in die Hand, die er hier selbst nicht hat; der Knopf
+  fehlt dann. Jeder Abruf steht im Audit-Log (`api.token.angezeigt`, ein
+  falsches Kennwort als `api.token.anzeigen_abgelehnt`). Gespeichert ist es
+  als SHA-256 (darüber wird angemeldet) und mit `app.key` verschlüsselt, nie
+  im Klartext.
 - **Ändern** passt Befugnisse, Standorte, Bindung und Ablauf an; das Token
   bleibt dasselbe.
 - **Widerrufen** wirkt sofort und löscht das verschlüsselte Token: es lässt
@@ -112,7 +115,8 @@ curl -i -H 'Authorization: Bearer mtma_…' https://strom.example/api/v1/info
 
 Zustände in der Liste: *aktiv* (mit „bis …“), *abgelaufen*, *widerrufen*,
 *ruht – Benutzer gesperrt*. *Zuletzt* nennt Zeitpunkt und Adresse des
-letzten Abrufs.
+letzten Abrufs. Wer nicht alle Standorte sieht, sieht in der Spalte
+*Standorte* nur die Namen der eigenen, die übrigen als Anzahl.
 
 Die **Adresse**, die B eintragen muss, steht oben auf der Seite. Sie kommt
 aus `app.url` in `config/config.php` – ohne diesen Eintrag zeigt die Seite,
@@ -175,12 +179,13 @@ dazugehört, und den Zustand:
 | *verknüpft – noch nicht übernommen* | „Nur verknüpfen“ gewählt | Übernehmen, oder den Stand hier hochladen bzw. zurückschicken |
 | *aktuell* | hier und dort wie beim letzten Übernehmen | nichts |
 | *dort geändert* | A hat geändert, hier nicht | Übernehmen |
-| *hier geändert* | hier geändert, dort nicht | Hochladen bzw. zurückschicken; Übernehmen nur mit Rückfrage (überschreibt hier) |
+| *hier geändert* | hier geändert, dort nicht – auch: hier gibt es Anlagen oder Kabel, die dort (noch) fehlen | Hochladen bzw. zurückschicken; Übernehmen nur mit Rückfrage (überschreibt hier) |
 | *beide geändert* | beide Seiten haben geändert | Übernehmen *oder* Hochladen, beides mit Rückfrage – der gewählte Stand gilt |
+| *verknüpft* (ohne Vergleich) | mit einem Standort hier verknüpft, den man selbst nicht sieht | nichts – es stehen weder seine Etagen noch sein Zustand da |
 
 Übernehmen, Zuordnen … und Lösen stehen an jeder Location, deren Standort
-hier man ändern darf; Hochladen und zurückschicken nur, wo es etwas zu
-schicken gibt.
+hier man ändern darf (eine Freigabe mit *bearbeiten*); Hochladen und
+zurückschicken nur, wo es etwas zu schicken gibt.
 
 Verglichen wird mit dem Stand beim letzten Übernehmen: dem `stand` von A
 und einem Fingerabdruck der verknüpften Etagen hier (Plan, Maßstab,
@@ -188,7 +193,8 @@ Notizen, Georeferenz, Feststrom). Mobile Anlagen und Kabel zählen nicht –
 die Planung der Veranstaltung ist keine Änderung an der Location.
 
 **Übernehmen** holt Plan, Maßstab, Notizen und Georeferenz der Etagen von
-dort (mit Feststrom auch Anlagen und Kabel, wenn A `feststrom` gibt). Eine
+dort – mit dem Kästchen *Feststrom* daneben (vorgewählt, wenn A `feststrom`
+gibt und man Anlagen und Kabel ändern darf) auch Anlagen und Kabel. Eine
 unveränderte Plandatei wird nicht noch einmal geladen. Dabei bleibt hier:
 
 - die **Namen** von Standort und Etagen, ihre Reihenfolge,
@@ -196,8 +202,16 @@ unveränderte Plandatei wird nicht noch einmal geladen. Dabei bleibt hier:
 - **Messpunkte**, Einsätze und Inventar an den Anlagen, auch an ihren
   Abgängen,
 - ein **Maßstab** und eine **Georeferenz**, wenn dort keiner gesetzt ist,
+- was hier aus einer übernommenen Anlage oder einem Kabel **mobil** gemacht
+  wurde: es bleibt mobil, wo es ist,
+- ein Kabelende an einer Anlage, die nicht mitkommt (andere Etage, ohne
+  Etage),
 - alles, was es nur hier gibt: mobile Anlagen und Kabel, Kabelbrücken,
   Bereiche, Anlagen und Kabel, die dort fehlen. **Gelöscht wird nichts.**
+
+Solange es hier Anlagen oder Kabel gibt, die dort fehlen, bleibt der
+Zustand danach *hier geändert* – bis sie hochgeladen oder dort angenommen
+sind.
 
 Anlagen und Kabel werden über ihren Schlüssel dort (`partner_schluessel`)
 nur **innerhalb des Standorts** wiedererkannt – eine gleichnamige Anlage an
@@ -210,7 +224,8 @@ höchstens einer Etage dort.
 
 ![Zuordnen: Etagen dort und hier, Feststrom übernehmen](bilder/instanz-zuordnen.png)
 
-- **Übernehmen** holt die gewählten Etagen.
+- **Übernehmen** holt die gewählten Etagen – mit derselben Rückfrage wie
+  in der Liste, wenn es hier etwas überschreibt.
 - **Nur verknüpfen** merkt sich die Zuordnung, ohne etwas zu holen. Der
   Bestand hier bleibt; er lässt sich danach hochladen bzw. zurückschicken
   oder später auf den Stand von dort bringen.
@@ -225,14 +240,31 @@ schicken nur die verknüpften Etagen, die A zum **Bearbeiten** freigegeben
 hat, mit den Schlüsseln und Etagennamen von A – A muss nicht wissen, wie B
 seine Halle nennt. Eine unveränderte Plandatei bleibt zu Hause; Feststrom
 geht nur zu einer PowerManagement-Instanz, und nur, wenn das Token dort
-`feststrom` hat.
+`feststrom` hat. Vor dem Senden fragt B die Befugnisse bei A neu ab: hat A
+sie inzwischen geändert (etwa `schreiben` dazugegeben, sodass ein
+„Vorschlag“ gleich übernommen würde), geht nichts hinaus – „Seite neu
+laden“.
+
+Feststrom geht so hinüber:
+
+- verknüpfte Anlagen und Kabel unter ihrem Schlüssel bei A – aber nur,
+  solange es sie bei A noch gibt. Was A gelöscht hat, bleibt hier, kommt
+  aber nicht still zurück;
+- eigene (nur hier angelegte) unter ihrem Schlüssel hier – oder, wenn der
+  bei A schon etwas anderes meint, unter einem freien („-2“ …). A legt sie
+  unter einem eigenen Schlüssel an und merkt sich, unter welchem sie von
+  diesem Token kamen; beim Hochladen nennt A ihn gleich, sonst steht er
+  beim nächsten Übernehmen dabei (`gesendet_als`). So entsteht nie eine
+  zweite.
 
 - **Hochladen** (A gibt `plaene.schreiben`): A übernimmt gleich, ohne
   Rückfrage – aber nur, wenn sich dort seit dem letzten Übernehmen nichts
   geändert hat. Danach sind beide Seiten *aktuell*.
   - Bei *hier geändert* ohne Rückfrage.
   - Bei *beide geändert* nur mit Rückfrage: es überschreibt die Änderungen
-    dort (`erzwingen`).
+    dort (`erzwingen`). Was A darüber hinaus hat (eine neue Anlage dort
+    etwa), bleibt dort – hier steht danach *dort geändert*, einmal
+    Übernehmen holt es.
   - Hat A inzwischen doch etwas geändert, lehnt A ab: „Dort hat sich etwas
     geändert – erst übernehmen (oder ausdrücklich überschreiben).“
   - Bei *aktuell* und *dort geändert* gibt es den Knopf nicht – erst
@@ -246,9 +278,10 @@ geht nur zu einer PowerManagement-Instanz, und nur, wenn das Token dort
   Standort.
 
 Bei A gelten dieselben Schutzregeln wie beim Übernehmen hier: Namen,
-Schaltsperre, Messpunkte, Maßstab und Georeferenz bleiben, gelöscht wird
-nichts. Neue Steckertypen legt ein Token bei A nie an – fehlt dort einer,
-lehnt A das Hochladen ab und nennt ihn.
+Schaltsperre und Messpunkte bleiben; ein Maßstab oder eine Georeferenz bei A
+wird nie gelöscht (fehlt er in der Sendung, bleibt der dortige); gelöscht
+wird nichts. Neue Steckertypen legt ein Token bei A nie an – fehlt dort
+einer, lehnt A das Hochladen ab und nennt ihn.
 
 ## Vorschläge bestätigen (A)
 
@@ -257,7 +290,8 @@ Vorschlag mit Eingang, Location, Absender, Notiz und Zustand: *offen*,
 *angenommen*, *direkt übernommen* (mit `plaene.schreiben` hochgeladen),
 *abgelehnt*, *ersetzt* (ein neuerer Vorschlag desselben Zugangs für
 denselben Standort bringt den ganzen Stand). Sichtbar ist ein Vorschlag nur
-für den, der den ganzen Standort sieht.
+für den, der den ganzen Standort sieht – eine Freigabe für eine einzelne
+Anlage darauf genügt nicht.
 
 ![Ein Vorschlag: je Etage, was sich ändern würde](bilder/vorschlag.png)
 
@@ -274,14 +308,22 @@ widerrufen, steht das darüber.
   Georeferenz* und *Feststrom* –, mit denselben Schutzregeln wie oben.
   Annehmen braucht „Grundrisse pflegen“ und *bearbeiten* am Standort, für
   Feststrom dazu „Anlagen ändern“ und „Kabel zeichnen“, für neue
-  Steckertypen „Steckverbinder-Katalog pflegen“.
-- **Ablehnen** mit Grund verwirft ihn; hier ändert sich nichts.
+  Steckertypen „Steckverbinder-Katalog pflegen“. Angelegt werden nur
+  Steckertypen, die ein Anschluss im Vorschlag wirklich verwendet.
+- **Ablehnen** mit Grund verwirft ihn; hier ändert sich nichts. Ablehnen
+  braucht ebenfalls *bearbeiten* am Standort.
 
-Ein Zugang hat höchstens zehn offene Vorschläge; eine Plandatei darin ist
-höchstens 30 MiB groß, ein Vorschlag höchstens 48 MiB. Beim Eingang wird
-nichts gerendert oder gekachelt, die Dateien liegen mit Zufallsnamen unter
-`storage/vorschlaege/`. Entschiedene Vorschläge löscht `bin/power wartung`
-nach 400 Tagen.
+Entscheiden zwei gleichzeitig, gewinnt der erste; der zweite hört
+„schon entschieden“, und nichts wird doppelt angewandt.
+
+Ein Zugang hat höchstens zehn offene Vorschläge und höchstens 60
+Sendungen in der Stunde (Vorschläge und direktes Schreiben zusammen); eine
+Plandatei darin ist höchstens 30 MiB groß, ein Vorschlag höchstens 48 MiB.
+Beim Eingang wird nichts gerendert oder gekachelt, die Dateien liegen mit
+Zufallsnamen unter `storage/vorschlaege/`. Ein ersetzter Vorschlag und
+direkt Geschriebenes behalten nur ihre Eckdaten (Location, Etagen, Zahlen)
+– ihre Dateien und den ganzen Inhalt nicht. Entschiedene Vorschläge löscht
+`bin/power wartung` nach 400 Tagen.
 
 ## Zusammenspiel mit MasterAdmin
 
@@ -335,7 +377,10 @@ curl -H "Authorization: Bearer $TOKEN" https://strom.example/api/v1/locations
 ```
 
 `stand` ändert sich mit allem, was das Token zu sehen bekommt (auch mit
-seinen Befugnissen und Freigaben), nicht mit mobiler Planung.
+seinen Befugnissen und Freigaben), nicht mit mobiler Planung. Anlagen und
+Kabel, die A aus einer Sendung dieses Tokens neu angelegt hat, tragen im
+Detail `gesendet_als` – den Schlüssel, unter dem das Token sie geschickt
+hat.
 
 **Einreichen:**
 
@@ -352,6 +397,14 @@ seinen Befugnissen und Freigaben), nicht mit mobiler Planung.
 
 - `location` ist Pflicht; nur Etagen, die es bei A schon gibt (neue legt A
   selbst an). `dosen`, `racks`, `aps` und alle `messpunkte` fallen weg.
+- Schlüssel (Location, Etagen, Anlagen, Leitungen): `a–z`, `0–9`, `-`,
+  höchstens 190 Zeichen – wie in der Adresse.
+- Jede Anlage braucht `name`, `anschluesse` und `schutzorgane`, jede
+  Leitung `punkte` – eine leere Liste heißt „keine“, ein fehlender
+  Schlüssel wird abgelehnt (422), statt hier alles zu löschen. Anlagen
+  ohne Etage nimmt A nicht an; ein Kabelende an einer solchen Anlage (oder
+  an einer, die nicht mitkommt) behält A, wie es ist.
+- Steckertypen, die kein Anschluss verwendet, legt A nie an.
 - `dateien` nur für Pläne, deren `plan.datei` im Vorschlag steht, mit
   passender Prüfsumme; eine unveränderte Datei lässt man weg.
 - `basis` ist der `stand` beim letzten Abruf. Mit `plaene.schreiben` und
@@ -364,7 +417,7 @@ Antworten:
 | Code | wann |
 |------|------|
 | 200 | gelesen |
-| 201 | eingegangen: `{"ok":true,"id":12,"uebernommen":false,"message":"Vorschlag eingegangen – …"}`, direkt geschrieben: `{"ok":true,"id":13,"uebernommen":true,"stand":"<neu>","message":"Übernommen."}` |
+| 201 | eingegangen: `{"ok":true,"id":12,"uebernommen":false,"message":"Vorschlag eingegangen – …"}`, direkt geschrieben: `{"ok":true,"id":13,"uebernommen":true,"stand":"<neu>","basis_passte":true,"schluessel":{"anlagen":{"<geschickt>":"<hier>"},"leitungen":{…}},"message":"Übernommen."}` – `basis_passte: false` nach `erzwingen` über einen anderen Stand; `schluessel` nennt je angewandtem Eintrag den Schlüssel bei A |
 | 400 | kein JSON, oder `location` fehlt |
 | 401 | Token fehlt, falsch, abgelaufen, widerrufen oder ruht – immer dieselbe Antwort |
 | 403 | Befugnis fehlt, oder der Standort ist nur zum Lesen freigegeben |
@@ -374,7 +427,7 @@ Antworten:
 | 413 | Körper größer als 48 MiB |
 | 415 | kein `Content-Type: application/json` |
 | 422 | Vorschlag abgelehnt (Format, Etage, Datei, Prüfsumme …); beim direkten Schreiben auch unbekannte Steckertypen (`"stecker":[…]`). Gespeichert wird dann nichts. |
-| 429 | zehn offene Vorschläge dieses Zugangs; von nginx auch bei mehr als zehn Anfragen in der Sekunde |
+| 429 | zehn offene Vorschläge dieses Zugangs oder 60 Sendungen in der letzten Stunde; von nginx auch bei mehr als zehn Anfragen in der Sekunde |
 | 500 | unerwarteter Fehler (Details im Log von A) |
 
 ## Verhältnis zum Location-Abgleich (Git)
@@ -388,8 +441,8 @@ Git ordnet über die eigenen Schlüssel (`sync_key`) zu, die Schnittstelle
 über die Schlüssel der Gegenseite (`partner_schluessel`), immer nur
 innerhalb des verknüpften Standorts. Eine Übernahme von einer anderen
 Instanz schreibt nie in `sync_key`; eine Anlage, die es nur hier gibt, geht
-mit ihrem eigenen Schlüssel hinüber und wird beim nächsten Übernehmen
-darüber wiedererkannt.
+mit ihrem eigenen Schlüssel hinüber (oder einem freien, wenn der dort schon
+etwas anderes meint) und wird beim nächsten Übernehmen wiedererkannt.
 
 ## Sicherheit
 

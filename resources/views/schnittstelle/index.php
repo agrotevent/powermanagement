@@ -3,7 +3,7 @@
  * Schnittstelle (API): Zugänge, die diese Instanz an andere Instanzen
  * ausgibt – Liste und „Neuer Zugang“.
  *
- * @var list<array<string,mixed>> $tokens ApiZugaenge::alle()
+ * @var list<array<string,mixed>> $tokens ApiZugaenge::alle() – ohne „alles“ nur sichtbare Standorte (der Rest als standorte_weitere)
  * @var array<string,string> $befugnisse
  * @var array<string,bool> $vergebbar
  * @var bool $darf Zugriff::alles() – anlegen, ändern, anzeigen, löschen
@@ -54,7 +54,7 @@ $zustandText = ['aktiv' => 'aktiv', 'abgelaufen' => 'abgelaufen', 'widerrufen' =
                     </td>
                     <td data-label="Token">
                         <span class="mono small"><?= View::e((string) $t['token_prefix']) ?>…</span>
-                        <?php if ($darf && $t['abrufbar']): ?>
+                        <?php if ($darf && $t['abrufbar'] && $t['verwaltbar']): ?>
                             <form method="post" action="/system/schnittstelle/<?= $id ?>/anzeigen" class="api-anzeigen">
                                 <?= Csrf::field() ?>
                                 <input type="password" name="kennwort" required autocomplete="current-password" placeholder="eigenes Kennwort"
@@ -64,9 +64,12 @@ $zustandText = ['aktiv' => 'aktiv', 'abgelaufen' => 'abgelaufen', 'widerrufen' =
                         <?php endif; ?>
                     </td>
                     <td data-label="Standorte" class="small">
-                        <?php if ($t['standorte'] === []): ?><span class="badge warn">keine</span>
+                        <?php $weitere = (int) ($t['standorte_weitere'] ?? 0); ?>
+                        <?php if ($t['standorte'] === [] && $weitere === 0): ?><span class="badge warn">keine</span>
                         <?php else: ?><?= implode(', ', array_map(static fn (array $s): string
-                            => View::e($s['name']) . ($s['bearbeiten'] ? ' <span class="muted">(bearbeiten)</span>' : ''), $t['standorte'])) ?><?php endif; ?>
+                            => View::e($s['name']) . ($s['bearbeiten'] ? ' <span class="muted">(bearbeiten)</span>' : ''), $t['standorte'])) ?>
+                            <?php if ($weitere > 0): ?><span class="muted"><?= $t['standorte'] !== [] ? '+ ' : '' ?><?= $weitere ?> <?= $weitere === 1 ? 'weiterer, den' : 'weitere, die' ?> du nicht siehst</span><?php endif; ?>
+                        <?php endif; ?>
                     </td>
                     <td data-label="Befugnisse" class="small"><?= $t['befugnisse'] === [] ? '<span class="muted">–</span>'
                         : implode(', ', array_map(static fn (string $b): string => '<code>' . View::e($b) . '</code>', $t['befugnisse'])) ?></td>

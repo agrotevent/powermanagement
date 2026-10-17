@@ -84,6 +84,9 @@ final class SiteService
         // ein Generator verschwindet nicht, weil sein Einsatzort gelöscht wird.
         BereichService::standortEntfernt($id);
         AufbauService::standortEntfernt($id);
+        // Was ein Token hier angelegt hat, gehört zu diesem Standort – ohne ihn
+        // findet die Schnittstelle es nicht mehr wieder.
+        Database::execute("DELETE FROM api_zuordnungen WHERE tabelle = 'objekte' AND ziel_id IN (SELECT id FROM objekte WHERE site_id = ?)", [$id]);
         Database::execute('UPDATE objekte SET site_id = NULL, floor_id = NULL, plan_x = NULL, plan_y = NULL WHERE site_id = ?', [$id]);
         foreach (Database::select('SELECT id FROM floors WHERE site_id = ?', [$id]) as $etage) {
             Database::execute('DELETE FROM leitungen WHERE floor_id = ?', [(int) $etage['id']]);
@@ -158,6 +161,7 @@ final class SiteService
         // Anlagen verlieren nur ihren Platz im Plan, Leitungen dieser Etage
         // gehen mit: ein Kabelweg ohne Plan hat keine Lage mehr.
         Database::execute('UPDATE objekte SET floor_id = NULL, plan_x = NULL, plan_y = NULL WHERE floor_id = ?', [$id]);
+        Database::execute("DELETE FROM api_zuordnungen WHERE tabelle = 'leitungen' AND ziel_id IN (SELECT id FROM leitungen WHERE floor_id = ?)", [$id]);
         Database::execute('DELETE FROM leitungen WHERE floor_id = ?', [$id]);
         Database::delete('floors', $id);
 
