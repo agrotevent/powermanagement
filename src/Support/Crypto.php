@@ -36,6 +36,16 @@ final class Crypto
         return substr($key, 0, SODIUM_CRYPTO_SECRETBOX_KEYBYTES);
     }
 
+    /**
+     * Ein eigener Schlüssel je Zweck, abgeleitet aus app.key (HKDF) – etwa
+     * für das Siegel der Übergabeberichte. So taugt ein Siegel-Schlüssel
+     * nie zum Entschlüsseln der Zugangsdaten und umgekehrt.
+     */
+    public static function ableiten(string $zweck): string
+    {
+        return hash_hkdf('sha256', self::key(), 32, 'pm:' . $zweck);
+    }
+
     public static function encrypt(?string $plain): string
     {
         if ($plain === null || $plain === '') {

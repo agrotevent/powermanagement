@@ -175,6 +175,26 @@ final class Auth
         ]);
     }
 
+    /**
+     * Das Kennwort des angemeldeten Kontos noch einmal bestätigen – zum
+     * Entsperren des Kundenmodus. Anders als attempt() zählt ein Fehler
+     * nicht gegen das Konto: sonst sperrte ein Kunde, der am Tablet
+     * herumtippt, den Prüfer für 15 Minuten aus. Gezählt wird in der
+     * Sitzung (Kundenmodus), festgehalten im Audit.
+     */
+    public static function kennwortBestaetigen(string $kennwort): bool
+    {
+        $user = self::user();
+        if ($user === null) {
+            return false;
+        }
+        if ($kennwort !== '' && password_verify($kennwort, (string) $user['password_hash'])) {
+            return true;
+        }
+        Audit::log('auth.kundenmodus_fehlversuch', 'user', (string) $user['id']);
+        return false;
+    }
+
     public static function logout(): void
     {
         if (self::check()) {

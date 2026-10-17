@@ -142,6 +142,27 @@ final class SchutzService
     }
 
     /**
+     * Das Überstrom-Schutzorgan dieses Abgangs: das erste LS, RCBO oder NH
+     * aufwärts in der Kette (es selbst eingeschlossen) – oder null, etwa wenn
+     * ein Abgang direkt an einem RCD hängt. Daraus kommt im Übergabebericht
+     * der Grenzwert der Schleifenimpedanz.
+     *
+     * @param array<int,array<string,mixed>> $alle
+     */
+    public static function ueberstrom(int $id, array $alle): ?array
+    {
+        $gesehen = [];
+        while (isset($alle[$id]) && !isset($gesehen[$id])) {
+            $gesehen[$id] = true;
+            if (in_array($alle[$id]['art'], ['ls', 'rcbo', 'nh'], true)) {
+                return $alle[$id];
+            }
+            $id = (int) ($alle[$id]['vorgeschaltet_id'] ?? 0);
+        }
+        return null;
+    }
+
+    /**
      * @return array{ok:bool,message:string,id?:int}
      */
     public static function speichern(int $objektId, ?int $id, array $daten): array

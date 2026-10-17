@@ -5,6 +5,7 @@ namespace App\Services;
 
 use App\Auth\Auth;
 use App\Auth\Zugriff;
+use App\Berichte\BerichtService;
 use App\Support\Audit;
 use App\Support\Database;
 use App\Support\Zeit;
@@ -302,6 +303,7 @@ final class InventarService
         }
         Database::execute('DELETE FROM inventar_messgeraete WHERE inventar_id = ?', [$id]);
         Database::execute('DELETE FROM einsaetze WHERE inventar_id = ?', [$id]);
+        BerichtService::inventarEntfernt($id);
         Database::delete('inventar', $id);
         Audit::log('inventar.delete', 'inventar', (string) $id, ['kennung' => $i['kennung']]);
         return ['ok' => true, 'message' => $i['kennung'] . ' gelöscht.'];

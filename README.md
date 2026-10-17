@@ -65,6 +65,12 @@ Mehr Bilder in der [Bedienungsanleitung](docs/bedienung.md).
   Die **Feststromanschlüsse** der Location und die **fest verlegten Kabel**
   dazwischen liegen als `strom.json` neben der `location.json`. Mobile
   Anlagen und Kabel bleiben in der Installation.
+- **Übergabeberichte** „Elektrische Anlage“: Prüfprotokoll nach DIN VDE
+  0100-600 und Errichterbestätigung am Tablet – vorbelegt aus Plan,
+  Schutzorganen, Kabeln und Inventar (Messwerte nie), Grenzwerte auf dem
+  Server, Unterschrift von Prüfer und Kunde am Gerät (nur als Linienzug),
+  eingefroren mit Prüfsumme und Siegel, PDF aus eigenem Schreiber.
+  Kundendaten als Freitext oder **nur lesend aus Eventworx**.
 - **Verteiler-Abgleich** über dasselbe Repository: Standard-Verteiler und
   Inventar (Verteiler und Zwischenstecker mit ihren Shellys), eine Datei je
   Verteiler. Je Verteiler steht, ob er hier, dort oder auf beiden Seiten
@@ -84,9 +90,10 @@ php -S 127.0.0.1:8080 -t public
 
 → <http://127.0.0.1:8080>, Anmeldung `admin` / `PowerAdmin2026!`. Weitere
 Demo-Konten: `veranstalter` / `Veranstalter2026!` (sieht nur die
-Festivalwoche) und `technik` / `Technik2026!!` (darf nur das Licht schalten).
+Festivalwoche) und `technik` / `Technik2026!!` (darf nur das Licht schalten,
+unterschreibt Übergabeberichte als Prüfer).
 
-Voraussetzungen: PHP ≥ 8.2 mit `pdo_sqlite`, `mbstring`, `sodium`,
+Voraussetzungen: PHP ≥ 8.2 mit `pdo_sqlite`, `mbstring`, `sodium`, `zlib`,
 `sockets`, `curl` und `gd`. Für PDF-Grundrisse zusätzlich `poppler-utils`.
 
 ## Produktivbetrieb
@@ -110,9 +117,11 @@ Update: **[docs/installation-debian-lxc.md](docs/installation-debian-lxc.md)**.
 | Datei | Inhalt |
 |-------|--------|
 | [docs/installation-debian-lxc.md](docs/installation-debian-lxc.md) | Installation, Update, Sicherung, Fehlersuche |
-| [docs/bedienung.md](docs/bedienung.md) | Übersicht, Karte, Anlagen, Verteilerplan, Aufbau und Abgleich, Inventar, Auswertung, Bereiche, Materialliste, Schalten |
+| [docs/bedienung.md](docs/bedienung.md) | Übersicht, Karte, Anlagen, Verteilerplan, Aufbau und Abgleich, Übergabeberichte, Inventar, Auswertung, Bereiche, Materialliste, Schalten |
+| [docs/berichte.md](docs/berichte.md) | Übergabeberichte: Ablauf vor Ort, Felder, Vorbelegung, Grenzwerte, Unterschrift und Beweiswert, Kundenmodus, Korrektur, Integrität, Datenschutz, Aufbewahrung |
 | [docs/rechte.md](docs/rechte.md) | Rollen, Freigaben, Zeitfenster, Schaltrechte je Gerät |
 | [docs/datenquellen.md](docs/datenquellen.md) | MQTT-Format, InfluxDB-Schema, Shelly, Victron, ComAp, WireGuard, Sammler, Node-RED |
+| [docs/eventworx.md](docs/eventworx.md) | Kundendaten aus Eventworx (nur lesend): Token, was gelesen wird, Fehlermeldungen, Datenschutz |
 
 ## Kommandozeile
 
@@ -127,6 +136,8 @@ bin/power titel "Titel" [untertitel] [kürzel]
 bin/power plan:kacheln [--neu]
 bin/power location:liste   ·   bin/power location:uebernehmen <schlüssel>
 bin/power verteiler:liste   ·   bin/power verteiler:uebernehmen|verteiler:hochladen --alle | <typ|inventar> <schlüssel>
+bin/power berichte:pruefen [<nummer> [--fassung=N]] [--pdf]   ·   bin/power berichte:pdf <nummer> <ziel.pdf> [--fassung=N]
+bin/power berichte:aufbewahrung [--ausfuehren]   ·   bin/power eventworx:pruefen
 bin/power demo:seed [--reset]
 bin/power wartung
 ```
@@ -154,10 +165,13 @@ deploy/                   Installation/Update Debian, nginx, PHP-FPM, systemd, M
 docs/                     Dokumentation
 public/                   Einstieg index.php, CSS, JS (Leaflet, uPlot, pdf.js mitgeliefert)
 resources/views/          Vorlagen (PHP)
+resources/fonts/          Liberation Sans für die PDF (SIL OFL 1.1)
 src/Auth/                 Anmeldung, Rechte, Freigaben/Zeitfenster (Zugriff)
+src/Berichte/             Übergabeberichte: Schema, Vorbelegung, Grenzwerte, Unterschrift, Kundenmodus, PDF-Layout
 src/Controllers/          Seiten
 src/Messung/              InfluxDB, MQTT, Modbus TCP, ComAp, VRM, Sammler, Steuerung, Demo
-src/Services/             Anlagen, Schutzorgane, Leitungen, Messpunkte, Inventar, Aufbau, Live, Bereiche, Material, Standorte, Location- und Verteiler-Abgleich
+src/Pdf/                  eigener PDF-Schreiber (Schrift als Teilmenge, Tabellen)
+src/Services/             Anlagen, Schutzorgane, Leitungen, Messpunkte, Inventar, Aufbau, Live, Bereiche, Material, Standorte, Location- und Verteiler-Abgleich, Eventworx
 src/Support/              Router, Datenbank, Sitzung, CSRF, Verschlüsselung …
 storage/                  Datenbank, Grundrisse, Kacheln, Zwischenspeicher, Protokolle
 tests/                    Prüfskripte
