@@ -739,6 +739,23 @@
         return d && !isNaN(d.getTime()) ? d.toLocaleDateString('de-DE', { day: '2-digit', month: '2-digit', year: 'numeric' }) : '';
     }
 
+    // Eine Eventworx-Abfrage zur Zeit: eine neue (Doppelklick, zweimal Enter, ein
+    // Treffer während der Suche) bricht die vorige ab, und deren Antwort zählt nicht
+    // mehr – sonst stünden Treffer doppelt oder veraltet in der Liste.
+    var ewxLauf = { nr: 0, anfrage: null };
+
+    function ewxStarten(pfad, felder, weiter) {
+        if (ewxLauf.anfrage && ewxLauf.anfrage.abbrechen) { ewxLauf.anfrage.abbrechen(); }
+        var nr = ++ewxLauf.nr;
+        var p = anfrage(pfad, felder);
+        ewxLauf.anfrage = p;
+        p.then(function (r) {
+            if (nr !== ewxLauf.nr) { return; }
+            ewxLauf.anfrage = null;
+            weiter(r);
+        });
+    }
+
     function ewxSuchen() {
         var feld = wurzel.querySelector('[data-ewx-q]');
         var liste = wurzel.querySelector('[data-ewx-treffer]');
@@ -747,7 +764,7 @@
         if (q.length < 2) { ewxMeldung('Bitte mindestens zwei Zeichen – am sichersten die Auftrags- oder Angebotsnummer.'); return; }
         ewxMeldung('sucht in Eventworx …');
         leeren(liste);
-        anfrage('/eventworx/suche', { q: q }).then(function (r) {
+        ewxStarten('/eventworx/suche', { q: q }, function (r) {
             if (!r.erg.ok) { ewxFehler(r.erg.message || 'Eventworx antwortet nicht.'); return; }
             var treffer = r.erg.treffer || [];
             ewxMeldung(treffer.length === 0 ? 'Kein Auftrag oder Angebot gefunden – am sichersten mit der Nummer suchen.'
@@ -775,7 +792,7 @@
 
     function ewxVorgang(id) {
         ewxMeldung('lädt den Vorgang …');
-        anfrage('/eventworx/vorgang', { vorgang_id: id }).then(function (r) {
+        ewxStarten('/eventworx/vorgang', { vorgang_id: id }, function (r) {
             if (!r.erg.ok) { ewxFehler(r.erg.message || 'Eventworx antwortet nicht.'); return; }
             ewxMeldung('');
             dialogOeffnen(r.erg);
