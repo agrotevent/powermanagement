@@ -9,6 +9,7 @@ use App\Support\Audit;
 use App\Support\Crypto;
 use App\Support\Database;
 use App\Support\Logger;
+use App\Support\Session;
 
 /**
  * Andere Instanzen (Seite B, die fragt): eintragen, Verbindung, Meldungen.
@@ -384,7 +385,10 @@ final class PartnerService
             }
         }
         $optionen['zeit'] = $zeit;
-        $a = Http::anfrage($methode, $url, ['kopf' => $kopf] + $optionen);
+        // Bis zu ZEITLIMIT bzw. DATEI_ZEITLIMIT Sekunden – so lange stünden
+        // sonst alle anderen Anfragen desselben Browsers an der Sitzung an.
+        // Die Aufrufer schreiben ihre Meldungen erst danach.
+        $a = Session::ohneSperre(static fn (): array => Http::anfrage($methode, $url, ['kopf' => $kopf] + $optionen));
         if (!$a['ok']) {
             if ((int) ($a['nummer'] ?? 0) === Http::ZU_GROSS) {
                 return $fehler((int) $a['status'], 'Die Antwort von dort ist zu groß – abgebrochen. ' . (string) $a['fehler']);

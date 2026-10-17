@@ -48,6 +48,49 @@ final class Session
         }
     }
 
+    /**
+     * $arbeit ohne Sitzungssperre ausführen – das Warten auf eine andere
+     * Instanz etwa, bei einer Plandatei bis zu Minuten – und die Sitzung
+     * danach wieder öffnen.
+     *
+     * PHP sperrt die Sitzungsdatei für die ganze Anfrage. Wer dabei wartet,
+     * hält jede weitere Anfrage desselben Browsers auf: andere Reiter,
+     * Live-Abfragen, das Speichern eines Formulars. Anders als nach
+     * freigeben() ist die Sitzung danach wieder offen – die Anfrage kann noch
+     * Meldungen (Flash) schreiben und weiterleiten.
+     *
+     * Beim Schließen wird geschrieben, was bis dahin in $_SESSION steht. Beim
+     * Wiederöffnen kommt $_SESSION neu aus der Ablage: Was eine andere
+     * Anfrage in der Zwischenzeit geschrieben hat, gilt – sie hat unseren
+     * Stand gelesen und ihren dazugeschrieben. $arbeit selbst schreibt
+     * deshalb nichts in $_SESSION, es ginge verloren. Wiedergeöffnet wird
+     * nur, solange noch nichts ausgegeben ist – also vor der Ansicht
+     * aufrufen. Ohne offene Sitzung (Kommandozeile, /api) läuft $arbeit
+     * einfach so.
+     *
+     * @template T
+     * @param callable():T $arbeit
+     * @return T
+     */
+    public static function ohneSperre(callable $arbeit): mixed
+    {
+        if (session_status() !== PHP_SESSION_ACTIVE) {
+            return $arbeit();
+        }
+        session_write_close();
+        try {
+            return $arbeit();
+        } finally {
+            // Name, Cookie-Parameter und strict_mode stehen noch von start().
+            // Die Kopfzeilen gegen Zwischenspeichern hat der erste Start
+            // gesetzt – nicht noch einmal, sie überschrieben sonst, was die
+            // Anfrage seitdem selbst gesetzt hat.
+            if (session_status() !== PHP_SESSION_ACTIVE && !headers_sent()) {
+                session_start(['cache_limiter' => '']);
+            }
+        }
+    }
+
     /** Hinter einem Reverse-Proxy kommt das Schema per Header. */
     public static function isHttps(): bool
     {
