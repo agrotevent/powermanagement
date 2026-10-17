@@ -4,6 +4,7 @@ declare(strict_types=1);
 namespace App\Messung;
 
 use App\Support\Config;
+use App\Support\Logger;
 use App\Support\Settings;
 
 /**
@@ -75,11 +76,18 @@ final class Influx
     public static function abfragenAlle(string $influxql, ?string &$fehler = null): ?array
     {
         $parameter = array_merge(['db' => self::datenbank(), 'q' => $influxql, 'epoch' => 'ms'], self::zugangParameter());
+        $beginn = microtime(true);
         $antwort = Http::anfrage('POST', self::url() . '/query', [
             'kopf'   => self::kopf() + ['Content-Type' => 'application/x-www-form-urlencoded'],
             'rumpf'  => http_build_query($parameter),
             'zeit'   => (int) Config::get('influx.timeout', 8),
         ]);
+        // Seiten mit Livewerten fragen alle 5 s – eine träge InfluxDB macht
+        // sich zuerst dort bemerkbar. Im Log steht sie dann schwarz auf weiß.
+        $dauer = microtime(true) - $beginn;
+        if ($dauer > 2.0) {
+            Logger::info('InfluxDB antwortet langsam', ['sekunden' => round($dauer, 1), 'ok' => $antwort['ok']]);
+        }
         if (!$antwort['ok']) {
             $fehler = 'InfluxDB nicht erreichbar: ' . $antwort['fehler'];
             return null;

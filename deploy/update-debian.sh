@@ -524,11 +524,13 @@ if [[ "$CODE_NEU" == "ja" ]]; then
     # Oberfläche läuft weiter und soll nicht kurz ihre Dateien verlieren.
     find "$ZIEL" -path "$ZIEL/storage" -prune -o ! -path "$ZIEL/config/config.php" \
         -exec chown root:root {} + -exec chmod go+rX,go-w {} +
+    # Was git eben als root in storage/ angelegt hat (neue .gitkeep-Ordner),
+    # erst der Anwendung übereignen – sonst darf sie dort keine Rechte setzen.
+    chown -R -P "$APP_USER:$APP_USER" "$ZIEL/storage"
     # mqtt/: Soll und Ergebnis der eigenen MQTT-Zugänge (deploy/mqtt-zugaenge.sh)
-    for d in logs plans demo cache sessions backups mqtt mqtt/soll mqtt/ist; do
+    for d in logs plans demo cache inventar sessions backups mqtt mqtt/soll mqtt/ist; do
         app_verzeichnis "$ZIEL/storage/$d"
     done
-    chown -R -P "$APP_USER:$APP_USER" "$ZIEL/storage"
     chown "root:$APP_USER" "$ZIEL/config/config.php"
     chmod 640 "$ZIEL/config/config.php"
 

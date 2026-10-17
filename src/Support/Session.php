@@ -34,6 +34,20 @@ final class Session
         $_SESSION['last_activity'] = time();
     }
 
+    /**
+     * Die Sitzung schließen, bevor eine Anfrage auf etwas wartet – Livewerte
+     * aus der InfluxDB etwa. PHP sperrt die Sitzungsdatei, solange sie offen
+     * ist: Jede weitere Anfrage desselben Browsers stünde so lange an, auch
+     * das Speichern eines Formulars. Danach wird nur noch gelesen; was noch in
+     * $_SESSION geschrieben würde, bliebe nicht erhalten.
+     */
+    public static function freigeben(): void
+    {
+        if (session_status() === PHP_SESSION_ACTIVE) {
+            session_write_close();
+        }
+    }
+
     /** Hinter einem Reverse-Proxy kommt das Schema per Header. */
     public static function isHttps(): bool
     {
