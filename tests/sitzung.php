@@ -13,10 +13,11 @@ declare(strict_types=1);
  * kommen durch, während mehrere langsame Live-Abfragen laufen, und die
  * Live-Abfragen liefern trotzdem ihre Antwort.
  *
- * Dasselbe für die Eventworx-Abfragen des Berichtsformulars (Suche beim
- * Tippen, Vorgang laden): Das Autosave des Berichts kommt durch, während
- * Eventworx trödelt, und der geladene Vorgang ist danach trotzdem in der
- * Sitzung vorgemerkt – das nächste Autosave übernimmt den Verweis.
+ * Dasselbe für die Eventworx-Abfragen des Berichtsformulars (Suche auf
+ * Knopfdruck oder mit Enter, Vorgang laden): Das Autosave des Berichts kommt
+ * durch, während Eventworx trödelt, und der geladene Vorgang ist danach
+ * trotzdem in der Sitzung vorgemerkt – das nächste Autosave übernimmt den
+ * Verweis.
  *
  * Eigene Instanz (POWERMANAGEMENT_CONFIG, eigene SQLite-Datenbank mit dem
  * Demo-Gelände, dann ohne Demo-Modus) sowie Attrappen für InfluxDB und
@@ -268,9 +269,9 @@ foreach ([
 }
 
 // ------------------------------------------------------------ Eventworx im Berichtsformular
-// Suche beim Tippen und „Vorgang laden“ fragen Eventworx (bis zu 12 s je
-// Versuch, dazu Drossel und Nachlesen). Hielten sie die Sitzung, stünde das
-// Autosave des Berichts so lange an.
+// Die Suche (Knopf oder Enter) und „Vorgang laden“ fragen Eventworx (bis zu
+// 12 s je Versuch, dazu Drossel und Nachlesen). Hielten sie die Sitzung,
+// stünde das Autosave des Berichts so lange an.
 file_put_contents($verzoegerung, '0');
 $r = holen($basis . '/system/einstellungen/eventworx', $dose, ['_token' => $token, 'eventworx_adresse' => $ewxBasis, 'eventworx_token' => $ewxToken]);
 gleich($r['status'], 302, 'Eventworx der zweiten Instanz auf die Attrappe eingestellt');

@@ -342,10 +342,11 @@ final class BerichtController extends Controller
     // ------------------------------------------------------------ Eventworx (nur lesen)
     //
     // Beide Wege warten auf Eventworx (bis zu 12 s je Versuch, dazu Drossel
-    // und Nachlesen) und werden beim Tippen laufend abgefragt. Nach der
-    // Prüfung des Berichts geben sie die Sitzung frei – sonst stünden das
-    // Autosave und jede andere Anfrage dieses Browsers so lange an. Danach
-    // wird nur noch gelesen; den Verweis trägt Session::nachtragen() ein.
+    // und Nachlesen). Sie starten nur auf Knopfdruck, die Suche auch mit
+    // Enter – eine Live-Suche beim Tippen gibt es nicht. Nach der Prüfung des
+    // Berichts geben sie die Sitzung frei – sonst stünden das Autosave und
+    // jede andere Anfrage dieses Browsers so lange an. Danach wird nur noch
+    // gelesen; den Verweis trägt Session::nachtragen() ein.
 
     public function eventworxSuche(Request $request, array $params): void
     {
