@@ -52,7 +52,7 @@ final class BerichtController extends Controller
             $this->fehler($request, 404, 'Diesen Bericht gibt es nicht.');
             return null;
         }
-        if ($zweck === 'bearbeiten' && $b['status'] !== 'entwurf') {
+        if ($zweck === 'bearbeiten' && ($b['status'] !== 'entwurf' || BerichtService::eingefroren($b))) {
             $this->fehler($request, 423, BerichtService::EINGEFROREN, '/berichte/' . $id);
             return null;
         }
@@ -291,7 +291,7 @@ final class BerichtController extends Controller
         }
         $pdf = BerichtService::pdf($b);
         if ($b['status'] === 'geprueft') {
-            BerichtService::ereignis((int) $b['id'], 'pdf_abgerufen', ['stufe' => 'vorschau']);
+            BerichtService::pdfAbgerufen((int) $b['id']);
         }
         http_response_code(200);
         header('Content-Type: application/pdf');
@@ -405,7 +405,8 @@ final class BerichtController extends Controller
         if ($b === null) {
             return;
         }
-        $e = BerichtService::ohneKunde((int) $b['id'], $request->str('art'), $request->str('grund'));
+        $hash = $request->str('inhalt_hash');
+        $e = BerichtService::ohneKunde((int) $b['id'], $request->str('art'), $request->str('grund'), $hash !== '' ? $hash : null);
         $e['ok'] ? Flash::success($e['message']) : Flash::error($e['message']);
         $this->redirect('/berichte/' . (int) $b['id']);
     }
@@ -447,25 +448,34 @@ final class BerichtController extends Controller
      */
     public function kunde(Request $request, array $params): void
     {
+        $id = ctype_digit((string) ($params['id'] ?? '')) ? (int) $params['id'] : 0;
+        $modus = Kundenmodus::aktiv();
+        $b = $id > 0 ? BerichtService::find($id) : null;
+        if ($modus !== null && $modus['bericht'] === $id && ($b === null || !BerichtService::sichtbar($b))) {
+            // Gesperrt auf einen Bericht, den dieses Konto (nicht mehr) sieht:
+            // nur das Entsperren – sonst führte jeder Weg ins Leere.
+            $this->view('berichte/kunde-gesperrt', ['id' => $id, 'modus' => $modus, 'title' => 'Gerät gesperrt',
+                'firma' => Einstellungen::wert('firma.name')], 'layout/kunde');
+            return;
+        }
         $b = $this->bericht($request, $params);
         if ($b === null) {
             return;
         }
-        $modus = Kundenmodus::aktiv();
         if ($modus === null || $modus['bericht'] !== (int) $b['id']) {
             Flash::info('Der Kundenmodus ist nicht aktiv.');
             $this->redirect('/berichte/' . (int) $b['id']);
             return;
         }
         $inhalt = BerichtSchema::vollstaendig($b['inhalt']);
-        $user = Auth::user() ?? [];
         $this->view('berichte/kunde', [
             'bericht'        => $b,
             'inhalt'         => $inhalt,
             'bewertung'      => $inhalt['bewertung'] ?? Grenzwerte::alle($inhalt),
             'unterschriften' => BerichtService::unterschriften((int) $b['id']),
             'modus'          => $modus,
-            'prueferName'    => trim((string) (($user['full_name'] ?? '') !== '' ? $user['full_name'] : ($user['username'] ?? ''))),
+            // Wer den Kundenmodus gestartet hat – nur mit dessen Kennwort geht es weiter.
+            'prueferName'    => $modus['name'],
             'firma'          => (string) ($inhalt['auftragnehmer']['name'] ?? Einstellungen::wert('firma.name')),
             'scripts'        => ['/assets/js/unterschrift.js', '/assets/js/bericht-kunde.js'],
         ], 'layout/kunde');
@@ -489,12 +499,15 @@ final class BerichtController extends Controller
             'vorbehalte'     => is_string($_POST['vorbehalte'] ?? null) ? $_POST['vorbehalte'] : '',
             'anfrage'        => $request->str('anfrage'),
             'geraet_am'      => $request->str('geraet_am'),
+            'inhalt_hash'    => $request->str('inhalt_hash'),
         ]));
     }
 
     /**
-     * Entsperren mit dem Kennwort des Prüfers. Ein Fehler zählt nur in der
-     * Sitzung (das Konto bleibt offen); beim fünften wird abgemeldet.
+     * Entsperren mit dem Kennwort dessen, der den Kundenmodus gestartet hat.
+     * Ein Fehler zählt nur in der Sitzung (das Konto bleibt offen); ab dem
+     * fünften wird das Entsperren gebremst – abgemeldet wird nie, sonst
+     * stünde dem Kunden die Anmeldeseite (mit gespeichertem Kennwort) offen.
      */
     public function kundeBeenden(Request $request, array $params): void
     {
@@ -504,7 +517,13 @@ final class BerichtController extends Controller
             $this->redirect('/berichte/' . $id);
             return;
         }
-        if (Auth::kennwortBestaetigen(is_string($_POST['kennwort'] ?? null) ? $_POST['kennwort'] : '')) {
+        $warten = Kundenmodus::wartezeit();
+        if ($warten > 0) {
+            Flash::error('Zu viele falsche Kennwörter – Entsperren erst in ' . self::dauer($warten) . ' wieder möglich.');
+            $this->redirect('/berichte/' . $id . '/kunde');
+            return;
+        }
+        if ($modus['user'] === (int) Auth::id() && Auth::kennwortBestaetigen(is_string($_POST['kennwort'] ?? null) ? $_POST['kennwort'] : '')) {
             BerichtService::ereignis($id, 'kundenmodus_ende');
             Kundenmodus::beenden();
             Session::regenerate();
@@ -515,15 +534,20 @@ final class BerichtController extends Controller
         }
         $fehl = Kundenmodus::fehlversuch();
         if ($fehl >= Kundenmodus::HOECHSTENS_FEHL) {
-            BerichtService::ereignis($id, 'kundenmodus_abgemeldet', ['fehlversuche' => (string) $fehl]);
-            Auth::logout();
-            Flash::warning('Zu viele falsche Kennwörter – abgemeldet. Bitte neu anmelden.');
-            $this->redirect('/login');
+            BerichtService::ereignis($id, 'kundenmodus_gebremst', ['fehlversuche' => (string) $fehl]);
+            Flash::error('Zu viele falsche Kennwörter – Entsperren erst in ' . self::dauer(Kundenmodus::wartezeit()) . ' wieder möglich.');
+            $this->redirect('/berichte/' . $id . '/kunde');
             return;
         }
         $rest = Kundenmodus::HOECHSTENS_FEHL - $fehl;
-        Flash::error('Kennwort falsch – noch ' . $rest . ($rest === 1 ? ' Versuch' : ' Versuche') . ', dann wird abgemeldet.');
+        Flash::error('Kennwort falsch – noch ' . $rest . ($rest === 1 ? ' Versuch' : ' Versuche') . ', dann wird das Entsperren gebremst.');
         $this->redirect('/berichte/' . $id . '/kunde');
+    }
+
+    private static function dauer(int $sekunden): string
+    {
+        $min = max(1, (int) ceil($sekunden / 60));
+        return $min . ($min === 1 ? ' Minute' : ' Minuten');
     }
 
     // ------------------------------------------------------------ Verwerfen, Löschen

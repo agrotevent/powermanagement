@@ -24,7 +24,14 @@ use App\Support\Zeit;
  */
 final class BerichtPdf
 {
-    public const ERZEUGER = 'pm-pdf-1';
+    /**
+     * Kennung dieses Erzeugers – bei JEDER Änderung, die die Bytes eines
+     * PDF ändert (Layout, Texte, Schreiber, Schrift), hochzählen. Die
+     * Integritätsprüfung (berichte:pruefen --pdf) wertet eine abweichende
+     * Neuerzeugung bei gleichem Erzeuger als Befund, bei einem älteren nur
+     * als Hinweis. pm-pdf-2: Konto je Unterschrift im Prüfnachweis.
+     */
+    public const ERZEUGER = 'pm-pdf-2';
 
     private const LINKS = 15.0;
     private const RECHTS = 195.0;
@@ -654,7 +661,8 @@ final class BerichtPdf
             'Schleifenimpedanz (TN): Zs ≤ f · U0 / (k · In) mit f = ' . $k($p['zs_faktor'] ?? '') . ', U0 = ' . $k($p['u0'] ?? '') . ' V; k = ' . implode(', ', $kWerte)
                 . '. Ik ≥ U0 / Zs,max. Ohne Rechenwert (NH/gG) gilt der eingetragene Grenzwert.',
             'Abschaltung durch RCD: Zs · IΔn ≤ U0.',
-            'Isolationswiderstand: ' . implode(', ', $riso) . ' Messspannung.',
+            'Isolationswiderstand: ' . implode(', ', $riso) . ' Messspannung'
+                . ((int) ($p['version'] ?? '1') >= 2 ? ' (SELV/PELV bei 250 V: ≥ 0,5 MΩ, vom Prüfer bewertet).' : '.'),
             'RCD: ' . $k($rcd['i_min'] ?? '') . ' · IΔn < IΔ ≤ ' . $k($rcd['i_max'] ?? '') . ' · IΔn; tA ≤ ' . $k($rcd['ta_max'] ?? '') . ' ms (selektiv '
                 . $k($rcd['ta_s_min'] ?? '') . '–' . $k($rcd['ta_s_max'] ?? '') . ' ms); Berührungsspannung UB ≤ UL = ' . $k($p['ul'] ?? '') . ' V.',
             'Schutzleiterwiderstand: Hinweis über ' . $k($p['rpe_hinweis'] ?? '') . ' Ω.',
@@ -675,7 +683,7 @@ final class BerichtPdf
                 $am = (string) $u['unterschrieben_am'];
                 $nachweis[] = 'Siegel ' . $wer . ((string) $u['art'] !== 'gezeichnet' ? ' (ohne Unterschrift)' : '') . ': ' . substr((string) $u['siegel'], 0, 16)
                     . ' · ' . Zeit::anzeige($am, 'Y-m-d H:i:s') . ' Ortszeit (' . (Zeit::ts($am) !== null ? gmdate('Y-m-d H:i:s', (int) Zeit::ts($am)) : '–') . ' UTC)'
-                    . ' · Schlüssel ' . preg_replace('/[^0-9a-f]/', '', (string) $u['schluessel_id']);
+                    . ' · Schlüssel ' . preg_replace('/[^0-9a-f]/', '', (string) $u['schluessel_id']) . ' · ' . $this->konto($rolle, $u);
             }
             $nachweis[] = 'Nummer ' . $this->nummer() . ', Fassung ' . (int) ($this->bericht['fassung'] ?? 1) . '. Inhalt, Unterschriften (nur als Linienzug) und Siegel sind gespeichert und lassen sich nachrechnen.';
         } else {
@@ -992,6 +1000,20 @@ final class BerichtPdf
             array_shift($zeilen);
         }
         return [['t' => implode("\n", $zeilen), 'pt' => 6.5]];
+    }
+
+    /**
+     * Das angemeldete Konto zu einer Unterschrift: beim Prüfer der beim
+     * Einfrieren festgehaltene Name des Kontos (voller Name, sonst
+     * Benutzername), beim Kunden das Konto des Geräts, an dem er
+     * unterschrieben hat – je mit Nummer des Kontos.
+     */
+    private function konto(string $rolle, array $u): string
+    {
+        $pruefer = is_array($this->i['kopf']['pruefer'] ?? null) ? $this->i['kopf']['pruefer'] : [];
+        $name = $rolle === 'pruefer' && (string) ($pruefer['konto'] ?? '') !== '' ? (string) $pruefer['konto'] : (string) ($u['username'] ?? '');
+        $id = (string) ($u['user_id'] ?? '');
+        return ($rolle === 'pruefer' ? 'Konto ' : 'am Gerät von Konto ') . self::einzeilig($name !== '' ? $name : '–') . ($id !== '' ? ' (#' . (int) $id . ')' : '');
     }
 
     /** @return array{nummer:string,fassung:string,inhalt_hash:string,abgeschlossen_am:string,grund:string}|null */

@@ -58,7 +58,7 @@ set_exception_handler(static function (\Throwable $e): void {
         echo '<pre>' . htmlspecialchars((string) $e, ENT_QUOTES) . '</pre>';
         return;
     }
-    echo View::render('errors/error', ['code' => 500, 'message' => 'Unerwarteter Fehler. Details stehen im Log.']);
+    echo View::render('errors/error', ['code' => 500, 'message' => 'Unerwarteter Fehler. Details stehen im Log.'], '');
 });
 
 // Fatale Fehler (Zeitlimit, Speichergrenze) erreichen den Handler oben
@@ -74,7 +74,7 @@ register_shutdown_function(static function (): void {
     ]);
     if (php_sapi_name() !== 'cli' && !headers_sent()) {
         http_response_code(500);
-        echo View::render('errors/error', ['code' => 500, 'message' => 'Unerwarteter Fehler. Details stehen im Log.']);
+        echo View::render('errors/error', ['code' => 500, 'message' => 'Unerwarteter Fehler. Details stehen im Log.'], '');
     }
 });
 

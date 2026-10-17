@@ -25,6 +25,15 @@ $wert = static function (array $w): string {
 };
 $jaNein = ['ja' => 'Ja', 'nein' => 'Nein', '' => '–'];
 $zeile = static fn (string $t): string => nl2br(View::e($t !== '' ? $t : '–'));
+// Wie im PDF: „RCD-Werte gemessen an Kreis N“ statt leerer Zellen, R_PE nur, wenn ein Kreis einen Wert hat.
+$nrNachZ = [];
+$mitRpe = false;
+foreach ($inhalt['kreise'] as $k) {
+    $nrNachZ[(string) $k['z']] = (string) $k['nr'];
+    if ((string) ($k['w']['rpe']['w'] ?? '') !== '') {
+        $mitRpe = true;
+    }
+}
 ?>
 <div class="bericht-ansicht">
     <div class="card">
@@ -83,21 +92,33 @@ $zeile = static fn (string $t): string => nl2br(View::e($t !== '' ? $t : '–'))
         <?php endif; ?>
         <div class="table-wrap">
             <table class="tabelle-karten">
-                <thead><tr><th>Nr.</th><th>Ort / Anlagenteil</th><th>Schutz</th><th class="num">Zs Ω</th><th class="num">R_iso MΩ</th><th class="num">IΔ mA</th>
-                    <th class="num">t_A ms</th><th class="num">U_B V</th><th>Bewertung</th></tr></thead>
+                <thead><tr><th>Nr.</th><th>Ort / Anlagenteil</th><th>Schutz</th><th class="num">Zs Ω</th><?php if ($mitRpe): ?><th class="num">R_PE Ω</th><?php endif; ?>
+                    <th class="num">R_iso MΩ</th><th class="num">IΔ mA</th><th class="num">t_A ms</th><th class="num">U_B V</th><th>Bewertung</th></tr></thead>
                 <tbody>
-                <?php if ($inhalt['kreise'] === []): ?><tr><td colspan="9" class="muted">Keine Stromkreise.</td></tr><?php endif; ?>
+                <?php if ($inhalt['kreise'] === []): ?><tr><td colspan="<?= $mitRpe ? 10 : 9 ?>" class="muted">Keine Stromkreise.</td></tr><?php endif; ?>
                 <?php foreach ($inhalt['kreise'] as $k): ?>
-                    <?php $bw = $bewertung['kreise'][(string) $k['z']] ?? null; [$kl, $tx] = Felder::bewertung((string) ($bw['auto'] ?? ''), (string) $k['pruefer']); ?>
+                    <?php
+                    $bw = $bewertung['kreise'][(string) $k['z']] ?? null;
+                    [$kl, $tx] = Felder::bewertung((string) ($bw['auto'] ?? ''), (string) $k['pruefer']);
+                    $von = (string) $k['rcd_von'];
+                    $vonNr = $von !== '' && $von !== (string) $k['z'] ? ($nrNachZ[$von] ?? null) : null;
+                    ?>
                     <tr>
                         <td data-label="Nr."><?= View::e((string) $k['nr']) ?></td>
                         <td data-label="Ort / Anlagenteil"><?= View::e((string) $k['ort']) ?><?= (string) $k['kabel'] !== '' ? '<div class="small muted">' . View::e((string) $k['kabel']) . '</div>' : '' ?></td>
                         <td data-label="Schutz" class="small"><?= View::e(Felder::schutzText($k)) ?></td>
                         <td data-label="Zs Ω" class="num"><?= View::e($wert((array) $k['w']['zs']) ?: ($wert((array) $k['w']['ik']) !== '' ? 'Ik ' . $wert((array) $k['w']['ik']) . ' A' : '')) ?></td>
+                        <?php if ($mitRpe): ?><td data-label="R_PE Ω" class="num"><?= View::e($wert((array) $k['w']['rpe'])) ?></td><?php endif; ?>
                         <td data-label="R_iso MΩ" class="num"><?= View::e($wert((array) $k['w']['riso'])) ?></td>
-                        <td data-label="IΔ mA" class="num"><?= View::e($wert((array) $k['w']['idelta'])) ?></td>
-                        <td data-label="t_A ms" class="num"><?= View::e($wert((array) $k['w']['ta'])) ?></td>
-                        <td data-label="U_B V" class="num"><?= View::e($wert((array) $k['w']['ub'])) ?></td>
+                        <?php if ($vonNr !== null): ?>
+                            <td data-label="IΔ mA" class="num small">an Kreis <?= View::e($vonNr) ?> gemessen</td>
+                            <td data-label="t_A ms" class="num">–</td>
+                            <td data-label="U_B V" class="num">–</td>
+                        <?php else: ?>
+                            <td data-label="IΔ mA" class="num"><?= View::e($wert((array) $k['w']['idelta'])) ?></td>
+                            <td data-label="t_A ms" class="num"><?= View::e($wert((array) $k['w']['ta'])) ?></td>
+                            <td data-label="U_B V" class="num"><?= View::e($wert((array) $k['w']['ub'])) ?></td>
+                        <?php endif; ?>
                         <td data-label="Bewertung"><span class="bewertung <?= View::e($kl) ?>"><?= View::e($tx) ?></span>
                             <?= (string) $k['status'] === 'nicht_gemessen' && (string) $k['grund'] !== '' ? '<div class="small muted">' . View::e((string) $k['grund']) . '</div>' : '' ?>
                             <?= (string) $k['begruendung'] !== '' ? '<div class="small muted">abweichend bewertet: ' . View::e((string) $k['begruendung']) . '</div>' : '' ?></td>

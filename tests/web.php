@@ -23,7 +23,10 @@ use App\Support\Database;
 use App\Support\Settings;
 
 $port = freierPort();
-hintergrund(['php', '-S', '127.0.0.1:' . $port, '-t', dirname(__DIR__) . '/public']);
+// Ohne app.debug zeigt der Server PHP-Meldungen nicht in der Seite, er schreibt
+// sie auf die Standardfehlerausgabe – die landet hier und wird mitgeprüft.
+$serverFehler = (string) tempnam(sys_get_temp_dir(), 'pm-web-fehler-');
+hintergrund(['php', '-S', '127.0.0.1:' . $port, '-t', dirname(__DIR__) . '/public'], null, $serverFehler);
 for ($i = 0; $i < 50 && !erreichbar('127.0.0.1', $port); $i++) {
     usleep(100_000);
 }
@@ -74,10 +77,26 @@ function anmelden(string $basis, string $name, string $kennwort): array
     return ['dose' => $dose, 'token' => token($profil['text'])];
 }
 
-/** PHP-Meldungen im ausgelieferten HTML (display_errors des eingebauten Servers). */
+/** PHP-Meldungen im ausgelieferten HTML (nur mit display_errors, also app.debug). */
 function phpMeldung(string $text): ?string
 {
     return preg_match('/<b>(Warning|Notice|Deprecated|Fatal error|Parse error)<\/b>:.*?(?=<br|$)/s', $text, $m) ? strip_tags($m[0]) : null;
+}
+
+/**
+ * PHP-Meldungen, die der Server seit dem letzten Aufruf auf die
+ * Standardfehlerausgabe geschrieben hat – dort stehen sie ohne app.debug.
+ *
+ * @return list<string>
+ */
+function serverMeldungen(string $datei): array
+{
+    static $gelesen = 0;
+    clearstatcache(true, $datei);
+    $text = (string) @file_get_contents($datei, false, null, $gelesen);
+    $gelesen += strlen($text);
+    preg_match_all('/PHP (?:Warning|Notice|Deprecated|Fatal error|Parse error):.*$/m', $text, $m);
+    return $m[0];
 }
 
 $kennung = 'pm-web-' . bin2hex(random_bytes(3));
@@ -92,6 +111,8 @@ foreach (array_keys(Einstellungen::VORGABEN) as $s) {
     $eventworxVorher[$s] = Settings::get($s);
 }
 $bSite = 0;
+// Nummernzähler der Übergabeberichte: die Prüfung vergibt Nummern im laufenden Jahr – am Ende zurück.
+$nummernVorher = array_column(Database::select('SELECT jahr, laufnr FROM bericht_nummern'), 'laufnr', 'jahr');
 
 try {
     $benutzer['admin'] = BenutzerService::anlegen($kennung . '-admin', $kennwort, 'admin', false);
@@ -129,6 +150,11 @@ try {
     foreach (['/assets/css/strom.css', '/assets/js/live.js', '/assets/js/module/karte.js', '/assets/vendor/uplot/uPlot.iife.min.js'] as $datei) {
         gleich(aufruf($basis, $leer, 'GET', $datei)['status'], 200, 'Datei ' . $datei);
     }
+    serverMeldungen($serverFehler);
+    $r = aufruf($basis, $leer, 'GET', '/gibt-es-nicht');
+    pruefe($r['status'] === 404 && substr_count($r['text'], '<!DOCTYPE') === 1 && !str_contains($r['text'], 'action="/logout"') && !str_contains($r['text'], 'href="/profil"'),
+        'ohne Anmeldung: 404 als eigenes Dokument, ohne Navigation und Abmelden');
+    gleich(serverMeldungen($serverFehler), [], 'ohne Anmeldung: 404 ohne PHP-Meldung');
 
     // ---------------------------------------------------- Admin: jede Seite
     $admin = anmelden($basis, $kennung . '-admin', $kennwort);
@@ -194,7 +220,9 @@ try {
     }
     $csv = aufruf($basis, $admin['dose'], 'GET', '/statistik/csv?zeitraum=24h');
     pruefe($csv['status'] === 200 && str_contains($csv['kopf'], 'text/csv'), 'CSV-Export');
-    gleich(aufruf($basis, $admin['dose'], 'GET', '/gibt-es-nicht')['status'], 404, 'unbekannte Adresse → 404');
+    $r = aufruf($basis, $admin['dose'], 'GET', '/gibt-es-nicht');
+    pruefe($r['status'] === 404 && substr_count($r['text'], '<!DOCTYPE') === 1 && !str_contains($r['text'], 'action="/logout"'), 'unbekannte Adresse → 404, Fehlerseite ohne Layout');
+    gleich(serverMeldungen($serverFehler), [], 'Admin: alle Seiten ohne PHP-Meldung im Fehlerprotokoll des Servers');
     gleich(aufruf($basis, $admin['dose'], 'GET', '/system/freigaben?id=0')['status'], 404, 'Freigaben ohne Benutzer → 404');
 
     // Eventworx-Karte: Token verschlüsselt, an den Host gebunden, nie in der Seite
@@ -638,10 +666,17 @@ try {
     pruefe($nachher['inhalt']['kopf']['kunde']['firma'] === $kennung . ' Kunde GmbH' && !isset($nachher['inhalt']['unbekannt'])
         && $nachher['inhalt']['kreise'][0]['w']['zs']['w'] === '0.35' && $nachher['inhalt']['kreise'][0]['objekt_id'] === (string) $bVert,
         'gespeichert: Kunde, Messwert als Dezimaltext; unbekannte Schlüssel und IDs aus dem Browser verworfen');
+    // Dieselbe Eingabe noch einmal mit dem alten Stand (die Antwort ging verloren): gespeichert, kein Konflikt.
     $r = aufruf($basis, $admin['dose'], 'POST', '/berichte/' . $bId . '/speichern', ['version' => $b['version'], 'inhalt' => json_encode($inhalt), '_token' => $admin['token']], $json);
     $j = json_decode($r['text'], true) ?? [];
+    pruefe($r['status'] === 200 && ($j['version'] ?? 0) === (int) $b['version'] + 1 && (int) Database::scalar('SELECT version FROM berichte WHERE id = ?', [$bId]) === (int) $b['version'] + 1,
+        'Autosave doppelt (Antwort verloren): 200 mit dem aktuellen Stand, nichts doppelt');
+    $anders = $inhalt;
+    $anders['kopf']['ort'] = 'Anderswo';
+    $r = aufruf($basis, $admin['dose'], 'POST', '/berichte/' . $bId . '/speichern', ['version' => $b['version'], 'inhalt' => json_encode($anders), '_token' => $admin['token']], $json);
+    $j = json_decode($r['text'], true) ?? [];
     pruefe($r['status'] === 409 && ($j['konflikt'] ?? false) === true && (int) Database::scalar('SELECT version FROM berichte WHERE id = ?', [$bId]) === (int) $b['version'] + 1,
-        'veraltete Version → 409, nichts geändert');
+        'veraltete Version mit anderem Inhalt → 409, nichts geändert');
     $r = aufruf($basis, $admin['dose'], 'POST', '/berichte/' . $bId . '/speichern', ['version' => $b['version'] + 1, 'inhalt' => '{kaputt', '_token' => $admin['token']], $json);
     gleich($r['status'], 422, 'unlesbares JSON → 422');
     $r = aufruf($basis, $admin['dose'], 'POST', '/berichte/' . $bId . '/speichern', ['version' => $b['version'] + 1, 'inhalt' => str_repeat('x', 600000), '_token' => $admin['token']], $json);
@@ -832,6 +867,13 @@ try {
                 $i['kreise'][$n]['w'][$feld] = ['op' => $op, 'w' => $w];
             }
         }
+        foreach (['besichtigung' => \App\Berichte\Katalog::besichtigung(), 'erprobung' => \App\Berichte\Katalog::erprobung()] as $teil => $katalog) {
+            foreach ($katalog as $schluessel => $punkt) {
+                if ($punkt['kurz']) {
+                    $i['punkte'][$teil][$schluessel] = 'io';
+                }
+            }
+        }
         $i['ergebnis']['entspricht'] = 'ja';
         aufruf($basis, $admin['dose'], 'POST', '/berichte/' . $id . '/speichern', ['version' => $b['version'], 'inhalt' => json_encode($i), '_token' => $admin['token']], $json);
         return json_decode(aufruf($basis, $admin['dose'], 'POST', '/berichte/' . $id . '/pruefen', ['_token' => $admin['token']], $json)['text'], true) ?? [];
@@ -909,8 +951,31 @@ try {
     gleich((int) Database::scalar('SELECT COUNT(*) FROM schaltvorgaenge WHERE user_id = ?', [$benutzer['admin']]), $schaltVorher, 'Kundenmodus: nichts geschaltet');
     gleich(aufruf($basis, $admin['dose'], 'POST', '/berichte/' . $b2Id . '/speichern', ['version' => 1, 'inhalt' => '{}', '_token' => $admin['token']], $json)['status'],
         423, 'Kundenmodus: Autosave eines anderen Berichts → 423');
+    // Auch, was es nicht gibt oder das Konto nicht darf, führt zur Kundenseite –
+    // keine Fehlerseite mit Navigation, Abmelden und Token.
+    foreach ([['GET', '/gibt-es-nicht'], ['GET', '/audit'], ['GET', '/system/benutzer'], ['GET', '/berichte/' . $b3 . '/kunde/beenden'], ['GET', '/login']] as [$m, $pfad]) {
+        $r = aufruf($basis, $admin['dose'], $m, $pfad);
+        pruefe($r['status'] === 302 && $r['ziel'] === '/berichte/' . $b3 . '/kunde' && !str_contains($r['text'], 'action="/logout"'), 'Kundenmodus: ' . $m . ' ' . $pfad . ' → Kundenseite');
+    }
+    pruefe(!str_contains($kundeSeite['text'], 'action="/logout"'), 'Kundenseite ohne Abmelden');
+    $r = aufruf($basis, $admin['dose'], 'POST', '/logout', ['_token' => $admin['token']]);
+    pruefe($r['status'] === 302 && $r['ziel'] === '/berichte/' . $b3 . '/kunde' && aufruf($basis, $admin['dose'], 'GET', '/dashboard')['ziel'] === '/berichte/' . $b3 . '/kunde',
+        'Kundenmodus: Abmelden gesperrt – die Sitzung bleibt gesperrt');
+    pruefe(str_contains((string) @file_get_contents($admin['dose']), "\tpm_kundenmodus\t"), 'Kundenmodus: Gerätecookie gesetzt');
+    // Dasselbe Gerät, neue Sitzung (Ablauf, Inaktivität) und neue Anmeldung mit dem gespeicherten Kennwort: wieder gesperrt.
+    $geraet = (string) tempnam(sys_get_temp_dir(), 'pm-web-');
+    $dosen[] = $geraet;
+    file_put_contents($geraet, "# Netscape HTTP Cookie File\n" . implode("\n", array_filter(explode("\n", (string) file_get_contents($admin['dose'])),
+        static fn (string $z): bool => str_contains($z, "\tpm_kundenmodus\t"))) . "\n");
+    $seite = aufruf($basis, $geraet, 'GET', '/login');
+    aufruf($basis, $geraet, 'POST', '/login', ['username' => $kennung . '-admin', 'password' => $kennwort, '_token' => token($seite['text'])]);
+    $r = aufruf($basis, $geraet, 'GET', '/dashboard');
+    pruefe($r['status'] === 302 && $r['ziel'] === '/berichte/' . $b3 . '/kunde', 'Kundenmodus am Gerät: nach neuer Anmeldung in diesem Browser weiter gesperrt');
     $kundeFelder = ['striche' => $striche(), 'name' => 'Kim Kunde', 'funktion' => 'Produktion', 'ort' => 'Musterstadt', 'vorbehalte' => '',
-        'anfrage' => bin2hex(random_bytes(16)), 'geraet_am' => gmdate('c'), '_token' => $admin['token']];
+        'anfrage' => bin2hex(random_bytes(16)), 'geraet_am' => gmdate('c'), '_token' => $admin['token'], 'inhalt_hash' => (string) BerichtService::find($b3)['inhalt_hash']];
+    $r = aufruf($basis, $admin['dose'], 'POST', '/berichte/' . $b3 . '/kunde/unterschreiben', ['inhalt_hash' => str_repeat('0', 64)] + $kundeFelder + ['bestaetigungen' => ['erhalten']], $json);
+    pruefe($r['status'] === 409 && BerichtService::find($b3)['status'] === 'geprueft', 'Kunde hat einen anderen Stand gesehen → 409, nichts gespeichert');
+    pruefe(str_contains($kundeSeite['text'], 'data-inhalt-hash="' . BerichtService::find($b3)['inhalt_hash'] . '"'), 'Kundenseite trägt den angezeigten Stand');
     $r = aufruf($basis, $admin['dose'], 'POST', '/berichte/' . $b3 . '/kunde/unterschreiben', $kundeFelder + ['bestaetigungen' => ['eingewiesen']], $json);
     pruefe($r['status'] === 422 && BerichtService::find($b3)['status'] === 'geprueft', 'Kunde ohne „Bericht erhalten“ → 422');
     $mit = $kundeFelder + ['bestaetigungen' => ['erhalten', 'uebernommen']];
@@ -972,13 +1037,18 @@ try {
     for ($n = 1; $n <= 5; $n++) {
         $r = aufruf($basis, $admin['dose'], 'POST', '/berichte/' . $b4 . '/kunde/beenden', ['kennwort' => 'falsch-' . $n, '_token' => $admin['token']]);
     }
-    pruefe($r['status'] === 302 && $r['ziel'] === '/login' && str_starts_with((string) aufruf($basis, $admin['dose'], 'GET', '/dashboard')['ziel'], '/login'),
-        'fünf falsche Kennwörter → abgemeldet');
+    pruefe($r['status'] === 302 && $r['ziel'] === '/berichte/' . $b4 . '/kunde' && aufruf($basis, $admin['dose'], 'GET', '/dashboard')['ziel'] === '/berichte/' . $b4 . '/kunde',
+        'fünf falsche Kennwörter → nicht abgemeldet, weiter gesperrt');
+    $r = aufruf($basis, $admin['dose'], 'POST', '/berichte/' . $b4 . '/kunde/beenden', ['kennwort' => $kennwort, '_token' => $admin['token']]);
+    pruefe($r['ziel'] === '/berichte/' . $b4 . '/kunde' && aufruf($basis, $admin['dose'], 'GET', '/dashboard')['ziel'] === '/berichte/' . $b4 . '/kunde',
+        'in der Wartezeit entsperrt auch das richtige Kennwort nicht');
+    pruefe(str_contains(aufruf($basis, $admin['dose'], 'GET', '/berichte/' . $b4 . '/kunde')['text'], 'Entsperren erst in'), 'Kundenseite nennt die Wartezeit');
     pruefe(Database::scalar('SELECT locked_until FROM users WHERE id = ?', [$benutzer['admin']]) === null, 'Konto nach fünf Fehlversuchen nicht gesperrt');
-    pruefe(in_array('kundenmodus_abgemeldet', array_column(BerichtService::ereignisse($b4), 'ereignis'), true), 'Ereignis „kundenmodus_abgemeldet“');
+    pruefe(in_array('kundenmodus_gebremst', array_column(BerichtService::ereignisse($b4), 'ereignis'), true), 'Ereignis „kundenmodus_gebremst“');
+    // Ein anderes Gerät (ohne Gerätecookie) ist nicht gesperrt.
     $admin = anmelden($basis, $kennung . '-admin', $kennwort);
     $dosen[] = $admin['dose'];
-    gleich(aufruf($basis, $admin['dose'], 'GET', '/dashboard')['status'], 200, 'neu angemeldet: ohne Kundenmodus');
+    gleich(aufruf($basis, $admin['dose'], 'GET', '/dashboard')['status'], 200, 'anderes Gerät, neu angemeldet: ohne Kundenmodus');
     $r = aufruf($basis, $admin['dose'], 'POST', '/berichte/' . $b4 . '/ohne-kunde', ['art' => 'verweigert', 'grund' => 'Kunde verweigert die Unterschrift', '_token' => $admin['token']]);
     pruefe($r['status'] === 302 && BerichtService::find($b4)['status'] === 'abgeschlossen', 'ohne Kunde abgeschlossen');
     $r = aufruf($basis, $admin['dose'], 'GET', '/berichte/' . $b4);
@@ -995,6 +1065,7 @@ try {
         'Formular der Korrektur nennt Fassung und Grund');
     $r = aufruf($basis, $admin['dose'], 'GET', '/berichte/' . $b3);
     pruefe(str_contains($r['text'], 'Eine Korrektur ist in Arbeit') && !str_contains($r['text'], 'action="/berichte/' . $b3 . '/korrektur"'), 'Vorgänger: Hinweis auf die offene Korrektur');
+    gleich(serverMeldungen($serverFehler), [], 'keine PHP-Meldung im Fehlerprotokoll des Servers');
 } finally {
     Settings::vergessen();
     foreach ($eventworxVorher as $s => $wert) {
@@ -1019,10 +1090,18 @@ try {
     }
     foreach ($benutzer as $id) {
         foreach (Database::select('SELECT id FROM berichte WHERE erstellt_von = ?', [$id]) as $b) {
-            foreach (['bericht_unterschriften', 'bericht_pdf', 'bericht_objekte', 'bericht_ereignisse'] as $tabelle) {
+            foreach (['bericht_unterschriften', 'bericht_pdf', 'bericht_objekte', 'bericht_ereignisse', 'kundenmodus_geraete'] as $tabelle) {
                 Database::execute("DELETE FROM {$tabelle} WHERE bericht_id = ?", [(int) $b['id']]);
             }
             Database::delete('berichte', (int) $b['id']);
+        }
+        Database::execute('DELETE FROM kundenmodus_geraete WHERE user_id = ?', [$id]);
+    }
+    foreach (Database::select('SELECT jahr, laufnr FROM bericht_nummern') as $z) {
+        if (!array_key_exists($z['jahr'], $nummernVorher)) {
+            Database::execute('DELETE FROM bericht_nummern WHERE jahr = ?', [$z['jahr']]);
+        } elseif ((int) $nummernVorher[$z['jahr']] !== (int) $z['laufnr']) {
+            Database::execute('UPDATE bericht_nummern SET laufnr = ? WHERE jahr = ?', [(int) $nummernVorher[$z['jahr']], $z['jahr']]);
         }
     }
     Database::execute('DELETE FROM pruefgeraete WHERE fabrikat LIKE ?', [$kennung . '%']);
@@ -1042,5 +1121,6 @@ try {
         @unlink($d);
     }
 }
+@unlink($serverFehler);
 
 ende('web');

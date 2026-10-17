@@ -36,8 +36,11 @@ final class Einstellungen
         'berichte.erde_generator'     => '50',
         'berichte.rpe_hinweis'        => '1.0',
         'berichte.bereitschaft'       => '',
+        // Nur, was die Unterschrift sicher belegt: den Erhalt. Einweisung und
+        // Übernahme sind eigene, freiwillige Häkchen – der Text darf sie nicht
+        // für den Kunden mitbestätigen.
         'berichte.text_kunde'         => 'Abnahme-/Dokumentbestätigung – es wird nicht der prüftechnische Inhalt bestätigt. '
-            . 'Mit der Unterschrift bestätigt der Kunde, den Bericht erhalten und die Anlage übernommen zu haben.',
+            . 'Mit der Unterschrift bestätigt der Kunde den Erhalt des Berichts; Einweisung und Übernahme ergeben sich aus den angekreuzten Feldern.',
         'berichte.text_einweisung'    => 'Einweisung erhalten: Hauptschalter/Not-Aus, RCD-Prüftaste arbeitstäglich betätigen, '
             . 'Verhalten bei Auslösung (nicht wiederholt einschalten, Elektrofachkraft rufen), keine Eingriffe durch Laien, Bereitschaft {telefon}.',
         'berichte.text_errichter'     => 'Der Errichter bestätigt, dass die oben bezeichnete Anlage den Bestimmungen der DGUV Vorschrift 3 '

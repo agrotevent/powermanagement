@@ -97,7 +97,7 @@ $muster = static function (int $anzahl, array $aend = []) use ($striche): array 
     $i['kopf']['kunde'] = ['firma' => 'Muster <script>(a)\\b GmbH', 'anschrift' => "Äußere Straße 12\n12345 Musterstadt", 'kundennummer' => 'K-77',
         'ansprechpartner' => 'Erika Musterfrau', 'telefon' => '0123 456789', 'email' => 'erika@example.org', 'quelle' => 'freitext'];
     $i['kopf']['anlage'] = ['bezeichnung' => 'Generator 100 kVA und Verteiler „Bühne“', 'details' => 'Inventar PD-12', 'aufstellort' => 'Nordwiese, hinter der Bühne'];
-    $i['kopf']['pruefer'] = ['user_id' => '3', 'name' => 'Tom Technik', 'qualifikation' => 'Elektrofachkraft für Veranstaltungstechnik'];
+    $i['kopf']['pruefer'] = ['user_id' => '3', 'name' => 'Tom Technik', 'qualifikation' => 'Elektrofachkraft für Veranstaltungstechnik', 'konto' => 'Tom Technik'];
     $i['kopf']['qualifikation'] = 'Elektrofachkraft für Veranstaltungstechnik';
     $i['netz'] = ['einspeisung' => 'generator', 'spannung' => '400', 'frequenz' => '50', 'form' => 'TN-S', 'erder' => 'Staberder', 'u_ln' => '231', 'drehfeld' => 'rechts'];
     $i['grundlage'] = ['normen' => ['0100-600', '0100-711', 'dguv-v3'], 'sonstige' => '', 'grund' => 'aufbau'];
@@ -170,10 +170,10 @@ $muster = static function (int $anzahl, array $aend = []) use ($striche): array 
     $unterschriften = [
         'pruefer' => ['rolle' => 'pruefer', 'art' => 'gezeichnet', 'name' => 'Tom Technik', 'funktion' => 'Elektrofachkraft für Veranstaltungstechnik',
             'ort' => 'Musterstadt', 'striche' => $striche(0), 'angaben' => [], 'unterschrieben_am' => '2026-08-14T10:02:00+00:00',
-            'siegel' => hash('sha256', 'siegel-p'), 'schluessel_id' => 'ab12cd34', 'username' => 'technik'],
+            'siegel' => hash('sha256', 'siegel-p'), 'schluessel_id' => 'ab12cd34', 'username' => 'technik', 'user_id' => '3'],
         'kunde' => ['rolle' => 'kunde', 'art' => 'gezeichnet', 'name' => 'Kim Kunde', 'funktion' => 'Produktionsleitung', 'ort' => 'Musterstadt',
             'striche' => $striche(900), 'angaben' => ['bestaetigungen' => ['erhalten', 'eingewiesen'], 'vorbehalte' => 'Kabelbrücke folgt.'],
-            'unterschrieben_am' => '2026-08-14T10:20:00+00:00', 'siegel' => hash('sha256', 'siegel-k'), 'schluessel_id' => 'ab12cd34', 'username' => 'technik'],
+            'unterschrieben_am' => '2026-08-14T10:20:00+00:00', 'siegel' => hash('sha256', 'siegel-k'), 'schluessel_id' => 'ab12cd34', 'username' => 'technik', 'user_id' => '3'],
     ];
     return [$bericht, $unterschriften];
 };
@@ -257,7 +257,8 @@ try {
         'Angewandte Grenzwerte und Prüfnachweis', 'Prüfsumme des eingefrorenen Inhalts (SHA-256): ' . $bericht['inhalt_hash'],
         'Ohne Rechenwert', 'Kabelbrücke am Fluchtweg fehlt', 'Errichterbestätigung', 'Übergabe an den Kunden', 'Kim Kunde', 'Vorbehalte des Kunden: Kabelbrücke folgt.',
         'Ort, Datum: Musterstadt, ' . Zeit::anzeige('2026-08-14T10:20:00+00:00'), 'Die elektrische Anlage entspricht den anerkannten Regeln der Elektrotechnik',
-        'Blatt ' . $seiten . ' von ' . $seiten, 'Ω Δ ≤ ≥ µ ² – „Anführung“', 'Einzelwerte im Messprotokoll, Blatt'] as $soll) {
+        'Blatt ' . $seiten . ' von ' . $seiten, 'Ω Δ ≤ ≥ µ ² – „Anführung“', 'Einzelwerte im Messprotokoll, Blatt',
+        'Konto Tom Technik (#3)', 'am Gerät von Konto technik (#3)', 'SELV/PELV bei 250 V'] as $soll) {
         pruefe(str_contains($alles, $soll), 'Text: ' . $soll);
     }
     pruefe(str_contains($alles, 'Kabel über Fluchtweg ohne Kabelbrücke ?') && !str_contains($alles, '😀'), 'Emoji wird „?“');

@@ -9,6 +9,12 @@
  * lädt die Seite neu und zeigt „Bitte geben Sie das Gerät zurück“.
  *
  * Ein Autosave gibt es hier nicht. Texte aus Antworten nur per textContent.
+ *
+ * Beim Laden meldet die Seite allen anderen Tabs dieses Browsers, dass der
+ * Kundenmodus läuft (BroadcastChannel, ersatzweise localStorage) – app.js
+ * leert dort die Seite und geht zur Kundenseite. Mit der Unterschrift geht
+ * der Stand mit, den der Kunde gelesen hat (inhalt_hash); hat er sich
+ * inzwischen geändert, speichert der Server nichts.
  */
 (function () {
     'use strict';
@@ -17,6 +23,18 @@
     if (!wurzel || !window.PMUnterschrift) { return; }
     var berichtId = wurzel.dataset.kunde;
     var ADRESSE = '/berichte/' + berichtId + '/kunde';
+    var ZEIT = 30000;
+
+    // Andere Tabs sperren (dort steht womöglich ein anderer Bericht mit Kundendaten).
+    try {
+        if (typeof window.BroadcastChannel === 'function') {
+            var kanal = new window.BroadcastChannel('pm-kundenmodus');
+            kanal.postMessage({ bericht: berichtId });
+            kanal.close();
+        }
+    } catch (e) { /* ohne BroadcastChannel: localStorage */ }
+    try { window.localStorage.setItem('pm-kundenmodus', JSON.stringify({ bericht: berichtId, zeit: Date.now() })); } catch (e) { /* privat */ }
+
     var SCHLUESSEL = 'kunde:' + berichtId;
     var meldung = wurzel.querySelector('[data-kunde-meldung]');
     var weiter = wurzel.querySelector('[data-kunde-weiter]');
@@ -43,7 +61,11 @@
         window.setTimeout(function () { window.location.href = ADRESSE; }, 900);
     }
 
-    var unterschrift = window.PMUnterschrift.dialog(dlg, { senden: senden });
+    var laufend = null;
+    var unterschrift = window.PMUnterschrift.dialog(dlg, {
+        senden: senden,
+        abbrechen: function () { if (laufend && laufend.abbrechen) { laufend.abbrechen(); } }
+    });
 
     wurzel.addEventListener('change', function (e) {
         if (e.target.matches && e.target.matches('[data-bestaetigung][data-pflicht]') && e.target.checked) { zeigen('', false); }
@@ -72,15 +94,15 @@
         bestaetigungen().forEach(function (b) { daten.append('bestaetigungen[]', b); });
         daten.append('anfrage', window.PMUnterschrift.schluessel(SCHLUESSEL));
         daten.append('geraet_am', new Date().toISOString());
+        daten.append('inhalt_hash', wurzel.dataset.inhaltHash || '');
 
         unterschrift.laeuft(true);
         unterschrift.meldung('wird gesendet …', false);
-        fetch(ADRESSE + '/unterschreiben', { method: 'POST', body: daten, credentials: 'same-origin', headers: { 'Accept': 'application/json' } })
-            .then(function (antwort) {
-                return antwort.json().then(function (erg) { return { status: antwort.status, erg: erg || {} }; },
-                    function () { return { status: antwort.status, erg: { ok: false, message: 'Unerwartete Antwort (' + antwort.status + ').' } }; });
-            }, function () { return { status: 0, erg: { ok: false, message: 'Keine Verbindung zum Server.' } }; })
+        laufend = window.PMNetz.post(ADRESSE + '/unterschreiben', daten, ZEIT);
+        laufend
+            .then(function (r) { return r; }, function () { return { status: 0, erg: { ok: false, message: 'Keine Verbindung zum Server.' } }; })
             .then(function (r) {
+                laufend = null;
                 if (r.status === 200 && r.erg.ok) {
                     window.PMUnterschrift.schluesselLoeschen(SCHLUESSEL);
                     neuLaden('Vielen Dank – unterschrieben.');

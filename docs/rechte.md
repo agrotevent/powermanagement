@@ -199,7 +199,10 @@ Standort Anlagen anlegen darf. Verlauf und CSV brauchen wie sonst
 **Sehen ist nicht ändern** gilt auch hier: Wer einen Standort nur sieht,
 sieht dort (im Datenzeitraum) abgeschlossene Berichte, aber keine Entwürfe,
 und kann nichts ausfüllen oder unterschreiben. Ein Bericht ohne Standort gehört dem, der ihn
-angelegt hat (und wer „alle Standorte“ hat). Wer „alle Standorte“ hat, sieht
+angelegt hat (und wer „alle Standorte“ hat). Wird ein Standort gelöscht,
+bleiben seine Berichte – sichtbar dann **nur noch mit „alle Standorte“**,
+auch nicht mehr für den, der sie angelegt hat (seine Freigabe für den
+Standort ist mit ihm weg). Wer „alle Standorte“ hat, sieht
 und ändert Berichte überall – Freigaben braucht er dafür nicht.
 
 **Kunden zeigen.** Die Rolle *Kunde / Veranstalter* hat das Recht nicht:

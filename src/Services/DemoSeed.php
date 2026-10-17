@@ -28,7 +28,8 @@ final class DemoSeed
     public static function anlegen(bool $zuruecksetzen): string
     {
         if ($zuruecksetzen) {
-            foreach (['bericht_ereignisse', 'bericht_pdf', 'bericht_unterschriften', 'bericht_objekte', 'berichte', 'pruefgeraete',
+            // Mit allen Berichten auch die Nummernzähler: die Demo beginnt wieder bei …-0001.
+            foreach (['bericht_ereignisse', 'bericht_pdf', 'bericht_unterschriften', 'bericht_objekte', 'berichte', 'bericht_nummern', 'kundenmodus_geraete', 'pruefgeraete',
                 'aufbau_posten', 'aufbauten', 'einsaetze', 'inventar_messgeraete', 'inventar', 'bereich_mitglieder', 'bereiche', 'leitungen', 'messpunkte', 'anschluesse', 'schutzorgane', 'objekte', 'datenquellen', 'freigaben', 'floors', 'sites', 'schaltvorgaenge', 'mqtt_zugaenge'] as $tabelle) {
                 Database::execute('DELETE FROM ' . $tabelle);
             }
@@ -470,12 +471,13 @@ final class DemoSeed
             // Kreis 3 (Grill-Truck, 108 m Kabel): Zs 0,90 Ω an C63 – abgeschaltet wird über den RCD.
             $i['kreise'] = $messen($i['kreise'], 0, count($i['kreise']), [1 => '0.35', 2 => '0.90', 3 => '0.58']);
             $i['ergebnis'] = ['entspricht' => 'ja', 'maengelfrei' => 'ja', 'instand_bis' => '', 'plakette' => 'ja', 'plakette_nr' => 'P-2026-0117',
-                'naechste' => 'bei jedem Neuaufbau, nach Änderung oder Instandsetzung', 'errichter' => '1'];
+                'naechste' => \App\Berichte\BerichtSchema::NAECHSTE, 'errichter' => '1'];
             $i['bemerkungen'] = 'Prüfung nach dem Aufbau im Beisein des Kunden. Abgang X1 (Powerlock) nicht belegt.';
             $speichern($id, $i);
             $unterschreiben($id, $striche('pruefer'));
             $r = BerichtService::kundeUnterschreiben($id, ['striche' => $striche('kunde'), 'name' => 'Max Mustermann', 'funktion' => 'Produktionsleitung',
-                'ort' => 'Musterstadt', 'bestaetigungen' => ['erhalten', 'eingewiesen', 'uebernommen'], 'vorbehalte' => '', 'anfrage' => $anfrage()]);
+                'ort' => 'Musterstadt', 'bestaetigungen' => ['erhalten', 'eingewiesen', 'uebernommen'], 'vorbehalte' => '', 'anfrage' => $anfrage(),
+                'inhalt_hash' => (string) BerichtService::find($id)['inhalt_hash']]);
             if (!$r['ok']) {
                 throw new \RuntimeException('Demo-Bericht: ' . $r['message']);
             }
@@ -493,7 +495,7 @@ final class DemoSeed
             $i['messung']['geraete'] = [(string) $fluke];
             $i['kreise'] = $messen($i['kreise'], 0, count($i['kreise']));
             $i['ergebnis'] = ['entspricht' => 'ja', 'maengelfrei' => 'ja', 'instand_bis' => '', 'plakette' => 'nein', 'plakette_nr' => '',
-                'naechste' => 'bei jedem Neuaufbau, nach Änderung oder Instandsetzung', 'errichter' => '1'];
+                'naechste' => \App\Berichte\BerichtSchema::NAECHSTE, 'errichter' => '1'];
             $speichern($id, $i);
             $unterschreiben($id, $striche('pruefer', 37));
 

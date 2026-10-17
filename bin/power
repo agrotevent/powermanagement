@@ -550,10 +550,14 @@ switch ($befehl) {
             $aus(count($faellig) . ' über der Aufbewahrungsfrist. Löschen (Bericht, Unterschriften, PDF, Lebenslauf) mit --ausfuehren.');
             break;
         }
+        // Je Nummer alle Fassungen gemeinsam (faellig() nennt nur ganze Familien).
+        $geloescht = [];
         foreach ($faellig as $b) {
-            BerichtService::aufbewahrungLoeschen((int) $b['id']);
+            if (!in_array((int) $b['id'], $geloescht, true)) {
+                $geloescht = array_merge($geloescht, BerichtService::aufbewahrungLoeschen((int) $b['id']));
+            }
         }
-        $aus(count($faellig) . ' gelöscht.');
+        $aus(count($geloescht) . ' gelöscht.');
         break;
 
     case 'eventworx:pruefen':

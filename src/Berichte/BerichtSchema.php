@@ -33,6 +33,14 @@ final class BerichtSchema
     /** Je Kreis: nur vom Server (Vorbelegung), nie aus dem Browser. */
     public const SERVER_FELDER = ['objekt_id', 'anschluss_id', 'inventar_id', 'abgang'];
 
+    /**
+     * Vorgabe „Nächster Prüftermin“: nichtstationäre Anlagen – Event- und
+     * Filmstrom – prüft man bei jedem Aufbau und nach Änderungen; läuft eine
+     * Anlage länger, verlangt die DGUV Vorschrift 3 (Durchführungsanweisung,
+     * Tab. 1A) die Wirksamkeit der RCD monatlich.
+     */
+    public const NAECHSTE = 'bei jedem Neuaufbau, nach Änderung oder Instandsetzung; bei längerem Betrieb spätestens nach 1 Monat (Wirksamkeit der RCD, DGUV V3 DA Tab. 1A)';
+
     /** Zeilenschlüssel: ein Buchstabe vorweg, damit er nie als Zahl gelesen wird. */
     public const ZEILE = '/^[a-z][a-z0-9]{5,15}$/';
 
@@ -69,7 +77,7 @@ final class BerichtSchema
             'maengel'     => [],
             'bemerkungen' => '',
             'ergebnis'    => ['entspricht' => '', 'maengelfrei' => '', 'instand_bis' => '', 'plakette' => '', 'plakette_nr' => '',
-                'naechste' => 'bei jedem Neuaufbau, nach Änderung oder Instandsetzung', 'errichter' => '0'],
+                'naechste' => self::NAECHSTE, 'errichter' => '0'],
             'anhang'      => ['thermographie' => '', 'weitere' => ''],
             'abschluss'   => ['warnungen_bestaetigt' => []],
             'grenzwerte'  => [],

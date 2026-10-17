@@ -12,7 +12,10 @@
  *   var d = PMUnterschrift.dialog(dialogElement, { senden: function (werte) { … } });  // Vollbild-Dialog
  *
  * Eingabe über Pointer Events mit setPointerCapture; wurde einmal ein Stift
- * erkannt, zählt kein Finger mehr (Handballen auf dem Tablet). Die Striche
+ * erkannt, zählt kein Finger mehr (Handballen auf dem Tablet). Liegt der
+ * Handballen schon auf, wenn der Stift kommt, wird sein Strich verworfen und
+ * der Stift zeichnet. Aufgenommen wird höchstens, was der Server annimmt
+ * (Punkte und Bytes, Unterschrift::MAX_PUNKTE/MAX_BYTES). Die Striche
  * liegen als Vektoren vor und werden nach Größenänderung und Drehung neu
  * gezeichnet – geglättet über quadratische Kurven durch die Mittelpunkte.
  *
@@ -27,6 +30,9 @@
     var MIN_ABSTAND = 20;
     var MAX_STRICHE = 200;
     var MAX_PUNKTE = 6000;
+    /** Wie Unterschrift::MAX_BYTES – mit etwas Rand für die Klammern. */
+    var MAX_BYTES = 65536;
+    var BYTES_RAND = 64;
     var MIN_BREITE = 1000;
     var MIN_HOEHE = 500;
     var MIN_LAENGE = 3000;
@@ -47,9 +53,25 @@
         var striche = [];
         var punkte = 0;
         var aktiv = null;       // pointerId des laufenden Strichs
+        var aktivArt = '';      // pointerType des laufenden Strichs
         var strich = null;
         var stift = false;      // einmal Stift erkannt: Finger zählen nicht mehr
         var geplant = false;
+        var bytes = 8;          // Länge von JSON.stringify({ s: striche }), laufend mitgezählt
+
+        /** So viele Bytes kostet ein Punkt im JSON („[x,y]“ und das Komma davor). */
+        function punktBytes(p) { return String(p[0]).length + String(p[1]).length + 4; }
+
+        function neuZaehlen() {
+            bytes = 8;
+            punkte = 0;
+            striche.forEach(function (s) {
+                bytes += 3;
+                s.forEach(function (p) { bytes += punktBytes(p); punkte++; });
+            });
+        }
+
+        function platz(p) { return punkte < MAX_PUNKTE && bytes + punktBytes(p) <= MAX_BYTES - BYTES_RAND; }
 
         function geaendert() {
             element.classList.toggle('hat-striche', striche.length > 0);
@@ -117,15 +139,27 @@
         }
 
         canvas.addEventListener('pointerdown', function (e) {
-            if (aktiv !== null || !zaehlt(e) || striche.length >= MAX_STRICHE || punkte >= MAX_PUNKTE) { return; }
+            if (e.pointerType === 'pen' && aktiv !== null && aktivArt === 'touch') {
+                // Der Handballen lag zuerst auf: sein Strich fällt weg, der Stift zeichnet.
+                var i = striche.indexOf(strich);
+                if (i !== -1) { striche.splice(i, 1); }
+                try { canvas.releasePointerCapture(aktiv); } catch (x) { /* schon frei */ }
+                aktiv = null;
+                aktivArt = '';
+                strich = null;
+                neuZaehlen();
+            }
+            if (aktiv !== null || !zaehlt(e) || striche.length >= MAX_STRICHE) { return; }
             var p = punkt(e);
-            if (!p) { return; }
+            if (!p || !platz(p)) { return; }
             e.preventDefault();
             aktiv = e.pointerId;
+            aktivArt = e.pointerType;
             try { canvas.setPointerCapture(e.pointerId); } catch (x) { /* ältere Browser */ }
             strich = [p];
             striche.push(strich);
             punkte++;
+            bytes += 3 + punktBytes(p);
             planen();
         });
 
@@ -135,11 +169,11 @@
             var liste = typeof e.getCoalescedEvents === 'function' ? e.getCoalescedEvents() : [];
             if (liste.length === 0) { liste = [e]; }
             liste.forEach(function (ev) {
-                if (punkte >= MAX_PUNKTE) { return; }
                 var p = punkt(ev);
-                if (p && abstand(p, strich[strich.length - 1]) >= MIN_ABSTAND) {
+                if (p && abstand(p, strich[strich.length - 1]) >= MIN_ABSTAND && platz(p)) {
                     strich.push(p);
                     punkte++;
+                    bytes += punktBytes(p);
                 }
             });
             planen();
@@ -148,6 +182,7 @@
         function ende(e) {
             if (e.pointerId !== aktiv) { return; }
             aktiv = null;
+            aktivArt = '';
             strich = null;
             try { canvas.releasePointerCapture(e.pointerId); } catch (x) { /* schon frei */ }
             planen();
@@ -177,13 +212,14 @@
                         if (i > 0) { laenge += abstand(p, s[i - 1]); }
                     });
                 });
-                return maxX - minX >= MIN_BREITE && maxY - minY >= MIN_HOEHE && laenge >= MIN_LAENGE;
+                return maxX - minX >= MIN_BREITE && maxY - minY >= MIN_HOEHE && laenge >= MIN_LAENGE
+                    && JSON.stringify({ s: striche }).length <= MAX_BYTES;
             },
             daten: function () { return JSON.stringify({ s: striche }); },
-            loeschen: function () { striche = []; punkte = 0; planen(); geaendert(); },
+            loeschen: function () { striche = []; neuZaehlen(); planen(); geaendert(); },
             rueckgaengig: function () {
-                var weg = striche.pop();
-                if (weg) { punkte -= weg.length; }
+                striche.pop();
+                neuZaehlen();
                 planen();
                 geaendert();
             },
@@ -245,7 +281,17 @@
         el.addEventListener('input', aktualisieren);
         el.addEventListener('click', function (e) {
             var k = e.target.closest ? e.target.closest('button') : null;
-            if (!k || laeuft) { return; }
+            if (!k) { return; }
+            if (laeuft && k.hasAttribute('data-dialog-zu')) {
+                // Abbrechen geht immer: die laufende Anfrage abbrechen und schließen.
+                // Ein Neuversuch sendet denselben Idempotenzschlüssel – nichts doppelt.
+                if (typeof o.abbrechen === 'function') { o.abbrechen(); }
+                laeuft = false;
+                aktualisieren();
+                schliessen();
+                return;
+            }
+            if (laeuft) { return; }
             if (k.hasAttribute('data-unterschrift-zurueck')) { pad.rueckgaengig(); }
             if (k.hasAttribute('data-unterschrift-loeschen')) { pad.loeschen(); }
             if (k.hasAttribute('data-dialog-zu')) { schliessen(); }

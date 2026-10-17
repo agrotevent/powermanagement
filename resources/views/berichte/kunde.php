@@ -19,15 +19,20 @@ $bst = Katalog::inReihenfolge(is_array($inhalt['labels']['bestaetigungen'] ?? nu
     : array_map(static fn (array $x): string => $x['text'], Katalog::bestaetigungen()), Katalog::bestaetigungen());
 $fertig = isset($unterschriften['kunde']);
 $offen = $b['status'] === 'geprueft' && !$fertig;
-$pruefer = (string) ($kopf['pruefer']['name'] ?? $prueferName);
+// Zurück an den, der den Kundenmodus gestartet hat – nur sein Kennwort entsperrt
+// (nicht unbedingt der unterschreibende Prüfer). Ohne vollen Namen kein
+// Benutzername auf dem Bildschirm des Kunden.
+$prueferName = trim((string) $prueferName);
+$zurueckAn = $prueferName !== '' ? $prueferName : 'den Prüfer';
+$kennwortVon = $prueferName !== '' ? 'Kennwort von ' . $prueferName : 'Kennwort des Prüfers';
 $datum = static fn (string $d): string => preg_match('/^(\d{4})-(\d{2})-(\d{2})$/', $d, $m) === 1 ? $m[3] . '.' . $m[2] . '.' . $m[1] : $d;
 ?>
-<div class="kunde" data-kunde="<?= $id ?>">
+<div class="kunde" data-kunde="<?= $id ?>" data-inhalt-hash="<?= View::e((string) $b['inhalt_hash']) ?>">
     <?php if ($fertig): ?>
         <section class="card kunde-fertig">
             <div class="card-body">
                 <h1>Vielen Dank!</h1>
-                <p class="kunde-gross">Bitte geben Sie das Gerät an <strong><?= View::e($pruefer) ?></strong> zurück.</p>
+                <p class="kunde-gross">Bitte geben Sie das Gerät an <strong><?= View::e($zurueckAn) ?></strong> zurück.</p>
                 <p class="small muted">Der Bericht <?= View::e((string) $b['nummer']) ?> ist abgeschlossen. Sie erhalten ihn als PDF.</p>
                 <p><a class="btn" href="/berichte/<?= $id ?>/pdf" target="_blank" rel="noopener">Bericht als PDF ansehen</a></p>
             </div>
@@ -41,7 +46,7 @@ $datum = static fn (string $d): string => preg_match('/^(\d{4})-(\d{2})-(\d{2})$
             <p><a class="btn" href="/berichte/<?= $id ?>/pdf" target="_blank" rel="noopener">Als PDF ansehen</a>
                 <span class="small muted">Vorschau – das endgültige PDF entsteht mit Ihrer Bestätigung.</span></p>
         <?php else: ?>
-            <p class="notice warn">Dieser Bericht ist nicht zur Unterschrift offen – bitte das Gerät an <?= View::e($pruefer) ?> zurückgeben.</p>
+            <p class="notice warn">Dieser Bericht ist nicht zur Unterschrift offen – bitte das Gerät an <?= View::e($zurueckAn) ?> zurückgeben.</p>
         <?php endif; ?>
     <?php endif; ?>
 
@@ -93,11 +98,11 @@ $datum = static fn (string $d): string => preg_match('/^(\d{4})-(\d{2})-(\d{2})$
             <form method="post" action="/berichte/<?= $id ?>/kunde/beenden" class="inline-form">
                 <?= Csrf::field() ?>
                 <?php /* new-password: kein automatisches Ausfüllen des gespeicherten Kennworts – sonst entsperrte ein Tipp des Kunden das Gerät. */ ?>
-                <input type="password" name="kennwort" required autocomplete="new-password" aria-label="Kennwort von <?= View::e($prueferName) ?>"
-                       placeholder="Kennwort von <?= View::e($prueferName) ?>">
+                <input type="password" name="kennwort" required autocomplete="new-password" aria-label="<?= View::e($kennwortVon) ?>"
+                       placeholder="<?= View::e($kennwortVon) ?>">
                 <button class="btn" type="submit">Entsperren</button>
             </form>
-            <p class="small muted mb0">Nach <?= \App\Berichte\Kundenmodus::HOECHSTENS_FEHL ?> falschen Versuchen wird abgemeldet.</p>
+            <p class="small muted mb0">Nach <?= \App\Berichte\Kundenmodus::HOECHSTENS_FEHL ?> falschen Versuchen wird das Entsperren für einige Minuten gebremst.</p>
         </div>
     </details>
 </div>

@@ -69,18 +69,30 @@ Eingabe, spätestens alle 20 Sekunden und beim Verlassen der Seite. Rechts in
 der Leiste steht „gespeichert 14:32“. Zusätzlich liegt eine Kopie im
 Browser des Geräts. Bricht das Netz weg, geht nichts verloren: Beim
 nächsten Öffnen wird sie gesendet, wenn sie auf dem aktuellen Stand
-aufsetzt, sonst fragt die Seite *Übernehmen / Verwerfen*.
+aufsetzt, sonst fragt die Seite *Übernehmen / Verwerfen*. Solange diese
+Frage offen ist, sichert die Seite den laufenden Stand getrennt davon; „auf
+dem Gerät gesichert“ steht nur da, wenn das Sichern geklappt hat – sonst
+eine Warnung, die Seite offen zu lassen.
+
+Jede Anfrage hat eine **Zeitgrenze** (Speichern 15 s, Unterschrift 30 s);
+eine hängende Verbindung blockiert also nichts, und *Abbrechen* im
+Unterschriftsdialog geht immer. Kam ein Speichern an, nur die Antwort
+nicht, geht dieselbe Eingabe beim nächsten Mal noch einmal hinaus – der
+Server erkennt sie (gleicher Inhalt, gleiches Konto) und antwortet
+„gespeichert“ statt mit einem Konflikt.
 
 Haben zwei Geräte denselben Bericht offen, überschreibt keines still das
 andere: Das zweite meldet „Auf einem anderen Gerät geändert – bitte neu
 laden“ und bietet die eigenen Eingaben danach wieder an. Nach dem Abmelden
-löscht der Browser die lokalen Kopien.
+löscht der Browser die lokalen Kopien – auch Eingaben der letzten
+Sekunden werden danach nicht mehr zurückgeschrieben (sie gehen vorher
+noch zum Server).
 
 ## Felder
 
 | Abschnitt | Inhalt |
 |---|---|
-| Kopf | Veranstaltung, Zeitraum, Auftrags- und Projektnummer, Prüfdatum, Ort, Prüfer (aus dem Konto, mit Qualifikation), Kunde, Ansprechpartner, Projektleiter Kunde und Montage, Anlagenverantwortlicher, Bereitschaft |
+| Kopf | Veranstaltung, Zeitraum, Auftrags- und Projektnummer, Prüfdatum, Ort, Prüfer (Qualifikation aus dem Konto; der Name in Druckbuchstaben muss zum vollen Namen des angemeldeten Kontos passen – das PDF nennt das Konto dazu), Kunde, Ansprechpartner, Projektleiter Kunde und Montage, Anlagenverantwortlicher, Bereitschaft |
 | Anlage | Bezeichnung, Einzelheiten (Kennungen, Seriennummern), Aufstellort |
 | Netz | Einspeisung (Generator, Feststromanschluss, Speicher, Hybrid), Spannung, Frequenz, Netzform, Erder, gemessene Spannung L-N, Drehfeld an der Einspeisung |
 | Prüfgrundlage | Normen (DIN VDE 0100-600, -711, -740, -551, 0105-100, DIN EN 60204-1, DGUV Vorschrift 3), Grund der Prüfung |
@@ -88,15 +100,20 @@ löscht der Browser die lokalen Kopien.
 | Erprobung | Kurzliste: Funktion der Anlage, Rechtsdrehfeld, RCD (Prüftaste und Auslösung), Trenneinrichtung (Hauptschalter, Not-Aus). Weitere: Schutzeinrichtungen, Durchgängigkeit, Motoren, Busleitungen, Isolationsüberwachung (IT). |
 | Messung | Prüfgeräte, Erdungswiderstand mit Methode und Bezug, Isolationswiderstand der Busleitung (selten), Messspannung R_iso, Stromkreise |
 | Stromkreis | Nr., Ort/Anlagenteil, Kabel, Leitung (Art, Leiter, Querschnitt), Überstromschutz (Art, Charakteristik, In), RCD (Bezeichnung, In, Typ, IΔn, selektiv), Messwerte Zs oder Ik, R_PE, R_iso (mit eigener Messspannung), IΔ, t_A, U_B, Drehfeld, Bewertung, Bemerkung |
-| Ergebnis | Mängel (Text, Stromkreis, Frist, behoben am), Bemerkungen, entspricht den Regeln (ja/nein), mängelfrei, Frist zur Instandsetzung, Prüfplakette mit Nummer, nächster Prüftermin, Errichterbestätigung |
+| Ergebnis | Mängel (Text, Stromkreis, Frist, behoben am), Bemerkungen, entspricht den Regeln (ja/nein), mängelfrei, Frist zur Instandsetzung, Prüfplakette mit Nummer, nächster Prüftermin (Vorgabe: bei jedem Neuaufbau, nach Änderung oder Instandsetzung; bei längerem Betrieb spätestens nach einem Monat – Wirksamkeit der RCD, DGUV Vorschrift 3, DA Tab. 1A), Errichterbestätigung |
 
 Ein Messwert hat einen **Operator**: `=`, `>` (über dem Messbereich, etwa
 „> 550 MΩ“) oder `<`. Geräte zeigen oft nur „> 550“; das ist ein gültiger
 Wert, kein Tippfehler.
 
 Wurden die RCD-Werte an einem anderen Kreis desselben RCD gemessen, steht
-in der Zeile „RCD-Werte gemessen an Kreis …“ statt einer Kopie der Werte.
-Das PDF schreibt dazu eine Fußnote.
+in der Zeile „RCD-Werte gemessen an Kreis …“ statt einer Kopie der Werte –
+in der Leseansicht wie im PDF (dort als Fußnote). Derselbe RCD heißt:
+gleiche Bezeichnung, gleiches IΔn (und Typ, Nennstrom, selektiv), dieselbe
+Anlage. Zeigt der Bezug auf einen anderen RCD, gelten seine Werte nicht
+(„Wert fehlt“ – jeder RCD wird gemessen, DIN VDE 0100-600 6.4.3.7); fehlt die
+Bezeichnung an einem der beiden Kreise, gibt es einen Hinweis. Die Auswahl
+bietet nur Kreise mit derselben Bezeichnung an, sobald eine eingetragen ist.
 
 Ein Kreis, der nicht gemessen wurde (etwa ein nicht belegter Abgang), wird
 auf **nicht gemessen** gestellt, mit Grund. Dann fehlt nichts.
@@ -136,18 +153,23 @@ ungerundeten Wert, angezeigt mit zwei Nachkommastellen.
 | … mit RCD | liegt Zs über dem Wert des LS, schützt aber ein RCD (Zs · IΔn ≤ U0): **Hinweis** „Abschaltung durch RCD“, kein Mangel – bei Generatoren der Regelfall | DGUV Information 203-032 |
 | Ik statt Zs | Ik ≥ k · In / f | wie oben |
 | NH/gG, Charakteristik ohne k | nur mit eingetragener Grenze, sonst bewertet der Prüfer selbst | – |
-| TT | Erdung R_A · IΔn ≤ U_L; Zs entfällt | DIN VDE 0100-410 |
-| IT | Zs entfällt; Isolationsüberwachung bei der Erprobung erwartet | DIN VDE 0100-410 |
+| TT | Erdung R_A · IΔn ≤ U_L; Zs entfällt **nur bei Schutz durch RCD** – ohne RCD gilt Zs · Ia ≤ U0 wie im TN-System | DIN VDE 0100-410 411.5 |
+| IT | Isolationsüberwachung bei der Erprobung erwartet; ohne RCD bewertet der Prüfer die Abschaltung im Zweitfehlerfall selbst | DIN VDE 0100-410 411.6 |
+| TN-C | ein RCD ist dort unwirksam: er zählt weder als Abschaltung noch als Zusatzschutz (Mangel), dazu der Hinweis, die Netzform zu prüfen (meist TN-C-S) | DIN VDE 0100-410 411.4.5 |
 | RCD-Pflicht | Endstromkreis bis 32 A mit RCD ≤ 30 mA (übersteuerbar mit Begründung) | DIN VDE 0100-711:2020-06 |
 | Auslösestrom IΔ | 0,5 · IΔn < IΔ ≤ 1,0 · IΔn (sinusförmiger Prüfstrom) | DIN EN 61008/61009 |
 | Auslösezeit t_A | ≤ 300 ms; selektiv (S): 130–500 ms | DIN EN 61008/61009 |
 | Berührungsspannung U_B | ≤ U_L (50 V, einstellbar 25 V) | DIN VDE 0100-410 |
-| Isolationswiderstand | 250 V: ≥ 0,5 MΩ · 500 V: ≥ 1,0 MΩ · 1000 V: ≥ 1,0 MΩ; ohne Messspannung „Wert fehlt“ | DIN VDE 0100-600:2017-06, Tab. 6.1 |
+| Isolationswiderstand | 500 V: ≥ 1,0 MΩ · 1000 V: ≥ 1,0 MΩ · reduziert auf 250 V (nicht abtrennbare Überspannungsschutzgeräte): ≥ 1,0 MΩ; 0,5 MΩ gilt nur für SELV/PELV – solche Kreise bewertet der Prüfer selbst; ohne Messspannung „Wert fehlt“ | DIN VDE 0100-600:2017-06, Tab. 6.1 und 6.4.3.3 |
 | Schutzleiter R_PE | ≤ 1 Ω, sonst Hinweis (einstellbar) | Praxiswert |
 | Querschnitt | Belastbarkeit ≥ In, sonst Hinweis | Belastbarkeit wie bei den Kabeln in der Karte |
 | Drehfeld | nicht links | DIN VDE 0100-600 |
 | Netzspannung | 230 V ± 10 %, sonst Hinweis | DIN EN 50160 |
-| Erdung | Generator im TN-System ≤ 50 Ω (einstellbar); TT ≤ U_L / IΔn; eigener Grenzwert; „keine Bewertung“ | DGUV Information 203-032 |
+| Erdung | Generator im TN-System ≤ 50 Ω (einstellbar); TT ≤ U_L / IΔn; IT ohne Bewertung (Vorgabe); eigener Grenzwert; „keine Bewertung“. Ohne berechenbaren Grenzwert (etwa TT ohne RCD im Bericht) muss der Prüfer einen Bezug wählen | DGUV Information 203-032 |
+
+Ein Bericht hält die Fassung der Grenzwerte fest, mit der er angelegt
+wurde: Fassung 1 bewertete R_iso bei 250 V noch gegen 0,5 MΩ, ab Fassung 2
+gilt 1,0 MΩ. Ältere Berichte rechnen weiter mit ihrer Fassung.
 
 **Einstellbar** unter *System → Einstellungen → Firma & Übergabeberichte*:
 der Faktor f für Zs (1,0; 0,8; 0,67 für die Messung im kalten Zustand),
@@ -174,20 +196,31 @@ bewertet: …“.
 (abhaken, dann geht es weiter):
 
 - Fehler: Kunde, Anlage, Aufstellort, Prüfdatum, Ort, Netzform, Spannung,
-  Prüfgrundlage oder Grund fehlen; Firmendaten nicht eingetragen; ein Kreis
-  ohne Werte oder mit fehlendem Pflichtwert; Messwerte ohne Prüfgerät;
-  „entspricht: ja“ trotz offener Mängel; „nein“ ohne Frist und ohne Mängel;
-  Errichterbestätigung ohne „ja“; abweichende Bewertung ohne Begründung;
-  Konto ohne Prüfer-Qualifikation.
+  Prüfgrundlage oder Grund fehlen; Prüfdatum unplausibel (Jahr vor 2000 oder
+  nach dem nächsten Jahr); Firmendaten nicht eingetragen; ein Kreis ohne
+  Werte oder mit fehlendem Pflichtwert; Messwerte ohne Prüfgerät;
+  Erdungswiderstand ohne berechenbaren Grenzwert; „entspricht: ja“, solange
+  ein Kreis, die Erdung oder ein Prüfpunkt einen Mangel zeigt – auch wenn in
+  der Mängelliste etwas als behoben steht (nach der Behebung wird neu
+  gemessen bzw. neu bewertet, DIN VDE 0100-600 6.4.3.1); „ja“ mit
+  unbeantworteten Punkten der Kurzliste (i.O., n.i.O. oder entf.);
+  „mängelfrei: ja“ trotz Mängeln, offener Einträge, Frist oder „nein“; „nein“
+  ohne Frist und ohne Mängel; Errichterbestätigung ohne „ja“; abweichende
+  Bewertung ohne Begründung; Konto ohne Prüfer-Qualifikation.
 - Warnungen: Kalibrierung eines Prüfgeräts abgelaufen, Erdungswiderstand
   fehlt bei Generator oder TT, Kreise mit Hinweis, gemessene Kreise ohne
-  Querschnitt, im Aufbau noch offene Positionen.
+  Querschnitt, im Aufbau noch offene Positionen, Prüfdatum in der Zukunft
+  oder mehr als 30 Tage zurück, bei „nein“ unbeantwortete Punkte der
+  Kurzliste.
 
 Die **Unterschrift** wird im Vollbild gezeichnet (am Telefon quer halten),
 mit *Letzten Strich zurück* und *Löschen*. Gespeichert wird **nur der
 Linienzug** – Punkte als ganze Zahlen auf einer Fläche 3:1, ohne Zeit, ohne
 Druck, ohne Geschwindigkeit. Dazu der Name in Druckbuchstaben, beim Kunden
-Funktion/Firma und Ort, und die Zeit des Servers. Eine Unterschrift, die
+Funktion/Firma und Ort, und die Zeit des Servers. Der Name des Prüfers muss
+zum vollen Namen des angemeldeten Kontos passen (Groß- und Kleinschreibung,
+Leerzeichen und ä/ae egal) – wer am Gerät eines anderen unterschriebe,
+schriebe sich sonst dessen Qualifikation zu. Eine Unterschrift, die
 schon an einem anderen Bericht steht, wird abgelehnt („bitte neu
 unterschreiben“). Wird nach einem Netzaussetzer erneut gesendet, entsteht
 keine zweite Unterschrift.
@@ -196,6 +229,8 @@ Mit der Prüfer-Unterschrift wird der Bericht **eingefroren**:
 
 - Er bekommt seine Nummer `<Kürzel>-<Jahr>-<laufende Nummer>`. Das Kürzel
   ist einstellbar (Vorgabe `UB`), die Nummer zählt je Jahr des Prüfdatums.
+  Eine vergebene Nummer kommt nie wieder – auch nicht, nachdem ein Bericht
+  nach Ablauf der Frist gelöscht wurde (Zähler `bericht_nummern`).
 - Der Inhalt wird mit allem, was später anders sein könnte, festgehalten:
   Firmendaten, Abbild der Prüfgeräte, Texte der Prüfpunkte, Kunden- und
   Einweisungstexte, die Bewertung. Ein alter Bericht sieht auch nach einem
@@ -205,8 +240,11 @@ Mit der Prüfer-Unterschrift wird der Bericht **eingefroren**:
   an die des Prüfers. Ein **Siegel** (HMAC mit einem aus `app.key`
   abgeleiteten Schlüssel) bindet Inhalt, Unterschrift, Name, Zeit und Konto.
 - Beim Abschluss entsteht das **PDF** und wird mit seiner Prüfsumme in der
-  Datenbank gespeichert. Der Kunde bekommt genau diese Datei; sie lässt sich
-  nicht mehr verändern, und zweimal erzeugt ergibt sie dieselben Bytes.
+  Datenbank gespeichert, dazu ein **Siegel** über Bericht, Nummer, Fassung,
+  die Kette der Kundenzeile, Prüfsumme und Erzeuger. Der Kunde bekommt genau
+  diese Datei; ein Austausch in der Datenbank fällt auf, und zweimal erzeugt
+  ergibt sie dieselben Bytes. Im Kasten *Prüfnachweis* steht je Unterschrift
+  das Konto, mit dem unterschrieben wurde.
 
 Rechtlich ist die gezeichnete Unterschrift eine **einfache elektronische
 Signatur** (eIDAS Art. 3 Nr. 10, Art. 25 Abs. 1). Sie ersetzt nicht die
@@ -231,6 +269,13 @@ beurteilen. Er setzt bis zu drei Häkchen:
   Bereitschaft (Telefon aus den Einstellungen),
 - **Anlage übernommen** für den Zeitraum.
 
+Der Text über den Häkchen (Vorgabe: „… Mit der Unterschrift bestätigt der
+Kunde den Erhalt des Berichts; Einweisung und Übernahme ergeben sich aus
+den angekreuzten Feldern.“) bestätigt nur, was sicher belegt ist: den
+Erhalt. Wer die Vorgabe früher übernommen und gespeichert hat, behält den
+alten Text (er bestätigte auch die Übernahme) – bitte in den Einstellungen
+prüfen. Eingefrorene Berichte behalten ihre Kopie.
+
 Dazu kommt ein freies Feld **Vorbehalte/Mängel aus Sicht des Kunden** –
 wer in Kenntnis eines Mangels ohne Vorbehalt abnimmt, verliert Rechte
 (§ 640 Abs. 3 BGB). Bei vermieteten Anlagen passt „Übergabe/Übernahme“
@@ -239,11 +284,22 @@ besser als „Abnahme“; die Texte stehen in den Einstellungen.
 **Kundenmodus.** *An Kunden übergeben* sperrt die Sitzung: Der Kunde sieht
 nur diesen Bericht (mit PDF-Vorschau), die Häkchen, den Datenschutzhinweis
 und die Unterschriftsfläche – keine Navigation, kein Schalten, kein
-anderes Formular. Nach der Unterschrift steht da „Vielen Dank – bitte geben
-Sie das Gerät an … zurück“. Entsperrt wird mit dem **Kennwort des
-Prüfers**; nach fünf falschen Versuchen wird abgemeldet (das Konto selbst
-wird nicht gesperrt). Das Kennwortfeld füllt der Browser nicht von selbst
-aus – sonst entsperrte ein Tipp des Kunden das Gerät.
+anderes Formular, auch keine Fehlerseite und **kein Abmelden**: jede
+andere Adresse führt zurück zur Kundenseite. Andere Tabs desselben
+Browsers leeren sich und gehen ebenfalls zur Kundenseite. Nach der
+Unterschrift steht da „Vielen Dank – bitte geben Sie das Gerät an …
+zurück“ – an den, der den Kundenmodus gestartet hat; entsperrt wird mit
+**dessen Kennwort**. Ab fünf falschen Versuchen wird das Entsperren
+gebremst (eine Minute, dann jeweils doppelt so lange, höchstens 15
+Minuten); abgemeldet wird nicht, und das Konto selbst wird nicht gesperrt.
+Das Kennwortfeld füllt der Browser nicht von selbst aus – sonst entsperrte
+ein Tipp des Kunden das Gerät.
+
+Die Sperre hängt zusätzlich **am Gerät** (ein Cookie, nur sein Hash steht in
+der Datenbank): Endet die Sitzung (Inaktivität, Höchstdauer) und meldet
+sich jemand in diesem Browser wieder mit dem Konto an – etwa mit dem dort
+gespeicherten Kennwort –, ist das Gerät gleich wieder gesperrt. Auf einem
+anderen Gerät gilt die Sperre nicht.
 
 ![Kundenmodus am Tablet: der eingefrorene Bericht, darunter Bestätigung und Unterschrift](bilder/bericht-kundenmodus.png)
 
@@ -278,12 +334,24 @@ sudo -u www-data php /opt/powermanagement/bin/power berichte:pdf UB-2026-0042 /r
 
 `berichte:pruefen` meldet je Bericht *OK* oder die Befunde: Inhalt
 verändert, Striche verändert, Kette unterbrochen, Siegel ungültig, PDF
-verändert oder fehlend. `--pdf` erzeugt das PDF zusätzlich neu und
-vergleicht Byte für Byte; weicht es ab (Layout oder Programm seither
-geändert), ist das nur ein **Hinweis** – maßgeblich bleibt das gespeicherte.
+verändert, ausgetauscht (Siegel des PDF, Prüfsumme im Lebenslauf) oder
+fehlend, Status passt nicht zu den Daten, Korrektur ohne Vorgänger.
+Eingefroren ist ein Bericht nach den Daten (Unterschrift, Prüfsumme, PDF),
+nicht nach der Spalte `status` – wer sie per SQL auf „Entwurf“ setzt, macht
+den Bericht nicht wieder änderbar, sondern bekommt einen Befund.
+
+`--pdf` erzeugt das PDF zusätzlich neu und vergleicht Byte für Byte. Stammt
+das gespeicherte vom selben Erzeuger (`BerichtPdf::ERZEUGER`), ist eine
+Abweichung ein **Befund**; bei einem älteren Erzeuger (Layout seither
+geändert) nur ein **Hinweis** – maßgeblich ist dann das gespeicherte, wenn
+sein Siegel stimmt. Deshalb zählt jede Änderung am Layout `ERZEUGER` hoch.
 Nach einem Wechsel von `app.key` heißt es „Siegel mit anderem Schlüssel,
 nicht prüfbar“, nicht „verfälscht“. Exitcode 1 bei einem Befund; die Ausgabe
 enthält keine Kundendaten.
+
+PDFs, die vor dem PDF-Siegel (Migration 016) gespeichert wurden, melden
+„Das gespeicherte PDF hat kein Siegel“ – im Demo-Modus legt
+`demo:seed --reset` sie neu an.
 
 `berichte:pdf` schreibt die gespeicherten Bytes eines abgeschlossenen
 Berichts heraus (nie über eine vorhandene Datei) und nennt die Prüfsumme.
@@ -315,8 +383,14 @@ Berichts heraus (nie über eine vorhandene Datei) und nennt die Prüfsumme.
 ## Aufbewahrung
 
 Ein abgeschlossener, ersetzter oder verworfener Bericht wird bis zum
-**31.12. des Jahres „Prüfdatum + 10 Jahre“** aufbewahrt (einstellbar
-1–30 Jahre). Zehn Jahre decken die üblichen Fristen ab: BetrSichV (bis zur
+**31.12. des Jahres „+ 10 Jahre“** aufbewahrt (einstellbar 1–30 Jahre) –
+gerechnet ab dem späteren von Prüfdatum und Abschluss (bzw. Verwerfen):
+die Fristen beginnen mit Übergabe oder Absendung, und ein altes oder
+vertipptes Prüfdatum macht einen frischen Bericht so nicht gleich
+löschfällig. Gelöscht wird immer eine **ganze Nummer** mit allen Fassungen
+– nur, wenn keine davon mehr offen ist (Entwurf oder vom Prüfer
+unterschrieben) und alle ihre Frist überschritten haben; sonst zeigte eine
+Korrektur ins Leere. Zehn Jahre decken die üblichen Fristen ab: BetrSichV (bis zur
 nächsten Prüfung), Handelsbriefe (6 Jahre), Verjährung von Mängelansprüchen
 (2 bzw. 5 Jahre) und die Höchstfrist für Sachschäden und
 Produkthaftung (10 Jahre). Für Personenschäden gelten bis zu 30 Jahre –

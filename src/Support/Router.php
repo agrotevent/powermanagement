@@ -55,6 +55,22 @@ final class Router
             $method = 'GET';
         }
 
+        // Kundenmodus: das Gerät liegt beim Kunden. Offen ist nur, was er
+        // für diesen einen Bericht braucht – kein Schalten, kein Formular,
+        // keine anderen Seiten, kein Abmelden. Geprüft vor allem anderen:
+        // auch eine unbekannte Adresse, eine verbotene Seite oder eine
+        // falsche Methode führt zurück zur Kundenseite statt auf eine
+        // Fehlerseite (die früher die ganze Navigation samt „Abmelden“ zeigte).
+        $sperre = Auth::check() ? Kundenmodus::aktiv() : null;
+        if ($sperre !== null && !Kundenmodus::erlaubt($method, $path, $sperre['bericht'])) {
+            if (self::willJson()) {
+                Response::json(['ok' => false, 'kundenmodus' => true, 'message' => 'Kundenmodus aktiv – erst mit dem Kennwort des Prüfers entsperren.'], 423);
+                return;
+            }
+            Response::redirect('/berichte/' . $sperre['bericht'] . '/kunde');
+            return;
+        }
+
         foreach ($this->routes as $route) {
             if (!preg_match($route['pattern'], $path, $matches)) {
                 continue;
@@ -90,19 +106,6 @@ final class Router
                 && !in_array($path, self::OHNE_NEUES_KENNWORT, true)) {
                 Flash::warning('Bitte zuerst ein neues Passwort vergeben.');
                 Response::redirect('/profil');
-                return;
-            }
-
-            // Kundenmodus: das Gerät liegt beim Kunden. Offen ist nur, was
-            // er für diesen einen Bericht braucht – kein Schalten, kein
-            // Formular, keine anderen Seiten, auch ohne eigenes Recht der Route.
-            $sperre = Auth::check() ? Kundenmodus::aktiv() : null;
-            if ($sperre !== null && !Kundenmodus::erlaubt($method, $path, $sperre['bericht'])) {
-                if (self::willJson()) {
-                    Response::json(['ok' => false, 'kundenmodus' => true, 'message' => 'Kundenmodus aktiv – erst mit dem Kennwort des Prüfers entsperren.'], 423);
-                    return;
-                }
-                Response::redirect('/berichte/' . $sperre['bericht'] . '/kunde');
                 return;
             }
 

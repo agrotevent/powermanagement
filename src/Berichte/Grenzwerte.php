@@ -38,16 +38,22 @@ final class Grenzwerte
     /**
      * Die Parameter aus den Einstellungen – alles Strings, damit sie
      * unverändert in den gehashten Inhalt passen.
+     *
+     * Fassung 2: R_iso bei 250 V ≥ 1,0 MΩ. Die Zeile „250 V / 0,5 MΩ“ der
+     * Tab. 6.1 (DIN VDE 0100-600) gilt nur für SELV/PELV; wird bei 230/400 V
+     * mit 250 V gemessen (nicht abtrennbare Überspannungsschutzgeräte,
+     * 6.4.3.3), bleibt es bei 1 MΩ. Ein SELV/PELV-Kreis wird von Hand
+     * bewertet. Ältere Berichte rechnen weiter mit ihrer Fassung.
      */
     public static function parameter(): array
     {
         return [
-            'version'        => '1',
+            'version'        => '2',
             'u0'             => '230',
             'ul'             => Einstellungen::wert('berichte.ul'),
             'zs_faktor'      => Einstellungen::wert('berichte.zs_faktor'),
             'k'              => ['B' => '5', 'C' => '10', 'D' => '20', 'K' => '14', 'Z' => '3'],
-            'riso'           => ['250' => '0.5', '500' => '1.0', '1000' => '1.0'],
+            'riso'           => ['250' => '1.0', '500' => '1.0', '1000' => '1.0'],
             'rcd'            => ['i_min' => '0.5', 'i_max' => '1.0', 'ta_max' => '300', 'ta_s_min' => '130', 'ta_s_max' => '500'],
             'rpe_hinweis'    => Einstellungen::wert('berichte.rpe_hinweis'),
             'erde_generator' => Einstellungen::wert('berichte.erde_generator'),
@@ -127,6 +133,10 @@ final class Grenzwerte
         $ul = self::zahl($p['ul'] ?? '50') ?? 50.0;
         $form = (string) ($netz['form'] ?? '');
         $tn = $form === '' || str_starts_with($form, 'TN');
+        // Im TN-C-System löst ein RCD nicht aus (der Fehlerstrom fließt über den
+        // PEN durch den Summenstromwandler zurück): er zählt weder als
+        // Abschaltung noch als Zusatzschutz (DIN VDE 0100-410 411.4.5).
+        $tnc = $form === 'TN-C';
         $nichtGemessen = ($kreis['status'] ?? '') === 'nicht_gemessen';
 
         $ueb = is_array($kreis['ueb'] ?? null) ? $kreis['ueb'] : [];
@@ -136,6 +146,7 @@ final class Grenzwerte
         if ($idn !== null && $idn <= 0) {
             $idn = null;
         }
+        $idnWirksam = $tnc ? null : $idn;
 
         $hatWerte = ((string) ($kreis['drehfeld'] ?? '')) !== '';
         foreach (self::MESSWERTE as $feld) {
@@ -148,8 +159,11 @@ final class Grenzwerte
         if (($ueb['art'] ?? '') === '' && ($ueb['in'] ?? '') === '' && ($ueb['grenze_hand'] ?? '') === '') {
             $melden('ueb_fehlt', 'hinweis', 'Kein Überstromschutz eingetragen.');
         }
-        if (($kreis['art'] ?? 'end') === 'end' && $in !== null && $in <= 32 && ($idn === null || $idn > 30)) {
+        if (($kreis['art'] ?? 'end') === 'end' && $in !== null && $in <= 32 && ($idnWirksam === null || $idnWirksam > 30)) {
             $melden('rcd_pflicht', 'mangel', 'Endstromkreis bis 32 A ohne RCD ≤ 30 mA (DIN VDE 0100-711).');
+        }
+        if ($tnc && $idn !== null) {
+            $melden('rcd_tnc', 'mangel', 'RCD im TN-C-System unwirksam (DIN VDE 0100-410 411.4.5) – weder Abschaltung noch Zusatzschutz belegt.');
         }
         $q = self::zahl($kreis['leitung']['querschnitt'] ?? '');
         if ($q !== null && $in !== null) {
@@ -179,8 +193,14 @@ final class Grenzwerte
             }
         }
 
-        // ---------------------------------------------- Schleifenimpedanz (TN)
-        if ($tn) {
+        // ---------------------------------------------- Schleifenimpedanz
+        // TN immer; TT ohne RCD ebenso (Zs · Ia ≤ U0, DIN VDE 0100-410
+        // 411.5.4) – „Zs entfällt“ gilt nur, wenn ein RCD den Kreis schützt.
+        $zsBewerten = $tn || ($form === 'TT' && $idn === null);
+        if ($form === 'IT' && $idn === null && $hatWerte) {
+            $melden('it_zweitfehler', 'manuell', 'IT-System ohne RCD: Abschaltung im Zweitfehlerfall (DIN VDE 0100-410 411.6.4) selbst bewerten.');
+        }
+        if ($zsBewerten) {
             $grenzeHand = self::zahl($ueb['grenze_hand'] ?? '');
             $zsMax = $grenzeHand;
             if ($zsMax === null && ($ueb['art'] ?? '') !== 'NH') {
@@ -190,8 +210,8 @@ final class Grenzwerte
                 $grenzen['zs_max'] = self::dez($zsMax);
                 $grenzen['ik_min'] = self::dez($u0 / $zsMax, 1);
             }
-            if ($idn !== null) {
-                $grenzen['zs_rcd_max'] = self::dez($u0 / ($idn / 1000), 0);
+            if ($idnWirksam !== null) {
+                $grenzen['zs_rcd_max'] = self::dez($u0 / ($idnWirksam / 1000), 0);
             }
             $zs = $gelesen['zs'];
             if ($zs === null && $gelesen['ik'] !== null && $gelesen['ik']['w'] > 0) {
@@ -205,7 +225,7 @@ final class Grenzwerte
                     $melden('zs_fehlt', 'fehlt', 'Schleifenimpedanz Zs (oder Ik) fehlt.');
                 }
             } else {
-                $durchRcd = $idn !== null && self::vergleich($zs, $u0 / ($idn / 1000), true) === 'ok';
+                $durchRcd = $idnWirksam !== null && self::vergleich($zs, $u0 / ($idnWirksam / 1000), true) === 'ok';
                 $ergebnis = $zsMax !== null ? self::vergleich($zs, $zsMax, true) : 'ohne';
                 if ($ergebnis === 'ok') {
                     $abschaltung = 'LS';
@@ -235,6 +255,9 @@ final class Grenzwerte
                 $melden('riso_u_fehlt', 'fehlt', 'Messspannung für R_iso fehlt.');
             } else {
                 $grenzen['riso_min'] = self::dez($min);
+                if ($risoU === '250' && $min >= 1.0) {
+                    $melden('riso_250', 'info', 'Reduzierte Messspannung 250 V (DIN VDE 0100-600 6.4.3.3): Grenzwert ' . self::komma($min) . ' MΩ; SELV/PELV (0,5 MΩ) selbst bewerten.');
+                }
                 $ergebnis = self::vergleich($gelesen['riso'], $min, false);
                 if ($ergebnis === 'ueber') {
                     $melden('riso_klein', 'mangel', sprintf('R_iso %s MΩ unter %s MΩ (bei %s V).', self::komma($gelesen['riso']['w']), self::komma($min), $risoU));
@@ -260,16 +283,34 @@ final class Grenzwerte
             $quelle = $gelesen;
             $vonZ = (string) ($kreis['rcd_von'] ?? '');
             $bezug = $vonZ !== '' && $vonZ !== (string) ($kreis['z'] ?? '') ? ($kreiseNachZ[$vonZ] ?? null) : null;
+            $anderer = false;
             if ($bezug !== null) {
-                $quelle = [];
-                foreach (['idelta', 'ta', 'ub'] as $feld) {
-                    $wert = self::lesen($bezug['w'][$feld] ?? null);
-                    $quelle[$feld] = $wert === false ? null : $wert;
-                }
-                $melden('rcd_von', 'info', 'RCD-Werte gemessen an Kreis ' . ($bezug['nr'] ?? '?') . '.');
-                $bezBezug = (string) ($bezug['rcd']['bez'] ?? '');
-                if ($bezBezug !== '' && (string) ($rcd['bez'] ?? '') !== '' && $bezBezug !== (string) $rcd['bez']) {
-                    $melden('rcd_von_anders', 'hinweis', 'Der Bezugskreis hängt an einem anderen RCD (' . $bezBezug . ').');
+                // Die Werte eines anderen Kreises gelten nur für denselben RCD
+                // (DIN VDE 0100-600 6.4.3.7: jede RCD wird nachgewiesen).
+                $rcdBezug = is_array($bezug['rcd'] ?? null) ? $bezug['rcd'] : [];
+                $bezBezug = (string) ($rcdBezug['bez'] ?? '');
+                $bezEigen = (string) ($rcd['bez'] ?? '');
+                $idnBezug = self::zahl($rcdBezug['idn'] ?? '');
+                $verschieden = static fn (string $a, string $b): bool => $a !== '' && $b !== '' && $a !== $b;
+                $anderer = $idnBezug === null || abs($idnBezug - $idn) > 1e-9
+                    || $verschieden($bezBezug, $bezEigen)
+                    || $verschieden((string) ($bezug['objekt_id'] ?? ''), (string) ($kreis['objekt_id'] ?? ''))
+                    || $verschieden((string) ($rcdBezug['in'] ?? ''), (string) ($rcd['in'] ?? ''))
+                    || $verschieden((string) ($rcdBezug['typ'] ?? ''), (string) ($rcd['typ'] ?? ''))
+                    || (string) ($rcdBezug['s'] ?? '0') !== (string) ($rcd['s'] ?? '0');
+                if ($anderer) {
+                    $melden('rcd_von_anders', 'fehlt', 'Der Bezugskreis (Kreis ' . ($bezug['nr'] ?? '?') . ') hängt an einem anderen RCD'
+                        . ($bezBezug !== '' ? ' (' . $bezBezug . ')' : '') . ' – den RCD dieses Kreises messen.');
+                } else {
+                    $quelle = [];
+                    foreach (['idelta', 'ta', 'ub'] as $feld) {
+                        $wert = self::lesen($bezug['w'][$feld] ?? null);
+                        $quelle[$feld] = $wert === false ? null : $wert;
+                    }
+                    $melden('rcd_von', 'info', 'RCD-Werte gemessen an Kreis ' . ($bezug['nr'] ?? '?') . '.');
+                    if ($bezBezug === '' || $bezEigen === '') {
+                        $melden('rcd_von_unbelegt', 'hinweis', 'Gleicher RCD nicht belegt – die Bezeichnung des RCD an beiden Kreisen eintragen.');
+                    }
                 }
             }
             $rp = is_array($p['rcd'] ?? null) ? $p['rcd'] : [];
@@ -310,7 +351,7 @@ final class Grenzwerte
                     $melden('ub_unklar', 'manuell', 'U_B außerhalb des Messbereichs – bitte selbst bewerten.');
                 }
             }
-            if ($quelle['idelta'] === null && $quelle['ta'] === null && $hatWerte) {
+            if ($quelle['idelta'] === null && $quelle['ta'] === null && $hatWerte && !$anderer) {
                 $bezug !== null
                     ? $melden('rcd_von_leer', 'fehlt', 'Der Bezugskreis hat keine RCD-Werte.')
                     : $melden('rcd_fehlt', 'fehlt', 'RCD-Werte fehlen (IΔ, t_A) – oder „gemessen an Kreis …“ wählen.');
@@ -337,9 +378,13 @@ final class Grenzwerte
     {
         $erdung = is_array($messung['erdung'] ?? null) ? $messung['erdung'] : [];
         $basis = (string) ($erdung['basis'] ?? '');
+        $form = (string) ($netz['form'] ?? '');
         if ($basis === '') {
+            // IT: R_A · Id ≤ U_L mit sehr kleinem Id (411.6.2) – kein Erder dieser
+            // Größe nötig, die 50 Ω des Generators gelten fürs TN-System.
             $basis = match (true) {
-                ($netz['form'] ?? '') === 'TT'                                       => 'tt',
+                $form === 'TT'                                                       => 'tt',
+                $form === 'IT'                                                       => 'keine',
                 in_array($netz['einspeisung'] ?? '', ['generator', 'hybrid'], true) => 'generator',
                 default                                                              => 'keine',
             };
@@ -372,6 +417,9 @@ final class Grenzwerte
         }
         $meldungen = [];
         $wert = self::lesen($erdung);
+        if ($basis === 'generator' && $form !== '' && !str_starts_with($form, 'TN') && $wert !== null) {
+            $meldungen[] = ['code' => 'erdung_bezug', 'stufe' => 'hinweis', 'text' => 'Der Bezug „Generator im TN-System“ gilt für TN-Systeme – die Netzform ist ' . $form . '.'];
+        }
         if ($wert === null) {
             return ['auto' => '', 'meldungen' => [], 'grenze' => $grenze !== null ? self::dez($grenze) : null, 'basis' => $basis, 'bezug' => $bezug];
         }
@@ -414,7 +462,11 @@ final class Grenzwerte
             $meldungen[] = ['code' => 'drehfeld_einspeisung', 'stufe' => 'mangel', 'text' => 'Linksdrehfeld an der Einspeisung.'];
         }
         if (($netz['form'] ?? '') === 'IT' && (($punkte['erprobung']['imd'] ?? '') !== 'io')) {
-            $meldungen[] = ['code' => 'it_imd', 'stufe' => 'hinweis', 'text' => 'IT-System: Isolationsüberwachung (IMD) erproben – Zs entfällt.'];
+            $meldungen[] = ['code' => 'it_imd', 'stufe' => 'hinweis', 'text' => 'IT-System: Isolationsüberwachung (IMD) erproben; Kreise ohne RCD für den Zweitfehler selbst bewerten.'];
+        }
+        if (($netz['form'] ?? '') === 'TN-C') {
+            $meldungen[] = ['code' => 'netz_tnc', 'stufe' => 'hinweis',
+                'text' => 'TN-C: hinter dem Übergabepunkt kein PEN in beweglichen Leitungen, RCDs wirken nur im TN-S-Teil – Netzform prüfen (meist TN-C-S).'];
         }
         $hat = $u !== null || ($netz['drehfeld'] ?? '') !== '';
         return ['auto' => $hat || $meldungen !== [] ? self::stufe($meldungen, 'ok') : '', 'meldungen' => $meldungen];

@@ -97,7 +97,7 @@ final class BerichtService
      */
     public static function liste(array $filter = []): array
     {
-        $sql = 'SELECT b.id, b.nummer, b.jahr, b.laufnr, b.fassung, b.vorgaenger_id, b.status, b.version, b.site_id, b.aufbau_id,
+        $sql = 'SELECT b.id, b.nummer, b.jahr, b.laufnr, b.fassung, b.vorgaenger_id, b.status, b.version, b.site_id, b.aufbau_id, b.standort_entfernt,
                        b.standort_name, b.titel, b.veranstaltung, b.kunde_name, b.pruefdatum, b.ewx_nummer, b.erstellt_von,
                        b.eingefroren_am, b.abgeschlossen_am, b.created_at, b.updated_at, s.name AS site_name
                 FROM berichte b LEFT JOIN sites s ON s.id = b.site_id WHERE 1 = 1';
@@ -149,7 +149,9 @@ final class BerichtService
     /**
      * Sieht der angemeldete Benutzer diesen Bericht?
      *
-     * Wer alles sieht: ja. Ohne Standort nur der Ersteller (mit „ausfüllen“).
+     * Wer alles sieht: ja. Ohne Standort nur der Ersteller (mit „ausfüllen“) –
+     * war der Standort da und wurde gelöscht, nicht einmal der: sonst lebte
+     * eine längst entzogene Freigabe mit dem Löschen wieder auf.
      * Wer am Standort ändern darf und Berichte ausfüllt: alle, auch Entwürfe.
      * Sonst nur abgeschlossene (und ersetzte), und nur mit einer Freigabe für
      * den Standort, deren Datenzeitraum den Prüftag berührt – ein Kunde sieht
@@ -165,7 +167,7 @@ final class BerichtService
         }
         $siteId = $b['site_id'] !== null ? (int) $b['site_id'] : null;
         if ($siteId === null) {
-            return Auth::can('berichte.manage') && (int) $b['erstellt_von'] === Auth::id();
+            return !self::standortGeloescht($b) && Auth::can('berichte.manage') && (int) $b['erstellt_von'] === Auth::id();
         }
         if (Auth::can('berichte.manage') && Zugriff::darfStandortAendern($siteId)) {
             return true;
@@ -181,10 +183,34 @@ final class BerichtService
         return $von !== null && Zugriff::imFenster($fenster, $von, $bis);
     }
 
-    /** Ausfüllen: nur Entwürfe, nur mit „ausfüllen“ und „bearbeiten“ für den Standort. */
+    /**
+     * Ausfüllen: nur Entwürfe, nur mit „ausfüllen“ und „bearbeiten“ für den
+     * Standort – und nie, was nach den Daten eingefroren ist (Unterschrift,
+     * Prüfsumme oder PDF da), ganz gleich, was in der Spalte status steht.
+     */
     public static function darfBearbeiten(array $b): bool
     {
-        return Auth::can('berichte.manage') && (string) $b['status'] === 'entwurf' && self::standortRegel($b);
+        return Auth::can('berichte.manage') && (string) $b['status'] === 'entwurf' && self::standortRegel($b) && !self::eingefroren($b);
+    }
+
+    /**
+     * Ist der Bericht eingefroren? Nach dem Status – und nach den Daten:
+     * eine Unterschriftszeile, ein inhalt_hash oder ein gespeichertes PDF.
+     * So wird ein unterschriebener Bericht nicht wieder änderbar, nur weil
+     * jemand per SQL den Status auf „entwurf“ zurückgesetzt hat.
+     */
+    public static function eingefroren(array $b): bool
+    {
+        if (in_array((string) $b['status'], ['geprueft', 'abgeschlossen', 'ersetzt'], true)) {
+            return true;
+        }
+        $id = (int) $b['id'];
+        return (int) Database::scalar(
+            'SELECT COUNT(*) FROM berichte b WHERE b.id = ? AND (b.inhalt_hash IS NOT NULL
+                OR EXISTS (SELECT 1 FROM bericht_unterschriften u WHERE u.bericht_id = b.id)
+                OR EXISTS (SELECT 1 FROM bericht_pdf p WHERE p.bericht_id = b.id))',
+            [$id]
+        ) > 0;
     }
 
     /** Kundenunterschrift einholen: wie Ausfüllen, aber nach der Prüfer-Unterschrift. */
@@ -204,7 +230,19 @@ final class BerichtService
         if ($b['site_id'] !== null) {
             return Zugriff::darfStandortAendern((int) $b['site_id']);
         }
+        if (self::standortGeloescht($b)) {
+            return Zugriff::alles();
+        }
         return (int) $b['erstellt_von'] === Auth::id() || Zugriff::alles();
+    }
+
+    /** Hatte der Bericht einen Standort, der inzwischen gelöscht ist? */
+    private static function standortGeloescht(array $b): bool
+    {
+        if (array_key_exists('standort_entfernt', $b)) {
+            return (int) $b['standort_entfernt'] === 1;
+        }
+        return (int) Database::scalar('SELECT standort_entfernt FROM berichte WHERE id = ?', [(int) $b['id']]) === 1;
     }
 
     private static function qualifikation(): string
@@ -294,8 +332,12 @@ final class BerichtService
      *
      * $version ist der Stand, auf dem der Browser gearbeitet hat; passt er
      * nicht mehr, ändert sich nichts (409) – kein stilles Überschreiben der
-     * Eingaben eines anderen Tablets. $ewxVorgang: Kennung eines in dieser
-     * Sitzung geladenen Eventworx-Vorgangs, „-“ entfernt den Verweis.
+     * Eingaben eines anderen Tablets. Ausnahme: derselbe Benutzer schickt
+     * genau den Inhalt noch einmal, der schon gespeichert ist (die Antwort
+     * auf sein Speichern ging unterwegs verloren) – das ist kein Konflikt,
+     * sondern gespeichert (200 mit dem aktuellen Stand). $ewxVorgang:
+     * Kennung eines in dieser Sitzung geladenen Eventworx-Vorgangs, „-“
+     * entfernt den Verweis.
      *
      * @return array{ok:bool,message:string,status:int,version?:int,gespeichert_am?:string,bewertung?:array,hinweise?:list<string>,abschnitte?:array,konflikt?:bool}
      */
@@ -316,25 +358,10 @@ final class BerichtService
         if (!is_array($roh)) {
             return ['ok' => false, 'status' => 422, 'message' => 'Der Inhalt ist nicht lesbar.'];
         }
+        [$inhalt, $hinweise] = self::aufbereiten($roh, $b);
         if ($version !== (int) $b['version']) {
-            return self::konflikt($b);
+            return self::schonGespeichert($b, $version, $inhalt, $hinweise, trim($ewxVorgang)) ?? self::konflikt($b);
         }
-
-        $bereinigt = BerichtSchema::bereinigen($roh, $b['inhalt']);
-        $inhalt = $bereinigt['inhalt'];
-        $hinweise = $bereinigt['hinweise'];
-
-        // Prüfgeräte: nur vorhandene und aktive.
-        $geraete = [];
-        foreach ($inhalt['messung']['geraete'] as $gid) {
-            $g = Pruefgeraete::find((int) $gid);
-            if ($g === null || (int) $g['aktiv'] !== 1) {
-                $hinweise[] = 'Ein Prüfgerät ist nicht (mehr) aktiv und wurde aus dem Bericht genommen.';
-                continue;
-            }
-            $geraete[] = (string) (int) $g['id'];
-        }
-        $inhalt['messung']['geraete'] = $geraete;
 
         $felder = BerichtSchema::listenfelder($inhalt);
         if ($b['site_id'] !== null && (string) ($b['site_name'] ?? '') !== '') {
@@ -365,7 +392,8 @@ final class BerichtService
                 $werte[] = $wert;
             }
             array_push($werte, $id, $version);
-            $n = Database::execute('UPDATE berichte SET ' . implode(', ', $sets) . ", version = version + 1 WHERE id = ? AND version = ? AND status = 'entwurf'", $werte);
+            $n = Database::execute('UPDATE berichte SET ' . implode(', ', $sets) . ", version = version + 1 WHERE id = ? AND version = ? AND status = 'entwurf'"
+                . ' AND inhalt_hash IS NULL AND NOT EXISTS (SELECT 1 FROM bericht_unterschriften u WHERE u.bericht_id = berichte.id)', $werte);
             if ($n !== 1) {
                 return null;
             }
@@ -386,7 +414,7 @@ final class BerichtService
         });
         if ($ergebnis === null) {
             $aktuell = self::find($id);
-            return $aktuell !== null && $aktuell['status'] !== 'entwurf'
+            return $aktuell !== null && ($aktuell['status'] !== 'entwurf' || self::eingefroren($aktuell))
                 ? ['ok' => false, 'status' => 423, 'message' => self::EINGEFROREN]
                 : self::konflikt($aktuell ?? $b);
         }
@@ -397,6 +425,60 @@ final class BerichtService
             'message'        => 'Gespeichert.',
             'version'        => $ergebnis,
             'gespeichert_am' => $jetzt,
+            'bewertung'      => $bewertung,
+            'hinweise'       => array_values(array_unique($hinweise)),
+            'abschnitte'     => self::abschnitte($inhalt, $bewertung),
+        ];
+    }
+
+    /**
+     * Rohen Inhalt aus dem Browser aufbereiten: Schema (BerichtSchema) und
+     * Prüfgeräte (nur vorhandene und aktive).
+     *
+     * @return array{0:array,1:list<string>} Inhalt und Hinweise
+     */
+    private static function aufbereiten(array $roh, array $b): array
+    {
+        $bereinigt = BerichtSchema::bereinigen($roh, $b['inhalt']);
+        $inhalt = $bereinigt['inhalt'];
+        $hinweise = $bereinigt['hinweise'];
+        $geraete = [];
+        foreach ($inhalt['messung']['geraete'] as $gid) {
+            $g = Pruefgeraete::find((int) $gid);
+            if ($g === null || (int) $g['aktiv'] !== 1) {
+                $hinweise[] = 'Ein Prüfgerät ist nicht (mehr) aktiv und wurde aus dem Bericht genommen.';
+                continue;
+            }
+            $geraete[] = (string) (int) $g['id'];
+        }
+        $inhalt['messung']['geraete'] = $geraete;
+        return [$inhalt, $hinweise];
+    }
+
+    /**
+     * Ein Speichern mit altem Stand, das in Wahrheit schon angekommen ist:
+     * derselbe Benutzer, genau der gespeicherte Inhalt, kein neuer
+     * Eventworx-Verweis. Dann 200 mit dem aktuellen Stand – sonst null
+     * (Konflikt).
+     */
+    private static function schonGespeichert(array $b, int $version, array $inhalt, array $hinweise, string $ewx): ?array
+    {
+        if ($version >= (int) $b['version'] || (int) ($b['geaendert_von'] ?? 0) !== (int) Auth::id()) {
+            return null;
+        }
+        $ewxGleich = $ewx === '' || ($ewx === '-' && (string) $b['ewx_id'] === '') || $ewx === (string) $b['ewx_id'];
+        $gespeichert = (string) Database::scalar('SELECT inhalt FROM berichte WHERE id = ?', [(int) $b['id']]);
+        if (!$ewxGleich || !hash_equals($gespeichert, Kanon::json($inhalt))) {
+            return null;
+        }
+        $bewertung = Grenzwerte::alle($inhalt);
+        return [
+            'ok'             => true,
+            'status'         => 200,
+            'message'        => 'Gespeichert.',
+            'wiederholt'     => true,
+            'version'        => (int) $b['version'],
+            'gespeichert_am' => (string) ($b['updated_at'] ?? gmdate('c')),
             'bewertung'      => $bewertung,
             'hinweise'       => array_values(array_unique($hinweise)),
             'abschnitte'     => self::abschnitte($inhalt, $bewertung),
@@ -446,7 +528,8 @@ final class BerichtService
         }
         $ok = self::transaktion(static function () use ($id, $version, $inhalt, $objekte): bool {
             $n = Database::execute(
-                "UPDATE berichte SET inhalt = ?, version = version + 1, geaendert_von = ?, updated_at = ? WHERE id = ? AND version = ? AND status = 'entwurf'",
+                "UPDATE berichte SET inhalt = ?, version = version + 1, geaendert_von = ?, updated_at = ? WHERE id = ? AND version = ? AND status = 'entwurf'
+                 AND inhalt_hash IS NULL AND NOT EXISTS (SELECT 1 FROM bericht_unterschriften u WHERE u.bericht_id = berichte.id)",
                 [Kanon::json($inhalt), Auth::id(), gmdate('c'), $id, $version]
             );
             if ($n !== 1) {
@@ -599,6 +682,18 @@ final class BerichtService
         }
         if ($leer($kopf['pruefdatum'])) {
             $f('kopf.pruefdatum', 'Prüfdatum fehlt.');
+        } else {
+            // Das Prüfdatum bestimmt Nummer und Jahr – ein Tippfehler im Jahr fiele sonst erst im PDF auf.
+            $pd = (string) $kopf['pruefdatum'];
+            $heute = new \DateTimeImmutable('today', Zeit::zone());
+            $tag = preg_match('/^(\d{4})-\d{2}-\d{2}$/', $pd, $pm) === 1 ? \DateTimeImmutable::createFromFormat('!Y-m-d', $pd, Zeit::zone()) : false;
+            if ($tag === false || (int) $pm[1] < 2000 || (int) $pm[1] > (int) $heute->format('Y') + 1) {
+                $f('kopf.pruefdatum', 'Prüfdatum unplausibel (' . $pd . ') – bitte das Jahr prüfen.');
+            } elseif ($tag > $heute) {
+                $w('pruefdatum_zukunft', 'Das Prüfdatum ' . $tag->format('d.m.Y') . ' liegt in der Zukunft.');
+            } elseif ($tag < $heute->modify('-30 days')) {
+                $w('pruefdatum_alt', 'Das Prüfdatum ' . $tag->format('d.m.Y') . ' liegt mehr als 30 Tage zurück.');
+            }
         }
         if ($leer($kopf['ort'])) {
             $f('kopf.ort', 'Ort der Prüfung fehlt.');
@@ -667,6 +762,9 @@ final class BerichtService
                 $mangel++;
             }
         }
+        if (($bewertung['erdung']['auto'] ?? '') === 'manuell') {
+            $f('messung.erdung', 'Erdungswiderstand ohne berechenbaren Grenzwert – Bezug wählen (eigener Grenzwert oder „ohne Bewertung“).');
+        }
         $erdungGemessen = !$leer($i['messung']['erdung']['w'] ?? '') || !$leer($i['messung']['iso_bus']['w'] ?? '');
         if (($gemessen || $erdungGemessen) && $i['messung']['geraete'] === []) {
             $f('messung.geraete', 'Messwerte ohne Prüfgerät – bitte das Messgerät angeben.');
@@ -677,17 +775,29 @@ final class BerichtService
         foreach (['besichtigung', 'erprobung'] as $teil) {
             $nio += count(array_filter($i['punkte'][$teil] ?? [], static fn ($z): bool => $z === 'nio'));
         }
-        $alleBehoben = $i['maengel'] !== [] && array_filter($i['maengel'], static fn (array $m): bool => trim((string) ($m['behoben'] ?? '')) === '') === [];
+        $kurzOffen = self::kurzlisteOffen($i['punkte']);
+        $offeneMaengel = count(array_filter($i['maengel'], static fn (array $m): bool => trim((string) ($m['behoben'] ?? '')) === ''));
         $entspricht = (string) $i['ergebnis']['entspricht'];
         if ($entspricht === '') {
             $f('ergebnis.entspricht', 'Prüfergebnis fehlt: entspricht die Anlage den Regeln der Elektrotechnik (ja oder nein)?');
-        } elseif ($entspricht === 'ja' && ($mangel > 0 || $nio > 0) && !$alleBehoben) {
-            $f('ergebnis.entspricht', '„Ja“ trotz Mängeln – Mängel als behoben eintragen oder „Nein“ wählen.');
+        } elseif ($entspricht === 'ja' && ($mangel > 0 || $nio > 0)) {
+            // Ein als behoben eingetragener Mangel belegt nichts, solange der
+            // Messwert oder Prüfpunkt selbst noch den Mangel zeigt (DIN VDE
+            // 0100-600 6.4.3.1: nach der Beseitigung wird die Prüfung wiederholt).
+            $f('ergebnis.entspricht', '„Ja“ trotz Mängeln – nach der Behebung neu messen bzw. den Prüfpunkt neu bewerten, oder „Nein“ wählen.');
         } elseif ($entspricht === 'nein' && $leer($i['ergebnis']['instand_bis']) && $i['maengel'] === []) {
             $f('ergebnis.instand_bis', 'Bei „Nein“ bitte eine Frist zur Instandsetzung oder die Mängel angeben.');
         }
+        if ($entspricht === 'ja' && $kurzOffen > 0) {
+            // Erstprüfung = Besichtigen, Erproben, Messen (DIN VDE 0100-600 6.4.1).
+            $f('punkte', $kurzOffen . ($kurzOffen === 1 ? ' Punkt' : ' Punkte') . ' der Kurzliste nicht beantwortet – i.O., n.i.O. oder entf. wählen.');
+        }
         if ((string) $i['ergebnis']['errichter'] === '1' && $entspricht !== 'ja') {
             $f('ergebnis.errichter', 'Die Errichterbestätigung setzt „entspricht: ja“ voraus.');
+        }
+        if ((string) $i['ergebnis']['maengelfrei'] === 'ja'
+            && ($mangel > 0 || $nio > 0 || $offeneMaengel > 0 || !$leer($i['ergebnis']['instand_bis']) || $entspricht === 'nein')) {
+            $f('ergebnis.maengelfrei', '„Mängelfrei: Ja“ widerspricht den eingetragenen Mängeln.');
         }
 
         // ---------------------------------------------- Warnungen
@@ -702,6 +812,9 @@ final class BerichtService
         }
         if ($hinweis > 0) {
             $w('hinweise', $hinweis . ' Stromkreis(e) mit Hinweis.');
+        }
+        if ($entspricht !== 'ja' && $kurzOffen > 0) {
+            $w('punkte_offen', $kurzOffen . ($kurzOffen === 1 ? ' Punkt' : ' Punkte') . ' der Kurzliste nicht beantwortet.');
         }
         if ($ohneQuerschnitt > 0) {
             $w('querschnitt_leer', $ohneQuerschnitt . ' gemessene(r) Stromkreis(e) ohne Querschnitt.');
@@ -733,16 +846,10 @@ final class BerichtService
         $anlageOffen = count(array_filter([$kopf['anlage']['bezeichnung'] ?? '', $kopf['anlage']['aufstellort'] ?? '', $netz['form'] ?? '',
             $netz['spannung'] ?? '', $inhalt['grundlage']['grund'] ?? ''], $leer))
             + (($inhalt['grundlage']['normen'] ?? []) === [] && $leer($inhalt['grundlage']['sonstige'] ?? '') ? 1 : 0);
-        $punkteOffen = 0;
+        $punkteOffen = self::kurzlisteOffen(is_array($inhalt['punkte'] ?? null) ? $inhalt['punkte'] : []);
         $nio = 0;
-        foreach (['besichtigung' => Katalog::besichtigung(), 'erprobung' => Katalog::erprobung()] as $teil => $katalog) {
-            $antworten = $inhalt['punkte'][$teil] ?? [];
-            foreach ($katalog as $schluessel => $punkt) {
-                if ($punkt['kurz'] && !isset($antworten[$schluessel])) {
-                    $punkteOffen++;
-                }
-            }
-            $nio += count(array_filter($antworten, static fn ($z): bool => $z === 'nio'));
+        foreach (['besichtigung', 'erprobung'] as $teil) {
+            $nio += count(array_filter((array) ($inhalt['punkte'][$teil] ?? []), static fn ($z): bool => $z === 'nio'));
         }
         $messOffen = 0;
         $messMangel = ($bewertung['erdung']['auto'] ?? '') === 'mangel' ? 1 : 0;
@@ -761,6 +868,21 @@ final class BerichtService
             'messung'  => ['offen' => $messOffen, 'mangel' => $messMangel],
             'ergebnis' => ['offen' => $leer($inhalt['ergebnis']['entspricht'] ?? '') ? 1 : 0, 'mangel' => 0],
         ];
+    }
+
+    /** Wie viele Punkte der Kurzliste (Besichtigung, Erprobung) sind unbeantwortet? „entf.“ zählt als beantwortet. */
+    private static function kurzlisteOffen(array $punkte): int
+    {
+        $offen = 0;
+        foreach (['besichtigung' => Katalog::besichtigung(), 'erprobung' => Katalog::erprobung()] as $teil => $katalog) {
+            $antworten = is_array($punkte[$teil] ?? null) ? $punkte[$teil] : [];
+            foreach ($katalog as $schluessel => $punkt) {
+                if ($punkt['kurz'] && trim((string) ($antworten[$schluessel] ?? '')) === '') {
+                    $offen++;
+                }
+            }
+        }
+        return $offen;
     }
 
     // ------------------------------------------------------------ Unterschriften
@@ -809,7 +931,7 @@ final class BerichtService
         if (($wieder = self::wiederholung($id, 'pruefer', $anfrage)) !== null) {
             return $wieder;
         }
-        if ($b['status'] !== 'entwurf') {
+        if ($b['status'] !== 'entwurf' || self::eingefroren($b)) {
             return self::unterschriftDa($id, 'pruefer')
                 ? ['ok' => false, 'status' => 409, 'message' => 'Der Bericht ist schon vom Prüfer unterschrieben.']
                 : ['ok' => false, 'status' => 423, 'message' => $b['status'] === 'verworfen' ? 'Der Bericht ist verworfen.' : self::EINGEFROREN];
@@ -819,6 +941,9 @@ final class BerichtService
         }
         if ($version !== (int) $b['version']) {
             return self::konflikt($b);
+        }
+        if (($fehlt = self::vorgaengerFehlt($b)) !== null) {
+            return $fehlt;
         }
 
         // Im Dialog bestätigte Warnungen gehören zum eingefrorenen Inhalt.
@@ -839,6 +964,15 @@ final class BerichtService
         if (mb_strlen($name) < 2) {
             return ['ok' => false, 'status' => 422, 'message' => 'Bitte den Namen in Druckbuchstaben eintragen.'];
         }
+        // Der Name gehört zum angemeldeten Konto: wer am Gerät eines anderen
+        // unterschreibt, schriebe sich sonst dessen Qualifikation zu. Ohne
+        // vollen Namen im Konto bleibt das Feld frei (sonst stünde nur der
+        // Benutzername da).
+        $konto = trim((string) (Auth::user()['full_name'] ?? ''));
+        if ($konto !== '' && self::nameVergleich($name) !== self::nameVergleich($konto)) {
+            return ['ok' => false, 'status' => 422, 'message' => 'Der Name passt nicht zum angemeldeten Konto („' . $konto
+                . '“). Wer als Prüfer unterschreibt, meldet sich mit dem eigenen Konto an.'];
+        }
         if (mb_strlen($ort) < 2) {
             return ['ok' => false, 'status' => 422, 'message' => 'Bitte den Ort der Unterschrift eintragen.'];
         }
@@ -848,16 +982,17 @@ final class BerichtService
         }
         $qualifikation = self::qualifikation();
         $geraetAm = self::geraetAm($u['geraet_am'] ?? null);
+        $kontoName = $konto !== '' ? $konto : (string) (Auth::user()['username'] ?? '');
 
         for ($versuch = 1; ; $versuch++) {
             try {
-                $erg = self::transaktion(static function () use ($b, $id, $version, $name, $ort, $qualifikation, $striche, $anfrage, $geraetAm): ?array {
+                $erg = self::transaktion(static function () use ($b, $id, $version, $name, $ort, $qualifikation, $striche, $anfrage, $geraetAm, $kontoName): ?array {
                     $jetzt = gmdate('c');
                     [$nummer, $jahr, $laufnr] = $b['nummer'] !== null
                         ? [(string) $b['nummer'], (int) $b['jahr'], (int) $b['laufnr']]
                         : self::nummerVergeben($b);
                     $b['nummer'] = $nummer;
-                    $inhalt = self::inhaltBauen($b, ['user_id' => (string) Auth::id(), 'name' => $name, 'qualifikation' => $qualifikation]);
+                    $inhalt = self::inhaltBauen($b, ['user_id' => (string) Auth::id(), 'name' => $name, 'qualifikation' => $qualifikation, 'konto' => $kontoName], true);
                     $json = Kanon::json($inhalt);
                     $inhaltHash = hash('sha256', $json);
                     $n = Database::execute(
@@ -877,9 +1012,16 @@ final class BerichtService
                     return ['nummer' => $nummer, 'unterschrift' => $uid];
                 });
                 break;
+            } catch (\DomainException) {
+                return self::vorgaengerFehlt($b) ?? self::konflikt(self::find($id) ?? $b);
             } catch (\PDOException $e) {
-                if (!self::eindeutigVerletzt($e) || $versuch >= 3) {
+                if ($versuch >= 3 || (!self::eindeutigVerletzt($e) && !self::besetzt($e))) {
                     throw $e;
+                }
+                if (self::besetzt($e)) {
+                    // Die Datenbank ist gerade gesperrt (zweites Tablet unterschreibt): kurz warten, noch einmal.
+                    usleep(150_000 * $versuch);
+                    continue;
                 }
                 // Dieselbe Anfrage von einem zweiten Versuch, ein anderer
                 // Prüfer – oder zwei Tablets haben dieselbe Nummer gezogen:
@@ -943,26 +1085,37 @@ final class BerichtService
         if (mb_strlen($grund) < 3) {
             return ['ok' => false, 'status' => 422, 'message' => 'Bitte einen Grund angeben.'];
         }
+        $beimKunden = ['ok' => false, 'status' => 409, 'message' => 'Der Bericht war schon beim Kunden (Kundenmodus oder PDF) – jetzt bitte abschließen und als Korrektur ändern.'];
         if (!self::zurueckziehbar($b)) {
-            return ['ok' => false, 'status' => 409, 'message' => 'Der Bericht war schon beim Kunden (Kundenmodus oder PDF) – jetzt bitte abschließen und als Korrektur ändern.'];
+            return $beimKunden;
         }
         $inhalt = self::ohneFesteKopien($b['inhalt']);
-        $ok = self::transaktion(static function () use ($id, $b, $grund, $inhalt): bool {
-            $kette = (string) (Database::scalar("SELECT kette_hash FROM bericht_unterschriften WHERE bericht_id = ? AND rolle = 'pruefer'", [$id]) ?: '');
-            $n = Database::execute(
-                "UPDATE berichte SET status = 'entwurf', inhalt = ?, inhalt_hash = NULL, eingefroren_am = NULL, pruefer_id = NULL,
-                 version = version + 1, geaendert_von = ?, updated_at = ? WHERE id = ? AND status = 'geprueft'",
-                [Kanon::json($inhalt), Auth::id(), gmdate('c'), $id]
-            );
-            if ($n !== 1) {
-                return false;
-            }
-            Database::execute("DELETE FROM bericht_unterschriften WHERE bericht_id = ? AND rolle = 'pruefer'", [$id]);
-            self::ereignis($id, 'zurueckgezogen', ['grund' => $grund, 'inhalt_hash' => (string) $b['inhalt_hash'], 'kette_hash' => $kette]);
-            return true;
-        });
+        try {
+            $ok = self::transaktion(static function () use ($id, $b, $grund, $inhalt): bool {
+                $kette = (string) (Database::scalar("SELECT kette_hash FROM bericht_unterschriften WHERE bericht_id = ? AND rolle = 'pruefer'", [$id]) ?: '');
+                // version: Kundenmodus und PDF-Abruf zählen sie hoch – was
+                // seit dem Lesen dazukam, lässt dieses UPDATE ins Leere laufen.
+                $n = Database::execute(
+                    "UPDATE berichte SET status = 'entwurf', inhalt = ?, inhalt_hash = NULL, eingefroren_am = NULL, pruefer_id = NULL,
+                     version = version + 1, geaendert_von = ?, updated_at = ? WHERE id = ? AND status = 'geprueft' AND version = ?",
+                    [Kanon::json($inhalt), Auth::id(), gmdate('c'), $id, (int) $b['version']]
+                );
+                if ($n !== 1) {
+                    return false;
+                }
+                // Und noch einmal in der Transaktion: war der Bericht inzwischen beim Kunden?
+                if (!self::zurueckziehbar(['status' => 'geprueft', 'id' => $id])) {
+                    throw new \DomainException('beim Kunden');
+                }
+                Database::execute("DELETE FROM bericht_unterschriften WHERE bericht_id = ? AND rolle = 'pruefer'", [$id]);
+                self::ereignis($id, 'zurueckgezogen', ['grund' => $grund, 'inhalt_hash' => (string) $b['inhalt_hash'], 'kette_hash' => $kette]);
+                return true;
+            });
+        } catch (\DomainException) {
+            return $beimKunden;
+        }
         if (!$ok) {
-            return ['ok' => false, 'status' => 409, 'message' => 'Der Bericht wurde inzwischen geändert – bitte neu laden.'];
+            return ['ok' => false, 'status' => 409, 'message' => 'Der Bericht wurde inzwischen geändert (etwa an den Kunden gegeben) – bitte neu laden.'];
         }
         Audit::log('bericht.zurueckgezogen', 'bericht', (string) $id, ['nummer' => $b['nummer']]);
         return ['ok' => true, 'status' => 200, 'message' => 'Unterschrift zurückgezogen – ' . $b['nummer'] . ' ist wieder ein Entwurf, die Nummer bleibt.'];
@@ -988,9 +1141,38 @@ final class BerichtService
         if (!self::darfKundenblock($b)) {
             return ['ok' => false, 'status' => 403, 'message' => 'Für diesen Bericht fehlt eine Freigabe mit „bearbeiten“.'];
         }
+        if (!self::beimKundenVermerken($id, 'kundenmodus_start')) {
+            return ['ok' => false, 'status' => 409, 'message' => 'Der Bericht wurde inzwischen geändert – bitte neu laden.'];
+        }
         Kundenmodus::starten($id);
-        self::ereignis($id, 'kundenmodus_start');
         return ['ok' => true, 'status' => 200, 'message' => 'Kundenmodus gestartet.'];
+    }
+
+    /**
+     * Die Vorschau eines vom Prüfer unterschriebenen Berichts wurde
+     * abgerufen – der Kunde kann sie gesehen haben (danach kein Zurückziehen).
+     */
+    public static function pdfAbgerufen(int $id): void
+    {
+        self::beimKundenVermerken($id, 'pdf_abgerufen', ['stufe' => 'vorschau']);
+    }
+
+    /**
+     * Kundenmodus oder PDF-Abruf festhalten: Ereignis und version + 1 in
+     * einer Transaktion. Ein gleichzeitiges Zurückziehen (prüft die version)
+     * scheitert dann, statt einen Bericht zurückzuziehen, den der Kunde
+     * schon sieht.
+     */
+    private static function beimKundenVermerken(int $id, string $ereignis, array $details = []): bool
+    {
+        return self::transaktion(static function () use ($id, $ereignis, $details): bool {
+            $n = Database::execute("UPDATE berichte SET version = version + 1 WHERE id = ? AND status = 'geprueft'", [$id]);
+            if ($n !== 1) {
+                return false;
+            }
+            self::ereignis($id, $ereignis, $details);
+            return true;
+        });
     }
 
     /**
@@ -1001,7 +1183,8 @@ final class BerichtService
      * ersetzt).
      *
      * $u: striche (JSON), name, funktion, ort, bestaetigungen (Liste),
-     * vorbehalte, anfrage, geraet_am.
+     * vorbehalte, anfrage, geraet_am, inhalt_hash (der Stand, den der Kunde
+     * auf seiner Seite gesehen hat – weicht er ab, wird nichts gespeichert).
      *
      * @return array{ok:bool,message:string,status:int,unterschrift?:int}
      */
@@ -1023,6 +1206,9 @@ final class BerichtService
         }
         if (!self::darfKundenblock($b)) {
             return ['ok' => false, 'status' => 403, 'message' => 'Für diesen Bericht fehlt eine Freigabe mit „bearbeiten“.'];
+        }
+        if (!hash_equals((string) $b['inhalt_hash'], (string) ($u['inhalt_hash'] ?? ''))) {
+            return ['ok' => false, 'status' => 409, 'message' => 'Der Bericht wurde inzwischen geändert – bitte neu laden und noch einmal lesen.'];
         }
         $erlaubt = array_keys(Katalog::bestaetigungen());
         $bestaetigungen = array_values(array_intersect($erlaubt, is_array($u['bestaetigungen'] ?? null) ? array_map('strval', $u['bestaetigungen']) : []));
@@ -1058,7 +1244,7 @@ final class BerichtService
      *
      * @return array{ok:bool,message:string,status:int}
      */
-    public static function ohneKunde(int $id, string $art, string $grund): array
+    public static function ohneKunde(int $id, string $art, string $grund, ?string $inhaltHash = null): array
     {
         $b = self::find($id);
         if ($b === null || !self::sichtbar($b)) {
@@ -1072,6 +1258,9 @@ final class BerichtService
         }
         if (!self::darfPruefen($b)) {
             return ['ok' => false, 'status' => 403, 'message' => self::NUR_PRUEFER];
+        }
+        if ($inhaltHash !== null && !hash_equals((string) $b['inhalt_hash'], $inhaltHash)) {
+            return ['ok' => false, 'status' => 409, 'message' => 'Der Bericht wurde inzwischen geändert – bitte neu laden.'];
         }
         $grund = Unterschrift::text($grund, 500);
         if (mb_strlen($grund) < 3) {
@@ -1179,14 +1368,20 @@ final class BerichtService
     /**
      * Ist ein eingefrorener Bericht noch, wie er unterschrieben wurde?
      * Gerechnet wird alles nach: Prüfsumme des Inhalts, je Unterschrift
-     * Striche, Kette und Siegel, dazu die Prüfsumme des gespeicherten PDF.
-     * Ein Siegel mit einem anderen Schlüssel (app.key gewechselt) ist nicht
-     * prüfbar – das ist ein Befund, aber kein „verfälscht“.
+     * Striche, Kette und Siegel, dazu Prüfsumme und Siegel des gespeicherten
+     * PDF. Ein Siegel mit einem anderen Schlüssel (app.key gewechselt) ist
+     * nicht prüfbar – das ist ein Befund, aber kein „verfälscht“.
+     *
+     * Eingefroren ist ein Bericht nach den Daten, nicht nach der Spalte
+     * status: Gibt es eine Unterschriftszeile, einen inhalt_hash oder ein
+     * PDF, wird geprüft – und ob der Status dazu passt (ein per SQL auf
+     * „entwurf“ gesetzter, unterschriebener Bericht ist ein Befund).
      *
      * Mit $neuErzeugen wird das PDF aus dem eingefrorenen Inhalt noch einmal
-     * erzeugt und Byte für Byte verglichen; weicht es ab, ist das nur ein
-     * Hinweis (Layout oder Programm seither geändert) – maßgeblich bleibt
-     * das gespeicherte.
+     * erzeugt und Byte für Byte verglichen. Weicht es ab und stammt das
+     * gespeicherte vom selben Erzeuger (BerichtPdf::ERZEUGER), ist das ein
+     * Befund; bei einem älteren Erzeuger nur ein Hinweis – maßgeblich ist
+     * dann das gespeicherte, wenn sein Siegel stimmt.
      *
      * @return array{ok:bool, eingefroren:bool, befunde:list<string>, hinweise?:list<string>}
      */
@@ -1197,28 +1392,60 @@ final class BerichtService
             return ['ok' => false, 'eingefroren' => false, 'befunde' => ['Diesen Bericht gibt es nicht.']];
         }
         $b = self::zeile($b);
-        if (!in_array($b['status'], ['geprueft', 'abgeschlossen', 'ersetzt'], true)) {
-            return ['ok' => true, 'eingefroren' => false, 'befunde' => []];
-        }
-        $befunde = [];
-        try {
-            $hash = Kanon::hash(json_decode((string) $b['inhalt'], true, 64, JSON_THROW_ON_ERROR));
-        } catch (\Throwable) {
-            $hash = '';
-        }
-        $inhaltHash = (string) ($b['inhalt_hash'] ?? '');
-        if ($inhaltHash === '' || !hash_equals($inhaltHash, $hash)) {
-            $befunde[] = 'Inhalt verändert – die Prüfsumme des eingefrorenen Inhalts stimmt nicht.';
-        }
-
         $zeilen = [];
         foreach (Database::select('SELECT * FROM bericht_unterschriften WHERE bericht_id = ? ORDER BY id', [$id]) as $z) {
             $zeilen[(string) $z['rolle']] = $z;
         }
+        $pdf = Database::first('SELECT * FROM bericht_pdf WHERE bericht_id = ?', [$id]);
+        $status = (string) $b['status'];
+        $statusText = self::STATUS[$status] ?? $status;
+        $inhaltHash = (string) ($b['inhalt_hash'] ?? '');
+        if (!in_array($status, ['geprueft', 'abgeschlossen', 'ersetzt'], true) && $zeilen === [] && $pdf === null && $inhaltHash === '') {
+            return ['ok' => true, 'eingefroren' => false, 'befunde' => []];
+        }
+        $befunde = [];
+
+        // ---------------------------------------------- Status passt zu den Daten?
+        if (isset($zeilen['pruefer']) && !in_array($status, ['geprueft', 'abgeschlossen', 'ersetzt'], true)) {
+            $befunde[] = 'Status „' . $statusText . '“ passt nicht zur Unterschrift des Prüfers – Status nachträglich geändert?';
+        }
+        if ((isset($zeilen['kunde']) || $pdf !== null) && !in_array($status, ['abgeschlossen', 'ersetzt'], true)) {
+            $befunde[] = 'Status „' . $statusText . '“ passt nicht zum Kundenblock bzw. zum gespeicherten PDF – Status nachträglich geändert?';
+        }
+        if ($status === 'ersetzt') {
+            $nach = $b['ersetzt_durch_id'] !== null ? Database::first('SELECT status, vorgaenger_id FROM berichte WHERE id = ?', [(int) $b['ersetzt_durch_id']]) : null;
+            if ($nach === null || (int) $nach['vorgaenger_id'] !== $id || !in_array((string) $nach['status'], ['abgeschlossen', 'ersetzt'], true)) {
+                $befunde[] = 'Als „ersetzt“ geführt, aber ohne abgeschlossene Korrektur, die ihn ersetzt.';
+            }
+        } elseif ((int) Database::scalar("SELECT COUNT(*) FROM berichte WHERE vorgaenger_id = ? AND status IN ('abgeschlossen', 'ersetzt')", [$id]) > 0) {
+            $befunde[] = 'Eine Korrektur dieses Berichts ist abgeschlossen, er selbst aber nicht als „ersetzt“ geführt.';
+        }
+
+        // ---------------------------------------------- Inhalt
+        try {
+            $inhalt = json_decode((string) $b['inhalt'], true, 64, JSON_THROW_ON_ERROR);
+            $hash = Kanon::hash($inhalt);
+        } catch (\Throwable) {
+            $inhalt = [];
+            $hash = '';
+        }
+        if ($inhaltHash === '' || !hash_equals($inhaltHash, $hash)) {
+            $befunde[] = 'Inhalt verändert – die Prüfsumme des eingefrorenen Inhalts stimmt nicht.';
+        }
+        if ((int) $b['fassung'] > 1) {
+            if (!is_array($inhalt['vorgaenger'] ?? null)) {
+                $befunde[] = 'Korrektur ohne Verweis auf den Vorgänger im eingefrorenen Inhalt.';
+            }
+            if ($b['vorgaenger_id'] === null || Database::scalar('SELECT id FROM berichte WHERE id = ?', [(int) $b['vorgaenger_id']]) === false) {
+                $befunde[] = 'Der Vorgänger dieser Korrektur fehlt.';
+            }
+        }
+
+        // ---------------------------------------------- Unterschriften
         if (!isset($zeilen['pruefer'])) {
             $befunde[] = 'Die Unterschrift des Prüfers fehlt.';
         }
-        if (in_array($b['status'], ['abgeschlossen', 'ersetzt'], true) && !isset($zeilen['kunde'])) {
+        if (in_array($status, ['abgeschlossen', 'ersetzt'], true) && !isset($zeilen['kunde'])) {
             $befunde[] = 'Der Kundenblock fehlt.';
         }
         $schluesselId = self::schluesselId();
@@ -1257,28 +1484,63 @@ final class BerichtService
             }
         }
 
-        $pdf = Database::first('SELECT sha256, groesse, daten FROM bericht_pdf WHERE bericht_id = ?', [$id]);
+        // ---------------------------------------------- PDF
         $hinweise = [];
         if ($pdf !== null) {
             $bytes = base64_decode((string) $pdf['daten'], true);
             $sha = $bytes === false ? '' : hash('sha256', $bytes);
             if ($bytes === false || !hash_equals((string) $pdf['sha256'], $sha) || (string) ($b['pdf_hash'] ?? '') !== $sha || strlen($bytes) !== (int) $pdf['groesse']) {
                 $befunde[] = 'PDF verändert – die Prüfsumme der gespeicherten Datei stimmt nicht.';
-            } elseif ($neuErzeugen) {
-                try {
-                    $neu = BerichtPdf::erzeugen((array) self::find($id), self::unterschriften($id), false);
-                } catch (\Throwable) {
-                    $neu = '';
+            } else {
+                $siegelOk = false;
+                $erzeuger = (string) $pdf['erzeuger'];
+                if ((string) ($pdf['siegel'] ?? '') === '') {
+                    $befunde[] = 'Das gespeicherte PDF hat kein Siegel.';
+                } elseif ((string) $pdf['schluessel_id'] !== $schluesselId) {
+                    $befunde[] = 'PDF: Siegel mit anderem Schlüssel (' . preg_replace('/[^0-9a-f]/', '', (string) $pdf['schluessel_id']) . '), nicht prüfbar.';
+                } elseif (!hash_equals(self::pdfSiegel($id, (string) $b['nummer'], (int) $b['fassung'], (string) ($zeilen['kunde']['kette_hash'] ?? ''), $sha, $erzeuger),
+                    (string) $pdf['siegel'])) {
+                    $befunde[] = 'PDF: Siegel ungültig – die Datei wurde nach dem Abschluss ausgetauscht.';
+                } else {
+                    $siegelOk = true;
                 }
-                if (!hash_equals($bytes, $neu)) {
-                    $hinweise[] = 'Neu erzeugt weicht das PDF vom gespeicherten ab (Layout oder Programm seither geändert) – maßgeblich ist das gespeicherte.';
+                $beimAbschluss = self::pdfBeimAbschluss($id);
+                if ($beimAbschluss !== null && !hash_equals($beimAbschluss, $sha)) {
+                    $befunde[] = 'PDF: die Prüfsumme weicht von der beim Abschluss festgehaltenen ab.';
+                }
+                if ($neuErzeugen) {
+                    try {
+                        $neu = BerichtPdf::erzeugen((array) self::find($id), self::unterschriften($id), false);
+                    } catch (\Throwable) {
+                        $neu = '';
+                    }
+                    if (!hash_equals($bytes, $neu)) {
+                        if ($erzeuger === BerichtPdf::ERZEUGER) {
+                            $befunde[] = 'PDF: neu erzeugt weicht es vom gespeicherten ab, obwohl der Erzeuger derselbe ist (' . $erzeuger
+                                . ') – Inhalt, Unterschriften oder Datei verändert.';
+                        } else {
+                            $hinweise[] = 'Neu erzeugt weicht das PDF vom gespeicherten ab (erzeugt mit ' . preg_replace('/[^a-z0-9.-]/', '', $erzeuger)
+                                . ', jetzt ' . BerichtPdf::ERZEUGER . ')' . ($siegelOk ? ' – maßgeblich ist das gespeicherte, sein Siegel stimmt.' : '.');
+                        }
+                    }
                 }
             }
-        } elseif ($b['pdf_hash'] !== null || in_array($b['status'], ['abgeschlossen', 'ersetzt'], true)) {
+        } elseif ($b['pdf_hash'] !== null || in_array($status, ['abgeschlossen', 'ersetzt'], true)) {
             $befunde[] = 'Das gespeicherte PDF fehlt.';
         }
         $out = ['ok' => $befunde === [], 'eingefroren' => true, 'befunde' => $befunde];
         return $neuErzeugen ? $out + ['hinweise' => $hinweise] : $out;
+    }
+
+    /** Die Prüfsumme des PDF, wie sie beim Abschluss im Lebenslauf festgehalten wurde – oder null. */
+    private static function pdfBeimAbschluss(int $id): ?string
+    {
+        $d = Database::scalar(
+            "SELECT details FROM bericht_ereignisse WHERE bericht_id = ? AND ereignis IN ('kunde_unterschrieben', 'ohne_kunde') ORDER BY id DESC LIMIT 1",
+            [$id]
+        );
+        $details = is_string($d) ? json_decode($d, true) : null;
+        return is_array($details) && is_string($details['pdf_sha256'] ?? null) ? $details['pdf_sha256'] : null;
     }
 
     // ------------------------------------------------------------ PDF
@@ -1340,7 +1602,7 @@ final class BerichtService
      * wird nicht gelöscht, sondern verworfen: so ist die Lücke in der
      * Nummernfolge erklärt.
      *
-     * @return array{ok:bool,message:string}
+     * @return array{ok:bool,message:string,status?:int}
      */
     public static function verwerfen(int $id, string $grund): array
     {
@@ -1358,13 +1620,26 @@ final class BerichtService
         if (mb_strlen($grund) < 3) {
             return ['ok' => false, 'message' => 'Bitte einen Grund angeben.'];
         }
-        self::transaktion(static function () use ($id, $b, $grund): void {
-            Database::execute("UPDATE berichte SET status = 'verworfen', aufbewahren_bis = ?, geaendert_von = ?, updated_at = ? WHERE id = ? AND status = 'entwurf'",
-                [self::aufbewahrenBis((string) $b['pruefdatum']), Auth::id(), gmdate('c'), $id]);
+        $ok = self::transaktion(static function () use ($id, $b, $grund): bool {
+            // Nur, was in diesem Moment noch ein Entwurf ist – unterschreibt
+            // gleichzeitig jemand, trifft das UPDATE nichts.
+            $jetzt = gmdate('c');
+            $n = Database::execute(
+                "UPDATE berichte SET status = 'verworfen', aufbewahren_bis = ?, geaendert_von = ?, updated_at = ? WHERE id = ? AND status = 'entwurf'
+                 AND nummer IS NOT NULL AND inhalt_hash IS NULL AND NOT EXISTS (SELECT 1 FROM bericht_unterschriften u WHERE u.bericht_id = berichte.id)",
+                [self::aufbewahrenBis((string) $b['pruefdatum'], $jetzt), Auth::id(), $jetzt, $id]
+            );
+            if ($n !== 1) {
+                return false;
+            }
             self::ereignis($id, 'verworfen', ['grund' => $grund]);
+            return true;
         });
+        if (!$ok) {
+            return ['ok' => false, 'status' => 409, 'message' => 'Der Bericht wurde inzwischen geändert (etwa unterschrieben) – bitte neu laden.'];
+        }
         Audit::log('bericht.verworfen', 'bericht', (string) $id, ['nummer' => $b['nummer']]);
-        return ['ok' => true, 'message' => $b['nummer'] . ' verworfen.'];
+        return ['ok' => true, 'status' => 200, 'message' => $b['nummer'] . ' verworfen.'];
     }
 
     /** Nur ein Entwurf ohne Nummer lässt sich löschen – samt Objekten und Ereignissen. */
@@ -1420,18 +1695,24 @@ final class BerichtService
     /**
      * Ein Standort wird gelöscht: Entwürfe ohne Nummer gehen mit, alle
      * anderen Berichte bleiben (mit dem Namen des Standorts in
-     * `standort_name`) – sichtbar dann nur noch mit „Alle Standorte“.
+     * `standort_name`) – sichtbar dann nur noch mit „Alle Standorte“, auch
+     * nicht mehr für den Ersteller (standort_entfernt).
      */
     public static function standortEntfernt(int $siteId): void
     {
-        foreach (Database::select("SELECT id FROM berichte WHERE site_id = ? AND status = 'entwurf' AND nummer IS NULL", [$siteId]) as $row) {
-            self::alleZeilenLoeschen((int) $row['id']);
+        foreach (Database::select("SELECT id FROM berichte WHERE site_id = ? AND status = 'entwurf' AND nummer IS NULL AND inhalt_hash IS NULL", [$siteId]) as $row) {
+            if (!self::eingefroren(['id' => (int) $row['id'], 'status' => 'entwurf'])) {
+                self::alleZeilenLoeschen((int) $row['id']);
+            }
         }
         $name = (string) (Database::scalar('SELECT name FROM sites WHERE id = ?', [$siteId]) ?: '');
         if ($name !== '') {
             Database::execute("UPDATE berichte SET standort_name = ? WHERE site_id = ? AND standort_name = ''", [mb_substr($name, 0, 190), $siteId]);
         }
-        Database::execute('UPDATE berichte SET site_id = NULL WHERE site_id = ?', [$siteId]);
+        foreach (Database::select('SELECT id FROM berichte WHERE site_id = ?', [$siteId]) as $row) {
+            self::ereignis((int) $row['id'], 'standort_entfernt', ['standort' => (string) $siteId]);
+        }
+        Database::execute('UPDATE berichte SET site_id = NULL, standort_entfernt = 1 WHERE site_id = ?', [$siteId]);
     }
 
     public static function aufbauEntfernt(int $aufbauId): void
@@ -1453,26 +1734,80 @@ final class BerichtService
     // ------------------------------------------------------------ Aufbewahrung
 
     /**
-     * Berichte über der Aufbewahrungsfrist (abgeschlossen, ersetzt, verworfen).
+     * Berichte über der Aufbewahrungsfrist (abgeschlossen, ersetzt,
+     * verworfen) – nur ganze Nummernfamilien (alle Fassungen einer Nummer):
+     * solange eine Fassung noch offen ist (Entwurf, vom Prüfer
+     * unterschrieben) oder ihre Frist nicht abgelaufen ist, bleibt die ganze
+     * Familie. Sonst zeigte eine Korrektur ins Leere. Nur Fristen der Form
+     * JJJJ-MM-TT zählen.
      *
      * @return list<array<string,mixed>>
      */
     public static function faellig(): array
     {
         $heute = (new \DateTimeImmutable('now', Zeit::zone()))->format('Y-m-d');
-        return Database::select(
-            "SELECT id, nummer, fassung, status, pruefdatum, aufbewahren_bis FROM berichte
+        $abgelaufen = static fn (array $r): bool => in_array((string) $r['status'], ['abgeschlossen', 'ersetzt', 'verworfen'], true)
+            && preg_match('/^\d{4}-\d{2}-\d{2}$/', (string) ($r['aufbewahren_bis'] ?? '')) === 1 && (string) $r['aufbewahren_bis'] < $heute;
+        $out = [];
+        $familien = [];
+        foreach (Database::select(
+            "SELECT id, nummer, jahr, laufnr, fassung, status, pruefdatum, aufbewahren_bis FROM berichte
              WHERE status IN ('abgeschlossen', 'ersetzt', 'verworfen') AND aufbewahren_bis IS NOT NULL AND aufbewahren_bis < ? ORDER BY aufbewahren_bis, id",
             [$heute]
-        );
+        ) as $r) {
+            if (!$abgelaufen($r)) {
+                continue;
+            }
+            if ($r['jahr'] === null || $r['laufnr'] === null) {
+                $out[] = $r;
+                continue;
+            }
+            $schluessel = (int) $r['jahr'] . '-' . (int) $r['laufnr'];
+            if (!isset($familien[$schluessel])) {
+                $familie = Database::select('SELECT id, status, aufbewahren_bis FROM berichte WHERE jahr = ? AND laufnr = ?', [(int) $r['jahr'], (int) $r['laufnr']]);
+                $familien[$schluessel] = array_filter($familie, static fn (array $f): bool => !$abgelaufen($f)) === [];
+            }
+            if ($familien[$schluessel]) {
+                $out[] = $r;
+            }
+        }
+        return $out;
     }
 
-    /** Einen Bericht nach Ablauf der Frist endgültig löschen – samt Unterschriften, PDF, Objekten und Ereignissen. */
-    public static function aufbewahrungLoeschen(int $id): void
+    /**
+     * Einen Bericht nach Ablauf der Frist endgültig löschen – samt
+     * Unterschriften, PDF, Objekten und Ereignissen, und mit ihm alle
+     * Fassungen seiner Nummer (in einer Transaktion). Nur, was faellig()
+     * nennt; sonst wird nichts gelöscht.
+     *
+     * @return list<int> die gelöschten Berichte (leer: nicht fällig)
+     */
+    public static function aufbewahrungLoeschen(int $id): array
     {
-        $nummer = Database::scalar('SELECT nummer FROM berichte WHERE id = ?', [$id]);
-        self::transaktion(static fn () => self::alleZeilenLoeschen($id));
-        Audit::log('bericht.geloescht', 'bericht', (string) $id, ['nummer' => is_string($nummer) ? $nummer : null]);
+        $faellig = array_map(static fn (array $r): int => (int) $r['id'], self::faellig());
+        if (!in_array($id, $faellig, true)) {
+            return [];
+        }
+        $b = Database::first('SELECT jahr, laufnr FROM berichte WHERE id = ?', [$id]);
+        $ids = $b !== null && $b['jahr'] !== null && $b['laufnr'] !== null
+            ? array_map(static fn (array $r): int => (int) $r['id'], Database::select('SELECT id FROM berichte WHERE jahr = ? AND laufnr = ? ORDER BY fassung DESC', [(int) $b['jahr'], (int) $b['laufnr']]))
+            : [$id];
+        if (array_diff($ids, $faellig) !== []) {
+            return [];
+        }
+        $nummern = [];
+        foreach ($ids as $bid) {
+            $nummern[$bid] = Database::scalar('SELECT nummer FROM berichte WHERE id = ?', [$bid]);
+        }
+        self::transaktion(static function () use ($ids): void {
+            foreach ($ids as $bid) {
+                self::alleZeilenLoeschen($bid);
+            }
+        });
+        foreach ($ids as $bid) {
+            Audit::log('bericht.geloescht', 'bericht', (string) $bid, ['nummer' => is_string($nummern[$bid]) ? $nummern[$bid] : null]);
+        }
+        return $ids;
     }
 
     /**
@@ -1523,13 +1858,24 @@ final class BerichtService
     public static function eingefrorene(): array
     {
         return array_map(static fn (array $b): array => ['id' => (int) $b['id'], 'nummer' => (string) $b['nummer'], 'fassung' => (int) $b['fassung'], 'status' => (string) $b['status']],
-            Database::select("SELECT id, nummer, fassung, status FROM berichte WHERE status IN ('geprueft', 'abgeschlossen', 'ersetzt') ORDER BY jahr, laufnr, fassung, id"));
+            Database::select("SELECT b.id, b.nummer, b.fassung, b.status FROM berichte b WHERE b.status IN ('geprueft', 'abgeschlossen', 'ersetzt')
+                OR b.inhalt_hash IS NOT NULL OR EXISTS (SELECT 1 FROM bericht_unterschriften u WHERE u.bericht_id = b.id)
+                OR EXISTS (SELECT 1 FROM bericht_pdf p WHERE p.bericht_id = b.id) ORDER BY b.jahr, b.laufnr, b.fassung, b.id"));
     }
 
-    /** 31.12. des Jahres „Prüfdatum + Aufbewahrung“. */
-    public static function aufbewahrenBis(string $pruefdatum): string
+    /**
+     * 31.12. des Jahres „Aufbewahrung + das spätere von Prüfdatum und
+     * Abschluss“ (Jahr in der Zeitzone der Installation). Die Fristen, auf
+     * die sich die zehn Jahre stützen, beginnen mit Übergabe bzw. Absendung –
+     * ein vertipptes oder altes Prüfdatum macht einen frischen Bericht so
+     * nicht gleich löschfällig.
+     */
+    public static function aufbewahrenBis(string $pruefdatum, ?string $abgeschlossenAm = null): string
     {
-        $jahr = preg_match('/^(\d{4})-/', $pruefdatum, $m) === 1 ? (int) $m[1] : (int) gmdate('Y');
+        $pruefjahr = preg_match('/^(\d{4})-\d{2}-\d{2}$/', $pruefdatum, $m) === 1 ? (int) $m[1] : 0;
+        $ts = $abgeschlossenAm !== null ? Zeit::ts($abgeschlossenAm) : null;
+        $abschlussjahr = (int) (new \DateTimeImmutable('@' . ($ts ?? time())))->setTimezone(Zeit::zone())->format('Y');
+        $jahr = min(9999 - 30, max($pruefjahr, $abschlussjahr));
         return sprintf('%04d-12-31', $jahr + (int) Einstellungen::wert('berichte.aufbewahrung_jahre'));
     }
 
@@ -1542,7 +1888,7 @@ final class BerichtService
             return ['ok' => false, 'status' => 404, 'message' => 'Diesen Bericht gibt es nicht.'];
         }
         if ($zweck === 'bearbeiten') {
-            if ($b['status'] !== 'entwurf') {
+            if ($b['status'] !== 'entwurf' || self::eingefroren($b)) {
                 return ['ok' => false, 'status' => 423, 'message' => $b['status'] === 'verworfen' ? 'Der Bericht ist verworfen.' : self::EINGEFROREN];
             }
             if (!self::darfBearbeiten($b)) {
@@ -1633,7 +1979,7 @@ final class BerichtService
     private static function letzte(string $bedingung, array $werte): ?array
     {
         $rows = Database::select(
-            "SELECT b.id, b.nummer, b.fassung, b.status, b.site_id, b.erstellt_von, b.pruefdatum, b.abgeschlossen_am, b.titel FROM berichte b
+            "SELECT b.id, b.nummer, b.fassung, b.status, b.site_id, b.standort_entfernt, b.erstellt_von, b.pruefdatum, b.abgeschlossen_am, b.titel FROM berichte b
              WHERE b.status = 'abgeschlossen' AND b.id IN (SELECT bo.bericht_id FROM bericht_objekte bo WHERE {$bedingung})
              ORDER BY b.abgeschlossen_am DESC, b.id DESC LIMIT 20",
             $werte
@@ -1649,7 +1995,7 @@ final class BerichtService
 
     private static function alleZeilenLoeschen(int $id): void
     {
-        foreach (['bericht_unterschriften', 'bericht_pdf', 'bericht_objekte', 'bericht_ereignisse'] as $tabelle) {
+        foreach (['bericht_unterschriften', 'bericht_pdf', 'bericht_objekte', 'bericht_ereignisse', 'kundenmodus_geraete'] as $tabelle) {
             Database::execute("DELETE FROM {$tabelle} WHERE bericht_id = ?", [$id]);
         }
         Database::delete('berichte', $id);
@@ -1715,6 +2061,37 @@ final class BerichtService
         return (string) ($e->errorInfo[0] ?? $e->getCode()) === '23000';
     }
 
+    /**
+     * Gerade gesperrt? SQLite: SQLITE_BUSY (5) / SQLITE_LOCKED (6);
+     * MySQL: Lock wait timeout (1205) / Deadlock (1213). Dann lohnt ein
+     * zweiter Versuch – es ist nichts gespeichert.
+     */
+    private static function besetzt(\PDOException $e): bool
+    {
+        $code = (int) ($e->errorInfo[1] ?? 0);
+        return Database::driver() === 'sqlite' ? in_array($code, [5, 6], true) || str_contains($e->getMessage(), 'database is locked')
+            : in_array($code, [1205, 1213], true);
+    }
+
+    /** Name zum Vergleich: Groß/klein, Leerzeichen und Umlaut-Schreibweise egal. */
+    private static function nameVergleich(string $name): string
+    {
+        $n = mb_strtolower(trim((string) preg_replace('/\s+/u', ' ', $name)));
+        return strtr($n, ['ä' => 'ae', 'ö' => 'oe', 'ü' => 'ue', 'ß' => 'ss']);
+    }
+
+    /** Eine Korrektur, deren Vorgänger fehlt, wird nicht eingefroren (409) – sonst null. */
+    private static function vorgaengerFehlt(array $b): ?array
+    {
+        if ((int) $b['fassung'] <= 1) {
+            return null;
+        }
+        if ($b['vorgaenger_id'] === null || Database::scalar('SELECT id FROM berichte WHERE id = ?', [(int) $b['vorgaenger_id']]) === false) {
+            return ['ok' => false, 'status' => 409, 'message' => 'Der Vorgänger dieser Korrektur fehlt (etwa nach Ablauf der Aufbewahrungsfrist gelöscht) – so lässt sie sich nicht einfrieren.'];
+        }
+        return null;
+    }
+
     private static function kundenblockOffen(array $b): ?array
     {
         if (self::unterschriftDa((int) $b['id'], 'kunde')) {
@@ -1734,6 +2111,27 @@ final class BerichtService
     private static function kundenblockAnlegen(array $b, array $z, array $details): array
     {
         $id = (int) $b['id'];
+        for ($versuch = 1; ; $versuch++) {
+            try {
+                return self::kundenblockVersuch($b, $z, $details);
+            } catch (\PDOException $e) {
+                if ($versuch >= 3 || !self::besetzt($e)) {
+                    throw $e;
+                }
+                // Gesperrt (zweites Gerät schreibt gerade): kurz warten, noch einmal.
+                usleep(150_000 * $versuch);
+                $neu = self::find($id);
+                if ($neu === null) {
+                    return self::nichtDa();
+                }
+                $b = $neu;
+            }
+        }
+    }
+
+    private static function kundenblockVersuch(array $b, array $z, array $details): array
+    {
+        $id = (int) $b['id'];
         try {
             $uid = self::transaktion(static function () use ($b, $id, $z, $details): ?int {
                 $pruefer = Database::first("SELECT kette_hash FROM bericht_unterschriften WHERE bericht_id = ? AND rolle = 'pruefer'", [$id]);
@@ -1741,10 +2139,12 @@ final class BerichtService
                     return null;
                 }
                 $jetzt = gmdate('c');
+                // Nur der Stand, den der Kunde gesehen hat (inhalt_hash) – nach
+                // einem Zurückziehen und neuer Unterschrift wäre es ein anderer.
                 $n = Database::execute(
                     "UPDATE berichte SET status = 'abgeschlossen', abgeschlossen_am = ?, aufbewahren_bis = ?, version = version + 1,
-                     geaendert_von = ?, updated_at = ? WHERE id = ? AND status = 'geprueft'",
-                    [$jetzt, self::aufbewahrenBis((string) $b['pruefdatum']), Auth::id(), $jetzt, $id]
+                     geaendert_von = ?, updated_at = ? WHERE id = ? AND status = 'geprueft' AND inhalt_hash = ?",
+                    [$jetzt, self::aufbewahrenBis((string) $b['pruefdatum'], $jetzt), Auth::id(), $jetzt, $id, (string) $b['inhalt_hash']]
                 );
                 if ($n !== 1) {
                     return null;
@@ -1785,9 +2185,11 @@ final class BerichtService
 
     /**
      * Das PDF beim Abschluss erzeugen und ablegen (base64 in bericht_pdf,
-     * SHA-256 in berichte.pdf_hash). Läuft in der Transaktion des
-     * Abschlusses; CreationDate ist abgeschlossen_am, die ID kommt aus dem
-     * inhalt_hash – neu erzeugt ergeben sich dieselben Bytes.
+     * SHA-256 in berichte.pdf_hash) – mit Siegel über Bericht, Nummer,
+     * Fassung, die Kette der Kundenzeile, Prüfsumme und Erzeuger. Läuft in
+     * der Transaktion des Abschlusses; CreationDate ist abgeschlossen_am,
+     * die ID kommt aus dem inhalt_hash – neu erzeugt ergeben sich dieselben
+     * Bytes.
      *
      * @return string SHA-256 des PDF
      */
@@ -1797,18 +2199,29 @@ final class BerichtService
         if ($b === null) {
             throw new \LogicException('Bericht verschwunden.');
         }
-        $bytes = BerichtPdf::erzeugen($b, self::unterschriften($id), false);
+        $unterschriften = self::unterschriften($id);
+        $bytes = BerichtPdf::erzeugen($b, $unterschriften, false);
         $sha = hash('sha256', $bytes);
         Database::insert('bericht_pdf', [
-            'bericht_id' => $id,
-            'sha256'     => $sha,
-            'groesse'    => strlen($bytes),
-            'daten'      => base64_encode($bytes),
-            'erzeuger'   => BerichtPdf::ERZEUGER,
-            'erzeugt_am' => $am,
+            'bericht_id'    => $id,
+            'sha256'        => $sha,
+            'groesse'       => strlen($bytes),
+            'daten'         => base64_encode($bytes),
+            'erzeuger'      => BerichtPdf::ERZEUGER,
+            'erzeugt_am'    => $am,
+            'siegel'        => self::pdfSiegel($id, (string) $b['nummer'], (int) $b['fassung'], (string) ($unterschriften['kunde']['kette_hash'] ?? ''),
+                $sha, BerichtPdf::ERZEUGER),
+            'schluessel_id' => self::schluesselId(),
         ]);
         Database::execute('UPDATE berichte SET pdf_hash = ? WHERE id = ?', [$sha, $id]);
         return $sha;
+    }
+
+    /** Das Siegel des gespeicherten PDF (HMAC, Schlüssel wie bei den Unterschriften). */
+    private static function pdfSiegel(int $id, string $nummer, int $fassung, string $kundenKette, string $sha, string $erzeuger): string
+    {
+        return hash_hmac('sha256', implode("\n", ['PM-UB-PDF-1', (string) $id, $nummer, (string) $fassung, $kundenKette !== '' ? $kundenKette : '-', $sha, $erzeuger]),
+            self::siegelSchluessel());
     }
 
     /**
@@ -1866,8 +2279,12 @@ final class BerichtService
     /**
      * Nummer, Jahr und laufende Nummer für die erste Prüfer-Unterschrift:
      * <Kürzel>-<Jahr des Prüfdatums>-<laufend>, bei einer Korrektur die
-     * Nummer des Vorgängers mit -K<n>. Ein Wettlauf zweier Tablets endet am
-     * UNIQUE-Index (jahr, laufnr, fassung) und wird wiederholt.
+     * Nummer des Vorgängers mit -K<n>. Die laufende Nummer zählt über
+     * bericht_nummern weiter – eine einmal vergebene Nummer kommt nie
+     * wieder, auch nicht nach dem Löschen nach Ablauf der Frist. Unter
+     * SQLite schließt BEGIN IMMEDIATE den Wettlauf zweier Tablets aus, unter
+     * MySQL endet er am UNIQUE-Index (jahr, laufnr, fassung) bzw. am
+     * Primärschlüssel des Zählers und wird wiederholt.
      *
      * @return array{0:string,1:int,2:int}
      */
@@ -1883,7 +2300,13 @@ final class BerichtService
             return [$basis . '-K' . ($fassung - 1), (int) $b['jahr'], (int) $b['laufnr']];
         }
         $jahr = preg_match('/^(\d{4})-/', (string) $b['pruefdatum'], $m) === 1 ? (int) $m[1] : (int) gmdate('Y');
-        $laufnr = (int) Database::scalar('SELECT COALESCE(MAX(laufnr), 0) FROM berichte WHERE jahr = ? AND fassung = 1', [$jahr]) + 1;
+        $zaehler = Database::scalar('SELECT laufnr FROM bericht_nummern WHERE jahr = ?', [$jahr]);
+        $laufnr = max((int) Database::scalar('SELECT COALESCE(MAX(laufnr), 0) FROM berichte WHERE jahr = ?', [$jahr]), (int) ($zaehler ?: 0)) + 1;
+        if ($zaehler === false) {
+            Database::insert('bericht_nummern', ['jahr' => $jahr, 'laufnr' => $laufnr]);
+        } else {
+            Database::execute('UPDATE bericht_nummern SET laufnr = ? WHERE jahr = ?', [$laufnr, $jahr]);
+        }
         return [sprintf('%s-%d-%04d', Einstellungen::wert('berichte.praefix'), $jahr, $laufnr), $jahr, $laufnr];
     }
 
@@ -1894,9 +2317,12 @@ final class BerichtService
      * Bericht sieht so nach jeder Änderung an Code oder Einstellungen aus
      * wie am Tag der Unterschrift.
      *
-     * @param array{user_id:string,name:string,qualifikation:string} $pruefer
+     * $vorgaengerPflicht: beim Einfrieren einer Korrektur muss der Vorgänger
+     * da sein – sonst \DomainException statt einer Fassung ohne Verweis.
+     *
+     * @param array{user_id:string,name:string,qualifikation:string,konto?:string} $pruefer
      */
-    private static function inhaltBauen(array $b, array $pruefer): array
+    private static function inhaltBauen(array $b, array $pruefer, bool $vorgaengerPflicht = false): array
     {
         $i = self::ohneFesteKopien(BerichtSchema::vollstaendig($b['inhalt']));
         $i['bewertung'] = Grenzwerte::alle($i);
@@ -1908,7 +2334,11 @@ final class BerichtService
             if ($v !== null) {
                 $i['vorgaenger'] = ['nummer' => (string) $v['nummer'], 'fassung' => (string) (int) $v['fassung'], 'inhalt_hash' => (string) $v['inhalt_hash'],
                     'abgeschlossen_am' => (string) ($v['abgeschlossen_am'] ?? ''), 'grund' => (string) $b['korrektur_grund']];
+            } elseif ($vorgaengerPflicht) {
+                throw new \DomainException('Vorgänger fehlt');
             }
+        } elseif ($fassung > 1 && $vorgaengerPflicht) {
+            throw new \DomainException('Vorgänger fehlt');
         }
         $i['kopf']['qualifikation'] = $pruefer['qualifikation'];
         $i['kopf']['pruefer'] = $pruefer;
@@ -1961,7 +2391,7 @@ final class BerichtService
     /** Zahlen aus der Datenbank als int (SQLite liefert Text). */
     private static function zeile(array $b): array
     {
-        foreach (['id', 'fassung', 'version', 'erstellt_von'] as $spalte) {
+        foreach (['id', 'fassung', 'version', 'erstellt_von', 'standort_entfernt'] as $spalte) {
             if (array_key_exists($spalte, $b)) {
                 $b[$spalte] = (int) $b[$spalte];
             }
@@ -1988,21 +2418,40 @@ final class BerichtService
         return [$beginn->getTimestamp(), $beginn->modify('+1 day')->getTimestamp()];
     }
 
-    /** Eine Arbeit in einer Transaktion (in einer laufenden: ohne eigene). */
+    private static int $tiefe = 0;
+
+    /**
+     * Eine Arbeit in einer Transaktion (in einer laufenden: ohne eigene).
+     *
+     * Unter SQLite mit BEGIN IMMEDIATE: die Schreibsperre gleich am Anfang.
+     * Eine aufgeschobene Transaktion, die erst liest und dann schreibt,
+     * scheitert sofort mit „database is locked“ – SQLite ruft den
+     * Busy-Handler nicht auf, wenn eine Verbindung mit offenem Lesestand
+     * aufstufen will. So wartet busy_timeout schon beim BEGIN, und Lesen und
+     * Schreiben sehen denselben Stand.
+     */
     private static function transaktion(callable $arbeit): mixed
     {
         $pdo = Database::pdo();
-        if ($pdo->inTransaction()) {
+        if (self::$tiefe > 0 || $pdo->inTransaction()) {
             return $arbeit();
         }
-        $pdo->beginTransaction();
+        $sqlite = Database::driver() === 'sqlite';
+        $sqlite ? $pdo->exec('BEGIN IMMEDIATE') : $pdo->beginTransaction();
+        self::$tiefe++;
         try {
             $ergebnis = $arbeit();
-            $pdo->commit();
+            $sqlite ? $pdo->exec('COMMIT') : $pdo->commit();
             return $ergebnis;
         } catch (\Throwable $e) {
-            $pdo->rollBack();
+            try {
+                $sqlite ? $pdo->exec('ROLLBACK') : $pdo->rollBack();
+            } catch (\Throwable) {
+                // schon zurückgerollt (etwa nach SQLITE_BUSY beim COMMIT)
+            }
             throw $e;
+        } finally {
+            self::$tiefe--;
         }
     }
 }

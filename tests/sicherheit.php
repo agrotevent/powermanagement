@@ -71,6 +71,28 @@ try {
     // Unterschriften nur als Linie: keine Zeit, kein Druck, keine Neigung im Erfassungscode.
     pruefe(preg_match('/pressure|timeStamp|Date\.now|performance\.now|tiltX|tiltY|twist|tangential/', (string) file_get_contents($js . 'unterschrift.js')) === 0,
         'unterschrift.js liest weder Zeit noch Druck');
+    // Abmelden: bericht.js hört vorher (Capture) und schreibt danach nichts mehr zurück – sonst
+    // legte pagehide den gerade gelöschten Entwurf mit Kundendaten wieder ab.
+    pruefe(preg_match('/document\.addEventListener\(\'submit\', function \(e\) \{[^}]*form\[action="\/logout"\][\s\S]{0,600}?uebernahme = true;[\s\S]{0,200}?\}, true\);/',
+        (string) file_get_contents($js . 'bericht.js')) === 1, 'bericht.js: Abmelden im Capture, danach kein lokaler Entwurf mehr');
+    // Netz: jede Anfrage der Berichte mit Zeitgrenze (PMNetz, AbortController) – kein fetch ohne.
+    $app = (string) file_get_contents($js . 'app.js');
+    pruefe(str_contains($app, 'window.PMNetz') && str_contains($app, 'AbortController') && str_contains($app, "BroadcastChannel('pm-kundenmodus')"),
+        'app.js: POST mit Zeitgrenze, Sperre anderer Tabs im Kundenmodus');
+    foreach (['bericht.js', 'bericht-kunde.js', 'unterschrift.js'] as $datei) {
+        pruefe(!str_contains((string) file_get_contents($js . $datei), 'fetch('), $datei . ': kein fetch ohne Zeitgrenze');
+    }
+    pruefe(str_contains((string) file_get_contents($js . 'bericht-kunde.js'), "BroadcastChannel('pm-kundenmodus')"), 'bericht-kunde.js meldet den Kundenmodus an andere Tabs');
+    // Die Fläche selbst: Handballen zuerst, dann Stift; viele Punkte mit großen Koordinaten.
+    $node = trim((string) shell_exec('command -v node 2>/dev/null'));
+    if ($node !== '') {
+        $flaeche = json_decode((string) shell_exec(escapeshellarg($node) . ' ' . escapeshellarg(__DIR__ . '/hilfen/unterschrift-flaeche.cjs') . ' '
+            . escapeshellarg($js . 'unterschrift.js')), true) ?? [];
+        pruefe(($flaeche['handballen']['striche'] ?? 0) === 1 && ($flaeche['handballen']['punkte'][0] ?? 0) > 20 && ($flaeche['handballen']['gueltig'] ?? false) === true,
+            'unterschrift.js: liegt der Handballen zuerst auf, zählt der Stiftstrich (nicht der Handballen) ' . json_encode($flaeche['handballen'] ?? null));
+        pruefe(($flaeche['gross']['bytes'] ?? PHP_INT_MAX) <= \App\Berichte\Unterschrift::MAX_BYTES && ($flaeche['gross']['punkte'] ?? PHP_INT_MAX) <= \App\Berichte\Unterschrift::MAX_PUNKTE,
+            'unterschrift.js: nimmt nie mehr auf, als der Server annimmt (Punkte und Bytes) ' . json_encode($flaeche['gross'] ?? null));
+    }
     $svg = \App\Berichte\Unterschrift::svg([[['"><script>alert(1)</script>', 5], [5000, 'x" onload="y']], [['1e400', [1, 2]]]]);
     pruefe(!str_contains($svg, 'script') && !str_contains($svg, 'onload') && preg_match('/ d="[MQLl0-9 ]*"/', $svg) === 1,
         'Unterschrift::svg aus manipulierten Strichen: nur Zahlen');

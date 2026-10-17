@@ -9,8 +9,15 @@
  *
  * Speichern: 1,5 s nach der letzten Eingabe, spätestens alle 20 s, beim
  * Verlassen der Seite mit keepalive. Was zählt, ist die Antwort des Servers,
- * nicht navigator.onLine. Jede Eingabe steht außerdem im lokalen Entwurf
- * (localStorage, je Bericht und Benutzer), bis der Server sie bestätigt hat.
+ * nicht navigator.onLine. Jede Anfrage hat eine Zeitgrenze (PMNetz in
+ * app.js); bleibt die Antwort aus, geht dieselbe Eingabe beim nächsten Mal
+ * zuerst noch einmal hinaus – ist sie schon angekommen, nimmt der Server sie
+ * als gespeichert (kein falscher Konflikt). Jede Eingabe steht außerdem im
+ * lokalen Entwurf (localStorage, je Bericht und Benutzer), bis der Server
+ * sie bestätigt hat. Wartet ein älterer Entwurf auf „Übernehmen/Verwerfen“,
+ * sichert die Seite den laufenden Stand unter einem zweiten Schlüssel
+ * (…:aktuell) und sagt nur dann „auf dem Gerät gesichert“, wenn das ging.
+ * Abmelden räumt beide weg; danach schreibt die Seite nichts mehr zurück.
  *
  * Bewertet wird nur auf dem Server – hier wird nur angezeigt, was das
  * Autosave zurückgibt. Texte aus Antworten nur per textContent, nie als HTML.
@@ -29,7 +36,10 @@
     var version = parseInt(wurzel.dataset.version, 10) || 0;
     var ADRESSE = '/berichte/' + berichtId;
     var LOKAL = 'pm-bericht:' + berichtId + ':' + (wurzel.dataset.benutzer || '0');
+    var AKTUELL = LOKAL + ':aktuell';
     var VERZOEGERUNG = 1500;
+    var ZEIT_SPEICHERN = 15000;
+    var ZEIT_ANFRAGE = 30000;
     var TAKT = 20000;
     var LOKAL_TAKT = 500;
     var KEEPALIVE_HOECHSTENS = 60000;
@@ -54,7 +64,8 @@
     var gestoppt = false;     // nach 401/409/419/423: nicht weiter senden
     var abgelehnt = null;     // Stand, den der Server abgelehnt hat (422 …) – nicht noch einmal
     var uebernahme = false;   // ein lokaler Entwurf wird gerade übernommen
-    var lokalGesperrt = false;
+    var lokalGesperrt = false;  // ein älterer lokaler Entwurf wartet auf Übernehmen/Verwerfen
+    var unsicher = null;      // { json, ewx }: gesendet, aber ohne Antwort – geht beim nächsten Mal zuerst
     var kette = Promise.resolve();
     var speicherZeit = null;
     var lokalZeit = null;
@@ -183,22 +194,34 @@
 
     // ======================================================== Lokaler Entwurf
 
-    function lokalLesen() {
+    function lokalLesen(schluessel) {
         try {
-            var roh = window.localStorage.getItem(LOKAL);
+            var roh = window.localStorage.getItem(schluessel || LOKAL);
             return roh ? JSON.parse(roh) : null;
         } catch (e) { return null; }
     }
 
+    /**
+     * Den Stand auf dem Gerät sichern – true, wenn das geklappt hat. Wartet
+     * ein älterer Entwurf auf die Entscheidung, unter AKTUELL (der alte
+     * bleibt, wie er ist).
+     */
     function lokalSchreiben(json) {
-        if (lokalGesperrt || uebernahme) { return; }
+        if (uebernahme) { return false; }
         try {
-            window.localStorage.setItem(LOKAL, JSON.stringify({ basis_version: version, zeit: Date.now(), inhalt: json, ewx: ewx }));
-        } catch (e) { /* voll oder privat – dann nur der Server */ }
+            window.localStorage.setItem(lokalGesperrt ? AKTUELL : LOKAL, JSON.stringify({ basis_version: version, zeit: Date.now(), inhalt: json, ewx: ewx,
+                unsicher: unsicher ? unsicher.json : null }));
+            return true;
+        } catch (e) { return false; /* voll oder privat – dann nur der Server */ }
     }
 
-    function lokalLoeschen() {
-        try { window.localStorage.removeItem(LOKAL); } catch (e) { /* privat */ }
+    function lokalLoeschen(schluessel) {
+        try { window.localStorage.removeItem(schluessel || LOKAL); } catch (e) { /* privat */ }
+    }
+
+    /** Der laufende Stand ist beim Server: seine Sicherung auf dem Gerät hat ausgedient. */
+    function lokalBestaetigt() {
+        lokalLoeschen(lokalGesperrt ? AKTUELL : LOKAL);
     }
 
     function lokalPlanen() {
@@ -224,11 +247,27 @@
         return kette;
     }
 
+    /**
+     * Senden – erst, was ohne Antwort blieb (unsicher), dann der jetzige
+     * Stand. Ist das Unsichere schon angekommen, antwortet der Server mit
+     * „gespeichert“ und dem aktuellen Stand statt mit einem Konflikt.
+     */
     function senden(o) {
+        if (unsicher && !o.uebernahme && !o.nachtrag) {
+            var u = unsicher;
+            return einmal({ inhalt: u.json, ewx: u.ewx, nachtrag: true, keepalive: o.keepalive }).then(function (ok) {
+                return ok ? einmal(o) : false;
+            });
+        }
+        return einmal(o);
+    }
+
+    function einmal(o) {
         if (gestoppt || (uebernahme && !o.uebernahme)) { return Promise.resolve(false); }
         var json = o.inhalt || zustand();
         var mitEwx = o.ewx !== undefined ? o.ewx : ewx;
         if (json === bestaetigt && mitEwx === '') {
+            if (o.nachtrag) { unsicher = null; }
             if (anzeige.classList.contains('warn') && meldung.hidden) { stand('ok', 'gespeichert', uhrzeit(null)); }
             return Promise.resolve(true);
         }
@@ -239,39 +278,34 @@
         daten.append('version', String(version));
         daten.append('inhalt', json);
         if (mitEwx !== '') { daten.append('ewx', mitEwx); }
-        return fetch(ADRESSE + '/speichern', {
-            method: 'POST', body: daten, credentials: 'same-origin', headers: { 'Accept': 'application/json' },
-            keepalive: !!o.keepalive && json.length < KEEPALIVE_HOECHSTENS
-        }).then(antwortLesen).then(function (r) {
-            return verarbeiten(r, json, mitEwx, !!o.uebernahme);
-        }).catch(function () {
-            ohneVerbindung();
-            return false;
-        });
-    }
-
-    function antwortLesen(antwort) {
-        return antwort.json().catch(function () {
-            return { ok: false, message: 'Unerwartete Antwort des Servers (' + antwort.status + ').' };
-        }).then(function (erg) { return { status: antwort.status, erg: erg || {} }; });
+        return window.PMNetz.post(ADRESSE + '/speichern', daten, ZEIT_SPEICHERN, { keepalive: !!o.keepalive && json.length < KEEPALIVE_HOECHSTENS })
+            .then(function (r) {
+                return verarbeiten(r, json, mitEwx, o.uebernahme || false);
+            }, function () {
+                // Keine Antwort (Netz weg oder Zeitgrenze): vielleicht ist es doch angekommen.
+                if (!unsicher && !o.uebernahme) { unsicher = { json: json, ewx: mitEwx }; }
+                ohneVerbindung();
+                return false;
+            });
     }
 
     function verarbeiten(r, json, mitEwx, ausLokal) {
         var erg = r.erg;
+        if (r.status !== 0) { unsicher = null; }
         if (r.status === 200 && erg.ok) {
             version = erg.version;
             wurzel.dataset.version = String(version);
             bestaetigt = json;
             abgelehnt = null;
             if (ausLokal) {
-                lokalLoeschen();
+                lokalLoeschen(typeof ausLokal === 'string' ? ausLokal : LOKAL);
                 stand('laeuft', 'übernommen – lädt neu …');
                 window.location.reload();
                 return true;
             }
             if (mitEwx === ewx) { ewx = ''; }
             var jetzt = zustand();
-            if (jetzt === json && ewx === '') { lokalLoeschen(); } else { lokalSchreiben(jetzt); }
+            if (jetzt === json && ewx === '') { lokalBestaetigt(); } else { lokalSchreiben(jetzt); }
             bewertungZeigen(erg.bewertung);
             abschnitteZeigen(erg.abschnitte);
             hinweiseZeigen(erg.hinweise);
@@ -279,11 +313,12 @@
             if (jetzt === json) { stand('ok', 'gespeichert', uhrzeit(erg.gespeichert_am)); } else { stand('warn', 'ungespeichert'); }
             return true;
         }
-        lokalSchreiben(zustand());
+        var gesichert = lokalSchreiben(zustand());
         if (r.status === 401) {
             gestoppt = true;
             stand('fehler', 'abgemeldet');
-            meldungZeigen('Abgemeldet – deine Eingaben sind auf diesem Gerät gesichert. Nach dem Anmelden geht es hier weiter.', { anmelden: true });
+            meldungZeigen(gesichert ? 'Abgemeldet – deine Eingaben sind auf diesem Gerät gesichert. Nach dem Anmelden geht es hier weiter.'
+                : 'Abgemeldet – deine Eingaben sind NICHT gesichert. Bitte in einem neuen Tab anmelden und diese Seite offen lassen.', { anmelden: true });
             return false;
         }
         if (r.status === 409) {
@@ -300,8 +335,9 @@
             return false;
         }
         if (r.status >= 500) {
-            stand('warn', 'auf dem Gerät gesichert');
-            meldungZeigen((erg.message || 'Der Server hat nicht gespeichert.') + ' Deine Eingaben sind auf diesem Gerät gesichert.', { erneut: true });
+            stand('warn', gesichert ? 'auf dem Gerät gesichert' : 'nicht gesichert');
+            meldungZeigen((erg.message || 'Der Server hat nicht gespeichert.') + (gesichert ? ' Deine Eingaben sind auf diesem Gerät gesichert.'
+                : ' Deine Eingaben sind NICHT gesichert – bitte die Seite offen lassen und gleich noch einmal versuchen.'), { erneut: true });
             return false;
         }
         abgelehnt = json;
@@ -311,9 +347,14 @@
     }
 
     function ohneVerbindung() {
-        lokalSchreiben(zustand());
-        stand('warn', 'auf dem Gerät gesichert');
-        meldungZeigen('Keine Verbindung – deine Eingaben sind auf diesem Gerät gesichert und gehen raus, sobald es wieder geht.', { erneut: true });
+        if (lokalSchreiben(zustand())) {
+            stand('warn', 'auf dem Gerät gesichert');
+            meldungZeigen('Keine Verbindung – deine Eingaben sind auf diesem Gerät gesichert und gehen raus, sobald es wieder geht.', { erneut: true });
+        } else {
+            stand('fehler', 'nicht gesichert');
+            meldungZeigen('Keine Verbindung – deine Eingaben sind NICHT gesichert (Speicher des Geräts nicht verfügbar). Bitte die Seite offen lassen, '
+                + 'bis die Verbindung wieder steht.', { erneut: true });
+        }
     }
 
     /** Eine Eingabe: „aus Plan“ entfernen, lokal sichern, Speichern einplanen. */
@@ -593,13 +634,21 @@
         return m;
     }
 
-    /** Die Auswahl „RCD-Werte gemessen an“ bzw. „Stromkreis“ eines Mangels – erst beim Öffnen gefüllt. */
+    /**
+     * Die Auswahl „RCD-Werte gemessen an“ bzw. „Stromkreis“ eines Mangels –
+     * erst beim Öffnen gefüllt. Für „gemessen an“ nur Kreise am selben RCD
+     * (gleiche Bezeichnung und IΔn), sobald eine Bezeichnung eingetragen ist.
+     */
     function kreisOptionen(select, ohne) {
         var wert = select.value;
         var erste = select.options[0];
+        var wert0 = function (z, pfad) { var f = feldIn(z, pfad); return f ? f.value.trim() : ''; };
+        var bez = ohne ? wert0(ohne, 'rcd.bez') : '';
+        var idn = ohne ? wert0(ohne, 'rcd.idn') : '';
         while (select.options.length > 1) { select.remove(1); }
         zeilen().forEach(function (z) {
             if (ohne && z === ohne) { return; }
+            if (ohne && bez !== '' && (wert0(z, 'rcd.bez') !== bez || (idn !== '' && wert0(z, 'rcd.idn') !== idn)) && z.dataset.zeile !== wert) { return; }
             var nr = feldIn(z, 'nr').value.trim();
             var ort = feldIn(z, 'ort').value.trim();
             var o = document.createElement('option');
@@ -655,16 +704,17 @@
             var v = felder[k];
             if (Array.isArray(v)) { v.forEach(function (x) { daten.append(k + '[]', x); }); } else { daten.append(k, v); }
         });
-        return fetch(ADRESSE + pfad, { method: 'POST', body: daten, credentials: 'same-origin', headers: { 'Accept': 'application/json' } })
-            .then(antwortLesen)
-            .then(function (r) {
-                if (r.status === 401) {
-                    gestoppt = true;
-                    stand('fehler', 'abgemeldet');
-                    meldungZeigen('Abgemeldet – deine Eingaben sind auf diesem Gerät gesichert.', { anmelden: true });
-                }
-                return r;
-            }, function () { return { status: 0, erg: { ok: false, message: 'Keine Verbindung zum Server.' } }; });
+        var netz = window.PMNetz.post(ADRESSE + pfad, daten, ZEIT_ANFRAGE);
+        var p = netz.then(function (r) {
+            if (r.status === 401) {
+                gestoppt = true;
+                stand('fehler', 'abgemeldet');
+                meldungZeigen('Abgemeldet – deine Eingaben sind auf diesem Gerät gesichert.', { anmelden: true });
+            }
+            return r;
+        }, function () { return { status: 0, erg: { ok: false, message: 'Keine Verbindung zum Server.' } }; });
+        p.abbrechen = netz.abbrechen;
+        return p;
     }
 
     // ---------------------------------------------------- Eventworx
@@ -995,12 +1045,18 @@
     // ---------------------------------------------------- Prüfer-Unterschrift
 
     var unterschrift = null;
+    var laufendeUnterschrift = null;
 
     /** Erst speichern und prüfen – der Dialog öffnet nur, wenn nichts mehr fehlt. */
     function unterschriftAuf(knopf) {
         var dlg = wurzel.querySelector('[data-unterschrift-dialog]');
         if (!dlg || !window.PMUnterschrift) { return; }
-        if (!unterschrift) { unterschrift = window.PMUnterschrift.dialog(dlg, { senden: unterschreiben }); }
+        if (!unterschrift) {
+            unterschrift = window.PMUnterschrift.dialog(dlg, {
+                senden: unterschreiben,
+                abbrechen: function () { if (laufendeUnterschrift && laufendeUnterschrift.abbrechen) { laufendeUnterschrift.abbrechen(); } }
+            });
+        }
         knopf.disabled = true;
         pruefen(knopf).then(function (r) {
             if (!r || !r.erg.bereit) {
@@ -1025,11 +1081,13 @@
         unterschrift.meldung('speichert und unterschreibt …', false);
         speichern().then(function (ok) {
             if (!ok) { return { status: 0, erg: { ok: false, message: 'Der Bericht ist nicht gespeichert – siehe Meldung oben.' } }; }
-            return anfrage('/unterschreiben', {
+            laufendeUnterschrift = anfrage('/unterschreiben', {
                 version: String(version), striche: unterschrift.daten(), name: werte.name || '', ort: werte.ort || '',
                 anfrage: window.PMUnterschrift.schluessel(schluessel), geraet_am: new Date().toISOString(), warnungen: bestaetigteWarnungen()
             });
+            return laufendeUnterschrift;
         }).then(function (r) {
+            laufendeUnterschrift = null;
             if (r.status === 200 && r.erg.ok) {
                 // Eingefroren: nichts mehr speichern, weiter zur Leseansicht.
                 window.PMUnterschrift.schluesselLoeschen(schluessel);
@@ -1246,11 +1304,15 @@
         if (knopf.hasAttribute('data-quelle-uebernehmen')) { ausFrueherem(); return; }
         if (knopf.hasAttribute('data-erneut')) { gestoppt = false; abgelehnt = null; speichern(); return; }
         if (knopf.hasAttribute('data-neu-laden')) { lokalSofort(); window.location.reload(); return; }
-        if (knopf.hasAttribute('data-lokal-uebernehmen')) { lokalUebernehmen(); return; }
+        if (knopf.hasAttribute('data-lokal-uebernehmen')) { lokalLoeschen(AKTUELL); lokalUebernehmen(); return; }
         if (knopf.hasAttribute('data-lokal-verwerfen')) {
             if (!window.confirm('Die Eingaben auf diesem Gerät verwerfen? Es gilt dann der Stand auf dem Server.')) { return; }
             lokalLoeschen();
             lokalGesperrt = false;
+            // Was seitdem eingegeben und noch nicht beim Server ist, bleibt gesichert.
+            var aktuellNoch = lokalLesen(AKTUELL);
+            lokalLoeschen(AKTUELL);
+            if (aktuellNoch && typeof aktuellNoch.inhalt === 'string' && zustand() !== bestaetigt) { lokalSchreiben(zustand()); }
             wurzel.querySelector('[data-lokal-leiste]').hidden = true;
         }
     });
@@ -1278,6 +1340,23 @@
         if (i >= 0 && alle[i + 1]) { alle[i + 1].focus(); }
     });
 
+    /*
+     * Abmelden: app.js räumt die lokalen Entwürfe weg (geteilte Tablets).
+     * Dieser Zuhörer läuft vorher (Capture auf document) und sorgt dafür,
+     * dass pagehide und visibilitychange danach nichts zurückschreiben.
+     * Ungesichertes geht vorher noch mit keepalive zum Server.
+     */
+    document.addEventListener('submit', function (e) {
+        var f = e.target;
+        if (!f || typeof f.matches !== 'function' || !f.matches('form[action="/logout"]')) { return; }
+        if (!gestoppt && !uebernahme && (zustand() !== bestaetigt || ewx !== '')) { einmal({ keepalive: true }); }
+        gestoppt = true;
+        uebernahme = true;
+        lokalGesperrt = true;
+        clearTimeout(speicherZeit);
+        clearTimeout(lokalZeit);
+    }, true);
+
     document.addEventListener('visibilitychange', function () {
         if (document.visibilityState !== 'hidden' || uebernahme) { return; }
         lokalSofort();
@@ -1294,24 +1373,47 @@
 
     // ======================================================== Start: lokaler Entwurf?
 
-    function lokalUebernehmen() {
-        var lokal = lokalLesen();
+    function lokalUebernehmen(schluessel) {
+        schluessel = schluessel || LOKAL;
+        var lokal = lokalLesen(schluessel);
         if (!lokal || typeof lokal.inhalt !== 'string') { return; }
         uebernahme = true;
         wurzel.querySelector('[data-lokal-leiste]').hidden = true;
         stand('laeuft', 'übernimmt Eingaben vom Gerät …');
-        speichern({ inhalt: lokal.inhalt, ewx: typeof lokal.ewx === 'string' ? lokal.ewx : '', uebernahme: true }).then(function (ok) {
+        speichern({ inhalt: lokal.inhalt, ewx: typeof lokal.ewx === 'string' ? lokal.ewx : '', uebernahme: schluessel }).then(function (ok) {
             if (!ok) { uebernahme = false; }
         });
+    }
+
+    /** Baut der Entwurf auf diesem Stand auf? Auch, wenn nur die Antwort auf sein letztes Speichern fehlte. */
+    function aufDiesemStand(lokal) {
+        return lokal.basis_version === version || (typeof lokal.unsicher === 'string' && lokal.unsicher === bestaetigt && lokal.basis_version === version - 1);
     }
 
     kopfHoehe();
     bestaetigt = zustand();
     (function () {
+        // Gesichert, während ein älterer Entwurf auf die Entscheidung wartete.
+        var aktuell = lokalLesen(AKTUELL);
+        if (aktuell && typeof aktuell.inhalt === 'string') {
+            if (aktuell.inhalt === bestaetigt && !aktuell.ewx) {
+                lokalLoeschen(AKTUELL);
+            } else if (aufDiesemStand(aktuell)) {
+                lokalUebernehmen(AKTUELL);
+                return;
+            } else {
+                // Veraltet: der neuere der beiden Entwürfe wartet auf die Entscheidung.
+                var alt = lokalLesen();
+                if (!alt || (aktuell.zeit || 0) > (alt.zeit || 0)) {
+                    try { window.localStorage.setItem(LOKAL, JSON.stringify(aktuell)); } catch (e) { /* voll oder privat */ }
+                }
+                lokalLoeschen(AKTUELL);
+            }
+        }
         var lokal = lokalLesen();
         if (!lokal || typeof lokal.inhalt !== 'string') { return; }
         if (lokal.inhalt === bestaetigt && !lokal.ewx) { lokalLoeschen(); return; }
-        if (lokal.basis_version === version) {
+        if (aufDiesemStand(lokal)) {
             // Auf genau diesem Stand weitergearbeitet, nur nicht angekommen: senden.
             lokalUebernehmen();
             return;

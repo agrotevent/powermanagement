@@ -56,7 +56,7 @@ $ereignisNamen = [
             <p class="small muted">Der Bericht ist vom Prüfer unterschrieben und eingefroren. Jetzt bestätigt der Kunde den Erhalt – am besten gleich hier
                 am Gerät. Im Kundenmodus ist alles andere gesperrt, bis du dein Kennwort eingibst.</p>
             <?php if ($darfKunde): ?>
-                <form method="post" action="/berichte/<?= $id ?>/kundenmodus" data-confirm="Das Gerät an den Kunden geben? Alles andere ist dann gesperrt, bis du dein Kennwort eingibst. Zurückziehen geht danach nicht mehr.">
+                <form method="post" action="/berichte/<?= $id ?>/kundenmodus" data-confirm="Das Gerät an den Kunden geben? Alles andere ist dann gesperrt, bis du dein Kennwort eingibst – auch Abmelden; andere Tabs dieses Browsers werden gesperrt. Zurückziehen geht danach nicht mehr.">
                     <?= Csrf::field() ?><button class="btn btn-primary" type="submit">An Kunden übergeben</button></form>
             <?php endif; ?>
             <?php if ($darfOhneKunde): ?>
@@ -64,6 +64,7 @@ $ereignisNamen = [
                     <summary>Ohne Unterschrift des Kunden abschließen</summary>
                     <form method="post" action="/berichte/<?= $id ?>/ohne-kunde" class="bericht-ohne-kunde" data-confirm="Ohne Unterschrift des Kunden abschließen?">
                         <?= Csrf::field() ?>
+                        <input type="hidden" name="inhalt_hash" value="<?= View::e((string) $b['inhalt_hash']) ?>">
                         <div class="field"><label for="ohne-art">Warum</label>
                             <select id="ohne-art" name="art" required>
                                 <?php foreach (BerichtService::OHNE_KUNDE as $art => $text): ?><option value="<?= View::e($art) ?>"><?= View::e($text) ?></option><?php endforeach; ?>

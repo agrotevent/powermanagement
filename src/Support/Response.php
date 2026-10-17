@@ -82,14 +82,19 @@ final class Response
         return self::sichererPfad($pfad) ?? $ersatz;
     }
 
+    /*
+     * Die Fehlerseite ist schon ein ganzes Dokument – ohne Layout, also auch
+     * ohne Navigation, „Profil“ und „Abmelden“ (und ohne den Zugriff auf
+     * den Benutzer, den es ohne Anmeldung nicht gibt).
+     */
     public static function notFound(string $message = 'Seite nicht gefunden.'): void
     {
-        self::html(View::render('errors/error', ['code' => 404, 'message' => $message]), 404);
+        self::html(View::render('errors/error', ['code' => 404, 'message' => $message], ''), 404);
     }
 
     public static function forbidden(string $message = 'Für diese Funktion fehlt dir die Berechtigung.'): void
     {
-        self::html(View::render('errors/error', ['code' => 403, 'message' => $message]), 403);
+        self::html(View::render('errors/error', ['code' => 403, 'message' => $message], ''), 403);
     }
 
     public static function download(string $filename, string $content, string $mime = 'text/plain'): void

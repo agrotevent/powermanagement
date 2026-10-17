@@ -70,6 +70,27 @@ $speichern = static function (int $id, array $inhalt, string $ewx = ''): array {
     $b = BerichtService::find($id);
     return BerichtService::speichern($id, (int) $b['version'], json_encode($inhalt, JSON_UNESCAPED_UNICODE), $ewx);
 };
+/** Alle Punkte der Kurzliste (Besichtigung, Erprobung) auf i.O. */
+$kurzlisteIo = static function (): array {
+    $punkte = ['besichtigung' => [], 'erprobung' => []];
+    foreach (['besichtigung' => App\Berichte\Katalog::besichtigung(), 'erprobung' => App\Berichte\Katalog::erprobung()] as $teil => $katalog) {
+        foreach ($katalog as $schluessel => $punkt) {
+            if ($punkt['kurz']) {
+                $punkte[$teil][$schluessel] = 'io';
+            }
+        }
+    }
+    return $punkte;
+};
+/** Ein Jahr ohne Berichte und ohne Nummernzähler ab $ab – die Prüfung löscht seinen Zähler am Ende wieder. */
+$freiesJahr = static function (int $ab): int {
+    while ((int) Database::scalar('SELECT COUNT(*) FROM berichte WHERE jahr = ? OR pruefdatum LIKE ?', [$ab, $ab . '-%']) > 0
+        || Database::scalar('SELECT laufnr FROM bericht_nummern WHERE jahr = ?', [$ab]) !== false) {
+        $ab++;
+    }
+    return $ab;
+};
+$testJahre = [];
 $kreisNach = static function (array $inhalt, string $feld, string $wert): ?array {
     foreach ($inhalt['kreise'] as $k) {
         if ((string) $k[$feld] === $wert) {
@@ -221,7 +242,12 @@ try {
     pruefe($e['auto'] === 'hinweis' && $e['abschaltung'] === 'RCD', 'NH ohne Rechenwert, aber RCD: Abschaltung durch RCD');
     $e = $bew($muster(['w' => ['riso' => ['op' => '', 'w' => '0.8']]]));
     pruefe($e['auto'] === 'mangel' && in_array('riso_klein', $codes($e), true), 'R_iso 0,8 MΩ bei 500 V → Mangel');
-    gleich($bew($muster(['w' => ['riso' => ['op' => '', 'w' => '0.6'], 'riso_u' => '250']]))['auto'], 'ok', 'R_iso 0,6 MΩ bei 250 V → ok');
+    // 250 V / 0,5 MΩ gilt nur für SELV/PELV (DIN VDE 0100-600 Tab. 6.1); bei 230/400 V mit reduzierter Messspannung 1 MΩ (6.4.3.3).
+    $e = $bew($muster(['w' => ['riso' => ['op' => '', 'w' => '0.6'], 'riso_u' => '250']]));
+    pruefe($e['auto'] === 'mangel' && in_array('riso_klein', $codes($e), true) && ($e['grenzen']['riso_min'] ?? '') === '1', 'R_iso 0,6 MΩ bei 250 V → Mangel (Grenze 1 MΩ)');
+    $e = $bew($muster(['w' => ['riso' => ['op' => '', 'w' => '1.2'], 'riso_u' => '250']]));
+    pruefe($e['auto'] === 'ok' && in_array('riso_250', $codes($e), true), 'R_iso 1,2 MΩ bei 250 V → ok, mit Info „reduzierte Messspannung“');
+    gleich([Grenzwerte::parameter()['version'], Grenzwerte::parameter()['riso']['250']], ['2', '1.0'], 'Grenzwerte Fassung 2: 250 V → 1,0 MΩ');
     $e = $bew($muster(), $tn, [], ['riso_u' => '']);
     pruefe($e['auto'] === 'fehlt' && in_array('riso_u_fehlt', $codes($e), true), 'R_iso ohne Messspannung → fehlt');
     foreach (['15' => 'mangel', '22' => 'ok', '31' => 'mangel'] as $wert => $soll) {
@@ -236,14 +262,31 @@ try {
     pruefe($e['auto'] === 'mangel' && in_array('rcd_pflicht', $codes($e), true), 'Endstromkreis 16 A ohne 30-mA-RCD → Mangel');
     gleich($bew($muster(['drehfeld' => 'links']))['auto'], 'mangel', 'Linksdrehfeld → Mangel');
     $e = $bew($muster(['w' => ['zs' => ['w' => '']]]), ['form' => 'TT']);
-    pruefe($e['auto'] === 'ok' && !in_array('zs_fehlt', $codes($e), true), 'TT: Zs je Zeile entfällt');
+    pruefe($e['auto'] === 'ok' && !in_array('zs_fehlt', $codes($e), true), 'TT mit RCD: Zs je Zeile entfällt');
     $e = $bew($muster(['w' => ['zs' => ['w' => '']]]), ['form' => 'IT']);
-    gleich($e['auto'], 'ok', 'IT: Zs entfällt');
+    gleich($e['auto'], 'ok', 'IT mit RCD: Zs entfällt');
+    // Ohne RCD gilt auch im TT-System Zs · Ia ≤ U0 (DIN VDE 0100-410 411.5.4): C63 mit 25 Ω schaltet nicht ab.
+    $c63 = array_replace_recursive($ohneRcd, ['ueb' => ['char' => 'C', 'in' => '63'], 'leitung' => ['querschnitt' => '16']]);
+    $e = $bew($muster(array_replace_recursive($c63, ['w' => ['zs' => ['w' => '25']]])), ['form' => 'TT']);
+    pruefe($e['auto'] === 'mangel' && in_array('zs_hoch', $codes($e), true), 'TT ohne RCD: Zs 25 Ω an C63 → Mangel');
+    $e = $bew($muster(array_replace_recursive($c63, ['w' => ['zs' => ['w' => '']]])), ['form' => 'TT']);
+    pruefe($e['auto'] === 'fehlt' && in_array('zs_fehlt', $codes($e), true), 'TT ohne RCD: Zs ist Pflicht');
+    $e = $bew($muster(array_replace_recursive($c63, ['w' => ['zs' => ['w' => '25']]])), ['form' => 'IT']);
+    pruefe($e['auto'] === 'manuell' && in_array('it_zweitfehler', $codes($e), true), 'IT ohne RCD: Zweitfehler selbst bewerten');
+    // TN-C: ein RCD ist dort unwirksam (DIN VDE 0100-410 411.4.5).
+    $e = $bew($muster(['w' => ['zs' => ['w' => '3.2']]]), ['form' => 'TN-C']);
+    pruefe($e['auto'] === 'mangel' && $e['abschaltung'] !== 'RCD' && in_array('rcd_tnc', $codes($e), true) && in_array('rcd_pflicht', $codes($e), true)
+        && !in_array('zs_rcd', $codes($e), true), 'TN-C: RCD weder Abschaltung noch Zusatzschutz');
+    pruefe(in_array('netz_tnc', array_column(Grenzwerte::netz(['form' => 'TN-C'], [], $p)['meldungen'], 'code'), true), 'TN-C: Hinweis „Netzform prüfen“');
     pruefe(in_array('it_imd', array_column(Grenzwerte::netz(['form' => 'IT'], [], $p)['meldungen'], 'code'), true), 'IT: Hinweis Isolationsüberwachung');
     $tt = static fn (string $w): string => Grenzwerte::erdung(['erdung' => ['op' => '', 'w' => $w, 'basis' => '']], ['form' => 'TT'], [$muster()], $p)['auto'];
     gleich([$tt('1700'), $tt('1600')], ['mangel', 'ok'], 'TT: Erdung 1700 Ω bei 30 mA → Mangel, 1600 Ω → ok');
     $gen50 = Grenzwerte::erdung(['erdung' => ['op' => '', 'w' => '12.4', 'basis' => '']], ['form' => 'TN-S', 'einspeisung' => 'generator'], [], $p);
     gleich([$gen50['auto'], $gen50['basis'], $gen50['grenze']], ['ok', 'generator', '50'], 'Generator: Erdung 12,4 Ω gegen 50 Ω');
+    $itGen = Grenzwerte::erdung(['erdung' => ['op' => '', 'w' => '80', 'basis' => '']], ['form' => 'IT', 'einspeisung' => 'generator'], [], $p);
+    gleich([$itGen['auto'], $itGen['basis']], ['entf', 'keine'], 'IT mit Generator: 80 Ω ohne Bewertung, kein Mangel nach „Generator im TN-System“');
+    $itGen = Grenzwerte::erdung(['erdung' => ['op' => '', 'w' => '12', 'basis' => 'generator']], ['form' => 'IT', 'einspeisung' => 'generator'], [], $p);
+    pruefe($itGen['auto'] === 'hinweis' && in_array('erdung_bezug', array_column($itGen['meldungen'], 'code'), true), 'IT, Bezug „Generator“ von Hand → Hinweis „gilt für TN“');
     $bezug = $muster();
     $bezug['z'] = 'kbezug01';
     $ohne = $muster(['w' => ['idelta' => ['w' => ''], 'ta' => ['w' => ''], 'ub' => ['w' => '']]]);
@@ -254,6 +297,19 @@ try {
     pruefe($e['auto'] === 'fehlt' && in_array('rcd_fehlt', $codes($e), true), 'ohne RCD-Werte und ohne Bezug → fehlt');
     $e = $bew(array_replace($ohne, ['rcd_von' => 'kbezug01']), $tn, ['kbezug01' => $ohne]);
     pruefe($e['auto'] === 'fehlt' && in_array('rcd_von_leer', $codes($e), true), 'Bezugszeile ohne RCD-Werte → fehlt');
+    // Werte eines anderen RCD gelten nicht (DIN VDE 0100-600 6.4.3.7): jeder RCD wird gemessen.
+    $f2 = $muster(['rcd' => ['bez' => 'F2'], 'w' => ['idelta' => ['w' => '20'], 'ta' => ['w' => '30']]]);
+    $f2['z'] = 'kbezugf2';
+    $e = $bew(array_replace_recursive($ohne, ['rcd_von' => 'kbezugf2', 'rcd' => ['bez' => 'F3']]), $tn, ['kbezugf2' => $f2]);
+    pruefe($e['auto'] === 'fehlt' && in_array('rcd_von_anders', $codes($e), true) && !in_array('rcd_von', $codes($e), true), 'rcd_von an anderem RCD (F2 statt F3) → fehlt, Werte nicht übernommen');
+    $e = $bew(array_replace_recursive($ohne, ['rcd_von' => 'kbezug01', 'rcd' => ['idn' => '300'], 'art' => 'verteiler']), $tn, ['kbezug01' => $bezug]);
+    pruefe($e['auto'] === 'fehlt' && in_array('rcd_von_anders', $codes($e), true), 'rcd_von mit anderem IΔn (300 statt 30 mA) → fehlt');
+    $e = $bew(array_replace_recursive($ohne, ['rcd_von' => 'kbezug01', 'rcd' => ['bez' => '']]), $tn, ['kbezug01' => $bezug]);
+    pruefe($e['auto'] === 'hinweis' && in_array('rcd_von_unbelegt', $codes($e), true), 'rcd_von ohne Bezeichnung → Hinweis „gleicher RCD nicht belegt“');
+    $fremd = $bezug;
+    $fremd['objekt_id'] = '424242';
+    $e = $bew(array_replace($ohne, ['rcd_von' => 'kbezug01', 'objekt_id' => '434343']), $tn, ['kbezug01' => $fremd]);
+    pruefe(in_array('rcd_von_anders', $codes($e), true), 'rcd_von an einer anderen Anlage → anderer RCD');
     gleich($bew(BerichtSchema::kreisLeer())['auto'], '', 'Zeile ohne Wert ist offen');
     gleich($bew($muster(['status' => 'nicht_gemessen', 'grund' => 'nicht zugänglich']))['auto'], 'entf', 'nicht gemessen mit Grund → entf');
     gleich($bew($muster(['status' => 'nicht_gemessen']))['auto'], 'fehlt', 'nicht gemessen ohne Grund → fehlt');
@@ -392,9 +448,19 @@ try {
     pruefe(!$geworfen, 'gespeicherter Inhalt ohne Gleitkomma (Kanon wirft nicht)');
     gleich([$b['kunde_name'], $b['standort_name'], $b['veranstaltung']], [$kundeName, 'Prüfung Bericht ' . $kennung, $kennung . ' Sommerfest'], 'Spalten der Liste');
     $vorher = Database::scalar('SELECT inhalt FROM berichte WHERE id = ?', [$id]);
-    $r = BerichtService::speichern($id, $v, json_encode($roh));
+    $anders = $roh;
+    $anders['kopf']['ort'] = 'Anderswo ' . $kennung;
+    $r = BerichtService::speichern($id, $v, json_encode($anders));
     pruefe(!$r['ok'] && $r['status'] === 409 && $r['konflikt'] === true && $r['version'] === $v + 1 && $r['geaendert_von'] === $kennung . '-technik', 'veraltete Version → 409 mit Stand');
     gleich(Database::scalar('SELECT inhalt FROM berichte WHERE id = ?', [$id]), $vorher, '409 ändert nichts');
+    // Die Antwort auf ein Speichern ging verloren: derselbe Inhalt mit dem alten Stand ist kein Konflikt.
+    $r = BerichtService::speichern($id, $v, json_encode($s, JSON_UNESCAPED_UNICODE));
+    pruefe($r['ok'] && $r['status'] === 200 && ($r['wiederholt'] ?? false) === true && $r['version'] === $v + 1 && isset($r['bewertung'])
+        && Database::scalar('SELECT inhalt FROM berichte WHERE id = ?', [$id]) === $vorher && (int) BerichtService::find($id)['version'] === $v + 1,
+        'gleicher Inhalt mit altem Stand vom selben Benutzer → 200 mit dem aktuellen Stand, nichts doppelt');
+    alsBenutzer($benutzer['admin']);
+    gleich(BerichtService::speichern($id, $v, json_encode($s, JSON_UNESCAPED_UNICODE))['status'], 409, 'gleicher Inhalt mit altem Stand von einem anderen Benutzer → 409');
+    alsBenutzer($benutzer['technik']);
     gleich(BerichtService::speichern($id, $v + 1, str_repeat(' ', BerichtSchema::MAX_BYTES + 1))['status'], 422, 'über 512 KB → 422');
     gleich(BerichtService::speichern($id, $v + 1, '{kaputt')['status'], 422, 'unlesbares JSON → 422');
     // abgeleitet bleibt, wenn nichts angefasst wird
@@ -476,13 +542,54 @@ try {
     $fertig['ergebnis']['entspricht'] = 'ja';
     $speichern($leerId, $fertig);
     $erg = BerichtService::abschlussPruefen(BerichtService::find($leerId));
-    gleich($felder($erg), ['ergebnis.entspricht'], '„ja“ bei einer Mangel-Zeile → Fehler');
+    gleich($felder($erg), ['ergebnis.entspricht', 'punkte'], '„ja“ bei einer Mangel-Zeile und offener Kurzliste → Fehler');
+    $fertig['punkte'] = $kurzlisteIo();
+    $fertig['punkte']['besichtigung']['zus_potentialausgleich'] = 'entf';
+    // Ein als behoben eingetragener Mangel an einem anderen Kreis entschuldigt den Mangel an Kreis 2 nicht.
+    $fertig['maengel'] = [['text' => 'Kabelbrücke fehlte', 'kreis' => 'kgut0001', 'frist' => '', 'behoben' => $heute]];
+    $speichern($leerId, $fertig);
+    $erg = BerichtService::abschlussPruefen(BerichtService::find($leerId));
+    gleich($felder($erg), ['ergebnis.entspricht'], '„ja“ bei einer Mangel-Zeile → Fehler, auch wenn ein anderer Eintrag behoben ist (Kurzliste mit „entf.“ beantwortet)');
+    $fertig['maengel'] = [];
+    $fertig['ergebnis']['maengelfrei'] = 'ja';
+    $speichern($leerId, $fertig);
+    pruefe(in_array('ergebnis.maengelfrei', $felder(BerichtService::abschlussPruefen(BerichtService::find($leerId))), true), '„Mängelfrei: Ja“ mit Mangel-Zeile → Fehler');
+    $fertig['ergebnis']['maengelfrei'] = '';
+    unset($fertig['punkte']['erprobung']['funktion_anlage']);
+    $fertig['ergebnis']['entspricht'] = 'nein';
+    $fertig['ergebnis']['instand_bis'] = $morgen;
+    $speichern($leerId, $fertig);
+    $erg = BerichtService::abschlussPruefen(BerichtService::find($leerId));
+    pruefe(!in_array('punkte', $felder($erg), true) && in_array('punkte_offen', array_column($erg['warnungen'], 'code'), true), '„nein“ mit offener Kurzliste → nur Warnung');
+    $fertig['punkte'] = $kurzlisteIo();
+    $fertig['ergebnis']['instand_bis'] = '';
+    $fertig['ergebnis']['entspricht'] = 'ja';
+    $speichern($leerId, $fertig);
     $fertig['kreise'][1]['pruefer'] = 'io';
     $speichern($leerId, $fertig);
     gleich($felder(BerichtService::abschlussPruefen(BerichtService::find($leerId))), ['kreise.kschlech.begruendung'], 'Übersteuerung ohne Begründung → Fehler');
     $fertig['kreise'][1]['begruendung'] = 'Zs am Kabelende gemessen, Kreis durch Vorsicherung geschützt';
     $speichern($leerId, $fertig);
     gleich($felder(BerichtService::abschlussPruefen(BerichtService::find($leerId))), [], 'mit Begründung keine Fehler mehr');
+    // Erdung ohne berechenbaren Grenzwert (TT, kein RCD im Bericht) blockiert die Unterschrift.
+    $tt = $fertig;
+    $tt['netz']['form'] = 'TT';
+    $tt['kreise'] = [$schlecht];
+    $tt['kreise'][0]['pruefer'] = 'auto';
+    $tt['messung']['erdung'] = ['op' => '', 'w' => '120', 'methode' => '', 'basis' => '', 'grenze' => ''];
+    $speichern($leerId, $tt);
+    pruefe(in_array('messung.erdung', $felder(BerichtService::abschlussPruefen(BerichtService::find($leerId))), true), 'Erdung „selbst bewerten“ (TT ohne RCD) → Fehler');
+    // Prüfdatum: unplausibel → Fehler, alt oder in der Zukunft → Warnung
+    foreach (['9995-01-01' => 'fehler', '1999-12-31' => 'fehler', (new DateTimeImmutable('-40 days', Zeit::zone()))->format('Y-m-d') => 'pruefdatum_alt',
+        $morgen => 'pruefdatum_zukunft'] as $datum => $soll) {
+        $mitDatum = $fertig;
+        $mitDatum['kopf']['pruefdatum'] = $datum;
+        $speichern($leerId, $mitDatum);
+        $erg = BerichtService::abschlussPruefen(BerichtService::find($leerId));
+        pruefe($soll === 'fehler' ? in_array('kopf.pruefdatum', $felder($erg), true) : in_array($soll, array_column($erg['warnungen'], 'code'), true),
+            'Prüfdatum ' . $datum . ' → ' . $soll);
+    }
+    $speichern($leerId, $fertig);
     $fertig['kreise'][1]['pruefer'] = 'auto';
     $fertig['ergebnis']['entspricht'] = 'nein';
     $speichern($leerId, $fertig);
@@ -601,6 +708,10 @@ try {
     pruefe(!BerichtService::verwerfen($entwurf, 'x y z')['ok'], 'Entwurf ohne Nummer wird nicht verworfen');
 
     // ================================================== Aufbewahrung
+    Database::update('berichte', $mitNummer, ['aufbewahren_bis' => '10005-12-31']);
+    pruefe(!in_array($mitNummer, array_map('intval', array_column(BerichtService::faellig(), 'id')), true), 'Frist „10005-12-31“ (kein JJJJ-MM-TT) ist nicht fällig');
+    gleich(BerichtService::aufbewahrenBis('9995-01-01', gmdate('c')) <= '9999-12-31' && strlen(BerichtService::aufbewahrenBis('9995-01-01', gmdate('c'))) === 10, true,
+        'aufbewahrenBis bleibt JJJJ-MM-TT');
     Database::update('berichte', $mitNummer, ['aufbewahren_bis' => '2000-12-31']);
     pruefe(in_array($mitNummer, array_map('intval', array_column(BerichtService::faellig(), 'id')), true), 'fällig nach vorgezogener Frist');
     BerichtService::aufbewahrungLoeschen($mitNummer);
@@ -632,8 +743,19 @@ try {
     SiteService::deleteSite($loeschSite);
     $d2b = BerichtService::find($d2);
     pruefe(BerichtService::find($d1) === null && (int) Database::scalar('SELECT COUNT(*) FROM bericht_objekte WHERE bericht_id = ?', [$d1]) === 0, 'Standort gelöscht → Entwurf ohne Nummer weg');
-    gleich([$d2b['site_id'], $d2b['standort_name'], $d2b['status']], [null, 'Prüfung Löschen ' . $kennung, 'abgeschlossen'], 'abgeschlossener Bericht bleibt mit Namen des Standorts');
+    gleich([$d2b['site_id'], $d2b['standort_name'], $d2b['status'], $d2b['standort_entfernt']], [null, 'Prüfung Löschen ' . $kennung, 'abgeschlossen', 1],
+        'abgeschlossener Bericht bleibt mit Namen des Standorts, als „Standort gelöscht“ vermerkt');
     pruefe(BerichtService::sichtbar($d2b), 'ohne Standort sichtbar mit „alle Standorte“');
+    pruefe(in_array('standort_entfernt', array_column(BerichtService::ereignisse($d2), 'ereignis'), true), 'Lebenslauf: Standort entfernt');
+    // Der Ersteller (Prüfer, Freigabe für den gelöschten Standort): keine Hintertür über „ohne Standort“.
+    alsBenutzer($benutzer['technik']);
+    $_SESSION = [];
+    pruefe(!BerichtService::sichtbar(BerichtService::find($d2)) && !in_array($d2, array_column(BerichtService::liste(), 'id'), true)
+        && !BerichtService::darfPruefen(BerichtService::find($d2)), 'Standort gelöscht: der Ersteller sieht den Bericht nicht mehr und handelt nicht als Prüfer');
+    gleich([BerichtService::korrektur($d2, 'Hintertür')['status'], BerichtService::ohneKunde($d2, 'abwesend', 'Hintertür')['status'],
+        BerichtService::kundenmodusStarten($d2)['status']], [404, 404, 404], 'Standort gelöscht: Korrektur, ohne Kunde, Kundenmodus → 404');
+    gleich((int) Database::scalar('SELECT COUNT(*) FROM berichte WHERE vorgaenger_id = ?', [$d2]), 0, 'keine Fassung 2 angelegt');
+    pruefe(BerichtService::sichtbar(BerichtService::find($leerId)), 'ein Bericht, der nie einen Standort hatte, bleibt für den Ersteller sichtbar');
     // Ohne Standort gilt Regel 2: der Ersteller (mit „ausfüllen“) und „alle Standorte“.
     alsBenutzer($benutzer['planer']);
     pruefe(!BerichtService::sichtbar(BerichtService::find($d2)), 'ohne Standort für andere nicht mehr sichtbar');
@@ -672,19 +794,37 @@ try {
     pruefe($abgelehnt('{"s":[[[5000,5000]]]}'), 'ein Punkt → abgelehnt');
     pruefe($abgelehnt('{"s":[[[1000,1000],[1600,1300],[1900,1200]]]}'), 'Rahmen zu klein → abgelehnt');
     gleich(Unterschrift::pruefen('{"s":[[[1000,1000],[1600,1300]]]}')['message'], Unterschrift::ZU_KLEIN, 'Meldung „zu klein oder leer“');
-    $vielePunkte = [];
-    for ($n = 0; $n <= Unterschrift::MAX_PUNKTE; $n++) {
-        $vielePunkte[] = [$n % 10, $n % 7];
-    }
-    $json = json_encode(['s' => [$vielePunkte]]);
-    pruefe(strlen($json) < Unterschrift::MAX_BYTES && $abgelehnt($json), 'über 6000 Punkte → abgelehnt');
+    /**
+     * Eine gültige, große Unterschrift mit genau $n Punkten: Zickzack über die
+     * Fläche, Abstand ≥ 20; $stellen = 4 nimmt vierstellige Koordinaten (mehr Bytes).
+     */
+    $grosse = static function (int $n, int $stellen = 3): string {
+        $linie = [];
+        $min = $stellen === 4 ? 1000 : 100;
+        $max = $stellen === 4 ? 9999 : 999;
+        for ($i = 0; $i < $n; $i++) {
+            $x = $min + ($i * 20) % ($max - $min);
+            $linie[] = [$x, $i % 2 === 0 ? $min : $max];
+        }
+        $linie[0] = [9999, 9999];   // Rahmen über die ganze Fläche
+        return json_encode(['s' => array_chunk($linie, 150)]);
+    };
+    $ok6000 = $grosse(Unterschrift::MAX_PUNKTE);
+    pruefe(Unterschrift::pruefen($ok6000)['ok'] && strlen($ok6000) < Unterschrift::MAX_BYTES, 'Gegenprobe: gültige Unterschrift mit 6000 Punkten unter 64 KB → angenommen');
+    $zuViele = $grosse(Unterschrift::MAX_PUNKTE + 1);
+    pruefe(strlen($zuViele) < Unterschrift::MAX_BYTES && Unterschrift::grossGenug(Unterschrift::pruefen($ok6000)['striche'] ?? [])
+        && Unterschrift::pruefen($zuViele)['message'] === 'Zu viele Punkte – bitte löschen und neu unterschreiben.', 'gültige Unterschrift mit 6001 Punkten (unter 64 KB) → „Zu viele Punkte“');
+    $zuGross = $grosse(Unterschrift::MAX_PUNKTE - 200, 4);
+    pruefe(strlen($zuGross) > Unterschrift::MAX_BYTES && Unterschrift::pruefen($zuGross)['message'] === 'Die Unterschrift ist zu groß – bitte löschen und neu unterschreiben.',
+        'gültige Unterschrift mit weniger als 6000 Punkten, aber über 64 KB → „zu groß“');
     pruefe($abgelehnt('{"s":[[[1000.5,1000],[9000,9000]]]}'), 'Gleitkommazahl → abgelehnt');
     pruefe($abgelehnt('{"s":[[[1000,1000],[9000,9000]]],"t":[1,2]}'), 'Schlüssel „t“ → abgelehnt');
     pruefe($abgelehnt('{"s":[[[1000,1000,1],[9000,9000,1]]]}'), 'Druck als dritter Wert → abgelehnt');
     pruefe($abgelehnt('{"s":[[{"x":1000,"y":1000,"p":0.5}]]}'), 'Punkt als Objekt mit „p“ → abgelehnt');
     pruefe($abgelehnt('{"s":[[["1000",1000],[9000,9000]]]}'), 'String im Punkt → abgelehnt');
     pruefe($abgelehnt('{"s":[[[1000,1000],[99999999999999999999,9000]]]}'), 'riesige Zahl → abgelehnt');
-    pruefe($abgelehnt('{"s":[[[1,1]' . str_repeat(',[1,1]', 11000) . ']]}'), 'über 64 KB → abgelehnt');
+    pruefe(str_contains((string) file_get_contents(dirname(__DIR__) . '/public/assets/js/unterschrift.js'), 'MAX_BYTES = ' . Unterschrift::MAX_BYTES),
+        'unterschrift.js begrenzt die Aufnahme auch an der Bytegrenze des Servers');
     $gross = Unterschrift::pruefen('{"s":[[[500,1000],[12000,6000],[3000,-200],[9000,9000]]]}');
     pruefe($gross['ok'] && $gross['striche'][0][1] === [10000, 6000] && $gross['striche'][0][2] === [3000, 0], 'gültige Unterschrift; Werte auf 0..10000 begrenzt');
     $svg = Unterschrift::svg([[['<script>', '1e9'], [5000, 'onload=x'], [-5, 20000]], 'kaputt', [['"/><a', 7]]]);
@@ -693,8 +833,10 @@ try {
 
     // ================================================== Kundenmodus: offene Wege, Kennwort
     pruefe(Kundenmodus::erlaubt('GET', '/berichte/41/kunde', 41) && Kundenmodus::erlaubt('POST', '/berichte/41/kunde/unterschreiben', 41)
-        && Kundenmodus::erlaubt('POST', '/berichte/41/kunde/beenden', 41) && Kundenmodus::erlaubt('GET', '/berichte/41/pdf', 41)
-        && Kundenmodus::erlaubt('POST', '/logout', 41) && Kundenmodus::erlaubt('GET', '/login', 41), 'Kundenmodus: Kundenseite, PDF, Unterschrift, Entsperren, Abmelden offen');
+        && Kundenmodus::erlaubt('POST', '/berichte/41/kunde/beenden', 41) && Kundenmodus::erlaubt('GET', '/berichte/41/pdf', 41),
+        'Kundenmodus: Kundenseite, PDF, Unterschrift, Entsperren offen');
+    pruefe(!Kundenmodus::erlaubt('POST', '/logout', 41) && !Kundenmodus::erlaubt('GET', '/login', 41) && !Kundenmodus::erlaubt('POST', '/login', 41),
+        'Kundenmodus: Abmelden und Anmeldeseite zu (sonst entsperrte ein gespeichertes Kennwort das Gerät)');
     pruefe(!Kundenmodus::erlaubt('GET', '/berichte/42/kunde', 41) && !Kundenmodus::erlaubt('GET', '/berichte/41', 41) && !Kundenmodus::erlaubt('GET', '/dashboard', 41)
         && !Kundenmodus::erlaubt('POST', '/steuerung/schalten', 41) && !Kundenmodus::erlaubt('POST', '/berichte/41/speichern', 41)
         && !Kundenmodus::erlaubt('GET', '/berichte/41/kunde/beenden', 41) && !Kundenmodus::erlaubt('POST', '/berichte/041/kunde/beenden', 41),
@@ -711,11 +853,9 @@ try {
     Settings::put('firma.name', 'Muster Eventstrom ' . $kennung);
     $praefix = 'T' . implode('', array_map(static fn (): string => chr(random_int(65, 90)), range(1, 5)));
     Settings::put('berichte.praefix', $praefix);
-    // Ein Jahr ohne Berichte: dann beginnt die laufende Nummer bei 1.
-    $jahrU = 2001;
-    while ((int) Database::scalar('SELECT COUNT(*) FROM berichte WHERE jahr = ?', [$jahrU]) > 0) {
-        $jahrU++;
-    }
+    // Ein Jahr ohne Berichte (und ohne Nummernzähler): dann beginnt die laufende Nummer bei 1.
+    $jahrU = $freiesJahr(2001);
+    $testJahre[] = $jahrU;
     $bereit = BerichtSchema::leer();
     $bereit['kopf']['kunde'] = ['firma' => $kundeName, 'email' => $kundeMail] + $bereit['kopf']['kunde'];
     $bereit['kopf']['pruefdatum'] = $jahrU . '-06-15';
@@ -728,7 +868,7 @@ try {
     $kreisU['z'] = 'kunter01';
     $kreisU['leitung']['querschnitt'] = '';   // ergibt die Warnung „ohne Querschnitt“
     $bereit['kreise'] = [$kreisU];
-    $bereit['punkte']['besichtigung']['auswahl'] = 'io';
+    $bereit['punkte'] = $kurzlisteIo();
     $bereit['ergebnis']['entspricht'] = 'ja';
     $bereitAnlegen = static function () use ($siteId, $vt, $bereit, $speichern): int {
         $id = (int) BerichtService::anlegen($siteId, null, [$vt])['id'];
@@ -736,6 +876,8 @@ try {
         return $id;
     };
     $anfrage = static fn (): string => bin2hex(random_bytes(16));
+    /** Der Stand, den die Kundenseite anzeigt – geht mit der Kundenunterschrift mit. */
+    $mitHash = static fn (int $id): array => ['inhalt_hash' => (string) BerichtService::find($id)['inhalt_hash']];
     $version = static fn (int $id): int => (int) BerichtService::find($id)['version'];
     $zeilen = static fn (int $id): int => (int) Database::scalar('SELECT COUNT(*) FROM bericht_unterschriften WHERE bericht_id = ?', [$id]);
 
@@ -747,6 +889,8 @@ try {
     $codes = array_column($r['warnungen'] ?? [], 'code');
     $prueferDaten['warnungen'] = $codes;
     gleich(BerichtService::prueferUnterschreiben($u1, $version($u1), ['name' => 'T'] + $prueferDaten)['status'], 422, 'Name mit einem Zeichen → 422');
+    $r = BerichtService::prueferUnterschreiben($u1, $version($u1), ['name' => 'MAX MEISTER'] + $prueferDaten);
+    pruefe($r['status'] === 422 && str_contains($r['message'], 'Tom Technik'), 'Name eines anderen als des angemeldeten Kontos → 422');
     gleich(BerichtService::prueferUnterschreiben($u1, $version($u1), ['striche' => '{"s":[[[1,1],[2,2]]]}'] + $prueferDaten)['status'], 422, 'zu kleine Unterschrift → 422');
     gleich(BerichtService::prueferUnterschreiben($u1, $version($u1), ['anfrage' => 'kurz'] + $prueferDaten)['status'], 422, 'ohne gültigen Idempotenzschlüssel → 422');
     gleich(BerichtService::prueferUnterschreiben($u1, $version($u1) - 1, $prueferDaten)['status'], 409, 'veraltete Version → 409');
@@ -774,7 +918,7 @@ try {
     $fest = $b1['inhalt'];
     pruefe(($fest['nummer'] ?? '') === $nummer1 && ($fest['fassung'] ?? '') === '1' && ($fest['auftragnehmer']['name'] ?? '') === 'Muster Eventstrom ' . $kennung
         && ($fest['kopf']['pruefer']['name'] ?? '') === 'Tom Technik' && ($fest['kopf']['pruefer']['qualifikation'] ?? '') === 'Elektrofachkraft für Veranstaltungstechnik'
-        && ($fest['messgeraete'][0]['seriennummer'] ?? '') === 'DEMO-1' && isset($fest['labels']['besichtigung']['auswahl'], $fest['labels']['normen']['0100-711'], $fest['texte']['kunde'])
+        && ($fest['kopf']['pruefer']['konto'] ?? '') === 'Tom Technik' && ($fest['messgeraete'][0]['seriennummer'] ?? '') === 'DEMO-1' && isset($fest['labels']['besichtigung']['auswahl'], $fest['labels']['normen']['0100-711'], $fest['texte']['kunde'])
         && ($fest['bewertung']['kreise']['kunter01']['auto'] ?? '') === 'ok', 'feste Kopien: Nummer, Firma, Prüfer, Messgeräte, Texte, Bewertung');
     pruefe(array_diff($codes, $fest['abschluss']['warnungen_bestaetigt']) === [], 'bestätigte Warnungen gehören zum eingefrorenen Inhalt');
     $pz = BerichtService::unterschriften($u1)['pruefer'] ?? [];
@@ -819,11 +963,18 @@ try {
     $r = BerichtService::prueferUnterschreiben($u2, $version($u2), ['anfrage' => $anfrage(), 'striche' => $striche()] + $prueferDaten);
     pruefe($r['ok'] && BerichtService::find($u2)['nummer'] === $nummer2, 'neu unterschrieben: dieselbe Nummer');
     $_SESSION = [];
-    pruefe(BerichtService::kundenmodusStarten($u2)['ok'] && (Kundenmodus::aktiv()['bericht'] ?? 0) === $u2, 'Kundenmodus gestartet');
+    $vorKunde = $version($u2);
+    pruefe(BerichtService::kundenmodusStarten($u2)['ok'] && (Kundenmodus::aktiv()['bericht'] ?? 0) === $u2 && $version($u2) === $vorKunde + 1,
+        'Kundenmodus gestartet, Version + 1 (ein gleichzeitiges Zurückziehen mit altem Stand scheitert)');
+    pruefe((Kundenmodus::aktiv()['user'] ?? 0) === $benutzer['technik'] && (Kundenmodus::aktiv()['name'] ?? '') === 'Tom Technik'
+        && (int) Database::scalar('SELECT COUNT(*) FROM kundenmodus_geraete WHERE bericht_id = ? AND user_id = ?', [$u2, $benutzer['technik']]) === 1,
+        'Kundenmodus: wer ihn gestartet hat, steht in der Sitzung und am Gerät');
     Kundenmodus::beenden();
+    gleich((int) Database::scalar('SELECT COUNT(*) FROM kundenmodus_geraete WHERE bericht_id = ?', [$u2]), 0, 'Kundenmodus beendet: Sperre am Gerät weg');
     pruefe(!BerichtService::zurueckziehbar(BerichtService::find($u2)) && BerichtService::zurueckziehen($u2, 'zu spät')['status'] === 409, 'nach dem Kundenmodus kein Zurückziehen');
     $u3 = $bereitAnlegen();
-    BerichtService::prueferUnterschreiben($u3, $version($u3), ['anfrage' => $anfrage(), 'striche' => $striche()] + $prueferDaten);
+    $r = BerichtService::prueferUnterschreiben($u3, $version($u3), ['anfrage' => $anfrage(), 'striche' => $striche(), 'name' => ' TOM   TECHNIK '] + $prueferDaten);
+    pruefe($r['ok'], 'Name in Druckbuchstaben (Groß/klein, Leerzeichen egal) passt zum Konto: ' . $r['message']);
     gleich(BerichtService::find($u3)['nummer'], sprintf('%s-%d-0003', $praefix, $jahrU), 'dritter Bericht: 0003');
     BerichtService::ereignis($u3, 'pdf_abgerufen', ['stufe' => 'vorschau']);
     gleich(BerichtService::zurueckziehen($u3, 'zu spät')['status'], 409, 'nach Abruf des PDF kein Zurückziehen');
@@ -838,24 +989,49 @@ try {
         'Vorschau nach der Prüfer-Unterschrift: nicht gespeichert');
     gleich(BerichtService::pdf($b3)['bytes'], $v3['bytes'], 'Vorschau ist reproduzierbar (feste Zeit und ID)');
 
+    // ================================================== Gleichzeitig: ein anderes Gerät hält die Datenbank
+    if (App\Support\Database::driver() === 'sqlite') {
+        $uSperre = $bereitAnlegen();
+        $signal = tempnam(sys_get_temp_dir(), 'pm-sperre-');
+        file_put_contents($signal, '');
+        $sperre = proc_open([PHP_BINARY, '-r', '$p = new PDO("sqlite:" . $argv[1]); $p->exec("PRAGMA journal_mode = WAL"); $p->exec("BEGIN IMMEDIATE");'
+            . ' file_put_contents($argv[2], "1"); usleep(1500000); $p->exec("COMMIT");', (string) App\Support\Config::get('database.path'), $signal],
+            [1 => ['file', '/dev/null', 'w'], 2 => ['file', '/dev/null', 'w']], $rohre);
+        for ($t = 0; $t < 100 && file_get_contents($signal) !== '1'; $t++) {
+            usleep(50_000);
+        }
+        $start = microtime(true);
+        $r = BerichtService::prueferUnterschreiben($uSperre, $version($uSperre), ['anfrage' => $anfrage(), 'striche' => $striche()] + $prueferDaten);
+        $gewartet = microtime(true) - $start;
+        proc_close($sperre);
+        @unlink($signal);
+        pruefe($r['ok'] && $r['status'] === 200 && $gewartet > 0.8, sprintf('Schreibsperre eines zweiten Prozesses: gewartet (%.1f s), dann unterschrieben: %s', $gewartet, $r['message']));
+    }
+
     // ================================================== Kunde
     $vorbehalte = 'Vorbehalt ' . $kennung . ': Kabelbrücke an Bühne fehlt';
     $unterzeichner = 'Kim Kunde ' . $kennung;
     $kundeDaten = ['striche' => $striche(), 'name' => $unterzeichner, 'funktion' => 'Produktionsleitung', 'ort' => 'Musterstadt',
         'bestaetigungen' => ['erhalten', 'eingewiesen', 'gibtsnicht'], 'vorbehalte' => $vorbehalte, 'anfrage' => $anfrage(), 'geraet_am' => 'gestern'];
     $u4 = $bereitAnlegen();
-    pruefe(BerichtService::kundeUnterschreiben($u4, $kundeDaten)['status'] === 409 && !BerichtService::kundenmodusStarten($u4)['ok'], 'Kunde vor dem Prüfer → abgelehnt');
-    pruefe(BerichtService::kundeUnterschreiben($u1, ['bestaetigungen' => ['eingewiesen']] + $kundeDaten)['status'] === 422, 'ohne „Bericht erhalten“ → abgelehnt');
-    pruefe(BerichtService::kundeUnterschreiben($u1, ['name' => ' '] + $kundeDaten)['status'] === 422, 'Kunde ohne Namen → abgelehnt');
-    pruefe(BerichtService::kundeUnterschreiben($u1, ['striche' => $prueferDaten['striche']] + $kundeDaten)['status'] === 422, 'Kunde mit den Strichen des Prüfers → abgelehnt');
+    pruefe(BerichtService::kundeUnterschreiben($u4, $mitHash($u4) + $kundeDaten)['status'] === 409 && !BerichtService::kundenmodusStarten($u4)['ok'], 'Kunde vor dem Prüfer → abgelehnt');
+    pruefe(BerichtService::kundeUnterschreiben($u1, $mitHash($u1) + ['bestaetigungen' => ['eingewiesen']] + $kundeDaten)['status'] === 422, 'ohne „Bericht erhalten“ → abgelehnt');
+    pruefe(BerichtService::kundeUnterschreiben($u1, $mitHash($u1) + ['name' => ' '] + $kundeDaten)['status'] === 422, 'Kunde ohne Namen → abgelehnt');
+    pruefe(BerichtService::kundeUnterschreiben($u1, $mitHash($u1) + ['striche' => $prueferDaten['striche']] + $kundeDaten)['status'] === 422, 'Kunde mit den Strichen des Prüfers → abgelehnt');
     alsBenutzer($benutzer['planer']);
-    gleich(BerichtService::kundeUnterschreiben($u1, $kundeDaten)['status'], 404, 'Planer ohne „bearbeiten“: kein Kundenblock');
+    gleich(BerichtService::kundeUnterschreiben($u1, $mitHash($u1) + $kundeDaten)['status'], 404, 'Planer ohne „bearbeiten“: kein Kundenblock');
+    alsBenutzer($benutzer['technik']);
+    gleich(BerichtService::kundeUnterschreiben($u1, ['inhalt_hash' => str_repeat('0', 64)] + $kundeDaten)['status'], 409, 'Kunde hat einen anderen Stand gesehen → 409');
+    gleich(BerichtService::kundeUnterschreiben($u1, $kundeDaten)['status'], 409, 'Kunde ohne gesehenen Stand → 409');
     alsBenutzer($benutzer['technik']);
     gleich($zeilen($u1), 1, 'abgelehnte Kundenunterschriften: keine Zeile');
-    $r = BerichtService::kundeUnterschreiben($u1, $kundeDaten);
+    $r = BerichtService::kundeUnterschreiben($u1, $mitHash($u1) + $kundeDaten);
     $b1 = BerichtService::find($u1);
     pruefe($r['ok'] && $b1['status'] === 'abgeschlossen' && $b1['abgeschlossen_am'] !== null, 'Kunde unterschreibt → abgeschlossen');
-    gleich($b1['aufbewahren_bis'], sprintf('%04d-12-31', $jahrU + 10), 'aufbewahren bis 31.12.(Jahr + 10)');
+    // Prüfdatum 2001, abgeschlossen heute: die Frist läuft ab dem späteren der beiden Jahre.
+    $jahrHeute = (int) (new DateTimeImmutable('now', Zeit::zone()))->format('Y');
+    gleich($b1['aufbewahren_bis'], sprintf('%04d-12-31', $jahrHeute + 10), 'aufbewahren bis 31.12.(Jahr des Abschlusses + 10), nicht ab dem alten Prüfdatum');
+    pruefe(!in_array($u1, array_map('intval', array_column(BerichtService::faellig(), 'id')), true), 'Bericht mit altem Prüfdatum ist nicht gleich nach dem Abschluss fällig');
     $pdfZeile = Database::first('SELECT * FROM bericht_pdf WHERE bericht_id = ?', [$u1]) ?? [];
     $pdfBytes = (string) base64_decode((string) ($pdfZeile['daten'] ?? ''), true);
     pruefe(str_starts_with($pdfBytes, '%PDF-') && str_ends_with($pdfBytes, "%%EOF\n"), 'Abschluss: PDF gespeichert (%PDF- … %%EOF)');
@@ -873,9 +1049,9 @@ try {
     pruefe(($kz['vorher_hash'] ?? '') === $alle['pruefer']['kette_hash'] && $kz['inhalt_hash'] === $b1['inhalt_hash'] && $kz['art'] === 'gezeichnet'
         && $kz['angaben'] === ['bestaetigungen' => ['erhalten', 'eingewiesen'], 'vorbehalte' => $vorbehalte] && $kz['geraet_am'] === null,
         'Kundenzeile kettet an die des Prüfers; nur bekannte Bestätigungen');
-    $r = BerichtService::kundeUnterschreiben($u1, $kundeDaten);
+    $r = BerichtService::kundeUnterschreiben($u1, $mitHash($u1) + $kundeDaten);
     pruefe($r['ok'] && $r['unterschrift'] === (int) $kz['id'] && $zeilen($u1) === 2, 'Kundenunterschrift doppelt gesendet → eine Zeile');
-    $r = BerichtService::kundeUnterschreiben($u1, ['anfrage' => $anfrage(), 'striche' => $striche()] + $kundeDaten);
+    $r = BerichtService::kundeUnterschreiben($u1, $mitHash($u1) + ['anfrage' => $anfrage(), 'striche' => $striche()] + $kundeDaten);
     pruefe(!$r['ok'] && $r['status'] === 409 && $zeilen($u1) === 2, 'zweite Kundenunterschrift → abgelehnt');
     gleich(BerichtService::integritaet($u1), ['ok' => true, 'eingefroren' => true, 'befunde' => []], 'Integrität nach dem Abschluss');
     pruefe(!BerichtService::ohneKunde($u2, 'abwesend', '')['ok'] && BerichtService::ohneKunde($u2, 'egal', 'Grund genug')['status'] === 422, 'ohne Kunde: Grund und Art sind Pflicht');
@@ -921,20 +1097,60 @@ try {
     Database::execute('UPDATE bericht_pdf SET daten = ? WHERE bericht_id = ?', [$rohPdf, $u1]);
     gleich(BerichtService::integritaet($u1, true), ['ok' => true, 'eingefroren' => true, 'befunde' => [], 'hinweise' => []],
         'mit Neuerzeugung: dieselben Bytes, kein Hinweis');
-    Database::execute('UPDATE bericht_pdf SET daten = ? WHERE bericht_id = ?', [base64_encode('%PDF-1.4 anders'), $u1]);
-    Database::execute('UPDATE bericht_pdf SET sha256 = ?, groesse = ? WHERE bericht_id = ?', [hash('sha256', '%PDF-1.4 anders'), 15, $u1]);
-    Database::execute('UPDATE berichte SET pdf_hash = ? WHERE id = ?', [hash('sha256', '%PDF-1.4 anders'), $u1]);
+    pruefe(($pdfZeile['siegel'] ?? '') !== '' && $pdfZeile['schluessel_id'] === BerichtService::schluesselId(), 'PDF beim Abschluss gesiegelt');
+    // Ein stimmig ausgetauschtes PDF (Daten, Prüfsumme, Größe und pdf_hash passend): das Siegel deckt es auf.
+    $tausch = '%PDF-1.4 anders';
+    $tauschSha = hash('sha256', $tausch);
+    Database::execute('UPDATE bericht_pdf SET daten = ?, sha256 = ?, groesse = ? WHERE bericht_id = ?', [base64_encode($tausch), $tauschSha, strlen($tausch), $u1]);
+    Database::execute('UPDATE berichte SET pdf_hash = ? WHERE id = ?', [$tauschSha, $u1]);
     $i = BerichtService::integritaet($u1, true);
-    pruefe($i['ok'] && count($i['hinweise']) === 1 && str_contains($i['hinweise'][0], 'weicht'), 'stimmiges, aber anderes PDF: nur ein Hinweis bei der Neuerzeugung');
-    Database::execute('UPDATE bericht_pdf SET daten = ?, sha256 = ?, groesse = ? WHERE bericht_id = ?', [$rohPdf, $pdfZeile['sha256'], $pdfZeile['groesse'], $u1]);
+    pruefe(!$i['ok'] && str_contains(implode(' ', $i['befunde']), 'PDF: Siegel ungültig') && str_contains(implode(' ', $i['befunde']), 'beim Abschluss festgehaltenen'),
+        'stimmig ausgetauschtes PDF → Befund (Siegel, Prüfsumme im Lebenslauf)');
+    // Nur ein älterer Erzeuger mit gültigem Siegel macht eine abweichende Neuerzeugung zum bloßen Hinweis.
+    $kundenKette = (string) Database::scalar("SELECT kette_hash FROM bericht_unterschriften WHERE bericht_id = ? AND rolle = 'kunde'", [$u1]);
+    $altSiegel = hash_hmac('sha256', implode("\n", ['PM-UB-PDF-1', (string) $u1, $nummer1, '1', $kundenKette, $tauschSha, 'pm-pdf-0']), Crypto::ableiten('bericht-siegel-1'));
+    Database::execute('UPDATE bericht_pdf SET erzeuger = ?, siegel = ? WHERE bericht_id = ?', ['pm-pdf-0', $altSiegel, $u1]);
+    $ereignisId = (int) Database::scalar("SELECT id FROM bericht_ereignisse WHERE bericht_id = ? AND ereignis = 'kunde_unterschrieben'", [$u1]);
+    $ereignisVorher = (string) Database::scalar('SELECT details FROM bericht_ereignisse WHERE id = ?', [$ereignisId]);
+    Database::execute('UPDATE bericht_ereignisse SET details = ? WHERE id = ?', [str_replace((string) $pdfZeile['sha256'], $tauschSha, $ereignisVorher), $ereignisId]);
+    $i = BerichtService::integritaet($u1, true);
+    pruefe($i['ok'] && count($i['hinweise']) === 1 && str_contains($i['hinweise'][0], 'pm-pdf-0') && str_contains($i['hinweise'][0], 'Siegel stimmt'),
+        'älterer Erzeuger, gültiges Siegel: abweichende Neuerzeugung nur ein Hinweis');
+    Database::execute('UPDATE bericht_pdf SET erzeuger = ? WHERE bericht_id = ?', [BerichtPdf::ERZEUGER, $u1]);
+    $i = BerichtService::integritaet($u1, true);
+    pruefe(!$i['ok'] && str_contains(implode(' ', $i['befunde']), 'obwohl der Erzeuger derselbe ist'), 'gleicher Erzeuger, abweichende Neuerzeugung → Befund');
+    Database::execute('UPDATE bericht_ereignisse SET details = ? WHERE id = ?', [$ereignisVorher, $ereignisId]);
+    Database::execute('UPDATE bericht_pdf SET daten = ?, sha256 = ?, groesse = ?, erzeuger = ?, siegel = ? WHERE bericht_id = ?',
+        [$rohPdf, $pdfZeile['sha256'], $pdfZeile['groesse'], $pdfZeile['erzeuger'], $pdfZeile['siegel'], $u1]);
     Database::execute('UPDATE berichte SET pdf_hash = ? WHERE id = ?', [$pdfZeile['sha256'], $u1]);
+    gleich(BerichtService::integritaet($u1, true)['ok'], true, 'PDF zurück: Integrität ok');
+    $pdfU2 = Database::first('SELECT * FROM bericht_pdf WHERE bericht_id = ?', [$u2]);
     Database::execute('DELETE FROM bericht_pdf WHERE bericht_id = ?', [$u2]);
     pruefe(str_contains(implode(' ', BerichtService::integritaet($u2)['befunde']), 'PDF fehlt'), 'gespeichertes PDF gelöscht → Befund');
     $neuU2 = BerichtService::pdf(BerichtService::find($u2));
-    pruefe(!$neuU2['gespeichert'] && $neuU2['sha256'] === BerichtService::find($u2)['pdf_hash'], 'ohne gespeichertes PDF: Neuerzeugung mit derselben Prüfsumme');
-    Database::insert('bericht_pdf', ['bericht_id' => $u2, 'sha256' => $neuU2['sha256'], 'groesse' => strlen($neuU2['bytes']), 'daten' => base64_encode($neuU2['bytes']),
-        'erzeuger' => BerichtPdf::ERZEUGER, 'erzeugt_am' => (string) BerichtService::find($u2)['abgeschlossen_am']]);
+    pruefe(!$neuU2['gespeichert'] && $neuU2['sha256'] === BerichtService::find($u2)['pdf_hash'] && $neuU2['sha256'] === $pdfU2['sha256'],
+        'ohne gespeichertes PDF: Neuerzeugung mit derselben Prüfsumme');
+    unset($pdfU2['id']);
+    Database::insert('bericht_pdf', $pdfU2);
     gleich(BerichtService::integritaet($u2)['ok'], true, 'PDF wieder abgelegt: Integrität ok');
+
+    // Status per SQL geändert: eingefroren ist, was die Daten sagen (Unterschrift, Prüfsumme, PDF)
+    foreach (['entwurf', 'verworfen', 'ersetzt', 'geprueft'] as $falsch) {
+        Database::execute('UPDATE berichte SET status = ? WHERE id = ?', [$falsch, $u1]);
+        $i = BerichtService::integritaet($u1);
+        pruefe(!$i['ok'] && $i['eingefroren'], 'Status per SQL auf „' . $falsch . '“ → Befund: ' . implode(' ', $i['befunde']));
+    }
+    Database::execute("UPDATE berichte SET status = 'entwurf' WHERE id = ?", [$u1]);
+    $bx = BerichtService::find($u1);
+    pruefe(!BerichtService::darfBearbeiten($bx) && BerichtService::speichern($u1, (int) $bx['version'], json_encode($bereit))['status'] === 423
+        && BerichtService::kreiseVorbelegen($u1, (int) $bx['version'], [$vt])['status'] === 423 && BerichtService::find($u1)['inhalt_hash'] === $b1['inhalt_hash'],
+        'Status „entwurf“ per SQL: nicht bearbeitbar, Autosave und Zeilen ergänzen → 423');
+    pruefe(in_array($u1, array_column(BerichtService::eingefrorene(), 'id'), true), 'eingefrorene(): nach den Daten, nicht nach dem Status');
+    $r = BerichtService::verwerfen($u1, 'per SQL zurückgesetzt');
+    pruefe(!$r['ok'] && ($r['status'] ?? 0) === 409 && !in_array('verworfen', array_column(BerichtService::ereignisse($u1), 'ereignis'), true),
+        'verwerfen trifft nichts → 409, kein „verworfen“ im Lebenslauf');
+    Database::execute("UPDATE berichte SET status = 'abgeschlossen' WHERE id = ?", [$u1]);
+    gleich(BerichtService::integritaet($u1)['ok'], true, 'Status zurück: Integrität ok');
 
     // ================================================== Feste Kopie
     Settings::put('firma.name', 'Ganz andere Firma ' . $kennung);
@@ -971,7 +1187,7 @@ try {
     gleich([BerichtService::find($u1)['status'], BerichtService::korrektur($u1, 'noch eine')['status']], ['abgeschlossen', 409], 'unterschriebene Korrektur: Vorgänger noch gültig, keine zweite');
     $pdfVorher = Database::select('SELECT * FROM bericht_pdf WHERE bericht_id = ?', [$u1]);
     $hashVorher = BerichtService::find($u1)['inhalt_hash'];
-    pruefe(BerichtService::kundeUnterschreiben($k1, ['anfrage' => $anfrage(), 'striche' => $striche()] + $kundeDaten)['ok'], 'Kunde unterschreibt die Korrektur');
+    pruefe(BerichtService::kundeUnterschreiben($k1, $mitHash($k1) + ['anfrage' => $anfrage(), 'striche' => $striche()] + $kundeDaten)['ok'], 'Kunde unterschreibt die Korrektur');
     $alt = BerichtService::find($u1);
     pruefe(BerichtService::find($k1)['status'] === 'abgeschlossen' && $alt['status'] === 'ersetzt' && $alt['ersetzt_durch_id'] === $k1, 'Korrektur abgeschlossen → Vorgänger ersetzt');
     pruefe($alt['inhalt_hash'] === $hashVorher && Database::select('SELECT * FROM bericht_pdf WHERE bericht_id = ?', [$u1]) === $pdfVorher
@@ -982,6 +1198,53 @@ try {
     pruefe(BerichtService::loeschen((int) $r['id'])['ok'], 'offene Korrektur ohne Nummer lässt sich verwerfen (löschen)');
     pruefe(in_array('ersetzt', array_column(BerichtService::ereignisse($u1), 'ereignis'), true)
         && in_array('korrektur_angelegt', array_column(BerichtService::ereignisse($u1), 'ereignis'), true), 'Ereignisse am Vorgänger: Korrektur angelegt, ersetzt');
+    Database::update('berichte', $k1, ['vorgaenger_id' => 999999999]);
+    pruefe(str_contains(implode(' ', BerichtService::integritaet($k1)['befunde']), 'Vorgänger dieser Korrektur fehlt'), 'Korrektur, deren Vorgänger fehlt → Befund');
+    Database::update('berichte', $k1, ['vorgaenger_id' => $u1]);
+    gleich(BerichtService::integritaet($k1)['ok'], true, 'Vorgänger zurück: Integrität ok');
+
+    // ================================================== Aufbewahrung: ganze Nummern, keine Nummer zweimal
+    $jahrA = $freiesJahr($jahrU + 1);
+    $testJahre[] = $jahrA;
+    $altesDatum = $bereit;
+    $altesDatum['kopf']['pruefdatum'] = $jahrA . '-03-02';
+    $unterschreibenAlt = static function () use ($siteId, $vt, $altesDatum, $speichern, $version, $anfrage, $striche, $prueferDaten): int {
+        $id = (int) BerichtService::anlegen($siteId, null, [$vt])['id'];
+        $speichern($id, $altesDatum);
+        $r = BerichtService::prueferUnterschreiben($id, $version($id), ['anfrage' => $anfrage(), 'striche' => $striche()] + $prueferDaten);
+        pruefe($r['ok'], 'Bericht mit altem Prüfdatum unterschrieben (Warnung bestätigt): ' . $r['message']);
+        return $id;
+    };
+    $pa = $unterschreibenAlt();
+    pruefe(BerichtService::ohneKunde($pa, 'abwesend', 'Kunde nicht vor Ort')['ok'], 'abgeschlossen ohne Kunde');
+    $pab = BerichtService::find($pa);
+    gleich([$pab['nummer'], $pab['aufbewahren_bis']], [sprintf('%s-%d-0001', $praefix, $jahrA), sprintf('%04d-12-31', $jahrHeute + 10)],
+        'Prüfdatum ' . $jahrA . ': Nummer im Jahr des Prüfdatums, Frist ab dem Abschluss');
+    $r = BerichtService::korrektur($pa, 'Ort nachgetragen');
+    $ka = (int) ($r['id'] ?? 0);
+    pruefe(BerichtService::prueferUnterschreiben($ka, $version($ka), ['anfrage' => $anfrage(), 'striche' => $striche()] + $prueferDaten)['ok']
+        && BerichtService::ohneKunde($ka, 'abwesend', 'Kunde nicht vor Ort')['ok'], 'Korrektur mit dem alten Prüfdatum unterschrieben und abgeschlossen');
+    gleich(BerichtService::find($ka)['aufbewahren_bis'], sprintf('%04d-12-31', $jahrHeute + 10), 'Korrektur: Frist ab dem Abschluss');
+    $faelligIds = static fn (): array => array_map('intval', array_column(BerichtService::faellig(), 'id'));
+    Database::update('berichte', $pa, ['aufbewahren_bis' => '2000-12-31']);
+    pruefe(!in_array($pa, $faelligIds(), true), 'nur der Vorgänger abgelaufen: die Nummer ist nicht fällig');
+    gleich(BerichtService::aufbewahrungLoeschen($pa), [], 'aufbewahrungLoeschen lehnt ab, solange nicht die ganze Nummer fällig ist');
+    $kb2 = (int) (BerichtService::korrektur($ka, 'noch eine Korrektur')['id'] ?? 0);
+    Database::update('berichte', $ka, ['aufbewahren_bis' => '2000-12-31']);
+    pruefe($kb2 > 0 && !in_array($pa, $faelligIds(), true) && !in_array($ka, $faelligIds(), true), 'offene Korrektur (Entwurf): die Nummer ist nicht fällig');
+    Database::update('berichte', $kb2, ['vorgaenger_id' => 999999999]);
+    gleich(BerichtService::prueferUnterschreiben($kb2, $version($kb2), ['anfrage' => $anfrage(), 'striche' => $striche()] + $prueferDaten)['status'], 409,
+        'Vorgänger fehlt → die Korrektur wird nicht ohne Verweis eingefroren (409)');
+    gleich(BerichtService::find($kb2)['status'], 'entwurf', 'nichts eingefroren');
+    Database::update('berichte', $kb2, ['vorgaenger_id' => $ka]);
+    pruefe(BerichtService::loeschen($kb2)['ok'], 'offene Korrektur gelöscht');
+    pruefe(in_array($pa, $faelligIds(), true) && in_array($ka, $faelligIds(), true), 'jetzt ist die ganze Nummer fällig');
+    $weg = BerichtService::aufbewahrungLoeschen($pa);
+    sort($weg);
+    gleich([$weg, BerichtService::find($pa), BerichtService::find($ka)], [[$pa, $ka], null, null], 'Aufbewahrung löscht alle Fassungen einer Nummer gemeinsam');
+    $pn = $unterschreibenAlt();
+    gleich([BerichtService::find($pn)['laufnr'], BerichtService::find($pn)['nummer']], [2, sprintf('%s-%d-0002', $praefix, $jahrA)],
+        'eine gelöschte Nummer wird nicht wieder vergeben');
 
     // ================================================== Kommandozeile und Wartung
     /** bin/power mit diesen Argumenten: [Exitcode, Ausgabe (stdout und stderr)] */
@@ -1015,6 +1278,12 @@ try {
     [$code, $aus] = $cli('berichte:pruefen');
     pruefe(str_contains($aus, $nummer1 . ' (Fassung 1') && str_contains($aus, $nummer1 . '-K1 (Fassung 2') && str_contains($aus, ' geprüft, ') && $ohneKundendaten($aus),
         'CLI berichte:pruefen ohne Nummer: alle unterschriebenen, ohne Kundendaten');
+    Database::execute("UPDATE berichte SET status = 'entwurf' WHERE id = ?", [$k1]);
+    [$code, $aus] = $cli('berichte:pruefen', $nummer1 . '-K1');
+    pruefe($code === 1 && str_contains($aus, 'BEFUND') && str_contains($aus, 'Status'), 'CLI: Status per SQL auf „entwurf“ → Befund, Exit 1');
+    [$code, $aus] = $cli('berichte:pruefen');
+    pruefe($code === 1 && str_contains($aus, $nummer1 . '-K1 (Fassung 2, Entwurf)'), 'CLI ohne Nummer: auch der zurückgesetzte Bericht wird geprüft');
+    Database::execute("UPDATE berichte SET status = 'abgeschlossen' WHERE id = ?", [$k1]);
 
     $zielOrdner = sys_get_temp_dir() . '/' . $kennung . '-pdf';
     mkdir($zielOrdner, 0700);
@@ -1037,7 +1306,9 @@ try {
 
     $entwurfAlt = (int) BerichtService::anlegen($siteId, null, [])['id'];
     Database::update('berichte', $entwurfAlt, ['updated_at' => gmdate('c', time() - 200 * 86400)]);
+    // Ganze Nummer: Fassung 1 (ersetzt) und die Korrektur K1.
     Database::update('berichte', $u1, ['aufbewahren_bis' => '2000-12-31']);
+    Database::update('berichte', $k1, ['aufbewahren_bis' => '2000-12-31']);
     $meldungen = implode(' ', BerichtService::wartungHinweise());
     pruefe(preg_match('/\d+ Übergabeberichte? über der Aufbewahrungsfrist \(bin\/power berichte:aufbewahrung\)/u', $meldungen) === 1
         && preg_match('/\d+ Entw(urf|ürfe) eines Übergabeberichts seit 180 Tagen unverändert/u', $meldungen) === 1, 'Wartung meldet fällige Berichte und liegende Entwürfe: ' . $meldungen);
@@ -1045,8 +1316,8 @@ try {
     [$code, $aus] = $cli('berichte:aufbewahrung');
     pruefe($code === 0 && str_contains($aus, $nummer1) && str_contains($aus, '--ausfuehren') && BerichtService::find($u1) !== null && $ohneKundendaten($aus),
         'CLI berichte:aufbewahrung zeigt nur, löscht ohne --ausfuehren nichts');
-    // Löschen nur, wenn ausschließlich eigene Berichte fällig sind (die mit
-    // Prüfdatum 2001 sind es ohnehin) – fremde Daten bleiben unangetastet.
+    // Löschen nur, wenn ausschließlich eigene Berichte fällig sind – fremde
+    // Daten bleiben unangetastet.
     $eigene = array_map('intval', array_column(Database::select(
         'SELECT id FROM berichte WHERE erstellt_von IN (' . implode(',', array_map('intval', $benutzer)) . ')'
     ), 'id'));
@@ -1064,6 +1335,23 @@ try {
         pruefe($code === 0 && str_contains($aus, 'Demo-Modus'), 'CLI eventworx:pruefen im Demo-Modus');
     }
 
+    // ================================================== Vorgaben und Leseansicht
+    $textKunde = Einstellungen::VORGABEN['berichte.text_kunde'];
+    pruefe(str_contains($textKunde, 'Erhalt des Berichts') && !str_contains($textKunde, 'übernommen zu haben'),
+        'Kundentext bestätigt nur den Erhalt – Übernahme und Einweisung sind eigene, freiwillige Häkchen');
+    pruefe(str_contains(BerichtSchema::leer()['ergebnis']['naechste'], 'spätestens nach 1 Monat') && mb_strlen(BerichtSchema::NAECHSTE) <= 255,
+        'Nächster Prüftermin: Monatsfrist der RCD bei längerem Betrieb (DGUV V3 DA Tab. 1A)');
+    $ansicht = $bereit;
+    $ka1 = $muster(['w' => ['rpe' => ['op' => '', 'w' => '0.3']]]);
+    $ka1['z'] = 'kansich1';
+    $ka2 = $muster(['nr' => '2', 'rcd_von' => 'kansich1', 'w' => ['idelta' => ['w' => ''], 'ta' => ['w' => ''], 'ub' => ['w' => '']]]);
+    $ka2['z'] = 'kansich2';
+    $ansicht['kreise'] = [$ka1, $ka2];
+    $ansicht = BerichtSchema::vollstaendig($ansicht);
+    $html = App\Support\View::partial('berichte/_ansicht', ['bericht' => ['status' => 'entwurf'], 'inhalt' => $ansicht, 'bewertung' => Grenzwerte::alle($ansicht), 'unterschriften' => []]);
+    pruefe(str_contains($html, 'an Kreis 1 gemessen') && str_contains($html, 'data-label="R_PE Ω"') && str_contains($html, '0,3'),
+        'Leseansicht (auch im Kundenmodus): „an Kreis 1 gemessen“ statt leerer Zellen, Spalte R_PE');
+
     // ================================================== Datenschutz
     foreach ([$kundeName, $kundeMail, $vorbehalte, $unterzeichner] as $geheim) {
         gleich((int) Database::scalar('SELECT COUNT(*) FROM audit_log WHERE details LIKE ?', ['%' . $geheim . '%']), 0, 'nicht im Audit: ' . $geheim);
@@ -1078,10 +1366,17 @@ try {
         'SELECT id FROM berichte WHERE erstellt_von IN (' . implode(',', array_map('intval', $benutzer)) . ')'
     ), 'id'));
     foreach ($ids as $bid) {
-        foreach (['bericht_unterschriften', 'bericht_pdf', 'bericht_objekte', 'bericht_ereignisse'] as $tabelle) {
+        foreach (['bericht_unterschriften', 'bericht_pdf', 'bericht_objekte', 'bericht_ereignisse', 'kundenmodus_geraete'] as $tabelle) {
             Database::execute("DELETE FROM {$tabelle} WHERE bericht_id = ?", [$bid]);
         }
         Database::delete('berichte', $bid);
+    }
+    foreach ($benutzer as $uid) {
+        Database::execute('DELETE FROM kundenmodus_geraete WHERE user_id = ?', [$uid]);
+    }
+    // Die Nummernzähler der Jahre, die nur diese Prüfung benutzt hat.
+    foreach ($testJahre as $jahr) {
+        Database::execute('DELETE FROM bericht_nummern WHERE jahr = ?', [$jahr]);
     }
     Database::execute('DELETE FROM pruefgeraete WHERE fabrikat LIKE ?', [$kennung . '%']);
     foreach ($inventar as $iid) {

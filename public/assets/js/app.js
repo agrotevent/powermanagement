@@ -1,4 +1,76 @@
 // Kleine Helfer ohne Framework.
+
+/*
+ * PMNetz.post(adresse, FormData, ms[, { keepalive }]): POST mit Zeitgrenze.
+ *
+ * fetch kennt von sich aus keine Zeitgrenze – eine hängende Anfrage (Funkloch,
+ * Proxy, der nicht antwortet) blockierte Autosave und Unterschrift sonst
+ * minutenlang. Nach `ms` wird abgebrochen, und es geht weiter wie bei einem
+ * Netzfehler (das Versprechen wird abgelehnt). Ergebnis: { status, erg } mit
+ * der gelesenen JSON-Antwort. `.abbrechen()` am Versprechen bricht von Hand
+ * ab (etwa „Abbrechen“ im Unterschriftsdialog).
+ */
+window.PMNetz = {
+    post: function (adresse, daten, ms, optionen) {
+        var steuerung = typeof window.AbortController === 'function' ? new window.AbortController() : null;
+        var abbrechen = function () { if (steuerung) { steuerung.abort(); } };
+        var uhr = window.setTimeout(abbrechen, ms || 15000);
+        var anfrage = { method: 'POST', body: daten, credentials: 'same-origin', headers: { 'Accept': 'application/json' } };
+        if (steuerung) { anfrage.signal = steuerung.signal; }
+        if (optionen && optionen.keepalive) { anfrage.keepalive = true; }
+        var p = fetch(adresse, anfrage).then(function (antwort) {
+            return antwort.json().then(function (erg) {
+                return { status: antwort.status, erg: erg || {} };
+            }, function (fehler) {
+                if (steuerung && steuerung.signal.aborted) { throw fehler; }
+                return { status: antwort.status, erg: { ok: false, message: 'Unerwartete Antwort des Servers (' + antwort.status + ').' } };
+            });
+        }).then(function (r) {
+            window.clearTimeout(uhr);
+            return r;
+        }, function (fehler) {
+            window.clearTimeout(uhr);
+            throw fehler;
+        });
+        p.abbrechen = abbrechen;
+        return p;
+    }
+};
+
+/*
+ * Kundenmodus in einem anderen Tab gestartet (bericht-kunde.js meldet es per
+ * BroadcastChannel, ersatzweise über localStorage): dieser Tab zeigt dann
+ * nichts mehr von dem, was er geladen hat – etwa Kundendaten eines anderen
+ * Berichts –, sondern geht zur Kundenseite. Der Server sperrt jede neue
+ * Anfrage ohnehin; hier geht es um das, was schon auf dem Bildschirm steht.
+ */
+(function () {
+    function sperren(nachricht) {
+        var id = nachricht && /^\d+$/.test(String(nachricht.bericht)) ? String(nachricht.bericht) : '';
+        if (id === '') { return; }
+        var ziel = '/berichte/' + id + '/kunde';
+        if (window.location.pathname === ziel) { return; }
+        var inhalt = document.querySelector('main') || document.body;
+        if (inhalt) {
+            while (inhalt.firstChild) { inhalt.removeChild(inhalt.firstChild); }
+            var hinweis = document.createElement('p');
+            hinweis.className = 'notice';
+            hinweis.textContent = 'Kundenmodus aktiv – dieses Gerät ist gesperrt.';
+            inhalt.appendChild(hinweis);
+        }
+        window.location.replace(ziel);
+    }
+    try {
+        if (typeof window.BroadcastChannel === 'function') {
+            new window.BroadcastChannel('pm-kundenmodus').onmessage = function (e) { sperren(e.data); };
+        }
+    } catch (e) { /* ohne BroadcastChannel bleibt localStorage */ }
+    window.addEventListener('storage', function (e) {
+        if (e.key !== 'pm-kundenmodus' || !e.newValue) { return; }
+        try { sperren(JSON.parse(e.newValue)); } catch (x) { /* kaputt: nichts tun */ }
+    });
+}());
+
 document.addEventListener('DOMContentLoaded', function () {
     // Navigation auf Tablet/Smartphone ein- und ausblenden.
     var navToggle = document.getElementById('nav-toggle');

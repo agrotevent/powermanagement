@@ -560,13 +560,14 @@ tr.abweichung-zeile td { background: var(--warning-light); }
 .messfeld { min-width: 0; margin-bottom: .2rem; }
 .messfeld label { display: block; font-size: .72rem; font-weight: 650; color: var(--text-muted); margin-bottom: .2rem; white-space: nowrap; }
 .messfeld-eingabe { display: flex; min-width: 0; }
+/* Zielgröße wie die übrigen Knöpfe: mindestens 48 px, mit dem Finger 56 px (auch am Telefon). */
 .op-wahl {
-    flex: 0 0 2.3rem; min-height: 44px; border: 1px solid var(--border); border-right: 0; border-radius: 8px 0 0 8px;
+    flex: 0 0 3rem; min-height: 48px; border: 1px solid var(--border); border-right: 0; border-radius: 8px 0 0 8px;
     background: var(--surface-alt); color: var(--text-muted); font: inherit; font-size: 1rem; font-weight: 800; cursor: pointer; padding: 0;
 }
 .op-wahl[value=">"], .op-wahl[value="<"] { background: var(--warning-light); color: var(--warning); }
 .messfeld-eingabe input { flex: 1; min-width: 0; border-radius: 0 8px 8px 0; text-align: right; font-variant-numeric: tabular-nums; }
-@media (pointer: coarse) { .op-wahl { min-height: var(--ziel); flex-basis: 2.6rem; } }
+@media (pointer: coarse) { .op-wahl { min-height: var(--ziel); flex-basis: 3.5rem; } }
 .grenze { font-size: .7rem; color: var(--text-muted); margin-top: .12rem; min-height: 1.05em; font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
 /* Stromkreise: Karten, ab genügend Breite sechs Werte in einer Reihe */
@@ -588,6 +589,8 @@ tr.abweichung-zeile td { background: var(--warning-light); }
 .kreis-kabel::before { content: '↳ '; }
 .kreis-werte { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: .45rem .55rem; margin-top: .25rem; }
 @container (min-width: 640px) { .kreis-werte { grid-template-columns: repeat(6, minmax(0, 1fr)); } }
+/* Am schmalen Telefon zwei Werte je Reihe – sonst bliebe neben dem Operator kaum Platz für die Zahl. */
+@container (max-width: 400px) { .kreis-werte { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 .kreis-details { border-top: 1px dashed var(--border); margin-top: .3rem; }
 .kreis-aktionen { margin: .2rem 0 .6rem; }
 .meldungen { list-style: none; padding: 0; margin: .25rem 0; font-size: .78rem; }
@@ -776,7 +779,6 @@ body.kundenmodus { background: var(--bg); }
     .speicherstand.ok .speicher-wort { display: none; }
     .kreis { padding: .5rem .55rem .2rem; }
     .kreis-werte { gap: .4rem; }
-    .op-wahl, .bericht .op-wahl { flex-basis: 1.9rem; }
     .messfeld-eingabe input { padding-left: .3rem; padding-right: .4rem; }
     .punkt { grid-template-columns: minmax(0, 1fr) auto; }
     .punkt-text { grid-column: 1 / -1; }
