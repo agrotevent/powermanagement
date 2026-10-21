@@ -21,7 +21,9 @@ use App\Support\Session;
  * Zufallswert, dessen Hash in kundenmodus_geraete steht. Endet die Sitzung
  * (Ablauf, Inaktivität) und meldet sich jemand in diesem Browser wieder mit
  * dem Konto an – etwa mit dem im Browser gespeicherten Kennwort –, gilt die
- * Sperre gleich wieder. Auf einem anderen Gerät gilt sie nicht.
+ * Sperre gleich wieder. Auf einem anderen Gerät gilt sie nicht, und ein
+ * anderes Konto sperrt sie nicht – weder in der Sitzung noch am Gerät
+ * (aktiv()).
  *
  * Entsperrt wird mit dem Kennwort dessen, der den Kundenmodus gestartet hat
  * (Auth::kennwortBestaetigen). Falsche Versuche zählen nur in der Sitzung –
@@ -41,12 +43,35 @@ final class Kundenmodus
     /** So lange gilt eine Sperre am Gerät, wenn niemand entsperrt. */
     private const GERAET_TAGE = 7;
 
-    /** @return array{bericht:int,seit:int,fehl:int,bis:int,user:int,name:string,geraet:int}|null */
+    /**
+     * Die Sperre für das angemeldete Konto – null ohne Anmeldung.
+     *
+     * Die Sperre in der Sitzung gilt nur für das Konto, das sie gestartet
+     * hat. Endet dessen Sitzung, ohne dass sie zerstört wird (Kennwort von
+     * der Verwaltung zurückgesetzt, Höchstdauer, Ende des Zugangs), bleiben
+     * ihre Daten stehen – Auth::attempt() vergibt nur eine neue Kennung.
+     * Meldete sich dann ein anderes Konto in diesem Browser an, erbte es
+     * sonst die fremde Sperre: Es käme auf die Kundenseite (der Router lässt
+     * sie ohne Recht durch, ausweg()), könnte nicht abmelden, und seine
+     * Fehlversuche bremsten ein Entsperren, das ihm nie gelingt. Die fremde
+     * Sperre kommt also aus der Sitzung; die am Gerät bleibt und gilt
+     * wieder, sobald sich das Konto anmeldet, das sie gestartet hat.
+     *
+     * @return array{bericht:int,seit:int,fehl:int,bis:int,user:int,name:string,geraet:int}|null
+     */
     public static function aktiv(): ?array
     {
+        $userId = Auth::id();
+        if ($userId === null) {
+            // Die Sperre in der Sitzung wartet auf die nächste Anmeldung.
+            return null;
+        }
         $m = Session::get(self::SITZUNG);
         if (is_array($m) && (int) ($m['bericht'] ?? 0) > 0) {
-            return self::form($m);
+            if ((int) ($m['user'] ?? 0) === $userId) {
+                return self::form($m);
+            }
+            Session::forget(self::SITZUNG);
         }
         // Keine Sperre in der Sitzung – vielleicht aber am Gerät (neu angemeldet).
         $z = self::geraet();

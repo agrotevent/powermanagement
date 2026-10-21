@@ -15,6 +15,7 @@ require __DIR__ . '/hilfen/pruefung.php';
 
 use App\Berichte\BerichtService;
 use App\Berichte\Einstellungen;
+use App\Berichte\Kundenmodus;
 use App\Services\BenutzerService;
 use App\Services\BereichService;
 use App\Services\Eventworx;
@@ -1296,6 +1297,49 @@ try {
     aufruf($basis, $geraet, 'POST', '/login', ['username' => $kennung . '-admin', 'password' => $kennwort, '_token' => token($seite['text'])]);
     $r = aufruf($basis, $geraet, 'GET', '/dashboard');
     pruefe($r['status'] === 302 && $r['ziel'] === '/berichte/' . $b3 . '/kunde', 'Kundenmodus am Gerät: nach neuer Anmeldung in diesem Browser weiter gesperrt');
+    // Ein anderes Konto im selben Browser: Endet die Sitzung des Prüfers, ohne
+    // zerstört zu werden (die Verwaltung setzt sein Kennwort zurück), bleiben
+    // ihre Daten samt Sperre stehen – die Anmeldung vergibt nur eine neue
+    // Kennung. Wer sich dann anmeldete, erbte die fremde Sperre: kein
+    // Abmelden, Kundenseite und Entsperren ohne das Recht (Kundenmodus::ausweg()),
+    // und seine Fehlversuche bremsten das Entsperren für den Prüfer. Die
+    // Sperre gilt nur für das Konto, das sie gestartet hat – am Gerät gilt sie
+    // weiter, sobald es sich wieder anmeldet.
+    $hashVorher = (string) Database::scalar('SELECT password_hash FROM users WHERE id = ?', [$benutzer['admin']]);
+    Database::execute('UPDATE users SET password_hash = ? WHERE id = ?', [password_hash('Zurueckgesetzt-' . bin2hex(random_bytes(6)), PASSWORD_DEFAULT), $benutzer['admin']]);
+    $ereignisseVorher = (int) Database::scalar('SELECT COUNT(*) FROM bericht_ereignisse WHERE bericht_id = ?', [$b3]);
+    $fehlVorher = (int) Database::scalar("SELECT COUNT(*) FROM audit_log WHERE action = 'auth.kundenmodus_fehlversuch' AND user_id = ?", [$benutzer['bkunde']]);
+    $geraetVorher = Database::select('SELECT id, bericht_id, user_id FROM kundenmodus_geraete WHERE user_id = ? ORDER BY id', [$benutzer['admin']]);
+    $r = aufruf($basis, $geraet, 'GET', '/dashboard');
+    pruefe($r['status'] === 302 && str_starts_with((string) $r['ziel'], '/login'), 'Kennwort des Prüfers zurückgesetzt: seine Sitzung im gesperrten Browser ist zu Ende');
+    $seite = aufruf($basis, $geraet, 'GET', '/login');
+    aufruf($basis, $geraet, 'POST', '/login', ['username' => $kennung . '-bkunde', 'password' => $kennwort, '_token' => token($seite['text'])]);
+    $aStart = aufruf($basis, $geraet, 'GET', '/anlagen');
+    $aListe = aufruf($basis, $geraet, 'GET', '/berichte');
+    pruefe($aStart['status'] === 200 && $aStart['ziel'] === null && $aListe['status'] === 200 && $aListe['ziel'] === null,
+        'anderes Konto im selben Browser: nicht gesperrt (' . $aStart['status'] . ' ' . (string) $aStart['ziel'] . ')');
+    $aKunde = aufruf($basis, $geraet, 'GET', '/berichte/' . $b3 . '/kunde');
+    // Das Token der Seite, die das Konto bekommt – auch der Kundenseite, wenn sie käme.
+    $aToken = token($aStart['text']) ?: token($aKunde['text']);
+    $aBeenden = [];
+    for ($n = 1; $n <= Kundenmodus::HOECHSTENS_FEHL; $n++) {
+        $aBeenden[] = aufruf($basis, $geraet, 'POST', '/berichte/' . $b3 . '/kunde/beenden', ['kennwort' => $kennwort, '_token' => $aToken])['status'];
+    }
+    pruefe($aKunde['status'] === 403 && !str_contains($aKunde['text'], 'kunde/beenden') && $aBeenden === array_fill(0, Kundenmodus::HOECHSTENS_FEHL, 403),
+        'anderes Konto: Kundenseite und Entsperren des fremden Kundenmodus → 403 wie ohne Recht (' . $aKunde['status'] . ', ' . implode('/', $aBeenden) . ')');
+    gleich([(int) Database::scalar('SELECT COUNT(*) FROM bericht_ereignisse WHERE bericht_id = ?', [$b3]),
+        (int) Database::scalar("SELECT COUNT(*) FROM audit_log WHERE action = 'auth.kundenmodus_fehlversuch' AND user_id = ?", [$benutzer['bkunde']]),
+        Database::select('SELECT id, bericht_id, user_id FROM kundenmodus_geraete WHERE user_id = ? ORDER BY id', [$benutzer['admin']])],
+        [$ereignisseVorher, $fehlVorher, $geraetVorher], 'anderes Konto: kein Ereignis am Bericht, kein Fehlversuch, die Sperre am Gerät bleibt');
+    $r = aufruf($basis, $geraet, 'POST', '/logout', ['_token' => $aToken]);
+    pruefe($r['status'] === 302 && $r['ziel'] === '/login', 'anderes Konto: Abmelden geht (' . (string) $r['ziel'] . ')');
+    Database::execute('UPDATE users SET password_hash = ? WHERE id = ?', [$hashVorher, $benutzer['admin']]);
+    $seite = aufruf($basis, $geraet, 'GET', '/login');
+    aufruf($basis, $geraet, 'POST', '/login', ['username' => $kennung . '-admin', 'password' => $kennwort, '_token' => token($seite['text'])]);
+    $r = aufruf($basis, $geraet, 'GET', '/dashboard');
+    $kSeite = aufruf($basis, $geraet, 'GET', '/berichte/' . $b3 . '/kunde');
+    pruefe($r['status'] === 302 && $r['ziel'] === '/berichte/' . $b3 . '/kunde' && $kSeite['status'] === 200 && str_contains($kSeite['text'], 'data-kunde="' . $b3 . '"')
+        && !str_contains($kSeite['text'], 'Entsperren erst in'), 'danach der Prüfer im selben Browser: wieder gesperrt, auf seiner Kundenseite, ungebremst');
     // Vorläufiges Kennwort („muss ändern“ – der Prüfer hatte seins vergessen,
     // das Gerät ist gesperrt): Das Profil führte zur Kundenseite, die zum
     // Profil, im Kreis, und entsperren ließ sich nie. Die Kundenseite kommt,
@@ -1319,7 +1363,7 @@ try {
     $kSeite = aufruf($basis, $geraet, 'GET', '/berichte/' . $b3 . '/kunde');
     $kPdf = aufruf($basis, $geraet, 'GET', '/berichte/' . $b3 . '/pdf');
     $kAntwort = aufruf($basis, $geraet, 'POST', '/berichte/' . $b3 . '/kunde/beenden', ['kennwort' => $kennwort, '_token' => token($kSeite['text'])]);
-    $kDanach = aufruf($basis, $geraet, 'GET', '/profil');
+    $kDanach = aufruf($basis, $geraet, 'GET', (string) $kAntwort['ziel']);
     foreach ($rollen as $z) {
         Database::execute('UPDATE user_roles SET gueltig_bis = ? WHERE id = ?', [$z['gueltig_bis'], $z['id']]);
     }
@@ -1327,8 +1371,10 @@ try {
         && !str_contains($kSeite['text'], 'data-kunde="') && !str_contains($kSeite['text'], 'class="sidebar'),
         'Kundenmodus, Rolle abgelaufen: die Kundenseite zeigt nur das Entsperren statt 403 (' . $kSeite['status'] . ')');
     gleich($kPdf['status'], 403, 'Kundenmodus, Rolle abgelaufen: das PDF bleibt beim Recht der Route');
-    pruefe($kAntwort['status'] === 302 && $kAntwort['ziel'] === '/berichte/' . $b3 && $kDanach['status'] === 200,
-        'Kundenmodus, Rolle abgelaufen: mit dem Kennwort entsperrt, danach wieder das Profil (' . $kAntwort['status'] . ' ' . (string) $kAntwort['ziel'] . ')');
+    // Zurück zum Bericht ginge nicht (403 ohne „berichte.view“): Es geht zur
+    // ersten Seite, die das Konto sehen darf – ohne Rolle das Profil.
+    pruefe($kAntwort['status'] === 302 && $kAntwort['ziel'] === '/profil' && $kDanach['status'] === 200 && str_contains($kDanach['text'], 'Kundenmodus beendet'),
+        'Kundenmodus, Rolle abgelaufen: mit dem Kennwort entsperrt, danach das Profil statt 403 (' . $kAntwort['status'] . ' ' . (string) $kAntwort['ziel'] . ' → ' . $kDanach['status'] . ')');
     pruefe(aufruf($basis, $admin['dose'], 'GET', '/dashboard')['ziel'] === '/berichte/' . $b3 . '/kunde', 'Kundenmodus: die Sitzung, die übergeben hat, bleibt gesperrt');
     $kundeFelder = ['striche' => unterschriftStriche(), 'name' => 'Kim Kunde', 'funktion' => 'Produktion', 'ort' => 'Musterstadt', 'vorbehalte' => '',
         'anfrage' => bin2hex(random_bytes(16)), 'geraet_am' => gmdate('c'), '_token' => $admin['token'], 'inhalt_hash' => (string) BerichtService::find($b3)['inhalt_hash']];

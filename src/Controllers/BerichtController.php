@@ -546,7 +546,12 @@ final class BerichtController extends Controller
             Session::regenerate();
             Csrf::erneuern();
             Flash::success('Kundenmodus beendet.');
-            $this->redirect('/berichte/' . $id);
+            // Zurück zum Bericht nur, wenn das Konto ihn noch sehen darf –
+            // entsperrt über den Ausweg (Rolle abgelaufen, Kundenmodus::ausweg())
+            // gäbe er 403. Dann die erste Seite, die es sehen darf; mit
+            // vorläufigem Kennwort leitet der Router ohnehin zum Profil.
+            $b = Auth::can('berichte.view') ? BerichtService::find($id) : null;
+            $this->redirect($b !== null && BerichtService::sichtbar($b) ? '/berichte/' . $id : Auth::landingPath());
             return;
         }
         $fehl = Kundenmodus::fehlversuch();
