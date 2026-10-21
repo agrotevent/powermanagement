@@ -587,10 +587,12 @@ try {
     gleich(KundenSicht::location($kunden['k4'], $sites['a'])['freigaben'][0]['daten'] ?? '', 'keine Messdaten freigegeben',
         'Freigabe ohne Datenenden (per SQL): „keine Messdaten freigegeben“');
     gleich((KundenSicht::etage($kunden['k1'], $sites['a'], $a1) ?? [])['id'] ?? null, $a1, 'etage(K1, A, A1): da');
+    // Gegenprobe: B1 ist eine Etage mit Plan auf B – null unten liegt also am Standort bzw. an der Freigabe, nicht an der ID.
+    gleich((KundenSicht::etage($kunden['k2'], $sites['b'], $b1) ?? [])['id'] ?? null, $b1, 'etage(K2, B, B1): da');
     foreach ([
-        'Etage eines anderen Standorts (B1 über A)' => [$kunden['k1'], $sites['a'], $ub1],
+        'Etage eines anderen Standorts (B1 über A)' => [$kunden['k1'], $sites['a'], $b1],
         'Etage ohne Plan (A3)'                      => [$kunden['k1'], $sites['a'], $a3],
-        'Standort nicht freigegeben (B1 über B)'    => [$kunden['k1'], $sites['b'], $ub1],
+        'Standort nicht freigegeben (B1 über B)'    => [$kunden['k1'], $sites['b'], $b1],
         'Freigabe abgelaufen (K2, A1)'              => [$kunden['k2'], $sites['a'], $a1],
         'unbekannte Etage'                          => [$kunden['k1'], $sites['a'], 999999999],
         'beendeter Kunde'                           => [$kunden['k3'], $sites['a'], $a1],
