@@ -9,6 +9,8 @@
  *   Vor Ort            Peilung und Betankung eintragen (nur mit „bearbeiten“)
  *   Verlauf            Liter, %, mm oder Rohwert (statistik.js über
  *                      /anlagen/{id}/tank/verlauf)
+ *   Verbrauch je Tag   Tage im Zeitraum, erkannte Betankungen ohne Eintrag
+ *                      (tank.js über /anlagen/{id}/tank/tage)
  *   Protokoll          Peilungen und Betankungen: kalibrieren, löschen, CSV;
  *                      das Angebot „Steigung aus beiden Peilungen“
  *   Sensor & Kennlinie der eingebaute Tanksensor, die jetzige Fassung, die
@@ -19,7 +21,8 @@
  *   Daten              die Eigenschaften in den Gruppen des Formulars
  *
  * Felder je Peilart und das Einbaumaß je Messprinzip blendet tank.js um
- * (data-Attribute, kein Inline-JS); ohne Skript geht alles auch.
+ * (data-Attribute, kein Inline-JS); ohne Skript geht alles auch – bis auf
+ * die Tage, die tank.js lädt.
  *
  * @var array<string,mixed> $objekt
  * @var bool $vorlage
@@ -196,6 +199,13 @@ $datenKarte = (string) ob_get_clean();
                     <p class="help">Liter gibt es erst mit bekanntem Inhalt je mm (Peilung oder Betankung) – davor zeigen „Füllhöhe“ und „Rohwert“ den Verlauf.
                         Lücken sind Zeiten ohne Freigabe oder ohne Meldung.<?php if (View::can('statistik.export')): ?>
                         <a href="/anlagen/<?= $id ?>/tank/csv<?= View::e($query([])) ?>">CSV herunterladen</a><?php endif; ?></p>
+                </div>
+            </div>
+            <div class="card" id="tage">
+                <div class="card-head"><h2>Verbrauch je Tag</h2><span class="hint">ganze Tage im gewählten Zeitraum</span></div>
+                <div class="card-body">
+                    <?= View::partial('partials/tank-tage', ['tankId' => $id, 'quelle' => '/anlagen/' . $id . '/tank/tage' . $query([]), 'eintragen' => $darfAendern,
+                        'csv' => View::can('statistik.export') ? '/anlagen/' . $id . '/tank/csv' . $query(['inhalt' => 'tage']) : null]) ?>
                 </div>
             </div>
         <?php endif; ?>

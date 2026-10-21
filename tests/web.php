@@ -376,6 +376,8 @@ try {
         pruefe(str_contains($seite['text'], 'data-quelle="/anlagen/' . $tankId . '/tank/verlauf"') && str_contains($seite['text'], 'Fassungen der Kennlinie')
             && str_contains($seite['text'], 'data-tank="roh"') && str_contains($seite['text'], 'data-live-url="/anlagen/' . $tankId . '/live"')
             && str_contains($seite['text'], 'id="statistik-daten"'), 'Tankseite: Jetzt (live), Verlauf, Fassungen');
+        pruefe(str_contains($seite['text'], 'data-tank-tage="/anlagen/' . $tankId . '/tank/tage?') && str_contains($seite['text'], '<template data-tage-vorlage>')
+            && str_contains($seite['text'], '/tank/csv?zeitraum=24h&amp;groesse=liter&amp;inhalt=tage'), 'Tankseite: Verbrauch je Tag mit Vorlage „Als Betankung eintragen“ und CSV');
         foreach (['?zeitraum=7d&groesse=roh', '?zeitraum=frei&von=2026-01-01&bis=2026-01-02&groesse=prozent', '?groesse=unsinn'] as $zusatz) {
             $r = aufruf($basis, $admin['dose'], 'GET', '/anlagen/' . $tankId . $zusatz);
             pruefe($r['status'] === 200 && phpMeldung($r['text']) === null, 'Tankseite ' . $zusatz . ' → ' . $r['status']);
@@ -391,6 +393,8 @@ try {
         $r = aufruf($basis, $admin['dose'], 'GET', '/statistik?mp[]=' . (int) ($mpTs['id'] ?? 0));
         pruefe($r['status'] === 200 && phpMeldung($r['text']) === null && str_contains($r['text'], 'data-quelle="/anlagen/' . $tankId . '/tank/verlauf?mp=' . (int) ($mpTs['id'] ?? 0) . '"')
             && !str_contains($r['text'], 'Spitzenleistung') && str_contains($r['text'], 'Tankseite'), 'Statistik: Tanksensor mit dem Verlauf des Tanks, ohne Leistungskennzahlen');
+        pruefe(str_contains($r['text'], 'data-tank-tage="/anlagen/' . $tankId . '/tank/tage?mp=' . (int) ($mpTs['id'] ?? 0) . '&amp;zeitraum=24h"')
+            && !str_contains($r['text'], 'data-tage-vorlage') && str_contains($r['text'], '/assets/js/tank.js'), 'Statistik: Verbrauch je Tag des Tanks, ohne Eintragen');
         $karteTank = json_decode(aufruf($basis, $admin['dose'], 'GET', '/karte/objekt/' . $tankId)['text'], true);
         pruefe(($karteTank['tank']['sensor']['kennung'] ?? '') === $kennung . '-TS' && ($karteTank['tank']['darf']['einsetzen'] ?? false) === true
             && is_int($karteTank['tank']['sensor']['einsatz_id'] ?? null) && array_key_exists('tank', $karteTank['live'] ?? []), 'Karte: Tank-Panel mit Sensor, Ausbau und Livewerten');
@@ -442,8 +446,9 @@ try {
         $dosen[] = $kundeTank['dose'];
         $r = aufruf($basis, $kundeTank['dose'], 'GET', '/anlagen/' . $tankId);
         pruefe($r['status'] === 200 && phpMeldung($r['text']) === null && str_contains($r['text'], 'id="protokoll"') && !str_contains($r['text'], '/tank/peilung')
-            && !str_contains($r['text'], '/tank/betankung') && !str_contains($r['text'], 'Erweitert') && !str_contains($r['text'], '/tank/ereignis/loeschen'),
-            'Kunde: Tankseite mit Protokoll, ohne Peilung, Betankung, Erweitert und Löschen');
+            && !str_contains($r['text'], '/tank/betankung') && !str_contains($r['text'], 'Erweitert') && !str_contains($r['text'], '/tank/ereignis/loeschen')
+            && !str_contains($r['text'], 'data-tage-vorlage'),
+            'Kunde: Tankseite mit Protokoll, ohne Peilung, Betankung, Erweitert, Löschen und „Als Betankung eintragen“');
         pruefe(str_contains($r['text'], 'id="versorgung"') && str_contains($r['text'], 'Generator (nicht freigegeben)') && !str_contains($r['text'], htmlspecialchars($kennung . '-gen')),
             'Kunde: Versorgung ohne den Namen des Generators, den er nicht sieht');
         $n = $ereignisse();
@@ -467,6 +472,16 @@ try {
         $r = aufruf($basis, $admin['dose'], 'GET', '/anlagen/' . $tankId . '/tank/verlauf?mp=' . ($mpAlt + 999999));
         pruefe($r['status'] === 404 && (json_decode($r['text'], true)['ok'] ?? true) === false, 'Tankverlauf: fremder Messpunkt → 404 (JSON)');
         gleich(aufruf($basis, $admin['dose'], 'GET', '/anlagen/' . (int) ($mobil['id'] ?? 0) . '/tank/verlauf')['status'], 404, 'Tankverlauf einer Verteilung → 404');
+        $r = aufruf($basis, $admin['dose'], 'GET', '/anlagen/' . $tankId . '/tank/tage?zeitraum=7d');
+        $v = json_decode($r['text'], true);
+        pruefe($r['status'] === 200 && phpMeldung($r['text']) === null && str_contains($r['kopf'], 'application/json') && ($v['ok'] ?? false) === true
+            && isset($v['tage'], $v['betankungen'], $v['summe'], $v['schwelle_text']) && ($v['darf_eintragen'] ?? null) === true, 'Verbrauch je Tag als JSON');
+        $r = aufruf($basis, $admin['dose'], 'GET', '/anlagen/' . $tankId . '/tank/tage?mp=' . ($mpAlt + 999999));
+        pruefe($r['status'] === 404 && (json_decode($r['text'], true)['ok'] ?? true) === false, 'Verbrauch je Tag: fremder Messpunkt → 404 (JSON)');
+        gleich(aufruf($basis, $admin['dose'], 'GET', '/anlagen/' . (int) ($mobil['id'] ?? 0) . '/tank/tage')['status'], 404, 'Verbrauch je Tag einer Verteilung → 404');
+        $r = aufruf($basis, $admin['dose'], 'GET', '/anlagen/' . $tankId . '/tank/csv?inhalt=tage&zeitraum=frei&von=2026-01-01&bis=2026-01-03');
+        pruefe($r['status'] === 200 && str_contains($r['kopf'], 'text/csv') && str_contains($r['text'], '"Tag";"Verbrauch [l]";"Getankt [l]";"Mittel [l/h]"')
+            && str_contains($r['kopf'], 'tage-20260101'), 'Verbrauch je Tag als CSV');
         $r = aufruf($basis, $admin['dose'], 'GET', '/anlagen/' . $tankId . '/tank/csv?zeitraum=24h&mp=' . $mpAlt);
         pruefe($r['status'] === 200 && str_contains($r['kopf'], 'text/csv') && str_contains($r['text'], '"Zeit";"Sensor";"Rohwert') && str_contains($r['text'], '"Inhalt [l]";"Füllstand [%]"'),
             'Tank-CSV mit Kopfzeile');
@@ -707,6 +722,8 @@ try {
         $r = aufruf($basis, $kunde['dose'], 'GET', '/anlagen/' . $tankId . '/tank/verlauf');
         pruefe($r['status'] === 404 && (json_decode($r['text'], true)['ok'] ?? true) === false, 'Kunde ohne Freigabe: fremder Tank, Verlauf → 404');
         gleich(aufruf($basis, $kunde['dose'], 'GET', '/anlagen/' . $tankId . '/tank/csv')['status'], 404, 'Kunde ohne Freigabe: fremder Tank, CSV → 404');
+        $r = aufruf($basis, $kunde['dose'], 'GET', '/anlagen/' . $tankId . '/tank/tage');
+        pruefe($r['status'] === 404 && (json_decode($r['text'], true)['ok'] ?? true) === false, 'Kunde ohne Freigabe: fremder Tank, Verbrauch je Tag → 404');
     }
     if ($etage > 0) {
         gleich(aufruf($basis, $kunde['dose'], 'GET', '/karte/' . $etage . '/geojson')['status'], 403, 'Kunde ohne Freigabe: kein GeoJSON');
@@ -881,6 +898,7 @@ try {
         if (($tankId ?? 0) > 0) {
             gleich(aufruf($basis, $planer['dose'], 'GET', '/anlagen/' . $tankId . '/tank/verlauf')['status'], 403, 'Planer ohne „statistik.view“: Tankverlauf → 403');
             gleich(aufruf($basis, $planer['dose'], 'GET', '/anlagen/' . $tankId . '/tank/csv')['status'], 403, 'Planer ohne „statistik.export“: Tank-CSV → 403');
+            gleich(aufruf($basis, $planer['dose'], 'GET', '/anlagen/' . $tankId . '/tank/tage')['status'], 403, 'Planer ohne „statistik.view“: Verbrauch je Tag → 403');
         }
         $json = ['Accept: application/json'];
         // Ein Tank auf dem nur sichtbaren Standort: ansehen ja, peilen und betanken nein

@@ -9,7 +9,7 @@ declare(strict_types=1);
  * der Anschlüsse, das dann im Timeout endet, ohne je beim Audit anzukommen.
  *
  * Geprüft wird, dass die Live-Endpunkte (Anlage, Dashboard, Karte, Bereiche,
- * Tank live und Tankverlauf) die Sitzung freigeben, bevor sie warten: Speichern und Seitenaufrufe
+ * Tank live, Tankverlauf und Verbrauch je Tag) die Sitzung freigeben, bevor sie warten: Speichern und Seitenaufrufe
  * kommen durch, während mehrere langsame Live-Abfragen laufen, und die
  * Live-Abfragen liefern trotzdem ihre Antwort. Ebenso die Peilung eines
  * Tanks, die den Rohwert liest – ihre Meldung kommt danach trotzdem an.
@@ -220,7 +220,7 @@ foreach ([
     }
 }
 
-// ------------------------------------------------------------ Tank: Live und Verlauf
+// ------------------------------------------------------------ Tank: Live, Verlauf und Verbrauch je Tag
 // Ein Tank mit Tanksensor und Kennlinie – direkt in die Datenbank der zweiten Instanz.
 $jetztIso = gmdate('c');
 $db->prepare("INSERT INTO objekte (art, name, site_id, floor_id, plan_x, plan_y, eigenschaften, created_at) VALUES ('tank', ?, ?, ?, 50, 50, ?, ?)")
@@ -236,6 +236,7 @@ $db->prepare("INSERT INTO tank_kennlinien (messpunkt_id, objekt_id, ab, rechnung
 foreach ([
     'Tank live'   => $basis . '/anlagen/' . $tank . '/live',
     'Tankverlauf' => $basis . '/anlagen/' . $tank . '/tank/verlauf?zeitraum=24h',
+    'Tank je Tag' => $basis . '/anlagen/' . $tank . '/tank/tage?zeitraum=7d',
 ] as $name => $liveUrl) {
     $lauf = waehrendLive([$liveUrl, $liveUrl], $basis . '/profil', $dose);
     gleich($lauf['antwort']['status'], 200, $name . ': andere Seite während der Abfragen');

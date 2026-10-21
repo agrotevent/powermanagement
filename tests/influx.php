@@ -6,7 +6,8 @@ declare(strict_types=1);
  * Datenfenster, Energie je Tag aus dem Zählerstand, Geräteliste, Herzschlag.
  * Tanksensoren: letzter Rohwert ab Einbau mit echter Zeit, Sensorfehler
  * (auch wieder weg), Lebenszeichen, Median, Analogkanäle in der Geräteliste
- * nach Tagen ohne Meldung, kein Livewert außerhalb des Datenfensters.
+ * nach Tagen ohne Meldung, kein Livewert außerhalb des Datenfensters,
+ * Verbrauch je Tag aus seltenen Meldungen (nur bei Änderung).
  *
  * Startet eine eigene InfluxDB 1.x auf freien Ports (influxd aus dem
  * Paket „influxdb“), damit die Prüfung nicht an einer eingerichteten
@@ -203,6 +204,31 @@ try {
     pruefe($l['stufe'] === 'bad' && str_contains($l['hinweis'], '3,6 mA'), 'Tank: 1,5 V (unter 3,6 mA) → Sensorfehler Leitungsbruch – ' . $l['hinweis']);
     gleich(TankService::rohJetzt(AnlagenService::find($tank), Database::first('SELECT * FROM messpunkte WHERE id = ?', [$mp]))['roh'] ?? null, 1.5,
         'rohJetzt: der letzte Rohwert vom Server (auch außerhalb der Grenzen – die Rechnung entscheidet)');
+    // Verbrauch je Tag: ein Shelly, der nur bei Änderung meldet – alle 2,5 h 0,1 V weniger (≈ 42,4 l, also ≈ 17 l/h),
+    // gestern gegen 10 Uhr +3,0 V (≈ 1.273 l) mit Lieferschein. Stille ist keine Lücke.
+    $mpTage = Database::insert('messpunkte', ['objekt_id' => $tank, 'geraet' => $uni, 'kanal' => 'voltmeter:103', 'rolle' => 'fuellstand', 'bezeichnung' => $kennung . '-tage',
+        'gueltig_ab' => Zeit::iso($jetzt - 3 * 86400), 'gueltig_bis' => Zeit::iso($jetzt - 2 * 3600), 'created_at' => gmdate('c')]);
+    TankService::fassungAnlegen(Database::first('SELECT * FROM messpunkte WHERE id = ?', [$mpTage]), $r, 'einsatz', Zeit::iso($jetzt - 3 * 86400), true);
+    $gestern = (new DateTimeImmutable('@' . $jetzt))->setTimezone(Zeit::zone())->modify('-1 day');
+    $zehn = $gestern->setTime(10, 0)->getTimestamp();
+    $meldungen = [];
+    for ($k = 0, $t = $jetzt - 3 * 86400 + 600; $t < $jetzt - 2 * 3600; $k++, $t += 9000) {
+        $meldungen[] = $tz($t, 'u=' . number_format(8.0 - 0.1 * $k + ($t >= $zehn ? 3.0 : 0.0), 2, '.', '') . ',sensorfehler=0', 'voltmeter:103');
+    }
+    Influx::schreiben($meldungen, $fehler);
+    $lieferschein = Database::insert('tank_ereignisse', ['objekt_id' => $tank, 'messpunkt_id' => $mpTage, 'art' => 'betankung', 'zeit' => Zeit::iso($zehn), 'liter' => 1273.0,
+        'lieferschein' => $kennung, 'von' => $kennung, 'created_at' => gmdate('c')]);
+    $d = TankService::tage(AnlagenService::find($tank), $jetzt - 2 * 86400, $jetzt, $fehler, $mpTage);
+    $g = array_column($d['tage'], null, 'tag')[$gestern->format('Y-m-d')] ?? [];
+    $tagLaenge = ($gestern->setTime(0, 0)->modify('+1 day')->getTimestamp() - $gestern->setTime(0, 0)->getTimestamp()) / 3600;
+    nahe($g['verbrauch_l'] ?? null, 0.1 * 152.6497 * 2.78 / 2.5 * $tagLaenge, 42.4, 'Verbrauch je Tag aus Meldungen nur bei Änderung (alle 2,5 h): ≈ 17 l/h ('
+        . var_export($g['verbrauch_l'] ?? null, true) . ', ' . (string) $fehler . ')');
+    gleich([$g['betankt_l'] ?? null, $g['stunden'] ?? null, array_column($d['betankungen'], 'quelle'), array_column($d['betankungen'], 'ereignisse')],
+        [1273.0, round($tagLaenge, 2), ['lieferschein'], [[$lieferschein]]], '… ganzer Tag ohne Lücke, die Betankung mit der Menge laut Lieferschein');
+    // Der zweite Sensor stört die Prüfungen danach nicht.
+    Database::execute('DELETE FROM tank_ereignisse WHERE id = ?', [$lieferschein]);
+    Database::execute('DELETE FROM tank_kennlinien WHERE messpunkt_id = ?', [$mpTage]);
+    Database::execute('DELETE FROM messpunkte WHERE id = ?', [$mpTage]);
     Database::insert('freigaben', ['subject_type' => 'user', 'subject_id' => $kunde, 'ziel_art' => 'site', 'ziel_id' => $siteId, 'darf_bearbeiten' => 0, 'darf_steuern' => 0,
         'daten_ab' => Zeit::iso($jetzt - 86400), 'daten_bis' => Zeit::iso($jetzt - 3000), 'notiz' => '', 'created_by' => 'test', 'created_at' => gmdate('c')]);
     \App\Auth\Auth::alsBenutzer($kunde);

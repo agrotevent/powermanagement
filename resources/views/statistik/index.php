@@ -94,14 +94,16 @@ ksort($jeObjekt);
             <?php endif; ?>
             <?php foreach ($auswahl as $a): ?>
                 <?php if ($a['rolle'] === 'fuellstand'): ?>
+                    <?php $tankQuery = ['mp' => (int) $a['id'], 'zeitraum' => $vorgabe]
+                        + ($vorgabe === 'frei' ? ['von' => Zeit::fuerEingabe(Zeit::iso($von)), 'bis' => Zeit::fuerEingabe(Zeit::iso($bis))] : []);
+                    $tankPfad = '/anlagen/' . (int) $a['objekt']['id'] . '/tank/'; ?>
                     <div class="card">
                         <div class="card-head">
                             <h2><?= View::e($a['titel']) ?></h2>
                             <span class="spacer"></span>
                             <span class="hint mono"><?= View::e($a['geraet'] . ' · ' . $a['kanal']) ?></span>
                             <?php if (View::can('statistik.export')): ?>
-                                <a class="btn btn-sm" href="/anlagen/<?= (int) $a['objekt']['id'] ?>/tank/csv?<?= View::e(http_build_query(['mp' => (int) $a['id'], 'zeitraum' => $vorgabe]
-                                    + ($vorgabe === 'frei' ? ['von' => Zeit::fuerEingabe(Zeit::iso($von)), 'bis' => Zeit::fuerEingabe(Zeit::iso($bis))] : []))) ?>">CSV</a>
+                                <a class="btn btn-sm" href="<?= View::e($tankPfad . 'csv?' . http_build_query($tankQuery)) ?>">CSV</a>
                             <?php endif; ?>
                             <a class="btn btn-sm" href="/anlagen/<?= (int) $a['objekt']['id'] ?>">Tankseite</a>
                         </div>
@@ -111,6 +113,9 @@ ksort($jeObjekt);
                                 <h3 class="mt">Inhalt</h3>
                                 <div class="diagramm" data-mp="" data-quelle="/anlagen/<?= (int) $a['objekt']['id'] ?>/tank/verlauf?mp=<?= (int) $a['id'] ?>" data-feld="liter" data-messung="zustand"></div>
                                 <p class="help">Liter aus dem Rohwert des Sensors, je Zeitpunkt mit der Kennlinie, die damals galt. Ohne Kennlinie: auf der Tankseite den Rohwert ansehen.</p>
+                                <h3 class="mt">Verbrauch je Tag</h3>
+                                <?= View::partial('partials/tank-tage', ['tankId' => (int) $a['objekt']['id'], 'quelle' => $tankPfad . 'tage?' . http_build_query($tankQuery),
+                                    'csv' => View::can('statistik.export') ? $tankPfad . 'csv?' . http_build_query($tankQuery + ['inhalt' => 'tage']) : null]) ?>
                             <?php endif; ?>
                         </div>
                     </div>

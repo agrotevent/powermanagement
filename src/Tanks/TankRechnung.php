@@ -101,6 +101,13 @@ final class TankRechnung
     public const GRENZEN = ['tank_warnung' => 25.0, 'tank_alarm' => 10.0, 'tank_rest_warnung_h' => 12.0,
                             'tank_rest_alarm_h' => 4.0, 'tank_stumm_h' => 24.0, 'tank_vorlauf_h' => 24.0];
 
+    /** Verbrauch je Tag: Eine Betankung steigt um die Schwelle innerhalb dieser Zeit … */
+    public const BETANKUNG_DAUER_S = 1800;
+    /** … zwei Anstiege höchstens so weit auseinander sind eine (Zapfpause) … */
+    public const ZAPFPAUSE_S = 1800;
+    /** … und eine eingetragene Betankung gehört zu einem Sprung höchstens so weit davor oder danach. */
+    public const LIEFERSCHEIN_S = 3600;
+
     /** 1 mbar entspricht 10,197 mm Wassersäule. */
     private const MM_WASSER_JE = ['mbar' => 10.197, 'mWS' => 1000.0, 'mm_wasser' => 1.0];
 
@@ -1231,7 +1238,7 @@ final class TankRechnung
     {
         $p = array_values(array_filter($punkte, static fn ($x): bool => is_array($x) && isset($x[0]) && is_numeric($x[1] ?? null)));
         usort($p, static fn (array $a, array $b): int => $a[0] <=> $b[0]);
-        $sprung = max(50.0, 0.03 * (float) ($nennL ?? 0), 3 * (float) ($schrittL ?? 0));
+        $sprung = self::betankungSchwelle($nennL, $schrittL);
         for ($i = count($p) - 1; $i > 0; $i--) {
             if ((float) $p[$i][1] - (float) $p[$i - 1][1] >= $sprung) {
                 $p = array_slice($p, $i);
@@ -1244,6 +1251,291 @@ final class TankRechnung
         }
         $g = self::gefaelle($p);
         return $g !== null && $g > 0 ? $g : null;
+    }
+
+    /** Ab welchem Anstieg eine Betankung zählt: max(50 l, 3 % des Nennvolumens, 3 Meldeschritte). */
+    public static function betankungSchwelle(?float $nennL, ?float $schrittL): float
+    {
+        return max(50.0, 0.03 * max(0.0, (float) ($nennL ?? 0)), 3 * max(0.0, (float) ($schrittL ?? 0)));
+    }
+
+    // ------------------------------------------------------------ Verbrauch je Tag
+
+    /**
+     * Verbrauch je Tag: je Kalendertag in $zone (auch über die
+     * Zeitumstellung) Anfang + getankt − Ende.
+     *
+     * Grundlage ist die Literreihe [ms, Liter], Median je 10 Minuten. Ein
+     * null darin ist eine **Lücke** – keine Freigabe, keine Kennlinie mit
+     * Litern, ein Sensorfehler, ein anderer Sensor – und teilt die Reihe; die
+     * Teile eines Tags werden addiert. Bis zur Lücke gilt der letzte Wert.
+     * Zwischen zwei Meldungen wird gerade verbunden, auch über Stunden: Ein
+     * Shelly meldet nur bei Änderung, Stille ist also keine Lücke. Der Wert
+     * um Mitternacht liegt auf dieser Verbindung.
+     *
+     * **Betankung erkannt:** ein Anstieg um mindestens $schwelleL innerhalb
+     * von 30 Minuten oder von einer Meldung zur nächsten. Die Menge ist der
+     * Wert danach minus dem davor. Am Rand zählen Anstiege um höchstens einen
+     * Meldeschritt nicht mit (Rauschen, Wärme); Anstiege höchstens
+     * 30 Minuten auseinander sind eine Betankung (Zapfpause). Reicht eine
+     * über Mitternacht, zählt zu jedem Tag sein Teil.
+     *
+     * **Lieferschein:** Eine eingetragene Betankung höchstens 1 h vor oder
+     * nach einem Sprung ersetzt dessen Menge (quelle „lieferschein“, mehrere
+     * zusammen). Liegt sie dort, wo es keine Messwerte gibt, zählt sie zum
+     * Getankten des Tags, aber in keine Bilanz („protokoll“). Liegt sie
+     * mitten in Messwerten ohne Sprung, zählt sie nicht („ohne_sprung“, mit
+     * Hinweis): Laut Messwerten kam dann nichts an – meist stimmt die Zeit
+     * nicht.
+     *
+     * Ein negativer Verbrauch wird 0 – mit Hinweis, wenn der Inhalt um mehr
+     * als einen Meldeschritt stieg.
+     *
+     * @param list<array{0:int,1:?float}> $reihe [ms, Liter]; null = Lücke
+     * @param list<array{zeit:int,liter:float,id?:int,lieferschein?:string}> $erfasst eingetragene Betankungen, zeit = Ende des Tankens (s)
+     * @param ?float $schrittL Liter je Meldeschritt
+     * @param ?int $von nur ab hier (s); Punkte davor dienen dem Wert an der Grenze
+     * @param ?int $bis nur bis hier (s)
+     * @return array{tage:array<string,array{verbrauch_l:?float,betankt_l:float,anfang_l:?float,ende_l:?float,stunden:float,l_h:?float,hinweis:string}>,betankungen:list<array{zeit:int,von:int,liter:float,erkannt_l:?float,quelle:string,ereignisse:list<int>,lieferschein:string}>}
+     */
+    public static function tagesbilanz(array $reihe, array $erfasst, float $schwelleL, \DateTimeZone $zone, ?float $schrittL = null, ?int $von = null, ?int $bis = null): array
+    {
+        // Teile ohne Lücke, Zeit in Sekunden; bis zur Lücke gilt der letzte Wert.
+        $punkte = array_values(array_filter($reihe, static fn ($x): bool => is_array($x) && isset($x[0]) && is_numeric($x[0])));
+        usort($punkte, static fn (array $a, array $b): int => $a[0] <=> $b[0]);
+        $teile = [];
+        $teil = [];
+        foreach ($punkte as $x) {
+            $t = intdiv((int) $x[0], 1000);
+            $w = $x[1] ?? null;
+            if (!(is_int($w) || is_float($w)) || !is_finite((float) $w)) {
+                if ($teil !== []) {
+                    $letzter = $teil[count($teil) - 1];
+                    if ($t > $letzter[0]) {
+                        $teil[] = [$t, $letzter[1]];
+                    }
+                    $teile[] = $teil;
+                }
+                $teil = [];
+                continue;
+            }
+            if ($teil !== [] && $teil[count($teil) - 1][0] === $t) {
+                $teil[count($teil) - 1][1] = (float) $w;
+                continue;
+            }
+            $teil[] = [$t, (float) $w];
+        }
+        if ($teil !== []) {
+            $teile[] = $teil;
+        }
+        $erfasst = array_values(array_filter($erfasst, static fn ($e): bool => is_array($e) && isset($e['zeit'], $e['liter'])
+            && is_numeric($e['zeit']) && is_numeric($e['liter'])));
+        $zeiten = array_merge(array_map(static fn (array $p): int => $p[0][0], $teile), array_map(static fn (array $p): int => $p[count($p) - 1][0], $teile),
+            array_map(static fn (array $e): int => (int) $e['zeit'], $erfasst));
+        if ($zeiten === []) {
+            return ['tage' => [], 'betankungen' => []];
+        }
+        $von ??= min($zeiten);
+        $bis ??= max($zeiten);
+        $klein = max(0.0, (float) ($schrittL ?? 0));
+
+        // Betankungen in den Messwerten: Anstiege, am Rand ohne Rauschen,
+        // zusammengefasst über Zapfpausen; zählt nur, was steil genug ist.
+        $laeufe = [];
+        foreach ($teile as $n => $p) {
+            $m = count($p);
+            $gruppen = [];
+            for ($k = 0; $k < $m - 1;) {
+                if ($p[$k + 1][1] <= $p[$k][1]) {
+                    $k++;
+                    continue;
+                }
+                $a = $k;
+                while ($k < $m - 1 && $p[$k + 1][1] > $p[$k][1]) {
+                    $k++;
+                }
+                $b = $k;
+                while ($a < $b && $p[$a + 1][1] - $p[$a][1] <= $klein) {
+                    $a++;
+                }
+                while ($b > $a && $p[$b][1] - $p[$b - 1][1] <= $klein) {
+                    $b--;
+                }
+                if ($b <= $a || !self::steilGenug($p, $a, $b, $schwelleL)) {
+                    continue;
+                }
+                $g = count($gruppen) - 1;
+                if ($g >= 0 && $p[$a][0] - $p[$gruppen[$g][1]][0] <= self::ZAPFPAUSE_S) {
+                    $gruppen[$g][1] = $b;
+                } else {
+                    $gruppen[] = [$a, $b];
+                }
+            }
+            foreach ($gruppen as [$a, $b]) {
+                if ($p[$b][1] - $p[$a][1] > 0) {
+                    $laeufe[] = ['teil' => $n, 'von' => $p[$a][0], 'zeit' => $p[$b][0], 'erkannt' => $p[$b][1] - $p[$a][1], 'erfasst' => []];
+                }
+            }
+        }
+
+        // Eingetragene Betankungen: zum nächsten Sprung (±1 h), sonst ins Protokoll oder „ohne Sprung“.
+        $einzeln = [];
+        foreach ($erfasst as $e) {
+            $z = (int) $e['zeit'];
+            $best = null;
+            $abstand = null;
+            foreach ($laeufe as $j => $l) {
+                $d = $z < $l['von'] ? $l['von'] - $z : max(0, $z - $l['zeit']);
+                if ($d <= self::LIEFERSCHEIN_S && ($abstand === null || $d < $abstand)) {
+                    [$best, $abstand] = [$j, $d];
+                }
+            }
+            if ($best !== null) {
+                $laeufe[$best]['erfasst'][] = $e;
+                continue;
+            }
+            $gedeckt = false;
+            foreach ($teile as $p) {
+                $gedeckt = $gedeckt || ($p[0][0] <= $z && $z <= $p[count($p) - 1][0]);
+            }
+            $einzeln[] = $e + ['quelle' => $gedeckt ? 'ohne_sprung' : 'protokoll'];
+        }
+        $lieferschein = static fn (array $liste): string => implode(', ', array_filter(array_map(static fn (array $e): string => trim((string) ($e['lieferschein'] ?? '')), $liste)));
+        $betankungen = [];
+        foreach ($laeufe as $j => $l) {
+            $summe = array_sum(array_map(static fn (array $e): float => (float) $e['liter'], $l['erfasst']));
+            $laeufe[$j]['faktor'] = $l['erfasst'] !== [] ? $summe / $l['erkannt'] : 1.0;
+            if ($l['zeit'] >= $von && $l['von'] <= $bis) {
+                $betankungen[] = ['zeit' => $l['zeit'], 'von' => $l['von'], 'liter' => round($l['erfasst'] !== [] ? $summe : $l['erkannt'], 1),
+                    'erkannt_l' => round($l['erkannt'], 1), 'quelle' => $l['erfasst'] !== [] ? 'lieferschein' : 'erkannt',
+                    'ereignisse' => array_values(array_filter(array_map(static fn (array $e): int => (int) ($e['id'] ?? 0), $l['erfasst']))),
+                    'lieferschein' => $lieferschein($l['erfasst'])];
+            }
+        }
+        foreach ($einzeln as $e) {
+            if ((int) $e['zeit'] >= $von && (int) $e['zeit'] <= $bis) {
+                $betankungen[] = ['zeit' => (int) $e['zeit'], 'von' => (int) $e['zeit'], 'liter' => round((float) $e['liter'], 1), 'erkannt_l' => null,
+                    'quelle' => $e['quelle'], 'ereignisse' => isset($e['id']) ? [(int) $e['id']] : [], 'lieferschein' => $lieferschein([$e])];
+            }
+        }
+        usort($betankungen, static fn (array $a, array $b): int => $a['zeit'] <=> $b['zeit']);
+
+        // Je Tag: die Teile darin – Anfang + getankt − Ende.
+        $lokal = static fn (int $ts): \DateTimeImmutable => (new \DateTimeImmutable('@' . $ts))->setTimezone($zone);
+        $tage = [];
+        $tag = static function (int $ts) use (&$tage, $lokal): string {
+            $k = $lokal($ts)->format('Y-m-d');
+            $tage[$k] ??= ['verbrauch' => 0.0, 'teile' => 0, 'betankt' => 0.0, 'anfang' => null, 'ende' => null, 'stunden' => 0.0, 'hinweise' => []];
+            return $k;
+        };
+        foreach ($teile as $n => $p) {
+            $ca = max($p[0][0], $von);
+            $cb = min($p[count($p) - 1][0], $bis);
+            for ($s = $lokal($ca)->setTime(0, 0)->getTimestamp(); $s < $cb; $s = $e) {
+                $e = $lokal($s)->modify('+1 day')->setTime(0, 0)->getTimestamp();
+                [$ps, $pe] = [max($ca, $s), min($cb, $e)];
+                if ($pe <= $ps) {
+                    continue;
+                }
+                $anfang = self::wertBei($p, $ps);
+                $ende = self::wertBei($p, $pe);
+                $getankt = 0.0;
+                foreach ($laeufe as $l) {
+                    [$la, $lb] = [max($l['von'], $ps), min($l['zeit'], $pe)];
+                    if ($l['teil'] === $n && $lb > $la) {
+                        $getankt += (self::wertBei($p, $lb) - self::wertBei($p, $la)) * $l['faktor'];
+                    }
+                }
+                $k = $tag($s);
+                $tage[$k]['verbrauch'] += $anfang + $getankt - $ende;
+                $tage[$k]['teile']++;
+                $tage[$k]['betankt'] += $getankt;
+                $tage[$k]['anfang'] ??= $anfang;
+                $tage[$k]['ende'] = $ende;
+                $tage[$k]['stunden'] += ($pe - $ps) / 3600;
+            }
+        }
+        foreach ($einzeln as $e) {
+            $z = (int) $e['zeit'];
+            if ($z < $von || $z > $bis) {
+                continue;
+            }
+            $k = $tag($z);
+            $text = 'Betankung ' . $lokal($z)->format('H:i') . ' (' . self::zahl(round((float) $e['liter'])) . ' l)';
+            if ($e['quelle'] === 'protokoll') {
+                $tage[$k]['betankt'] += (float) $e['liter'];
+            } else {
+                $tage[$k]['hinweise'][] = $text . ' ohne Sprung in den Messwerten – Zeit prüfen';
+            }
+        }
+        ksort($tage);
+        $aus = [];
+        foreach ($tage as $k => $d) {
+            $mitternacht = new \DateTimeImmutable($k, $zone);
+            $laenge = min($bis, $mitternacht->modify('+1 day')->getTimestamp()) - max($von, $mitternacht->getTimestamp());
+            $verbrauch = $d['teile'] > 0 ? $d['verbrauch'] : null;
+            if ($verbrauch !== null && $verbrauch < 0) {
+                if ($verbrauch < -max($klein, 1.0)) {
+                    $d['hinweise'][] = 'Inhalt ohne erkannte Betankung um ' . self::zahl(round(-$verbrauch)) . ' l gestiegen (Wärme, Schwappen?)';
+                }
+                $verbrauch = 0.0;
+            }
+            if ($d['teile'] > 0 && $d['stunden'] * 3600 < $laenge - 3600) {
+                array_unshift($d['hinweise'], 'Messwerte für ' . self::zahl(round($d['stunden'], 1)) . ' von ' . self::zahl(round($laenge / 3600, 1)) . ' h');
+            }
+            $aus[$k] = [
+                'verbrauch_l' => $verbrauch !== null ? round($verbrauch, 1) : null,
+                'betankt_l'   => round($d['betankt'], 1),
+                'anfang_l'    => $d['anfang'] !== null ? round($d['anfang'], 1) : null,
+                'ende_l'      => $d['ende'] !== null ? round($d['ende'], 1) : null,
+                'stunden'     => round($d['stunden'], 2),
+                'l_h'         => $verbrauch !== null && $d['stunden'] > 0 ? round($verbrauch / $d['stunden'], 2) : null,
+                'hinweis'     => implode(' · ', $d['hinweise']),
+            ];
+        }
+        return ['tage' => $aus, 'betankungen' => $betankungen];
+    }
+
+    /** Steigt der Inhalt zwischen den Punkten a … b irgendwo um $schwelle – innerhalb von 30 min oder von einer Meldung zur nächsten? */
+    private static function steilGenug(array $p, int $a, int $b, float $schwelle): bool
+    {
+        for ($i = $a, $j = $a; $i < $b; $i++) {
+            if ($p[$i + 1][1] - $p[$i][1] >= $schwelle - 1e-9) {
+                return true;
+            }
+            $j = max($j, $i);
+            while ($j < $b && $p[$j + 1][0] - $p[$i][0] <= self::BETANKUNG_DAUER_S) {
+                $j++;
+            }
+            if ($p[$j][1] - $p[$i][1] >= $schwelle - 1e-9) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** Der Wert einer Folge [s, Liter] zur Zeit $x – gerade zwischen den Nachbarn, am Rand der Randwert. */
+    private static function wertBei(array $p, int $x): float
+    {
+        $hi = count($p) - 1;
+        if ($x <= $p[0][0]) {
+            return $p[0][1];
+        }
+        if ($x >= $p[$hi][0]) {
+            return $p[$hi][1];
+        }
+        $lo = 0;
+        while ($hi - $lo > 1) {
+            $mitte = intdiv($lo + $hi, 2);
+            if ($p[$mitte][0] <= $x) {
+                $lo = $mitte;
+            } else {
+                $hi = $mitte;
+            }
+        }
+        [$ta, $va] = $p[$lo];
+        [$tb, $vb] = $p[$hi];
+        return $tb === $ta ? $vb : $va + ($vb - $va) * ($x - $ta) / ($tb - $ta);
     }
 
     // ------------------------------------------------------------ Stufen

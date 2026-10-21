@@ -41,7 +41,8 @@ use App\Support\Zeit;
  *
  * Gelesen wird beim Anzeigen: live() holt den letzten Rohwert seit dem
  * Einbau (Messdaten::tankLetzte – höchstens 7 Tage, nur im Datenfenster),
- * reihe() den Verlauf je Fassung. In der InfluxDB steht nie ein Liter.
+ * reihe() den Verlauf je Fassung, tage() den Verbrauch je Kalendertag mit
+ * den erkannten Betankungen. In der InfluxDB steht nie ein Liter.
  *
  * Versorgung: Kraftstoffschläuche (Leitungsart „kraftstoff“) verbinden
  * Tanks und Generatoren. Was zusammenhängt, hat einen Vorrat (Σ nutzbar) und
@@ -63,6 +64,20 @@ final class TankService
 
     /** Wie weit eine Betankung zurückliegen darf. */
     public const BETANKUNG_ZURUECK_S = 7 * 86400;
+
+    /** Verbrauch je Tag: höchstens so viele Tage auf einmal (Median je 10 min). */
+    public const TAGE_MAX = 92;
+
+    /** … gelesen ab einem Tag davor – für den Wert um Mitternacht. */
+    private const TAGE_VORLAUF_S = 86400;
+
+    /** Woher die Menge einer Betankung im Verbrauch je Tag stammt (TankRechnung::tagesbilanz). */
+    public const BETANKUNG_QUELLEN = [
+        'erkannt'      => 'erkannt, ohne Eintrag',
+        'lieferschein' => 'laut Lieferschein',
+        'protokoll'    => 'eingetragen, ohne Messwerte',
+        'ohne_sprung'  => 'eingetragen, ohne Sprung in den Messwerten',
+    ];
 
     /** Größen eines Verlaufs: Beschriftung und Einheit (Rohwert: Einheit des Felds). */
     public const GROESSEN = [
@@ -981,12 +996,13 @@ final class TankService
      * seiner Zeit galt – Grundlage für reihe() und die CSV. Lücken (Zeiten
      * ohne Freigabe zwischen zwei Teilen) sind null.
      *
+     * @param ?int $schritt Sekunden je Punkt (Median); ohne passend zum Zeitraum wie im Diagramm
      * @return array{zeiten:list<int>,punkte:list<?array{roh:float,rechnung:?array,feld:string,messpunkt:int,kennung:string}>,schritt:int,teile:list<array{0:int,1:int}>,felder:list<string>}
      */
-    public static function rohwerte(array $tank, ?int $messpunktId, int $von, int $bis, ?string &$fehler = null): array
+    public static function rohwerte(array $tank, ?int $messpunktId, int $von, int $bis, ?string &$fehler = null, ?int $schritt = null): array
     {
         $bis = min($bis, time());
-        $leer = ['zeiten' => [], 'punkte' => [], 'schritt' => Messdaten::schritt($von, max($von + 1, $bis)), 'teile' => [], 'felder' => []];
+        $leer = ['zeiten' => [], 'punkte' => [], 'schritt' => $schritt ?? Messdaten::schritt($von, max($von + 1, $bis)), 'teile' => [], 'felder' => []];
         if ($bis <= $von) {
             return $leer;
         }
@@ -1053,6 +1069,114 @@ final class TankService
             'schritt' => $schritt,
             'teile'   => Zugriff::begrenzen($tankFenster, $von, $bis),
             'felder'  => array_keys($felder),
+        ];
+    }
+
+    // ------------------------------------------------------------ Verbrauch je Tag
+
+    /**
+     * Verbrauch je Tag im Zeitraum – ganze Tage in Ortszeit: Anfang +
+     * getankt − Ende (TankRechnung::tagesbilanz), aus der Literreihe aller
+     * Tanksensoren des Tanks (oder nur $messpunktId), Median je 10 Minuten,
+     * je Punkt mit der Fassung, die damals galt; nur im Datenfenster. Gelesen
+     * wird ab einem Tag vor dem ersten: Ein Shelly meldet nur bei Änderung,
+     * der Wert um Mitternacht liegt zwischen zwei Meldungen.
+     *
+     * Dazu die Betankungen im Zeitraum – erkannt (ein Sprung in den
+     * Messwerten), laut Lieferschein (ein Eintrag ersetzt die Menge des
+     * Sprungs) oder nur eingetragen. Einen erkannten Sprung ohne Eintrag darf
+     * eintragen, wer am Tank bearbeiten darf, höchstens 7 Tage zurück.
+     *
+     * @return array{tage:list<array<string,mixed>>,betankungen:list<array<string,mixed>>,summe:array<string,mixed>,kalibriert:bool,schwelle_l:float,schwelle_text:string,hinweis:string,darf_eintragen:bool,von:int,bis:int}
+     */
+    public static function tage(array $tank, int $von, int $bis, ?string &$fehler = null, ?int $messpunktId = null): array
+    {
+        $zone = Zeit::zone();
+        $jetzt = time();
+        $bis = min($bis, $jetzt);
+        $tagBeginn = static fn (int $ts): int => (new \DateTimeImmutable('@' . $ts))->setTimezone($zone)->setTime(0, 0)->getTimestamp();
+        $von = $tagBeginn(min($von, $bis));
+        $hinweise = [];
+        if ($bis - $von > self::TAGE_MAX * 86400) {
+            $von = $tagBeginn($bis - (self::TAGE_MAX - 1) * 86400);
+            $hinweise[] = 'Gezeigt werden die letzten ' . self::TAGE_MAX . ' Tage.';
+        }
+        $roh = self::rohwerte($tank, $messpunktId, $von - self::TAGE_VORLAUF_S, $bis, $fehler, 600);
+        $reihe = [];
+        $schrittL = null;
+        $kalibriert = false;
+        foreach ($roh['punkte'] as $i => $p) {
+            $liter = null;
+            if ($p !== null && $p['rechnung'] !== null) {
+                $erg = TankRechnung::umrechnen($p['rechnung'], $p['roh']);
+                // Ein Sensorfehler oder ein unplausibler Wert ist eine Lücke, kein Inhalt.
+                $liter = $erg['fehler'] === null ? $erg['liter'] : null;
+                $s = $liter !== null ? TankRechnung::schrittLiter($p['rechnung']) : null;
+                $schrittL = $s !== null && ($schrittL === null || $s > $schrittL) ? $s : $schrittL;
+                $kalibriert = $kalibriert || $liter !== null;
+            }
+            $reihe[] = [$roh['zeiten'][$i], $liter];
+        }
+        $erfasst = [];
+        foreach (self::ereignisse($tank, 2000) as $e) {
+            $ts = Zeit::ts($e['zeit']);
+            if ($e['art'] === 'betankung' && $e['liter'] !== null && $ts !== null && $ts >= $von - self::TAGE_VORLAUF_S && $ts <= $bis + TankRechnung::LIEFERSCHEIN_S) {
+                $erfasst[] = ['zeit' => $ts, 'liter' => (float) $e['liter'], 'id' => $e['id'], 'lieferschein' => $e['lieferschein']];
+            }
+        }
+        $schwelle = TankRechnung::betankungSchwelle(TankRechnung::zahlLesen(((array) $tank['eigenschaften'])['inhalt_l'] ?? null), $schrittL);
+        $bilanz = TankRechnung::tagesbilanz($reihe, $erfasst, $schwelle, $zone, $schrittL, $von, $bis);
+
+        $literText = static fn (?float $l): string => $l === null ? '–' : self::zahl(round($l)) . ' l';
+        $wochentag = ['So', 'Mo', 'Di', 'Mi', 'Do', 'Fr', 'Sa'];
+        $tage = [];
+        $summe = ['verbrauch_l' => 0.0, 'betankt_l' => 0.0, 'stunden' => 0.0];
+        foreach ($bilanz['tage'] as $tag => $d) {
+            $dt = new \DateTimeImmutable($tag, $zone);
+            $tage[] = ['tag' => $tag, 'text' => $wochentag[(int) $dt->format('w')] . ' ' . $dt->format('d.m.')] + $d + [
+                'verbrauch_text' => $literText($d['verbrauch_l']),
+                'betankt_text'   => $d['betankt_l'] > 0 ? $literText($d['betankt_l']) : '–',
+                'l_h_text'       => $d['l_h'] !== null ? self::zahl(round($d['l_h'], 1)) : '–',
+            ];
+            if ($d['verbrauch_l'] !== null) {
+                $summe['verbrauch_l'] += $d['verbrauch_l'];
+                $summe['stunden'] += $d['stunden'];
+            }
+            $summe['betankt_l'] += $d['betankt_l'];
+        }
+        $summe['l_h'] = $summe['stunden'] > 0 ? round($summe['verbrauch_l'] / $summe['stunden'], 2) : null;
+        $summe['text'] = $tage === [] ? '' : 'Zusammen ' . $literText($summe['verbrauch_l']) . ' verbraucht, ' . $literText($summe['betankt_l']) . ' getankt'
+            . ($summe['l_h'] !== null ? ' · Ø ' . self::zahl(round($summe['l_h'], 1)) . ' l/h' : '');
+        $darf = Zugriff::darfBearbeiten($tank);
+        $betankungen = [];
+        foreach ($bilanz['betankungen'] as $x) {
+            $betankungen[] = $x + [
+                'zeit_iso'        => Zeit::iso($x['zeit']),
+                'zeit_text'       => Zeit::anzeige(Zeit::iso($x['zeit']), 'd.m. H:i'),
+                'liter_text'      => $literText($x['liter']),
+                'erkannt_text'    => $x['erkannt_l'] !== null ? $literText($x['erkannt_l']) : '',
+                'quelle_text'     => self::BETANKUNG_QUELLEN[$x['quelle']] ?? $x['quelle'],
+                // Ein Sprung ohne Eintrag lässt sich eintragen – wie jede Betankung höchstens 7 Tage zurück.
+                'eintragen'       => $darf && $x['quelle'] === 'erkannt' && $x['zeit'] >= $jetzt - self::BETANKUNG_ZURUECK_S + 300 && $x['zeit'] <= $jetzt,
+                'eintragen_zeit'  => Zeit::fuerEingabe(Zeit::iso($x['zeit'])),
+                'eintragen_liter' => (string) (int) round($x['liter']),
+            ];
+        }
+        if (!$kalibriert) {
+            $hinweise[] = $roh['zeiten'] === [] ? 'Keine Messwerte im Zeitraum.'
+                : 'Liter gibt es erst mit bekanntem Inhalt je mm – peilen oder eine Betankung eintragen.';
+        }
+        return [
+            'tage'           => $tage,
+            'betankungen'    => $betankungen,
+            'summe'          => $summe,
+            'kalibriert'     => $kalibriert,
+            'schwelle_l'     => round($schwelle, 1),
+            'schwelle_text'  => $literText($schwelle),
+            'hinweis'        => implode(' ', $hinweise),
+            'darf_eintragen' => $darf,
+            'von'            => $von,
+            'bis'            => $bis,
         ];
     }
 

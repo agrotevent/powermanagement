@@ -18,8 +18,8 @@ use App\Tanks\TankRechnung;
 use App\Tanks\TankService;
 
 /**
- * Tanks: Verlauf und CSV des Füllstands, Peilung, Betankung und Kennlinie
- * vor Ort.
+ * Tanks: Verlauf, Verbrauch je Tag und CSV des Füllstands, Peilung,
+ * Betankung und Kennlinie vor Ort.
  *
  * Das Recht prüft die Route (statistik.view bzw. statistik.export zum
  * Lesen, anlagen.manage zum Eintragen); hier wird jede ID einzeln geprüft:
@@ -93,6 +93,30 @@ final class TankController extends Controller
         ]);
     }
 
+    /**
+     * Verbrauch je Tag als JSON für die Tabelle „Tage“ (Tankseite, Statistik):
+     * ganze Tage in Ortszeit im Zeitraum, dazu die Betankungen – erkannte
+     * ohne Eintrag lassen sich eintragen (darf_eintragen, eintragen).
+     */
+    public function tage(Request $request, array $params): void
+    {
+        $tank = $this->tank($request, $params, false, true);
+        if ($tank === null) {
+            return;
+        }
+        // Liest Tage an Messwerten – die Sitzung nicht halten.
+        Session::freigeben();
+        $mp = $this->messpunkt($request, $tank);
+        if ($mp === false) {
+            $this->json(['ok' => false, 'message' => 'Dieser Messpunkt gehört nicht zu diesem Tank.'], 404);
+            return;
+        }
+        [$von, $bis] = Zeitraum::ausAnfrage($request);
+        $fehler = null;
+        $tage = TankService::tage($tank, $von, $bis, $fehler, $mp);
+        $this->json(['ok' => $fehler === null, 'message' => $this->fehlerText($fehler)] + $tage);
+    }
+
     /** CSV: Rohwert, Füllhöhe, Inhalt und Füllstand je Zeitpunkt, im Datenfenster. */
     public function csv(Request $request, array $params): void
     {
@@ -111,6 +135,10 @@ final class TankController extends Controller
             return;
         }
         [$von, $bis] = Zeitraum::ausAnfrage($request);
+        if ($request->str('inhalt') === 'tage') {
+            $this->tageCsv($tank, $von, $bis, $mp);
+            return;
+        }
         $fehler = null;
         $roh = TankService::rohwerte($tank, $mp, $von, $bis, $fehler);
         if ($fehler !== null) {
@@ -137,6 +165,37 @@ final class TankController extends Controller
         Audit::log('tank.csv', 'objekt', (string) $tank['id'], ['von' => Zeit::iso($von), 'bis' => Zeit::iso($bis), 'messpunkt' => $mp]);
         header('Content-Type: text/csv; charset=utf-8');
         header('Content-Disposition: attachment; filename="tank-' . (int) $tank['id'] . '-' . date('Ymd-Hi', $von) . '-' . date('Ymd-Hi', $bis) . '.csv"');
+        echo "\xEF\xBB\xBF" . implode("\r\n", $zeilen) . "\r\n";
+    }
+
+    /** CSV des Verbrauchs je Tag: je Tag eine Zeile, die Betankungen des Tags in einer Spalte. */
+    private function tageCsv(array $tank, int $von, int $bis, ?int $mp): void
+    {
+        $fehler = null;
+        $d = TankService::tage($tank, $von, $bis, $fehler, $mp);
+        if ($fehler !== null) {
+            Logger::info('Tank-CSV (Tage): ' . $fehler);
+        }
+        $zahl = static fn (?float $w, int $n): string => $w === null ? '' : str_replace('.', ',', (string) round($w, $n));
+        $jeTag = [];
+        foreach ($d['betankungen'] as $b) {
+            $jeTag[Zeit::anzeige($b['zeit_iso'], 'Y-m-d')][] = Zeit::anzeige($b['zeit_iso'], 'H:i') . ' ' . $zahl($b['liter'], 0) . ' l ' . $b['quelle_text']
+                . ($b['lieferschein'] !== '' ? ' (' . $b['lieferschein'] . ')' : '');
+        }
+        $zeilen = [implode(';', array_map([StatistikController::class, 'csvFeld'],
+            ['Tag', 'Verbrauch [l]', 'Getankt [l]', 'Mittel [l/h]', 'Anfang [l]', 'Ende [l]', 'Stunden mit Messwerten', 'Betankungen', 'Hinweis']))];
+        foreach ($d['tage'] as $t) {
+            $zeilen[] = implode(';', [
+                $t['tag'],
+                $zahl($t['verbrauch_l'], 1), $zahl($t['betankt_l'], 1), $zahl($t['l_h'], 2),
+                $zahl($t['anfang_l'], 1), $zahl($t['ende_l'], 1), $zahl($t['stunden'], 2),
+                StatistikController::csvFeld(implode('; ', $jeTag[$t['tag']] ?? [])),
+                StatistikController::csvFeld($t['hinweis']),
+            ]);
+        }
+        Audit::log('tank.csv', 'objekt', (string) $tank['id'], ['tage' => true, 'von' => Zeit::iso($d['von']), 'bis' => Zeit::iso($d['bis']), 'messpunkt' => $mp]);
+        header('Content-Type: text/csv; charset=utf-8');
+        header('Content-Disposition: attachment; filename="tank-' . (int) $tank['id'] . '-tage-' . date('Ymd', $d['von']) . '-' . date('Ymd', $d['bis']) . '.csv"');
         echo "\xEF\xBB\xBF" . implode("\r\n", $zeilen) . "\r\n";
     }
 

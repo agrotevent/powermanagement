@@ -519,3 +519,9 @@ tr.abweichung-zeile td { background: var(--warning-light); }
 .stufe-warn .tank-rest { color: var(--stufe-warn); }
 .stufe-bad .tank-rest { color: var(--stufe-bad); }
 .schlaeuche li { padding: .3rem 0; border-bottom: 1px dashed var(--border); }
+
+/* Tank: Verbrauch je Tag – erkannte Betankungen mit „Als Betankung eintragen“ */
+.tank-erkannt li { padding: .4rem 0; border-bottom: 1px dashed var(--border); }
+.tank-eintragen { margin-top: .25rem; }
+.tank-eintragen summary { cursor: pointer; color: var(--primary, #2563eb); }
+.tank-eintragen form { margin-top: .4rem; }

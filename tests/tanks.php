@@ -48,6 +48,13 @@ declare(strict_types=1);
  * zweiten Durchgang; ein Generator ohne Freigabe verrät weder Namen noch
  * Leistung; Verbrauch aus dem Pegel; Betankung mit abgezogenem Verbrauch;
  * Material mit Schläuchen und Kupplungen.
+ *
+ * G – Verbrauch je Tag: Anfang + getankt − Ende je Kalendertag (rein, Prüfwerte
+ * §7.5: −20 l/h mit +1.500 l, Lieferschein ersetzt den Sprung, Rauschen, der
+ * 25.10.2026 mit 25 h), Meldungen nur bei Änderung, Lücken, eingetragen ohne
+ * Messwerte bzw. ohne Sprung, Zapfpause, über Mitternacht, Wärme; im
+ * Demo-Modus über TankService::tage (erkannte Betankung um 06:00, eintragen,
+ * Lieferschein, Kunde mit Datenfenster, ohne Kalibrierung, ohne Sensor).
  */
 
 require __DIR__ . '/hilfen/pruefung.php';
@@ -1556,6 +1563,221 @@ try {
         Database::execute('DELETE FROM users WHERE id = ?', [$u]);
     }
     Database::execute('DELETE FROM audit_log WHERE username LIKE ? OR details LIKE ?', [$kennungF . '%', '%' . $kennungF . '%']);
+}
+
+// ------------------------------------------------ G – Verbrauch je Tag (rein, Prüfwerte §7.5)
+$zoneG = new DateTimeZone('Europe/Berlin');
+$um = static fn (string $lokal): int => (new DateTimeImmutable($lokal, $zoneG))->getTimestamp();
+// Eine Reihe je 10 min von … bis (Ortszeit); $liter(t in s) – null ist eine Lücke.
+$reiheG = static function (string $von, string $bis, callable $liter) use ($um): array {
+    $out = [];
+    for ($t = $um($von); $t <= $um($bis); $t += 600) {
+        $out[] = [$t * 1000, $liter($t)];
+    }
+    return $out;
+};
+$schwelleG = TankRechnung::betankungSchwelle(3000.0, 42.4);
+gleich(array_map(static fn (float $x): float => round($x, 6), [$schwelleG, TankRechnung::betankungSchwelle(null, null), TankRechnung::betankungSchwelle(30000.0, 10.0)]),
+    [127.2, 50.0, 900.0],
+    'Schwelle einer Betankung: max(50 l, 3 % des Nennvolumens, 3 Meldeschritte)');
+$bilanz = static fn (array $reihe, array $erfasst = [], ?int $von = null, ?int $bis = null): array
+    => TankRechnung::tagesbilanz($reihe, $erfasst, $schwelleG, $zoneG, 42.4, $von, $bis);
+
+// −20 l/h über den Tag, um 10:00 in 20 min +1.500 l
+$t0G = $um('2026-10-19 22:00');
+$tanken = static fn (int $t, string $ab, float $menge = 1500.0, int $dauer = 1200): float
+    => $t <= $um($ab) ? 0.0 : ($t >= $um($ab) + $dauer ? $menge : $menge * ($t - $um($ab)) / $dauer);
+$reihe = $reiheG('2026-10-19 22:00', '2026-10-21 02:00', static fn (int $t): float => 2000 - 20 * ($t - $t0G) / 3600 + $tanken($t, '2026-10-20 10:00'));
+$b = $bilanz($reihe);
+$tag = $b['tage']['2026-10-20'] ?? [];
+nahe($tag['verbrauch_l'] ?? null, 480.0, 42.4, '−20 l/h mit Betankung: Verbrauch 480 l ± 1 Meldeschritt');
+nahe($tag['betankt_l'] ?? null, 1500.0, 42.4, '… getankt 1.500 l ± 1 Meldeschritt');
+gleich([$tag['stunden'] ?? null, $tag['hinweis'] ?? null], [24.0, ''], '… über 24 h, ohne Hinweis');
+nahe($tag['l_h'] ?? null, 20.0, 1.8, '… Ø 20 l/h');
+gleich(array_map(static fn (array $x): array => [$x['quelle'], $x['zeit'], $x['von']], $b['betankungen']), [['erkannt', $um('2026-10-20 10:20'), $um('2026-10-20 10:00')]],
+    'eine erkannte Betankung, 10:00 bis 10:20');
+$b = $bilanz($reihe, [['zeit' => $um('2026-10-20 10:30'), 'liter' => 1500.0, 'id' => 7, 'lieferschein' => 'LS-7']]);
+$tag = $b['tage']['2026-10-20'];
+gleich($tag['betankt_l'], 1500.0, 'Lieferschein 1.500 l um 10:30: getankt genau 1.500 l');
+nahe($tag['verbrauch_l'], 480.0, 0.1, '… Verbrauch 480 l');
+gleich(array_map(static fn (array $x): array => [$x['quelle'], $x['liter'], $x['ereignisse'], $x['lieferschein']], $b['betankungen']),
+    [['lieferschein', 1500.0, [7], 'LS-7']], '… die Betankung zählt mit der Menge laut Lieferschein');
+nahe($b['betankungen'][0]['erkannt_l'], 1493.3, 0.1, '… und nennt den Sprung (1.500 l minus Verbrauch in 20 min)');
+$b = $bilanz($reihe, [['zeit' => $um('2026-10-20 08:00'), 'liter' => 1500.0, 'id' => 8]]);
+gleich(array_column($b['betankungen'], 'quelle'), ['ohne_sprung', 'erkannt'], 'Lieferschein 2 h vor dem Sprung: gehört nicht dazu');
+pruefe($b['tage']['2026-10-20']['betankt_l'] < 1500 && str_contains($b['tage']['2026-10-20']['hinweis'], 'Betankung 08:00 (1.500 l) ohne Sprung in den Messwerten'),
+    '… zählt nicht, Hinweis am Tag: ' . $b['tage']['2026-10-20']['hinweis']);
+$b = $bilanz($reihe, [['zeit' => $um('2026-10-20 10:15'), 'liter' => 1000.0, 'id' => 1], ['zeit' => $um('2026-10-20 10:25'), 'liter' => 500.0, 'id' => 2]]);
+gleich([$b['tage']['2026-10-20']['betankt_l'], $b['betankungen'][0]['ereignisse'] ?? null, count($b['betankungen'])], [1500.0, [1, 2], 1],
+    'zwei Lieferscheine zu einem Sprung: zusammen');
+
+// Nur Rauschen ±1 Meldeschritt
+$i = 0;
+$b = $bilanz($reiheG('2026-10-19 22:00', '2026-10-21 02:00', static function () use (&$i): float {
+    return 1500 + ($i++ % 3 - 1) * 42.4;
+}));
+pruefe($b['betankungen'] === [] && ($b['tage']['2026-10-20']['verbrauch_l'] ?? 99) <= 42.4, 'nur Rauschen ±1 Schritt: keine Betankung, Verbrauch ≤ 42,4 l ('
+    . var_export($b['tage']['2026-10-20']['verbrauch_l'] ?? null, true) . ')');
+
+// 25.10.2026: Zeitumstellung, der Tag hat 25 h
+$t1G = $um('2026-10-24 20:00');
+$b = $bilanz($reiheG('2026-10-24 20:00', '2026-10-26 04:00', static fn (int $t): float => 2500 - 20 * ($t - $t1G) / 3600));
+nahe($b['tage']['2026-10-25']['verbrauch_l'] ?? null, 500.0, 1.0, '25.10.2026 (25 h) bei −20 l/h: 500 l');
+gleich($b['tage']['2026-10-25']['stunden'] ?? null, 25.0, '… über 25 Stunden');
+gleich(array_keys($b['tage']), ['2026-10-24', '2026-10-25', '2026-10-26'], 'Tage in Ortszeit');
+
+// Ein Shelly meldet nur bei Änderung: alle 42,4 l (17 l/h → etwa alle 2,5 h) – Stille ist keine Lücke
+$t2G = $um('2026-10-19 00:00');
+$selten = [];
+for ($k = 0; $k * 42.4 / 17 * 3600 < 3 * 86400; $k++) {
+    $t = $t2G + (int) round($k * 42.4 / 17 * 3600);
+    $selten[] = [intdiv($t, 600) * 600 * 1000, 2000 - 42.4 * $k];
+}
+$b = $bilanz($selten);
+nahe($b['tage']['2026-10-20']['verbrauch_l'] ?? null, 408.0, 42.4, 'Meldungen nur bei Änderung (alle ≈ 2,5 h): 17 l/h · 24 h = 408 l');
+gleich([$b['tage']['2026-10-20']['stunden'] ?? null, $b['tage']['2026-10-20']['hinweis'] ?? null, $b['betankungen']], [24.0, '', []], '… ganzer Tag, ohne Lücke');
+
+// Lücke (keine Freigabe) 12:00–18:00 – wie Messdaten::reihe sie liefert: ein null am Ende des
+// freigegebenen Teils –, darin eine eingetragene Betankung: zählt zum Getankten, in keine Bilanz
+$mitLuecke = array_values(array_filter($reiheG('2026-10-19 22:00', '2026-10-21 02:00', static fn (int $t): float
+    => 2000 - 20 * ($t - $t0G) / 3600 + ($t >= $um('2026-10-20 18:00') ? 1000 : 0)),
+    static fn (array $x): bool => $x[0] <= $um('2026-10-20 12:00') * 1000 || $x[0] >= $um('2026-10-20 18:00') * 1000));
+$mitLuecke[] = [$um('2026-10-20 12:00') * 1000 + 1, null];
+$b = $bilanz($mitLuecke, [['zeit' => $um('2026-10-20 14:00'), 'liter' => 1000.0, 'id' => 9]]);
+$tag = $b['tage']['2026-10-20'];
+nahe($tag['verbrauch_l'], 20.0 * 18, 0.1, 'Lücke 12–18 Uhr: Verbrauch nur aus den 18 h mit Messwerten');
+gleich([$tag['betankt_l'], $tag['stunden'], array_column($b['betankungen'], 'quelle')], [1000.0, 18.0, ['protokoll']], '… die Betankung in der Lücke zählt zum Getankten');
+pruefe(str_contains($tag['hinweis'], 'Messwerte für 18 von 24 h'), '… Hinweis: ' . $tag['hinweis']);
+
+// Zapfpause: +800 l, 10 min Pause, +700 l – eine Betankung
+$b = $bilanz($reiheG('2026-10-19 22:00', '2026-10-21 02:00', static fn (int $t): float => 2000 - 20 * ($t - $t0G) / 3600
+    + $tanken($t, '2026-10-20 10:00', 800.0, 600) + $tanken($t, '2026-10-20 10:20', 700.0, 600)));
+gleich(count($b['betankungen']), 1, 'Zapfpause von 10 min: eine Betankung');
+nahe($b['betankungen'][0]['liter'] ?? null, 1500.0, 42.4, '… mit beiden Teilen');
+
+// Über Mitternacht: 23:50 bis 00:10 – jeder Tag bekommt seinen Teil
+$b = $bilanz($reiheG('2026-10-19 22:00', '2026-10-22 02:00', static fn (int $t): float => 2000 - 20 * ($t - $t0G) / 3600 + $tanken($t, '2026-10-20 23:50')));
+nahe(($b['tage']['2026-10-20']['betankt_l'] ?? 0) + ($b['tage']['2026-10-21']['betankt_l'] ?? 0), 1500.0, 42.4, 'Betankung über Mitternacht: zusammen 1.500 l');
+pruefe(($b['tage']['2026-10-20']['betankt_l'] ?? 0) > 500 && ($b['tage']['2026-10-21']['betankt_l'] ?? 0) > 500, '… auf beide Tage verteilt');
+nahe($b['tage']['2026-10-21']['verbrauch_l'] ?? null, 480.0, 42.4, '… Verbrauch am zweiten Tag');
+
+// Wärme: Inhalt steigt um 100 l über den Tag, ohne Sprung – Verbrauch 0 mit Hinweis
+$b = $bilanz($reiheG('2026-10-19 22:00', '2026-10-21 02:00', static fn (int $t): float => 1000 + 100 * ($t - $t0G) / (28 * 3600)));
+gleich([$b['tage']['2026-10-20']['verbrauch_l'], $b['betankungen']], [0.0, []], 'Wärme ohne Sprung: Verbrauch 0, keine Betankung');
+pruefe(str_contains($b['tage']['2026-10-20']['hinweis'], 'gestiegen'), '… mit Hinweis: ' . $b['tage']['2026-10-20']['hinweis']);
+
+// Zeitraum: nur von … bis zählt, die Punkte davor geben den Wert an der Grenze
+$b = $bilanz($reihe, [], $um('2026-10-20 00:00'), $um('2026-10-20 09:00'));
+gleich(array_keys($b['tage']), ['2026-10-20'], 'Zeitraum: nur die Tage darin');
+nahe($b['tage']['2026-10-20']['verbrauch_l'], 180.0, 0.1, '… 9 h zu 20 l/h');
+gleich([$b['tage']['2026-10-20']['stunden'], $b['tage']['2026-10-20']['hinweis'], $b['betankungen']], [9.0, '', []], '… keine Betankung außerhalb');
+gleich(TankRechnung::tagesbilanz([], [], 50.0, $zoneG), ['tage' => [], 'betankungen' => []], 'ohne Werte: nichts');
+gleich(array_keys($bilanz([[1, null], [2, 'x'], [3, INF]])['tage']), [], 'nur Lücken: keine Tage');
+
+// ------------------------------------------------ G – Verbrauch je Tag über TankService (Demo-Modus)
+Config::set('app.demo', true);
+$kennungG = 'pm-tank-' . bin2hex(random_bytes(3));
+$siteG = SiteService::saveSite(null, ['name' => 'Prüfung Tank je Tag ' . $kennungG]);
+$floorG = SiteService::saveFloor(null, ['site_id' => $siteG, 'name' => 'Wiese']);
+$adminG = BenutzerService::anlegen($kennungG, 'Pruefung2026!!', 'admin', false);
+$kundeG = BenutzerService::anlegen($kennungG . '-kunde', 'Pruefung2026!!', 'kunde', false);
+
+try {
+    alsBenutzer($adminG);
+    $jetzt = time();
+    $eigG = ['inhalt_l' => '3000', 'kraftstoff' => 'HVO', 'bauform' => 'Quader', 'sumpf_l' => '140', 'liter_je_mm' => '2,78'];
+    $sensorG = ['prinzip' => 'hydrostatisch', 'feld' => 'u', 'signal' => '4-20mA', 'buerde_ohm' => 500, 'bereich_von' => 0, 'bereich_bis' => 100,
+        'bereich_einheit' => 'mbar', 'schritt_roh' => 0.1];
+    $neuG = static fn (string $name, array $eig) => (int) AnlagenService::speichern(null, ['art' => 'tank', 'name' => $kennungG . ' ' . $name, 'floor_id' => $floorG,
+        'eigenschaften' => $eig])['id'];
+    // Demo-Sonde: 2.700 l um 06:00, 22 l/h – eingebaut vor 3 Tagen, kalibriert mit 2,78 l/mm
+    $einbauen = static function (int $tank, array $eig) use ($kennungG, $sensorG, $jetzt): int {
+        $mp = Database::insert('messpunkte', ['objekt_id' => $tank, 'geraet' => 'shellyplusuni-tank1', 'kanal' => 'voltmeter:100', 'rolle' => 'fuellstand',
+            'bezeichnung' => $kennungG . '-TS' . $tank, 'gueltig_ab' => Zeit::iso($jetzt - 3 * 86400), 'created_at' => gmdate('c')]);
+        $r = TankRechnung::rechnung($sensorG, ['offset_mm' => 20], $eig, ['kennung' => 'G', 'text' => 'Einbau'])['rechnung'];
+        TankService::fassungAnlegen(Database::first('SELECT * FROM messpunkte WHERE id = ?', [$mp]), $r, 'einsatz', Zeit::iso($jetzt - 3 * 86400), true);
+        return $mp;
+    };
+    $tankG = $neuG('Tank', $eigG);
+    $einbauen($tankG, $eigG);
+    $oG = static fn (int $id): array => AnlagenService::find($id);
+    $lokal = static fn (int $ts): DateTimeImmutable => (new DateTimeImmutable('@' . $ts))->setTimezone(Zeit::zone());
+    $gestern = $lokal($jetzt)->modify('-1 day')->format('Y-m-d');
+    $sechsGestern = (new DateTimeImmutable($gestern . ' 06:00', Zeit::zone()))->getTimestamp();
+
+    $d = TankService::tage($oG($tankG), $jetzt - 2 * 86400, $jetzt);
+    $tage = array_column($d['tage'], null, 'tag');
+    gleich(array_keys($tage), [$lokal($jetzt - 2 * 86400)->format('Y-m-d'), $gestern, $lokal($jetzt)->format('Y-m-d')], 'Tage: ganze Tage ab Mitternacht vor zwei Tagen bis heute');
+    gleich($d['von'], (new DateTimeImmutable($lokal($jetzt - 2 * 86400)->format('Y-m-d'), Zeit::zone()))->getTimestamp(), '… ab Mitternacht (Ortszeit)');
+    $g = $tage[$gestern] ?? [];
+    $stunden = (new DateTimeImmutable($gestern, Zeit::zone()))->modify('+1 day')->getTimestamp() - (new DateTimeImmutable($gestern, Zeit::zone()))->getTimestamp();
+    nahe($g['verbrauch_l'] ?? null, 22.0 * $stunden / 3600, 100.0, 'Demo-Sonde gestern: Verbrauch ≈ 22 l/h über den Tag (' . var_export($g['verbrauch_l'] ?? null, true) . ')');
+    nahe($g['betankt_l'] ?? null, 528.0, 50.0, '… getankt ≈ 528 l um 06:00 (' . var_export($g['betankt_l'] ?? null, true) . ')');
+    gleich([$g['stunden'] ?? null, $d['kalibriert'], $d['schwelle_l']], [round($stunden / 3600, 2), true, round(3 * 0.1 * 163.4135 * 2.78, 1)],
+        '… mit Messwerten über den ganzen Tag, kalibriert, Schwelle 3 Meldeschritte');
+    pruefe(str_contains((string) ($g['text'] ?? ''), $lokal($sechsGestern)->format('d.m.')) && ($g['verbrauch_text'] ?? '') !== '' && isset($g['l_h_text']), 'Tag mit Wochentag und Texten: ' . ($g['text'] ?? ''));
+    $erkannt = array_values(array_filter($d['betankungen'], static fn (array $x): bool => abs($x['zeit'] - $sechsGestern) <= 1200));
+    pruefe(count($erkannt) === 1 && $erkannt[0]['quelle'] === 'erkannt' && $erkannt[0]['eintragen'] === true && $erkannt[0]['eintragen_zeit'] === Zeit::fuerEingabe(Zeit::iso($erkannt[0]['zeit'])),
+        'Betankung gestern 06:00 erkannt, ohne Eintrag – eintragbar');
+    // Der Sprung von heute 06:00 ist erst ab dem nächsten 10-min-Punkt sicher zu sehen.
+    $sechsUhr = [$sechsGestern - 86400, $sechsGestern, $sechsGestern + 86400];
+    $anzahlErkannt = count(array_filter($d['betankungen'], static fn (array $x): bool => $x['quelle'] === 'erkannt'));
+    pruefe($anzahlErkannt >= count(array_filter($sechsUhr, static fn (int $t): bool => $t >= $d['von'] && $t < $jetzt - 600))
+        && $anzahlErkannt <= count(array_filter($sechsUhr, static fn (int $t): bool => $t >= $d['von'] && $t <= $jetzt)), 'je Tag eine erkannte Betankung um 06:00 (' . $anzahlErkannt . ')');
+    pruefe($d['darf_eintragen'] && str_contains($d['summe']['text'], 'verbraucht') && $d['hinweis'] === '', 'Summe, darf eintragen, kein Hinweis');
+
+    // Eintragen mit Lieferschein: ersetzt die erkannte Menge
+    $e = TankService::betankungSpeichern($oG($tankG), ['liter' => '528', 'zeit' => $erkannt[0]['eintragen_zeit'] ?? '', 'lieferschein' => $kennungG, 'kalibrieren' => false]);
+    pruefe($e['ok'] && empty($e['kalibriert']), 'erkannte Betankung eingetragen (ohne zu kalibrieren): ' . $e['message']);
+    $d = TankService::tage($oG($tankG), $jetzt - 2 * 86400, $jetzt);
+    $g = array_column($d['tage'], null, 'tag')[$gestern] ?? [];
+    $ls = array_values(array_filter($d['betankungen'], static fn (array $x): bool => $x['quelle'] === 'lieferschein'));
+    gleich([$g['betankt_l'] ?? null, count($ls), $ls[0]['ereignisse'] ?? null, $ls[0]['lieferschein'] ?? null, $ls[0]['eintragen'] ?? null],
+        [528.0, 1, [(int) ($e['id'] ?? 0)], $kennungG, false], 'mit Eintrag: getankt laut Lieferschein, nicht mehr eintragbar');
+
+    // Ohne Kalibrierung keine Liter; ohne Sensor nur das Protokoll
+    $ohneLjm = array_diff_key($eigG, ['liter_je_mm' => 1]);
+    $tankU = $neuG('unkalibriert', $ohneLjm);
+    $einbauen($tankU, $ohneLjm);
+    $d = TankService::tage($oG($tankU), $jetzt - 86400, $jetzt);
+    pruefe($d['tage'] === [] && $d['kalibriert'] === false && str_contains($d['hinweis'], 'Inhalt je mm'), 'ohne Inhalt je mm: keine Tage, Hinweis „peilen“ – ' . $d['hinweis']);
+    $tankO = $neuG('ohne Sensor', ['inhalt_l' => '1000']);
+    TankService::betankungSpeichern($oG($tankO), ['liter' => '300', 'zeit' => Zeit::fuerEingabe(Zeit::iso($jetzt - 3 * 3600)), 'lieferschein' => 'O-1']);
+    $d = TankService::tage($oG($tankO), $jetzt - 86400, $jetzt);
+    $heute = array_column($d['tage'], null, 'tag')[$lokal($jetzt - 3 * 3600)->format('Y-m-d')] ?? [];
+    gleich([array_key_exists('verbrauch_l', $heute) ? $heute['verbrauch_l'] : 'x', $heute['betankt_l'] ?? null, array_column($d['betankungen'], 'quelle')], [null, 300.0, ['protokoll']],
+        'ohne Sensor: die Betankung zählt zum Getankten, Verbrauch unbekannt');
+
+    // Kunde mit Datenfenster: nur Tage und Betankungen darin, nichts einzutragen
+    Database::insert('freigaben', ['subject_type' => 'user', 'subject_id' => $kundeG, 'ziel_art' => 'site', 'ziel_id' => $siteG,
+        'darf_bearbeiten' => 0, 'darf_steuern' => 0, 'gueltig_ab' => null, 'gueltig_bis' => null,
+        'daten_ab' => Zeit::iso($jetzt - 86400), 'daten_bis' => Zeit::iso($jetzt - 3600), 'notiz' => '', 'created_by' => 'test', 'created_at' => gmdate('c')]);
+    alsBenutzer($kundeG);
+    $d = TankService::tage($oG($tankG), $jetzt - 3 * 86400, $jetzt);
+    $ab = $lokal($jetzt - 86400);
+    $ersterTag = $ab->format('Y-m-d');
+    // Beginnt das Fenster kurz vor Mitternacht, liegt der erste 10-min-Punkt schon am nächsten Tag.
+    pruefe($d['tage'] !== [] && in_array(min(array_column($d['tage'], 'tag')), [$ersterTag, $lokal($jetzt - 86400 + 600)->format('Y-m-d')], true),
+        'Kunde: Tage erst ab dem Datenfenster (' . implode(', ', array_column($d['tage'], 'tag')) . ')');
+    pruefe(array_filter($d['betankungen'], static fn (array $x): bool => $x['zeit'] < $jetzt - 86400 || $x['zeit'] > $jetzt - 3600) === []
+        && array_filter($d['betankungen'], static fn (array $x): bool => $x['eintragen']) === [] && $d['darf_eintragen'] === false,
+        'Kunde: Betankungen nur im Datenfenster, nichts einzutragen');
+    if ((int) $ab->format('G') >= 2 && (int) $ab->format('G') <= 22) {
+        pruefe(str_contains((string) (array_column($d['tage'], null, 'tag')[$ersterTag]['hinweis'] ?? ''), 'Messwerte für'), 'Kunde: der erste Tag nur zum Teil');
+    }
+    alsBenutzer($adminG);
+} finally {
+    alsBenutzer(null);
+    foreach (Database::select('SELECT id FROM objekte WHERE name LIKE ?', [$kennungG . '%']) as $o) {
+        AnlagenService::loeschen((int) $o['id']);
+    }
+    SiteService::deleteSite($siteG);
+    foreach ([$adminG, $kundeG] as $u) {
+        Database::execute("DELETE FROM freigaben WHERE subject_type = 'user' AND subject_id = ?", [$u]);
+        Database::execute('DELETE FROM user_roles WHERE user_id = ?', [$u]);
+        Database::execute('DELETE FROM users WHERE id = ?', [$u]);
+    }
+    Database::execute('DELETE FROM audit_log WHERE username LIKE ? OR details LIKE ?', [$kennungG . '%', '%' . $kennungG . '%']);
 }
 
 ende('tanks');

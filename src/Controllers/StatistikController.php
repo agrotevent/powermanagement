@@ -101,7 +101,8 @@ final class StatistikController extends Controller
             'vorgabe'     => $vorgabe,
             'auswertung'  => MesspunktService::auswertung(),
             'stylesheets' => ['/assets/vendor/uplot/uPlot.min.css'],
-            'scripts'     => ['/assets/vendor/uplot/uPlot.iife.min.js', '/assets/js/live.js', '/assets/js/statistik.js'],
+            // tank.js: Verbrauch je Tag eines Tanksensors
+            'scripts'     => ['/assets/vendor/uplot/uPlot.iife.min.js', '/assets/js/live.js', '/assets/js/statistik.js', '/assets/js/tank.js'],
         ]);
     }
 

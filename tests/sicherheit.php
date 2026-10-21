@@ -9,9 +9,10 @@ declare(strict_types=1);
  * ohne fremde Vorgeschichte; Schalt-Freigaben für einen Kanal gelten nur für
  * ihn; am Standort ändern braucht „bearbeiten“; Schlüssel aus dem Repository
  * werden keine Pfade; Namen brechen kein Line Protocol; CSV ohne Formeln
- * (auch die des Tanks und sein Protokoll mit Lieferscheinen); nur http(s);
- * kein öffentlicher Schlüssel; PDF-Werkzeuge hängen nicht; der Tankverlauf
- * verrät die Abfrage an die InfluxDB nur der Messtechnik; eine Kennlinie von
+ * (auch die des Tanks, sein Protokoll mit Lieferscheinen und der Verbrauch
+ * je Tag); nur http(s); kein öffentlicher Schlüssel; PDF-Werkzeuge hängen
+ * nicht; Tankverlauf und Verbrauch je Tag verraten die Abfrage an die
+ * InfluxDB nur der Messtechnik; eine Kennlinie von
  * Hand nimmt nur Anker und Steigung als endliche Zahlen.
  *
  * Die Prüfungen über HTTP (Weiterleitungen, Sitzung, Token, Benutzer-
@@ -208,6 +209,9 @@ try {
     $csv = $aufruf('csv', ['inhalt' => 'protokoll']);
     pruefe($e['ok'] && str_contains($csv, '"\'=SUMME(B1:B9)"') && str_contains($csv, '"\'@HYPERLINK(""x"")"') && !str_contains($csv, ';"=SUMME') && !str_contains($csv, ';"@'),
         'Protokoll-CSV: Lieferschein und Notiz als Text, keine Formel');
+    $csv = $aufruf('csv', ['inhalt' => 'tage', 'zeitraum' => '24h']);
+    pruefe(str_contains($csv, '"Tag";"Verbrauch [l]"') && str_contains($csv, '=SUMME(B1:B9)') && !str_contains($csv, ';"=') && !str_contains($csv, ';"@'),
+        'Tage-CSV: Lieferschein in den Betankungen des Tags, keine Formel');
     // Kennlinie von Hand: nur Anker und Steigung, nur endliche Zahlen
     $fassungenVorher = (int) Database::scalar('SELECT COUNT(*) FROM tank_kennlinien WHERE objekt_id = ?', [$tank]);
     foreach ([['roh_anker' => '2', 'mm_anker' => '20', 'mm_je_roh' => '150', 'roh_max' => '99'], ['roh_anker' => '2', 'mm_anker' => '20', 'mm_je_roh' => '1e999'],
@@ -228,6 +232,9 @@ try {
     $antwort = json_decode($aufruf('verlauf', ['zeitraum' => '6h']), true);
     gleich([$antwort['ok'] ?? null, $antwort['message'] ?? null], [false, 'Die Messdaten ließen sich gerade nicht abfragen.'],
         'Tankverlauf: ohne „datenquellen.manage“ kein Text der InfluxDB (Aufbau der Abfrage)');
+    $antwort = json_decode($aufruf('tage', ['zeitraum' => '24h']), true);
+    gleich([$antwort['ok'] ?? null, $antwort['message'] ?? null, str_contains(json_encode($antwort), 'InfluxDB')], [false, 'Die Messdaten ließen sich gerade nicht abfragen.', false],
+        'Verbrauch je Tag: ohne „datenquellen.manage“ kein Text der InfluxDB');
     Config::set('influx.url', $urlVorher);
     Config::set('app.demo', $demoVorher);
     $_GET = [];
