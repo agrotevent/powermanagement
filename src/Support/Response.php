@@ -151,6 +151,11 @@ final class Response
      * Nicht zwischenspeichern, kein Referer hinaus, kein Erraten des Typs.
      * Der Dateiname nur aus [A-Za-z0-9._-] (höchstens 100 Zeichen) – nie
      * Kundennamen oder andere Angaben aus dem Inhalt in der Kopfzeile.
+     *
+     * Inline nur eigene PDFs (Übergabeberichte aus App\Pdf): die CSP
+     * „sandbox“ sperrte die PDF-Ansicht von Chrome. Fremde PDFs (Prüfnachweise
+     * aus einer Prüfsoftware) gehen als Anhang und zusätzlich mit „sandbox“ –
+     * öffnete ein Browser sie trotzdem selbst, liefe darin nichts.
      */
     public static function pdf(string $name, string $bytes, bool $anhang = false): void
     {
@@ -161,6 +166,9 @@ final class Response
         header('X-Content-Type-Options: nosniff');
         header('Cache-Control: private, no-store');
         header('Referrer-Policy: no-referrer');
+        if ($anhang) {
+            header("Content-Security-Policy: default-src 'none'; sandbox");
+        }
         echo $bytes;
     }
 

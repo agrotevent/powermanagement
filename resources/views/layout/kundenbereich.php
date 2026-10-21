@@ -9,7 +9,7 @@
  * den Daumen, Ziele ≥ 48 px, über dem Home-Balken), ab 720 px Reiter oben.
  * Keine Bedienung nur über Hover. Im Kundenbereich durchgehend „Sie“.
  *
- * Neue Seiten (Prüfnachweise) kommen in $navigation dazu.
+ * Neue Seiten kommen in $navigation dazu.
  *
  * @var string $content
  * @var array<string,mixed>|null $kunde
@@ -25,7 +25,8 @@ $absender = $firma !== '' ? $firma : (string) ($appName ?? 'PowerManagement');
 $pfad = (string) (parse_url((string) ($_SERVER['REQUEST_URI'] ?? '/'), PHP_URL_PATH) ?: '/');
 
 /*
- * Ziel => [Wort, Symbol (ein Pfad im 24er-Raster, nur Striche)]. Aktiv ist
+ * Ziel => [Wort, Symbol (ein Pfad im 24er-Raster, nur Striche), kurzes Wort
+ * für die Leiste am Telefon]. Aktiv ist
  * ein Eintrag auf seiner Seite und auf allem darunter (eine Location →
  * „Locations“), die Übersicht nur auf sich selbst – auf einer Fehlerseite
  * keiner: ihr Rumpf ist für jede Adresse derselbe (fremd = nicht vorhanden).
@@ -34,6 +35,7 @@ $navigation = [
     Kundenbereich::PFAD                => ['Übersicht', 'M3 11 12 4l9 7M5 10v10h5v-6h4v6h5V10'],
     Kundenbereich::PFAD . '/locations' => ['Locations', 'M12 21s-7-6.2-7-11.5a7 7 0 0 1 14 0C19 14.8 12 21 12 21zM12 12.5a3 3 0 1 0 0-6 3 3 0 0 0 0 6z'],
     Kundenbereich::PFAD . '/protokolle' => ['Protokolle', 'M7 3h7l5 5v13H7zM14 3v5h5M10 12.5h6M10 16.5h6'],
+    Kundenbereich::PFAD . '/pruefnachweise' => ['Prüfnachweise', 'M12 3l7 3v5c0 4.6-3 8.4-7 10-4-1.6-7-5.4-7-10V6zM8.8 12.2l2.2 2.2 4.4-4.6', 'Nachweise'],
     Kundenbereich::KONTO               => ['Konto', 'M12 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8zM4 21c0-4.4 3.6-7 8-7s8 2.6 8 7'],
 ];
 $fehlerseite = !empty($fehlerseite);
@@ -64,10 +66,15 @@ $aktiv = static fn (string $ziel): bool => !$fehlerseite
     </form>
 </header>
 <nav class="kb-nav" aria-label="Kundenbereich">
-    <?php foreach ($navigation as $ziel => [$text, $symbol]): ?>
-        <a href="<?= View::e($ziel) ?>"<?= $aktiv($ziel) ? ' aria-current="page"' : '' ?>>
+    <?php foreach ($navigation as $ziel => $eintrag): ?>
+        <?php [$text, $symbol] = $eintrag; $kurz = $eintrag[2] ?? null; ?>
+        <a href="<?= View::e($ziel) ?>"<?= $aktiv($ziel) ? ' aria-current="page"' : '' ?><?= $kurz !== null ? ' aria-label="' . View::e($text) . '"' : '' ?>>
             <svg class="kb-symbol" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="<?= View::e($symbol) ?>"/></svg>
-            <span><?= View::e($text) ?></span>
+            <?php if ($kurz !== null): ?>
+                <span class="kb-nav-lang" aria-hidden="true"><?= View::e($text) ?></span><span class="kb-nav-kurz" aria-hidden="true"><?= View::e($kurz) ?></span>
+            <?php else: ?>
+                <span><?= View::e($text) ?></span>
+            <?php endif; ?>
         </a>
     <?php endforeach; ?>
 </nav>

@@ -31,6 +31,10 @@ use App\Support\Zeit;
  * nur gespeichert – nie eine Vorschau. Sie bleiben, wenn die
  * Location-Freigabe abläuft, und enden mit dem Kunden.
  *
+ * Prüfnachweise (DGUV V3) ebenso nur über den Kunden (pruefnachweise.kunde_id),
+ * erst nach der Freigabe durch eine Person und nur mit unversehrter Datei –
+ * auch sie unabhängig von der Location-Freigabe.
+ *
  * Herausgegeben werden nur ausdrücklich genannte Felder – nie sites.notes,
  * floors.notes, floors.fremdbestand, kunden.notizen, mobile Anlagen,
  * Kabel, Messgeräte oder Einsätze. Eventworx wird von hier aus nie gefragt.
@@ -98,9 +102,10 @@ final class KundenSicht
      *
      * etagen: nur Etagen mit Plan; feststrom: nur fest installierte Anlagen
      * dieses Standorts (keine Vorlagen, nie mobile); berichte: die Protokolle
-     * des Kunden an diesem Standort (berichte()).
+     * des Kunden an diesem Standort (berichte()); nachweise: seine
+     * Prüfnachweise, die diesem Standort zugeordnet sind (nachweise()).
      *
-     * @return array{site:array{id:int,name:string,address:string},freigaben:list<array<string,mixed>>,etagen:list<array{id:int,name:string,plan:string,seite:int}>,feststrom:list<array{name:string,art:string,etage:string,anschluss:string,vorsicherung:string}>,berichte:list<array<string,mixed>>}|null
+     * @return array{site:array{id:int,name:string,address:string},freigaben:list<array<string,mixed>>,etagen:list<array{id:int,name:string,plan:string,seite:int}>,feststrom:list<array{name:string,art:string,etage:string,anschluss:string,vorsicherung:string}>,berichte:list<array<string,mixed>>,nachweise:list<array<string,mixed>>}|null
      */
     public static function location(int $kundeId, int $siteId, ?int $jetzt = null): ?array
     {
@@ -140,7 +145,8 @@ final class KundenSicht
                 'vorsicherung' => $vorsicherung,
             ];
         }
-        return $eintrag + ['etagen' => $etagen, 'feststrom' => $feststrom, 'berichte' => self::berichte($kundeId, $siteId, $jetzt)];
+        return $eintrag + ['etagen' => $etagen, 'feststrom' => $feststrom, 'berichte' => self::berichte($kundeId, $siteId, $jetzt),
+            'nachweise' => self::nachweise($kundeId, $siteId, $jetzt)];
     }
 
     /**
@@ -268,11 +274,49 @@ final class KundenSicht
     }
 
     /**
+     * Die Prüfnachweise des Kunden, neueste Prüfung zuerst – nur
+     * freigegebene mit Datei, nur Listenfelder (nie Herkunft, Dateiname,
+     * Bearbeiter oder Eventworx-Kennungen), mit Gültigkeit und Quelle. Mit
+     * $siteId nur die an dieser Location. Kunde beendet → [].
+     *
+     * @return list<array{id:int,bezeichnung:string,inventarnummer:string,seriennummer:string,norm:string,ergebnis:string,geprueft_am:?string,naechste_pruefung:?string,einsatz_von:?string,einsatz_bis:?string,hinweis:string,standort:string,site_id:?int,quelle:string,gueltigkeit:array<string,mixed>}>
+     */
+    public static function nachweise(int $kundeId, ?int $siteId = null, ?int $jetzt = null): array
+    {
+        if (Kundenbereich::kundeSperre($kundeId, $jetzt) !== null) {
+            return [];
+        }
+        $heute = Pruefnachweise::heute($jetzt);
+        return array_map(static fn (array $n): array => self::nachweisZeile($n, $heute), Pruefnachweise::fuerKunde($kundeId, true, $siteId));
+    }
+
+    /** Ein Prüfnachweis, wie der Kunde ihn sieht – oder null (fremd, nicht freigegeben, ohne Datei, Kunde beendet: dasselbe). */
+    public static function nachweis(int $kundeId, int $id): ?array
+    {
+        $n = self::nachweisRoh($kundeId, $id);
+        return $n === null ? null : self::nachweisZeile($n, Pruefnachweise::heute());
+    }
+
+    /**
+     * Das PDF eines Prüfnachweises für den Kunden – die hinterlegten Bytes
+     * mit nachgerechneter Prüfsumme (sonst nichts), unter einem neutralen
+     * Namen (nie dem der hochgeladenen Datei).
+     *
+     * @return array{name:string,bytes:string,sha256:string}|null
+     */
+    public static function nachweisPdf(int $kundeId, int $id): ?array
+    {
+        $n = self::nachweisRoh($kundeId, $id);
+        $datei = $n !== null ? Pruefnachweise::datei($n) : null;
+        return $datei === null ? null : ['name' => Pruefnachweise::kundenDateiname($n), 'bytes' => $datei['bytes'], 'sha256' => $datei['sha256']];
+    }
+
+    /**
      * Für das Personal: „Der Kunde sieht derzeit …“ – aus denselben
      * Prädikaten wie der Kundenbereich. gesperrt: null oder der Grund
      * (Kunde beendet oder abgelaufen; dann sieht er nichts).
      *
-     * @return array{gesperrt:?string,locations:list<array<string,mixed>>,kommend:list<array{name:string,ab:string}>,berichte:list<array<string,mixed>>}
+     * @return array{gesperrt:?string,locations:list<array<string,mixed>>,kommend:list<array{name:string,ab:string}>,berichte:list<array<string,mixed>>,nachweise:list<array<string,mixed>>}
      */
     public static function zusammenfassung(int $kundeId, ?int $jetzt = null): array
     {
@@ -281,7 +325,21 @@ final class KundenSicht
             'locations' => self::locations($kundeId, $jetzt),
             'kommend'   => self::kommend($kundeId, $jetzt),
             'berichte'  => self::berichte($kundeId, null, $jetzt),
+            'nachweise' => self::nachweise($kundeId, null, $jetzt),
         ];
+    }
+
+    /**
+     * Zahlen zu den Prüfnachweisen für die Übersicht: wie viele, wie viele
+     * laufen bald ab, wie viele sind abgelaufen, wie viele ohne Datum.
+     *
+     * @param list<array<string,mixed>> $nachweise aus nachweise()
+     * @return array{alle:int,laeuft_ab:int,abgelaufen:int,unbekannt:int}
+     */
+    public static function nachweisZahlen(array $nachweise): array
+    {
+        $codes = array_count_values(array_map(static fn (array $n): string => (string) $n['gueltigkeit']['code'], $nachweise));
+        return ['alle' => count($nachweise), 'laeuft_ab' => $codes['laeuft_ab'] ?? 0, 'abgelaufen' => $codes['abgelaufen'] ?? 0, 'unbekannt' => $codes['unbekannt'] ?? 0];
     }
 
     // ------------------------------------------------------------ intern
@@ -307,6 +365,39 @@ final class KundenSicht
             'abgeschlossen_am' => $b['abgeschlossen_am'] !== null ? (string) $b['abgeschlossen_am'] : null,
             'pdf'              => $b['pdf_sha256'] !== null,
             'ersetzt_durch'    => $nachfolger !== null ? (string) $nachfolger['nummer'] : null,
+        ];
+    }
+
+    /** Der Nachweis als Zeile aus der Datenbank – nur, wenn der Kunde ihn sieht. */
+    private static function nachweisRoh(int $kundeId, int $id): ?array
+    {
+        if (Kundenbereich::kundeSperre($kundeId) !== null) {
+            return null;
+        }
+        $n = Pruefnachweise::vonKunde($kundeId, $id);
+        return $n !== null && Pruefnachweise::sichtbar($n) ? $n : null;
+    }
+
+    /** Ein Prüfnachweis in der Liste des Kunden – nur ausdrücklich genannte Felder. */
+    private static function nachweisZeile(array $n, string $heute): array
+    {
+        return [
+            'id'                => (int) $n['id'],
+            'bezeichnung'       => (string) $n['bezeichnung'],
+            'inventarnummer'    => (string) $n['inventarnummer'],
+            'seriennummer'      => (string) $n['seriennummer'],
+            'norm'              => (string) $n['norm'],
+            'ergebnis'          => (string) $n['ergebnis'],
+            'geprueft_am'       => $n['geprueft_am'] !== null ? (string) $n['geprueft_am'] : null,
+            'naechste_pruefung' => $n['naechste_pruefung'] !== null ? (string) $n['naechste_pruefung'] : null,
+            'einsatz_von'       => $n['einsatz_von'] !== null ? (string) $n['einsatz_von'] : null,
+            'einsatz_bis'       => $n['einsatz_bis'] !== null ? (string) $n['einsatz_bis'] : null,
+            'hinweis'           => (string) $n['hinweis'],
+            // Location nur mit Namen – sie stammt aus den Freigaben dieses Kunden (Pruefnachweise::angaben).
+            'site_id'           => $n['site_id'] !== null ? (int) $n['site_id'] : null,
+            'standort'          => (string) ($n['standort_name'] ?? ''),
+            'quelle'            => Pruefnachweise::quelleText($n),
+            'gueltigkeit'       => Pruefnachweise::gueltigkeit($n, $heute),
         ];
     }
 

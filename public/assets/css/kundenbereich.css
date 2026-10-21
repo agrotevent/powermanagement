@@ -36,6 +36,8 @@ body.kundenbereich { background: var(--bg); font-size: 15px; --kb-rand: max(1rem
     gap: .15rem; padding: .3rem .2rem; color: var(--text-muted); font-size: .72rem; font-weight: 600; text-decoration: none;
 }
 .kb-nav a span { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Am Telefon das kurze Wort (fünf Ziele nebeneinander), ab 720 px das ganze. */
+.kb-nav .kb-nav-lang { display: none; }
 .kb-nav a[aria-current="page"] { color: var(--primary); }
 .kb-nav a[aria-current="page"] .kb-symbol { stroke-width: 2.2; }
 .kb-nav a:focus-visible { outline: 2px solid var(--primary); outline-offset: -4px; border-radius: 8px; }
@@ -61,6 +63,8 @@ body.kundenbereich { background: var(--bg); font-size: 15px; --kb-rand: max(1rem
     .kb-nav a { flex: 0 0 auto; flex-direction: row; gap: .45rem; min-height: 48px; padding: 0 .9rem; font-size: .9rem; border-bottom: 3px solid transparent; }
     .kb-nav a[aria-current="page"] { border-bottom-color: var(--primary); }
     .kb-symbol { width: 20px; height: 20px; }
+    .kb-nav .kb-nav-lang { display: inline; }
+    .kb-nav .kb-nav-kurz { display: none; }
     .kb-fuss { padding-bottom: 1.2rem; }
 }
 
@@ -124,6 +128,29 @@ a.kb-ort:hover .kb-ort-name, a.kb-ort:focus-visible .kb-ort-name { text-decorati
 .kb-pruefsumme { overflow-wrap: anywhere; word-break: break-all; }
 .kundenbereich .bericht-ansicht .kv dd { overflow-wrap: anywhere; }
 
+/* Prüfnachweise: Frist immer mit Symbol und Wort, Hinweise zur Mietzeit darunter. */
+.kb-geraet { display: block; font-weight: 650; overflow-wrap: anywhere; }
+.kb-frist { display: inline-flex; align-items: center; gap: .3rem; padding: .05rem .55rem; border-radius: 999px; font-size: .8rem; font-weight: 650;
+    border: 1px solid var(--border); color: var(--text-muted); white-space: nowrap; }
+.kb-frist-gueltig { color: var(--success); }
+.kb-frist.kb-frist-gueltig { background: var(--success-light); border-color: transparent; }
+.kb-frist-laeuft_ab { color: var(--warning); }
+.kb-frist.kb-frist-laeuft_ab { background: var(--warning-light); border-color: transparent; }
+.kb-frist-abgelaufen { color: var(--danger); }
+.kb-frist.kb-frist-abgelaufen { background: var(--danger-light); border-color: transparent; }
+.kb-hinweis { display: block; margin-top: .25rem; font-size: .85rem; color: var(--warning); overflow-wrap: anywhere; }
+.kb-hinweis::before { content: "! "; font-weight: 700; }
+.kb-notiz { display: block; margin-top: .25rem; font-size: .85rem; overflow-wrap: anywhere; }
+.kb-nachweise td { vertical-align: top; }
+.kb-nachweise .kb-pdf { white-space: nowrap; }
+.kb-zahlen { list-style: none; display: flex; flex-wrap: wrap; gap: .3rem 1.2rem; margin: 0 0 .8rem; padding: 0; }
+.kb-zahlen li { display: inline-flex; align-items: baseline; gap: .3rem; }
+.kb-filter { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem .8rem; margin: 0 0 1rem; }
+.kb-filter label { font-weight: 600; }
+.kb-filter select { min-height: 44px; min-width: 0; flex: 1 1 12rem; max-width: 28rem; }
+/* Mit Skript schickt die Auswahl selbst ab; der Knopf bleibt für ohne. */
+@media (scripting: enabled) { .kb-filter .btn { display: none; } }
+
 /* Ansprechpartner */
 .kb-kontakt p { overflow-wrap: anywhere; }
 
@@ -140,7 +167,9 @@ a.kb-ort:hover .kb-ort-name, a.kb-ort:focus-visible .kb-ort-name { text-decorati
 /* ------------------------------------------------------------ Druck */
 @media print {
     body.kundenbereich { background: #fff; font-size: 11pt; }
-    .kb-nav, .kb-abmelden, .kb-sprung, .kb-fuss, .kb-zurueck, .demo-flag, .kb-pdf, .kb-protokoll-pdf .btn { display: none !important; }
+    .kb-nav, .kb-abmelden, .kb-sprung, .kb-fuss, .kb-zurueck, .demo-flag, .kb-pdf, .kb-protokoll-pdf .btn, .kb-filter { display: none !important; }
+    .kb-frist { border: 1px solid #000; background: none !important; color: #000 !important; }
+    .kb-hinweis { color: #000; }
     .kb-fruehere { display: block; }
     .kb-kopf { padding: 0 0 .4rem; border-bottom: 1px solid #000; }
     .kb-inhalt { max-width: none; padding: .6rem 0 0; }

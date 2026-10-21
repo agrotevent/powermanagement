@@ -1,7 +1,9 @@
 <?php
 /**
  * Ein Kunde – Reiter Übersicht, Stammdaten, Zugänge, Freigaben, Protokolle,
- * Abrufe (Zugänge, Freigaben und Abrufe nur mit „kunden.manage“).
+ * Prüfnachweise, Abrufe (Zugänge, Freigaben und Abrufe nur mit
+ * „kunden.manage“). Die Zahl an den Reitern Protokolle und Prüfnachweise:
+ * was der Kunde davon sieht.
  *
  * @var array<string,mixed> $kunde
  * @var string $tab
@@ -37,6 +39,7 @@ $id = (int) $kunde['id'];
                 'zugaenge'  => ' (' . (int) $zahlen['zugaenge'] . ')',
                 'freigaben' => ' (' . (int) $zahlen['freigaben'] . ')',
                 'protokolle' => ' (' . (int) $zahlen['berichte'] . ')',
+                'nachweise' => ' (' . (int) $zahlen['nachweise'] . ')',
                 default     => '',
             }; ?></a>
     <?php endforeach; ?>

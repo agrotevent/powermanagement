@@ -9,7 +9,7 @@ use App\Support\Audit;
 use App\Support\Database;
 
 /**
- * Wer hat welches Dokument im Kundenbereich geladen (Protokoll-PDF, später
+ * Wer hat welches Dokument im Kundenbereich geladen (Protokoll-PDF,
  * Prüfnachweis) – damit sich nach einer Fehlzuordnung sagen lässt, ob der
  * falsche Kunde das Dokument wirklich hatte (Art. 33 DSGVO).
  *

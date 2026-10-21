@@ -33,7 +33,9 @@ use App\Support\View;
  *
  * Protokolle sind die Übergabeberichte, die dem Kunden ausdrücklich
  * zugeordnet und abgeschlossen sind; ihr PDF nur in den beim Abschluss
- * gespeicherten Bytes. Jeder Download steht in den Abrufen (App\Kunden\Abrufe).
+ * gespeicherten Bytes. Prüfnachweise (DGUV V3) sind die freigegebenen
+ * Nachweise des Kunden; ihr PDF geht als Datei hinaus (fremdes Dokument).
+ * Jeder Download steht in den Abrufen (App\Kunden\Abrufe).
  */
 final class KundenbereichController extends Controller
 {
@@ -52,6 +54,7 @@ final class KundenbereichController extends Controller
             'locations' => KundenSicht::locations($id),
             'kommend'   => KundenSicht::kommend($id),
             'berichte'  => KundenSicht::berichte($id),
+            'nachweise' => KundenSicht::nachweise($id),
             'kontakt'   => KundenEinstellungen::kontakt(),
         ]);
     }
@@ -152,6 +155,58 @@ final class KundenbereichController extends Controller
         Abrufe::merken((int) $kunde['id'], 'bericht', (int) $id, $pdf['sha256']);
         Session::freigeben();
         Response::pdf($pdf['name'], $pdf['bytes']);
+    }
+
+    /**
+     * Die Prüfnachweise (DGUV V3) der Geräte des Kunden – freigegebene mit
+     * Datei, wahlweise nur die einer Location (?location=…, nur eine der
+     * Locations aus der Liste selbst; alles andere heißt „alle“).
+     */
+    public function nachweise(Request $request): void
+    {
+        $kunde = $this->kunde($request);
+        if ($kunde === null) {
+            return;
+        }
+        $alle = KundenSicht::nachweise((int) $kunde['id']);
+        $orte = [];
+        foreach ($alle as $n) {
+            if ($n['site_id'] !== null && $n['standort'] !== '') {
+                $orte[$n['site_id']] = $n['standort'];
+            }
+        }
+        natcasesort($orte);
+        $roh = $request->str('location');
+        $ort = preg_match('/^[1-9]\d{0,17}$/', $roh) === 1 && isset($orte[(int) $roh]) ? (int) $roh : null;
+        $this->seite('kundenbereich/nachweise', [
+            'kunde'     => $kunde,
+            'nachweise' => $ort === null ? $alle : array_values(array_filter($alle, static fn (array $n): bool => $n['site_id'] === $ort)),
+            'zahlen'    => KundenSicht::nachweisZahlen($alle),
+            'orte'      => $orte,
+            'ort'       => $ort,
+        ]);
+    }
+
+    /**
+     * Das PDF eines Prüfnachweises – als Datei (es stammt nicht von uns,
+     * also nicht im Browser), unter neutralem Namen; der Abruf wird
+     * festgehalten.
+     */
+    public function nachweisPdf(Request $request, array $params): void
+    {
+        $kunde = $this->kunde($request);
+        if ($kunde === null) {
+            return;
+        }
+        $id = self::id($params, 'id');
+        $pdf = $id === null ? null : KundenSicht::nachweisPdf((int) $kunde['id'], $id);
+        if ($pdf === null) {
+            Response::notFound();
+            return;
+        }
+        Abrufe::merken((int) $kunde['id'], 'nachweis', (int) $id, $pdf['sha256']);
+        Session::freigeben();
+        Response::pdf($pdf['name'], $pdf['bytes'], true);
     }
 
     public function konto(Request $request): void

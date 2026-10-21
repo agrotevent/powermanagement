@@ -106,7 +106,9 @@ final class KundenService
             'kommend'         => count(Kundenbereich::kommend($kundeId)),
             'freigaben'       => (int) Database::scalar("SELECT COUNT(*) FROM freigaben WHERE subject_type = 'kunde' AND subject_id = ?", [$kundeId]),
             'berichte'        => (int) Database::scalar("SELECT COUNT(*) FROM berichte WHERE kunde_id = ? AND status IN ('abgeschlossen', 'ersetzt')", [$kundeId]),
-            'nachweise'       => (int) Database::scalar("SELECT COUNT(*) FROM pruefnachweise WHERE kunde_id = ? AND status = 'freigegeben'", [$kundeId]),
+            // Wie im Kundenbereich: freigegeben und mit Datei.
+            'nachweise'       => (int) Database::scalar("SELECT COUNT(*) FROM pruefnachweise n JOIN pruefnachweis_dateien d ON d.id = n.datei_id
+                WHERE n.kunde_id = ? AND n.status = 'freigegeben'", [$kundeId]),
             'vorgaenge'       => (int) Database::scalar('SELECT COUNT(*) FROM kunden_vorgaenge WHERE kunde_id = ?', [$kundeId]),
             'abrufe'          => (int) Database::scalar('SELECT COUNT(*) FROM kunden_abrufe WHERE kunde_id = ?', [$kundeId]),
         ];
@@ -117,7 +119,7 @@ final class KundenService
      * Kundenbereich ihm zeigt (KundenSicht::zusammenfassung(), dieselben
      * Prädikate) –, dazu, wie viele seiner Zugänge sich anmelden können.
      *
-     * @return array{gesperrt:?string,locations:list<array<string,mixed>>,kommend:list<array{name:string,ab:string}>,zugaenge_aktiv:int}
+     * @return array{gesperrt:?string,locations:list<array<string,mixed>>,kommend:list<array{name:string,ab:string}>,berichte:list<array<string,mixed>>,nachweise:list<array<string,mixed>>,zugaenge_aktiv:int}
      */
     public static function uebersicht(int $kundeId): array
     {
@@ -236,14 +238,9 @@ final class KundenService
             }
             Database::execute("DELETE FROM freigaben WHERE subject_type = 'kunde' AND subject_id = ?", [$id]);
             Database::execute('DELETE FROM kunden_vorgaenge WHERE kunde_id = ?', [$id]);
-            $dateien = array_map('intval', array_column(Database::select(
-                'SELECT DISTINCT datei_id FROM pruefnachweise WHERE kunde_id = ? AND datei_id IS NOT NULL', [$id]), 'datei_id'));
-            Database::execute('DELETE FROM pruefnachweise WHERE kunde_id = ?', [$id]);
-            foreach ($dateien as $datei) {
-                // Gleiche Bytes liegen nur einmal da – eine Datei, die noch ein
-                // anderer Nachweis nutzt, bleibt.
-                Database::execute('DELETE FROM pruefnachweis_dateien WHERE id = ? AND NOT EXISTS (SELECT 1 FROM pruefnachweise WHERE datei_id = ?)', [$datei, $datei]);
-            }
+            // Nachweise mit ihren Abrufen; gleiche Bytes liegen nur einmal da –
+            // eine Datei, die noch ein anderer Nachweis nutzt, bleibt.
+            Pruefnachweise::kundeEntfernt($id);
             Database::execute('DELETE FROM kunden_abrufe WHERE kunde_id = ?', [$id]);
             // Übergabeberichte bleiben für die Aufbewahrung – nur ohne Kunde.
             BerichtService::kundeEntfernt($id);

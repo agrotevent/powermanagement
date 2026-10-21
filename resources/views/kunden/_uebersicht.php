@@ -5,10 +5,11 @@
  * Prädikate).
  *
  * @var array<string,mixed> $kunde
- * @var array{gesperrt:?string,locations:list<array<string,mixed>>,kommend:list<array{name:string,ab:string}>,berichte:list<array<string,mixed>>,zugaenge_aktiv:int} $uebersicht
+ * @var array{gesperrt:?string,locations:list<array<string,mixed>>,kommend:list<array{name:string,ab:string}>,berichte:list<array<string,mixed>>,nachweise:list<array<string,mixed>>,zugaenge_aktiv:int} $uebersicht
  * @var array<string,int> $zahlen
  * @var bool $pflegen
  */
+use App\Kunden\KundenSicht;
 use App\Support\View;
 use App\Support\Zeit;
 
@@ -16,6 +17,8 @@ $id = (int) $kunde['id'];
 $u = $uebersicht;
 $n = count($u['locations']);
 $p = count($u['berichte']);
+$k = count($u['nachweise']);
+$nz = KundenSicht::nachweisZahlen($u['nachweise']);
 $datum = static fn (string $d): string => preg_match('/^(\d{4})-(\d{2})-(\d{2})$/', $d, $m) === 1 ? $m[3] . '.' . $m[2] . '.' . $m[1] : $d;
 ?>
 <div class="grid grid-2">
@@ -25,7 +28,8 @@ $datum = static fn (string $d): string => preg_match('/^(\d{4})-(\d{2})-(\d{2})$
             <?php if ($u['gesperrt'] !== null): ?>
                 <p class="notice warn">Nichts – der Kunde ist <?= (int) $kunde['aktiv'] === 1 ? 'abgelaufen' : 'beendet' ?>, seine Zugänge sind zu.</p>
             <?php else: ?>
-                <p><strong><?= $n ?> <?= $n === 1 ? 'Location' : 'Locations' ?></strong> · <strong><?= $p ?> <?= $p === 1 ? 'Protokoll' : 'Protokolle' ?></strong></p>
+                <p><strong><?= $n ?> <?= $n === 1 ? 'Location' : 'Locations' ?></strong> · <strong><?= $p ?> <?= $p === 1 ? 'Protokoll' : 'Protokolle' ?></strong>
+                    · <strong><?= $k ?> <?= $k === 1 ? 'Prüfnachweis' : 'Prüfnachweise' ?></strong></p>
                 <?php if ($u['locations'] === []): ?>
                     <p class="muted">Keine – Standorte gibt eine Freigabe frei<?= $pflegen ? ' (Reiter „Freigaben“)' : '' ?>.</p>
                 <?php else: ?>
@@ -50,6 +54,14 @@ $datum = static fn (string $d): string => preg_match('/^(\d{4})-(\d{2})-(\d{2})$
                     </ul>
                     <?php if ($p > 10): ?><p class="small"><a href="/kunden/<?= $id ?>?tab=protokolle">Alle <?= $p ?> Protokolle</a></p><?php endif; ?>
                 <?php endif; ?>
+                <?php if ($u['nachweise'] !== []): ?>
+                    <h3 class="mt">Prüfnachweise</h3>
+                    <p class="small"><?= View::e(implode(' · ', array_filter([
+                        $nz['abgelaufen'] > 0 ? $nz['abgelaufen'] . ' abgelaufen' : '',
+                        $nz['laeuft_ab'] > 0 ? $nz['laeuft_ab'] . ($nz['laeuft_ab'] === 1 ? ' läuft' : ' laufen') . ' in 30 Tagen ab' : '',
+                        $nz['unbekannt'] > 0 ? $nz['unbekannt'] . ' ohne Datum der nächsten Prüfung' : '',
+                    ])) ?: 'alle gültig') ?> · <a href="/kunden/<?= $id ?>?tab=nachweise">alle Nachweise</a></p>
+                <?php endif; ?>
                 <?php if ($u['kommend'] !== []): ?>
                     <h3 class="mt">Kommt noch</h3>
                     <ul class="liste-schlicht">
@@ -60,7 +72,7 @@ $datum = static fn (string $d): string => preg_match('/^(\d{4})-(\d{2})-(\d{2})$
                 <?php endif; ?>
                 <p class="help">Je Location: Anschrift, Pläne der Etagen und feste Stromanschlüsse – keine mobilen Anlagen, Kabel,
                     Messgeräte oder Notizen. Protokolle sieht der Kunde erst, wenn sie ihm ausdrücklich zugeordnet und abgeschlossen sind
-                    (Reiter „Protokolle“), Prüfnachweise erst nach der Freigabe – nie über den Standort allein.</p>
+                    (Reiter „Protokolle“), Prüfnachweise erst nach der Freigabe (Reiter „Prüfnachweise“) – nie über den Standort allein.</p>
             <?php endif; ?>
         </div>
     </section>

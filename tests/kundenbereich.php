@@ -36,7 +36,9 @@ declare(strict_types=1);
  * über die Zuordnung am Bericht – mehrere Veranstalter auf einem Gelände,
  * ersetzte Fassungen unter der gültigen, PDF nur gespeichert (Kopfzeilen,
  * Prüfsumme, Abruf in kunden_abrufe, Audit und Lebenslauf), Fremdes und
- * Unfertiges mit derselben 404 –, am Bericht und im Reiter Protokolle
+ * Unfertiges mit derselben 404 –; Prüfnachweise nur freigegeben mit Datei
+ * (PDF als Anhang, Abruf; Fremdes, Entwurf, Zurückgezogenes, ohne Datei mit
+ * derselben 404) –, am Bericht und im Reiter Protokolle
  * zuordnen (Vorschlag, Rückfrage bei anderem Namen, CSRF, Rechte);
  * Kundenverwaltung mit allen Reitern,
  * Geheimnis nur einmal in der Antwort (no-store, Einmal-Marke), Einrichtungs-
@@ -61,6 +63,7 @@ use App\Kunden\KundenEinstellungen;
 use App\Kunden\Kundenbereich;
 use App\Kunden\KundenService;
 use App\Kunden\KundenSicht;
+use App\Kunden\Pruefnachweise;
 use App\Services\BenutzerService;
 use App\Services\SiteService;
 use App\Support\Config;
@@ -311,6 +314,21 @@ try {
         + $abgeschlossen($vorTagen(2)), $pdfVon('b4'));
     $ub5 = $berichtAnlegen('b5', ['nummer' => $nummer(5), 'laufnr' => 5, 'kunde_id' => $kunden['k1'], 'kunde_name' => $kundeK1] + $abgeschlossen($vorTagen(1)));
     $ub6 = $berichtAnlegen('b6', ['nummer' => $nummer(6), 'laufnr' => 6, 'kunde_id' => $kunden['k3']] + $abgeschlossen($vorTagen(1)), $pdfVon('b6'));
+
+    // Prüfnachweise per SQL (Upload und Freigabe prüft tests/pruefnachweise.php): nf (K1, freigegeben, mit Datei, an A),
+    // ne (K1, Entwurf), nz (K1, zurückgezogen), no (K1, freigegeben, aber ohne Datei), n2f (K2, freigegeben).
+    $nachweisBytes = "%PDF-1.4\n% Nachweis " . $kennung . "\n%%EOF\n";
+    $nachweisDateien = [Pruefnachweise::dateiSpeichern($nachweisBytes)];
+    $inTagen = static fn (int $n): string => (new DateTimeImmutable('now', Zeit::zone()))->modify('+' . $n . ' days')->format('Y-m-d');
+    $nachweisAnlegen = static fn (int $kunde, string $status, ?int $datei, string $name): int => Database::insert('pruefnachweise', [
+        'kunde_id' => $kunde, 'status' => $status, 'quelle' => 'hand', 'bezeichnung' => $kennung . ' ' . $name, 'inventarnummer' => 'INV-' . $name,
+        'geprueft_am' => $vorTagen(30), 'naechste_pruefung' => $inTagen(300), 'site_id' => $sites['a'], 'datei_id' => $datei,
+        'datei_name' => $kennung . '-intern.pdf', 'herkunft' => json_encode(['art' => 'upload', 'name' => $kennung . '-intern.pdf']), 'created_at' => gmdate('c')]);
+    $nf = $nachweisAnlegen($kunden['k1'], 'freigegeben', $nachweisDateien[0], 'nf');
+    $ne = $nachweisAnlegen($kunden['k1'], 'entwurf', $nachweisDateien[0], 'ne');
+    $nz = $nachweisAnlegen($kunden['k1'], 'zurueckgezogen', $nachweisDateien[0], 'nz');
+    $no = $nachweisAnlegen($kunden['k1'], 'freigegeben', null, 'no');
+    $n2f = $nachweisAnlegen($kunden['k2'], 'freigegeben', $nachweisDateien[0], 'n2f');
 
     // ------------------------------------------------ Rechte vergeben: Standardrollen
     alsBenutzer($personal['planung']);
@@ -885,7 +903,7 @@ try {
     pruefe($token !== '', 'Token aus dem Kundenbereich (Abmelden)');
     $seiten = ['/kundenbereich' => $start];
     foreach (['/kundenbereich/locations', '/kundenbereich/locations/' . $sites['a'], '/kundenbereich/konto', '/kundenbereich/hilfe', '/kundenbereich/protokolle',
-        '/kundenbereich/protokolle/' . $ub1k, '/kundenbereich/protokolle/' . $ub1] as $pfad) {
+        '/kundenbereich/protokolle/' . $ub1k, '/kundenbereich/protokolle/' . $ub1, '/kundenbereich/pruefnachweise'] as $pfad) {
         $seiten[$pfad] = anfrage($basis, $z1['dose'], 'GET', $pfad);
     }
     foreach ($seiten as $pfad => $r) {
@@ -1055,6 +1073,31 @@ try {
         'K2 (anderer Veranstalter am Gelände A): sein Protokoll b2 – das von K1 nicht');
     gleich(meldungenDesServers($serverFehler), [], 'Protokolle des Kundenbereichs ohne PHP-Meldung');
     gleich(meldungenDesServers($serverFehler), [], 'Seiten und Pläne des Kundenbereichs ohne PHP-Meldung');
+
+    // Prüfnachweise: nur freigegebene mit Datei, das PDF als Anhang; Fremdes und Unfertiges mit derselben 404 – ohne Abruf.
+    $nachweisSeite = $seiten['/kundenbereich/pruefnachweise']['text'];
+    $da = array_values(array_filter(['nf', 'ne', 'nz', 'no', 'n2f'], static fn (string $n): bool => str_contains($nachweisSeite, $kennung . ' ' . $n . '</strong>')));
+    gleich($da, ['nf'], 'Prüfnachweise: nur der freigegebene mit Datei (nicht Entwurf, zurückgezogen, ohne Datei, der von K2)');
+    pruefe(!str_contains($nachweisSeite, '-intern.pdf') && !str_contains($nachweisSeite, 'herkunft') && str_contains($nachweisSeite, 'href="/kundenbereich/pruefnachweise/' . $nf . '/pdf"'),
+        'Prüfnachweise: ohne Dateinamen und Herkunft, mit PDF');
+    pruefe(str_contains($start['text'], 'Ihre Prüfnachweise') && str_contains($ort, $kennung . ' nf</strong>'), 'Übersicht und Location A nennen den Prüfnachweis');
+    $vorher = $abrufeAlle();
+    $pdf = anfrage($basis, $z1['dose'], 'GET', '/kundenbereich/pruefnachweise/' . $nf . '/pdf');
+    gleich([$pdf['status'], kopfzeile($pdf, 'Content-Disposition'), kopfzeile($pdf, 'Cache-Control'), $pdf['text'] === $nachweisBytes, $abrufeAlle() - $vorher],
+        [200, 'attachment; filename="Pruefnachweis-INV-nf-' . $vorTagen(30) . '.pdf"', 'private, no-store', true, 1], 'Prüfnachweis-PDF: Anhang, neutraler Name, Bytes, ein Abruf');
+    $vorher = $abrufeAlle();
+    $abweichend = [];
+    foreach ([$no . '/pdf', $ne . '/pdf', $nz . '/pdf', $n2f . '/pdf', '999999999/pdf', '0/pdf', $nf . 'x/pdf', '-' . $nf . '/pdf', $nf, $nf . '/pdf/x', $no] as $rest) {
+        $r = anfrage($basis, $z1['dose'], 'GET', '/kundenbereich/pruefnachweise/' . $rest);
+        if ($r['status'] !== 404 || $ohneMarken($r['text']) !== $ohneMarken($vorlage['text']) || kopfzeile($r, 'Cache-Control') !== 'private, no-store') {
+            $abweichend[] = $rest . ' → ' . $r['status'];
+        }
+    }
+    gleich($abweichend, [], 'IDOR: Prüfnachweis ohne Datei, Entwurf, zurückgezogen, eines anderen Kunden, nicht vorhanden, kaputte IDs – dieselbe 404');
+    gleich($abrufeAlle(), $vorher, '… und kein Abruf festgehalten');
+    gleich([anfrage($basis, $z2['dose'], 'GET', '/kundenbereich/pruefnachweise/' . $n2f . '/pdf')['status'],
+        anfrage($basis, $z2['dose'], 'GET', '/kundenbereich/pruefnachweise/' . $nf . '/pdf')['status']], [200, 404], 'K2: sein Prüfnachweis – der von K1 nicht');
+    gleich(meldungenDesServers($serverFehler), [], 'Prüfnachweise des Kundenbereichs ohne PHP-Meldung');
 
     // Personal.
     $admin = anmeldenAls($basis, $kennung . '-admin', $kennwort, $dosen);
@@ -1289,7 +1332,8 @@ try {
     // Ohne CSRF-Token ändert keine der neuen Routen etwas.
     $stand = static fn (): array => [(int) Database::scalar('SELECT COUNT(*) FROM kunden'), $konten(), (int) Database::scalar('SELECT COUNT(*) FROM freigaben'),
         Settings::get('kundenbereich.kontakt'), (string) Database::scalar('SELECT name FROM kunden WHERE id = ?', [$kunden['k5']]),
-        Database::scalar('SELECT kunde_id FROM berichte WHERE id = ?', [$ub4])];
+        Database::scalar('SELECT kunde_id FROM berichte WHERE id = ?', [$ub4]), (int) Database::scalar('SELECT COUNT(*) FROM pruefnachweise'),
+        Database::scalar('SELECT status || bezeichnung FROM pruefnachweise WHERE id = ?', [$ne])];
     $vorher = $stand();
     preg_match('/name="einmal" value="([0-9a-f]{32})"/', anfrage($basis, $planung['dose'], 'GET', '/kunden/' . $kunden['k5'] . '?tab=zugaenge')['text'], $m);
     $adminDose = anmeldenAls($basis, $kennung . '-admin', $kennwort, $dosen)['dose'];
@@ -1304,6 +1348,10 @@ try {
         [$planung['dose'], '/kunden/' . $kunden['k2'] . '/freigabe/' . (int) $k2b['id'] . '/loeschen', []],
         [$adminDose, '/system/einstellungen/kundenbereich', ['kundenbereich__kontakt' => $kennung . ' Ohne Token']],
         [$planung['dose'], '/berichte/' . $ub4 . '/kundenbereich', ['kunde_id' => $kunden['k1']]],
+        [$planung['dose'], '/kunden/' . $kunden['k1'] . '/nachweise/hochladen', ['bezeichnung' => $kennung . ' Ohne Token', 'geprueft_am' => $vorTagen(1)]],
+        [$planung['dose'], '/kunden/' . $kunden['k1'] . '/nachweise/' . $ne . '/speichern', ['bezeichnung' => $kennung . ' Umbenannt', 'geprueft_am' => $vorTagen(1)]],
+        [$planung['dose'], '/kunden/' . $kunden['k1'] . '/nachweise/' . $ne . '/status', ['status' => 'freigegeben']],
+        [$planung['dose'], '/kunden/' . $kunden['k1'] . '/nachweise/' . $ne . '/loeschen', []],
     ] as [$dose, $ziel, $felder]) {
         gleich(anfrage($basis, $dose, 'POST', $ziel, $felder)['status'], 302, 'ohne CSRF-Token: ' . $ziel . ' → zurück');
     }
@@ -1343,6 +1391,8 @@ try {
     pruefe($r['status'] === 302 && str_starts_with((string) $r['ziel'], '/login'), 'Kunde beendet: … und keine Location');
     $r = anfrage($basis, $z1neu['dose'], 'GET', '/kundenbereich/protokolle/' . $ub1k . '/pdf');
     pruefe($r['status'] === 302 && str_starts_with((string) $r['ziel'], '/login') && $r['text'] !== $pdfVon('b1k'), 'Kunde beendet: … und kein Protokoll mehr');
+    $r = anfrage($basis, $z1neu['dose'], 'GET', '/kundenbereich/pruefnachweise/' . $nf . '/pdf');
+    pruefe($r['status'] === 302 && str_starts_with((string) $r['ziel'], '/login') && $r['text'] !== $nachweisBytes, 'Kunde beendet: … und kein Prüfnachweis mehr');
     $versuch = anmeldenAls($basis, $kennung . '-z1', $kennwort, $dosen);
     pruefe($versuch['ziel'] === '/login' && str_contains(anmeldeMeldung($basis, $versuch['dose']), 'nicht mehr aktiv'),
         'Kunde beendet: Anmeldung mit richtigem Kennwort „nicht mehr aktiv“');
@@ -1389,7 +1439,7 @@ try {
     foreach ($zugaenge as $id) {
         Database::execute("DELETE FROM audit_log WHERE target_type = 'user' AND target_id = ?", [(string) $id]);
     }
-    foreach ($dateien as $id) {
+    foreach (array_merge($dateien, $nachweisDateien ?? []) as $id) {
         Database::execute('DELETE FROM pruefnachweise WHERE datei_id = ?', [$id]);
         Database::delete('pruefnachweis_dateien', $id);
     }

@@ -2,9 +2,9 @@
 /**
  * Eine Location, wie der Kunde sie sieht: Anschrift, Freigabe(n) mit
  * Veranstaltung, „sichtbar bis“ und Messzeitraum, Pläne der Etagen (Bild im
- * Browser, PDF als Datei), die festen Stromanschlüsse und Ihre Protokolle
- * an dieser Location. Nie Notizen, mobile Anlagen, Kabel oder Messgeräte
- * (KundenSicht::location()).
+ * Browser, PDF als Datei), die festen Stromanschlüsse, Ihre Protokolle und
+ * Ihre Prüfnachweise an dieser Location. Nie Notizen, mobile Anlagen, Kabel
+ * oder Messgeräte (KundenSicht::location()).
  *
  * @var array<string,mixed> $kunde
  * @var array{site:array{id:int,name:string,address:string},freigaben:list<array<string,mixed>>,etagen:list<array{id:int,name:string,plan:string,seite:int}>,feststrom:list<array<string,string>>} $location
@@ -99,5 +99,15 @@ $basis = Kundenbereich::PFAD . '/locations/' . (int) $site['id'];
                 <?= View::partial('kundenbereich/_protokolle', ['berichte' => $location['berichte'], 'mitLocation' => false]) ?>
             <?php endif; ?>
         </div>
+    </section>
+
+    <section class="card kb-breit" aria-labelledby="kb-ort-nachweise-titel">
+        <div class="card-head"><h2 id="kb-ort-nachweise-titel">Ihre Prüfnachweise an dieser Location</h2></div>
+        <?php if (($location['nachweise'] ?? []) === []): ?>
+            <div class="card-body"><p class="kb-leer">Für diese Location ist kein Prüfnachweis hinterlegt. Alle Ihre Prüfnachweise stehen unter
+                <a href="<?= View::e(Kundenbereich::PFAD . '/pruefnachweise') ?>">Prüfnachweise</a>.</p></div>
+        <?php else: ?>
+            <?= View::partial('kundenbereich/_nachweise', ['nachweise' => $location['nachweise'], 'mitLocation' => false]) ?>
+        <?php endif; ?>
     </section>
 </div>

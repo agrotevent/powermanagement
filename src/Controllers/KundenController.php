@@ -10,6 +10,7 @@ use App\Kunden\Abrufe;
 use App\Kunden\Einrichtung;
 use App\Kunden\KundenEinstellungen;
 use App\Kunden\KundenService;
+use App\Kunden\Pruefnachweise;
 use App\Services\BenutzerService;
 use App\Services\SiteService;
 use App\Support\EinmalMarke;
@@ -34,7 +35,9 @@ use App\Support\View;
  *
  * Übergabeberichte gibt eine Person einem Kunden (berichtZuordnen, am
  * Bericht oder im Reiter Protokolle) – nie automatisch; weicht der Name im
- * Bericht ab, erst nach einer Rückfrage.
+ * Bericht ab, erst nach einer Rückfrage. Prüfnachweise (Reiter
+ * Prüfnachweise) hinterlegt und gibt frei, wer „kunden.nachweise“ hat
+ * (PruefnachweiseController).
  */
 final class KundenController extends Controller
 {
@@ -47,14 +50,15 @@ final class KundenController extends Controller
         'zugaenge'   => ['Zugänge', true],
         'freigaben'  => ['Freigaben', true],
         'protokolle' => ['Protokolle', false],
+        'nachweise'  => ['Prüfnachweise', false],
         'abrufe'     => ['Abrufe', true],
     ];
 
     /** Zweck der Einmal-Marken (Formular „Neuer Zugang“). */
     private const EINMAL = 'kunden_zugang';
 
-    /** Sitzungsschlüssel: Eingaben nach einem Fehler wieder ins Formular (nie ein Geheimnis). */
-    private const EINGABE = 'kunden_eingabe';
+    /** Sitzungsschlüssel: Eingaben nach einem Fehler wieder ins Formular (nie ein Geheimnis; auch PruefnachweiseController). */
+    public const EINGABE = 'kunden_eingabe';
 
     public function index(Request $request): void
     {
@@ -124,6 +128,13 @@ final class KundenController extends Controller
         } elseif ($tab === 'protokolle') {
             $daten['protokolle'] = KundenService::protokolle($id);
             $daten['rueckfrage'] = $pflegen ? KundenService::rueckfrage(null, $id) : null;
+        } elseif ($tab === 'nachweise') {
+            $darf = Auth::can('kunden.nachweise');
+            $daten['nachweise'] = Pruefnachweise::fuerPersonal($id);
+            $daten['darfNachweise'] = $darf;
+            $daten['standorte'] = $darf ? Pruefnachweise::standorte($id) : [];
+            $daten['vorgaenge'] = $darf ? Pruefnachweise::vorgaenge($id) : [];
+            $daten['inventar'] = $darf ? Pruefnachweise::inventar() : [];
         } elseif ($tab === 'abrufe') {
             $daten['abrufe'] = Abrufe::fuerKunde($id);
         }

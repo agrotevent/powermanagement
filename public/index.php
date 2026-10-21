@@ -20,6 +20,7 @@ use App\Controllers\KarteController;
 use App\Controllers\KatalogImportController;
 use App\Controllers\KundenbereichController;
 use App\Controllers\KundenController;
+use App\Controllers\PruefnachweiseController;
 use App\Controllers\LocationController;
 use App\Controllers\ManifestController;
 use App\Controllers\PruefgeraeteController;
@@ -76,6 +77,9 @@ $router->get('/kundenbereich/locations/{id}/plan/{etage}', [KundenbereichControl
 $router->get('/kundenbereich/protokolle', [KundenbereichController::class, 'protokolle']);
 $router->get('/kundenbereich/protokolle/{id}', [KundenbereichController::class, 'protokoll']);
 $router->get('/kundenbereich/protokolle/{id}/pdf', [KundenbereichController::class, 'protokollPdf']);
+// Prüfnachweise (DGUV V3): nur freigegebene des Kunden; das PDF als Datei (fremdes Dokument).
+$router->get('/kundenbereich/pruefnachweise', [KundenbereichController::class, 'nachweise']);
+$router->get('/kundenbereich/pruefnachweise/{id}/pdf', [KundenbereichController::class, 'nachweisPdf']);
 $router->get('/kundenbereich/konto', [KundenbereichController::class, 'konto']);
 $router->post('/kundenbereich/konto/kennwort', [KundenbereichController::class, 'kennwort']);
 $router->get('/kundenbereich/hilfe', [KundenbereichController::class, 'hilfe']);
@@ -89,7 +93,7 @@ $router->post('/kundenbereich/einrichten/{token}', [KundenbereichController::cla
  * Die Kundenverwaltung: ansehen mit „kunden.view“, pflegen mit
  * „kunden.manage“. Zugänge und Freigaben sieht nur, wer pflegen darf;
  * Standorte freigeben zusätzlich nur, wer alles sieht (prüft
- * KundenService). Jede {uid} und {fid} wird gegen den Kunden {id} geprüft.
+ * KundenService). Jede {uid}, {fid} und {nid} wird gegen den Kunden {id} geprüft.
  * Ein Link oder vorläufiges Kennwort steht nur in der Antwort auf das
  * Anlegen (no-store).
  */
@@ -101,6 +105,14 @@ $router->post('/kunden/{id}/zugang', [KundenController::class, 'zugangAnlegen'],
 $router->post('/kunden/{id}/zugang/{uid}', [KundenController::class, 'zugang'], 'kunden.manage');
 $router->post('/kunden/{id}/freigabe', [KundenController::class, 'freigabeSpeichern'], 'kunden.manage');
 $router->post('/kunden/{id}/freigabe/{fid}/loeschen', [KundenController::class, 'freigabeLoeschen'], 'kunden.manage');
+// Prüfnachweise (DGUV V3) des Kunden: hinterlegen, korrigieren, freigeben,
+// zurückziehen, löschen mit „kunden.nachweise“; die Datei ansehen mit
+// „kunden.view“. Jede {nid} wird gegen den Kunden {id} geprüft.
+$router->post('/kunden/{id}/nachweise/hochladen', [PruefnachweiseController::class, 'hochladen'], 'kunden.nachweise');
+$router->post('/kunden/{id}/nachweise/{nid}/speichern', [PruefnachweiseController::class, 'speichern'], 'kunden.nachweise');
+$router->post('/kunden/{id}/nachweise/{nid}/status', [PruefnachweiseController::class, 'status'], 'kunden.nachweise');
+$router->post('/kunden/{id}/nachweise/{nid}/loeschen', [PruefnachweiseController::class, 'loeschen'], 'kunden.nachweise');
+$router->get('/kunden/{id}/nachweise/{nid}/datei', [PruefnachweiseController::class, 'datei'], 'kunden.view');
 
 // ---------------------------------------------------------------- Übersicht
 $router->get('/', [DashboardController::class, 'start']);

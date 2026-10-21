@@ -91,6 +91,12 @@ try {
     gleich(Response::sichererDateiname("Muster Events GmbH & Co. KG \"ü\"\r\nX.pdf"), 'Muster-Events-GmbH-Co.-KG-X.pdf',
         'Dateiname in Content-Disposition nur ASCII ohne Anführungszeichen und Zeilenumbruch');
     gleich(Response::sichererDateiname('../..'), 'dokument.pdf', 'leerer Dateiname: Ersatz');
+    // Prüfnachweise: der hochgeladene Name ohne Pfad und Sonderzeichen; der Kunde bekommt einen neutralen.
+    gleich(\App\Kunden\Pruefnachweise::dateiname("..\\..\\Prüfung \"x\"\r\nContent-Type: text/html<script>.PDF"), 'html-script.pdf',
+        'Dateiname eines Prüfnachweises: ohne Pfad, nur ASCII, endet auf .pdf');
+    gleich(\App\Kunden\Pruefnachweise::kundenDateiname(['id' => 7, 'inventarnummer' => "Ä\"; filename=x", 'seriennummer' => '', 'geprueft_am' => '2026-07-01']),
+        'Pruefnachweis-Ae-filename-x-2026-07-01.pdf', 'Dateiname für den Kunden: neutral, nur ASCII');
+    pruefe(preg_match('/^[A-Za-z0-9._-]+$/', \App\Kunden\Pruefnachweise::dateiname('../../')) === 1, 'leerer Name eines Prüfnachweises: Ersatz');
     // Einrichtungslinks: gespeichert nur ein HMAC – mit eigenem, aus app.key abgeleitetem Schlüssel.
     gleich(Einrichtung::hash('x'), hash_hmac('sha256', 'x', Crypto::ableiten('kunden-einrichtung')), 'Einrichtungslink: HMAC mit abgeleitetem Schlüssel');
     pruefe(Einrichtung::hash('x') !== hash('sha256', 'x') && Einrichtung::hash('x') !== hash_hmac('sha256', 'x', (string) Config::get('app.key')),

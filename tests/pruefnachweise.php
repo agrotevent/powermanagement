@@ -1,0 +1,619 @@
+<?php
+declare(strict_types=1);
+
+/**
+ * Prüfnachweise (DGUV V3) im Kundenbereich – von Hand hinterlegt.
+ *
+ * Upload nur PDF (beginnt mit %PDF-, finfo), höchstens 10 MiB, Dateiname
+ * bereinigt, gleiche Bytes nur einmal; Angaben (Prüfdatum Pflicht und
+ * gültig, nächste Prüfung nicht davor, Ergebnis nur aus der Liste, Mietzeit,
+ * Location nur aus den Freigaben des Kunden, Vorgang nur seiner, Inventar
+ * nur mit „Datenquellen ansehen“); Sichtbarkeit (nur freigegeben, nur der
+ * eigene Kunde, nicht bei beendetem Kunden, nur ausdrücklich genannte
+ * Felder); Gültigkeit (abgelaufen, läuft bald ab, gültig, unbekannt;
+ * Hinweise zur Mietzeit; tagesgenau in der Zeitzone der Installation, auch
+ * über die Zeitumstellung); Aufbewahrung (31.12. plus Jahre, fällige löschen
+ * samt Abrufen und unbenutzter Datei, nie eine geteilte; Kommandozeile);
+ * Integrität (ein Byte geändert, Datei fehlt, unbenutzte Datei – Befund,
+ * nichts ausgeliefert, Kommandozeile mit Exit 1); Inventar löschen.
+ *
+ * Über HTTP (eigener PHP-Server): Reiter Prüfnachweise, Hochladen als
+ * multipart (auch über 2 MB, über 10 MB abgelehnt, kein PDF abgelehnt,
+ * ohne CSRF-Token nichts), Bearbeiten mit Fehler (Eingaben bleiben),
+ * Freigeben/Zurückziehen, Datei für das Personal als Anhang mit sandbox,
+ * Rechte (ansehen ohne hochladen, ohne Kunden-Rechte gar nicht), Löschen;
+ * im Kundenbereich die Liste (nur Freigegebenes, Filter je Location) und das
+ * PDF (Anhang, neutraler Name, Kopfzeilen, Prüfsumme, Abruf festgehalten).
+ *
+ * Eigene Kunden, Konten, Rollen, Standorte, Inventar und Dateien mit
+ * eindeutiger Kennung; am Ende ist alles weg.
+ */
+
+require __DIR__ . '/hilfen/pruefung.php';
+
+use App\Auth\Auth;
+use App\Kunden\Kundenbereich;
+use App\Kunden\KundenService;
+use App\Kunden\KundenSicht;
+use App\Kunden\Pruefnachweise;
+use App\Services\BenutzerService;
+use App\Services\InventarService;
+use App\Services\SiteService;
+use App\Support\Config;
+use App\Support\Database;
+use App\Support\Settings;
+
+if (!function_exists('curl_init')) {
+    uebersprungen('pruefnachweise', 'die PHP-Erweiterung curl fehlt');
+}
+
+$kennung = 'pm-pn-' . bin2hex(random_bytes(3));
+$kennwort = 'Pruefung-' . bin2hex(random_bytes(6)) . '1';
+$jetzt = time();
+$tag = 86400;
+$kunden = [];
+$personal = [];
+$rollen = [];
+$sites = [];
+$dosen = [];
+$inventar = [];
+$auditVorher = (int) Database::scalar('SELECT COALESCE(MAX(id), 0) FROM audit_log');
+$jahreVorher = Settings::get('kundenbereich.nachweise_jahre');
+$zoneVorher = (string) Config::get('app.timezone', 'Europe/Berlin');
+$logDatei = dirname(__DIR__) . '/storage/logs/app.log';
+$logVorher = is_file($logDatei) ? (int) filesize($logDatei) : 0;
+
+/** Ein kleines PDF mit Marke – jedes Mal andere Bytes. */
+$pdf = static fn (string $name): string => "%PDF-1.4\n% " . $kennung . ' ' . $name . ' ' . bin2hex(random_bytes(4))
+    . "\n1 0 obj\n<< /Type /Catalog >>\nendobj\ntrailer\n<< /Root 1 0 R >>\n%%EOF\n";
+$iso = static fn (int $ts): string => gmdate('c', $ts);
+/** Ortsdatum in n Tagen (negativ: vor n Tagen). */
+$tagIn = static fn (int $n): string => (new DateTimeImmutable('now', \App\Support\Zeit::zone()))->modify(($n >= 0 ? '+' : '') . $n . ' days')->format('Y-m-d');
+$heute = Pruefnachweise::heute();
+$angaben = static fn (array $mehr = []): array => $mehr + ['bezeichnung' => $kennung . ' Verteiler PD63-07', 'inventarnummer' => 'PD63-07',
+    'seriennummer' => 'SN-4711', 'norm' => 'DIN EN 50699 (VDE 0702)', 'ergebnis' => '', 'geprueft_am' => $tagIn(-40), 'naechste_pruefung' => $tagIn(325)];
+
+// ------------------------------------------------------------ HTTP-Hilfen
+
+/** Ein Aufruf mit eigener Cookie-Dose; folgt keinen Weiterleitungen. $multipart: Felder (auch CURLFile) als multipart/form-data. */
+function anfrage(string $basis, string $dose, string $methode, string $pfad, array $felder = [], bool $multipart = false): array
+{
+    $c = curl_init($basis . $pfad);
+    curl_setopt_array($c, [
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_HEADER         => true,
+        CURLOPT_COOKIEJAR      => $dose,
+        CURLOPT_COOKIEFILE     => $dose,
+        CURLOPT_TIMEOUT        => 60,
+        CURLOPT_HTTPHEADER     => ['Expect:'],
+    ]);
+    if ($methode === 'POST') {
+        curl_setopt($c, CURLOPT_POST, true);
+        curl_setopt($c, CURLOPT_POSTFIELDS, $multipart ? $felder : http_build_query($felder));
+    }
+    $antwort = (string) curl_exec($c);
+    $status = (int) curl_getinfo($c, CURLINFO_RESPONSE_CODE);
+    $kopfLaenge = (int) curl_getinfo($c, CURLINFO_HEADER_SIZE);
+    curl_close($c);
+    $kopfText = substr($antwort, 0, $kopfLaenge);
+    preg_match('/^Location:\s*(\S+)/mi', $kopfText, $m);
+    return ['status' => $status, 'kopf' => $kopfText, 'text' => substr($antwort, $kopfLaenge), 'ziel' => $m[1] ?? null];
+}
+
+function csrfAus(string $html): string
+{
+    preg_match('/name="_token" value="([^"]+)"/', $html, $m);
+    return $m[1] ?? '';
+}
+
+/** Anmelden; die Cookie-Dose kommt in $dosen. @return array{dose:string,ziel:?string} */
+function anmeldenAls(string $basis, string $name, string $kennwort, array &$dosen): array
+{
+    $dose = (string) tempnam(sys_get_temp_dir(), 'pm-pn-');
+    $dosen[] = $dose;
+    $seite = anfrage($basis, $dose, 'GET', '/login');
+    $r = anfrage($basis, $dose, 'POST', '/login', ['username' => $name, 'password' => $kennwort, '_token' => csrfAus($seite['text'])]);
+    return ['dose' => $dose, 'ziel' => $r['ziel']];
+}
+
+function kopfzeile(array $r, string $name): string
+{
+    return preg_match('/^' . preg_quote($name, '/') . ':\s*(.+?)\r?$/mi', $r['kopf'], $m) ? trim($m[1]) : '';
+}
+
+/** Die Meldungen (Flash) auf einer Seite. */
+function meldungen(string $html): string
+{
+    preg_match_all('/<div class="flash [a-z]+">([^<]*)<\/div>/', $html, $m);
+    return html_entity_decode(implode(' ', $m[1]), ENT_QUOTES, 'UTF-8');
+}
+
+/** PHP-Meldungen, die der Server seit dem letzten Aufruf geschrieben hat. @return list<string> */
+function meldungenDesServers(string $datei): array
+{
+    static $gelesen = 0;
+    clearstatcache(true, $datei);
+    $text = (string) @file_get_contents($datei, false, null, $gelesen);
+    $gelesen += strlen($text);
+    preg_match_all('/PHP (?:Warning|Notice|Deprecated|Fatal error|Parse error):.*$/m', $text, $m);
+    return $m[0];
+}
+
+/** Eine Datei für einen Upload (multipart). */
+function hochladeDatei(string $bytes, string $name, array &$dosen, string $typ = 'application/pdf'): CURLFile
+{
+    $pfad = (string) tempnam(sys_get_temp_dir(), 'pm-pn-up-');
+    $dosen[] = $pfad;
+    file_put_contents($pfad, $bytes);
+    return new CURLFile($pfad, $typ, $name);
+}
+
+/** bin/power aufrufen. @return array{0:int,1:string} Exitcode, Ausgabe */
+function power(string ...$argumente): array
+{
+    $befehl = array_merge([PHP_BINARY, dirname(__DIR__) . '/bin/power'], $argumente);
+    $p = proc_open($befehl, [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $rohre);
+    $aus = stream_get_contents($rohre[1]) . stream_get_contents($rohre[2]);
+    fclose($rohre[1]);
+    fclose($rohre[2]);
+    return [proc_close($p), (string) $aus];
+}
+
+try {
+    // ------------------------------------------------ Bestand
+    Settings::put('kundenbereich.nachweise_jahre', '3');
+    Config::set('app.timezone', 'Europe/Berlin');
+    $sites['a'] = SiteService::saveSite(null, ['name' => $kennung . ' Gelände A']);
+    $sites['b'] = SiteService::saveSite(null, ['name' => $kennung . ' Gelände B']);
+    $sites['c'] = SiteService::saveSite(null, ['name' => $kennung . ' Gelände C']);
+    foreach (['k1' => ['Muster Events', 1], 'k2' => ['Stadtmarketing', 1], 'k3' => ['Beendet', 0]] as $k => [$name, $aktiv]) {
+        $kunden[$k] = Database::insert('kunden', ['name' => $kennung . ' ' . $name, 'kundennummer' => 'K-' . random_int(10000, 99999), 'aktiv' => $aktiv,
+            'created_at' => gmdate('c')]);
+    }
+    $freigabe = static fn (int $kunde, int $site, int $ab, int $bis): int => Database::insert('freigaben', ['subject_type' => 'kunde', 'subject_id' => $kunde,
+        'ziel_art' => 'site', 'ziel_id' => $site, 'ziel_kanal' => '', 'darf_bearbeiten' => 0, 'darf_steuern' => 0, 'gueltig_ab' => $iso($ab), 'gueltig_bis' => $iso($bis),
+        'daten_ab' => $iso($ab), 'daten_bis' => $iso($bis), 'notiz' => $kennung, 'created_by' => 'pruefung', 'created_at' => gmdate('c')]);
+    $freigabe($kunden['k1'], $sites['a'], $jetzt - 3 * $tag, $jetzt + 7 * $tag);
+    $freigabe($kunden['k1'], $sites['c'], $jetzt - 30 * $tag, $jetzt - 20 * $tag);   // abgelaufen – als Location des Nachweises trotzdem wählbar
+    $freigabe($kunden['k2'], $sites['b'], $jetzt - 1 * $tag, $jetzt + 5 * $tag);
+    $zugang = static fn (string $name, int $kunde): int => Database::insert('users', ['username' => $kennung . '-' . $name, 'full_name' => 'Zugang ' . $name,
+        'email' => '', 'password_hash' => password_hash($kennwort, PASSWORD_DEFAULT), 'is_active' => 1, 'must_change_password' => 0, 'kunde_id' => $kunde,
+        'created_at' => gmdate('c')]);
+    $z1 = $zugang('z1', $kunden['k1']);
+    $z2 = $zugang('z2', $kunden['k2']);
+    $personal['planung'] = BenutzerService::anlegen($kennung . '-planung', $kennwort, 'planung', false);
+    $personal['technik'] = BenutzerService::anlegen($kennung . '-technik', $kennwort, 'technik', false);
+    $rollen['ansehen'] = (int) BenutzerService::rolleSpeichern(null, $kennung . ' nur ansehen', '', ['kunden.view'])['id'];
+    $rollen['ohneinventar'] = (int) BenutzerService::rolleSpeichern(null, $kennung . ' ohne Inventar', '', ['kunden.view', 'kunden.nachweise'])['id'];
+    $rollen['nichts'] = (int) BenutzerService::rolleSpeichern(null, $kennung . ' ohne Kunden', '', ['dashboard.view'])['id'];
+    foreach (['ansehen', 'ohneinventar', 'nichts'] as $r) {
+        $personal[$r] = BenutzerService::anlegen($kennung . '-' . $r, $kennwort, (string) Database::scalar('SELECT role_key FROM roles WHERE id = ?', [$rollen[$r]]), false);
+    }
+    $vorgang = static fn (int $kunde, string $nummer, ?string $von = null, ?string $bis = null): int => Database::insert('kunden_vorgaenge', ['kunde_id' => $kunde,
+        'ewx_host' => $kennung . '.example', 'ewx_id' => bin2hex(random_bytes(12)), 'ewx_art' => 'order', 'ewx_nummer' => $nummer, 'titel' => $kennung,
+        'von' => $von, 'bis' => $bis, 'verknuepft_am' => gmdate('c')]);
+    $v1 = $vorgang($kunden['k1'], 'AU-' . random_int(1000, 9999), $tagIn(-5), $tagIn(5));
+    $v2 = $vorgang($kunden['k2'], 'AU-' . random_int(1000, 9999));
+    $inventar['pd'] = Database::insert('inventar', ['art' => 'verteilung', 'kennung' => $kennung . '-PD', 'name' => 'Verteiler', 'seriennummer' => 'INV-SN-1',
+        'created_at' => gmdate('c')]);
+    $nachweis = static fn (int $id): ?array => Database::first('SELECT * FROM pruefnachweise WHERE id = ?', [$id]);
+    $dateiZahl = static fn (string $bytes): int => (int) Database::scalar('SELECT COUNT(*) FROM pruefnachweis_dateien WHERE sha256 = ?', [hash('sha256', $bytes)]);
+    alsBenutzer($personal['planung']);
+
+    // ------------------------------------------------ Upload
+    $bytes1 = $pdf('n1');
+    $r = Pruefnachweise::pdfAnlegen($kunden['k1'], $bytes1, '../../' . $kennung . ' Prüf<script>alert(1)</script> "Protokoll".PDF', $angaben(['site_id' => (string) $sites['a']]), false);
+    pruefe($r['ok'], 'gültiges PDF hinterlegt: ' . $r['message']);
+    $n1 = (int) ($r['id'] ?? 0);
+    $z = $nachweis($n1) ?? [];
+    gleich([$z['status'] ?? '', $z['quelle'] ?? '', (int) ($z['kunde_id'] ?? 0), (int) ($z['site_id'] ?? 0), $z['geprueft_am'] ?? '', (int) ($z['erstellt_von'] ?? 0), $z['freigegeben_am'] ?? null],
+        ['entwurf', 'hand', $kunden['k1'], $sites['a'], $tagIn(-40), $personal['planung'], null], 'Nachweis als Entwurf, Quelle „hand“, Kunde, Location, Prüfdatum, wer');
+    pruefe(preg_match('/^[A-Za-z0-9._-]+\.pdf$/', (string) ($z['datei_name'] ?? '')) === 1 && !str_contains((string) $z['datei_name'], '..')
+        && !str_contains((string) $z['datei_name'], 'script>'), 'Dateiname bereinigt: ' . ($z['datei_name'] ?? ''));
+    $herkunft = json_decode((string) ($z['herkunft'] ?? ''), true);
+    gleich([$herkunft['art'] ?? null, $herkunft['name'] ?? null, $herkunft['user_id'] ?? null], ['upload', $z['datei_name'] ?? '', $personal['planung']], 'Herkunft: Upload, Name, wer');
+    $d = Database::first('SELECT * FROM pruefnachweis_dateien WHERE id = ?', [(int) ($z['datei_id'] ?? 0)]) ?? [];
+    gleich([$d['sha256'] ?? '', (int) ($d['groesse'] ?? 0), base64_decode((string) ($d['daten'] ?? ''), true), $d['art'] ?? ''], [hash('sha256', $bytes1), strlen($bytes1), $bytes1, 'pdf'],
+        'Datei Byte für Byte (base64), Prüfsumme, Größe');
+    gleich($z['aufbewahren_bis'] ?? '', ((int) substr($tagIn(-40), 0, 4) + 3) . '-12-31', 'aufbewahren bis 31.12. des Prüfjahres + 3');
+    $audit = Database::first("SELECT details FROM audit_log WHERE action = 'kunden.nachweis_hochgeladen' AND target_id = ?", [(string) $n1]);
+    gleich(json_decode((string) ($audit['details'] ?? '{}'), true), ['kunde_id' => $kunden['k1'], 'nachweis_id' => $n1, 'quelle' => 'hand', 'freigegeben' => false],
+        'Audit nur mit IDs (kein Dateiname)');
+    $r2 = Pruefnachweise::pdfAnlegen($kunden['k1'], $bytes1, 'zweimal.pdf', $angaben(['bezeichnung' => $kennung . ' Kabeltrommel KT-12']), false);
+    pruefe($r2['ok'] && $dateiZahl($bytes1) === 1 && (int) ($nachweis((int) $r2['id'])['datei_id'] ?? 0) === (int) $z['datei_id'],
+        'gleiche Bytes zweimal: eine Datei, zwei Nachweise');
+    $n2 = (int) $r2['id'];
+    foreach ([
+        'kein PDF (HTML)'        => '<html>%PDF-1.4</html>',
+        'Text'                   => 'Prüfprotokoll ' . $kennung,
+        'leer'                   => '',
+        'über 10 MiB'            => "%PDF-1.4\n" . str_repeat('0', Pruefnachweise::MAX_BYTES),
+    ] as $was => $falsch) {
+        $vorher = (int) Database::scalar('SELECT COUNT(*) FROM pruefnachweise WHERE kunde_id = ?', [$kunden['k1']]);
+        $r = Pruefnachweise::pdfAnlegen($kunden['k1'], $falsch, 'x.pdf', $angaben(), false);
+        pruefe(!$r['ok'] && (int) Database::scalar('SELECT COUNT(*) FROM pruefnachweise WHERE kunde_id = ?', [$kunden['k1']]) === $vorher
+            && $dateiZahl($falsch) === 0, 'abgelehnt: ' . $was . ' (' . $r['message'] . ')');
+    }
+    pruefe(!Pruefnachweise::pdfAnlegen(999999999, $pdf('x'), 'x.pdf', $angaben(), false)['ok'], 'unbekannter Kunde: abgelehnt');
+    foreach ([['error' => UPLOAD_ERR_NO_FILE], ['error' => UPLOAD_ERR_INI_SIZE], ['error' => [0], 'tmp_name' => ['/etc/passwd']],
+        ['error' => UPLOAD_ERR_OK, 'tmp_name' => '/etc/hostname', 'name' => 'x.pdf', 'size' => 10]] as $datei) {
+        pruefe(!Pruefnachweise::pdfHochladen($kunden['k1'], $datei, $angaben(), false)['ok'], 'Upload ohne echte Datei abgelehnt: ' . json_encode($datei));
+    }
+
+    // ------------------------------------------------ Angaben
+    $falsch = [
+        'ohne Bezeichnung'                 => ['bezeichnung' => ' '],
+        'ohne Prüfdatum'                   => ['geprueft_am' => ''],
+        'Prüfdatum 31.02.2026'             => ['geprueft_am' => '31.02.2026'],
+        'Prüfdatum 2026-02-31'             => ['geprueft_am' => '2026-02-31'],
+        'Prüfdatum in der Zukunft'         => ['geprueft_am' => $tagIn(1), 'naechste_pruefung' => $tagIn(400)],
+        'Prüfdatum 1999'                   => ['geprueft_am' => '1999-05-01', 'naechste_pruefung' => ''],
+        'nächste vor dem Prüfdatum'        => ['naechste_pruefung' => $tagIn(-41)],
+        'Ergebnis „ok“'                    => ['ergebnis' => 'ok'],
+        'Mietzeit verkehrt'                => ['einsatz_von' => $tagIn(5), 'einsatz_bis' => $tagIn(1)],
+        'Location eines anderen Kunden'    => ['site_id' => (string) $sites['b']],
+        'Location kaputt'                  => ['site_id' => '1x'],
+        'Vorgang eines anderen Kunden'     => ['vorgang_id' => (string) $v2],
+        'Vorgang kaputt'                   => ['vorgang_id' => 'abc'],
+        'Inventar, das es nicht gibt'      => ['inventar_id' => '999999999'],
+        'Hinweis über 500 Zeichen'         => ['hinweis' => str_repeat('x', 501)],
+        'Inventarnummer über 80 Zeichen'   => ['inventarnummer' => str_repeat('1', 81)],
+    ];
+    foreach ($falsch as $was => $mehr) {
+        $r = Pruefnachweise::speichern($kunden['k1'], $n2, $mehr + $angaben());
+        pruefe(!$r['ok'], 'Angaben abgelehnt: ' . $was . ' (' . $r['message'] . ')');
+    }
+    gleich($nachweis($n2)['bezeichnung'] ?? '', $kennung . ' Kabeltrommel KT-12', '… und nichts geändert');
+    $r = Pruefnachweise::speichern($kunden['k1'], $n2, $angaben(['bezeichnung' => $kennung . ' Kabeltrommel KT-12', 'geprueft_am' => '12.03.2026',
+        'naechste_pruefung' => '12.03.2026', 'ergebnis' => 'bestanden', 'site_id' => (string) $sites['c'], 'vorgang_id' => (string) $v1, 'einsatz_von' => '',
+        'einsatz_bis' => '', 'inventar_id' => (string) $inventar['pd'], 'inventarnummer' => '', 'seriennummer' => '', 'hinweis' => "Zeile 1\nZeile 2"]));
+    $z = $nachweis($n2) ?? [];
+    pruefe($r['ok'], 'Angaben gespeichert: ' . $r['message']);
+    gleich([$z['geprueft_am'] ?? '', $z['naechste_pruefung'] ?? '', $z['ergebnis'] ?? '', (int) ($z['site_id'] ?? 0), (int) ($z['vorgang_id'] ?? 0),
+        $z['einsatz_von'] ?? '', $z['einsatz_bis'] ?? '', (int) ($z['inventar_id'] ?? 0), $z['inventarnummer'] ?? '', $z['seriennummer'] ?? '', $z['hinweis'] ?? '', $z['aufbewahren_bis'] ?? ''],
+        ['2026-03-12', '2026-03-12', 'bestanden', $sites['c'], $v1, $tagIn(-5), $tagIn(5), $inventar['pd'], $kennung . '-PD', 'INV-SN-1', 'Zeile 1 Zeile 2', '2029-12-31'],
+        'TT.MM.JJJJ gelesen, nächste = Prüfdatum erlaubt, abgelaufene Location des Kunden, Mietzeit aus dem Vorgang, Nummern aus dem Inventar, Aufbewahrung neu');
+    alsBenutzer($personal['ohneinventar']);
+    $r = Pruefnachweise::speichern($kunden['k1'], $n2, $angaben(['bezeichnung' => $kennung . ' Kabeltrommel KT-12', 'geprueft_am' => '2026-03-12', 'inventar_id' => '',
+        'site_id' => (string) $sites['c'], 'vorgang_id' => (string) $v1]));
+    gleich([$r['ok'], (int) ($nachweis($n2)['inventar_id'] ?? 0)], [true, $inventar['pd']], 'ohne „Datenquellen ansehen“: Inventar bleibt, wie es ist');
+    $r = Pruefnachweise::speichern($kunden['k1'], $n2, $angaben(['bezeichnung' => $kennung . ' Kabeltrommel KT-12', 'geprueft_am' => '2026-03-12', 'site_id' => (string) $sites['c']]));
+    gleich([$r['ok'], (int) ($nachweis($n2)['vorgang_id'] ?? 0)], [true, $v1], 'ohne Feld „Vorgang“: der Vorgang bleibt');
+    gleich(Pruefnachweise::inventar(), [], 'ohne „Datenquellen ansehen“: keine Inventar-Auswahl');
+    alsBenutzer($personal['planung']);
+    pruefe(!Pruefnachweise::speichern($kunden['k2'], $n2, $angaben())['ok'] && Pruefnachweise::vonKunde($kunden['k2'], $n2) === null,
+        'Nachweis über einen anderen Kunden: nicht vorhanden');
+    gleich(array_column(Pruefnachweise::standorte($kunden['k1']), 'id'), [$sites['a'], $sites['c']], 'Locations zur Auswahl: die aus den Freigaben des Kunden');
+
+    // ------------------------------------------------ Sichtbarkeit
+    $sichtbar = static fn (int $kunde): array => array_column(KundenSicht::nachweise($kunde), 'id');
+    gleich([$sichtbar($kunden['k1']), array_column(Pruefnachweise::fuerKunde($kunden['k1'], true), 'id')], [[], []], 'Entwürfe sieht der Kunde nicht');
+    $r = Pruefnachweise::status($kunden['k1'], $n1, 'freigegeben');
+    $z = $nachweis($n1) ?? [];
+    pruefe($r['ok'] && (int) $z['freigegeben_von'] === $personal['planung'] && $z['freigegeben_am'] !== null, 'freigegeben (wer, wann)');
+    gleich([$sichtbar($kunden['k1']), $sichtbar($kunden['k2'])], [[$n1], []], 'K1 sieht den freigegebenen Nachweis, K2 nicht');
+    pruefe(!Pruefnachweise::status($kunden['k1'], $n1, 'freigegeben')['ok'] && !Pruefnachweise::status($kunden['k1'], $n2, 'zurueckgezogen')['ok']
+        && !Pruefnachweise::status($kunden['k1'], $n1, 'entwurf')['ok'] && !Pruefnachweise::status($kunden['k2'], $n1, 'zurueckgezogen')['ok'],
+        'kein zweites Freigeben, Zurückziehen nur vom Freigegebenen, kein „entwurf“, nicht über einen anderen Kunden');
+    pruefe(Pruefnachweise::status($kunden['k1'], $n1, 'zurueckgezogen')['ok'] && $sichtbar($kunden['k1']) === [], 'zurückgezogen: sofort weg');
+    pruefe(Pruefnachweise::status($kunden['k1'], $n1, 'freigegeben')['ok'] && Pruefnachweise::status($kunden['k1'], $n2, 'freigegeben')['ok'], 'wieder freigegeben, n2 auch');
+    gleich([array_column(KundenSicht::nachweise($kunden['k1'], $sites['a']), 'id'), array_column(KundenSicht::nachweise($kunden['k1'], $sites['c']), 'id')], [[$n1], [$n2]],
+        'je Location nur ihre Nachweise');
+    $ort = KundenSicht::location($kunden['k1'], $sites['a']);
+    gleich([array_column($ort['nachweise'] ?? [], 'id'), count(KundenSicht::zusammenfassung($kunden['k1'])['nachweise'])], [[$n1], 2],
+        'Location A zeigt n1; „sieht derzeit“ zählt beide (n2 an abgelaufener Location bleibt sichtbar)');
+    $zeile = KundenSicht::nachweis($kunden['k1'], $n2) ?? [];
+    gleich(array_keys($zeile), ['id', 'bezeichnung', 'inventarnummer', 'seriennummer', 'norm', 'ergebnis', 'geprueft_am', 'naechste_pruefung', 'einsatz_von',
+        'einsatz_bis', 'hinweis', 'site_id', 'standort', 'quelle', 'gueltigkeit'], 'Kundensicht: nur ausdrücklich genannte Felder');
+    $json = json_encode(KundenSicht::nachweise($kunden['k1']), JSON_UNESCAPED_UNICODE);
+    pruefe(!str_contains((string) $json, 'herkunft') && !str_contains((string) $json, (string) $nachweis($n1)['datei_name']) && !str_contains((string) $json, 'erstellt')
+        && !str_contains((string) $json, 'ewx'), 'Kundensicht ohne Herkunft, Dateiname, Bearbeiter, Eventworx-Kennungen');
+    gleich($zeile['quelle'] ?? '', 'von Hand hinterlegt', 'Quelle als Satzteil');
+    $pdfKunde = KundenSicht::nachweisPdf($kunden['k1'], $n1);
+    gleich([$pdfKunde['bytes'] ?? null, $pdfKunde['sha256'] ?? null, $pdfKunde['name'] ?? null], [$bytes1, hash('sha256', $bytes1), 'Pruefnachweis-PD63-07-' . $tagIn(-40) . '.pdf'],
+        'PDF für den Kunden: die Bytes, Prüfsumme, neutraler Name');
+    gleich([KundenSicht::nachweisPdf($kunden['k2'], $n1), KundenSicht::nachweis($kunden['k2'], $n1)], [null, null], 'K2 bekommt das PDF von K1 nicht');
+    Database::update('kunden', $kunden['k1'], ['aktiv' => 0]);
+    KundenService::vergessen();
+    gleich([KundenSicht::nachweise($kunden['k1']), KundenSicht::nachweisPdf($kunden['k1'], $n1)], [[], null], 'Kunde beendet: keine Nachweise, kein PDF');
+    $personalSicht = Pruefnachweise::fuerPersonal($kunden['k1']);
+    pruefe(count($personalSicht) === 2 && array_filter($personalSicht, static fn (array $n): bool => $n['beim_kunden']) === [], 'Personal: beide da, „sieht der Kunde“ nicht');
+    Database::update('kunden', $kunden['k1'], ['aktiv' => 1]);
+    KundenService::vergessen();
+    $personalSicht = Pruefnachweise::fuerPersonal($kunden['k1']);
+    gleich(array_column($personalSicht, 'beim_kunden', 'id'), [$n1 => true, $n2 => true], 'Personal: wieder beim Kunden');
+
+    // ------------------------------------------------ Gültigkeit
+    $g = static fn (array $n, string $heute): array => Pruefnachweise::gueltigkeit($n + ['naechste_pruefung' => null, 'geprueft_am' => null, 'einsatz_von' => null, 'einsatz_bis' => null], $heute);
+    gleich([$g(['naechste_pruefung' => '2026-06-14'], '2026-06-15')['code'], $g(['naechste_pruefung' => '2026-06-15'], '2026-06-15')['code'],
+        $g(['naechste_pruefung' => '2026-07-15'], '2026-06-15')['code'], $g(['naechste_pruefung' => '2026-07-16'], '2026-06-15')['code'], $g([], '2026-06-15')['code']],
+        ['abgelaufen', 'laeuft_ab', 'laeuft_ab', 'gueltig', 'unbekannt'], 'Gültigkeit: gestern abgelaufen, heute und in 30 Tagen bald, in 31 Tagen gültig, ohne Datum unbekannt');
+    gleich([$g(['naechste_pruefung' => '2026-06-15'], '2026-06-15')['text'], $g(['naechste_pruefung' => '2026-06-16'], '2026-06-15')['text'],
+        $g(['naechste_pruefung' => '2026-06-14'], '2026-06-15')['text'], $g(['naechste_pruefung' => '2027-01-31'], '2026-06-15')['text']],
+        ['nächste Prüfung heute fällig', 'nächste Prüfung am 16.06.2026 (in 1 Tag)', 'Prüffrist abgelaufen am 14.06.2026', 'gültig bis 31.01.2027'], 'Gültigkeit: Texte');
+    gleich([$g(['naechste_pruefung' => '2026-04-27'], '2026-03-28')['code'], $g(['naechste_pruefung' => '2026-04-28'], '2026-03-28')['code'],
+        $g(['naechste_pruefung' => '2026-11-24'], '2026-10-25')['code'], $g(['naechste_pruefung' => '2026-11-25'], '2026-10-25')['code']],
+        ['laeuft_ab', 'gueltig', 'laeuft_ab', 'gueltig'], 'Gültigkeit über die Zeitumstellung: 30 Tage bleiben 30 Tage');
+    $miete = ['einsatz_von' => '2026-06-10', 'einsatz_bis' => '2026-06-20'];
+    gleich([$g($miete + ['naechste_pruefung' => '2026-06-18', 'geprueft_am' => '2025-06-18'], '2026-06-01')['hinweise'],
+        $g($miete + ['naechste_pruefung' => '2026-06-05', 'geprueft_am' => '2025-06-05'], '2026-06-01')['hinweise'],
+        $g($miete + ['naechste_pruefung' => '2027-06-12', 'geprueft_am' => '2026-06-12'], '2026-06-15')['hinweise'],
+        $g($miete + ['naechste_pruefung' => '2027-06-10', 'geprueft_am' => '2026-06-10'], '2026-06-15')['hinweise'],
+        $g($miete + ['naechste_pruefung' => '2026-06-21', 'geprueft_am' => '2025-06-21'], '2026-06-01')['hinweise']],
+        [['Die Prüffrist endet in der Mietzeit (18.06.2026).'], ['Die Prüffrist war schon vor Beginn der Mietzeit abgelaufen.'], ['Nach der Übergabe geprüft (am 12.06.2026).'], [], []],
+        'Hinweise zur Mietzeit: endet darin, war schon vorher abgelaufen, erst nach der Übergabe geprüft; am Übergabetag und danach keiner');
+    gleich([$g(['naechste_pruefung' => '2026-06-14'], '2026-06-15')['symbol'], $g(['naechste_pruefung' => '2026-06-14'], '2026-06-15')['wort']], ['✗', 'abgelaufen'],
+        'Symbol und Wort');
+    // Mitternacht in Berlin: 23:30 UTC am 1. März ist schon der 2. März, am 1. Juli (Sommerzeit) 22:30 UTC der 2. Juli.
+    gleich([Pruefnachweise::heute((int) strtotime('2026-03-01T22:59:59Z')), Pruefnachweise::heute((int) strtotime('2026-03-01T23:00:00Z')),
+        Pruefnachweise::heute((int) strtotime('2026-07-01T21:59:59Z')), Pruefnachweise::heute((int) strtotime('2026-07-01T22:00:00Z'))],
+        ['2026-03-01', '2026-03-02', '2026-07-01', '2026-07-02'], 'heute: Mitternacht in Europe/Berlin (Winter- und Sommerzeit)');
+    $ab = Pruefnachweise::gueltigkeit(['naechste_pruefung' => '2026-03-01', 'geprueft_am' => null, 'einsatz_von' => null, 'einsatz_bis' => null],
+        Pruefnachweise::heute((int) strtotime('2026-03-01T23:30:00Z')));
+    gleich($ab['code'], 'abgelaufen', 'kurz nach Mitternacht (Ortszeit) ist die Frist von gestern abgelaufen');
+
+    // ------------------------------------------------ Aufbewahrung
+    gleich([Pruefnachweise::aufbewahrenBis('2026-07-01'), Pruefnachweise::aufbewahrenBis('2026-12-31'), Pruefnachweise::aufbewahrenBis('2027-01-01')],
+        ['2029-12-31', '2029-12-31', '2030-12-31'], 'aufbewahren bis: 31.12. des Prüfjahres + 3');
+    Settings::put('kundenbereich.nachweise_jahre', '5');
+    gleich(Pruefnachweise::aufbewahrenBis('2026-07-01'), '2031-12-31', 'mit 5 Jahren: 2031-12-31');
+    Settings::put('kundenbereich.nachweise_jahre', '3');
+    $bytes3 = $pdf('n3');
+    $n3 = (int) Pruefnachweise::pdfAnlegen($kunden['k2'], $bytes3, 'n3.pdf', $angaben(['bezeichnung' => $kennung . ' Verlängerung CEE32']), true)['id'];
+    $n4 = (int) Pruefnachweise::pdfAnlegen($kunden['k2'], $bytes1, 'geteilt.pdf', $angaben(['bezeichnung' => $kennung . ' geteilte Datei']), true)['id'];
+    Database::insert('kunden_abrufe', ['kunde_id' => $kunden['k2'], 'user_id' => $z2, 'username' => $kennung . '-z2', 'art' => 'nachweis', 'ziel_id' => $n3, 'am' => gmdate('c')]);
+    $faellig = static fn (): array => array_values(array_intersect(array_column(Pruefnachweise::faellig(), 'id'), [$n1, $n2, $n3, $n4]));
+    gleich($faellig(), [], 'nichts fällig');
+    pruefe(!Pruefnachweise::aufbewahrungLoeschen($n3) && $nachweis($n3) !== null, 'nicht fälliger Nachweis wird nicht gelöscht');
+    Database::execute('UPDATE pruefnachweise SET aufbewahren_bis = ? WHERE id IN (?, ?)', [$tagIn(-1), $n3, $n4]);
+    gleich($faellig(), [$n3, $n4], 'Aufbewahrung vorgezogen: n3, n4 fällig');
+    $hinweise = Pruefnachweise::wartungHinweise();
+    pruefe(count($hinweise) === 1 && str_contains($hinweise[0], 'über der Aufbewahrungsfrist (bin/power kunden:aufbewahrung)'), 'Hinweis für „wartung“: ' . implode(' ', $hinweise));
+    pruefe(preg_match("/case 'wartung':.*?Pruefnachweise::wartungHinweise\(\).*?break;/s", (string) file_get_contents(dirname(__DIR__) . '/bin/power')) === 1,
+        'bin/power wartung meldet ihn (und löscht nichts)');
+    [$code, $aus] = power('kunden:aufbewahrung');
+    pruefe($code === 0 && str_contains($aus, 'Nachweis #' . $n3) && str_contains($aus, '--ausfuehren') && $nachweis($n3) !== null
+        && !str_contains($aus, $kennung), 'kunden:aufbewahrung zeigt nur (ohne Namen)');
+    pruefe(Pruefnachweise::aufbewahrungLoeschen($n3), 'n3 gelöscht');
+    gleich([$nachweis($n3), (int) Database::scalar("SELECT COUNT(*) FROM kunden_abrufe WHERE art = 'nachweis' AND ziel_id = ?", [$n3]), $dateiZahl($bytes3)], [null, 0, 0],
+        'mit Abrufen und unbenutzter Datei');
+    [$code, $aus] = power('kunden:aufbewahrung', '--ausfuehren');
+    gleich([$code, $nachweis($n4), $dateiZahl($bytes1), $nachweis($n1) !== null], [0, null, 1, true], 'kunden:aufbewahrung --ausfuehren: n4 weg, die geteilte Datei bleibt (n1, n2)');
+    $audit = Database::first("SELECT username, details FROM audit_log WHERE action = 'kunden.nachweis_loeschen' AND target_id = ?", [(string) $n4]) ?? [];
+    gleich([$audit['username'] ?? '', json_decode((string) ($audit['details'] ?? '{}'), true)['grund'] ?? ''], ['cli', 'aufbewahrung'], 'Audit: von der Kommandozeile, Grund');
+
+    // ------------------------------------------------ Integrität
+    $datei1 = (int) $nachweis($n1)['datei_id'];
+    $lose = 0;
+    $befunde = static function () use (&$datei1, &$n1, &$n2, &$lose): array {
+        $eigene = ['Datei #' . $datei1 . ':', 'Nachweis #' . $n1 . ':', 'Nachweis #' . $n2 . ':', 'Datei #' . $lose . ':'];
+        return array_values(array_filter(Pruefnachweise::pruefen(), static fn (string $b): bool
+            => array_filter($eigene, static fn (string $e): bool => str_starts_with($b, $e)) !== []));
+    };
+    gleich($befunde(), [], 'unversehrt: kein Befund');
+    $kaputt = $bytes1;
+    $kaputt[20] = $kaputt[20] === 'A' ? 'B' : 'A';
+    Database::execute('UPDATE pruefnachweis_dateien SET daten = ? WHERE id = ?', [base64_encode($kaputt), $datei1]);
+    gleich($befunde(), ['Datei #' . $datei1 . ': Prüfsumme stimmt nicht.'], 'ein Byte geändert: Befund');
+    gleich([Pruefnachweise::datei($nachweis($n1)), KundenSicht::nachweisPdf($kunden['k1'], $n1)], [null, null], '… und nichts ausgeliefert');
+    clearstatcache(true, $logDatei);
+    $zeilen = preg_grep('/Prüfnachweis: gespeicherte Datei weicht/', explode("\n", (string) @file_get_contents($logDatei, false, null, $logVorher))) ?: [];
+    pruefe($zeilen !== [] && preg_grep('/' . preg_quote($kennung, '/') . '/', $zeilen) === [], 'Logeintrag nur mit IDs, ohne Inhalt');
+    Pruefnachweise::status($kunden['k1'], $n1, 'zurueckgezogen');
+    pruefe(!Pruefnachweise::status($kunden['k1'], $n1, 'freigegeben')['ok'], 'beschädigte Datei: nicht freigegeben');
+    [$code, $aus] = power('kunden:nachweise-pruefen');
+    pruefe($code === 1 && str_contains($aus, 'BEFUND   Datei #' . $datei1 . ': Prüfsumme stimmt nicht.') && !str_contains($aus, $kennung),
+        'kunden:nachweise-pruefen: Exit 1, Befund ohne Namen');
+    Database::execute('UPDATE pruefnachweis_dateien SET daten = ? WHERE id = ?', [base64_encode($bytes1), $datei1]);
+    Database::execute('UPDATE pruefnachweise SET datei_id = ? WHERE id = ?', [999999999, $n2]);
+    $lose = Pruefnachweise::dateiSpeichern($pdf('lose'));
+    gleich($befunde(), ['Nachweis #' . $n2 . ': Datei #999999999 fehlt.', 'Datei #' . $lose . ': von keinem Nachweis genutzt.'], 'Datei fehlt, Datei ungenutzt: Befunde');
+    Database::delete('pruefnachweis_dateien', $lose);
+    pruefe(KundenSicht::nachweis($kunden['k1'], $n2) === null && !in_array($n2, $sichtbar($kunden['k1']), true), 'ohne Datei sieht der Kunde den Nachweis nicht');
+    Database::execute('UPDATE pruefnachweise SET datei_id = ? WHERE id = ?', [$datei1, $n2]);
+    Pruefnachweise::status($kunden['k1'], $n1, 'freigegeben');
+    gleich($befunde(), [], 'wiederhergestellt: kein Befund');
+
+    // ------------------------------------------------ Inventar
+    pruefe(InventarService::loeschen($inventar['pd'])['ok'], 'Inventarstück gelöscht');
+    $z = $nachweis($n2) ?? ['inventar_id' => 'weg', 'inventarnummer' => ''];
+    gleich([(int) Database::scalar('SELECT COUNT(*) FROM inventar WHERE id = ?', [$inventar['pd']]), $z['inventar_id'], $z['inventarnummer']],
+        [0, null, 'PD63-07'], 'Inventarstück gelöscht: der Nachweis bleibt, ohne Verweis (die Nummer bleibt)');
+    unset($inventar['pd']);
+
+    // ------------------------------------------------ HTTP
+    $nK2 = (int) Pruefnachweise::pdfAnlegen($kunden['k2'], $pdf('k2'), 'k2.pdf', $angaben(['bezeichnung' => $kennung . ' Nachweis K2']), true)['id'];
+    $port = freierPort();
+    $serverFehler = (string) tempnam(sys_get_temp_dir(), 'pm-pn-fehler-');
+    $dosen[] = $serverFehler;
+    // Größere Uploads als die Vorgabe des eingebauten Servers (2 MB) – wie unter FPM (64 MB).
+    hintergrund([PHP_BINARY, '-d', 'upload_max_filesize=16M', '-d', 'post_max_size=20M', '-S', '127.0.0.1:' . $port, '-t', dirname(__DIR__) . '/public'],
+        ['PHP_CLI_SERVER_WORKERS' => '4'], $serverFehler);
+    for ($i = 0; $i < 50 && !erreichbar('127.0.0.1', $port); $i++) {
+        usleep(100_000);
+    }
+    if (!erreichbar('127.0.0.1', $port)) {
+        throw new RuntimeException('eingebauter PHP-Server startet nicht');
+    }
+    $basis = 'http://127.0.0.1:' . $port;
+    alsBenutzer(null);
+    $k1 = $kunden['k1'];
+    $reiter = '/kunden/' . $k1 . '?tab=nachweise';
+    $planung = anmeldenAls($basis, $kennung . '-planung', $kennwort, $dosen);
+    $seite = anfrage($basis, $planung['dose'], 'GET', $reiter);
+    pruefe($seite['status'] === 200 && str_contains($seite['text'], $kennung . ' Verteiler PD63-07') && str_contains($seite['text'], 'enctype="multipart/form-data"')
+        && str_contains($seite['text'], 'id="nachweis-' . $n1 . '"') && str_contains($seite['text'], 'sieht der Kunde') && !str_contains($seite['text'], 'onclick='),
+        'Reiter Prüfnachweise: Liste, Formular zum Hinterlegen');
+    pruefe(str_contains($seite['text'], 'Prüfnachweise (2)'), 'Reiter mit der Zahl, die der Kunde sieht');
+    $token = csrfAus($seite['text']);
+    $zahl = static fn (): int => (int) Database::scalar('SELECT COUNT(*) FROM pruefnachweise WHERE kunde_id = ?', [$k1]);
+    $vorher = $zahl();
+    $felder = static fn (array $mehr = []): array => $mehr + ['bezeichnung' => $kennung . ' per HTTP', 'inventarnummer' => 'HT-01', 'geprueft_am' => $tagIn(-2),
+        'naechste_pruefung' => $tagIn(20), 'ergebnis' => 'bestanden', 'site_id' => (string) $sites['a'], 'einsatz_von' => $tagIn(-1), 'einsatz_bis' => $tagIn(3)];
+    // Über 2 MB (die Vorgabe des eingebauten Servers), unter 10 MB.
+    $gross = "%PDF-1.4\n% " . $kennung . " gross\n" . str_repeat("% Fuellzeile 0123456789\n", 130000) . "%%EOF\n";
+    $r = anfrage($basis, $planung['dose'], 'POST', '/kunden/' . $k1 . '/nachweise/hochladen',
+        $felder(['_token' => $token, 'freigeben' => '1', 'datei' => hochladeDatei($gross, 'Prüfprotokoll Müller & Söhne <x>.pdf', $dosen)]), true);
+    $nh = (int) Database::scalar('SELECT id FROM pruefnachweise WHERE kunde_id = ? AND bezeichnung = ?', [$k1, $kennung . ' per HTTP']);
+    $z = $nachweis($nh) ?? [];
+    pruefe($r['status'] === 302 && str_starts_with((string) $r['ziel'], '/kunden/' . $k1 . '?tab=nachweise#nachweis-') && $zahl() === $vorher + 1,
+        'hochgeladen (' . number_format(strlen($gross) / 1048576, 1) . ' MB) → zurück zum Nachweis');
+    gleich([$z['status'] ?? '', $z['datei_name'] ?? '', $z['einsatz_von'] ?? '', $dateiZahl($gross)], ['freigegeben', 'Pruefprotokoll-Mueller-Soehne-x.pdf', $tagIn(-1), 1],
+        'gleich freigegeben, Dateiname bereinigt, Mietzeit, Datei gespeichert');
+    $vorher = $zahl();
+    $zuGross = "%PDF-1.4\n" . str_repeat('0', Pruefnachweise::MAX_BYTES + 10);
+    $r = anfrage($basis, $planung['dose'], 'POST', '/kunden/' . $k1 . '/nachweise/hochladen',
+        $felder(['_token' => $token, 'bezeichnung' => $kennung . ' zu groß', 'datei' => hochladeDatei($zuGross, 'gross.pdf', $dosen)]), true);
+    $nachher = anfrage($basis, $planung['dose'], 'GET', $reiter);
+    pruefe($zahl() === $vorher && str_contains(meldungen($nachher['text']), 'größer als 10 MB') && str_contains($nachher['text'], 'value="' . $kennung . ' zu groß"'),
+        'über 10 MB: abgelehnt, Meldung, Eingaben bleiben im Formular');
+    $r = anfrage($basis, $planung['dose'], 'POST', '/kunden/' . $k1 . '/nachweise/hochladen',
+        $felder(['_token' => $token, 'datei' => hochladeDatei('<html><script>alert(1)</script></html>', 'boese.pdf', $dosen, 'text/html')]), true);
+    pruefe($zahl() === $vorher && str_contains(meldungen(anfrage($basis, $planung['dose'], 'GET', $reiter)['text']), 'Nur PDF-Dateien'), 'kein PDF: abgelehnt');
+    anfrage($basis, $planung['dose'], 'POST', '/kunden/' . $k1 . '/nachweise/hochladen', $felder(['datei' => hochladeDatei($pdf('ohne'), 'ohne.pdf', $dosen)]), true);
+    anfrage($basis, $planung['dose'], 'POST', '/kunden/' . $k1 . '/nachweise/hochladen', $felder(['_token' => $token]), true);
+    gleich($zahl(), $vorher, 'ohne CSRF-Token und ohne Datei: nichts angelegt');
+    anfrage($basis, $planung['dose'], 'GET', $reiter);   // Meldungen abholen
+
+    // Bearbeiten (mit Fehler: Eingaben bleiben, Formular offen), Freigeben, Zurückziehen.
+    $r = anfrage($basis, $planung['dose'], 'POST', '/kunden/' . $k1 . '/nachweise/' . $nh . '/speichern',
+        $felder(['_token' => $token, 'bezeichnung' => $kennung . ' geändert', 'naechste_pruefung' => $tagIn(-10)]));
+    $seite = anfrage($basis, $planung['dose'], 'GET', $reiter);
+    pruefe($r['ziel'] === '/kunden/' . $k1 . '?tab=nachweise#nachweis-' . $nh && str_contains(meldungen($seite['text']), 'vor dem Prüfdatum')
+        && str_contains($seite['text'], 'value="' . $kennung . ' geändert"') && preg_match('/<details class="zugang-bearbeiten" open>/', $seite['text']) === 1
+        && ($nachweis($nh)['bezeichnung'] ?? '') === $kennung . ' per HTTP', 'Bearbeiten mit Fehler: nichts geändert, Eingaben im offenen Formular');
+    anfrage($basis, $planung['dose'], 'POST', '/kunden/' . $k1 . '/nachweise/' . $nh . '/speichern', $felder(['_token' => $token, 'bezeichnung' => $kennung . ' geändert',
+        'hinweis' => $kennung . '-hinweis']));
+    gleich([$nachweis($nh)['bezeichnung'] ?? '', $nachweis($nh)['hinweis'] ?? ''], [$kennung . ' geändert', $kennung . '-hinweis'], 'Bearbeiten gespeichert');
+    anfrage($basis, $planung['dose'], 'POST', '/kunden/' . $k1 . '/nachweise/' . $nh . '/status', ['_token' => $token, 'status' => 'zurueckgezogen']);
+    gleich($nachweis($nh)['status'] ?? '', 'zurueckgezogen', 'zurückgezogen über HTTP');
+    anfrage($basis, $planung['dose'], 'POST', '/kunden/' . $k1 . '/nachweise/' . $nh . '/status', ['_token' => $token, 'status' => 'freigegeben']);
+    gleich($nachweis($nh)['status'] ?? '', 'freigegeben', 'wieder freigegeben über HTTP');
+    anfrage($basis, $planung['dose'], 'POST', '/kunden/' . $k1 . '/nachweise/' . $nh . '/status', ['status' => 'zurueckgezogen']);
+    gleich($nachweis($nh)['status'] ?? '', 'freigegeben', 'Status ohne CSRF-Token: unverändert');
+
+    // Die Datei für das Personal: als Anhang, sandbox, Prüfsumme.
+    $d = anfrage($basis, $planung['dose'], 'GET', '/kunden/' . $k1 . '/nachweise/' . $nh . '/datei');
+    gleich([$d['status'], kopfzeile($d, 'Content-Type'), kopfzeile($d, 'Content-Disposition'), kopfzeile($d, 'Content-Security-Policy'), kopfzeile($d, 'Cache-Control'),
+        hash('sha256', $d['text'])], [200, 'application/pdf', 'attachment; filename="Pruefprotokoll-Mueller-Soehne-x.pdf"', "default-src 'none'; sandbox", 'private, no-store',
+        hash('sha256', $gross)], 'Datei für das Personal: Anhang, sandbox, no-store, die Bytes');
+    foreach (['/kunden/' . $k1 . '/nachweise/' . $nK2 . '/datei', '/kunden/' . $kunden['k2'] . '/nachweise/' . $nh . '/datei', '/kunden/' . $k1 . '/nachweise/999999999/datei',
+        '/kunden/' . $k1 . '/nachweise/' . $nh . 'x/datei', '/kunden/' . $k1 . '/nachweise/0/datei'] as $pfad) {
+        gleich(anfrage($basis, $planung['dose'], 'GET', $pfad)['status'], 404, 'Personal ' . $pfad . ' → 404 (Nachweis eines anderen Kunden, nicht vorhanden, kaputt)');
+    }
+    gleich(anfrage($basis, $planung['dose'], 'POST', '/kunden/' . $kunden['k2'] . '/nachweise/' . $nh . '/status', ['_token' => $token, 'status' => 'zurueckgezogen'])['status'], 404,
+        'Status über einen anderen Kunden: 404');
+    gleich($nachweis($nh)['status'] ?? '', 'freigegeben', '… unverändert');
+
+    // Rechte: nur ansehen; ohne Kunden-Rechte nichts.
+    $ansehen = anmeldenAls($basis, $kennung . '-ansehen', $kennwort, $dosen);
+    $s = anfrage($basis, $ansehen['dose'], 'GET', $reiter);
+    pruefe($s['status'] === 200 && !str_contains($s['text'], 'enctype="multipart/form-data"') && !str_contains($s['text'], '/status"')
+        && str_contains($s['text'], '/nachweise/' . $nh . '/datei'), 'nur „kunden.view“: Liste mit PDF, ohne Formulare');
+    $at = csrfAus($s['text']);
+    gleich([anfrage($basis, $ansehen['dose'], 'POST', '/kunden/' . $k1 . '/nachweise/hochladen', $felder(['_token' => $at, 'datei' => hochladeDatei($pdf('r'), 'r.pdf', $dosen)]), true)['status'],
+        anfrage($basis, $ansehen['dose'], 'POST', '/kunden/' . $k1 . '/nachweise/' . $nh . '/status', ['_token' => $at, 'status' => 'zurueckgezogen'])['status'],
+        anfrage($basis, $ansehen['dose'], 'POST', '/kunden/' . $k1 . '/nachweise/' . $nh . '/loeschen', ['_token' => $at])['status'],
+        anfrage($basis, $ansehen['dose'], 'GET', '/kunden/' . $k1 . '/nachweise/' . $nh . '/datei')['status'], $nachweis($nh)['status'] ?? ''],
+        [403, 403, 403, 200, 'freigegeben'], 'nur „kunden.view“: hochladen, Status, löschen 403 – Datei 200');
+    $nichts = anmeldenAls($basis, $kennung . '-nichts', $kennwort, $dosen);
+    gleich([anfrage($basis, $nichts['dose'], 'GET', $reiter)['status'], anfrage($basis, $nichts['dose'], 'GET', '/kunden/' . $k1 . '/nachweise/' . $nh . '/datei')['status']],
+        [403, 403], 'ohne Kunden-Rechte: Reiter und Datei 403');
+    $ohne = anmeldenAls($basis, $kennung . '-ohneinventar', $kennwort, $dosen);
+    $s = anfrage($basis, $ohne['dose'], 'GET', $reiter);
+    pruefe($s['status'] === 200 && str_contains($s['text'], 'enctype="multipart/form-data"') && !str_contains($s['text'], 'name="inventar_id"'),
+        'ohne „Datenquellen ansehen“: hinterlegen ja, ohne Inventar-Auswahl');
+    gleich(anfrage($basis, $planung['dose'], 'GET', '/kundenbereich/pruefnachweise')['status'], 403, 'Personal: /kundenbereich/pruefnachweise 403');
+    gleich(meldungenDesServers($serverFehler), [], 'Personal-Seiten ohne PHP-Meldung');
+
+    // Im Kundenbereich: Liste und PDF.
+    $kunde = anmeldenAls($basis, $kennung . '-z1', $kennwort, $dosen);
+    $liste = anfrage($basis, $kunde['dose'], 'GET', '/kundenbereich/pruefnachweise');
+    pruefe($liste['status'] === 200 && str_contains($liste['text'], $kennung . ' geändert') && str_contains($liste['text'], $kennung . ' Verteiler PD63-07')
+        && str_contains($liste['text'], 'href="/kundenbereich/pruefnachweise/' . $nh . '/pdf"') && str_contains($liste['text'], 'läuft bald ab')
+        && str_contains($liste['text'], $kennung . '-hinweis') && str_contains($liste['text'], 'Ergebnis: bestanden') && str_contains($liste['text'], 'aria-current="page"'),
+        'Kundenbereich: Prüfnachweise mit Frist, Hinweis, Ergebnis, PDF; Navigation markiert');
+    gleich([kopfzeile($liste, 'Cache-Control'), kopfzeile($liste, 'Referrer-Policy')], ['private, no-store', 'no-referrer'], 'Liste: no-store, no-referrer');
+    $durch = array_filter(['Pruefprotokoll-Mueller', 'herkunft', $kennung . '-planung', '/kunden/', 'Entwurf', 'onclick='], static fn (string $m): bool => str_contains($liste['text'], $m));
+    gleich(array_values($durch), [], 'Liste ohne Dateinamen, Herkunft, Bearbeiter, Personal-Links, Entwürfe, Inline-JavaScript');
+    $gefiltert = anfrage($basis, $kunde['dose'], 'GET', '/kundenbereich/pruefnachweise?location=' . $sites['c']);
+    pruefe(str_contains($gefiltert['text'], $kennung . ' Kabeltrommel KT-12') && !str_contains($gefiltert['text'], $kennung . ' geändert')
+        && str_contains($gefiltert['text'], 'value="' . $sites['c'] . '" selected'), 'Filter je Location');
+    $unsinn = anfrage($basis, $kunde['dose'], 'GET', '/kundenbereich/pruefnachweise?location=' . $sites['b']);
+    pruefe($unsinn['status'] === 200 && str_contains($unsinn['text'], $kennung . ' geändert') && !str_contains($unsinn['text'], $kennung . ' Gelände B'),
+        'fremde Location im Filter: alle eigenen, kein fremder Name');
+    $start = anfrage($basis, $kunde['dose'], 'GET', '/kundenbereich');
+    pruefe(str_contains($start['text'], 'Ihre Prüfnachweise') && str_contains($start['text'], '1</strong> läuft in 30 Tagen ab') && str_contains($start['text'], 'href="/kundenbereich/pruefnachweise"'),
+        'Übersicht: Prüfnachweise mit dem, was bald abläuft');
+    $ort = anfrage($basis, $kunde['dose'], 'GET', '/kundenbereich/locations/' . $sites['a']);
+    pruefe(str_contains($ort['text'], 'Ihre Prüfnachweise an dieser Location') && str_contains($ort['text'], $kennung . ' geändert')
+        && !str_contains($ort['text'], $kennung . ' Kabeltrommel KT-12'), 'Location A: ihre Nachweise, nicht die von C');
+    gleich([anfrage($basis, $kunde['dose'], 'GET', '/kundenbereich/pruefnachweise/' . $nK2 . '/pdf')['status'],
+        anfrage($basis, $kunde['dose'], 'GET', '/kundenbereich/pruefnachweise/' . $nK2 . '/pdf')['text'] === ''], [404, false], 'K1 bekommt das PDF von K2 nicht (404)');
+    $abrufe = static fn (): int => (int) Database::scalar("SELECT COUNT(*) FROM kunden_abrufe WHERE kunde_id = ? AND art = 'nachweis'", [$k1]);
+    $vorher = $abrufe();
+    $p = anfrage($basis, $kunde['dose'], 'GET', '/kundenbereich/pruefnachweise/' . $nh . '/pdf');
+    gleich([$p['status'], kopfzeile($p, 'Content-Type'), kopfzeile($p, 'Content-Disposition'), kopfzeile($p, 'X-Content-Type-Options'), kopfzeile($p, 'Cache-Control'),
+        kopfzeile($p, 'Referrer-Policy'), kopfzeile($p, 'Content-Security-Policy'), hash('sha256', $p['text'])],
+        [200, 'application/pdf', 'attachment; filename="Pruefnachweis-HT-01-' . $tagIn(-2) . '.pdf"', 'nosniff', 'private, no-store', 'no-referrer', "default-src 'none'; sandbox",
+            hash('sha256', $gross)], 'PDF für den Kunden: Anhang, neutraler Name, nosniff, no-store, no-referrer, sandbox, die Bytes');
+    $abruf = Database::first("SELECT * FROM kunden_abrufe WHERE kunde_id = ? AND art = 'nachweis' ORDER BY id DESC LIMIT 1", [$k1]) ?? [];
+    gleich([$abrufe() - $vorher, (int) ($abruf['ziel_id'] ?? 0), (int) ($abruf['user_id'] ?? 0), $abruf['sha256'] ?? ''], [1, $nh, $z1, hash('sha256', $gross)],
+        'Abruf festgehalten: Nachweis, Zugang, Prüfsumme');
+    $audit = Database::first("SELECT details FROM audit_log WHERE action = 'kundenbereich.abruf' AND target_type = 'nachweis' AND target_id = ?", [(string) $nh]);
+    gleich(json_decode((string) ($audit['details'] ?? '{}'), true), ['art' => 'nachweis', 'ziel_id' => $nh], 'Audit kundenbereich.abruf mit Art und ID');
+    $seite = anfrage($basis, $planung['dose'], 'GET', $reiter);
+    pruefe(preg_match('/id="nachweis-' . $nh . '".*?data-label="Geladen" class="small">\d{2}\.\d{2}\.\d{4}/s', $seite['text']) === 1, 'Personal sieht „zuletzt geladen“');
+    pruefe(str_contains(anfrage($basis, $planung['dose'], 'GET', '/kunden/' . $k1 . '?tab=abrufe')['text'], $kennung . ' geändert'), 'Reiter Abrufe nennt den Nachweis');
+    gleich(meldungenDesServers($serverFehler), [], 'Kundenbereich ohne PHP-Meldung');
+
+    // Löschen über HTTP: weg für den Kunden, samt Abrufen; die Datei (nur hier genutzt) mit.
+    anfrage($basis, $planung['dose'], 'POST', '/kunden/' . $k1 . '/nachweise/' . $nh . '/loeschen', ['_token' => $token]);
+    gleich([$nachweis($nh), $dateiZahl($gross), (int) Database::scalar("SELECT COUNT(*) FROM kunden_abrufe WHERE art = 'nachweis' AND ziel_id = ?", [$nh]),
+        anfrage($basis, $kunde['dose'], 'GET', '/kundenbereich/pruefnachweise/' . $nh . '/pdf')['status']], [null, 0, 0, 404], 'gelöscht: Nachweis, Datei, Abrufe; Kunde 404');
+    gleich(meldungenDesServers($serverFehler), [], 'Löschen ohne PHP-Meldung');
+
+    // Datenschutz: keine Kundennamen und Dateinamen im Audit.
+    $treffer = 0;
+    foreach (Database::select('SELECT details FROM audit_log WHERE id > ?', [$auditVorher]) as $a) {
+        $treffer += str_contains((string) $a['details'], $kennung . ' Muster') || str_contains((string) $a['details'], '.pdf') ? 1 : 0;
+    }
+    gleich($treffer, 0, 'kein Kundenname und kein Dateiname in audit_log.details');
+} finally {
+    alsBenutzer(null);
+    Config::set('app.timezone', $zoneVorher);
+    $jahreVorher === null ? Settings::forget('kundenbereich.nachweise_jahre') : Settings::put('kundenbereich.nachweise_jahre', (string) $jahreVorher);
+    foreach ($kunden as $id) {
+        Pruefnachweise::kundeEntfernt($id);
+        foreach (['kunden_vorgaenge', 'kunden_abrufe'] as $tabelle) {
+            Database::execute('DELETE FROM ' . $tabelle . ' WHERE kunde_id = ?', [$id]);
+        }
+        Database::execute("DELETE FROM freigaben WHERE subject_type = 'kunde' AND subject_id = ?", [$id]);
+        foreach (Database::select('SELECT id FROM users WHERE kunde_id = ?', [$id]) as $u) {
+            BenutzerService::kontoEntfernen((int) $u['id']);
+        }
+        Database::delete('kunden', $id);
+    }
+    foreach ($inventar as $id) {
+        Database::delete('inventar', $id);
+    }
+    foreach ($sites as $id) {
+        SiteService::deleteSite($id);
+    }
+    foreach ($personal as $id) {
+        BenutzerService::kontoEntfernen($id);
+    }
+    foreach ($rollen as $id) {
+        BenutzerService::rolleLoeschen($id);
+    }
+    Database::execute('DELETE FROM audit_log WHERE id > ? AND (username LIKE ? OR username = ? OR details LIKE ? OR target_type IN (?, ?, ?, ?, ?, ?))',
+        [$auditVorher, $kennung . '%', 'cli', '%' . $kennung . '%', 'pruefnachweis', 'nachweis', 'inventar', 'site', 'role', 'user']);
+    foreach ($dosen as $d) {
+        @unlink($d);
+    }
+}
+gleich((int) Database::scalar('SELECT COUNT(*) FROM audit_log WHERE id > ?', [$auditVorher]), 0, 'aufgeräumt: kein Audit-Eintrag dieses Laufs übrig');
+gleich((int) Database::scalar('SELECT COUNT(*) FROM kunden WHERE name LIKE ?', [$kennung . '%']) + (int) Database::scalar('SELECT COUNT(*) FROM users WHERE username LIKE ?', [$kennung . '%'])
+    + (int) Database::scalar('SELECT COUNT(*) FROM pruefnachweise WHERE bezeichnung LIKE ?', [$kennung . '%']), 0, 'aufgeräumt: keine Kunden, Konten und Nachweise übrig');
+
+ende('pruefnachweise');

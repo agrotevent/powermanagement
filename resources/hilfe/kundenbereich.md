@@ -33,7 +33,8 @@ nach Ihrer Zeit dort geplant ist, gehört nicht zu Ihrem Zugang.
 - **Was geprüft wird:** einzelne ortsveränderliche Geräte, etwa Verteiler, Kabeltrommeln und Verlängerungen.
 - **Wann:** in festen Abständen in unserer Werkstatt – unabhängig von Ihrer Veranstaltung.
 - **Grundlage:** DGUV Vorschrift 3 und DIN EN 50699 (VDE 0702).
-- **Was Sie bekommen:** ein Prüfprotokoll je Gerät mit Prüfdatum und nächster Prüfung.
+- **Was Sie bekommen:** ein Prüfprotokoll je Gerät mit Prüfdatum und nächster Prüfung – manchmal als
+  Sammelnachweis für mehrere Geräte in einer Datei.
 
 Ein Übergabebericht kann **ersetzt** werden: Korrigieren wir einen abgeschlossenen Bericht, entsteht eine neue
 Fassung. Die alte bleibt sichtbar und trägt den Hinweis „ersetzt durch …“ – gültig ist die neueste.
@@ -51,7 +52,13 @@ ist. Die Protokolle bleiben hier, auch wenn die Location nicht mehr freigegeben 
 | ✗ abgelaufen | Das Datum der nächsten Prüfung ist überschritten – setzen Sie das Gerät erst nach einer neuen Prüfung wieder ein. |
 | ? unbekannt | Im Nachweis steht kein Datum der nächsten Prüfung; fragen Sie uns. |
 
-Endet eine Prüffrist während Ihrer Mietzeit, weisen wir am Nachweis darauf hin.
+Endet eine Prüffrist während Ihrer Mietzeit, war sie schon vor der Mietzeit abgelaufen oder wurde ein Gerät erst nach
+der Übergabe geprüft, weisen wir am Nachweis darauf hin. Ein Ergebnis („bestanden“, „mit Mängeln“) steht nur dabei, wenn
+es im Prüfprotokoll steht – maßgeblich ist immer das PDF.
+
+Unter *Prüfnachweise* laden Sie jedes Prüfprotokoll als PDF-Datei herunter; mit der Auswahl oben sehen Sie nur die
+Nachweise einer Location. Die Nachweise bleiben hier, auch wenn die Location nicht mehr freigegeben ist – bis zum Ende
+ihrer Aufbewahrungsfrist, einige Jahre nach der Prüfung.
 
 ## Was Sie vor Ort tun sollten
 
