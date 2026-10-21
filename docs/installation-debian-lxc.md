@@ -863,8 +863,11 @@ anderen Instanz oder aus einem angenommenen Vorschlag rechnet immer dieser
 Prozess – die Anfrage selbst wartet nicht darauf. Solche Prozesse rechnen
 **nacheinander**, nie zwei Pläne zugleich (jeder hält bei einem großen Plan
 150–200 MB, dazu pdftoppm); wer warten muss, sagt es im Protokoll. Bricht
-einer ab – etwa weil php-fpm beim Update neu startet –, holt die
-nächtliche Wartung es nach und räumt seine Zwischendateien weg.
+einer ab – etwa weil ein Update zurückrollt und dabei PHP-FPM anhält (ein
+gewöhnliches Update lädt PHP-FPM nur neu, die Bauten laufen weiter) –,
+beginnt der nächste Bau dieses Plans von vorn. Fehlende Kacheln rechnet
+nach jedem Update `powermanagement-kacheln` nach, sonst die nächtliche
+Wartung; sie räumt auch die Zwischendateien weg.
 
 Holen und Hochladen über Git und das Übernehmen von einer anderen Instanz
 dürfen in der Oberfläche zusammen höchstens **285 Sekunden** dauern
@@ -1039,7 +1042,14 @@ Die Schritte (die Oberfläche zählt sie mit):
 9. **Dienste starten:** PHP-FPM nach `php-fpm -t` nur neu laden (die
    Oberfläche ist kaum weg), nginx nach `nginx -t`, den Sammler neu starten,
    Node-RED nur, wenn sich Einheit, Einstellungen oder Flows ändern.
-10. **Grundrisse kacheln.**
+10. **Grundrisse kacheln** – nicht in diesem Schritt: Fehlende Kacheln
+    rechnet nach der Prüfung, wenn die Schreibsperre aufgehoben ist, eine
+    eigene Einheit als www-data (`powermanagement-kacheln`; mitlesen mit
+    `journalctl -u powermanagement-kacheln`). Ein Plan mit 100 MB braucht
+    Minuten – so lange bliebe sonst die Oberfläche gesperrt. Bauten, die
+    schon im Hintergrund laufen (ein eben hochgeladener Plan), rechnen
+    während des Updates weiter: Sie lesen die Datenbank nur und schreiben
+    nur Kacheln.
 11. **Prüfen.** *Pflicht:* Die Anmeldeseite antwortet mit HTTP 200 (wenn
     sie es vorher tat), PHP-FPM, nginx und alle Dienste, die vorher liefen,
     laufen (der Sammler ohne Neustarts), und `bin/power pruefen` erreicht
@@ -1209,7 +1219,16 @@ höchstens 150 s; jede schreibende Anfrage hält dafür
 auf die andere Instanz wartet, übernimmt nichts und meldet „Gerade läuft
 ein Update – nichts übernommen“; ebenso Prüfnachweise aus Eventworx, die
 noch auf Eventworx warten (die Liste mit Auswahl und Angaben steht dann
-wieder da). Kunden im Kundenbereich lesen und laden weiter; ändern können
+wieder da), und der Location- und Verteiler-Abgleich, solange er noch auf
+das Repository wartet (Holen und Hochladen dürfen zusammen bis zu 285 s
+dauern): Beginnt das Update beim Holen, übernimmt bzw. schiebt er nichts
+(„… nichts hochgeladen …“); beginnt es während des Hochladens, ist der
+Stand im Repository, hier fehlt nur der Vermerk – das nächste Hochladen
+meldet „schon derselbe Stand“ und trägt ihn nach. Ein Grundriss trägt
+Etage und Audit ein, bevor er kachelt, Sekunden nach dem Hochladen; das
+Kacheln danach schreibt nur Dateien. Ist ein Grundriss größer, als PHP
+annimmt (`post_max_size`), nennt die Meldung auch während der Sperre die
+Größe – ein zweiter Versuch hülfe nicht. Kunden im Kundenbereich lesen und laden weiter; ändern können
 sie nur ihr Kennwort, und das meldet „Gerade wird das System aktualisiert –
 nichts gespeichert …“ im Kundenbereich. Abrufe von Dokumenten in dieser
 Zeit stehen zusätzlich in `storage/logs/app.log` – rollt das Update zurück,
@@ -1290,7 +1309,11 @@ Update-Dienst prüft wie jeden anderen; root liest nie die Datenbank.
   Ein fehlerhafter Stand kann so noch ersetzt werden.
 - **Veranstaltungsschutz** über alle Standorte: Läuft ein Aufbau oder Betrieb
   (nicht *beendet*) oder wurde in den letzten 30 Minuten geschaltet, wird
-  **verschoben** und im Fenster erneut geprüft. Ebenso bei *Pausieren bis*
+  **verschoben** und im Fenster erneut geprüft. Ebenso, solange der Server
+  im Hintergrund Kacheln für Grundrisse rechnet (ein großer Plan, ein
+  Abgleich – meist Minuten): Das schadet einem Update nicht, aber beides
+  zugleich braucht viel Speicher, und rollt das Update zurück, finge der
+  Bau von vorn an. *Jetzt aktualisieren* von Hand hält es nicht auf. Ebenso bei *Pausieren bis*
   (einschließlich dieses Tages, höchstens 90 Tage voraus), lokalen
   Änderungen am Code, nicht linearem Verlauf, `AUTOMATIK=nein` und einem
   noch nicht zurückgerollten Update. Ins Audit-Log kommt das höchstens
@@ -1469,6 +1492,18 @@ Wenn etwas nicht klappt:
   liegen):
   `systemd-run --unit=pm-update --collect -p KillMode=mixed -p TimeoutStopSec=20min /opt/powermanagement/deploy/update-debian.sh --flows-ersetzen`
   (zusehen mit `journalctl -a -f -u pm-update`).
+- *„Die nginx-Site ist von Hand verändert und bleibt so“* (in Lauf 2 dazu
+  `Darin fehlt der Block für Grundrisse bis 100 MB …`): Die eigenen Zeilen
+  bleiben – Grundrisse über der Grenze der Site (früher 64 MB) lehnt nginx
+  dann aber ab. Die neue Fassung liegt daneben:
+  `diff -u /etc/nginx/sites-available/powermanagement /etc/nginx/powermanagement.powermanagement-neu`.
+  Den Block `location = /standorte/grundriss { … }` samt
+  `location @pm_plan_413` (und die neuen `fastcgi_…`-Zeilen in
+  `location ^~ /api/`) in die eigene Site übernehmen – oder, wenn die
+  eigenen Änderungen entbehrlich sind, die neue Fassung ganz:
+  `cp /etc/nginx/powermanagement.powermanagement-neu /etc/nginx/sites-available/powermanagement` –,
+  dann `nginx -t && systemctl reload nginx` (*Größe der Uploads*,
+  Abschnitt 9).
 - *Schon umgestellt?* Der Befehl schadet nicht – beide Läufe melden dann
   „aktuell“.
 - *Anderer Ort als /opt/powermanagement:* steht in
@@ -1672,7 +1707,7 @@ printf 'Authorization: Token %s\n' "$T" | curl -sG -H @- http://127.0.0.1:8086/q
 | Speichern auf einer Anlagen-Seite mit Livewerten hängt bis zum Timeout, im Audit-Log steht nichts | Ältere Fassungen: jede Live-Abfrage hielt die Sitzung, bis die InfluxDB antwortete – bei einer trägen InfluxDB stauten sie sich, und alles Weitere aus demselben Browser wartete. Neuen Stand einspielen (Abschnitt 10). Wie schnell die InfluxDB antwortet: `grep 'InfluxDB antwortet langsam' /opt/powermanagement/storage/logs/app.log`, `systemctl status influxdb`. |
 | `502 Bad Gateway` | PHP-FPM läuft nicht: `systemctl status php8.4-fpm`, Socket `/run/php/powermanagement.sock`. |
 | Grundriss-Upload: englisches „413 Request Entity Too Large“, „Die Anfrage ist für den Webserver zu groß“ oder Abbruch ohne Meldung | Ein Proxy davor oder eine von Hand veränderte nginx-Site begrenzt die Größe – Abschnitt 9, *Größe der Uploads*. Die Meldung „größer, als der Server annimmt“ kommt von PHP: Pool prüfen (`grep -e upload_max -e post_max /etc/php/8.4/fpm/pool.d/powermanagement.conf`). |
-| Großer Grundriss hochgeladen (oder über den Abgleich übernommen), die Karte zeichnet ihn unscharf und langsam | Die Kacheln rechnen noch im Hintergrund – `tail /opt/powermanagement/storage/logs/kacheln.log`; mehrere Pläne rechnen nacheinander („Ein anderer Prozess rechnet gerade Kacheln“). Von Hand: `cd /opt/powermanagement && runuser -u www-data -- php bin/power plan:kacheln`. |
+| Großer Grundriss hochgeladen (oder über den Abgleich übernommen), die Karte zeichnet ihn unscharf und langsam | Die Kacheln rechnen noch im Hintergrund – `tail /opt/powermanagement/storage/logs/kacheln.log`, nach einem Update `journalctl -u powermanagement-kacheln`; mehrere Pläne rechnen nacheinander („Ein anderer Prozess rechnet gerade Kacheln“). Von Hand: `cd /opt/powermanagement && runuser -u www-data -- php bin/power plan:kacheln`. |
 | Location-Abgleich oder andere Instanz: „… länger, als eine Anfrage hier dauern darf (zusammen höchstens 285 Sekunden …)“ | Die Leitung ist für die Größe der Pläne zu langsam. Noch einmal versuchen (bei Git kommt, was schon vollständig geholt ist, nicht noch einmal); für Git sonst auf dem Server `cd /opt/powermanagement && runuser -u www-data -- php bin/power location:uebernehmen <schlüssel>`, bei einer anderen Instanz die Pläne dort kleiner exportieren. |
 | „Welcome to nginx“ statt Anmeldung | `rm -f /etc/nginx/sites-enabled/default && systemctl reload nginx` |
 | Andere Instanz: „Das Token wird dort nicht (mehr) angenommen“, obwohl es stimmt | Ein Proxy (oder Apache ohne `CGIPassAuth On`) verschluckt den Kopf `Authorization` – Abschnitt 9, *Schnittstelle für andere Instanzen*. Sonst ist es widerrufen oder abgelaufen: bei der Gegenseite unter *System → Schnittstelle (API)* nachsehen. |

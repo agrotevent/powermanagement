@@ -1187,7 +1187,8 @@ Die **Karenzzeit** (Vorgabe 24 Stunden) lässt nur Stände zu, die schon so
 lange veröffentlicht sind – ein fehlerhafter Stand kann bis dahin noch
 ersetzt werden. Nie während eines Aufbaus oder Betriebs an irgendeinem
 Standort und nicht, wenn in den letzten 30 Minuten geschaltet wurde: Dann
-wird verschoben und im Fenster erneut geprüft. **Pausieren bis** hält die
+wird verschoben und im Fenster erneut geprüft – ebenso, solange der Server
+Kacheln für einen großen Grundriss rechnet (meist Minuten). **Pausieren bis** hält die
 Automatik bis einschließlich des gewählten Tages an, etwa über ein
 Veranstaltungswochenende. Ein Stand, der zurückgerollt werden musste, wird
 nicht automatisch wiederholt – erst ein neuerer oder *Jetzt aktualisieren*.

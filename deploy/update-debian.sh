@@ -1465,6 +1465,36 @@ wunschpruefung() {
     return 0
 }
 
+# Fehlende Kacheln (Schritt 10) rechnet das Update nicht selbst: Ein Plan mit
+# 100 MB braucht Minuten, ein PDF mit 60 Seiten eine halbe Stunde. So lange
+# stünde die Schreibsperre, die Frist des Update-Dienstes (60 min) liefe ab –
+# und plan:kacheln wartete zudem, bis ein Bau im Hintergrund fertig ist
+# (PlanTileService::nacheinander). Erst nach dem Punkt ohne Rückweg, als eigene
+# Einheit und Anwendungsbenutzer (nie als root – sonst gehörten Kacheln root):
+# Sie überlebt das Ende dieses Dienstes (systemd beendet dessen cgroup mit ihm),
+# rechnet mit dem neuen Code und schreibt nur unter storage/plans/kacheln, nie
+# in die Datenbank. Ohne Namensräume (PrivateTmp & Co.), damit sie auch im LXC
+# ohne Nesting startet. Was nicht anläuft, holt die nächtliche Wartung nach.
+kacheln_anstossen() {
+    local php
+    [[ "$OHNE_DIENSTE" == "nein" ]] || return 0
+    if systemctl is-active --quiet powermanagement-kacheln.service 2>/dev/null; then
+        echo "    Fehlende Kacheln: powermanagement-kacheln rechnet noch"
+        return 0
+    fi
+    php="$(command -v php 2>/dev/null || true)"
+    if [[ -n "$php" ]] && systemd-run --quiet --no-block --collect --unit=powermanagement-kacheln \
+            --description="PowerManagement: fehlende Kacheln nachrechnen" \
+            --uid="$APP_USER" --gid="$APP_USER" --working-directory="$ZIEL" -p Nice=10 \
+            "$php" "$ZIEL/bin/power" plan:kacheln >/dev/null 2>&1; then
+        echo "    Fehlende Kacheln rechnet jetzt powermanagement-kacheln nach (journalctl -u powermanagement-kacheln)"
+    else
+        hinweis "Fehlende Kacheln ließen sich nicht anstoßen – die nächtliche Wartung rechnet sie nach."
+        WARNUNGEN+=(kacheln)
+    fi
+    return 0
+}
+
 # Ohne den Update-Dienst gestartet (Konsole): ihn einmal anstoßen, damit
 # Stand und Verlauf für die Oberfläche stimmen. --no-block: nie warten, und
 # aus dem Dienst selbst heraus wird das nie aufgerufen.
@@ -2197,12 +2227,10 @@ stufe2() {
     schritt 9 "Dienste starten" dienste
     dienste_starten voll
 
-    # Das Kacheln großer Grundrisse dauert – ein Fehler ist nur eine Warnung.
+    # Fehlende Kacheln nicht hier, unter der Schreibsperre – erst nach dem
+    # Punkt ohne Rückweg, in einer eigenen Einheit (kacheln_anstossen).
     schritt 10 "Grundrisse kacheln" intern
-    if ! as_app php "$ZIEL/bin/power" plan:kacheln; then
-        hinweis "Kacheln ließen sich nicht berechnen – die Oberfläche holt das beim ersten Aufruf nach."
-        WARNUNGEN+=(kacheln)
-    fi
+    echo "    Fehlende Kacheln rechnet nach der Prüfung eine eigene Einheit nach (powermanagement-kacheln)."
 
     schritt 11 "Prüfen" pruefung
     if ! pflichtpruefung; then
@@ -2214,6 +2242,7 @@ stufe2() {
     # nähme ein Zurückrollen sonst mit (die Wunschprüfung wartet bis zu 10 min).
     eingespielt_festhalten
     wartung_aus
+    kacheln_anstossen
     wunschpruefung
 
     schritt 12 "Fertig" intern

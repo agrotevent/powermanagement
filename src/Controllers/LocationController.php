@@ -48,7 +48,9 @@ final class LocationController extends Controller
     public function uebernehmen(Request $request): void
     {
         $ergebnis = LocationSync::uebernehmen($request->str('schluessel'));
-        $ergebnis['ok'] ? Flash::success($ergebnis['message']) : Flash::error($ergebnis['message']);
+        // „wartung“: Während des Holens begann ein Update (LocationSync::updateBegonnen()).
+        !empty($ergebnis['wartung']) ? Flash::warning($ergebnis['message'])
+            : ($ergebnis['ok'] ? Flash::success($ergebnis['message']) : Flash::error($ergebnis['message']));
         $this->redirect('/location?holen=1');
     }
 
@@ -61,7 +63,8 @@ final class LocationController extends Controller
             return;
         }
         $ergebnis = LocationSync::locationHochladen($siteId, Auth::name());
-        $ergebnis['ok'] ? Flash::success($ergebnis['message']) : Flash::error($ergebnis['message']);
+        !empty($ergebnis['wartung']) ? Flash::warning($ergebnis['message'])
+            : ($ergebnis['ok'] ? Flash::success($ergebnis['message']) : Flash::error($ergebnis['message']));
         $this->redirect('/location');
     }
 }

@@ -536,6 +536,18 @@ try {
     gleich(array_column(UpdateAutomatik::hindernisse(time()), 'art'), ['geschaltet'], 'Hindernis: geschaltet vor 10 min');
     Database::execute('UPDATE schaltvorgaenge SET created_at = ? WHERE geraet = ?', [gmdate('c', time() - 2400), $kennung]);
     gleich(UpdateAutomatik::hindernisse(time()), [], 'Hindernis: geschaltet vor 40 min zählt nicht');
+    // Kacheln im Hintergrund schaden einem Update nicht (nur lesen, nur unter
+    // storage/plans/kacheln) – von Hand keine Rückfrage, nur die Automatik wartet.
+    $hg = fopen(\App\Services\PlanTileService::hintergrundSperre(), 'c');
+    pruefe($hg !== false && flock($hg, LOCK_EX | LOCK_NB) && \App\Services\PlanTileService::rechnetImHintergrund(), 'Kacheln im Hintergrund: Sperre gehalten');
+    $r = UpdateService::anfordern('aktualisieren', $V, 'hand', 'pruefer');
+    pruefe($r['ok'] && empty($r['bestaetigen']) && empty($r['hindernisse']) && is_file($upd . '/soll/auftrag'), 'Kacheln im Hintergrund: von Hand ohne Rückfrage gestellt');
+    $auftragWeg();
+    if ($hg !== false) {
+        flock($hg, LOCK_UN);
+        fclose($hg);
+    }
+    gleich(\App\Services\PlanTileService::rechnetImHintergrund(), false, 'Kacheln im Hintergrund: Sperre frei');
 
     // Besitzer: storage/update gehört jemand anderem (root ruft bin/power auf)
     if ($alsRoot) {
@@ -828,6 +840,8 @@ try {
         'unterbrochenes Update offen' => [['offen' => 'ja'], [], '- verschoben:offen'],
         'Aufbau'             => [['hindernisse' => [['art' => 'aufbau', 'text' => 'Aufbau „Messe“ läuft.']]], ['karenz' => 0], "- verschoben:aufbau {$v7}"],
         'geschaltet'         => [['hindernisse' => [['art' => 'geschaltet', 'text' => 'geschaltet']]], ['karenz' => 0], "- verschoben:geschaltet {$v7}"],
+        'Kacheln im Hintergrund' => [['kacheln' => true], ['karenz' => 0], "- verschoben:kacheln {$v7}"],
+        'Aufbau vor Kacheln' => [['kacheln' => true, 'hindernisse' => [['art' => 'aufbau', 'text' => 'Aufbau']]], ['karenz' => 0], "- verschoben:aufbau {$v7}"],
         'MySQL mit Migration' => [['treiber' => 'mysql', 'stand' => $standAm($J, ['migrationen' => true])], ['karenz' => 0], "- verschoben:treiber {$v7}"],
         'MySQL ohne Migration' => [['treiber' => 'mysql'], ['karenz' => 0], "aktualisieren einspielen {$v7}"],
         'außerhalb'          => [[], [], '- ausserhalb', $ts('2026-10-21 07:00')],
@@ -840,6 +854,25 @@ try {
         gleich($kurzE($ent($mehr, $einst, $jetzt)), $erwartet, 'entscheiden: ' . $fall);
     }
     gleich($ent(['hindernisse' => [['art' => 'aufbau', 'text' => 'Aufbau „Messe“ läuft.']]])['text'], 'Aufbau „Messe“ läuft.', 'entscheiden: Aufbau mit Namen');
+    pruefe(str_contains(UpdateAutomatik::grundText('kacheln'), 'Kacheln für Grundrisse'), 'verschoben:kacheln hat einen Satz');
+
+    // lage(): Kacheln im Hintergrund = jemand hält die Sperre von
+    // PlanTileService::nacheinander() (bin/power plan:kacheln, die Wartung).
+    // Nur beim automatischen Einspielen gefragt; von Hand hält es nichts auf.
+    $hintergrund = fopen(\App\Services\PlanTileService::hintergrundSperre(), 'c');
+    $hintergrundFrei = $hintergrund !== false && flock($hintergrund, LOCK_EX | LOCK_NB);
+    Settings::put(UpdateAutomatik::MODUS, 'einspielen');
+    $lageJetzt = UpdateAutomatik::lage(time(), false);
+    pruefe($hintergrundFrei && $lageJetzt['kacheln'] === true, 'lage(): ein Bau im Hintergrund hält die Sperre → kacheln');
+    Settings::put(UpdateAutomatik::MODUS, 'suchen');
+    gleich(UpdateAutomatik::lage(time(), false)['kacheln'], false, 'lage(): nur suchen → Kacheln nicht gefragt');
+    if ($hintergrund !== false) {
+        flock($hintergrund, LOCK_UN);
+        fclose($hintergrund);
+    }
+    Settings::put(UpdateAutomatik::MODUS, 'einspielen');
+    gleich(UpdateAutomatik::lage(time(), false)['kacheln'], false, 'lage(): Sperre frei → keine Kacheln');
+    Settings::forget(UpdateAutomatik::MODUS);
     foreach ([
         'Sommerzeit 29.03.2026'   => $ts('2026-03-29 04:30'),
         'Winterzeit 25.10.2026'   => strtotime('2026-10-25T03:30:00Z'),
@@ -1460,6 +1493,20 @@ stream_wrapper_register("langsam", LangsamAttrappe::class);
     $seite = $aufruf($port, $a['dose'], 'GET', '/standorte')['text'];
     pruefe($r['status'] === 302 && str_contains($seite, 'größer, als der Server annimmt (post_max_size 4M)') && !str_contains($seite, UpdateService::GESPERRT),
         'Schreibsperre + Körper über post_max_size (Formular): die Größe gemeldet, nicht das Update');
+    // Ein Grundriss in der Grenze während der Schreibsperre: abgewiesen wie
+    // jeder POST (auch über location = /standorte/grundriss mit eigenem
+    // FastCGI-Block in nginx – die Tür ist index.php), keine Etage, keine Datei.
+    require_once $wurzel . '/tests/hilfen/grundriss-dateien.php';
+    $sperrSite = SiteService::saveSite(null, ['name' => $kennung . ' Grundriss gesperrt']);
+    $plaeneVorher = glob($wurzel . '/storage/plans/*') ?: [];
+    $r = pruefHochladen('http://127.0.0.1:' . $port, $a['dose'], '/standorte/grundriss', ['_token' => $a['token'], 'site_id' => (string) $sperrSite,
+        'neue_etagen' => '1'], $wurzel . '/tests/hilfen/location-lager/plaene/grundriss.svg', 'eg.svg', 'image/svg+xml');
+    $seite = $aufruf($port, $a['dose'], 'GET', '/standorte')['text'];
+    pruefe($r['status'] === 302 && str_contains($seite, UpdateService::GESPERRT)
+        && (int) Database::scalar('SELECT COUNT(*) FROM floors WHERE site_id = ?', [$sperrSite]) === 0
+        && array_values(array_diff(glob($wurzel . '/storage/plans/*') ?: [], $plaeneVorher)) === [],
+        'Schreibsperre: Grundriss hochladen abgewiesen – keine Etage, keine Datei (' . $r['status'] . ')');
+    SiteService::deleteSite($sperrSite);
 
     $schreiben('wartung', UpdateService::KOPF_WARTUNG . "\nseit " . (time() - 4000) . "\nkennung -\n");
     $r = $aufruf($port, $a['dose'], 'POST', '/system/update/automatik', $sperrFelder, ['Accept: application/json']);
@@ -1552,6 +1599,145 @@ stream_wrapper_register("langsam", LangsamAttrappe::class);
     pruefe($rc === 0 && str_contains($aus, 'Schreibsperre der Oberfläche an') && UpdateService::wartungAktiv(), 'wartung_an: Schreibsperre an – ' . trim($aus));
     pruefe($dauer < 1.5 && !str_contains($aus, 'Warte'), sprintf('wartung_an: ohne laufende Änderung kein Warten (%.1f s)', $dauer));
     $schreiben('wartung', null);
+
+    // Fehlende Kacheln rechnet das Update nicht unter der Schreibsperre (ein
+    // Plan mit 100 MB braucht Minuten, plan:kacheln wartete zudem auf einen
+    // Bau im Hintergrund), sondern nach dem Punkt ohne Rückweg eine eigene
+    // Einheit als Anwendungsbenutzer – nie als root (root-eigene Kacheln).
+    $skript = (string) file_get_contents($wurzel . '/deploy/update-debian.sh');
+    preg_match('/^stufe2\(\) \{$(.*?)^\}$/ms', $skript, $st2);
+    $st2 = $st2[1] ?? '';
+    $posAus = strpos($st2, "\n    wartung_aus\n");
+    $posKacheln = strpos($st2, "\n    kacheln_anstossen\n");
+    pruefe($posAus !== false && $posKacheln !== false && $posKacheln > $posAus && strpos($st2, "\n    eingespielt_festhalten\n") < $posAus
+        && !str_contains($st2, 'plan:kacheln'), 'Stufe 2: Kacheln erst nach Pflichtprüfung und Schreibsperre (kacheln_anstossen), kein plan:kacheln darin');
+    $alsRootGerechnet = [];
+    foreach (glob($wurzel . '/deploy/*.sh') ?: [] as $f) {
+        foreach (file($f) ?: [] as $nr => $zeile) {
+            if (str_contains($zeile, 'plan:kacheln') && !preg_match('/^\s*#/', $zeile) && !str_contains($zeile, 'as_app ')
+                && !preg_match('/"\$php" "\$ZIEL\/bin\/power" plan:kacheln/', $zeile)) {
+                $alsRootGerechnet[] = basename($f) . ':' . ($nr + 1);
+            }
+        }
+    }
+    gleich($alsRootGerechnet, [], 'deploy/*.sh: plan:kacheln nur als Anwendungsbenutzer (as_app oder die Einheit mit --uid)');
+    pruefe(preg_match('/^kacheln_anstossen\(\) \{$.*?--uid="\$APP_USER" --gid="\$APP_USER".*?^\}$/ms', $skript) === 1,
+        'kacheln_anstossen: Einheit mit --uid/--gid des Anwendungsbenutzers');
+    $attrappen = $ordner . '/kacheln-attrappen';
+    mkdir($attrappen, 0700, true);
+    file_put_contents($attrappen . '/systemctl', "#!/bin/sh\n[ -f \"\$PM_AKTIV\" ] && exit 0\nexit 3\n");
+    file_put_contents($attrappen . '/systemd-run', "#!/bin/sh\nprintf '%s\\n' \"\$@\" > \"\$PM_ARGS\"\nexit \"\$(cat \"\$PM_RC\")\"\n");
+    chmod($attrappen . '/systemctl', 0700);
+    chmod($attrappen . '/systemd-run', 0700);
+    file_put_contents($ordner . '/kacheln-anstossen.sh', <<<'SH'
+        set -Eeuo pipefail
+        ZIEL="$1"; APP_USER="$2"; OHNE_DIENSTE="$3"; WARNUNGEN=()
+        hinweis() { printf 'HINWEIS %s\n' "$1"; }
+        eval "$(sed -n '/^kacheln_anstossen() {$/,/^}$/p' "$4")"
+        declare -F kacheln_anstossen > /dev/null || { echo 'kacheln_anstossen fehlt in update-debian.sh'; exit 9; }
+        kacheln_anstossen
+        printf 'WARNUNGEN %s\n' "${WARNUNGEN[*]-}"
+        SH);
+    $anstossen = static function (string $ohneDienste, bool $aktiv, int $rc) use ($ordner, $attrappen, $wurzel): array {
+        @unlink($ordner . '/kacheln-args');
+        file_put_contents($ordner . '/kacheln-rc', (string) $rc);
+        $aktiv ? touch($ordner . '/kacheln-aktiv') : @unlink($ordner . '/kacheln-aktiv');
+        $p = proc_open(['bash', $ordner . '/kacheln-anstossen.sh', '/opt/pm-pruefung', 'www-data', $ohneDienste, $wurzel . '/deploy/update-debian.sh'],
+            [0 => ['file', '/dev/null', 'r'], 1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $rohre, null,
+            ['PATH' => $attrappen . ':' . (string) getenv('PATH'), 'PM_AKTIV' => $ordner . '/kacheln-aktiv', 'PM_ARGS' => $ordner . '/kacheln-args',
+                'PM_RC' => $ordner . '/kacheln-rc']);
+        $aus = stream_get_contents($rohre[1]) . stream_get_contents($rohre[2]);
+        fclose($rohre[1]);
+        fclose($rohre[2]);
+        return [proc_close($p), $aus, is_file($ordner . '/kacheln-args') ? file($ordner . '/kacheln-args', FILE_IGNORE_NEW_LINES) : null];
+    };
+    [$rc, $aus, $args] = $anstossen('nein', false, 0);
+    $php = (string) trim((string) shell_exec('command -v php'));
+    pruefe($rc === 0 && $args !== null && in_array('--uid=www-data', $args, true) && in_array('--gid=www-data', $args, true)
+        && in_array('--unit=powermanagement-kacheln', $args, true) && in_array('--collect', $args, true) && in_array('--no-block', $args, true)
+        && in_array('--working-directory=/opt/pm-pruefung', $args, true) && array_slice($args, -3) === [$php, '/opt/pm-pruefung/bin/power', 'plan:kacheln']
+        && str_contains($aus, 'WARNUNGEN ' . "\n") && str_contains($aus, 'powermanagement-kacheln nach'),
+        'kacheln_anstossen: eigene Einheit als www-data, ohne zu warten, mit plan:kacheln – ' . trim($aus));
+    [$rc, $aus, $args] = $anstossen('nein', true, 0);
+    pruefe($rc === 0 && $args === null && str_contains($aus, 'rechnet noch'), 'kacheln_anstossen: läuft schon eine – keine zweite');
+    [$rc, $aus, $args] = $anstossen('nein', false, 1);
+    pruefe($rc === 0 && str_contains($aus, 'HINWEIS Fehlende Kacheln ließen sich nicht anstoßen') && str_contains($aus, 'WARNUNGEN kacheln'),
+        'kacheln_anstossen: startet sie nicht – Warnung kacheln, das Update bleibt eingespielt');
+    [$rc, $aus, $args] = $anstossen('ja', false, 0);
+    pruefe($rc === 0 && $args === null && str_contains($aus, 'WARNUNGEN ' . "\n"), 'kacheln_anstossen: --ohne-dienste startet nichts');
+
+    // Ein Grundriss, während ein Update beginnt. Der Upload ist ein POST:
+    // angemeldet, bevor er nach der Sperre fragt – das Update wartet bis zu
+    // ANFRAGEN_WARTEN (150 s) auf ihn, dann sichert es die Datenbank. Danach
+    // darf er nichts mehr eintragen. Er kachelt bis zu 30 s und, je Aufruf
+    // von poppler, darüber hinaus – deshalb steht alles, was er einträgt,
+    // vor dem Kacheln. Hier sichert eine Attrappe von pdftoppm die Datenbank
+    // beim ersten Aufruf (wie das Update mitten im Kacheln): Etage und Audit
+    // müssen in dieser Sicherung stehen.
+    $poppler = \App\Services\PdfRasterService::verfuegbar() && extension_loaded('gd');
+    $kachelSite = SiteService::saveSite(null, ['name' => $kennung . ' Kacheln']);
+    if (!$poppler) {
+        fwrite(STDOUT, "  (ohne poppler-utils oder gd: Grundriss während des Updates übersprungen)\n");
+    } else {
+        require_once $wurzel . '/tests/hilfen/grundriss-dateien.php';
+        $echt = (string) \App\Support\Programm::finden('pdftoppm', ['-v']);
+        $schnapp = $ordner . '/sicherung-mitten-im-kacheln.sqlite';
+        $popplerAttrappe = $ordner . '/poppler-attrappe';
+        mkdir($popplerAttrappe, 0700, true);
+        file_put_contents($popplerAttrappe . '/pdftoppm', "#!/bin/sh\n[ -e \"\$PM_SCHNAPP\" ] || " . escapeshellarg(PHP_BINARY)
+            . " -r '\$p = new PDO(\"sqlite:\" . \$argv[1]); \$p->exec(\"VACUUM INTO \" . \$p->quote(\$argv[2]));' \"\$PM_DB\" \"\$PM_SCHNAPP\"\n"
+            . 'exec ' . escapeshellarg($echt) . ' "$@"' . "\n");
+        chmod($popplerAttrappe . '/pdftoppm', 0700);
+        $pfadVorher = (string) getenv('PATH');
+        putenv('PATH=' . $popplerAttrappe . ':' . $pfadVorher);
+        putenv('PM_SCHNAPP=' . $schnapp);
+        putenv('PM_DB=' . $ordner . '/datenbank.sqlite');
+        \App\Support\Programm::vergessen();
+        pruefPdf($ordner . '/eg.pdf', 1);
+        $hoch = SiteService::uploadPlan($kachelSite, ['name' => 'eg.pdf', 'type' => 'application/pdf', 'tmp_name' => $ordner . '/eg.pdf',
+            'error' => UPLOAD_ERR_OK, 'size' => (int) filesize($ordner . '/eg.pdf')], ['neue_etagen' => true]);
+        putenv('PATH=' . $pfadVorher);
+        \App\Support\Programm::vergessen();
+        $etagen = Database::select('SELECT * FROM floors WHERE site_id = ?', [$kachelSite]);
+        pruefe($hoch['ok'] && count($etagen) === 1 && \App\Services\PlanTileService::meta($etagen[0]) !== null && is_file($schnapp),
+            'Upload mit Kacheln, die Attrappe sicherte mitten darin – ' . $hoch['message']);
+        $gesichert = new PDO('sqlite:' . $schnapp);
+        $q = $gesichert->prepare('SELECT plan_file FROM floors WHERE site_id = ?');
+        $q->execute([$kachelSite]);
+        gleich($q->fetchColumn(), $etagen[0]['plan_file'] ?? null, 'Sicherung mitten im Kacheln: die Etage mit ihrem Grundriss steht darin');
+        $q = $gesichert->prepare("SELECT COUNT(*) FROM audit_log WHERE action = 'plan.upload' AND target_id = ?");
+        $q->execute([(string) $kachelSite]);
+        gleich((int) $q->fetchColumn(), 1, 'Sicherung mitten im Kacheln: auch der Audit-Eintrag (vor dem Kacheln geschrieben)');
+        $gesichert = null;
+
+        // Bauten im Hintergrund (bin/power plan:kacheln, die Wartung) laufen
+        // während eines Updates weiter: Sie lesen die Datenbank nur und
+        // schreiben unter storage/plans/kacheln – eine Sicherung, eine
+        // Migration und ein Zurückrollen der Datenbank trifft das nicht. Rollt
+        // ein Update zurück, endet mit PHP-FPM ein Bau, den der Upload in den
+        // Hintergrund gab, mitten im Plan: Zoomstufen ohne kacheln.json. Der
+        // nächste Bau beginnt dann leer.
+        $etage = $etagen[0];
+        $kOrdner = \App\Services\PlanTileService::planDir($etage);
+        unlink(\App\Services\PlanTileService::metaPfad($etage));
+        mkdir($kOrdner . '/9/77', 0775, true);
+        file_put_contents($kOrdner . '/9/77/88.png', 'Rest eines getöteten Baus');
+        gleich(\App\Services\PlanTileService::meta($etage), null, 'getöteter Bau: ohne kacheln.json gilt die Pyramide als fehlend');
+        $fingerabdruck = static function () use ($ordner): string {
+            $p = new PDO('sqlite:' . $ordner . '/datenbank.sqlite');
+            $teile = [];
+            foreach ($p->query("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")->fetchAll(PDO::FETCH_COLUMN) as $t) {
+                $teile[] = $t . ':' . md5((string) json_encode($p->query('SELECT * FROM "' . $t . '"')->fetchAll(PDO::FETCH_NUM)));
+            }
+            return md5(implode('|', $teile));
+        };
+        $vorher = $fingerabdruck();
+        [$rc, $aus] = $power(['plan:kacheln', '--etage=' . (int) $etage['id']]);
+        pruefe($rc === 0 && \App\Services\PlanTileService::meta($etage) !== null && !is_file($kOrdner . '/9/77/88.png') && !is_dir($kOrdner . '/9'),
+            'plan:kacheln (wie im Hintergrund): Reste des getöteten Baus weg, Pyramide neu – ' . trim($aus));
+        gleich($fingerabdruck(), $vorher, 'plan:kacheln schreibt nichts in die Datenbank (alle Tabellen unverändert)');
+    }
+    SiteService::deleteSite($kachelSite);
 
     // db_zuruecklegen aus deploy/update-debian.sh: der Schnappschuss (VACUUM INTO vor der
     // Migration, etwa von 016) als harter Verweis an die Stelle der Datenbank, ohne alte

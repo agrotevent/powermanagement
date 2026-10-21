@@ -19,6 +19,7 @@ use App\Services\LocationBundle;
 use App\Services\LocationSync;
 use App\Services\SchutzService;
 use App\Services\SiteService;
+use App\Services\UpdateService;
 use App\Services\VerteilerBundle;
 use App\Services\VerteilerSync;
 use App\Support\Config;
@@ -155,6 +156,58 @@ try {
     gleich($status('inventar', $zKey), 'aktuell', 'Zwischenstecker nach „Alle hochladen“ aktuell');
     $nochmal = VerteilerSync::hochladen([['inventar', $vKey]], 'pruefung');
     pruefe($nochmal['ok'] && str_contains($nochmal['message'], 'nichts zu tun'), 'unverändertes Stück erzeugt keinen Commit');
+
+    // ------------------------------------------------ Ein Update beginnt, während auf das Repository gewartet wird
+    // Wie im Location-Abgleich (LocationSync::updateBegonnen()): nach dem Holen
+    // nichts übernommen, geschoben oder entfernt; nach dem Push fehlen hier
+    // nur die Vermerke, das nächste Hochladen trägt sie nach.
+    $updOrdner = $tmp . '/update';
+    mkdir($updOrdner . '/ist', 0775, true);
+    $demoVorher = Config::isDemo();
+    Config::set('app.demo', false);   // im Demo-Modus gibt es keine Schreibsperre
+    Config::set('update.verzeichnis', $updOrdner);
+    $sperre = static function (bool $an) use ($updOrdner): void {
+        $an ? file_put_contents($updOrdner . '/ist/wartung', UpdateService::KOPF_WARTUNG . "\nseit " . time() . "\nkennung -\n")
+            : @unlink($updOrdner . '/ist/wartung');
+    };
+    $fernKopf = static fn (): string => trim($sh('git --git-dir=' . escapeshellarg($fern) . ' rev-parse main'));
+    $kopfVorher = $fernKopf();
+    $sperre(true);
+    $r = VerteilerSync::hochladen(null, 'pruefung');
+    pruefe(!$r['ok'] && ($r['wartung'] ?? false) === true && $r['message'] === UpdateService::NICHTS_HOCHGELADEN && $fernKopf() === $kopfVorher,
+        'Update beginnt beim Holen: nichts hochgeladen');
+    $r = VerteilerSync::uebernehmen(null, ['typ' => true, 'inventar' => true]);
+    pruefe(!$r['ok'] && ($r['wartung'] ?? false) === true && $r['message'] === UpdateService::NICHTS_UEBERNOMMEN, 'Update beginnt beim Holen: nichts übernommen');
+    $r = VerteilerSync::entfernen('inventar', $zKey, 'pruefung');
+    pruefe(!$r['ok'] && ($r['wartung'] ?? false) === true && $fernKopf() === $kopfVorher && $dortDatei('verteiler/inventar/' . $zKey . '.json') !== null,
+        'Update beginnt beim Holen: nichts entfernt');
+    $sperre(false);
+    Database::execute('UPDATE inventar SET name = ? WHERE id = ?', ['Foodtruck (Update)', $vId]);
+    $vermerk = static fn (): string => (string) Database::scalar('SELECT synced_hash FROM inventar WHERE id = ?', [$vId]);
+    $vermerkVorher = $vermerk();
+    $echtGit = (string) Programm::finden('git', ['--version']);
+    $gitAttrappe = $tmp . '/git-attrappe';
+    mkdir($gitAttrappe, 0700, true);
+    file_put_contents($gitAttrappe . '/git', "#!/bin/sh\nif [ \"\$1\" = push ]; then printf '%s\\nseit %s\\nkennung -\\n' "
+        . escapeshellarg(UpdateService::KOPF_WARTUNG) . ' "$(date +%s)" > ' . escapeshellarg($updOrdner . '/ist/wartung') . "; fi\nexec " . escapeshellarg($echtGit) . ' "$@"' . "\n");
+    chmod($gitAttrappe . '/git', 0700);
+    $pfadVorher = (string) getenv('PATH');
+    putenv('PATH=' . $gitAttrappe . ':' . $pfadVorher);
+    Programm::vergessen();
+    $r = VerteilerSync::hochladen([['inventar', $vKey]], 'pruefung');
+    putenv('PATH=' . $pfadVorher);
+    Programm::vergessen();
+    pruefe($r['ok'] && ($r['wartung'] ?? false) === true && str_contains($r['message'], UpdateService::VERMERK_FEHLT) && $fernKopf() !== $kopfVorher
+        && ($dortDatei('verteiler/inventar/' . $vKey . '.json')['stueck']['name'] ?? '') === 'Foodtruck (Update)', 'Update beginnt beim Push: dort angekommen – ' . $r['message']);
+    gleich($vermerk(), $vermerkVorher, 'Update beginnt beim Push: hier kein Vermerk');
+    $sperre(false);
+    $r = VerteilerSync::hochladen([['inventar', $vKey]], 'pruefung');
+    pruefe($r['ok'] && str_contains($r['message'], 'nichts zu tun') && $vermerk() !== $vermerkVorher && $status('inventar', $vKey) === 'aktuell',
+        'nach dem Update: Vermerk nachgetragen, „aktuell“');
+    Database::execute('UPDATE inventar SET name = ? WHERE id = ?', ['Foodtruck', $vId]);
+    $r = VerteilerSync::hochladen([['inventar', $vKey]], 'pruefung');
+    pruefe($r['ok'] && $status('inventar', $vKey) === 'aktuell', 'Name wieder wie vorher hochgeladen');
+    Config::set('app.demo', $demoVorher);
 
     // ------------------------------------------------ Eine zweite Installation ändert
     $sh('git clone -q ' . escapeshellarg($fern) . ' ' . escapeshellarg($andere));

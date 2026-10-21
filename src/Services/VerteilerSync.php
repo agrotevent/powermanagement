@@ -6,6 +6,7 @@ namespace App\Services;
 use App\Support\Audit;
 use App\Support\Config;
 use App\Support\Database;
+use App\Support\Logger;
 
 /**
  * Verteiler-Abgleich: Standard-Verteiler und Inventar über das gemeinsame
@@ -282,6 +283,10 @@ final class VerteilerSync
         if (!$holen['ok']) {
             return ['ok' => false, 'message' => $holen['message']];
         }
+        // Während des Holens begann ein Update? Dann nichts (LocationSync::updateBegonnen()).
+        if (($sperre = LocationSync::updateBegonnen(UpdateService::NICHTS_UEBERNOMMEN)) !== null) {
+            return $sperre;
+        }
         $dort = self::dort();
         if ($auswahl === null) {
             $auswahl = self::mitStatus(self::liste($dort), self::ALLE_UEBERNEHMEN);
@@ -395,6 +400,9 @@ final class VerteilerSync
         if (!$holen['ok']) {
             return ['ok' => false, 'message' => $holen['message']];
         }
+        if (($sperre = LocationSync::updateBegonnen(UpdateService::NICHTS_HOCHGELADEN)) !== null) {
+            return $sperre;
+        }
         $dort = self::dort();
         $hier = VerteilerBundle::hier();
         if ($auswahl === null) {
@@ -448,6 +456,12 @@ final class VerteilerSync
             // Mehrere Dateien: der Ordner, nicht die erste davon.
             $wo = ' ' . (count($pfade) === 1 ? $ergebnis['wo'] : str_replace($pfade[0], 'verteiler/', $ergebnis['wo']));
         }
+        // Geschoben ist es – die Vermerke hier nur ohne Update, das inzwischen begann.
+        if (($sperre = LocationSync::updateBegonnen(UpdateService::VERMERK_FEHLT)) !== null) {
+            Logger::info('Verteiler hochgeladen, während ein Update begann – Vermerke und Audit fehlen.', ['typen' => $zahl['typ'], 'inventar' => $zahl['inventar']]);
+            return ['ok' => true, 'wartung' => true, 'message' => ($pfade !== [] ? self::zahlText($zahl['typ'], $zahl['inventar']) . ' hochgeladen.' . $wo . ' ' : '')
+                . $sperre['message']];
+        }
         foreach ($vermerken as [$bereich, $h]) {
             self::festhalten($bereich, (int) $h['id'], $h['hash']);
         }
@@ -490,6 +504,9 @@ final class VerteilerSync
         if (!$holen['ok']) {
             return ['ok' => false, 'message' => $holen['message']];
         }
+        if (($sperre = LocationSync::updateBegonnen(UpdateService::NICHTS_HOCHGELADEN)) !== null) {
+            return $sperre;
+        }
         $datei = LocationSync::arbeitsKopie() . '/' . $pfad;
         if (!is_file($datei)) {
             return ['ok' => false, 'message' => 'Dieser Verteiler steht nicht (mehr) im Repository.'];
@@ -501,6 +518,11 @@ final class VerteilerSync
             ($bereich === 'typ' ? 'Standard-Verteiler ' : 'Verteiler ') . $titel . ' entfernt', 'Entfernt von ' . $wer);
         if (!$ergebnis['ok']) {
             return ['ok' => false, 'message' => $ergebnis['message']];
+        }
+        // Entfernt ist es dort; hier gibt es nur den Eintrag im Audit – nicht während eines Updates.
+        if (UpdateService::wartungAktiv()) {
+            Logger::info('Verteiler aus dem Repository entfernt, während ein Update begann – ohne Audit.', ['bereich' => $bereich, 'schluessel' => $schluessel]);
+            return ['ok' => true, 'wartung' => true, 'message' => '„' . $titel . '“ ist aus dem Repository entfernt. Hier bleibt es stehen. ' . $ergebnis['wo']];
         }
         Audit::log('verteiler.entfernen', 'repository', LocationSync::kopfCommit(), ['bereich' => $bereich, 'schluessel' => $schluessel]);
         return ['ok' => true, 'message' => '„' . $titel . '“ ist aus dem Repository entfernt. Hier bleibt es stehen. ' . $ergebnis['wo']];

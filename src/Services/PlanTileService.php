@@ -251,7 +251,23 @@ final class PlanTileService
     /** Hält jemand die Sperrdatei dieses Kachelordners (siehe laeuft())? */
     private static function ordnerGesperrt(string $ordner): bool
     {
-        $pfad = $ordner . '/.sperre';
+        return self::gehalten($ordner . '/.sperre');
+    }
+
+    /**
+     * Rechnet gerade ein Prozess im Hintergrund (bin/power plan:kacheln, die
+     * Wartung) – hält er die Sperre von nacheinander()? Wer nur darauf
+     * wartet, hält sie nicht. Für die Automatik der Updates: Sie verschiebt
+     * dann (UpdateAutomatik::lage()).
+     */
+    public static function rechnetImHintergrund(): bool
+    {
+        return self::gehalten(self::hintergrundSperre());
+    }
+
+    /** Hält jemand diese Sperrdatei exklusiv (flock)? Ohne Datei: nein. */
+    private static function gehalten(string $pfad): bool
+    {
         if (!is_file($pfad)) {
             return false;
         }
@@ -403,6 +419,20 @@ final class PlanTileService
         }
 
         try {
+            /*
+             * Ohne kacheln.json liegt hier höchstens der Rest eines Baus, der
+             * getötet wurde – sein finally lief nicht mehr: php-fpm angehalten
+             * (ein Update rollt zurück; mit ihm enden die Bauten, die der
+             * Upload in den Hintergrund gab), der OOM-Killer, ein Neustart.
+             * Dann von vorn, in einem leeren Ordner. Sonst blieben Kacheln
+             * liegen, die nicht zu dieser Pyramide gehören (anderes Raster,
+             * eine andere Fassung des Codes), unter einer kacheln.json, die
+             * nicht weiß, dass es sie gibt. Mit kacheln.json (neu rechnen)
+             * bleibt die alte Pyramide zu sehen, bis die neue fertig ist.
+             */
+            if (self::meta($floor) === null) {
+                self::teilbauWeg($floor);
+            }
             $ergebnis = self::schneiden($floor, $quelle, $ordner, $bis);
         } finally {
             flock($sperre, LOCK_UN);

@@ -60,6 +60,10 @@ final class UpdateService
     public const ANFRAGEN = '.anfragen';
     /** Wer erst beim Schreiben merkt, dass ein Update begonnen hat (LocationUebertrag::anwenden()). */
     public const NICHTS_UEBERNOMMEN = 'Gerade läuft ein Update – nichts übernommen, bitte in etwa einer Minute noch einmal.';
+    /** … dasselbe vor dem Hochladen ins Repository (LocationSync, VerteilerSync): nichts geschoben, nichts eingetragen. */
+    public const NICHTS_HOCHGELADEN = 'Gerade läuft ein Update – nichts hochgeladen, bitte in etwa einer Minute noch einmal.';
+    /** … und nach dem Hochladen: Das Repository hat es, der Vermerk hier fehlt (LocationSync, VerteilerSync). */
+    public const VERMERK_FEHLT = 'Während des Hochladens hat hier ein Update begonnen – der Vermerk, was abgeglichen ist, fehlt deshalb noch. Nach dem Update noch einmal hochladen: Es meldet dann „schon derselbe Stand“ und trägt ihn nach.';
     /** Abgewiesene Änderung (wartungsSperre()) – für das Personal … */
     public const GESPERRT = 'Gerade läuft ein Update – Änderungen sind in etwa einer Minute wieder möglich.';
     /** … und im Kundenbereich (Kundenzugänge, Einrichtungslink): im Ton des Kundenbereichs, ohne Technik. */
@@ -1385,10 +1389,10 @@ final class UpdateService
     public static function warnungText(string $code): string
     {
         return match ($code) {
-            'kacheln'        => 'Die Grundrisse ließen sich nicht alle kacheln.',
+            'kacheln'        => 'Fehlende Kacheln der Grundrisse ließen sich nach dem Update nicht anstoßen – die nächtliche Wartung rechnet sie nach.',
             'pruefung'       => 'bin/power pruefen meldet Fehler (InfluxDB, MQTT oder Node-RED) – das Update selbst ist eingespielt.',
             'flows_behalten' => 'Im Editor geänderte Node-RED-Flows bleiben; die neue Fassung liegt daneben (flows.powermanagement-neu.json). Tanksensoren und eigene MQTT-Zugänge brauchen sie – im Editor importieren oder auf der Konsole update-debian.sh --flows-ersetzen.',
-            'site_behalten'  => 'Die von Hand veränderte nginx-Site bleibt; die neue Fassung liegt daneben.',
+            'site_behalten'  => 'Die von Hand veränderte nginx-Site bleibt; die neue Fassung liegt daneben. Fehlt der Site der Block für Grundrisse bis 100 MB (location = /standorte/grundriss), nennt das Protokoll es – ohne ihn lehnt nginx große Pläne ab.',
             'acl_behalten'   => 'Die von Hand veränderte Mosquitto-ACL bleibt; die neue Fassung liegt daneben.',
             'mqtt_helfer'    => 'Der Abgleich der MQTT-Zugänge meldete Fehler.',
             'nachgeholt'     => 'Fehlende Einrichtung wurde nachgeholt.',

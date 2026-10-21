@@ -643,6 +643,9 @@ final class LocationSync
         if (!$holen['ok']) {
             return ['ok' => false, 'message' => $holen['message']];
         }
+        if (($sperre = self::updateBegonnen(UpdateService::NICHTS_UEBERNOMMEN)) !== null) {
+            return $sperre;
+        }
         $daten = self::locationLesen($schluessel);
         if ($daten === null) {
             return ['ok' => false, 'message' => 'Diese Location gibt es im Repository nicht.'];
@@ -679,6 +682,28 @@ final class LocationSync
         return ['ok' => true, 'message' => $meldung];
     }
 
+    /**
+     * Hat ein Update begonnen, während hier auf das Repository gewartet
+     * wurde? Dann die Antwort mit $meldung (und „wartung“) – sonst null.
+     *
+     * Holen und Hochladen dürfen in der Oberfläche zusammen bis zu
+     * Anfragezeit::SEKUNDEN (285 s) dauern; auf eine schreibende Anfrage,
+     * die vor der Schreibsperre hereinkam, wartet ein Update aber höchstens
+     * 150 s (wartung_an in deploy/update-debian.sh), dann sichert es die
+     * Datenbank. Was danach noch geschrieben würde, verwürfe ein
+     * Zurückrollen still – also unmittelbar vor dem ersten Schreiben nach
+     * dem Warten noch einmal fragen, wie LocationUebertrag::anwenden() und
+     * VerteilerSync. Nach einem Push hat das Repository den neuen Stand
+     * schon; dann fehlt hier nur der Vermerk, und das nächste Hochladen
+     * („schon derselbe Stand“) trägt ihn nach.
+     *
+     * @return array{ok:false,wartung:true,message:string}|null
+     */
+    public static function updateBegonnen(string $meldung): ?array
+    {
+        return UpdateService::wartungAktiv() ? ['ok' => false, 'wartung' => true, 'message' => $meldung] : null;
+    }
+
     // --------------------------------------------------------- Hochladen
 
     /**
@@ -712,6 +737,10 @@ final class LocationSync
         $holen = self::holen();
         if (!$holen['ok']) {
             return ['ok' => false, 'message' => $holen['message']];
+        }
+        // Vor dem ersten Schreiben (der Schlüssel des Standorts) und vor dem Push.
+        if (($sperre = self::updateBegonnen(UpdateService::NICHTS_HOCHGELADEN)) !== null) {
+            return $sperre;
         }
         $schluessel = LocationBundle::schluesselSichern('sites', $siteId, (string) $site['name'], 'standort-' . $siteId);
         if (!LocationBundle::schluesselGueltig($schluessel)) {
@@ -750,6 +779,13 @@ final class LocationSync
         );
         if (!$ergebnis['ok']) {
             return ['ok' => false, 'message' => $ergebnis['message']];
+        }
+        // Der Push ist durch – den Vermerk hier nur, wenn inzwischen kein
+        // Update begonnen hat (siehe updateBegonnen()).
+        if (($sperre = self::updateBegonnen(UpdateService::VERMERK_FEHLT)) !== null) {
+            Logger::info('Location hochgeladen, während ein Update begann – Vermerk und Audit fehlen.', ['site' => $siteId, 'schluessel' => $schluessel]);
+            return ['ok' => true, 'wartung' => true, 'message' => ($ergebnis['hochgeladen'] ? $site['name'] . ' ist hochgeladen. ' : '')
+                . $ergebnis['wo'] . ' ' . $sperre['message']];
         }
         Database::execute('UPDATE sites SET synced_at = ?, synced_commit = ? WHERE id = ?', [gmdate('c'), self::kopfCommit(), $siteId]);
         if (!$ergebnis['hochgeladen']) {

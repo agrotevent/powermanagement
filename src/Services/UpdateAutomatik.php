@@ -389,6 +389,7 @@ final class UpdateAutomatik
             'letzte_suche'   => $letzteSuche === false ? null : $letzteSuche,
             'letzter'        => self::letzter(),
             'hindernisse'    => $e['modus'] === 'einspielen' ? self::hindernisse($jetzt) : [],
+            'kacheln'        => $e['modus'] === 'einspielen' && PlanTileService::rechnetImHintergrund(),
             'treiber'        => Database::driver(),
         ];
     }
@@ -399,7 +400,7 @@ final class UpdateAutomatik
      * grund: demo | nicht_eingerichtet | wartung | laeuft | aus | abgeschaltet
      *   | suchen | suche_wartet | nur_suchen | ausserhalb | erledigt | suchen_vorher
      *   | nichts_neu | einspielen | verschoben:<pausiert|nicht_linear|lokal_geaendert
-     *   |kein_zweig|abgeschaltet|offen|karenz|gescheitert|aufbau|geschaltet|treiber>
+     *   |kein_zweig|abgeschaltet|offen|karenz|gescheitert|aufbau|geschaltet|kacheln|treiber>
      *
      * @param array<string,mixed> $lage wie lage()
      * @return array{aktion:?string, ziel:?string, grund:string, tag:?string, text:string}
@@ -497,6 +498,18 @@ final class UpdateAutomatik
                     return $ergebnis(null, 'verschoben:' . $art, $tag, $ziel, (string) ($h['text'] ?? ''));
                 }
             }
+        }
+        /*
+         * Rechnet ein Prozess im Hintergrund Kacheln (ein großer Grundriss,
+         * ein Abgleich): ihm schadet ein Update nicht – er liest die
+         * Datenbank nur und schreibt unter storage/plans/kacheln. Aber er
+         * hält 150–400 MB, ein Update braucht selbst Speicher (Migrationen,
+         * apt, npm), und rollt es zurück, endet er mit PHP-FPM und fängt
+         * nachts von vorn an. Er ist in Minuten fertig, das Fenster dauert
+         * Stunden – also warten. Von Hand hält es nichts auf.
+         */
+        if (!empty($lage['kacheln'])) {
+            return $ergebnis(null, 'verschoben:kacheln', $tag, $ziel);
         }
         // Zurück kommt eine Datenbank nur als SQLite-Schnappschuss.
         if (($lage['treiber'] ?? 'sqlite') !== 'sqlite' && $stand['migrationen']) {
@@ -779,6 +792,7 @@ final class UpdateAutomatik
             'gescheitert'     => 'Der neue Stand ist schon einmal gescheitert – automatisch wird er nicht wiederholt.',
             'aufbau'          => $text !== '' ? $text : 'Ein Aufbau läuft.',
             'geschaltet'      => $text !== '' ? $text : 'In den letzten 30 Minuten wurde geschaltet.',
+            'kacheln'         => 'Der Server rechnet gerade Kacheln für Grundrisse (im Hintergrund) – das Update wartet, bis er fertig ist.',
             'treiber'         => 'Das Update erweitert die Datenbank, und sie ist nicht SQLite – nur von Hand mit eigener Sicherung.',
             default           => 'Grund: ' . $grund,
         };

@@ -21,6 +21,7 @@ use App\Services\MesspunktService;
 use App\Services\PlanGeoService;
 use App\Services\SchutzService;
 use App\Services\SiteService;
+use App\Services\UpdateService;
 use App\Support\Anfragezeit;
 use App\Support\Config;
 use App\Support\Database;
@@ -166,6 +167,63 @@ try {
     $loc = json_decode($sh('git --git-dir=' . escapeshellarg($fern) . ' show main:locations/lager/location.json'), true);
     gleich(count($loc['etagen']), 2, 'neue Etage in location.json ergänzt');
     gleich(count($loc['etagen'][0]['dosen']), 2, 'Dosen bleiben dabei erhalten');
+
+    // Ein Update beginnt, während auf das Repository gewartet wird. Holen und
+    // Hochladen dürfen zusammen bis zu 285 s dauern (Anfragezeit), auf eine
+    // laufende Anfrage wartet ein Update aber höchstens 150 s, dann sichert es
+    // die Datenbank. Danach fragen sie die Schreibsperre noch einmal: vor dem
+    // ersten Schreiben (nichts übernommen, nichts geschoben) und nach dem Push
+    // (dort ist es, hier fehlt nur der Vermerk – das nächste Hochladen trägt
+    // ihn nach). Die Sperre hier in einem eigenen storage/update.
+    $updOrdner = $tmp . '/update';
+    mkdir($updOrdner . '/ist', 0775, true);
+    $demoVorher = Config::isDemo();
+    Config::set('app.demo', false);   // im Demo-Modus gibt es keine Schreibsperre
+    Config::set('update.verzeichnis', $updOrdner);
+    $sperre = static function (bool $an) use ($updOrdner): void {
+        $an ? file_put_contents($updOrdner . '/ist/wartung', UpdateService::KOPF_WARTUNG . "\nseit " . time() . "\nkennung -\n")
+            : @unlink($updOrdner . '/ist/wartung');
+    };
+    $fernKopf = static fn (): string => trim($sh('git --git-dir=' . escapeshellarg($fern) . ' rev-parse main'));
+    $vermerk = static fn (): array => Database::first('SELECT synced_at, synced_commit FROM sites WHERE id = ?', [$siteId]) ?? [];
+    $auditZahl = static fn (string $aktion): int => (int) Database::scalar('SELECT COUNT(*) FROM audit_log WHERE action = ?', [$aktion]);
+    $hausName = (string) Database::scalar('SELECT name FROM objekte WHERE id = ?', [$an]);
+    $kopfVorher = $fernKopf();
+    $vermerkVorher = $vermerk();
+    $uebVorher = $auditZahl('location.uebernehmen');
+    $hochVorher = $auditZahl('location.hochladen');
+    $sperre(true);
+    $erg = LocationSync::uebernehmen('lager');
+    pruefe(!$erg['ok'] && ($erg['wartung'] ?? false) === true && $erg['message'] === UpdateService::NICHTS_UEBERNOMMEN
+        && $auditZahl('location.uebernehmen') === $uebVorher && $vermerk() === $vermerkVorher, 'Update beginnt beim Holen: nichts übernommen, mit „wartung“');
+    Database::execute('UPDATE objekte SET name = ? WHERE id = ?', [$hausName . ' (Update)', $an]);
+    $erg = LocationSync::locationHochladen($siteId, 'pruefung');
+    pruefe(!$erg['ok'] && ($erg['wartung'] ?? false) === true && $erg['message'] === UpdateService::NICHTS_HOCHGELADEN
+        && $fernKopf() === $kopfVorher && $vermerk() === $vermerkVorher, 'Update beginnt beim Holen: nichts hochgeladen, nichts geschoben');
+    $sperre(false);
+    // Jetzt beginnt das Update erst während des Push (eine Attrappe vor git setzt die Sperre).
+    $echtGit = (string) Programm::finden('git', ['--version']);
+    $gitAttrappe = $tmp . '/git-attrappe';
+    mkdir($gitAttrappe, 0700, true);
+    file_put_contents($gitAttrappe . '/git', "#!/bin/sh\nif [ \"\$1\" = push ]; then printf '%s\\nseit %s\\nkennung -\\n' "
+        . escapeshellarg(UpdateService::KOPF_WARTUNG) . ' "$(date +%s)" > ' . escapeshellarg($updOrdner . '/ist/wartung') . "; fi\nexec " . escapeshellarg($echtGit) . ' "$@"' . "\n");
+    chmod($gitAttrappe . '/git', 0700);
+    $pfadVorher = (string) getenv('PATH');
+    putenv('PATH=' . $gitAttrappe . ':' . $pfadVorher);
+    Programm::vergessen();
+    $erg = LocationSync::locationHochladen($siteId, 'pruefung');
+    putenv('PATH=' . $pfadVorher);
+    Programm::vergessen();
+    pruefe($erg['ok'] && ($erg['wartung'] ?? false) === true && str_contains($erg['message'], 'ist hochgeladen') && str_contains($erg['message'], UpdateService::VERMERK_FEHLT)
+        && $fernKopf() !== $kopfVorher && is_file($updOrdner . '/ist/wartung'), 'Update beginnt beim Push: dort angekommen, Meldung nennt den fehlenden Vermerk – ' . $erg['message']);
+    pruefe($vermerk() === $vermerkVorher && $auditZahl('location.hochladen') === $hochVorher, 'Update beginnt beim Push: hier weder Vermerk noch Audit');
+    $sperre(false);
+    $erg = LocationSync::locationHochladen($siteId, 'pruefung');
+    pruefe($erg['ok'] && str_contains($erg['message'], 'schon derselbe Stand') && ($vermerk()['synced_commit'] ?? '') !== ($vermerkVorher['synced_commit'] ?? '')
+        && str_starts_with($fernKopf(), (string) ($vermerk()['synced_commit'] ?? '-')), 'nach dem Update: „schon derselbe Stand“, der Vermerk ist nachgetragen');
+    Database::execute('UPDATE objekte SET name = ? WHERE id = ?', [$hausName, $an]);
+    pruefe(LocationSync::locationHochladen($siteId, 'pruefung')['ok'], 'Name wieder wie vorher hochgeladen');
+    Config::set('app.demo', $demoVorher);
 
     // MasterAdmin ändert location.json (neue Dose) – strom.json bleibt
     $git($mo, 'pull -q origin main');

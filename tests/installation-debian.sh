@@ -19,13 +19,16 @@
 #   2b. eine Datenbank ohne Benutzer (wie nach einem abgebrochenen ersten
 #      Lauf): derselbe Aufruf legt den Administrator an, mit neuem Erstkennwort
 #   3. Update auf einen neuen Stand, der einen Ordner in storage/ mitbringt,
-#      danach ein Update ohne Neues
+#      danach ein Update ohne Neues; fehlende Kacheln (samt dem Rest eines
+#      getöteten Baus) rechnet danach powermanagement-kacheln als www-data
 #   3b. Update ohne HOME und ohne Terminal (systemd-run, wie ein Dienst):
 #      läuft durch, Ausgabe ohne Farben, kein globales safe.directory
 #   3c. Node-RED-Flows: neue Flows ersetzen unveränderte (wie die
 #      Analogeingänge der Tanksensoren); im Editor veränderte bleiben, die neue
 #      Fassung liegt daneben, Hinweis und Zusammenfassung sagen es;
 #      --flows-ersetzen sichert die eigene Fassung und spielt die neue ein
+#   3d. von Hand veränderte nginx-Site ohne den Block für Grundrisse: bleibt,
+#      das Update nennt den fehlenden Block, die neue Fassung liegt daneben
 #   4. Update über die Oberfläche (System → Update: anmelden, suchen,
 #      aktualisieren, Status abfragen über Neustarts hinweg) mit Selbst-Update:
 #      die neue Fassung des Update-Skripts übernimmt im selben Lauf (Stufe 2);
@@ -919,6 +922,28 @@ cp "$SITE_DATEI" "/var/lib/powermanagement/vorlagen/$(printf '%s' "$SITE_DATEI" 
 systemctl restart "$(systemctl list-unit-files 'php*-fpm.service' --no-legend | awk '{print $1}' | sort -V | tail -1)"
 systemctl reload nginx
 pruefe "vorher: Pool mit den alten Grenzen" grep -q 'upload_max_filesize\] = 64M' "$POOL_DATEI"
+# Ein Grundriss ohne Kacheln, dazu der Rest eines getöteten Baus (Zoomstufe
+# ohne kacheln.json – wie nach einem Zurückrollen, das PHP-FPM anhielt): Das
+# Update rechnet sie nicht selbst unter der Schreibsperre, sondern stößt nach
+# der Prüfung eine eigene Einheit als www-data an (powermanagement-kacheln).
+KACHEL_ETAGE="$(cd "$ZIEL" && runuser -u www-data -- php -r '
+    require "src/bootstrap.php";
+    require "tests/hilfen/grundriss-dateien.php";
+    $site = App\Services\SiteService::saveSite(null, ["name" => "Prüfung Kacheln nach dem Update"]);
+    $etage = App\Services\SiteService::saveFloor(null, ["site_id" => $site, "name" => "EG"]);
+    $name = "site" . $site . "_" . bin2hex(random_bytes(8)) . ".pdf";
+    pruefPdf(App\Services\SiteService::planDir() . "/" . $name, 1);
+    App\Support\Database::update("floors", $etage, ["plan_file" => $name, "plan_type" => "pdf", "plan_page" => 1, "plan_original_name" => "eg.pdf"]);
+    $o = App\Services\PlanTileService::planDir(App\Services\SiteService::floor($etage));
+    mkdir($o . "/9/77", 0775, true);
+    file_put_contents($o . "/9/77/88.png", "Rest eines getöteten Baus");
+    echo $etage;')"
+kacheln_fertig() {
+    PM_ETAGE="$1" app_php '$e = App\Services\SiteService::floor((int) getenv("PM_ETAGE"));
+        exit($e !== null && App\Services\PlanTileService::meta($e) !== null && !is_dir(App\Services\PlanTileService::planDir($e) . "/9") ? 0 : 1);'
+}
+pruefe "vorher: Grundriss ohne Kacheln, mit dem Rest eines getöteten Baus (Etage ${KACHEL_ETAGE:-?})" \
+    bash -c '[[ "$1" =~ ^[0-9]+$ ]]' _ "$KACHEL_ETAGE"
 mkdir -p "$QUELLE/storage/pruefung-update"
 : > "$QUELLE/storage/pruefung-update/.gitkeep"
 printf '\n' >> "$QUELLE/README.md"
@@ -937,6 +962,16 @@ pruefe "auf dem neuen Stand" test "$(git -C "$ZIEL" rev-parse HEAD)" = "$NEU"
 pruefe "neuer Ordner in storage/ gehört www-data" \
     test "$(stat -c %U:%G "$ZIEL/storage/pruefung-update" 2>/dev/null)" = "www-data:www-data"
 pruefe "Update: nginx-Site wieder mit 105m für Grundrisse" grep -q 'client_max_body_size 105m;' "$SITE_DATEI"
+pruefe "Update: fehlende Kacheln an powermanagement-kacheln übergeben" enthaelt "$LAUF" "Fehlende Kacheln rechnet jetzt powermanagement-kacheln nach"
+pruefe "Update: erst nach der Schreibsperre (nicht unter ihr)" bash -c \
+    'aus="$(grep -n "Schreibsperre der Oberfläche aus" "$1" | tail -1 | cut -d: -f1)"; k="$(grep -n "powermanagement-kacheln nach" "$1" | tail -1 | cut -d: -f1)"
+     [[ -n "$aus" && -n "$k" && "$k" -gt "$aus" ]]' _ "$LAUF"
+# --no-block: Die Einheit läuft womöglich erst einen Augenblick später an.
+pruefe "nach dem Update: Kacheln nachgerechnet, der Rest des getöteten Baus weg" warte_auf 300 kacheln_fertig "$KACHEL_ETAGE"
+pruefe "powermanagement-kacheln endet" einheit_abwarten powermanagement-kacheln.service
+pruefe "powermanagement-kacheln lief als www-data (Kacheln gehören www-data)" \
+    leer "$(find "$ZIEL/storage/plans" ! -user www-data -print)"
+PM_ETAGE="$KACHEL_ETAGE" app_php 'App\Services\SiteService::deleteSite((int) App\Services\SiteService::floor((int) getenv("PM_ETAGE"))["site_id"]);' || true
 pruefe_installation
 pruefe_grenzen hochladen
 
@@ -1007,6 +1042,34 @@ pruefe "--flows-ersetzen: keine Datei mehr daneben" test ! -e "$NR_NEU"
 pruefe "--flows-ersetzen: Ergebnis aktuell" enthaelt "$LAUF" "==> Ergebnis: aktuell – Node-RED-Flows neu eingespielt"
 pruefe_installation
 abschluss "Node-RED-Flows"
+
+# ------------------------------------------------------------ 3d
+schritt "3d · Von Hand veränderte nginx-Site ohne den Block für Grundrisse: bleibt, das Update sagt es"
+# Wie eine Site, die jemand vor den 100 MB angepasst hat: ohne
+# location = /standorte/grundriss. Das Update behält sie, legt die neue
+# Fassung daneben und nennt den fehlenden Block; übernimmt man die neue
+# Fassung, gelten die Grenzen wieder.
+sed -i '/^    location = \/standorte\/grundriss {$/,/^    }$/d' "$SITE_DATEI"
+pruefe "vorher: Site ohne den Block für Grundrisse" bash -c '! grep -q "location = /standorte/grundriss" "$1"' _ "$SITE_DATEI"
+pruefe "vorher: nginx -t mit der veränderten Site" nginx -t -q
+systemctl reload nginx
+SITE_VORHER="$(sha256sum < "$SITE_DATEI")"
+NEU="$(neuer_stand "Stand für die veränderte Site" "printf '\n' >> README.md")"
+update_lauf
+pruefe "veränderte Site: Update endet mit 0 (kam: $RC)" test "$RC" = 0
+pruefe "veränderte Site: bleibt, wie sie ist" test "$(sha256sum < "$SITE_DATEI")" = "$SITE_VORHER"
+pruefe "veränderte Site: Hinweis und neue Fassung daneben" \
+    bash -c 'grep -qF "Die nginx-Site ist von Hand verändert und bleibt so" "$1" && grep -q "location = /standorte/grundriss" /etc/nginx/powermanagement.powermanagement-neu' _ "$LAUF"
+pruefe "veränderte Site: das Update nennt den fehlenden Block für Grundrisse" enthaelt "$LAUF" "Darin fehlt der Block für Grundrisse bis 100 MB"
+pruefe "veränderte Site: Ergebnis mit Hinweis site_behalten" enthaelt "$LAUF" "Hinweise:  site_behalten"
+code="$(head -c $((17 * 1024 * 1024)) /dev/zero | curl -s -o /dev/null -w '%{http_code}' --max-time 60 -H 'Host: powermanagement.lan' \
+    -H 'Expect:' -H 'Content-Type: application/octet-stream' --data-binary @- http://127.0.0.1/standorte/grundriss 2>/dev/null)" || true
+pruefe "veränderte Site: ohne den Block gilt die Grenze der Site (17 MiB → 413, kam: ${code:-000})" test "${code:-000}" = 413
+cp /etc/nginx/powermanagement.powermanagement-neu "$SITE_DATEI"
+pruefe "neue Fassung übernommen: nginx -t" nginx -t -q
+systemctl reload nginx
+pruefe_installation
+abschluss "veränderte Site"
 
 # ------------------------------------------------------------ 4
 schritt "4 · Update über die Oberfläche mit Selbst-Update: die neue Fassung übernimmt im selben Lauf"
