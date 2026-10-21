@@ -23,6 +23,12 @@ $subtitle = 'Rollen, Freigaben und Passwort';
                     <?php endif; ?>
                 </dd>
                 <dt>Letzte Anmeldung</dt><dd><?= View::e(Zeit::anzeige($currentUser['last_login_at'])) ?></dd>
+                <?php if (trim((string) ($currentUser['pruefer_qualifikation'] ?? '')) !== '' || View::can('berichte.pruefen')): ?>
+                    <dt>Prüfer-Qualifikation</dt>
+                    <dd><?= trim((string) ($currentUser['pruefer_qualifikation'] ?? '')) !== '' ? View::e((string) $currentUser['pruefer_qualifikation'])
+                        : '<span class="text-warn">nicht hinterlegt – ohne sie keine Prüfer-Unterschrift</span>' ?>
+                        <div class="small muted">Trägt die Benutzerverwaltung ein.</div></dd>
+                <?php endif; ?>
                 <dt>Rollen</dt>
                 <dd>
                     <?php foreach ($roles as $role): ?>

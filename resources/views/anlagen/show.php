@@ -83,6 +83,7 @@ $messgeraet = static function (array $m) use ($objekt, $auswertung, $live): stri
             title="<?= View::e(number_format($lage['lat'], 6, '.', '') . ', ' . number_format($lage['lon'], 6, '.', '')) ?>">Lage (OSM)</a><?php endif; ?>
         <?php if (!$vorlage && View::can('statistik.view') && $messpunkte !== []): ?><a class="btn btn-sm" href="/statistik?anlage=<?= $id ?>">Statistik</a><?php endif; ?>
         <a class="btn btn-sm" href="/anlagen/<?= $id ?>/druck" target="_blank" rel="noopener">Dokumentation drucken</a>
+        <?php if (!empty($berichtNeu)): ?><a class="btn btn-sm" href="/berichte/neu?anlage=<?= $id ?>">Übergabebericht</a><?php endif; ?>
         <?php if ($darfAendern): ?>
             <a class="btn btn-sm btn-primary" href="/anlagen/<?= $id ?>/bearbeiten">Bearbeiten</a>
         <?php endif; ?>
@@ -148,6 +149,10 @@ $messgeraet = static function (array $m) use ($objekt, $auswertung, $live): stri
                     <dt>Nennleistung</dt><dd><?= $objekt['nennleistung_kva'] !== null ? View::e($zahl($objekt['nennleistung_kva'])) . ' kVA' : '–' ?></dd>
                     <dt>Nennstrom</dt><dd><?= View::e($zahl(MesspunktService::nennstrom($objekt, $anschluesse), 0)) ?> A je Phase</dd>
                     <dt>Netz</dt><dd><?= (int) $objekt['phasen'] ?>~ <?= (int) $objekt['spannung_v'] ?> V</dd>
+                    <?php if (!$vorlage && View::can('berichte.view')): ?>
+                        <dt>Letzte Prüfung</dt><dd><?php if (!empty($letztePruefung)): ?><a href="/berichte/<?= (int) $letztePruefung['id'] ?>"><?= View::e((string) ($letztePruefung['nummer'] ?? ('#' . $letztePruefung['id']))) ?></a>
+                            am <?= View::e(preg_replace('/^(\d{4})-(\d{2})-(\d{2})$/', '$3.$2.$1', (string) $letztePruefung['pruefdatum'])) ?><?php else: ?><span class="muted">kein abgeschlossener Übergabebericht</span><?php endif; ?></dd>
+                    <?php endif; ?>
                     <?php foreach (AnlagenService::FELDER[$objekt['art']] as $k => [$beschriftung, $typ, $zusatz]): ?>
                         <?php if (isset($objekt['eigenschaften'][$k])): ?>
                             <dt><?= View::e($beschriftung) ?></dt><dd><?= View::e(is_float($objekt['eigenschaften'][$k]) ? $zahl($objekt['eigenschaften'][$k]) : (string) $objekt['eigenschaften'][$k]) ?><?= $typ !== 'auswahl' && $zusatz !== '' ? ' ' . View::e($zusatz) : '' ?></dd>

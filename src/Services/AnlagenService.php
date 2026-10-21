@@ -3,6 +3,7 @@ declare(strict_types=1);
 
 namespace App\Services;
 
+use App\Berichte\BerichtService;
 use App\Support\Audit;
 use App\Support\Database;
 
@@ -441,6 +442,7 @@ final class AnlagenService
         Database::execute('UPDATE leitungen SET zu_objekt_id = NULL, zu_anschluss_id = NULL WHERE zu_objekt_id = ?', [$id]);
         BereichService::objektEntfernt($id);
         InventarService::objektEntfernt($id);
+        BerichtService::objektEntfernt($id);
         Database::execute('DELETE FROM anschluesse WHERE objekt_id = ?', [$id]);
         Database::execute('DELETE FROM schutzorgane WHERE objekt_id = ?', [$id]);
         Database::execute('DELETE FROM messpunkte WHERE objekt_id = ?', [$id]);

@@ -18,9 +18,9 @@ und Stromplanung haben es.
 | Rolle | gedacht für | Rechte (Auszug) |
 |-------|-------------|-----------------|
 | **Administration** | Betreiber | alles (`*`) |
-| **Stromplanung** | Planer im Büro | Anlagen, Stecker, Karte, Grundrisse, Kabel, Statistik und Export, Datenquellen ansehen, Inventar pflegen, Locations holen. Sieht alle Standorte, **schaltet nicht**. |
-| **Elektrotechnik vor Ort** | Elektriker auf dem Gelände | Anlagen und Kabel dokumentieren, Statistik, Datenquellen ansehen, **schalten** und Schaltprotokoll – nur auf freigegebenen Standorten |
-| **Kunde / Veranstalter** | Auftraggeber | Übersicht, Anlagen, Karte, Statistik und CSV-Export – nur Freigegebenes im freigegebenen Zeitraum |
+| **Stromplanung** | Planer im Büro | Anlagen, Stecker, Karte, Grundrisse, Kabel, Statistik und Export, Datenquellen ansehen, Inventar pflegen, Locations holen, Übergabeberichte anlegen und ausfüllen (mit Eventworx). Sieht alle Standorte, **schaltet nicht**, **unterschreibt nicht als Prüfer**. |
+| **Elektrotechnik vor Ort** | Elektriker auf dem Gelände | Anlagen und Kabel dokumentieren, Statistik, Datenquellen ansehen, **schalten** und Schaltprotokoll, Übergabeberichte ausfüllen und **als Prüfer unterschreiben** – nur auf freigegebenen Standorten |
+| **Kunde / Veranstalter** | Auftraggeber | Übersicht, Anlagen, Karte, Statistik und CSV-Export – nur Freigegebenes im freigegebenen Zeitraum. Keine Übergabeberichte (siehe unten). |
 
 Rollen und ihre Rechte lassen sich unter **System → Rollen & Rechte** anpassen oder
 neu anlegen. Die Rolle *Administration* behält immer alle Rechte.
@@ -199,6 +199,36 @@ Kachel („… nicht freigegeben – die Summe ist unvollständig“). Anlegen,
 Standort Anlagen anlegen darf. Verlauf und CSV brauchen wie sonst
 „Statistik“ bzw. „Export“.
 
+## Übergabeberichte
+
+| Recht | erlaubt |
+|-------|---------|
+| „Übergabeberichte ansehen“ (`berichte.view`) | Liste, Bericht und PDF. Ohne „ausfüllen“ nur **abgeschlossene** Berichte, nur mit Freigabe für den Standort und nur, wenn das Prüfdatum im Datenzeitraum der Freigabe liegt. |
+| „… anlegen, ausfüllen, vom Kunden unterschreiben lassen“ (`berichte.manage`) | Entwürfe anlegen und ausfüllen und den Kundenmodus starten – nur auf Standorten mit Freigabe *bearbeiten* –, dazu die Prüfgeräte pflegen |
+| „Als Prüfer unterschreiben …“ (`berichte.pruefen`) | unterschreiben, ohne Kunde abschließen, zurückziehen, Korrektur anlegen, verwerfen – nur mit hinterlegter **Prüfer-Qualifikation** im Konto und *bearbeiten* für den Standort |
+| „Kundendaten aus Eventworx …“ (`berichte.eventworx`) | im Formular nach Aufträgen und Angeboten suchen und übernehmen. Eventworx zeigt dabei alle Vorgänge des Mandanten – deshalb nie für Kunden-Rollen. |
+
+**Sehen ist nicht ändern** gilt auch hier: Wer einen Standort nur sieht,
+sieht dort (im Datenzeitraum) abgeschlossene Berichte, aber keine Entwürfe,
+und kann nichts ausfüllen oder unterschreiben. Ein Bericht ohne Standort gehört dem, der ihn
+angelegt hat (und wer „alle Standorte“ hat). Wird ein Standort gelöscht,
+bleiben seine Berichte – sichtbar dann **nur noch mit „alle Standorte“**,
+auch nicht mehr für den, der sie angelegt hat (seine Freigabe für den
+Standort ist mit ihm weg). Wer „alle Standorte“ hat, sieht
+und ändert Berichte überall – Freigaben braucht er dafür nicht.
+
+**Kunden zeigen.** Die Rolle *Kunde / Veranstalter* hat das Recht nicht:
+Auf einem Gelände arbeiten viele Veranstalter, und Berichte enthalten
+Kundendaten. Wer seine Berichte sehen soll, bekommt „Übergabeberichte
+ansehen“ einzeln (eigene Rolle) und eine Freigabe für den Standort **mit
+Datenzeitraum** – etwa genau die Festivalwoche. Dann sieht er nur Berichte,
+deren Prüfdatum darin liegt. Eine Freigabe ohne Datenzeitraum zeigt alle
+abgeschlossenen Berichte des Standorts, auch die anderer Veranstalter.
+
+Die Qualifikation („Elektrofachkraft für Veranstaltungstechnik“) trägt die
+Benutzerverwaltung ein; im Profil ist sie nur zu lesen. Ändert jemand sie,
+steht das im Audit-Log. Rechte vergibt auch hier nur, wer sie selbst hat.
+
 ## Demo-Zugänge
 
 Im Demo-Modus legt `bin/power demo:seed` zwei Beispielkonten an:
@@ -206,4 +236,4 @@ Im Demo-Modus legt `bin/power demo:seed` zwei Beispielkonten an:
 | Benutzer | Kennwort | zeigt |
 |----------|----------|-------|
 | `veranstalter` | `Veranstalter2026!` | Rolle Kunde. Freigabe nur für das Festivalgelände und nur für die Festivalwoche. Konto läuft nach 10 Tagen ab. |
-| `technik` | `Technik2026!!` | Rolle Elektrotechnik. Bearbeiten auf dem Festivalgelände, schalten nur beim Shelly der Geländebeleuchtung. |
+| `technik` | `Technik2026!!` | Rolle Elektrotechnik. Bearbeiten auf dem Festivalgelände, schalten nur beim Shelly der Geländebeleuchtung. Mit Prüfer-Qualifikation: unterschreibt Übergabeberichte. |

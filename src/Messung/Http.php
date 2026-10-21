@@ -4,15 +4,24 @@ declare(strict_types=1);
 namespace App\Messung;
 
 /**
- * Kleine HTTP-Anfragen – für InfluxDB, ComAp WebSupervisor und Victron VRM.
+ * Kleine HTTP-Anfragen – für InfluxDB, ComAp WebSupervisor, Victron VRM
+ * und Eventworx.
  *
  * curl, wenn vorhanden (Zeitgrenzen, TLS), sonst PHP-Streams. Kein
- * Rahmenwerk: drei Gegenstellen rechtfertigen keine Bibliothek.
+ * Rahmenwerk: vier Gegenstellen rechtfertigen keine Bibliothek.
+ *
+ * Umleitungen werden auf beiden Wegen **nie** verfolgt: Die Kopfzeilen
+ * (Tokens wie `S-API-TOKEN` oder `X-Authorization`) gingen sonst an das
+ * neue Ziel, wer immer das ist. Ein 3xx kommt als Antwort zurück, der
+ * Aufrufer entscheidet.
  */
 final class Http
 {
     /** Für Prüfskripte: statt ins Netz zu gehen, hier antworten. */
     public static $attrappe = null;
+
+    /** Für Prüfskripte: den Weg über PHP-Streams erzwingen, auch wenn curl da ist. */
+    public static bool $ohneCurl = false;
 
     /**
      * @param array{kopf?:array<string,string>,rumpf?:string,zeit?:int} $optionen
@@ -30,11 +39,16 @@ final class Http
         }
         $kopf = [];
         foreach ((array) ($optionen['kopf'] ?? []) as $name => $wert) {
+            // Ein Umbruch im Wert – etwa in einem eingefügten Token – schriebe
+            // sonst eine eigene Kopfzeile in die Anfrage.
+            if (preg_match('/^[A-Za-z0-9!#$%&\'*+.^_`|~-]+$/', (string) $name) !== 1 || preg_match('/[\r\n\0]/', (string) $wert) === 1) {
+                return ['ok' => false, 'status' => 0, 'rumpf' => '', 'fehler' => 'Ungültige Kopfzeile in der Anfrage.'];
+            }
             $kopf[] = $name . ': ' . $wert;
         }
         $zeit = max(1, (int) ($optionen['zeit'] ?? 10));
 
-        if (function_exists('curl_init')) {
+        if (function_exists('curl_init') && !self::$ohneCurl) {
             $ch = curl_init($url);
             curl_setopt_array($ch, [
                 CURLOPT_CUSTOMREQUEST  => $methode,
@@ -59,12 +73,16 @@ final class Http
             return ['ok' => true, 'status' => $status, 'rumpf' => (string) $rumpf, 'fehler' => ''];
         }
 
+        // PHP-Streams folgen Umleitungen von Haus aus – und nähmen dabei
+        // die Kopfzeilen mit. Hier also ausdrücklich nicht.
         $kontext = stream_context_create(['http' => [
-            'method'        => $methode,
-            'header'        => implode("\r\n", $kopf),
-            'content'       => (string) ($optionen['rumpf'] ?? ''),
-            'timeout'       => $zeit,
-            'ignore_errors' => true,
+            'method'          => $methode,
+            'header'          => implode("\r\n", $kopf),
+            'content'         => (string) ($optionen['rumpf'] ?? ''),
+            'timeout'         => $zeit,
+            'ignore_errors'   => true,
+            'follow_location' => 0,
+            'max_redirects'   => 0,
         ]]);
         $rumpf = @file_get_contents($url, false, $kontext);
         if ($rumpf === false) {

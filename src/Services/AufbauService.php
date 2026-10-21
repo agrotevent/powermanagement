@@ -5,6 +5,7 @@ namespace App\Services;
 
 use App\Auth\Auth;
 use App\Auth\Zugriff;
+use App\Berichte\BerichtService;
 use App\Messung\Messdaten;
 use App\Support\Audit;
 use App\Support\Database;
@@ -269,6 +270,7 @@ final class AufbauService
             return ['ok' => false, 'message' => 'Diesen Aufbau gibt es nicht.'];
         }
         Database::execute('DELETE FROM aufbau_posten WHERE aufbau_id = ?', [$id]);
+        BerichtService::aufbauEntfernt($id);
         Database::delete('aufbauten', $id);
         Audit::log('aufbau.delete', 'site', (string) $a['site_id'], ['aufbau' => $id, 'name' => $a['name']]);
         return ['ok' => true, 'message' => '„' . $a['name'] . '“ gelöscht.'];
@@ -276,6 +278,9 @@ final class AufbauService
 
     public static function standortEntfernt(int $siteId): void
     {
+        foreach (Database::select('SELECT id FROM aufbauten WHERE site_id = ?', [$siteId]) as $a) {
+            BerichtService::aufbauEntfernt((int) $a['id']);
+        }
         Database::execute('DELETE FROM aufbau_posten WHERE aufbau_id IN (SELECT id FROM aufbauten WHERE site_id = ?)', [$siteId]);
         Database::execute('DELETE FROM aufbauten WHERE site_id = ?', [$siteId]);
     }
