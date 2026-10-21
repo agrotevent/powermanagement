@@ -166,7 +166,7 @@ final class TankService
                     'beschriftung' => self::beschriftung($beschriftung),
                     // Zum Lesen auf 4 Stellen (ein gelernter Inhalt je mm hat 6) – das Formular zeigt alle.
                     'wert'         => is_float($wert) || is_int($wert) ? self::zahl(round((float) $wert, 4)) : (string) $wert,
-                    'einheit'      => $typ !== 'auswahl' ? (string) $zusatz : '',
+                    'einheit'      => AnlagenService::einheit($typ, $zusatz, $wert),
                 ];
             }
             if ($zeilen !== []) {

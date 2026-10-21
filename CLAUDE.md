@@ -61,6 +61,19 @@ keine Build-Schritte. JS-Bibliotheken liegen fertig unter `public/assets/vendor`
   was still anders ankäme (Auswahl-Werte, leere Spannung, neue Stecker ohne
   Werte), ist ein Fehler. Ein Katalog-Typ hat nie Messpunkte. Formulare geben
   Zahlen ungerundet aus (`View::zahlFeld`): unverändert speichern ändert nichts.
+- **Tanks:** In die InfluxDB kommen nur Rohwerte (`u`, `eingang`, `x`,
+  `i_ma`, `abstand_mm`, `sensorfehler` …). Liter und Prozent rechnet nur
+  `App\Tanks\TankRechnung` beim Lesen, mit der Fassung aus `tank_kennlinien`,
+  die zur Zeit des Werts galt (größte id mit `ab ≤ t`). Fassungen nie ändern –
+  eine Korrektur ist eine neue (nur `TankService::fassungAnlegen`), rückwirkend
+  nur mit unbegrenztem Datenfenster. Live liest frühestens ab Einbau
+  (`Messdaten::tankLetzte`); ein Sensorfehler ist nie „leer“. Den Rohwert für
+  Peilung und Betankung holt der Server, nie der Browser. Ein Tank ist nicht
+  elektrisch (`AnlagenService::elektrisch()`): keine Anschlüsse, Schutzorgane,
+  Kabel und kein Wechsel der Art. Aus Tankwerten wird nie geschaltet, ein
+  Gerät am Tank schaltet niemand. Die Restlaufzeit verrät von Generatoren
+  ohne Freigabe weder Namen noch Leistung; Tankwerte auf der Kommandozeile
+  nur mit `--als=<benutzer>`.
 - Neue Tabellen oder Spalten kommen als **neue Migration** dazu
   (`database/migrations/00N_*.sql`). Vorhandene Migrationen nie ändern.
 - Oberfläche **mobil zuerst**: Tabellen mit `tabelle-karten` und
@@ -86,24 +99,25 @@ bash -n deploy/*.sh tests/*.sh && shellcheck -S warning -e SC2016,SC1111 deploy/
 | Prüfskript | prüft |
 |------------|-------|
 | `tests/zeitfenster.php` | Freigaben, Gültigkeit, Datenfenster, Schalt-Freigaben |
-| `tests/anschluesse.php` | Anschlüsse, Standard-Verteiler, Schutzorgane, Kabel, Spannungsfall, fest/mobil (Anlagen und Kabel) |
-| `tests/inventar.php` | Inventar, Einsatz/Abbau, Gültigkeit der Messpunkte, Bereiche über wechselnde Geräte, Schalten nach Abbau |
-| `tests/location-abgleich.php` | Git-Location-Abgleich mit MasterAdmin-Format; nur Feststromanschlüsse und feste Kabel, mobile Planung bleibt |
-| `tests/katalog-import.php` | Katalog-Import: Format (kein JSON, falsche Art, Format 2, leer, doppelter Schlüssel, unbekannte Art, Stecker ohne Beschreibung, neuer Stecker ohne Werte, Auswahl, Spannung …), neu → übernommen → schon da, keine Messpunkte am Typ (auch im Verteiler-Abgleich), bearbeitbar, „hier anders“ nur mit Auswahl und nur im Stand der Vorschau überschrieben, Typwechsel mit Eigenschaften, Rechte, alles oder nichts, Vorschau ablegen, Kommandozeile und jedes Paket unter `resources/kataloge` (je eigene leere Instanz) |
-| `tests/verteiler-abgleich.php` | Verteiler-Abgleich: Standard-Verteiler und Inventar hochladen/übernehmen, hier/dort/beide geändert, Shelly-Tausch im Einsatz, Rechte, Entfernen |
-| `tests/aufbau.php` | Aufbau: Plan festhalten, bestätigen/geändert/entfallen/zusätzlich, fertig, beenden, Abgleich (Versatz, Längen, Material, Last) |
-| `tests/bereiche.php` | Bereiche: Summe ohne Doppelzählung, Live/Verlauf, Aufräumen; Materialliste und Kabelstückelung |
+| `tests/anschluesse.php` | Anschlüsse, Standard-Verteiler, Schutzorgane, Kabel, Spannungsfall, fest/mobil (Anlagen und Kabel); Kraftstoffschlauch ohne Anschlüsse, nicht in Belegung, Speisung, Baum und Spannungsfall, Hinweise „nur Vorlauf“ und „Rücklauf muss in denselben Tank“ |
+| `tests/inventar.php` | Inventar, Einsatz/Abbau, Gültigkeit der Messpunkte, Bereiche über wechselnde Geräte, Schalten nach Abbau; Stellen des Tanksensors, Stecker-Pflicht nur beim Zwischenstecker |
+| `tests/location-abgleich.php` | Git-Location-Abgleich mit MasterAdmin-Format; nur Feststromanschlüsse und feste Kabel, mobile Planung bleibt; fester Tank mit Eigenschaften hin und zurück, Schläuche nicht |
+| `tests/katalog-import.php` | Katalog-Import: Format (kein JSON, falsche Art, Format 2, leer, doppelter Schlüssel, unbekannte Art, Stecker ohne Beschreibung, neuer Stecker ohne Werte, Auswahl, Spannung …), neu → übernommen → schon da, keine Messpunkte am Typ (auch im Verteiler-Abgleich), bearbeitbar, „hier anders“ nur mit Auswahl und nur im Stand der Vorschau überschrieben, Typwechsel mit Eigenschaften, Tank-Typ (nur Eigenschaften, feste elektrische Werte, Anschlüsse in der Datei abgelehnt, gelernter Inhalt je mm → „hier anders“), Rechte, alles oder nichts, Vorschau ablegen, Kommandozeile und jedes Paket unter `resources/kataloge` (je eigene leere Instanz) |
+| `tests/verteiler-abgleich.php` | Verteiler-Abgleich: Standard-Verteiler und Inventar hochladen/übernehmen, hier/dort/beide geändert, Shelly-Tausch im Einsatz, Rechte, Entfernen; Tanksensor mit Sensordaten und Tank-Typ ohne Anschlüsse, Fingerabdruck vorhandener Stücke unverändert |
+| `tests/aufbau.php` | Aufbau: Plan festhalten, bestätigen/geändert/entfallen/zusätzlich, fertig, beenden, Abgleich (Versatz, Längen, Material, Last); Schlauch als Posten, Last ohne Tanks |
+| `tests/bereiche.php` | Bereiche: Summe ohne Doppelzählung, Live/Verlauf, Aufräumen; Materialliste und Kabelstückelung; Tank zählt nicht und ist nicht wählbar, Material mit Schläuchen und Kupplungen |
 | `tests/georeferenz.php` | Plan ↔ Breite/Länge, Koordinaten lesen, Längen aus der Georeferenz, strom.json |
 | `tests/modbus.php` | Modbus TCP, Victron-Profil, Line Protocol |
 | `tests/mqtt.php` | MQTT-Client, Shelly schalten (Gen1/Gen2, Antwort im Baum bei eigenem Zugang, falsches dst), Sammler → MQTT (eigener Mosquitto) |
 | `tests/mqtt-helfer.php` | Helfer `deploy/mqtt-zugaenge.sh`: Namensregeln, Soll-Datei prüfen und ablehnen, Block in der Kennwortdatei, wirksame ACL, Rechte am Broker mit der echten ACL (eigener Mosquitto) |
 | `tests/mqtt-zugaenge.php` | Eigene MQTT-Zugänge von App bis Broker: Gen2 einrichten/übertragen/prüfen/Neustart/neues Kennwort/entfernen, Gen1, Sperre des gemeinsamen Zugangs, Kontoprobe gegen falsche ACLs, keine Geheimnisse (eigener Mosquitto, Shelly-Attrappen) |
-| `tests/influx.php` | InfluxQL: Livewerte, Verläufe, Datenfenster, Energie je Tag (eigene InfluxDB 1.x) |
+| `tests/influx.php` | InfluxQL: Livewerte, Verläufe, Datenfenster, Energie je Tag; Tank: letzter Rohwert ab Einbau mit exakter Zeit, Sensorfehler, Lebenszeichen, Median, Analogkanäle bis 7 Tage, Gefälle, Verbrauch je Tag bei seltenen Meldungen (eigene InfluxDB 1.x) |
 | `tests/cloud.php` | ComAp WebSupervisor, Victron VRM (Http-Attrappe) |
-| `tests/web.php` | alle Seiten ohne PHP-Meldung, 403/404, CSRF, Schalt-Ablehnung, Weiterleitungen, Sitzung nach Kennwortwechsel, Benutzerverwaltung ohne Administration, Ändern nur mit „bearbeiten“, Katalog-Import (Seite, Vorschau nach Upload mit vorausgewählten neuen Typen, Übernehmen mit CSRF, Stand der Vorschau, nichts übernommen → Warnung und Vorschau bleibt, ohne Stecker-Recht, Zahlen ungerundet im Formular, 403, kein JSON) (eigener PHP-Server) |
-| `tests/sitzung.php` | Sitzungssperre: Live-Endpunkte (Anlage, Dashboard, Karte, Bereiche) geben die Sitzung frei – Speichern und Seiten kommen bei träger InfluxDB durch (eigene Instanz, InfluxDB-Attrappe) |
-| `tests/sicherheit.php` | Rechte vergeben, Anmelde-Bremse ohne Kontoerkennung, Geräte zuordnen, Kanal-Freigaben beim Schalten, Schlüssel aus dem Repository, Line Protocol, CSV, Adressen, app.key, PDF-Werkzeuge |
-| `tests/nodered-funktionen.mjs` | Node-RED-Funktionen, `flows.json` passt zu den Quellen |
+| `tests/web.php` | alle Seiten ohne PHP-Meldung, 403/404, CSRF, Schalt-Ablehnung, Weiterleitungen, Sitzung nach Kennwortwechsel, Benutzerverwaltung ohne Administration, Ändern nur mit „bearbeiten“, Katalog-Import (Seite, Vorschau nach Upload mit vorausgewählten neuen Typen, Übernehmen mit CSRF, Stand der Vorschau, nichts übernommen → Warnung und Vorschau bleibt, ohne Stecker-Recht, Zahlen ungerundet im Formular, 403, kein JSON), Tanks (Formular ohne elektrische Felder, kein Artwechsel, kein Kabel und kein Anschluss am Tank, Schlauch auf der Karte, Tanksensor anlegen und einbauen, Tankseite mit Vor Ort, Verlauf, Tagen, Protokoll, Kennlinie und Versorgung, Verlauf/Tage/CSV mit 403/404, Peilung und Betankung nur mit CSRF und *bearbeiten*, Kunde ohne Knöpfe, Tank-Grenzen in den Einstellungen) (eigener PHP-Server) |
+| `tests/sitzung.php` | Sitzungssperre: Live-Endpunkte (Anlage, Dashboard, Karte, Bereiche) und die des Tanks (live, Verlauf, Tage, Peilung) geben die Sitzung frei – Speichern und Seiten kommen bei träger InfluxDB durch (eigene Instanz, InfluxDB-Attrappe) |
+| `tests/sicherheit.php` | Rechte vergeben, Anmelde-Bremse ohne Kontoerkennung, Geräte zuordnen, Kanal-Freigaben beim Schalten, Schlüssel aus dem Repository, Line Protocol, CSV (auch Tankverlauf, Protokoll mit Lieferschein, Tage), Adressen, app.key, PDF-Werkzeuge; Tank: Fehler der InfluxDB nur für die Messtechnik, Kennlinie von Hand nur endliche Zahlen, `tank:liste` nur mit `--als` |
+| `tests/tanks.php` | Tanks und Tanksensoren: Art ohne Strom, Rechnung Rohwert → mm → l (4–20 mA an Bürde und Wandler, 0–10 V, Ultraschall, Zylinder), Fassungen (Einsatz, Shelly-Tausch, Sensor, Tank, Peilung, Betankung, von Hand, rückwirkend, zurück, nie geändert), Live ab Einbau, Stufen, Peilung und Betankung, Versorgung und Restlaufzeit, Verbrauch je Tag, Rechte, Kommandozeile (`tank:liste`, `tank:rechnen`) und Demo-Gelände (eigene Instanz) |
+| `tests/nodered-funktionen.mjs` | Node-RED-Funktionen (auch Analogeingänge: Voltmeter, Analog-Input, Uni-ADC mit `sensorfehler`), `flows.json` passt zu den Quellen |
 | `tests/installation-debian.sh` | `deploy/install-debian.sh` auf frischem Debian 13 mit systemd (Docker): Erstinstallation, zweiter Lauf (Kennwörter, app.key bleiben), Update mit neuem Ordner in `storage/`; Rechte (Code root, `storage/` www-data), Dienste, Anmeldung, Broker, `bin/power pruefen` |
 
 Prüfskripte legen eigene Daten mit eindeutiger Kennung an und löschen sie am

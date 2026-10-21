@@ -281,6 +281,11 @@ Alter; „stumm“ gilt erst ohne Lebenszeichen des Geräts (`online`).
   PVC-Kabel, Datenblatt prüfen.
 
 Die App warnt nur. Grenzwertgeber und Leckanzeiger am Tank bleiben Pflicht.
+Wie eine Sonde angenommen, in den Tank gebracht und vor dem Transport
+ausgebaut wird – Öffnung, druckoffene Dose für das belüftete Kabel, Wasser
+am Boden –, steht in
+[bedienung.md](bedienung.md#sonde-annehmen-und-einbauen); Peilung,
+Betankung und Kennlinie im Abschnitt [Tanks](bedienung.md#tanks-und-kraftstoff).
 
 ## Victron Energy
 

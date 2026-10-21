@@ -339,7 +339,13 @@ final class VerteilerBundle
                 $teile[] = $n . ' × ' . ($namen[$k] ?? $k);
             }
             $art = AnlagenService::ARTEN[$inhalt['art'] ?? '']['name'] ?? (string) ($inhalt['art'] ?? '');
-            return trim($art . (($inhalt['modell'] ?? '') !== '' ? ' · ' . $inhalt['modell'] : '')
+            $modell = is_scalar($inhalt['modell'] ?? null) && (string) $inhalt['modell'] !== '' ? ' · ' . $inhalt['modell'] : '';
+            if (is_string($inhalt['art'] ?? null) && !AnlagenService::elektrisch($inhalt['art'])) {
+                // Ein Tank: „Tank · QUADRO-AG 3000 · 3.000 l · Diesel · Quader“ statt Anschlüssen
+                $eig = is_array($inhalt['eigenschaften'] ?? null) ? $inhalt['eigenschaften'] : [];
+                return $art . $modell . ' · ' . TankService::kurzform(['eigenschaften' => $eig]);
+            }
+            return trim($art . $modell
                 . ($teile !== [] ? ' · ' . implode(', ', $teile) : '')
                 . ' · ' . count((array) ($inhalt['schutzorgane'] ?? [])) . ' Schutzorgane');
         }

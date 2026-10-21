@@ -149,8 +149,8 @@ zeichnen darf.
 
 ## Inventar
 
-Das Inventar (Verteiler und Zwischenstecker mit Shellys) gehört keinem
-Standort. Ansehen darf es, wer „Datenquellen ansehen“ hat (Planung,
+Das Inventar (Verteiler, Zwischenstecker und Tanksensoren mit Shellys)
+gehört keinem Standort. Ansehen darf es, wer „Datenquellen ansehen“ hat (Planung,
 Technik), pflegen, wer „Inventar pflegen“ hat. Ein Stück **einsetzen** oder
 **abbauen** ist eine Änderung an der Anlage: dafür braucht es „Anlagen
 ändern“ und eine Freigabe mit „bearbeiten“ für diese Anlage. Messgeräte aus
@@ -199,6 +199,36 @@ Kachel („… nicht freigegeben – die Summe ist unvollständig“). Anlegen,
 Standort Anlagen anlegen darf. Verlauf und CSV brauchen wie sonst
 „Statistik“ bzw. „Export“.
 
+## Tanks
+
+Ein Tank ist eine Anlage wie jede andere: Sehen darf ihn, wer ihn über eine
+Freigabe sieht, ändern, wer „Anlagen ändern“ und eine Freigabe mit
+„bearbeiten“ für ihn hat.
+
+- **Füllstand, Verlauf, Verbrauch je Tag**: wie alle Messdaten nur im
+  Datenfenster der Freigabe; live nur, solange die Freigabe jetzt gilt (sonst
+  „gesperrt“). Peilungen, Betankungen und Fassungen der Kennlinie außerhalb
+  des Datenfensters sieht niemand. Verlauf und Tage brauchen „Statistik
+  ansehen“, die CSV „Statistik exportieren“ (im Audit).
+- **Peilen, betanken, kalibrieren, löschen, Tanksensor ein- und ausbauen**:
+  „Anlagen ändern“ und *bearbeiten* am Tank. Wer das nicht hat (etwa ein
+  Kunde), sieht die Knöpfe nicht. Ein eigenes Recht „nur betanken“ gibt es
+  nicht.
+- **Rückwirkend** kalibrieren (*Erweitert*) nur mit unbegrenztem
+  Datenfenster – sonst änderte man Werte, die man selbst nicht sehen darf.
+  Es steht im Audit.
+- **Tanksensor anlegen**: „Inventar pflegen“; den Shelly-Kanal nur, wer das
+  Gerät zuordnen darf.
+- **Kraftstoffschlauch**: „Kabel zeichnen“ und *bearbeiten* an beiden Enden.
+- **Restlaufzeit**: Es zählen nur Generatoren, die der Betrachter sieht und
+  live sehen darf. Ein fremder Generator verrät weder Namen noch Leistung –
+  dann kommt der Verbrauch aus dem Pegel.
+- **Nie schalten**: Aus Tankwerten wird nie geschaltet, und einen Shelly, der
+  an einem Tank misst, schaltet niemand – auch nicht die Administration.
+- **Kommandozeile**: `bin/power tank:liste` braucht `--als=<benutzer>` und
+  zeigt genau, was dieses Konto sähe; ein gesperrtes oder abgelaufenes Konto
+  wird abgelehnt. `tank:rechnen` zeigt nur die Kennlinie, keine Messwerte.
+
 ## Demo-Zugänge
 
 Im Demo-Modus legt `bin/power demo:seed` zwei Beispielkonten an:
@@ -206,4 +236,4 @@ Im Demo-Modus legt `bin/power demo:seed` zwei Beispielkonten an:
 | Benutzer | Kennwort | zeigt |
 |----------|----------|-------|
 | `veranstalter` | `Veranstalter2026!` | Rolle Kunde. Freigabe nur für das Festivalgelände und nur für die Festivalwoche. Konto läuft nach 10 Tagen ab. |
-| `technik` | `Technik2026!!` | Rolle Elektrotechnik. Bearbeiten auf dem Festivalgelände, schalten nur beim Shelly der Geländebeleuchtung. |
+| `technik` | `Technik2026!!` | Rolle Elektrotechnik. Bearbeiten auf dem Festivalgelände (auch peilen und betanken), schalten nur beim Shelly der Geländebeleuchtung. |

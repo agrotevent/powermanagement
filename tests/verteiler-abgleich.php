@@ -356,6 +356,7 @@ try {
     gleich([$status('inventar', $tsKey), $status('typ', $tankTypKey)], ['aktuell', 'aktuell'], 'nach dem Hochladen aktuell (Fingerabdruck hier = dort)');
     pruefe(str_contains(VerteilerBundle::kurzbeschreibung($tsDatei), 'Hydrostatisch 0–100 mbar') && str_contains(VerteilerBundle::kurzbeschreibung($tsDatei), '1 Messkanal'),
         'Kurzbeschreibung des Tanksensors: ' . VerteilerBundle::kurzbeschreibung($tsDatei));
+    gleich(VerteilerBundle::kurzbeschreibung($tankDatei), 'Tank · ' . $k . '-AG3000 · 3.000 l', 'Kurzbeschreibung des Tank-Typs: Nennvolumen statt Anschlüssen');
     $andereAendern('verteiler/inventar/' . $tsKey . '.json', static function (array $d): array {
         $d['stueck']['eigenschaften']['buerde_ohm'] = 470;
         return $d;

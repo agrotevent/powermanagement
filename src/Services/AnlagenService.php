@@ -163,6 +163,22 @@ final class AnlagenService
     }
 
     /**
+     * Die Einheit hinter dem Wert einer Eigenschaft (FELDER) in der Anzeige –
+     * nicht bei einer Auswahl und nicht bei einem Text, der seine Einheit
+     * schon nennt: „1.200 × 1.000 × 1.229 mm (L × B × H)“ oder „100% 22L /
+     * 70% 16L“ aus dem Katalog bekämen sonst ein zweites „mm“ bzw. „l/h“.
+     */
+    public static function einheit(string $typ, mixed $einheit, mixed $wert): string
+    {
+        // Bei einer Auswahl steht an dieser Stelle die Liste der Werte.
+        if ($typ === 'auswahl' || !is_string($einheit) || $einheit === ''
+            || ($typ === 'text' && preg_match('/\p{L}/u', (string) (is_scalar($wert) ? $wert : '')) === 1)) {
+            return '';
+        }
+        return $einheit;
+    }
+
+    /**
      * Die Eigenschaften einer Art in ihren Gruppen (FELDGRUPPEN) –
      * ohne Gruppen eine einzige ohne Titel.
      *

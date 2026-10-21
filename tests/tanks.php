@@ -55,6 +55,13 @@ declare(strict_types=1);
  * Messwerte bzw. ohne Sprung, Zapfpause, über Mitternacht, Wärme; im
  * Demo-Modus über TankService::tage (erkannte Betankung um 06:00, eintragen,
  * Lieferschein, Kunde mit Datenfenster, ohne Kalibrierung, ohne Sensor).
+ *
+ * H – Kommandozeile und Demo: tank:liste nur mit --als (gesperrtes und
+ * unbekanntes Konto, Standort), Zeile mit Liter, %, Restlaufzeit und Grund,
+ * --warnungen mit Rückgabewert, Kunde nur mit seiner Freigabe und im
+ * Datenfenster; tank:rechnen mit den Prüfwerten aus B; das Demo-Gelände in
+ * eigener Instanz (Tank-Typen aus dem Katalog, TS-01 mit zwei Fassungen,
+ * Betankung DEMO-0815, Reservetank mit Peilung, TS-02 im Lager).
  */
 
 require __DIR__ . '/hilfen/pruefung.php';
@@ -1778,6 +1785,203 @@ try {
         Database::execute('DELETE FROM users WHERE id = ?', [$u]);
     }
     Database::execute('DELETE FROM audit_log WHERE username LIKE ? OR details LIKE ?', [$kennungG . '%', '%' . $kennungG . '%']);
+}
+
+// ------------------------------------------------ H – Kommandozeile und Demo-Gelände
+$kennungH = 'pm-tank-' . bin2hex(random_bytes(3));
+$wurzel = dirname(__DIR__);
+$ordnerH = sys_get_temp_dir() . '/' . $kennungH;
+mkdir($ordnerH, 0700, true);
+register_shutdown_function(static function () use ($ordnerH): void {
+    // Nur den eigenen Ordner.
+    foreach (glob($ordnerH . '/*') ?: [] as $datei) {
+        @unlink($datei);
+    }
+    @rmdir($ordnerH);
+});
+// Die Konfiguration dieser Prüfung (dieselbe Datenbank) im Demo-Modus – die Werte kommen von der Demo-Sonde.
+$basisH = getenv('POWERMANAGEMENT_CONFIG');
+$basisH = is_string($basisH) && $basisH !== '' && is_file($basisH) ? $basisH
+    : (is_file($wurzel . '/config/config.php') ? $wurzel . '/config/config.php' : $wurzel . '/config/config.example.php');
+$hierH = $ordnerH . '/hier.php';
+file_put_contents($hierH, '<?php
+$c = require ' . var_export($basisH, true) . ';
+$c["app"]["demo"] = true;
+return $c;
+');
+/** bin/power aufrufen – mit eigener Konfiguration oder der dieser Prüfung. @return array{0:int,1:string,2:string} Rückgabewert, Ausgabe, Fehlerausgabe */
+$power = static function (array $argumente, ?string $config = null) use ($wurzel, $hierH): array {
+    $p = proc_open(array_merge(['php', $wurzel . '/bin/power'], $argumente), [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $rohre, $wurzel,
+        ['POWERMANAGEMENT_CONFIG' => $config ?? $hierH] + getenv());
+    $aus = (string) stream_get_contents($rohre[1]);
+    $err = (string) stream_get_contents($rohre[2]);
+    fclose($rohre[1]);
+    fclose($rohre[2]);
+    return [proc_close($p), $aus, $err];
+};
+$zeileMit = static function (string $ausgabe, string $text): string {
+    foreach (explode("\n", $ausgabe) as $z) {
+        if (str_contains($z, $text)) {
+            return $z;
+        }
+    }
+    return '';
+};
+Config::set('app.demo', true);
+$siteH = SiteService::saveSite(null, ['name' => 'Prüfung Kommandozeile ' . $kennungH]);
+$floorH = SiteService::saveFloor(null, ['site_id' => $siteH, 'name' => 'Wiese']);
+$adminH = BenutzerService::anlegen($kennungH, 'Pruefung2026!!', 'admin', false);
+$kundeH = BenutzerService::anlegen($kennungH . '-kunde', 'Pruefung2026!!', 'kunde', false);
+$spaetH = BenutzerService::anlegen($kennungH . '-spaet', 'Pruefung2026!!', 'kunde', false);
+$ausH = BenutzerService::anlegen($kennungH . '-aus', 'Pruefung2026!!', 'admin', false);
+Database::execute('UPDATE users SET is_active = 0 WHERE id = ?', [$ausH]);
+
+try {
+    alsBenutzer($adminH);
+    $jetzt = time();
+    $eigH = ['inhalt_l' => '3000', 'kraftstoff' => 'Diesel', 'bauform' => 'Quader', 'sumpf_l' => '140', 'liter_je_mm' => '2,78'];
+    $sensorH = ['prinzip' => 'hydrostatisch', 'feld' => 'u', 'signal' => '4-20mA', 'buerde_ohm' => 500, 'bereich_von' => 0, 'bereich_bis' => 100,
+        'bereich_einheit' => 'mbar', 'schritt_roh' => 0.1];
+    $tankH = static function (string $name, array $eig, bool $mitSensor) use ($floorH, $kennungH, $sensorH, $jetzt): array {
+        $id = (int) AnlagenService::speichern(null, ['art' => 'tank', 'name' => $kennungH . ' ' . $name, 'floor_id' => $floorH,
+            'plan_x' => 30.0, 'plan_y' => 30.0, 'eigenschaften' => $eig])['id'];
+        $mp = null;
+        if ($mitSensor) {
+            // an der Demo-Sonde, eingebaut vor drei Tagen
+            $mp = Database::insert('messpunkte', ['objekt_id' => $id, 'geraet' => 'shellyplusuni-tank1', 'kanal' => 'voltmeter:100', 'rolle' => 'fuellstand',
+                'bezeichnung' => $kennungH . '-' . $name, 'gueltig_ab' => Zeit::iso($jetzt - 3 * 86400), 'created_at' => gmdate('c')]);
+            $r = TankRechnung::rechnung($sensorH, ['offset_mm' => 20], $eig, ['kennung' => $kennungH . '-' . $name, 'text' => 'Einbau'])['rechnung'];
+            TankService::fassungAnlegen(Database::first('SELECT * FROM messpunkte WHERE id = ?', [$mp]), $r, 'einsatz', Zeit::iso($jetzt - 3 * 86400), false);
+        }
+        return [$id, $mp];
+    };
+    [$h1, $mpH1] = $tankH('Tank A', $eigH, true);
+    [$h2] = $tankH('Tank B', $eigH + ['alarm_prozent' => '99'], true);
+    $tankH('Tank C', ['inhalt_l' => '1000'], false);
+
+    // ------------------------------------------------ tank:liste nur mit Konto
+    [$rc, $out, $err] = $power(['tank:liste']);
+    pruefe($rc === 2 && $out === '' && str_contains($err, '--als=<benutzer>'), 'tank:liste ohne --als: Abbruch mit Rückgabewert 2 und Meldung');
+    [$rc, , $err] = $power(['tank:liste', '--als=' . $kennungH . '-aus']);
+    pruefe($rc === 2 && str_contains($err, 'gesperrt'), 'tank:liste mit gesperrtem Konto: Abbruch – ' . trim($err));
+    [$rc, , $err] = $power(['tank:liste', '--als=' . $kennungH . '-gibtsnicht']);
+    pruefe($rc === 2 && str_contains($err, 'gibt es nicht'), 'tank:liste mit unbekanntem Konto: Abbruch');
+    [$rc, , $err] = $power(['tank:liste', '--als=' . $kennungH, '--standort=abc']);
+    pruefe($rc === 2 && str_contains($err, '--standort'), 'tank:liste mit unlesbarem Standort: Abbruch');
+
+    [$rc, $out] = $power(['tank:liste', '--als=' . $kennungH, '--standort=' . $siteH]);
+    $a = $zeileMit($out, $kennungH . ' Tank A');
+    $b = $zeileMit($out, $kennungH . ' Tank B');
+    $c = $zeileMit($out, $kennungH . ' Tank C');
+    pruefe($rc === 0 && substr_count(trim($out), "\n") === 2, 'tank:liste: drei Tanks am Standort, Rückgabewert 0');
+    pruefe(str_starts_with($a, 'ok ') && preg_match('/ \d[\d.]* l  \d+ %/u', $a) === 1 && str_contains($a, '(Prüfung Kommandozeile ' . $kennungH . ')')
+        && str_contains($a, 'Stand vor'), 'Zeile mit Liter, Prozent, Standort und Alter: ' . $a);
+    pruefe(str_starts_with($b, 'bad ') && str_contains($b, '– nur noch'), 'Alarm des Tanks (unter 99 %) mit Grund: ' . $b);
+    pruefe(str_starts_with($c, 'keine ') && str_contains($c, 'kein Tanksensor'), 'Tank ohne Sensor: ' . $c);
+    [$rc, $out] = $power(['tank:liste', '--als=' . $kennungH, '--standort=' . $siteH, '--warnungen']);
+    pruefe($rc === 1 && $zeileMit($out, 'Tank B') !== '' && $zeileMit($out, 'Tank A') === '' && $zeileMit($out, 'Tank C') === '',
+        '--warnungen: nur der rote Tank, Rückgabewert 1');
+    AnlagenService::eigenschaftSetzen($h2, ['alarm_prozent' => null], true);
+    [$rc, $out] = $power(['tank:liste', '--als=' . $kennungH, '--standort=' . $siteH, '--warnungen']);
+    pruefe($rc === 0 && trim($out) === '', '--warnungen ohne Warnung: keine Zeile, Rückgabewert 0');
+
+    // Kunde: nur, was freigegeben ist – und nur im Datenfenster
+    BenutzerService::freigabeSpeichern(['subject_type' => 'user', 'subject_id' => $kundeH, 'ziel_art' => 'objekt', 'ziel_id' => $h1]);
+    Database::insert('freigaben', ['subject_type' => 'user', 'subject_id' => $spaetH, 'ziel_art' => 'site', 'ziel_id' => $siteH,
+        'darf_bearbeiten' => 0, 'darf_steuern' => 0, 'gueltig_ab' => null, 'gueltig_bis' => null,
+        'daten_ab' => Zeit::iso($jetzt - 86400), 'daten_bis' => Zeit::iso($jetzt - 3600), 'notiz' => '', 'created_by' => 'test', 'created_at' => gmdate('c')]);
+    [$rc, $out] = $power(['tank:liste', '--als=' . $kennungH . '-kunde']);
+    pruefe($rc === 0 && $zeileMit($out, 'Tank A') !== '' && $zeileMit($out, 'Tank B') === '' && $zeileMit($out, 'Tank C') === ''
+        && substr_count(trim($out), "\n") === 0, 'Kunde: nur der freigegebene Tank – ' . trim($out));
+    [$rc, $out] = $power(['tank:liste', '--als=' . $kennungH . '-kunde', '--standort=' . $siteH]);
+    pruefe($rc === 0 && $zeileMit($out, 'Tank A') !== '' && substr_count(trim($out), "\n") === 0, 'Kunde mit --standort: auch dort nur der freigegebene Tank');
+    [$rc, $out] = $power(['tank:liste', '--als=' . $kennungH . '-spaet']);
+    $a = $zeileMit($out, 'Tank A');
+    pruefe($rc === 0 && str_starts_with($a, 'gesperrt ') && preg_match('/ \d[\d.]* l /u', $a) !== 1 && !str_contains($a, '%'),
+        'Datenfenster vorbei: „gesperrt“, keine Liter – ' . $a);
+
+    // ------------------------------------------------ tank:rechnen (Prüfwerte B: Diesel, 500 Ω, 2,78 l/mm, Sumpf 140 l)
+    $f = TankService::fassungJetzt((int) $mpH1);
+    [$rc, $out] = $power(['tank:rechnen', (string) $mpH1, '7,5']);
+    gleich([$rc, explode("\n", trim($out))], [0, ['7,5 V → 859,6 mm → 2.389,6 l → 79,7 % (Fassung ' . $f['id'] . ', einsatz, ab ' . Zeit::anzeige($f['ab'], 'd.m. H:i') . ', ungeprüft)',
+        'nutzbar 2.249,6 l']], 'tank:rechnen: Rohwert → Füllhöhe → Liter → % mit der jetzigen Fassung');
+    [$rc, $out] = $power(['tank:rechnen', (string) $mpH1, '1.7']);
+    pruefe($rc === 0 && str_contains($out, 'Leitungsbruch') && !str_contains($out, ' l →') && !str_contains($out, 'nutzbar'), 'tank:rechnen 1,7 V: Sensorfehler, keine Liter');
+    [$rc, , $err] = $power(['tank:rechnen', (string) $mpH1, 'NAN']);
+    pruefe($rc === 1 && str_contains($err, 'keine Zahl'), 'tank:rechnen mit NAN: abgelehnt');
+    $mpFremd = (int) Database::scalar("SELECT id FROM messpunkte WHERE rolle <> 'fuellstand' ORDER BY id DESC LIMIT 1");
+    [$rc, , $err] = $power(['tank:rechnen', (string) $mpFremd, '7']);
+    pruefe($rc === 1 && str_contains($err, 'kein Messpunkt eines Tanksensors'), 'tank:rechnen an einem anderen Messpunkt: abgelehnt');
+
+    // ------------------------------------------------ Demo-Gelände in eigener Instanz
+    $config = $ordnerH . '/config.php';
+    $datenbank = $ordnerH . '/datenbank.sqlite';
+    $vorlage = is_file($wurzel . '/config/config.php') ? $wurzel . '/config/config.php' : $wurzel . '/config/config.example.php';
+    file_put_contents($config, '<?php
+$c = require ' . var_export($vorlage, true) . ';
+$c["app"]["demo"] = true;
+$c["database"]["driver"] = "sqlite";
+$c["database"]["path"] = ' . var_export($datenbank, true) . ';
+return $c;
+');
+    [$rc, , $err] = $power(['install', 'admin', 'Pruefung2026!!', '--ohne-wechsel'], $config);
+    [$rc2, $seed, $err2] = $power(['demo:seed'], $config);
+    pruefe($rc === 0 && $rc2 === 0 && str_contains($seed, '2 Tanks'), 'Demo-Gelände in eigener Instanz angelegt: ' . trim($seed . $err . $err2));
+    $db = new PDO('sqlite:' . $datenbank, null, null, [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION, PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC]);
+    $dort = static function (string $sql, array $werte = []) use ($db): array {
+        $s = $db->prepare($sql);
+        $s->execute($werte);
+        return $s->fetchAll();
+    };
+    $tankDemo = $dort("SELECT * FROM objekte WHERE art = 'tank' AND ist_vorlage = 0 AND name = 'Tank Aggregat 1'")[0] ?? [];
+    $eigDemo = json_decode((string) ($tankDemo['eigenschaften'] ?? ''), true) ?: [];
+    $typDemo = $dort("SELECT id, sync_key FROM objekte WHERE art = 'tank' AND ist_vorlage = 1 ORDER BY sync_key");
+    gleich(array_column($typDemo, 'sync_key'), ['tank-quadro-ag-1000', 'tank-quadro-ag-3000'], 'Demo: die Tank-Typen aus dem mitgelieferten Katalog');
+    pruefe(($tankDemo['modell'] ?? '') === 'QUADRO-AG 3000' && ($eigDemo['zulassung'] ?? '') === 'D/BAM/16125/31A, Z-38.12-223'
+        && ($eigDemo['kraftstoff'] ?? '') === 'HVO' && (float) ($eigDemo['sumpf_l'] ?? 0) === 140.0, 'Demo: Tank Aggregat 1 aus dem QUADRO-AG 3000, HVO, Sumpf 140 l');
+    $mpDemo = $dort("SELECT m.*, i.kennung FROM messpunkte m JOIN einsaetze e ON e.id = m.einsatz_id JOIN inventar i ON i.id = e.inventar_id
+                     WHERE m.objekt_id = ? AND m.rolle = 'fuellstand' AND m.gueltig_bis IS NULL", [(int) ($tankDemo['id'] ?? 0)]);
+    gleich([count($mpDemo), $mpDemo[0]['kennung'] ?? null, $mpDemo[0]['geraet'] ?? null, $mpDemo[0]['kanal'] ?? null], [1, 'TS-01', 'shellyplusuni-tank1', 'voltmeter:100'],
+        'Demo: TS-01 misst im Tank des Aggregats');
+    $fassDemo = $dort('SELECT anlass, geprueft, ab, ereignis_id FROM tank_kennlinien WHERE messpunkt_id = ? ORDER BY id', [(int) ($mpDemo[0]['id'] ?? 0)]);
+    gleich([array_column($fassDemo, 'anlass'), array_map('intval', array_column($fassDemo, 'geprueft'))], [['einsatz', 'betankung'], [0, 1]],
+        'Demo: zwei Fassungen – Einbau (ungeprüft) und Betankung (geprüft)');
+    pruefe(($fassDemo[0]['ab'] ?? '') === ($mpDemo[0]['gueltig_ab'] ?? '-') && Zeit::ts((string) ($mpDemo[0]['gueltig_ab'] ?? '')) < time() - 2 * 86400
+        && Zeit::ts((string) ($fassDemo[1]['ab'] ?? '')) < time() - 86400 + 3600, 'Demo: Einbau vor drei Tagen, Kalibrierung seit gestern bzw. vorgestern');
+    $ereignisDemo = $dort("SELECT * FROM tank_ereignisse WHERE objekt_id = ? AND art = 'betankung'", [(int) ($tankDemo['id'] ?? 0)]);
+    pruefe(count($ereignisDemo) === 1 && $ereignisDemo[0]['lieferschein'] === 'DEMO-0815' && (float) $ereignisDemo[0]['liter'] === 528.0
+        && $ereignisDemo[0]['roh_vor'] !== null && (float) $ereignisDemo[0]['roh_nach'] > (float) $ereignisDemo[0]['roh_vor']
+        && (int) ($fassDemo[1]['ereignis_id'] ?? 0) === (int) $ereignisDemo[0]['id'], 'Demo: Betankung DEMO-0815 aus dem Sprung der Demo-Sonde ausgewertet');
+    pruefe((float) ($eigDemo['liter_je_mm'] ?? 0) > 2.5 && (float) ($eigDemo['liter_je_mm'] ?? 0) < 3.2 && str_starts_with((string) ($eigDemo['liter_je_mm_herkunft'] ?? ''), 'Betankung'),
+        'Demo: Inhalt je mm im Tank, aus der Betankung (' . ($eigDemo['liter_je_mm'] ?? '–') . ')');
+    $reserve = $dort("SELECT o.id, e.prozent, e.zeit FROM objekte o LEFT JOIN tank_ereignisse e ON e.objekt_id = o.id WHERE o.name = 'Reserve Catering'");
+    pruefe(count($reserve) === 1 && (float) $reserve[0]['prozent'] === 60.0 && Zeit::ts((string) $reserve[0]['zeit']) <= time()
+        && $dort("SELECT id FROM messpunkte WHERE objekt_id = ? AND rolle = 'fuellstand'", [(int) $reserve[0]['id']]) === [],
+        'Demo: Reserve Catering ohne Sensor, mit einer Peilung 60 %');
+    gleich($dort("SELECT i.kennung FROM inventar i WHERE i.art = 'tanksensor' AND NOT EXISTS (SELECT 1 FROM einsaetze e WHERE e.inventar_id = i.id AND e.bis IS NULL)"),
+        [['kennung' => 'TS-02']], 'Demo: TS-02 liegt im Lager');
+    [$rc, $out] = $power(['tank:liste', '--als=technik'], $config);
+    $agg = $zeileMit($out, 'Tank Aggregat 1');
+    pruefe($rc === 0 && preg_match('/^(ok|warn|bad) /', $agg) === 1 && preg_match('/ \d[\d.]* l  \d+ %/u', $agg) === 1
+        && str_starts_with($zeileMit($out, 'Reserve Catering'), 'keine ') && str_contains($zeileMit($out, 'Reserve Catering'), '60 %'),
+        'Demo: tank:liste als Technik – ' . trim($out));
+    [$rc, $out] = $power(['tank:rechnen', (string) ($mpDemo[0]['id'] ?? 0), '7,8'], $config);
+    pruefe($rc === 0 && str_contains($out, '7,8 V →') && str_contains($out, ' l → ') && str_contains($out, 'betankung'), 'Demo: tank:rechnen an TS-01 – ' . trim($out));
+    [$rc, $out] = $power(['katalog:import', $wurzel . '/resources/kataloge/bss-strombibel.json', '--pruefen'], $config);
+    pruefe($rc === 0 && str_contains($out, '  schon da    QUADRO-AG 1000') && str_contains($out, '  schon da    QUADRO-AG 3000') && str_contains($out, '  neu         QUADRO-AG 2000'),
+        'Demo: die Tank-Typen stehen genau wie im Katalog – der Import sieht sie „schon da“');
+} finally {
+    alsBenutzer(null);
+    foreach (Database::select('SELECT id FROM objekte WHERE name LIKE ?', [$kennungH . '%']) as $o) {
+        AnlagenService::loeschen((int) $o['id']);
+    }
+    SiteService::deleteSite($siteH);
+    foreach ([$adminH, $kundeH, $spaetH, $ausH] as $u) {
+        Database::execute("DELETE FROM freigaben WHERE subject_type = 'user' AND subject_id = ?", [$u]);
+        Database::execute('DELETE FROM user_roles WHERE user_id = ?', [$u]);
+        Database::execute('DELETE FROM users WHERE id = ?', [$u]);
+    }
+    Database::execute('DELETE FROM audit_log WHERE username LIKE ? OR details LIKE ?', [$kennungH . '%', '%' . $kennungH . '%']);
 }
 
 ende('tanks');

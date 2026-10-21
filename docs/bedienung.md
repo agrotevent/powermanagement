@@ -6,8 +6,8 @@ legen (Browser-Menü → *Zum Startbildschirm*). Livewerte aktualisieren sich
 alle 5 Sekunden, solange die Seite offen ist.
 
 Die Bilder zeigen das Demo-Gelände (`php bin/power demo:seed`): ein
-Festivalgelände mit Netzanschluss, Energiesäulen, Aggregat, Speicher,
-Verteilern, einer Foodtruck-Meile und einem laufenden Aufbau.
+Festivalgelände mit Netzanschluss, Energiesäulen, Aggregat mit Tank,
+Speicher, Verteilern, einer Foodtruck-Meile und einem laufenden Aufbau.
 
 ## Übersicht
 
@@ -26,6 +26,10 @@ Oben steht die **Einspeisung gesamt**. Sie wird aus dem Verteilbaum
 berechnet, also nur aus den Einspeisungen (Netz, Aggregate, Speicher) ohne
 Doppelzählung der nachgelagerten Verteilungen. Schwellen:
 **System → Einstellungen → Grenzwerte**.
+
+**Tanks** haben einen eigenen Abschnitt: Balken für den Füllstand, Liter und
+%, Restlaufzeit und das Alter des Werts – die Farbe nach den Stufen der
+[Tanks](#stufen). Die Zähler oben zählen sie mit.
 
 ![Übersicht: Einspeisung gesamt, Zähler nach Zustand und Livekacheln je Anlage](bilder/uebersicht.png)
 
@@ -73,6 +77,7 @@ vorhanden ist.
 | **Kabel** | Anlage A antippen (Abgang wählen), Zwischenpunkte setzen, Anlage B antippen (Eingang wählen). Kabeltyp, Querschnitt, Adern, Länge. Die Länge wird mit Maßstab aus dem Verlauf vorgeschlagen. |
 | **Kabelweg** | Trasse ohne feste Enden (Kabelkanal, Traverse, Erdverlegung). Doppeltippen beendet. |
 | **Kabelbrücke** | zwei Punkte über einen Weg. Modell und Anzahl der Elemente. |
+| **Schlauch** | Kraftstoffschlauch: Tank antippen, Zwischenpunkte, Generator antippen (oder umgekehrt). Schlauchtyp, Kupplung, Vor- und Rücklauf – siehe [Tanks](#schlauch-verbrauch-und-restlaufzeit). Ein Kabel endet nie an einem Tank. |
 | **Maßstab** | zwei Punkte mit bekanntem Abstand setzen. Danach stimmen Längen und Spannungsfall. |
 | **Georeferenz** | zwei gut erkennbare Punkte weit auseinander antippen (Gebäudeecke, Tor, Mast, eine Energiesäule) und zu jedem Breite und Länge eintragen – siehe [Georeferenz](#georeferenz-und-gps). |
 | **Hier bin ich** | (nur mit Georeferenz) zeigt die eigene GPS-Position als blauen Punkt im Plan, mit Genauigkeitskreis. Noch einmal tippen schaltet sie ab. |
@@ -146,7 +151,7 @@ steht im Kabelfenster.
 ## Anlagen
 
 **Anlagen** listet Netzanschlüsse, Aggregate, Speicher/Wechselrichter,
-Verteilungen, Unterverteilungen und Verbraucher. Filter nach Art, *fest
+Verteilungen, Unterverteilungen, Verbraucher und Tanks. Filter nach Art, *fest
 oder mobil*, Standort und Suchbegriff. **Anlagen → Feststromanschlüsse**
 zeigt nur die fest installierten.
 
@@ -156,7 +161,9 @@ alle anderen Arten mobil. Eine fest eingebaute Hallenverteilung oder ein
 Baustromkasten, der nur für eine Veranstaltung steht, lässt sich
 entsprechend umstellen. Auch die **Art** lässt sich nachträglich ändern
 (etwa Verteilung → Generator). Anschlüsse, Sicherungen, Kabel und
-Messgeräte bleiben dabei, nur die Angaben der alten Art fallen weg.
+Messgeräte bleiben dabei, nur die Angaben der alten Art fallen weg. Nur
+zwischen einem [Tank](#tanks-und-kraftstoff) und einer elektrischen Anlage
+gibt es keinen Wechsel.
 
 Je Anlage gibt es diese Reiter:
 
@@ -201,6 +208,8 @@ Katalog.
 Im Katalog stehen auch **Feststromanschluss-Typen** (*„+
 Feststromanschluss-Typ“*), etwa die Energiesäulen eines Geländes, die
 überall gleich bestückt sind. Was daraus entsteht, ist fest installiert.
+**Tank-Typen** (*„+ Tank-Typ“*) haben nur Eigenschaften – Nennvolumen,
+Maße, Gewicht, Zulassung, Tankanschluss.
 
 ![Katalog der Standard-Verteiler mit Anschlüssen und Bestückung](bilder/katalog.png)
 
@@ -240,7 +249,14 @@ Stecker aus `anschluesse` gibt es hier schon, oder er ist unter
 Schutzorgane und Auslastung. Zu den Eigenschaften gehören bei Verteilungen Artikelnummer,
 Gehäuse, Schutzart, Zuleitung und Gewicht, bei Generatoren Artikelnummer,
 Gewicht leer und Abmessungen (L × B × H in mm) neben Kraftstoff (Diesel,
-HVO, Gas oder Benzin – Groß- und Kleinschreibung egal), Tank und Verbrauch.
+HVO, Gas oder Benzin – Groß- und Kleinschreibung egal), Tank, Verbrauch bei
+Volllast und Verbrauch je Last (`verbrauch_kennlinie`, wörtlich wie in der
+Strombibel: „100% 22L / 70% 16L / 50% 12L“). Ein **Tank** (`"art": "tank"`)
+hat nur Eigenschaften – Nennvolumen, Abmessungen, Gewicht leer und voll,
+Zulassung, Tankanschluss –, keine Anschlüsse und keine Schutzorgane (stehen
+welche in der Datei, ist das ein Fehler); Nennstrom, Leistung und Steuerung
+gibt es bei ihm nicht. Den Inhalt je mm, den ein Tank hier gelernt hat,
+überschreibt ein späterer Import nicht still – er steht dann „hier anders“.
 `spannung_v` ist eine Zahl oder fehlt ganz (dann 400 V). Messpunkte gehören
 nicht zu einem Katalog-Typ und bleiben weg.
 
@@ -256,7 +272,7 @@ Name, Art, Bestückung und Zustand:
 | **neu** | gibt es hier noch nicht | ja |
 | **schon da** | steht hier genauso | – |
 | **hier anders** | steht hier anders als in der Datei – meist, weil jemand einen Fehler korrigiert hat; aufklappbar, was genau anders ist | nein („überschreiben“) |
-| **Fehler** | die Datei taugt für diesen Typ nicht (Grund steht dabei: unbekannte Art, Stecker ohne Beschreibung, neuer Stecker ohne Nennstrom, Kraftstoff, den die Auswahl nicht kennt, Abgang an einem Schutzorgan, das es nicht gibt …) | – |
+| **Fehler** | die Datei taugt für diesen Typ nicht (Grund steht dabei: unbekannte Art, Stecker ohne Beschreibung, neuer Stecker ohne Nennstrom, Kraftstoff, den die Auswahl nicht kennt, Abgang an einem Schutzorgan, das es nicht gibt, Anschlüsse an einem Tank …) | – |
 
 Darüber stehen die Steckertypen, die neu angelegt würden, mit Nennstrom,
 Phasen, Spannung und den Typen, die sie brauchen. Wer den
@@ -348,7 +364,8 @@ was das für die nächste Planung heißt:
 ## Inventar
 
 Im **Inventar** (*Anlagen → Inventar*) stehen die Geräte aus dem Lager, in
-denen Shellys eingebaut sind – jedes mit seinem Aufkleber:
+denen Shellys eingebaut sind – jedes mit seinem Aufkleber (Tanksensoren
+siehe [Tanks](#tanksensor)):
 
 - **Verteiler** (PD63-07): ein Standard-Verteiler aus dem Katalog als Typ,
   dazu seine Shellys – an der **Einspeisung** (misst den ganzen Verteiler),
@@ -394,6 +411,264 @@ Pflegen darf das Inventar, wer das Recht *Inventar pflegen* hat (Rolle
 Stromplanung); ansehen, wer Datenquellen sehen darf. Einsetzen und Abbauen
 darf, wer die Anlage bearbeiten darf.
 
+## Tanks und Kraftstoff
+
+Ein **Tank** steht im Plan wie jede Anlage (*Anlagen → Tanks*), hat aber
+keinen Strom: keine Anschlüsse, keine Sicherungen, kein Kabel endet an ihm,
+nichts wird geschaltet. Im Verteilbaum, in den Bereichen und in der Last des
+Aufbaus fehlt er. Ein Tank wird keine elektrische Anlage und umgekehrt –
+dafür eine neue Anlage anlegen.
+
+**Setzen.** Auf der Karte *+ Anlage* → *Tanks aus dem Katalog* (die
+QUADRO-AG 1000, 2000 und 3000 aus der Strombibel) oder → *Neue mobile
+Anlage: Tank*. Im Formular stehen die Angaben in Gruppen:
+
+| Gruppe | Angaben |
+|--------|---------|
+| **Katalog** | Artikelnummer, Nennvolumen, Gewicht leer und voll, Zulassung, Tankanschluss, Tankheizung |
+| **Maße** | Abmessungen, Bauform (Quader, Zylinder stehend oder liegend), Innendurchmesser und -länge |
+| **Kennlinie** | Kraftstoff (Diesel 0,835, HVO 0,78, Heizöl EL 0,845 kg/l), Dichte, Inhalt je mm Füllhöhe, Füllgrenze (Vorgabe 95 %), nicht entnehmbarer Rest (Vorgabe 5 % des Nennvolumens) |
+| **Grenzen** | Warnung und Alarm in % – leer gelten die Einstellungen |
+
+Den **Inhalt je mm** rechnet die App nicht aus den Außenmaßen – die
+Innenmaße stehen in keinem Katalog. Er kommt aus der ersten Peilung oder
+Betankung (siehe unten) und bleibt am Tank, auch für den nächsten Sensor.
+Bis dahin zeigt der Tank die Füllhöhe und „Inhalt unbekannt – peilen“.
+
+Auf der Karte zeigt das Zeichen des Tanks den Füllstand als Balken, der Rand
+die Stufe; daneben steht etwa „88 % · 2.630 l · 7 Tage“.
+
+![Tank auf der Karte angetippt: Füllstand, Rohwert mit Alter, Verbrauch, Restlaufzeit und „nachbestellen bis“, Peilung und Betankung](bilder/karte-tank.png)
+
+### Tanksensor
+
+Ein Tanksensor ist ein Stück im Inventar (*Inventar → + Tanksensor*): eine
+Sonde mit ihrem Shelly, genau ein Messkanal (etwa `voltmeter:100` eines
+Plus Uni) und die Sensordaten:
+
+- **Sensor**: hydrostatische Sonde, Ultraschall von oben, Schwimmer oder ein
+  Gerät, das den Füllstand schon liefert.
+- **Wert des Geräts**: welches Feld der Messung den Rohwert trägt (`u` beim
+  Voltmeter, `eingang` beim Analog-Eingang).
+- **Signal**: 4–20 mA an einer Bürde, 4–20 mA über einen Spannungswandler
+  (Vorgabe: 2,0 V bei 4 mA, 10,0 V bei 20 mA) oder 0–10 V. Die Spannungen
+  so eintragen, wie der Shelly sie meldet.
+- **Messbereich** laut Sonde (etwa 0–2 m Wassersäule) – ohne Vorgabe, er
+  steht auf der Sonde.
+- **Meldeschritt** (`report_thr` am Gerät) und, bei Ultraschall, die
+  Totzone.
+
+Wie die Sonde an den Shelly kommt und was am Gerät einzustellen ist, steht
+in [datenquellen.md](datenquellen.md#tanksensoren-rohwerte-statt-liter).
+
+![Ein Tanksensor im Inventar: Sensordaten, Messkanal und seine Einsätze](bilder/inventar-tanksensor.png)
+
+**Einbauen** auf der Tankseite (*Sensor & Kennlinie*) oder im Tankfenster
+der Karte (*Tanksensor einsetzen …*), im Aufbau-Modus ebenso: Sensor wählen,
+**Sondenspitze über dem Boden** (Vorgabe 20 mm) bzw. bei Ultraschall die
+**Höhe der Sensorfläche** eintragen, optional gleich die **Anzeige am Tank
+(%)** als erste Peilung. In einen Tank kommt nur ein Tanksensor und ein
+Tanksensor nur in einen Tank; ein neuer ersetzt den alten. Aus Sensordaten,
+Einbaumaß und Tank entsteht die **Kennlinie** Rohwert → Füllhöhe → Liter.
+Nach jedem Einbau steht „seit Einbau nicht gepeilt“ da, bis gepeilt ist – die
+Einbautiefe ist jedes Mal etwas anders.
+
+Nutzt die Sonde weniger als 40 % ihres Messbereichs (eine 0–5-mWS-Sonde im
+1,55 m hohen Tank nutzt etwa 26 %), sagt das die Meldung beim Einbau, sofern
+die Tankhöhe bekannt ist: Die Genauigkeit in % vom Messbereich wirkt dann
+entsprechend stärker. Steht ein Wandler auf „4–20 mA → 0–10 V“ (4 mA = 0 V),
+warnen Formular und Tankseite: Ein Leitungsbruch sähe aus wie ein leerer
+Tank.
+
+**Ausbauen** beendet den Einsatz; Protokoll und Kennlinien bleiben am Tank.
+
+### Die Tankseite
+
+![Tankseite: Füllstand, Vor Ort (Peilung, Betankung), Verlauf, Verbrauch je Tag, Protokoll, Sensor & Kennlinie, Versorgung](bilder/tank.png)
+
+| Abschnitt | Inhalt |
+|-----------|--------|
+| **Jetzt** | Balken, Liter, %, nutzbarer Inhalt, Füllhöhe, Rohwert mit Alter, Restlaufzeit |
+| **Vor Ort** | Peilung und Betankung eintragen (nur mit *bearbeiten*) |
+| **Verlauf** | Liter, %, Füllhöhe oder Rohwert; jeder Punkt mit der Kennlinie, die damals galt |
+| **Verbrauch je Tag** | Tage mit Verbrauch, Getanktem und Mittel; erkannte Betankungen ohne Eintrag |
+| **Protokoll** | Peilungen und Betankungen mit Zeit, Wert, Rohwert und wer; *Kalibrieren aus dieser Betankung*, *Löschen*, CSV |
+| **Sensor & Kennlinie** | der eingebaute Sensor, die jetzige Kennlinie im Klartext („2,91 l/mm · Betankung … · geprüft“), ihre Fassungen, *Erweitert*, frühere Sensoren |
+| **Versorgung** | Schläuche und Generatoren mit ihrer Kennlinie, Gegenprüfung Pegel ↔ Last |
+| **Daten** | Eigenschaften, *Bearbeiten* |
+
+### Peilen und betanken
+
+**Peilung** (*Vor Ort* oder im Tankfenster *Peilung …*): eine Angabe –
+Anzeige am Tank (%), Inhalt (l) oder Peilstab (mm). Die Zeit ist jetzt, den
+Rohwert des Sensors nimmt der Server.
+
+- Der **Peilstab** setzt den Nullpunkt der Kennlinie. Die Steigung bleibt.
+- **Anzeige oder Inhalt** bestimmen beim ersten Mal den Inhalt je mm, später
+  setzen sie den Nullpunkt.
+- Zwei Peilungen mit dem Peilstab im selben Einbau, mindestens 300 mm
+  auseinander (etwa vor und nach dem Betanken): Das Protokoll bietet an, die
+  **Steigung aus beiden Peilungen** zu setzen – nur mit Haken. Weicht sie um
+  mehr als 15 % von den Sensordaten ab, kommt die Warnung „Messbereich,
+  Dichte oder Wandler prüfen“.
+- Nicht peilen, während getankt wird. Meldet der Sensor gerade einen Fehler
+  oder nichts, steht die Peilung nur im Protokoll.
+- Ohne Sensor zeigt der Tank die letzte Peilung mit ihrem Alter.
+
+**Betankung**: geliefert in Litern laut Lieferschein, Ende des Tankens (leer
+= jetzt, höchstens 7 Tage zurück), Nummer des Lieferscheins. Mit *Gleich
+kalibrieren* (ab 30 min nach dem Tanken) sucht die App den Sprung in den
+Rohwerten und lernt daraus den **Inhalt je mm des Tanks**. Was der Generator
+am Schlauch währenddessen verbraucht hat, wird abgezogen. Ein Sprung unter
+zehn Meldeschritten taugt nicht; weicht das Ergebnis um mehr als 25 % vom
+bisherigen ab, nur mit *trotzdem*. Später kalibrieren geht im Protokoll.
+
+**Fassungen.** Jede Kalibrierung, jeder Einbau, ein Shelly-Tausch und jede
+Änderung an Sensordaten oder Tank ergibt eine neue Fassung der Kennlinie ab
+jetzt. Ältere bleiben, wie sie sind: Jeder Messwert wird mit der Fassung
+gerechnet, die damals galt. *Geprüft* heißt: mit Peilung oder Lieferschein
+bestätigt.
+
+**Löschen** im Protokoll: Eine Peilung oder Betankung, die kalibriert hat,
+lässt sich nur zurücknehmen, solange danach nichts neu kalibriert wurde – die
+Kennlinie und der Inhalt je mm gehen auf den Stand davor.
+
+**Erweitert**: Nullpunkt und Steigung von Hand. *Rückwirkend für diesen
+Einbau* gibt es nur für Konten ohne Datengrenze; es steht im Audit.
+
+### Schlauch, Verbrauch und Restlaufzeit
+
+Das Werkzeug **Schlauch** auf der Karte zieht einen Kraftstoffschlauch vom
+Tank zum Generator (verkehrt herum gezogen wird getauscht). Im Fenster:
+Schlauchtyp, Kupplung (aus dem Tankanschluss, sonst HK-A3), **Anzahl** 2 =
+Vor- und Rücklauf, fest oder mobil. Hinweise: „Nur Vorlauf – Rücklauf
+fehlt?“ und „Rücklauf muss in denselben Tank“. Die Materialliste zählt
+Schläuche und Kupplungen im Abschnitt *Kraftstoff*; im Aufbau ist der
+Schlauch ein Posten mit Länge.
+
+Daraus rechnet der Tank:
+
+- **Verbrauch** aus der Kennlinie des Generators (Strombibel: „100% 22L /
+  70% 16L / 50% 12L“) und seiner Last. Ohne Kennlinie gilt der
+  Volllastverbrauch (geschätzt, eher zu hoch). Ohne Livewert des Generators
+  kommt der Verbrauch aus dem Pegel – erst ab der letzten Betankung und erst,
+  wenn er in 6 h um drei Meldeschritte gefallen ist.
+- **Vorrat**: der nutzbare Inhalt aller Tanks, die über Schläuche dieselben
+  Generatoren versorgen.
+- **Restlaufzeit**, **leer um** und **nachbestellen bis** (leer um minus
+  Lieferzeit, Vorgabe 24 h).
+
+Einen Generator ohne Freigabe nennt der Tank nicht – weder Name noch
+Leistung.
+
+### Stufen
+
+| Stufe | wann |
+|-------|------|
+| rot | Sensorfehler (nie „leer“), höchstens 10 % oder höchstens 4 h Restlaufzeit, nichts mehr entnehmbar |
+| gelb | höchstens 25 %, höchstens 12 h Restlaufzeit, nachbestellen fällig, über der Füllgrenze, „meldet nicht, obwohl … läuft“ |
+| grau (stumm) | Gerät offline, 24 h ohne Lebenszeichen oder noch kein Wert seit dem Einbau |
+| ohne Farbe | kein Sensor – die letzte Peilung steht dabei |
+
+Die Grenzen stehen unter **System → Einstellungen → Tanks**, Warnung und
+Alarm auch je Tank. Benachrichtigungen verschickt die App nicht; dafür gibt
+es `bin/power tank:liste --warnungen` (unten).
+
+### Verbrauch je Tag
+
+Auf der Tankseite und in der Statistik des Sensors: je Kalendertag (Ortszeit,
+auch über die Zeitumstellung) **Anfang + getankt − Ende**.
+
+- Eine Betankung wird am Anstieg erkannt: innerhalb von 30 min mindestens
+  50 l, 3 % des Nennvolumens und drei Meldeschritte. Eine eingetragene
+  Betankung bis 1 h davor oder danach ersetzt die erkannte Menge.
+- Erkannte Betankungen ohne Eintrag stehen darunter; *Als Betankung
+  eintragen …* hat Zeit und Menge vorbelegt.
+- Ein Shelly meldet nur bei Änderung – lange Stille ist keine Lücke. Geteilt
+  wird ein Tag nur, wo es keine gültigen Werte gibt (keine Freigabe, keine
+  Kennlinie, Sensorfehler); dann steht „Messwerte für N von 24 h“ dabei.
+- Ein negativer Verbrauch (Wärme) wird 0, mit Hinweis.
+- CSV mit Tag, Verbrauch, Getanktem, Mittel, Anfang, Ende, Stunden mit
+  Messwerten und Betankungen.
+
+### Grenzen der Messung
+
+- **Auflösung**: Meldeschritt × Füllhöhe je Schritt × Inhalt je mm. Eine
+  Sonde 0–100 mbar an 500 Ω mit 0,1 V Meldeschritt im QUADRO-AG 3000
+  (≈ 2,8 l/mm) sieht etwa 42 l je Schritt. Messbereich und `report_thr`
+  passend wählen.
+- Die **Dichte** zählt: Mit HVO statt Diesel gerechnet läge die Füllhöhe
+  rund 7 % daneben. Ein anderer Kraftstoff am Tank ergibt eine neue Fassung.
+- Wärme dehnt den Kraftstoff (≈ 36 l bei 15 K im AG 3000), Schwappen und
+  Schieflage verschieben den Wert – Verläufe nehmen den Median.
+- **Die App warnt nur.** Sie schaltet nie, ersetzt keine Überfüllsicherung;
+  Grenzwertgeber und Leckanzeiger bleiben Pflicht.
+
+### Sonde annehmen und einbauen
+
+Kurz für vor Ort – Verdrahtung in [datenquellen.md](datenquellen.md#420-ma-sonde-am-plus-uni).
+
+**Annehmen**
+- An der Luft 4,00 ± 0,08 mA. Eine Sonde mit 3 mA an der Luft meldet bei
+  leerem Tank „Sensorfehler“ – zurückgeben.
+- Steigung im senkrechten, wassergefüllten Rohr (1–1,5 m) bei zwei bis drei
+  Tiefen prüfen, jeweils nach 10 min – nicht im Eimer.
+- Gehäuse ↔ Adern über 20 MΩ.
+- Kabel- und Dichtungswerkstoff sind bei billigen Sonden unbekannt: vorher
+  1–2 Wochen zur Probe in Diesel.
+
+**Öffnung**
+- Eine freie Muffe G 2 (die Sonde misst etwa 28 × 108 mm, G ¾ ist zu klein).
+  Nicht Füll-, Entnahme- oder Lüftungsstutzen, nicht Grenzwertgeber,
+  Leckanzeiger oder Peilöffnung.
+- Stopfen G 2 mit Kabelverschraubung (NBR); die Sonde hängt an einer
+  Zugentlastung, nicht an der Verschraubung. Freigabe beim Tankhersteller
+  erfragen. **Nie anbohren.**
+
+**Kabel und Dose**
+- Sonde, belüftetes Kabel und Dose sind eine Einheit; die Tiefe am Kabel
+  markieren. Das Röhrchen im Kabel nicht knicken oder quetschen.
+- Die Dose für das Kabelende **druckoffen** (Druckausgleich mit
+  PTFE-Membran und Trockenmittel), nie hermetisch – sonst misst die Sonde
+  gegen den Druck in der Dose (10 K ≈ 420 mm Diesel). Feuchte in der Dose
+  lässt den Tank voller erscheinen.
+- Die Dose **oberhalb des höchsten Füllstands** am Tankrahmen, mit
+  Tropfschlaufen. Uni, Netzteil und Bürde gehören in diese Dose – keine
+  lange Analogleitung über das Gelände.
+
+**Im Betrieb**
+- Tank waagerecht ausrichten, Sonde möglichst mittig, nahe der Sonde peilen.
+  Die Entlüftung des Tanks prüfen (1 mbar im Gasraum ≈ 12 mm Diesel); beim
+  Befüllen nicht peilen.
+- Wasser am Boden zählt 1,2-fach – Wasserfindpaste beim Peilen. „0“ heißt
+  nicht leer: Unter der Sonde bleibt ein Rest (≈ 55 l bei AG 2000/3000).
+- Nur Diesel, HVO und Heizöl, nie Benzin. Bei Diesel und HVO ist nach
+  TRGS 721 keine Ex-Zone zu erwarten; die Sonde ist nicht Ex-zugelassen.
+  Abstand zum Grenzwertgeber halten.
+- Messbereich: Ein voller QUADRO-AG steht nach den Außenmaßen nur etwa
+  1,1 m hoch (≈ 0,9 mWS). 0–2 m ist die sichere Wahl, 0–1 m nur, wenn die
+  gemessene volle Füllhöhe unter 1,15 m liegt.
+
+**Transport**: Der Tank ist zugleich Gefahrgut-Großpackmittel (D/BAM) –
+**vor jedem Transport die Sonde raus und den Originalverschluss rein**, die
+Schutzkappe dabei spülen. Nach dem Wiedereinbau neu peilen.
+
+### Auf der Kommandozeile
+
+```bash
+php bin/power tank:liste --als=technik                 # alle Tanks, die dieses Konto sieht
+php bin/power tank:liste --als=technik --warnungen     # nur gelb, rot, stumm – Rückgabewert 1, wenn es welche gibt
+php bin/power tank:rechnen 15 7,5                       # Rechnung der jetzigen Kennlinie von Messpunkt 15
+```
+
+`tank:liste` braucht ein Konto: Tankwerte sieht nur, wer sie in der
+Oberfläche auch sähe (Freigaben, Datenfenster). Eine Zeile je Tank, etwa
+`ok  Tank Aggregat 1 (Festivalgelände Nordwiese)  2.630 l  88 %  noch 7 Tage  nachbestellen bis 27.10. 21:39`.
+Bei einem Fehler (kein `--als`, Konto gesperrt) ist der Rückgabewert 2 – so
+lässt sich der Befehl in ein Monitoring hängen. `tank:rechnen` liest nur
+die Kennlinie: `7,5 V → 918,8 mm → 2.677,3 l → 89,2 % (Fassung 2, betankung,
+ab 20.10. 07:00)`. Beide ändern nichts.
+
 ## Auswertung (Statistik)
 
 - **Zeitraum**: 1 h, 6 h, heute, 24 h, 7 Tage, 30 Tage oder frei.
@@ -407,6 +682,8 @@ darf, wer die Anlage bearbeiten darf.
 - **Vergleich**: die Wirkleistung aller ausgewählten Geräte in einem
   Diagramm.
 - **CSV-Export** (Semikolon, UTF-8 mit BOM, öffnet sich direkt in Excel).
+- Ein **Tanksensor** erscheint als Verlauf seines Tanks (Liter, %, Füllhöhe,
+  Rohwert) mit dem Verbrauch je Tag und einem Link zur Tankseite.
 
 ![Statistik: Kennzahlen, Wirkleistung, Strom und Spannung je Phase, Energie je Tag](bilder/statistik.png)
 
@@ -482,6 +759,8 @@ Materialliste, was zum Aufbau mitgebracht werden muss:
 - **Kupplungen** je Kabelsorte und die **Stückelung je Kabel** zum
   Aufklappen;
 - **Kabelbrücken** nach Modell;
+- **Kraftstoff**: Schläuche nach Typ (Länge × Anzahl) und Kupplungen – in
+  der Liste der Etage und eines Bereichs, zu dem der Generator gehört;
 - **vor Ort vorhanden**: Feststromanschlüsse und fest verlegte Kabel –
   die werden nicht mitgebracht.
 
@@ -614,6 +893,10 @@ PDF (wird serverseitig gerastert und gekachelt), PNG/JPG oder SVG.
   Abgang.
 - Eine zweite PowerManagement-Installation bekommt so die feste
   Infrastruktur einer Location und plant ihre Veranstaltung darauf.
+- Ein **fester Tank** (Bodentank der Location) geht mit seinen
+  Eigenschaften mit, Kraftstoffschläuche nicht; Kennlinien, Peilungen und
+  Betankungen bleiben in der Installation. Eine ältere Installation ohne
+  Tanks übergeht ihn still – erst alle Installationen aktualisieren.
 
 ![Location-Abgleich mit dem gemeinsamen Repository](bilder/location.png)
 
@@ -628,13 +911,18 @@ kennen alle Installationen dieselben Typen und dasselbe Lager:
 
 - **Standard-Verteiler** aus dem Katalog mit Nennwerten, Anschlüssen und
   Sicherungen – je Typ eine Datei `verteiler/typen/<schlüssel>.json`.
-- **Inventar**: Verteiler und Zwischenstecker mit ihren Shellys – je Stück
-  eine Datei `verteiler/inventar/<schlüssel>.json`. Der Schlüssel kommt aus
-  der Inventarnummer (PD63-07 → `pd63-07`), ein Stück verweist über den
-  Schlüssel auf seinen Typ.
+- **Inventar**: Verteiler, Zwischenstecker und Tanksensoren mit ihren
+  Shellys (ein Tanksensor auch mit seinen Sensordaten) – je Stück eine Datei
+  `verteiler/inventar/<schlüssel>.json`. Der Schlüssel kommt aus der
+  Inventarnummer (PD63-07 → `pd63-07`), ein Stück verweist über den
+  Schlüssel auf seinen Typ. Tank-Typen gehen wie Standard-Verteiler mit.
 
-**Nicht übertragen** wird, wo ein Stück gerade eingesetzt ist, und welche
-Anlagen aus einem Typ entstanden sind. Das gehört zur Veranstaltung und
+Eine ältere Installation ohne Tanks lehnt Tank-Typen und Tanksensoren mit
+Meldung ab – erst alle Installationen aktualisieren, dann hochladen.
+
+**Nicht übertragen** wird, wo ein Stück gerade eingesetzt ist, welche
+Anlagen aus einem Typ entstanden sind und was ein Tanksensor dort gemessen
+und kalibriert hat (Kennlinien, Peilungen, Betankungen). Das gehört zur Veranstaltung und
 bleibt in der Installation, die den Aufbau führt.
 
 *Repository abfragen* zeigt je Verteiler, wie er hier und dort steht –

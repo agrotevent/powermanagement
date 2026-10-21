@@ -13,7 +13,8 @@ declare(strict_types=1);
  * je Tag); nur http(s); kein öffentlicher Schlüssel; PDF-Werkzeuge hängen
  * nicht; Tankverlauf und Verbrauch je Tag verraten die Abfrage an die
  * InfluxDB nur der Messtechnik; eine Kennlinie von
- * Hand nimmt nur Anker und Steigung als endliche Zahlen.
+ * Hand nimmt nur Anker und Steigung als endliche Zahlen; Tankwerte auf der
+ * Kommandozeile (tank:liste) nur mit --als und nur, was dieses Konto sieht.
  *
  * Die Prüfungen über HTTP (Weiterleitungen, Sitzung, Token, Benutzer-
  * verwaltung) stehen in web.php.
@@ -239,6 +240,24 @@ try {
     Config::set('app.demo', $demoVorher);
     $_GET = [];
     alsBenutzer(null);
+
+    // ------------------------------------------------ Tankwerte auf der Kommandozeile nur aus Sicht eines Kontos
+    $power = static function (array $argumente): array {
+        $p = proc_open(array_merge(['php', dirname(__DIR__) . '/bin/power'], $argumente), [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $rohre, dirname(__DIR__));
+        $aus = (string) stream_get_contents($rohre[1]);
+        $err = (string) stream_get_contents($rohre[2]);
+        fclose($rohre[1]);
+        fclose($rohre[2]);
+        return [proc_close($p), $aus, $err];
+    };
+    [$rc, $aus, $err] = $power(['tank:liste']);
+    pruefe($rc !== 0 && !str_contains($aus, $k . ' Tank') && str_contains($err, '--als=<benutzer>'), 'tank:liste ohne --als: Abbruch mit Meldung, kein Tank');
+    [$rc, $aus, $err] = $power(['tank:liste', '--als=' . $k . '-klein']);
+    pruefe($rc !== 0 && !str_contains($aus, $k . ' Tank') && str_contains($err, 'keine Anlagen'), 'tank:liste als Konto ohne „anlagen.view“: abgelehnt');
+    [$rc, $aus] = $power(['tank:liste', '--als=' . $k . '-technik']);
+    pruefe($rc === 0 && !str_contains($aus, $k . ' Tank'), 'tank:liste als Technik ohne Freigabe: der Tank fehlt');
+    [$rc, $aus] = $power(['tank:liste', '--als=' . $k . '-admin', '--standort=' . $tankSite]);
+    pruefe($rc === 0 && str_contains($aus, $k . ' Tank'), 'tank:liste als Administration: der Tank steht da');
 
     $starten = new ReflectionMethod(\App\Services\PdfRasterService::class, 'starten');
     $zeit = microtime(true);

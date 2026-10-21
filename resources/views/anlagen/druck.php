@@ -31,8 +31,8 @@ $eingaenge = array_values(array_filter($anschluesse, static fn ($a) => $a['richt
             <?php foreach (AnlagenService::feldGruppen((string) $objekt['art']) as $schluesselListe): ?>
                 <?php foreach ($schluesselListe as $k): ?>
                     <?php if (!isset($objekt['eigenschaften'][$k])) { continue; } ?>
-                    <?php [$beschriftung, $typ, $zusatz] = AnlagenService::FELDER[$objekt['art']][$k]; $wert = $objekt['eigenschaften'][$k]; ?>
-                    <tr><th><?= View::e(TankService::beschriftung($beschriftung)) ?></th><td><?= View::e(is_float($wert) ? TankService::zahl($wert) : (string) $wert) ?><?= $typ !== 'auswahl' && $zusatz !== '' ? ' ' . View::e($zusatz) : '' ?></td></tr>
+                    <?php [$beschriftung, $typ, $zusatz] = AnlagenService::FELDER[$objekt['art']][$k]; $wert = $objekt['eigenschaften'][$k]; $einheit = AnlagenService::einheit($typ, $zusatz, $wert); ?>
+                    <tr><th><?= View::e(TankService::beschriftung($beschriftung)) ?></th><td><?= View::e(is_float($wert) ? TankService::zahl($wert) : (string) $wert) ?><?= $einheit !== '' ? ' ' . View::e($einheit) : '' ?></td></tr>
                 <?php endforeach; ?>
             <?php endforeach; ?>
             </tbody>
