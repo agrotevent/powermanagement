@@ -112,7 +112,7 @@ vorgaben() {
     SICHERUNG="-"; SCHNAPPSCHUSS="-"; MIGRIERT="nein"; PHASE="-"
     LOGIN_VORHER="-"; PRUEFUNG_VORHER="-"; AKTIV_VORHER=(); LOGIN_CODE="000"
     PRUEF_HOST="127.0.0.1"; PRUEF_PORT="80"; PRUEF_NAME="powermanagement.lan"
-    SAMMLER_ANGEHALTEN="nein"; NEU_MERKEN="nein"; ABGLEICH_BEGONNEN="nein"
+    SAMMLER_ANGEHALTEN="nein"; NEU_MERKEN="nein"; ABGLEICH_BEGONNEN="nein"; NACH_SIGNAL="nein"
     WARNUNGEN=(); PRUEFUNG="-"; PRUEF_RC=1; PRUEF_AUSGABE=""
     SCHRITT_NR=0; SCHRITT_NAME="Start"; SCHRITT_GRUND="intern"
     SIGNAL=""; ZURUECK=""; ABBRUCH=""; ARBEIT=""
@@ -609,6 +609,19 @@ neu_merken() {
     marke_hinzufuegen neu_angelegt "$1"
 }
 
+# Mit --flows-ersetzen beiseitegelegte eigene Flows (flows.json.vor-<zeit>):
+# nur dieser Name, nur in NODERED_DIR.
+verschoben_erlaubt() {
+    [[ "$1" == "$NODERED_DIR/flows.json.vor-"* && "${1#"$NODERED_DIR/flows.json.vor-"}" =~ ^[0-9]{8}-[0-9]{6}$ ]]
+}
+
+# verschoben_merken <pfad>: in Stufe 2 vor dem Umbenennen in die Marke
+verschoben_merken() {
+    [[ "$NEU_MERKEN" == "ja" && -f "$MARKE" ]] || return 0
+    verschoben_erlaubt "$1" || return 0
+    marke_hinzufuegen verschoben "$1"
+}
+
 # marke_lesen: setzt M_*; rc 1, wenn Kopf, Form oder ein Wert nicht passt
 marke_lesen() {
     local zeile schluessel wert n=0
@@ -616,7 +629,7 @@ marke_lesen() {
     M_ALT=""; M_ALT_ZWEIG=""; M_ZWEIG=""; M_ZWEIG_REF_VORHER="-"; M_NEU=""
     M_SICHERUNG="-"; M_SCHNAPPSCHUSS="-"; M_MIGRIERT="nein"
     M_LOGIN_VORHER="-"; M_PRUEFUNG_VORHER="-"; M_AKTIV_VORHER="-"; M_FLOWS_ERSETZEN="nein"
-    M_ERGEBNIS_DATEI="-"; M_FORTSCHRITT_DATEI="-"; M_NEU_ANGELEGT=()
+    M_ERGEBNIS_DATEI="-"; M_FORTSCHRITT_DATEI="-"; M_NEU_ANGELEGT=(); M_VERSCHOBEN=()
     [[ -f "$MARKE" && ! -L "$MARKE" ]] || return 1
     while IFS= read -r zeile || [[ -n "$zeile" ]]; do
         n=$((n + 1))
@@ -659,6 +672,7 @@ marke_lesen() {
             ergebnis_datei)   [[ "$wert" =~ ^(-|/[A-Za-z0-9._/-]+)$ ]] || return 1; M_ERGEBNIS_DATEI="$wert" ;;
             fortschritt_datei) [[ "$wert" =~ ^(-|/[A-Za-z0-9._/-]+)$ ]] || return 1; M_FORTSCHRITT_DATEI="$wert" ;;
             neu_angelegt)     neu_angelegt_erlaubt "$wert" || return 1; M_NEU_ANGELEGT+=("$wert") ;;
+            verschoben)       verschoben_erlaubt "$wert" || return 1; M_VERSCHOBEN+=("$wert") ;;
             *) ;;   # unbekannt: von einer neueren Fassung – überlesen
         esac
     done < "$MARKE"
@@ -699,6 +713,18 @@ wartung_aus() {
         as_app rm -f -- "$ZIEL/storage/update/ist/wartung" && echo "    Schreibsperre der Oberfläche aus"
     fi
     return 0
+}
+
+# Den Schnappschuss als Anwendungsbenutzer an die Stelle der Datenbank:
+# harter Verweis im selben Dateisystem (braucht keinen Platz, öffnet nichts –
+# eine untergeschobene FIFO hielte cp auf, und der Schnappschuss bleibt für
+# einen weiteren Versuch), sonst kopieren mit Zeitlimit. Erst wenn die Kopie
+# bereitliegt, -wal/-shm weg und umbenennen – keine alte WAL in der neuen Datei.
+db_zuruecklegen() {
+    as_app /bin/sh -c '[ -f "$1" ] && [ ! -L "$1" ] || exit 1
+        rm -f -- "$2.zurueck" || exit 1
+        ln -- "$1" "$2.zurueck" 2>/dev/null || timeout -s KILL 600 cp -- "$1" "$2.zurueck" || exit 1
+        rm -f -- "$2-wal" "$2-shm" && mv -f -- "$2.zurueck" "$2"' sh "$SCHNAPPSCHUSS" "$DB"
 }
 
 schnappschuss_loeschen() {
@@ -893,7 +919,7 @@ rechte_setzen() {
 VORLAGE_ERGEBNIS=""
 vorlage_uebernehmen() {
     local quelle="$1" ziel="$2" besitzer="$3" modus="$4" neu="$5" erzwingen="${6:-nein}"
-    local merk
+    local merk vorher
     merk="$VORLAGEN/$(printf '%s' "$ziel" | tr '/' '_')"
     install -d -m 700 "$VORLAGEN"
 
@@ -906,8 +932,11 @@ vorlage_uebernehmen() {
         # Umbenennen statt „cp -p“: cp folgte als root einem Verweis, den der
         # Besitzer des Ordners (nodered) unter dem Namen der Sicherung angelegt
         # hat, und überschriebe dessen Ziel (Befund 8). rename folgt keinem
-        # Verweis; install legt die Datei unten neu an.
-        mv -fT -- "$ziel" "$ziel.vor-$(date +%Y%m%d-%H%M%S)"
+        # Verweis; install legt die Datei unten neu an. Vorher in die Marke:
+        # ein Zurückrollen benennt die eigene Fassung wieder zurück.
+        vorher="$ziel.vor-$(date +%Y%m%d-%H%M%S)"
+        verschoben_merken "$vorher"
+        mv -fT -- "$ziel" "$vorher"
         VORLAGE_ERGEBNIS="ersetzt"
     elif [[ -f "$merk" ]] && cmp -s "$merk" "$ziel"; then
         VORLAGE_ERGEBNIS="ersetzt"
@@ -953,21 +982,38 @@ rendern() {
         -e "s|__NODERED_APP__|$NODERED_APP|g" -e "s|__NODERED_DIR__|$NODERED_DIR|g" "$1"
 }
 
-# datei_abgleichen <inhalt> <ziel>: schreibt nur bei Änderung (rc 0), sonst rc 1
+# datei_abgleichen <inhalt> <ziel>: schreibt nur bei Änderung (rc 0), sonst
+# rc 1; rc 2, wenn sich die Datei nicht schreiben ließ. Die Aufrufer prüfen
+# das mit „|| rc=$?“ – als Bedingung griffe weder set -e noch der ERR-Trap,
+# und eine leere oder abgeschnittene Datei gälte als „aktualisiert“. Darum
+# auch Temp-Datei und Umbenennen statt „>“ (das kürzte vorher). Die Endung „~“
+# übergehen logrotate, systemd (keine Einheit) und PHP-FPM (nicht *.conf),
+# falls ein SIGKILL die Temp-Datei liegen lässt.
 datei_abgleichen() {
-    local inhalt="$1" ziel="$2"
+    local inhalt="$1" ziel="$2" t
     if [[ -f "$ziel" ]] && [[ "$inhalt" == "$(cat -- "$ziel")" ]]; then
         return 1
     fi
-    neu_merken "$ziel"
-    printf '%s\n' "$inhalt" > "$ziel"
-    return 0
+    neu_merken "$ziel" || return 2
+    t="$(mktemp --suffix='~' "${ziel%/*}/.${ziel##*/}.XXXXXX")" || return 2
+    if printf '%s\n' "$inhalt" > "$t" && chmod 644 -- "$t" && mv -fT -- "$t" "$ziel"; then
+        return 0
+    fi
+    rm -f -- "$t"
+    return 2
+}
+
+# Nach datei_abgleichen mit rc 2: melden und abbrechen (ERR-Trap) – außerhalb
+# jeder Bedingung aufgerufen.
+nicht_geschrieben() {
+    hinweis "$1 ließ sich nicht schreiben (Platte voll, nur lesbar?)."
+    false
 }
 
 # abgleichen: Einheiten, Logrotate, Pool, Site, Mosquitto, Node-RED für den
 # ausgecheckten Stand. Merkt, was sich geändert hat (für die Neustarts).
 abgleichen() {
-    local einheit gerendert inhalt site_neu listen_zeile s_listen s_port s_name helfer_rc helfer_ausgabe helfer_meldung
+    local einheit gerendert inhalt site_neu listen_zeile s_listen s_port s_name helfer_rc helfer_ausgabe helfer_meldung rc
     ABGLEICH_BEGONNEN="ja"
     FPM_VERSION="$(fpm_version)"
     NODERED_NEUSTART="nein"
@@ -983,7 +1029,10 @@ abgleichen() {
     while IFS= read -r einheit; do
         [[ -f "$ZIEL/deploy/$einheit" ]] || continue
         gerendert="$(rendern "$ZIEL/deploy/$einheit")"
-        if datei_abgleichen "$gerendert" "/etc/systemd/system/$einheit"; then
+        rc=0
+        datei_abgleichen "$gerendert" "/etc/systemd/system/$einheit" || rc=$?
+        [[ "$rc" -ne 2 ]] || nicht_geschrieben "/etc/systemd/system/$einheit"
+        if [[ "$rc" -eq 0 ]]; then
             echo "    $einheit aktualisiert"
             GEAENDERT_EINHEITEN+=("$einheit")
             [[ "$einheit" == powermanagement-nodered.service ]] && NODERED_NEUSTART="ja"
@@ -1035,12 +1084,16 @@ abgleichen() {
     # Logrotate und PHP-FPM-Pool (Upload-Grenzen, open_basedir): gehören der
     # Anwendung – erst rendern, dann vergleichen, nur bei Änderung schreiben.
     inhalt="$(rendern "$ZIEL/deploy/powermanagement.logrotate")"
-    if datei_abgleichen "$inhalt" /etc/logrotate.d/powermanagement; then
-        echo "    Logrotate aktualisiert"
-    fi
+    rc=0
+    datei_abgleichen "$inhalt" /etc/logrotate.d/powermanagement || rc=$?
+    [[ "$rc" -ne 2 ]] || nicht_geschrieben /etc/logrotate.d/powermanagement
+    [[ "$rc" -eq 0 ]] && echo "    Logrotate aktualisiert"
     if [[ -n "$FPM_VERSION" ]]; then
         inhalt="$(rendern "$ZIEL/deploy/php-fpm-pool.conf")"
-        if datei_abgleichen "$inhalt" "/etc/php/$FPM_VERSION/fpm/pool.d/powermanagement.conf"; then
+        rc=0
+        datei_abgleichen "$inhalt" "/etc/php/$FPM_VERSION/fpm/pool.d/powermanagement.conf" || rc=$?
+        [[ "$rc" -ne 2 ]] || nicht_geschrieben "/etc/php/$FPM_VERSION/fpm/pool.d/powermanagement.conf"
+        if [[ "$rc" -eq 0 ]]; then
             echo "    PHP-FPM-Pool aktualisiert"
             POOL_GEAENDERT="ja"
         fi
@@ -1335,8 +1388,12 @@ wunschpruefung() {
         return 0
     fi
     # Node-RED braucht nach einem Neustart eine Weile bis zum ersten Herzschlag.
+    # Ein Signal (Stopp, Herunterfahren) beendet nur das Warten – das Update
+    # ist schon eingespielt.
     for i in 1 2 3 4 5 6 7 8 9; do
+        [[ "$NACH_SIGNAL" == "ja" ]] && break
         sleep 10
+        [[ "$NACH_SIGNAL" == "ja" ]] && break
         PRUEF_RC=0
         PRUEF_AUSGABE="$(as_app timeout 60 php "$ZIEL/bin/power" pruefen 2>&1)" || PRUEF_RC=$?
         if [[ "$PRUEF_RC" -eq 0 ]]; then
@@ -1392,7 +1449,7 @@ abbrechen() {   # abbrechen <grund> [<zeile>]
     fi
     schnappschuss_loeschen
     if [[ "$SAMMLER_ANGEHALTEN" == "ja" ]]; then
-        systemctl start powermanagement-sammler.service
+        systemctl start powermanagement-sammler.service && rm -f -- "$ZUSTAND/sammler-angehalten"
     fi
     wartung_aus
     if [[ "$ABGLEICH_BEGONNEN" == "ja" ]]; then
@@ -1419,7 +1476,7 @@ zurueckrollen() {   # zurueckrollen <grund> [<zeile>]
     set +e
     trap - ERR
     trap '' INT TERM HUP
-    local grund="$1" luecke="nein" herunter="nein" phase="$PHASE" f opt=()
+    local grund="$1" luecke="nein" herunter="nein" phase="$PHASE" f opt=() code_zurueck="ja"
     # Terminal weg: EIO träfe sonst jeden Schritt.
     [[ "$SIGNAL" == "HUP" ]] && exec >>"$(zurueck_protokoll)" 2>&1 </dev/null
     case "$grund" in
@@ -1435,10 +1492,12 @@ zurueckrollen() {   # zurueckrollen <grund> [<zeile>]
 
     # Git: Commit UND Zweig (B22)
     if [[ "$ALT_ZWEIG" == "-" ]]; then
-        g checkout -q -f --detach "$ALT" || luecke="ja"
+        g checkout -q -f --detach "$ALT" || code_zurueck="nein"
     else
-        g checkout -q -f -B "$ALT_ZWEIG" "$ALT" || luecke="ja"
+        g checkout -q -f -B "$ALT_ZWEIG" "$ALT" || code_zurueck="nein"
     fi
+    [[ "$(g rev-parse HEAD 2>/dev/null)" == "$ALT" ]] || code_zurueck="nein"
+    [[ "$code_zurueck" == "ja" ]] || luecke="ja"
     if [[ "$ZWEIG" != "$ALT_ZWEIG" ]]; then
         if [[ "$ZWEIG_REF_VORHER" == "-" ]]; then
             g branch -q -D -- "$ZWEIG" || luecke="ja"
@@ -1446,7 +1505,6 @@ zurueckrollen() {   # zurueckrollen <grund> [<zeile>]
             g update-ref "refs/heads/$ZWEIG" "$ZWEIG_REF_VORHER" || luecke="ja"
         fi
     fi
-    [[ "$(g rev-parse HEAD 2>/dev/null)" == "$ALT" ]] || luecke="ja"
 
     if [[ "$phase" == "stufe1" || "$phase" == "checkout" ]]; then
         # Außerhalb von git noch nichts angefasst (etwa die neue Fassung
@@ -1469,33 +1527,56 @@ zurueckrollen() {   # zurueckrollen <grund> [<zeile>]
         exit 3
     fi
 
+    if [[ "$code_zurueck" == "nein" ]]; then
+        # Der alte Code ist nicht zurück (etwa eine verwaiste .git/index.lock
+        # nach einem Absturz mitten im Checkout). Dann weder die Datenbank
+        # zurücklegen (neuer Code auf altem Schema) noch mit dem ausgecheckten
+        # – neuen – Skript abgleichen (es legte die eben entfernten Einheiten
+        # wieder an), nichts neu starten, und die Schreibsperre bleibt. Die
+        # Marke bleibt: --wiederaufnehmen räumt verwaiste git-Sperren weg und
+        # versucht es erneut.
+        hinweis "Git ließ sich nicht auf $(kurz "$ALT") zurücksetzen – Datenbank, Einheiten und Dienste bleiben, wie sie sind; die Oberfläche bleibt gesperrt."
+        hinweis "Handarbeit nötig – docs/installation-debian-lxc.md (Zurückrollen von Hand). Die Marke bleibt: $MARKE"
+        case "$grund" in abgebrochen|unterbrochen) ;; *) gescheitert_merken "$NEU" "$grund" ;; esac
+        [[ "$herunter" == "nein" ]] && dienst_anstossen
+        ergebnis unvollstaendig "$grund" "Handarbeit nötig"
+        exit 3
+    fi
+
     rechte_setzen
     FPM_VERSION="$(fpm_version)"
-    local fpm_angehalten="nein"
+    local fpm_angehalten="nein" daten_luecke="nein" flows_zurueck="nein" v
     if [[ "$MIGRIERT" == "ja" ]]; then
-        if [[ "$SCHNAPPSCHUSS" != "-" && -f "$SCHNAPPSCHUSS" ]]; then
+        if [[ "$SCHNAPPSCHUSS" != "-" && -f "$SCHNAPPSCHUSS" && ! -L "$SCHNAPPSCHUSS" ]]; then
             # PHP-FPM dafür anhalten: offene SQLite-Verbindungen (WAL)
             # schrieben sonst in die ersetzte Datei.
             if [[ -n "$FPM_VERSION" ]]; then
                 systemctl stop "php$FPM_VERSION-fpm"
                 fpm_angehalten="ja"
             fi
-            if as_app cp -- "$SCHNAPPSCHUSS" "$DB.zurueck" && as_app mv -f -- "$DB.zurueck" "$DB" \
-                && as_app rm -f -- "$DB-wal" "$DB-shm"; then
+            if db_zuruecklegen; then
                 echo "    Datenbank auf den Stand vor dem Update zurückgesetzt"
+                # Bleibt die Marke (etwas weiter unten fehlt), legt ein
+                # weiterer Versuch sie nicht noch einmal zurück – was danach
+                # gespeichert wurde, ginge sonst verloren.
+                MIGRIERT="nein"
+                marke_setzen migriert nein && sync -- "$MARKE" "$ZUSTAND"
             else
                 luecke="ja"
-                hinweis "Datenbank ließ sich nicht zurücklegen – Kopie von vorher: $SCHNAPPSCHUSS"
+                daten_luecke="ja"
+                hinweis "Die Datenbank ließ sich nicht zurücklegen. Der Schnappschuss liegt unter $SCHNAPPSCHUSS –"
+                hinweis "nur als $APP_USER zurücklegen (docs/installation-debian-lxc.md, Zurückrollen von Hand)."
             fi
         elif ! g diff --quiet "$ALT" "$NEU" -- database/migrations 2>/dev/null; then
             luecke="ja"
+            daten_luecke="ja"
             hinweis "Die Datenbank ist migriert, aber es gibt keine Kopie zum Zurücklegen (kein SQLite?) – von Hand aus der Sicherung."
         fi
     fi
 
     # Von der neuen Fassung neu angelegte Dateien (die alte kennt sie nicht)
     local neu_angelegt=()
-    mapfile -t neu_angelegt < <(marke_neu_angelegt)
+    mapfile -t neu_angelegt < <(marke_werte neu_angelegt)
     for f in ${neu_angelegt[@]+"${neu_angelegt[@]}"}; do
         neu_angelegt_erlaubt "$f" || continue
         if [[ "$f" == /etc/systemd/system/* ]]; then
@@ -1518,7 +1599,23 @@ zurueckrollen() {   # zurueckrollen <grund> [<zeile>]
         hinweis "Die alte Fassung kennt --nur-abgleichen nicht – Einheiten und Vorlagen von Hand prüfen."
     fi
 
+    # Mit --flows-ersetzen beiseitegelegte eigene Flows zurück an ihren Platz.
+    # Erst nach dem Abgleich: der hat die ausgelieferten alten Flows samt
+    # Merker eingespielt – mit der eigenen Fassung darüber ist es wie vorher.
+    while IFS= read -r v; do
+        verschoben_erlaubt "$v" && [[ -f "$v" && ! -L "$v" ]] || continue
+        if mv -fT -- "$v" "${v%.vor-*}"; then
+            echo "    eigene Fassung zurück: ${v%.vor-*}"
+            flows_zurueck="ja"
+        else
+            luecke="ja"
+        fi
+    done < <(marke_werte verschoben)
+
     if [[ "$herunter" == "nein" ]]; then
+        if [[ "$flows_zurueck" == "ja" && "$MIT_NODERED" == "ja" ]]; then
+            systemctl try-restart powermanagement-nodered.service || hinweis "Node-RED ließ sich nicht neu starten."
+        fi
         if [[ -n "$FPM_VERSION" ]]; then
             # Den alten Code laden (OPcache) bzw. nach dem Zurücklegen starten
             if [[ "$fpm_angehalten" == "ja" ]]; then
@@ -1536,7 +1633,13 @@ zurueckrollen() {   # zurueckrollen <grund> [<zeile>]
             fi
         fi
     fi
-    wartung_aus
+    # Liegt die Datenbank nicht zurück, läuft alter Code auf dem neuen Schema –
+    # dann bleibt die Oberfläche gesperrt, bis ein weiterer Versuch gelingt.
+    if [[ "$daten_luecke" == "nein" ]]; then
+        wartung_aus
+    else
+        hinweis "Die Schreibsperre der Oberfläche bleibt, bis die Datenbank zurückliegt."
+    fi
     case "$grund" in abgebrochen|unterbrochen) ;; *) gescheitert_merken "$NEU" "$grund" ;; esac
     if [[ "$luecke" == "nein" ]]; then
         schnappschuss_loeschen   # B23
@@ -1556,13 +1659,14 @@ zurueckrollen() {   # zurueckrollen <grund> [<zeile>]
     exit 3
 }
 
-# Die Einträge neu_angelegt der Marke, so wie sie jetzt ist
-marke_neu_angelegt() {
+# marke_werte <schlüssel>: alle Werte eines mehrfachen Schlüssels
+# (neu_angelegt, verschoben), so wie die Marke jetzt ist
+marke_werte() {
     local zeile
     [[ -f "$MARKE" ]] || return 0
     while IFS= read -r zeile; do
-        if [[ "$zeile" == "neu_angelegt "* ]]; then
-            printf '%s\n' "${zeile#neu_angelegt }"
+        if [[ "$zeile" == "$1 "* ]]; then
+            printf '%s\n' "${zeile#"$1 "}"
         fi
     done < "$MARKE"
     return 0
@@ -1808,8 +1912,12 @@ stufe1() {
     wartung_an
     # Der Sammler schreibt Zustände der Datenquellen in die Datenbank – vor
     # der Sicherung anhalten, sonst fehlte beim Zurücklegen, was er danach schrieb.
+    # Stirbt das Update vor der Marke (SIGKILL), startet ihn der Update-Dienst
+    # wieder („sammler-angehalten“, update-helfer.sh); danach das Zurückrollen.
     if systemctl is-active --quiet powermanagement-sammler.service; then
         SAMMLER_ANGEHALTEN="ja"
+        install -d -m 700 "$ZUSTAND"
+        : > "$ZUSTAND/sammler-angehalten"
     fi
     systemctl stop powermanagement-sammler.service >/dev/null 2>&1 || true
 
@@ -1856,6 +1964,14 @@ stufe1() {
     PHASE="stufe1"
     traps_nach_marke
     marke_schreiben
+    rm -f -- "$ZUSTAND/sammler-angehalten"
+    # Auf die Platte, bevor git etwas ändert: nach einem Stromausfall müssen
+    # Marke, alte Fassung und Schnappschuss lesbar sein (eine neu angelegte
+    # Datei kann auf ext4 sonst leer zurückbleiben).
+    if [[ "$SCHNAPPSCHUSS" != "-" ]]; then
+        as_app sync -- "$SCHNAPPSCHUSS"
+    fi
+    sync -- "$ZUSTAND/alt/update-debian.sh" "$ZUSTAND/alt" "$MARKE" "$ZUSTAND"
 
     # ------------------------------------------------ Quellcode
     schritt 4 "Quellcode aktualisieren" checkout
@@ -2005,6 +2121,9 @@ stufe2() {
     schritt 6 "Migrationen ausführen" migration
     marke_setzen migriert ja
     MIGRIERT="ja"
+    # Erst auf der Platte, dann migrieren: nach einem Stromausfall muss die
+    # Marke sagen, dass die Datenbank zurück muss.
+    sync -- "$MARKE" "$ZUSTAND"
     as_app php "$ZIEL/bin/power" migrate
     local treiber
     treiber="$(as_app php -r '$c = require $argv[1]; echo $c["database"]["driver"] ?? "sqlite";' "$ZIEL/config/config.php" 2>/dev/null || echo sqlite)"
@@ -2033,11 +2152,29 @@ stufe2() {
         PRUEFUNG="fehler"
         zurueckrollen pruefung
     fi
+    # Die Pflichtprüfung ist bestanden: ab hier rollt nichts mehr zurück –
+    # erst dann die Schreibsperre aufheben. Was danach gespeichert wird,
+    # nähme ein Zurückrollen sonst mit (die Wunschprüfung wartet bis zu 10 min).
+    eingespielt_festhalten
     wartung_aus
     wunschpruefung
 
     schritt 12 "Fertig" intern
     erfolg
+}
+
+# Der Punkt ohne Rückweg: keine Traps mehr, die zurückrollen, erst die Marke
+# weg (auf die Platte), dann Schnappschuss und Kopie der alten Fassung. Ein
+# Signal danach überspringt nur noch die Wunschprüfung.
+eingespielt_festhalten() {
+    set +e
+    trap - ERR
+    trap 'NACH_SIGNAL=ja' INT TERM HUP
+    marke_loeschen
+    sync -- "$ZUSTAND" 2>/dev/null
+    schnappschuss_loeschen
+    rm -f -- "$ZUSTAND/alt/update-debian.sh"
+    return 0
 }
 
 pakete_nachziehen() {
@@ -2073,14 +2210,10 @@ pakete_nachziehen() {
 
 erfolg() {
     local erg="eingespielt" zweig_befehl
-    # Ab hier ist das Update eingespielt – nichts rollt mehr zurück, und ein
-    # Signal unterbricht das Aufräumen nicht.
-    set +e
-    trap - ERR
+    # Das Update ist eingespielt – nichts rollt mehr zurück, und ein Signal
+    # unterbricht das Aufräumen nicht.
+    eingespielt_festhalten
     trap '' INT TERM HUP
-    schnappschuss_loeschen
-    marke_loeschen
-    rm -f -- "$ZUSTAND/alt/update-debian.sh"
     [[ ${#WARNUNGEN[@]} -gt 0 ]] && erg="eingespielt_mit_warnung"
 
     if [[ "$ALT_ZWEIG" == "-" ]]; then
@@ -2098,13 +2231,12 @@ ZUSAMMENFASSUNG
         cat <<ZUSAMMENFASSUNG
   Sicherung: $SICHERUNG
 
-  Zurückrollen, falls nötig (die Sicherung enthält config/config.php und
-  database.sqlite – mit app.key, also nicht nach /tmp auspacken):
+  Zurückrollen, falls nötig – die Datenbank aus der Sicherung nur als
+  $APP_USER lesen und schreiben (storage/ gehört der Anwendung; als root
+  folgten install und tar dort einem Verweis):
     systemctl stop powermanagement-sammler ${FPM_VERSION:+php$FPM_VERSION-fpm}
     $zweig_befehl
-    install -d -m 700 /root/pm-zurueck && tar xzf $SICHERUNG -C /root/pm-zurueck
-    install -o $APP_USER -g $APP_USER -m 640 /root/pm-zurueck/database.sqlite $DB
-    rm -f $DB-wal $DB-shm
+    runuser -u $APP_USER -- sh -c 'tar -xzOf "\$1" database.sqlite > "\$2.zurueck" && [ -s "\$2.zurueck" ] && rm -f -- "\$2-wal" "\$2-shm" && mv -f -- "\$2.zurueck" "\$2"' sh $SICHERUNG $DB
     $ZIEL/deploy/update-debian.sh --nur-abgleichen
     systemctl start ${FPM_VERSION:+php$FPM_VERSION-fpm} powermanagement-sammler
 
@@ -2142,6 +2274,26 @@ nur_abgleichen() {
 }
 
 # ================================================================ --wiederaufnehmen
+# Stirbt git mitten im Checkout (SIGKILL, Strom weg), bleiben Sperrdateien
+# liegen, an denen jeder weitere checkout scheitert. Hier hält dieser Lauf
+# update.lock – kein Update und keine Installation arbeitet gerade im Checkout.
+git_sperren_raeumen() {
+    local f z
+    for f in index.lock HEAD.lock ORIG_HEAD.lock packed-refs.lock config.lock; do
+        if [[ -f "$ZIEL/.git/$f" && ! -L "$ZIEL/.git/$f" ]]; then
+            rm -f -- "$ZIEL/.git/$f" && echo "    verwaiste git-Sperre entfernt: .git/$f"
+        fi
+    done
+    for z in "$ZWEIG" "$ALT_ZWEIG"; do
+        [[ "$z" != "-" ]] && zweig_ok "$z" || continue
+        f="$ZIEL/.git/refs/heads/$z.lock"
+        if [[ -f "$f" && ! -L "$f" ]]; then
+            rm -f -- "$f" && echo "    verwaiste git-Sperre entfernt: .git/refs/heads/$z.lock"
+        fi
+    done
+    return 0
+}
+
 # Ein Update, das ohne Zurückrollen endete (SIGKILL, Strom weg): mit den
 # Werten der Marke zurückrollen. Ergebnis- und Fortschrittsdatei gelten aus
 # der Kommandozeile, nicht aus der Marke.
@@ -2160,6 +2312,7 @@ wiederaufnehmen() {
     fi
     marke_uebernehmen
     echo "    Unterbrochen in Phase „$PHASE“: $(kurz "$ALT") → $(kurz "$NEU") (Zweig $ZWEIG)"
+    git_sperren_raeumen
     trap 'zurueckrollen unterbrochen "$LINENO"' ERR
     trap 'SIGNAL=INT; zurueckrollen unterbrochen' INT
     trap 'SIGNAL=TERM; zurueckrollen unterbrochen' TERM

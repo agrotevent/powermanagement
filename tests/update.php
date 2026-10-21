@@ -123,6 +123,10 @@ $schreiben = static function (string $name, ?string $inhalt) use ($upd): void {
     $pfad = $upd . '/ist/' . $name;
     if ($inhalt === null) {
         @unlink($pfad);
+        if ($name === 'lauf') {
+            // Kein Lauf – und kein Auftrag, zu dem der Helfer den Lauf noch schreibt.
+            @unlink($upd . '/.angefordert');
+        }
     } else {
         file_put_contents($pfad, $inhalt);
     }
@@ -176,6 +180,7 @@ $gitHead = static function (string $head, array $refs = [], string $gepackt = ''
 $auftragWeg = static function () use ($upd): void {
     @unlink($upd . '/soll/auftrag');
     @unlink($upd . '/.letzter');
+    @unlink($upd . '/.angefordert');
     UpdateService::vergessen();
 };
 $eingerichtet = static function () use ($schreiben, $helferText, $standText, $gitHead, $auftragWeg, $I, $upd): void {
@@ -300,8 +305,43 @@ try {
     gleich(UpdateService::zustand($jetzt)['zustand'], 'fertig', 'Zustand: fertig');
     $schreiben('lauf', $laufText(['zustand' => 'fehler', 'ergebnis' => 'zurueckgerollt', 'grund' => 'migration', 'ende' => (string) $jetzt]));
     gleich(UpdateService::zustand($jetzt)['zustand'], 'fehler', 'Zustand: fehler');
+    // Lücke: der Helfer hat soll/auftrag schon weggeräumt (er prüft ihn noch),
+    // ist/lauf zeigt den vorigen Lauf – der ist nicht das Ergebnis des Auftrags.
+    $vorher = $laufText(['zustand' => 'fehler', 'ergebnis' => 'zurueckgerollt', 'grund' => 'migration',
+        'beginn' => (string) (time() - 600), 'ende' => (string) (time() - 300)]);
+    $schreiben('lauf', $vorher);
+    $r = UpdateService::anfordern('pruefen', null, 'hand', 'admin');
+    pruefe($r['ok'], 'Lücke: Auftrag gestellt');
+    unlink($upd . '/soll/auftrag');
+    UpdateService::vergessen();
+    $z = UpdateService::zustand();
+    pruefe($z['zustand'] === 'angefordert' && !$z['haengt'], 'Lücke: Auftrag übernommen, Lauf noch nicht geschrieben → angefordert, nicht „zurückgerollt“');
+    pruefe(UpdateService::statusJson()['aktiv'] === true, 'Lücke: Status-JSON aktiv – update.js fragt weiter');
+    $schreiben('lauf', $laufText(['kennung' => (string) $r['kennung'], 'aktion' => 'pruefen', 'beginn' => (string) time(), 'puls' => (string) time()]));
+    gleich(UpdateService::zustand()['zustand'], 'laeuft', 'Lücke: dann der Lauf zum Auftrag');
+    $schreiben('lauf', $laufText(['kennung' => (string) $r['kennung'], 'aktion' => 'pruefen', 'zustand' => 'fehler', 'ergebnis' => 'abgelehnt',
+        'grund' => 'doppelt', 'beginn' => (string) time(), 'ende' => (string) time()]));
+    gleich(UpdateService::zustand()['zustand'], 'fehler', 'Lücke: eine Ablehnung mit dieser Kennung beendet sie');
+    $schreiben('lauf', $laufText(['kennung' => str_repeat('e', 32), 'aktion' => 'wiederaufnehmen', 'zustand' => 'fertig', 'ergebnis' => 'aktuell',
+        'beginn' => (string) (time() + 2), 'ende' => (string) (time() + 3)]));
+    gleich(UpdateService::zustand()['zustand'], 'fertig', 'Lücke: ein späterer Lauf mit anderer Kennung (Wiederanlauf) zählt gleich');
+    $schreiben('lauf', $vorher);
+    file_put_contents($upd . '/.angefordert', $r['kennung'] . ' ' . (time() - UpdateService::HAENGT - 5) . "\n");
+    UpdateService::vergessen();
+    gleich(UpdateService::zustand()['zustand'], 'fehler', 'Lücke: nach 2 min ohne Lauf zählt wieder der vorige Lauf');
+    $auftragWeg();
+    $schreiben('lauf', $laufText(['zustand' => 'fehler', 'ergebnis' => 'zurueckgerollt', 'grund' => 'migration', 'ende' => (string) $jetzt]));
     $schreiben('helfer', $helferText($jetzt - 3000));
     pruefe(UpdateService::zustand($jetzt)['still'], 'Zustand: Helfer still nach 45 min');
+    // Das Lebenszeichen kommt zu Beginn und am Ende eines Laufs – ein Update
+    // über 45 min, das pulst, ist kein stiller Dienst.
+    $schreiben('lauf', $laufText(['beginn' => (string) ($jetzt - 2900), 'puls' => (string) ($jetzt - 1)]));
+    $z = UpdateService::zustand($jetzt);
+    pruefe($z['zustand'] === 'laeuft' && !$z['still'], 'Zustand: Update über 45 min, das pulst – Dienst nicht still');
+    pruefe(!str_contains((string) UpdateService::sperrgrund('pruefen', null, $jetzt), 'meldet sich nicht'), 'Sperrgrund: langes Update mit Puls – kein „meldet sich nicht“');
+    pruefe((UpdateService::navHinweis($jetzt)['text'] ?? '') !== 'Der Update-Dienst meldet sich nicht', 'Abzeichen: langes Update mit Puls – kein „meldet sich nicht“');
+    $schreiben('lauf', $laufText(['beginn' => (string) ($jetzt - 2900), 'puls' => (string) ($jetzt - 200)]));
+    pruefe(UpdateService::zustand($jetzt)['still'], 'Zustand: langes Update ohne Puls – Dienst still');
     $schreiben('helfer', $helferText($jetzt, 'nein', 'nein'));
     $z = UpdateService::zustand($jetzt);
     pruefe($z['abgeschaltet'] && $z['automatik_root'], 'Zustand: Oberfläche und Automatik root-seitig abgeschaltet');
@@ -357,13 +397,17 @@ try {
     gleich(glob($upd . '/.auftrag-*'), [], 'Auftrag: keine Temp-Datei übrig');
     $r2 = UpdateService::anfordern('pruefen', null, 'hand', 'pruefer');
     pruefe(!$r2['ok'] && str_contains($r2['message'], 'wartet schon'), 'kein zweiter offener Auftrag');
+    // Der Helfer übernimmt den Auftrag (soll/auftrag weg) und schreibt den Lauf dazu.
     unlink($upd . '/soll/auftrag');
+    $schreiben('lauf', $laufText(['kennung' => (string) $r['kennung'], 'aktion' => 'pruefen', 'zustand' => 'fertig', 'ergebnis' => 'geprueft',
+        'beginn' => (string) time(), 'ende' => (string) time()]));
     $r2 = UpdateService::anfordern('pruefen', null, 'hand', 'pruefer');
     pruefe(!$r2['ok'] && str_contains($r2['message'], 'Eben erst gesucht'), 'Suchen höchstens alle 30 s');
     touch($upd . '/.letzter', time() - 40);
     $r2 = UpdateService::anfordern('pruefen', null, 'hand', 'Max Müller <x>');
     pruefe($r2['ok'] && str_contains((string) file_get_contents($upd . '/soll/auftrag'), "\nvon MaxMllerx\n"), 'nach 30 s wieder; „von“ bereinigt');
     gleich(UpdateService::vonBereinigen(''), 'unbekannt', 'leeres „von“ → unbekannt');
+    $schreiben('lauf', null);
     $auftragWeg();
 
     $r = UpdateService::anfordern('aktualisieren', $V, 'hand', 'pruefer');
@@ -450,6 +494,24 @@ try {
         [$rc, $aus] = $power(['update:stand']);
         pruefe($rc === 0 && str_contains($aus, 'Update-Funktion: eingerichtet'), 'als root: update:stand liest');
         chown($upd, 0);
+        clearstatcache();
+        // storage/update als Verweis auf einen Ordner von root (etwa /tmp): root bleibt fremd
+        pruefe(!UpdateService::fremderRoot(), 'als root: storage/update gehört root → nicht fremd');
+        $rootZiel = $ordner . '/root-ziel';
+        mkdir($rootZiel, 0755);
+        rename($upd, $upd . '.echt');
+        symlink($rootZiel, $upd);
+        clearstatcache();
+        pruefe(UpdateService::fremderRoot(), 'als root: storage/update ist ein Verweis auf einen Ordner von root → fremd');
+        foreach ([['update:automatik', 'aus'], ['update:zeitplan'], ['update:suchen']] as $befehl) {
+            [$rc, $aus] = $power($befehl);
+            pruefe($rc === 1 && str_contains($aus, 'runuser -u'), 'als root mit Verweis: ' . $befehl[0] . ' abgelehnt');
+        }
+        gleich(array_values(array_diff(scandir($rootZiel), ['.', '..'])), [], 'als root mit Verweis: hinter dem Verweis nichts angelegt');
+        Settings::vergessen();
+        gleich(Settings::get(UpdateAutomatik::MODUS), null, 'als root mit Verweis: Modus nicht gespeichert');
+        unlink($upd);
+        rename($upd . '.echt', $upd);
         clearstatcache();
     } else {
         fwrite(STDOUT, "  (Besitzerprüfung und „als root abgelehnt“ übersprungen – nur als root)\n");
@@ -749,6 +811,7 @@ try {
     pruefe($r['aktion'] === 'pruefen' && str_contains($text, "aktion pruefen\nausloeser automatik\nvon zeitplan\n") && !str_contains($text, 'ziel '),
         'Zeitplan, nur suchen: Stand älter als 6 Std. → Auftrag pruefen');
     @unlink($upd . '/soll/auftrag');
+    @unlink($upd . '/.angefordert');
     UpdateService::vergessen();
     $r = UpdateAutomatik::zeitplan();
     pruefe($r['aktion'] === null && $r['grund'] === 'suche_wartet' && !is_file($upd . '/soll/auftrag'), 'Zeitplan: Suche schlug fehl – nicht gleich wieder');
@@ -767,6 +830,13 @@ try {
     touch($upd . '/zeitplan', time() - 1000);
     UpdateService::vergessen();
     gleich(UpdateService::navHinweis(), ['stufe' => 'warn', 'text' => 'Der Update-Zeitplan läuft nicht'], 'Abzeichen: Zeitplan still seit 15 min → gelb');
+    // Während der Schreibsperre setzt der Zeitplan aus – danach zählt die Zeit ab dem Ende des Laufs.
+    $schreiben('lauf', $laufText(['zustand' => 'fertig', 'ergebnis' => 'eingespielt', 'beginn' => (string) (time() - 1500), 'ende' => (string) (time() - 60)]));
+    pruefe(!UpdateAutomatik::zeitplanStill(), 'Zeitplan: kurz nach einem Update über 15 min nicht „still“');
+    gleich(UpdateService::navHinweis()['stufe'] ?? '', 'primary', 'Abzeichen: kurz nach einem langen Update kein „Zeitplan läuft nicht“');
+    $schreiben('lauf', $laufText(['zustand' => 'fertig', 'ergebnis' => 'eingespielt', 'beginn' => (string) (time() - 2500), 'ende' => (string) (time() - 1000)]));
+    pruefe(UpdateAutomatik::zeitplanStill(), 'Zeitplan: 15 min nach dem Ende des Laufs ohne Lebenszeichen → still');
+    $schreiben('lauf', null);
     UpdateAutomatik::speichern('aus', [], '04:00', 120, 24, '');
     UpdateService::vergessen();
     pruefe((UpdateService::navHinweis()['stufe'] ?? '') === 'primary', 'Abzeichen: Modus aus – ein stiller Zeitplan zählt nicht');
@@ -786,6 +856,19 @@ try {
     Settings::put(UpdateAutomatik::VERSCHOBEN, gmdate('c', time() - 13 * 86400));
     UpdateService::vergessen();
     pruefe((UpdateService::navHinweis()['stufe'] ?? '') === 'primary', 'Abzeichen: seit 13 Tagen verschoben – noch nicht');
+    // Eine gewollte Pause ist kein „verschoben“: kein Abzeichen, und der Zeitplan setzt „seit“ zurück statt es zu setzen.
+    $in30 = (new \DateTimeImmutable('now', $tz))->modify('+30 days')->format('Y-m-d');
+    gleich(UpdateAutomatik::speichern('einspielen', [1, 2, 3, 4, 5, 6, 7], (new \DateTimeImmutable('now', $tz))->format('H:i'), 60, 0, $in30, 0)['ok'],
+        true, 'Pause: 30 Tage eingestellt');
+    Settings::put(UpdateAutomatik::VERSCHOBEN, gmdate('c', time() - 15 * 86400));
+    UpdateService::vergessen();
+    pruefe(!UpdateAutomatik::langeVerschoben() && (UpdateService::navHinweis()['text'] ?? '') !== 'Automatische Updates werden seit über 14 Tagen verschoben',
+        'Abzeichen: pausiert – nicht „seit über 14 Tagen verschoben“');
+    $r = UpdateAutomatik::zeitplan();
+    pruefe($r['grund'] === 'verschoben:pausiert' && UpdateAutomatik::verschobenSeit() === null, 'Zeitplan: pausiert → „verschoben seit“ zurückgesetzt');
+    $r = UpdateAutomatik::zeitplan();
+    pruefe($r['grund'] === 'verschoben:pausiert' && UpdateAutomatik::verschobenSeit() === null, 'Zeitplan: pausiert – auch beim nächsten Takt nicht gesetzt');
+    pruefe(!is_file($upd . '/soll/auftrag'), 'Zeitplan: pausiert – kein Auftrag');
     $automatikZurueck();
     UpdateService::vergessen();
 

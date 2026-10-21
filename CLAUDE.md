@@ -56,14 +56,20 @@ keine Build-Schritte. JS-Bibliotheken liegen fertig unter `public/assets/vendor`
   `update-debian.sh` hat eine stabile Schnittstelle
   (`# update-debian-schnittstelle: 1`: `--stufe=2` mit Marke,
   `--nur-abgleichen [--ohne-dienste]`, `--wiederaufnehmen`); jede Datei, die
-  es außerhalb von git schreibt, gehört in `abgleichen` – eine neue trägt
-  Stufe 2 als `neu_angelegt` in die Marke ein, eine neue Einheit kommt in
+  es außerhalb von git schreibt, gehört in `abgleichen` (`datei_abgleichen`:
+  Temp-Datei und Umbenennen, ein Schreibfehler bricht über den ERR-Trap ab –
+  nie als `if`-Bedingung) – eine neue trägt Stufe 2 als `neu_angelegt` in die
+  Marke ein, eine beiseitegelegte als `verschoben`, eine neue Einheit kommt in
   `einheiten()` und in `DIENSTE` von `install-debian.sh`. Es stoppt
-  `powermanagement-update.service` nie und startet ihn nie neu. Während der
-  Schreibsperre (`storage/update/ist/wartung`) nimmt die App keine POSTs an
+  `powermanagement-update.service` nie und startet ihn nie neu. Die
+  Schreibsperre hebt es erst nach dem Punkt ohne Rückweg auf
+  (`eingespielt_festhalten`). Während der Schreibsperre
+  (`storage/update/ist/wartung`) nimmt die App keine POSTs an
   (`UpdateService::wartungsSperre()` vor `dispatch()`); wer an Router und
-  Sitzung vorbei schreibt, fragt `UpdateService::wartungAktiv()`.
-  `bin/power update:*` nie als root. Hinweise für Betreiber stehen als
+  Sitzung vorbei schreibt, fragt `UpdateService::wartungAktiv()`. Dateien in
+  `storage/` fasst root nur als App-Benutzer an – auch in Anleitungen zum
+  Zurückrollen von Hand (`runuser -u www-data -- sh -c …`, nie `install`,
+  `cp` oder `tar` als root). `bin/power update:*` nie als root. Hinweise für Betreiber stehen als
   Commit-Trailer `Update-Hinweis: …` – System → Update zeigt sie.
 - **Broker-Zugänge der Shellys** nur über `MqttZugaenge` (Soll-Datei in
   `storage/mqtt/soll` → root-Helfer `deploy/mqtt-zugaenge.sh`); `/etc/mosquitto`
@@ -117,8 +123,8 @@ bash -n deploy/*.sh tests/*.sh tests/hilfen/*.sh && shellcheck -S warning -e SC2
 | `tests/nodered-funktionen.mjs` | Node-RED-Funktionen, `flows.json` passt zu den Quellen |
 | `tests/installation-debian.sh` | `deploy/install-debian.sh` auf frischem Debian 13 mit systemd (Docker): Erstinstallation, zweiter Lauf (Kennwörter, app.key bleiben), Update mit neuem Ordner in `storage/`; Rechte (Code root, `storage/` www-data), Dienste, Anmeldung, Broker, `bin/power pruefen` |
 | `tests/installation-debian.sh` (Update) | Phasen 3b–8: Update ohne HOME und Terminal (systemd-run), über die Oberfläche mit Selbst-Update, kaputte Migration und Prüfung nach dem Neustart (vollständig zurück, auch Einheiten und Vorlagen), Abbruch und SIGKILL mit Wiederanlauf, Automatik mit Veranstaltungsschutz, Aufträge als App-Benutzer und untergeschobene Aufträge; `--umstieg=<commit>`: einmaliger Umstieg von einer Fassung ohne Update-Funktion genau wie in der Anleitung, danach das erste Update über die Oberfläche (eigener CI-Job „Umstieg“) |
-| `tests/update-helfer.php` | Update-Helfer ohne root: Auftrag übernehmen und prüfen (Verweis, FIFO, Ordner, Größe, Zeichen, Kennung, Alter, Abstände, gescheiterte Stände, `update.conf`), argv und Umgebung, Sperre, Signale als TERM, Wiederanlauf (höchstens zweimal, dann aufgegeben), Nachlauf, Protokoll bereinigt und ohne Token, Stand aus git (Kandidaten auch von einem Seitenzweig aus, linear, lokal), Abgleich mit `UpdateService::auftragText()`; als root zusätzlich Code-Prüfung und setpriv (Attrappe `tests/hilfen/update-attrappe.sh`, Temp-Repository) |
-| `tests/update.php` | Update in der App: Parser der Helfer-Dateien, Zustände über die Zeit, installierter Stand ohne git-Prozess, Auftrag (Format, Sperrgründe, Hindernisse), Abzeichen, Audit idempotent, Automatik (Einstellungen, Fenster mit Zeitumstellung und über Mitternacht, Versatz, Karenz, Hindernisse, einmal je Tag, Zeitplan mit Dateien und Audit), Kommandozeile `update:*`, HTTP (Seite, Rechte, CSRF, Schreibsperre 503/Meldung, Status-JSON ohne Sitzungssperre), `update.js` ohne HTML aus Daten (eigene Instanz) |
+| `tests/update-helfer.php` | Update-Helfer ohne root: Auftrag übernehmen und prüfen (Verweis, FIFO, Ordner, Größe, Zeichen, Kennung, Alter, Abstände, gescheiterte Stände, `update.conf` – unbekannte Zeilen und über 4 KiB schalten ab, „nein“ bleibt), argv und Umgebung, Sperre, Signale als TERM, Wiederanlauf (höchstens zweimal, dann aufgegeben), Nachlauf, `ist/wartung` mit Zeitlimit gelesen, Sammler nach einem vor der Marke abgebrochenen Update wieder gestartet, Pfad-Einheit nur geheilt, wenn `soll/` in Ordnung ist (nie im Nachlauf), Protokoll bereinigt und ohne Token, Stand aus git (Kandidaten auch von einem Seitenzweig aus, linear, lokal), Abgleich mit `UpdateService::auftragText()`; als root zusätzlich Code-Prüfung, setpriv und `soll/` ohne Schreibrecht des App-Benutzers (Attrappen `tests/hilfen/update-attrappe.sh`, `systemctl`, Temp-Repository) |
+| `tests/update.php` | Update in der App: Parser der Helfer-Dateien, Zustände über die Zeit (auch die Lücke zwischen Übernahme des Auftrags und seinem Lauf, ein langes Update mit Puls ist kein stiller Dienst), installierter Stand ohne git-Prozess, Auftrag (Format, Sperrgründe, Hindernisse), Abzeichen, Audit idempotent, Automatik (Einstellungen, Fenster mit Zeitumstellung und über Mitternacht, Versatz, Karenz, Hindernisse, einmal je Tag, Zeitplan mit Dateien und Audit, nach einer langen Schreibsperre nicht „still“, eine Pause ist kein „verschoben“), Kommandozeile `update:*` (als root abgelehnt, auch wenn `storage/update` ein Verweis auf einen Ordner von root ist), HTTP (Seite, Rechte, CSRF, Schreibsperre 503/Meldung, Status-JSON ohne Sitzungssperre), `update.js` ohne HTML aus Daten (eigene Instanz) |
 | `tests/sitzung-gc.php` | Sitzungsdateien aufräumen: GC nach `Session::start()` (Debians php.ini, Lebensdauer aus `idle_timeout`/`max_session`, ohne Grenze aus, Takt einer eingeschalteten GC bleibt, gemeinsames oder unlesbares Verzeichnis unberührt); eingebauter Server mit echtem Dateien-Handler: Veraltetes weg, Jüngeres und die angemeldete Sitzung bleiben, keine PHP-Meldung (eigene Instanz) |
 
 Prüfskripte legen eigene Daten mit eindeutiger Kennung an und löschen sie am

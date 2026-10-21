@@ -979,8 +979,12 @@ rm /etc/powermanagement/update.conf                              # wieder an
 Der Update-Dienst liest die Datei bei jedem Lauf (nie per `source`); die
 Seite zeigt den neuen Stand nach seinem nächsten Lauf, spätestens nach 15
 Minuten. Die Datei muss root gehören; lässt sie sich nicht sicher lesen oder
-steht dort etwas anderes als `ja` oder `nein`, gilt „nein“.
-`update-debian.sh` von Hand geht immer.
+steht dort etwas anderes als `ja` oder `nein`, gilt „nein“. Erlaubt sind nur
+Zeilen `OBERFLAECHE=ja|nein` und `AUTOMATIK=ja|nein`, Kommentare (`#`) und
+Leerzeilen – jede andere Zeile (etwa `oberflaeche=nein` oder
+`export OBERFLAECHE=nein`) und eine Datei über 4 KiB schalten beides ab. Ein
+„nein“ gilt, auch wenn weiter unten „ja“ steht. `update-debian.sh` von Hand
+geht immer.
 
 | Datei | Inhalt |
 |-------|--------|
@@ -1200,10 +1204,15 @@ wiederherstellen (git, Datenbank, Abgleich oder die Anmeldeseite danach).
 Die Marke `/var/lib/powermanagement/update/offen` bleibt, Updates aus der
 Oberfläche sind gesperrt, und die Seite zeigt es rot. Ein unterbrochenes
 Update versucht der Update-Dienst höchstens zweimal zurückzurollen, danach
-gibt er auf („aufgegeben“) und meldet es einmal.
+gibt er auf („aufgegeben“) und meldet es einmal. Ließ sich git nicht
+zurücksetzen, bleibt alles andere auf dem neuen Stand (Datenbank, Einheiten,
+Dienste) und die Oberfläche gesperrt; `--wiederaufnehmen` räumt verwaiste
+git-Sperren (`.git/index.lock` …) weg. Liegt die Datenbank schon zurück,
+steht in der Marke `migriert nein` – ein weiterer Versuch legt sie nicht noch
+einmal zurück, was seitdem gespeichert wurde, bleibt.
 
 ```bash
-cat /var/lib/powermanagement/update/offen                   # alt, alt_zweig, neu, Sicherung, Schnappschuss, migriert, neu_angelegt, Phase
+cat /var/lib/powermanagement/update/offen                   # alt, alt_zweig, neu, Sicherung, Schnappschuss, migriert, neu_angelegt, verschoben, Phase
 ls -t /var/log/powermanagement/update/ | head               # Protokolle, darunter …-zurueckrollen.log
 journalctl -a -u powermanagement-update -n 200 --no-pager
 # Ursache beheben (Platte voll, Paketquelle, Rechte …), dann erneut:
@@ -1211,15 +1220,20 @@ journalctl -a -u powermanagement-update -n 200 --no-pager
 ```
 
 Geht es so nicht, die Schritte des Zurückrollens von Hand – mit den Werten
-aus der Marke:
+aus der Marke. Schnappschuss und Sicherung liegen in `storage/backups` und
+gehören der Anwendung: Nur als `www-data` lesen und schreiben – als root
+folgten `install`, `cp` und `tar` dort einem Verweis, den www-data
+untergeschoben haben könnte, und kopierten etwa das Token in die Datenbank.
 
 ```bash
 systemctl stop powermanagement-sammler php8.4-fpm
 git -C /opt/powermanagement checkout -q -f -B <alt_zweig> <alt>     # alt_zweig „-“: checkout -q -f --detach <alt>
-# nur bei „migriert ja“ – die Datenbank aus dem Schnappschuss (oder aus der Sicherung, wie unten):
-install -o www-data -g www-data -m 640 <schnappschuss> /opt/powermanagement/storage/database.sqlite
-rm -f /opt/powermanagement/storage/database.sqlite-wal /opt/powermanagement/storage/database.sqlite-shm
+# nur bei „migriert ja“ – die Datenbank aus dem Schnappschuss (oder aus der Sicherung, wie unten), als www-data:
+runuser -u www-data -- sh -c 'cp -- "$1" "$2.zurueck" && rm -f -- "$2-wal" "$2-shm" && mv -f -- "$2.zurueck" "$2"' \
+  sh <schnappschuss> /opt/powermanagement/storage/database.sqlite
 # je Zeile „neu_angelegt <datei>“: Einheiten erst ausschalten (systemctl disable --now <name>), dann rm <datei>
+# je Zeile „verschoben <datei>“ (eigene Flows, --flows-ersetzen): nach dem Abgleich unten
+#   mv -fT <datei> /var/lib/powermanagement/node-red/flows.json und systemctl restart powermanagement-nodered
 rm /var/lib/powermanagement/update/offen
 /opt/powermanagement/deploy/update-debian.sh --nur-abgleichen
 systemctl start php8.4-fpm powermanagement-sammler
@@ -1235,12 +1249,11 @@ echten Werten stehen am Ende jedes Laufs, etwa:
 ```bash
 systemctl stop powermanagement-sammler php8.4-fpm
 git -C /opt/powermanagement checkout -q -f -B <zweig> <vorher>
-install -d -m 700 /root/pm-zurueck && tar xzf /opt/powermanagement/storage/backups/vor-update-<zeit>.tar.gz -C /root/pm-zurueck
-install -o www-data -g www-data -m 640 /root/pm-zurueck/database.sqlite /opt/powermanagement/storage/database.sqlite
-rm -f /opt/powermanagement/storage/database.sqlite-wal /opt/powermanagement/storage/database.sqlite-shm
+# nur database.sqlite aus der Sicherung, als www-data (ein Verweis im Archiv ergibt nichts – dann bricht es ab):
+runuser -u www-data -- sh -c 'tar -xzOf "$1" database.sqlite > "$2.zurueck" && [ -s "$2.zurueck" ] && rm -f -- "$2-wal" "$2-shm" && mv -f -- "$2.zurueck" "$2"' \
+  sh /opt/powermanagement/storage/backups/vor-update-<zeit>.tar.gz /opt/powermanagement/storage/database.sqlite
 /opt/powermanagement/deploy/update-debian.sh --nur-abgleichen
 systemctl start php8.4-fpm powermanagement-sammler
-rm -rf /root/pm-zurueck                           # darin steckt config.php mit app.key
 systemctl start powermanagement-update.service    # Stand und Verlauf für die Oberfläche
 ```
 
@@ -1381,10 +1394,10 @@ printf 'Authorization: Token %s\n' "$T" | curl -sG -H @- http://127.0.0.1:8086/q
 | Update bricht mit „could not read Username“ ab | Privates Repository ohne Token – `/etc/powermanagement/git.conf` anlegen (Abschnitt 3). |
 | Update meldet „lokale Änderungen“ | Jemand hat Dateien in `/opt/powermanagement` geändert. Sichern, dann `--erzwingen`. |
 | System → Update: „Die Update-Funktion ist … noch nicht eingerichtet“ (`update:stand`: „nicht eingerichtet“) | Noch das alte Update-Skript – einmal umsteigen (Abschnitt 10, *Erstes Update auf die Fassung mit Update-Funktion*). Sonst hat sich der Update-Dienst nie gemeldet: `systemctl status powermanagement-update.path powermanagement-update.timer`, `journalctl -a -u powermanagement-update -n 50`. Steht dort „Code nicht root-eigen …“, hat jemand in `/opt/powermanagement` Besitz oder Rechte geändert – `update-debian.sh --nur-abgleichen` setzt sie zurück. Fehlende Einheiten und Ordner holt `update-debian.sh` (ohne Option) nach. |
-| „Der Auftrag wird nicht übernommen“ | Die Pfad-Einheit hat nach zu vielen Starts aufgegeben (`start-limit-hit`) oder läuft nicht. Der Zeitgeber heilt das nach spätestens 15 Minuten; sofort: `systemctl reset-failed powermanagement-update.service powermanagement-update.path && systemctl restart powermanagement-update.path`. Steht in `storage/update/ist/helfer` die Zeile `pfad soll_ungueltig`, ist `storage/update/soll` kein gewöhnlicher Ordner – als www-data entfernen, dann legt `update-debian.sh --nur-abgleichen` ihn neu an. |
+| „Der Auftrag wird nicht übernommen“ | Die Pfad-Einheit hat nach zu vielen Starts aufgegeben (`start-limit-hit`) oder läuft nicht. Der Zeitgeber heilt das nach spätestens 15 Minuten; sofort: `systemctl reset-failed powermanagement-update.service powermanagement-update.path && systemctl restart powermanagement-update.path`. Steht in `storage/update/ist/helfer` die Zeile `pfad soll_ungueltig`, ist `storage/update/soll` kein gewöhnlicher Ordner, oder www-data darf darin nichts wegräumen (`ls -ld /opt/powermanagement/storage/update/soll` – gehört www-data, `drwxr-x---`); dann heilt der Update-Dienst die Pfad-Einheit nicht, sonst startete sie gleich wieder 20-mal. `update-debian.sh --nur-abgleichen` setzt Besitz und Rechte in `storage/` zurück und legt einen fehlenden Ordner neu an; einen Verweis oder eine Datei an seiner Stelle vorher als www-data entfernen. |
 | „Der Update-Dienst meldet sich seit … nicht“ | Der Zeitgeber weckt ihn sonst alle 15 Minuten: `systemctl status powermanagement-update.path powermanagement-update.timer`; ausgeschaltet? `systemctl enable --now powermanagement-update.path powermanagement-update.timer`. |
 | „Der Zeitplan läuft nicht“, `powermanagement-update-zeitplan.service` scheitert mit `status=226/NAMESPACE` | Nesting ist am Container aus – `pct set <id> --features nesting=1`, Container neu starten. Ohne nesting gehen Updates aus der Oberfläche und von der Konsole trotzdem, nur die Automatik nicht. Gemeldet wird nach 15 Minuten ohne Lebenszeichen; lief der Zeitplan noch nie, zählt die Zeit ab der Einrichtung. |
-| „Automatische Updates werden seit … verschoben“ | Der Grund steht auf der Seite. Meist ein Aufbau, der nie beendet wurde (Standort → Aufbau → beenden), sonst eine vergessene Pause, lokale Änderungen oder `AUTOMATIK=nein`. |
+| „Automatische Updates werden seit … verschoben“ | Der Grund steht auf der Seite. Meist ein Aufbau, der nie beendet wurde (Standort → Aufbau → beenden), sonst lokale Änderungen oder `AUTOMATIK=nein`. Eine eingestellte Pause zählt nicht. |
 | „Zu kurz nach dem letzten Update“ | Zwischen zwei Updates liegen mindestens zwei Minuten, automatisch 20 Stunden – kurz warten. |
 | „Suche fehlgeschlagen“ | `kein_zugang`: Token in `/etc/powermanagement/git.conf` abgelaufen oder ohne Leserecht (Abschnitt 3). `abruf`: GitHub nicht erreichbar – auf Veranstaltungen oft ohne Netz; es wird später wieder gesucht. Genaueres: `journalctl -a -u powermanagement-update -I`. |
 | „Ein früheres Update wurde unterbrochen“ (`update-debian.sh` oder `install-debian.sh` brechen ab, die Seite sperrt Updates) | Die Marke `/var/lib/powermanagement/update/offen` steht – Strom weg oder `kill -9` mitten im Update. Der Update-Dienst rollt zwei Minuten nach dem Start selbst zurück; von Hand: `/opt/powermanagement/deploy/update-debian.sh --wiederaufnehmen`, dann den Aufruf wiederholen. |

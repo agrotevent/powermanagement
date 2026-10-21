@@ -589,7 +589,13 @@ final class UpdateAutomatik
         $neu = self::letzterSetzen($jetzt, $tag, 'verschoben', $grund, $ziel, $text);
         $l = self::letzter();
         if ($l !== null && $l['tag'] === $tag && $l['ergebnis'] === 'verschoben') {
-            if (self::verschobenSeit() === null) {
+            // Eine gewollte Pause ist kein Hindernis: sie beginnt die Zählung
+            // „seit 14 Tagen verschoben“ nicht – und setzt sie zurück.
+            if ($grund === 'pausiert') {
+                if (self::verschobenSeit() !== null) {
+                    Settings::forget(self::VERSCHOBEN);
+                }
+            } elseif (self::verschobenSeit() === null) {
                 Settings::put(self::VERSCHOBEN, Zeit::iso($jetzt));
             }
             if (!in_array($grund, $l['gemeldet'], true)) {
@@ -638,7 +644,8 @@ final class UpdateAutomatik
      * Läuft der Zeitplan nicht (Modus ≠ aus, seit 15 min kein Lebenszeichen)?
      * Lief er noch nie, zählt die Zeit ab der Einrichtung (storage/update/soll)
      * – ohne Namensräume im LXC (226/NAMESPACE) startet er nie. Während der
-     * Schreibsperre setzt er bewusst aus.
+     * Schreibsperre setzt er bewusst aus; danach zählt die Zeit erst ab dem
+     * Ende des letzten Laufs (sonst meldete jede Sperre über 10 min ihn still).
      *
      * @param array<string,mixed>|null $zustand wie UpdateService::zustand()
      */
@@ -656,14 +663,24 @@ final class UpdateAutomatik
             $soll = @filemtime($pfad);
             $alter = $soll === false ? null : max(0, $jetzt - $soll);
         }
+        $ende = $z['lauf']['ende'] ?? null;
+        if ($alter !== null && is_int($ende) && $ende <= $jetzt) {
+            $alter = min($alter, $jetzt - $ende);
+        }
         return $alter !== null && $alter > self::ZEITPLAN_STILL;
     }
 
-    /** Werden automatische Updates seit 14 Tagen oder länger verschoben? */
+    /**
+     * Werden automatische Updates seit 14 Tagen oder länger verschoben? Eine
+     * gewollte Pause zählt nicht (sie setzt „verschoben seit“ auch nicht).
+     */
     public static function langeVerschoben(?int $jetzt = null): bool
     {
+        $jetzt ??= time();
         $seit = self::verschobenSeit();
-        return $seit !== null && self::einstellungen()['modus'] === 'einspielen' && ($jetzt ?? time()) - $seit >= self::VERSCHOBEN_LANG;
+        $e = self::einstellungen();
+        return $seit !== null && $e['modus'] === 'einspielen' && !($e['pause_bis'] !== null && $e['pause_bis'] > $jetzt)
+            && $jetzt - $seit >= self::VERSCHOBEN_LANG;
     }
 
     /**

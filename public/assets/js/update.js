@@ -40,6 +40,10 @@
     var beendet = false;
     var stoerungSeit = null;
 
+    // Das Protokoll folgt den neuen Zeilen, solange man nicht selbst
+    // hochgescrollt hat – also beim Laden einmal ans Ende.
+    if (protokoll) { protokoll.scrollTop = protokoll.scrollHeight; }
+
     function aktiv(z) { return z === 'angefordert' || z === 'laeuft'; }
 
     function dauer(sekunden) {

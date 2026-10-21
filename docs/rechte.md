@@ -179,12 +179,14 @@ protokolliert; das Audit-Log nennt nur Gerät und Schritt.
 
 ## Update
 
-**System → Update** und die Befehle `bin/power update:*` brauchen das Recht
-„PowerManagement aktualisieren“ (`system.update`). Von sich aus hat es nur
-die Rolle *Administration*; bestehende Rollen bekommen es nicht nachträglich,
-und vergeben kann es nur, wer es selbst hat. Ein Update startet die Dienste
-neu – Messung und Schalten sind für alle Standorte 1–3 Minuten
-unterbrochen.
+**System → Update** braucht das Recht „PowerManagement aktualisieren“
+(`system.update`). Die Befehle `bin/power update:*` prüfen kein Recht –
+maßgeblich ist, wer auf der Konsole als Anwendungsbenutzer arbeiten darf
+(auf einer Installation lehnen sie als root ab, außer `update:stand`). Von
+sich aus hat das Recht nur die Rolle *Administration*; bestehende Rollen
+bekommen es nicht nachträglich, und vergeben kann es nur, wer es selbst hat.
+Ein Update startet die Dienste neu – Messung und Schalten sind für alle
+Standorte 1–3 Minuten unterbrochen.
 
 Das Recht ist bewusst eng: Es erlaubt, nach neuen Ständen zu suchen, einen
 Stand **vorwärts** auf dem ausgecheckten Zweig einzuspielen – genau den

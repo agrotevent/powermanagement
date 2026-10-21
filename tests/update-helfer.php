@@ -625,6 +625,34 @@ try {
     $auftrag('pruefen');
     $helfer(['--update-skript' => $skript]);
     gleich($lauf()['grund'] ?? null, 'abgeschaltet', 'update.conf mit ungültigem Wert: gilt als nein');
+    // Was nicht genau so aussieht, schaltet beides ab – nie still übergangen.
+    foreach ([
+        'kleingeschrieben'      => "oberflaeche=nein\n",
+        'Umlaut'                => "OBERFLÄCHE=nein\n",
+        'export davor'          => "export OBERFLAECHE=nein\n",
+        'Doppelpunkt'           => "OBERFLAECHE: nein\n",
+        'hinter 4 KiB'          => str_repeat("# Kommentar, der lang ist\n", 200) . "OBERFLAECHE=nein\n",
+        'nein, dann ja'         => "OBERFLAECHE=nein\nOBERFLAECHE=ja\n",
+    ] as $name => $inhalt) {
+        file_put_contents($conf, $inhalt);
+        $skript = $fall(['ergebnis' => 'geprueft']);
+        $T += 61;
+        $auftrag('pruefen');
+        $r = $helfer(['--update-skript' => $skript]);
+        gleich([$lauf()['ergebnis'] ?? null, $lauf()['grund'] ?? null, $aufgerufen($skript)], ['abgelehnt', 'abgeschaltet', false],
+            "update.conf ({$name}): abgelehnt, nicht ausgeführt");
+        gleich(lesen($d['ist'] . '/helfer')['oberflaeche'] ?? null, 'nein', "update.conf ({$name}): ist/helfer oberflaeche nein");
+    }
+    gleich(lesen($d['ist'] . '/helfer')['automatik'] ?? null, 'ja', 'update.conf: „nein, dann ja“ betrifft nur OBERFLAECHE');
+    file_put_contents($conf, "export OBERFLAECHE=ja\n");
+    $helfer(['--update-skript' => $nie]);
+    gleich(lesen($d['ist'] . '/helfer')['automatik'] ?? null, 'nein', 'update.conf mit unbekannter Zeile: auch AUTOMATIK nein');
+    file_put_contents($conf, "# Kommentar\n\n  OBERFLAECHE = ja  \r\nAUTOMATIK=\"ja\"\n");
+    $skript = $fall(['ergebnis' => 'geprueft']);
+    $T += 61;
+    $auftrag('pruefen');
+    $helfer(['--update-skript' => $skript]);
+    gleich([$lauf()['ergebnis'] ?? null, $aufgerufen($skript)], ['geprueft', true], 'update.conf mit Kommentar, Leerzeile, CRLF und „ja“: erlaubt');
     unlink($conf);
 
     // Abstände und gescheiterte Stände
@@ -697,6 +725,62 @@ try {
     rename($d['soll'] . '.weg', $d['soll']);
     $helfer(['--update-skript' => $nie]);
     gleich(lesen($d['ist'] . '/helfer')['pfad'] ?? null, 'ok', 'soll/ wieder da: pfad ok');
+
+    // ist/wartung wird mit Zeitlimit gelesen: eine FIFO, die zwischen Prüfung
+    // und Öffnen untergeschoben wird, hält den Helfer nicht auf. Nachgestellt
+    // mit einem head, das bei ist/wartung nie endet.
+    $stubs = $basis . '/stubs';
+    mkdir($stubs, 0755);
+    $echtesHead = trim((string) shell_exec('command -v head'));
+    file_put_contents($stubs . '/head', "#!/bin/sh\nfor a in \"\$@\"; do case \"\$a\" in */wartung) exec sleep 300 ;; esac; done\nexec {$echtesHead} \"\$@\"\n");
+    chmod($stubs . '/head', 0755);
+    $mitStubs = ['PATH' => $stubs . ':' . getenv('PATH')];
+    file_put_contents($d['ist'] . '/wartung', "# powermanagement update-wartung 1\nseit " . ($T - 3600) . "\nkennung -\n");
+    $r = ausfuehren(['timeout', '-s', 'KILL', '60', ...$optionen(['--update-skript' => $nie])], null, $mitStubs);
+    pruefe($r['code'] === 0 && $r['dauer'] < 30, 'ist/wartung hängt beim Lesen: der Helfer endet trotzdem (' . round($r['dauer'], 1) . ' s, Exit ' . $r['code'] . ')');
+    $helfer(['--update-skript' => $nie]);
+    pruefe(!file_exists($d['ist'] . '/wartung'), 'ist/wartung ohne Marke, älter als 10 min: aufgehoben');
+
+    // Ein Sammler, den ein abgebrochenes Update angehalten zurückließ (Notiz
+    // ohne Marke, update.lock frei), startet der Helfer wieder – mit
+    // systemctl-Attrappe statt --ohne-systemd.
+    $systemctlLog = $basis . '/systemctl.log';
+    file_put_contents($stubs . '/systemctl', "#!/bin/sh\necho \"\$*\" >> " . escapeshellarg($systemctlLog) . "\n"
+        . "[ \"\$1\" = is-failed ] && exit \"\${PM_PRUEFUNG_FAILED:-1}\"\nexit 0\n");
+    chmod($stubs . '/systemctl', 0755);
+    $mitSystemd = static fn (array $umgebung = []): array => ausfuehren($optionen(['--update-skript' => $nie, '--ohne-systemd' => false]), null,
+        $umgebung + $mitStubs);
+    $notiz = $d['zustand'] . '/sammler-angehalten';
+    touch($notiz);
+    $halter = $sperreHalten($usperre);
+    @unlink($systemctlLog);
+    $mitSystemd();
+    pruefe(is_file($notiz) && !str_contains((string) @file_get_contents($systemctlLog), 'start powermanagement-sammler'),
+        'Sammler angehalten, update.lock belegt: nichts gestartet, Notiz bleibt');
+    $sperreLoesen($halter);
+    @unlink($systemctlLog);
+    $r = $mitSystemd();
+    pruefe(!is_file($notiz) && str_contains((string) @file_get_contents($systemctlLog), 'start powermanagement-sammler.service'),
+        'Sammler angehalten, update.lock frei, keine Marke: gestartet, Notiz weg');
+    pruefe(str_contains($r['aus'], 'wieder gestartet'), 'Sammler angehalten: der Helfer sagt es');
+    // Steht die Marke, startet ihn das Zurückrollen – nicht der Helfer davor.
+    touch($notiz);
+    file_put_contents($d['zustand'] . '/offen', "# powermanagement update-offen 1\nphase stufe1\nzeit {$T}\n");
+    @unlink($systemctlLog);
+    ausfuehren($optionen(['--update-skript' => $nie, '--ohne-systemd' => false, '--nachlauf']), null, $mitStubs);
+    pruefe(is_file($notiz) && !str_contains((string) @file_get_contents($systemctlLog), 'start powermanagement-sammler'),
+        'Sammler angehalten, Marke steht: der Nachlauf startet ihn nicht');
+    unlink($d['zustand'] . '/offen');
+    @unlink($d['zustand'] . '/wiederaufnahme');
+    ausfuehren($optionen(['--update-skript' => $nie, '--ohne-systemd' => false, '--nachlauf']), null, $mitStubs);
+    pruefe(!is_file($notiz), 'Sammler angehalten, keine Marke: auch der Nachlauf startet ihn');
+    // Die Pfad-Einheit wird geheilt, wenn soll/ in Ordnung ist – nie im Nachlauf.
+    @unlink($systemctlLog);
+    ausfuehren($optionen(['--update-skript' => $nie, '--ohne-systemd' => false, '--nachlauf']), null, ['PM_PRUEFUNG_FAILED' => '0'] + $mitStubs);
+    pruefe(!str_contains((string) @file_get_contents($systemctlLog), 'restart powermanagement-update.path'), 'Pfad-Einheit ausgefallen: der Nachlauf heilt nicht');
+    $r = $mitSystemd(['PM_PRUEFUNG_FAILED' => '0']);
+    pruefe(str_contains((string) @file_get_contents($systemctlLog), 'restart powermanagement-update.path') && str_contains($r['aus'], 'wieder gestartet'),
+        'Pfad-Einheit ausgefallen, soll/ in Ordnung: der Lauf heilt sie');
 
     // --------------------------------------------- 8 · Sperre
     $halter = $sperreHalten($sperre);
@@ -1136,6 +1220,27 @@ try {
         $app($nie);
         gleich(lesen($ist2 . '/lauf')['grund'] ?? null, 'keine_datei', 'setpriv: Datei, die der App-Benutzer nicht lesen darf → keine_datei');
         pruefe(!file_exists($soll2 . '/auftrag'), 'setpriv: auch sie ist danach weg');
+        // soll/, in dem der App-Benutzer nichts wegräumen kann: der Auftrag bliebe
+        // liegen, PathExists sähe ihn weiter – dann nie die Pfad-Einheit heilen.
+        $appMitSystemd = static fn (): array => ausfuehren($optionen(['--app-benutzer' => 'nobody', '--soll' => $soll2, '--ist' => $ist2,
+            '--update-skript' => $nie, '--ohne-systemd' => false]), null, ['PM_PRUEFUNG_FAILED' => '0'] + $mitStubs);
+        foreach (['555' => 0555, '000' => 0000] as $name => $modus) {
+            $T += 61;
+            $schreibenAlsApp($auftragText('pruefen')[1]);
+            chmod($soll2, $modus);
+            @unlink($systemctlLog);
+            $appMitSystemd();
+            $hApp = lesen($ist2 . '/helfer');
+            gleich($hApp['pfad'] ?? null, 'soll_ungueltig', "setpriv: soll/ {$name} → pfad soll_ungueltig");
+            pruefe(!str_contains((string) @file_get_contents($systemctlLog), 'restart powermanagement-update.path'),
+                "setpriv: soll/ {$name} → Pfad-Einheit nicht geheilt");
+            chmod($soll2, 0750);
+            @unlink($soll2 . '/auftrag');
+        }
+        @unlink($systemctlLog);
+        $appMitSystemd();
+        gleich(lesen($ist2 . '/helfer')['pfad'] ?? null, 'repariert', 'setpriv: soll/ wieder beschreibbar → pfad repariert');
+        pruefe(str_contains((string) @file_get_contents($systemctlLog), 'restart powermanagement-update.path'), 'setpriv: soll/ in Ordnung → Pfad-Einheit geheilt');
         clearstatcache();
         gleich(fileowner($d['zustand'] . '/lauf'), 0, 'setpriv: Zustand bleibt root');
     }

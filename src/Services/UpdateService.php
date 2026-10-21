@@ -419,6 +419,27 @@ final class UpdateService
         return ['kennung' => $kennung, 'aktion' => $aktion, 'zeit' => $zeit, 'alter' => max(0, $jetzt - (int) ($info['mtime'] ?? $jetzt))];
     }
 
+    /**
+     * Der zuletzt gestellte Auftrag (storage/update/.angefordert, nur von
+     * anfordern() geschrieben) – solange er höchstens HAENGT alt ist.
+     *
+     * @return array{kennung:string, zeit:int}|null
+     */
+    private static function angefordert(int $jetzt): ?array
+    {
+        $pfad = self::verzeichnis() . '/.angefordert';
+        clearstatcache(true, $pfad);
+        if (is_link($pfad) || !@is_file($pfad)) {
+            return null;
+        }
+        $inhalt = (string) @file_get_contents($pfad, false, null, 0, 128);
+        if (preg_match('/^([0-9a-f]{32}) ([0-9]{1,12})\n?$/', $inhalt, $m) !== 1) {
+            return null;
+        }
+        $alter = $jetzt - (int) $m[2];
+        return $alter >= -self::HAENGT && $alter <= self::HAENGT ? ['kennung' => $m[1], 'zeit' => (int) $m[2]] : null;
+    }
+
     // ================================================================ Zustand
 
     /**
@@ -447,12 +468,12 @@ final class UpdateService
         }
         $lauf = self::lauf();
         $auftrag = self::auftrag($jetzt);
+        $angefordert = self::angefordert($jetzt);
         $z['helfer'] = $helfer;
         $z['lauf'] = $lauf;
         $z['stand'] = self::stand();
         $z['auftrag'] = $auftrag;
         $z['helfer_alter'] = max(0, $jetzt - $helfer['zeit']);
-        $z['still'] = $z['helfer_alter'] > self::STILL;
         $z['abgeschaltet'] = !$helfer['oberflaeche'];
         $z['automatik_root'] = !$helfer['automatik'];
         $z['offen'] = $helfer['offen'];
@@ -460,12 +481,22 @@ final class UpdateService
 
         $pulsAlter = $lauf !== null ? max(0, $jetzt - (int) ($lauf['puls'] ?? $lauf['beginn'] ?? 0)) : null;
         $z['puls_alter'] = $pulsAlter;
+        $pulst = $lauf !== null && $lauf['zustand'] === 'laeuft' && $pulsAlter <= self::PULS_GRENZE;
+        // Das Lebenszeichen schreibt der Helfer zu Beginn und am Ende eines
+        // Laufs – ein Update über 45 min pulst dazwischen nur im Lauf.
+        $z['still'] = $z['helfer_alter'] > self::STILL && !$pulst;
         if ($lauf !== null && $lauf['zustand'] === 'laeuft' && $pulsAlter <= self::VERSCHWUNDEN) {
             $z['zustand'] = 'laeuft';
             $z['keine_rueckmeldung'] = $pulsAlter > self::PULS_GRENZE;
         } elseif ($auftrag !== null && ($lauf === null || $auftrag['kennung'] === null || $lauf['kennung'] !== $auftrag['kennung'])) {
             $z['zustand'] = 'angefordert';
             $z['haengt'] = $auftrag['alter'] > self::HAENGT;
+        } elseif ($angefordert !== null && ($lauf === null
+            || ($lauf['kennung'] !== $angefordert['kennung'] && (int) ($lauf['beginn'] ?? 0) <= $angefordert['zeit']))) {
+            // Der Helfer hat den Auftrag schon weggeräumt, den Lauf dazu aber
+            // noch nicht geschrieben (er prüft ihn gerade): ist/lauf zeigt
+            // noch den vorigen Lauf – der ist nicht das Ergebnis.
+            $z['zustand'] = 'angefordert';
         } elseif ($lauf !== null && $lauf['zustand'] === 'laeuft') {
             // Seit einer halben Stunde kein Puls: der Helfer ist weg. Der
             // Zeitgeber rollt beim nächsten Wecken zurück.
@@ -481,6 +512,11 @@ final class UpdateService
      * Läuft das als root, während storage/update (bzw. storage/) jemand
      * anderem gehört? Dann schreibt PHP weder Aufträge noch ins Audit –
      * Dateien und SQLite-Nebendateien (-wal, -shm) gehörten sonst root.
+     *
+     * lstat statt fileowner: ein Verweis zählt immer als fremd. Ersetzte
+     * www-data storage/update durch einen Verweis auf einen Ordner von root
+     * (etwa /tmp), gölte root sonst nicht mehr als fremd. Ebenso der
+     * Elternordner (storage/).
      */
     public static function fremderRoot(): bool
     {
@@ -488,7 +524,17 @@ final class UpdateService
             return false;
         }
         $dir = self::verzeichnis();
-        return @fileowner(is_dir($dir) ? $dir : dirname($dir)) !== 0;
+        clearstatcache();
+        foreach ([$dir, dirname($dir)] as $i => $pfad) {
+            $info = @lstat($pfad);
+            if ($info === false && $i === 0) {
+                continue;   // storage/update fehlt: dann zählt storage/
+            }
+            if ($info === false || is_link($pfad) || (int) $info['uid'] !== 0) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /** Läuft ein Update (oder wartet ein Auftrag) – dann fragt die Seite ab. */
@@ -762,6 +808,16 @@ final class UpdateService
             if (@file_put_contents($temp, $text) !== strlen($text) || !@chmod($temp, 0640) || !@rename($temp, $dir . '/soll/auftrag')) {
                 @unlink($temp);
                 return ['ok' => false, 'message' => 'Der Auftrag ließ sich nicht ablegen.'];
+            }
+            // Für zustand(): der Helfer räumt soll/auftrag weg, bevor er den
+            // Lauf dazu schreibt – bis dahin gilt der Auftrag als angefordert.
+            $merk = @tempnam($dir, '.angefordert-');
+            if ($merk !== false && dirname($merk) === $dir && @file_put_contents($merk, $kennung . ' ' . time() . "\n") !== false
+                && @chmod($merk, 0640) && @rename($merk, $dir . '/.angefordert')) {
+                $merk = false;
+            }
+            if ($merk !== false) {
+                @unlink($merk);
             }
             if ($aktion === 'pruefen') {
                 @touch($dir . '/.letzter');

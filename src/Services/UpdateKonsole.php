@@ -65,7 +65,12 @@ final class UpdateKonsole
     private static function appBenutzer(): string
     {
         $dir = UpdateService::verzeichnis();
-        $uid = @fileowner(is_dir($dir) ? $dir : dirname($dir));
+        clearstatcache();
+        $info = @lstat($dir);
+        if ($info === false || is_link($dir)) {
+            $info = @lstat(dirname($dir));
+        }
+        $uid = $info !== false ? (int) $info['uid'] : false;
         if ($uid !== false && $uid !== 0 && function_exists('posix_getpwuid')) {
             $name = (string) (posix_getpwuid($uid)['name'] ?? '');
             if (preg_match('/^[A-Za-z0-9_][A-Za-z0-9_.-]*$/', $name) === 1) {

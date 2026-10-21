@@ -9,16 +9,18 @@
 #
 #   1. Code root-eigen? (Helfer, deploy/, bin/power, .git, .git/config, .git/hooks)
 #   2. eigene Sperre (fd 8) – nie update.lock, die hält deploy/update-debian.sh
-#   3. /etc/powermanagement/update.conf lesen, Pfad-Einheit heilen, Lebenszeichen
+#   3. /etc/powermanagement/update.conf lesen, soll/ prüfen, Lebenszeichen
 #   4. ein unterbrochenes Update (Marke „offen“, update.lock frei) zurückrollen –
-#      mit der gesicherten alten Fassung, höchstens zweimal
+#      mit der gesicherten alten Fassung, höchstens zweimal; einen Sammler, den
+#      ein abgebrochenes Update angehalten zurückließ, wieder starten
 #   5. Auftrag als App-Benutzer übernehmen (umbenennen, ≤ 1025 Byte lesen,
 #      löschen) und streng prüfen; abgelehnt → storage/update/ist/lauf
 #   6. deploy/update-debian.sh [--pruefen | --bis=<commit>] mit selbst gebautem
 #      argv und env -i; Ausgabe in eine root-Datei (nie in ein Rohr) und
 #      bereinigt ins Journal; TERM/INT/HUP gehen als TERM an das Update
 #   7. Stand aus git (nur lesend), Lauf, Protokoll und Verlauf als App-Benutzer
-#      nach storage/update/ist/
+#      nach storage/update/ist/; zuletzt die Pfad-Einheit heilen – nur, wenn
+#      sich der Auftrag wegräumen ließ
 #
 # Mit --nachlauf (ExecStopPost) trägt er nach, wenn der Helfer selbst starb
 # oder das Zeitlimit des Dienstes griff. powermanagement-update.timer weckt ihn
@@ -353,10 +355,13 @@ zustand_anlegen() {
 
 # ------------------------------------------------------------- update.conf
 # OBERFLAECHE=ja|nein, AUTOMATIK=ja|nein – gelesen, nie per source. Was sich
-# nicht lesen lässt oder einen anderen Wert trägt, schaltet ab (lieber kein
-# Update als eines, das der Betreiber abgeschaltet hatte).
+# nicht lesen lässt, einen anderen Wert trägt oder sonst nicht genau so
+# aussieht, schaltet ab (lieber kein Update als eines, das der Betreiber
+# abgeschaltet hatte): eine unbekannte Zeile („oberflaeche=nein“,
+# „export OBERFLAECHE=nein“, „OBERFLAECHE: nein“) und eine Datei über 4 KiB
+# schalten beides ab. Ein „nein“ bleibt, auch wenn später „ja“ folgt.
 conf_lesen() {
-    local inhalt zeile
+    local inhalt zeile groesse n=0 unbekannt=""
     OBERFLAECHE="ja"
     AUTOMATIK="ja"
     [[ -e "$UPDATE_CONF" || -L "$UPDATE_CONF" ]] || return 0
@@ -367,33 +372,57 @@ conf_lesen() {
         AUTOMATIK="nein"
         return 0
     fi
+    groesse="$(stat -c %s -- "$UPDATE_CONF" 2>/dev/null || true)"
+    if [[ ! "$groesse" =~ ^[0-9]+$ ]] || (( groesse > 4096 )); then
+        echo "update-helfer.sh: $UPDATE_CONF ist größer als 4 KiB – Updates aus der Oberfläche bleiben abgeschaltet." >&2
+        OBERFLAECHE="nein"
+        AUTOMATIK="nein"
+        return 0
+    fi
     inhalt="$(head -c 4096 -- "$UPDATE_CONF" 2>/dev/null || true)"
     while IFS= read -r zeile || [[ -n "$zeile" ]]; do
+        n=$((n + 1))
         zeile="${zeile%$'\r'}"
         zeile="${zeile#"${zeile%%[![:space:]]*}"}"
         zeile="${zeile%"${zeile##*[![:space:]]}"}"
         [[ -z "$zeile" || "$zeile" == \#* ]] && continue
         if [[ "$zeile" =~ ^(OBERFLAECHE|AUTOMATIK)[[:space:]]*=[[:space:]]*\"?(ja|nein)\"?$ ]]; then
-            printf -v "${BASH_REMATCH[1]}" '%s' "${BASH_REMATCH[2]}"
+            if [[ "${BASH_REMATCH[2]}" == "nein" ]]; then
+                printf -v "${BASH_REMATCH[1]}" '%s' "nein"
+            fi
         elif [[ "$zeile" =~ ^(OBERFLAECHE|AUTOMATIK)[[:space:]]*= ]]; then
             echo "update-helfer.sh: $UPDATE_CONF: ${BASH_REMATCH[1]} erwartet ja oder nein – gilt als nein." >&2
             printf -v "${BASH_REMATCH[1]}" '%s' "nein"
+        else
+            unbekannt="${unbekannt:-$n}"
         fi
     done <<< "$inhalt"
+    if [[ -n "$unbekannt" ]]; then
+        echo "update-helfer.sh: $UPDATE_CONF: Zeile $unbekannt ist weder OBERFLAECHE=ja|nein noch AUTOMATIK=ja|nein – Updates aus der Oberfläche bleiben abgeschaltet." >&2
+        OBERFLAECHE="nein"
+        AUTOMATIK="nein"
+    fi
     return 0
 }
 
 # ------------------------------------------------------------- Pfad-Einheit, Lebenszeichen
-# Ist soll/ ein echter Ordner (als App-Benutzer gesehen)? Sonst wird die
-# Pfad-Einheit nicht geheilt – ein böswilliger Verweis schaukelte sonst alle
-# 15 Minuten 20 Starts auf.
-pfad_heilen() {
+# Ist soll/ ein echter Ordner, in dem der App-Benutzer einen Auftrag auch
+# wegräumen kann (schreiben und betreten)? Sonst gilt „soll_ungueltig“, und
+# die Pfad-Einheit wird nicht geheilt – ein böswilliger Verweis oder ein
+# Ordner ohne Rechte schaukelte sonst alle 15 Minuten 20 Starts auf (der
+# Auftrag bliebe liegen, PathExists sähe ihn als root weiter).
+pfad_pruefen() {
     PFAD_ZUSTAND="ok"
-    if ! als_app /bin/sh -c '[ -d "$1" ] && [ ! -L "$1" ]' sh "$SOLL" 2>/dev/null; then
+    if ! als_app /bin/sh -c '[ -d "$1" ] && [ ! -L "$1" ] && [ -w "$1" ] && [ -x "$1" ]' sh "$SOLL" 2>/dev/null; then
         PFAD_ZUSTAND="soll_ungueltig"
-        return 0
     fi
-    [[ "$OHNE_SYSTEMD" == "nein" ]] || return 0
+    return 0
+}
+
+# Erst nach der Übernahme: konnte dieser Lauf den Auftrag nicht wegräumen
+# (auftrag_uebernehmen setzt dann „soll_ungueltig“), bleibt die Pfad-Einheit aus.
+pfad_heilen() {
+    [[ "$PFAD_ZUSTAND" == "ok" && "$OHNE_SYSTEMD" == "nein" ]] || return 0
     if systemctl is-failed --quiet powermanagement-update.path 2>/dev/null; then
         systemctl reset-failed powermanagement-update.path powermanagement-update.service >/dev/null 2>&1 || true
         if systemctl restart powermanagement-update.path >/dev/null 2>&1; then
@@ -646,10 +675,12 @@ auftrag_uebernehmen() {
         exit $rc' sh "$SOLL" "$$" "$((AUFTRAG_MAX + 1))" > "$ARBEIT/auftrag" 2>/dev/null || rc=$?
     case "$rc" in
         0) return 0 ;;
-        # soll/ fehlt oder ist nicht zu betreten: dann liegt dort auch kein
-        # Auftrag (ist/helfer meldet „pfad soll_ungueltig“).
-        3|6) return 3 ;;
-        4) UEBERNAHME_GRUND="soll_ungueltig" ;;
+        3) return 3 ;;
+        # soll/ fehlt oder ist nicht zu betreten: lesen lässt sich dort nichts
+        # (ist/helfer meldet „pfad soll_ungueltig“, die Pfad-Einheit bleibt aus).
+        6) PFAD_ZUSTAND="soll_ungueltig"; return 3 ;;
+        # Der Auftrag lässt sich nicht wegräumen – er bliebe liegen.
+        4) PFAD_ZUSTAND="soll_ungueltig"; UEBERNAHME_GRUND="soll_ungueltig" ;;
         *) UEBERNAHME_GRUND="keine_datei" ;;
     esac
     : > "$ARBEIT/auftrag"
@@ -836,7 +867,8 @@ verlauf_spiegeln() {
 wartung_verwaist_raeumen() {
     local inhalt seit=""
     [[ ! -e "$ZUSTAND/offen" ]] || return 0
-    inhalt="$(als_app /bin/sh -c '[ -f "$1" ] && [ ! -L "$1" ] && exec head -c 512 -- "$1"' sh "$IST/wartung" 2>/dev/null || true)"
+    # timeout: zwischen Prüfung und Öffnen ließe sich eine FIFO unterschieben.
+    inhalt="$(als_app /bin/sh -c '[ -f "$1" ] && [ ! -L "$1" ] && exec timeout -s KILL 10 head -c 512 -- "$1"' sh "$IST/wartung" 2>/dev/null || true)"
     [[ -n "$inhalt" ]] || return 0
     update_sperre_frei || return 0
     if [[ "$inhalt" =~ (^|$'\n')seit\ ([0-9]{1,12})($'\n'|$) ]]; then
@@ -846,6 +878,23 @@ wartung_verwaist_raeumen() {
     if als_app rm -f -- "$IST/wartung" 2>/dev/null; then
         echo "update-helfer.sh: verwaiste Schreibsperre der Oberfläche aufgehoben."
     fi
+    return 0
+}
+
+# Stufe 1 hält den Sammler vor der Sicherung an und vermerkt das in
+# „sammler-angehalten“ (root). Starb das Update, bevor es die Marke schrieb
+# (SIGKILL, OOM), startet ihn sonst niemand wieder – Restart=always greift
+# nach einem ausdrücklichen stop nicht. Nur bei freier update.lock und ohne
+# Marke (sonst startet ihn das Zurückrollen).
+sammler_nachholen() {
+    [[ -e "$ZUSTAND/sammler-angehalten" && ! -e "$ZUSTAND/offen" && "$OHNE_SYSTEMD" == "nein" ]] || return 0
+    update_sperre_frei || return 0
+    if ! systemctl start powermanagement-sammler.service >/dev/null 2>&1; then
+        echo "update-helfer.sh: der Sammler (seit einem abgebrochenen Update angehalten) ließ sich nicht starten." >&2
+        return 0
+    fi
+    rm -f -- "$ZUSTAND/sammler-angehalten"
+    echo "update-helfer.sh: der Sammler war seit einem abgebrochenen Update angehalten – wieder gestartet."
     return 0
 }
 
@@ -972,6 +1021,11 @@ kind() {
     ( exec 8>&-; tail --pid="$KIND" -s 0.5 -n +1 -F -- "$LOG" 2>/dev/null | bereinigen_strom ) &
     mitleser=$!
     trap 'ABGEBROCHEN=ja; kill -s TERM "$KIND" 2>/dev/null' TERM INT HUP
+    # Kam das Signal zwischen der Prüfung in kind_lauf und diesem Trap, hat
+    # es nur ABGEBROCHEN gesetzt – dann jetzt weiterreichen.
+    if [[ "$ABGEBROCHEN" == "ja" ]]; then
+        kill -s TERM "$KIND" 2>/dev/null
+    fi
     # Alle 0,5 s nachsehen, alle 2 s ein Puls, alle 4 s das Protokoll.
     while kill -0 "$KIND" 2>/dev/null; do
         sleep 0.5 8>&- &
@@ -1273,20 +1327,23 @@ main() {
     zustand_anlegen
     if [[ "$MODUS" == "nachlauf" ]]; then
         nachlauf
+        sammler_nachholen
         conf_lesen
-        pfad_heilen
+        # Geheilt wird nur im Lauf selbst (nach der Übernahme), nie hier.
+        pfad_pruefen
         lebenszeichen
         return 0
     fi
 
     arbeit_reste_raeumen
     conf_lesen
-    pfad_heilen
+    pfad_pruefen
     lebenszeichen
     if [[ -e "$ZUSTAND/offen" ]] && update_sperre_frei; then
         wiederaufnehmen
     fi
     wartung_verwaist_raeumen
+    sammler_nachholen
     verlauf_spiegeln
 
     auftrag_uebernehmen || rc=$?
@@ -1295,6 +1352,7 @@ main() {
         3)  # kein Auftrag (Zeitgeber, nach einem Lauf)
             stand_schreiben
             protokolle_aufraeumen
+            pfad_heilen
             lebenszeichen
             return 0 ;;
         *)
@@ -1302,6 +1360,7 @@ main() {
             echo "update-helfer.sh: Auftrag abgelehnt ($UEBERNAHME_GRUND)."
             lauf_abgelehnt "$UEBERNAHME_GRUND"
             stand_schreiben
+            pfad_heilen
             lebenszeichen
             return 0 ;;
     esac
@@ -1310,6 +1369,7 @@ main() {
     if ! auftrag_pruefen; then
         lauf_abgelehnt "$GRUND"
         stand_schreiben
+        pfad_heilen
         lebenszeichen
         return 0
     fi
@@ -1333,6 +1393,7 @@ main() {
         wiederaufnehmen
     fi
     protokolle_aufraeumen
+    pfad_heilen
     lebenszeichen
     return 0
 }

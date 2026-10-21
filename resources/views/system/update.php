@@ -280,7 +280,7 @@ $heute = (new DateTimeImmutable('now', Zeit::zone()));
 // Steht AUTOMATIK=nein in update.conf, ist „einspielen“ gesperrt – außer es ist schon gewählt (sonst fehlte der Modus beim Speichern).
 $einspielenAus = $zustand['automatik_root'] && $ae['modus'] !== 'einspielen';
 $modi = [
-    'aus'        => ['Aus', 'Nichts automatisch. Gesucht wird nur, wenn Sie auf „Jetzt suchen“ tippen.'],
+    'aus'        => ['Aus', 'Nichts automatisch. Gesucht wird nur mit „Jetzt suchen“.'],
     'suchen'     => ['Nur suchen und anzeigen', 'Etwa alle sechs Stunden nachsehen; ein Abzeichen im Menü zeigt neue Stände. Eingespielt wird nur von Hand.'],
     'einspielen' => ['Automatisch einspielen', 'Im Zeitfenster unten von selbst aktualisieren – mit Sicherung und Zurückrollen wie von Hand.'],
 ];
@@ -416,7 +416,8 @@ $letzterAuto = $automatik['letzter'];
             . $wurzel . "/deploy/update-debian.sh --flows-ersetzen\njournalctl -a -f -u pm-update") ?></pre>
         <p>Ein unterbrochenes Update (Strom weg) rollt der Update-Dienst zwei Minuten nach dem Start selbst zurück – von Hand:</p>
         <pre class="update-befehl mono"><?= View::e("cat /var/lib/powermanagement/update/offen\n" . $wurzel . '/deploy/update-debian.sh --wiederaufnehmen') ?></pre>
-        <p>Updates aus der Oberfläche ganz abschalten – oder nur das automatische Einspielen:</p>
+        <p>Updates aus der Oberfläche ganz abschalten – oder nur das automatische Einspielen (nur genau diese Zeilen; jede andere Zeile in
+            der Datei schaltet beides ab):</p>
         <pre class="update-befehl mono"><?= View::e("printf 'OBERFLAECHE=nein\\n' > /etc/powermanagement/update.conf   # entweder: ganz\n"
             . "printf 'AUTOMATIK=nein\\n'   > /etc/powermanagement/update.conf   # oder: nur das Einspielen\n"
             . 'rm /etc/powermanagement/update.conf                              # wieder an') ?></pre>
