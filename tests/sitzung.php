@@ -966,7 +966,69 @@ if ($geprueft > 0) {
     // Entsperren mit dem Kennwort des Prüfers – danach geht es weiter wie zuvor.
     $r = holen($basis . $kunde . '/beenden', ['_token' => $token, 'kennwort' => $neuesKennwort]);
     gleich([$r['status'], parse_url($r['ziel'], PHP_URL_PATH)], [302, '/berichte/' . $geprueft], 'Kundenmodus: mit dem Kennwort entsperrt');
-    gleich(holen($basis . '/dashboard')['status'], 200, 'Kundenmodus: danach wieder das Dashboard');
+    $seite = holen($basis . '/dashboard');
+    gleich($seite['status'], 200, 'Kundenmodus: danach wieder das Dashboard');
+
+    // Nach dem Entsperren gilt ein neues Token (Csrf::erneuern()).
+    $tokenAus = static fn (string $text): string => preg_match('/name="_token" value="([^"]+)"/', $text, $t) === 1 ? $t[1] : '';
+    $token = $tokenAus($seite['text']);
+    $entsperren = static function (string $wofuer) use ($basis, $kunde, $geprueft, $neuesKennwort, $tokenAus, &$token): void {
+        $r = holen($basis . $kunde . '/beenden', ['_token' => $token, 'kennwort' => $neuesKennwort]);
+        gleich([$r['status'], parse_url($r['ziel'], PHP_URL_PATH)], [302, '/berichte/' . $geprueft], 'Kundenmodus: entsperrt (' . $wofuer . ')');
+        $token = $tokenAus(holen($basis . '/profil')['text']);
+    };
+    $starten = static function (string $wofuer, array $langsam) use ($basis, $geprueft, $kunde, &$token): array {
+        $lauf = waehrendLangsam($langsam, $basis . '/berichte/' . $geprueft . '/kundenmodus', ['_token' => $token]);
+        gleich([$lauf['antwort']['status'], parse_url($lauf['antwort']['ziel'], PHP_URL_PATH)], [302, $kunde], 'Kundenmodus gestartet, während ' . $wofuer);
+        return $lauf;
+    };
+    $meldungen = static fn (string $html): array => preg_match_all('#<div class="flash [^"]*">(.*?)</div>#s', $html, $m) ? $m[1] : [];
+
+    // Ein CSV-Download, der auf die InfluxDB wartet, geht an
+    // Controller::view() vorbei. Mit Strg- oder Mittelklick (Hintergrund-
+    // reiter, den kein BroadcastChannel mehr umlenkt) läge die Datei sonst
+    // im Download-Ordner des Tablets.
+    $mp = (int) ($abfrage("SELECT id FROM messpunkte WHERE objekt_id = ? AND gueltig_bis IS NULL AND geraet <> '' ORDER BY kanal LIMIT 1", [$id])[0]['id'] ?? 0);
+    $bereich = (int) ($abfrage('SELECT b.id FROM bereiche b WHERE EXISTS (SELECT 1 FROM bereich_mitglieder m WHERE m.bereich_id = b.id) ORDER BY b.name LIMIT 1')[0]['id'] ?? 0);
+    pruefe($mp > 0 && $bereich > 0, 'Kundenmodus: Messpunkt und Bereich für die CSV-Downloads');
+    foreach (['Messwerte' => '/statistik/csv?mp[]=' . $mp, 'Bereich' => '/bereiche/' . $bereich . '/csv'] as $name => $csvPfad) {
+        $csvVorher = count($abfrage("SELECT id FROM audit_log WHERE action IN ('statistik.csv', 'bereich.csv')"));
+        file_put_contents($verzoegerung, '1.5');
+        $lauf = $starten('der CSV-Download (' . $name . ') auf die InfluxDB wartet', [$basis . $csvPfad]);
+        file_put_contents($verzoegerung, '0');
+        $csv = $lauf['langsam'][0];
+        pruefe($csv['status'] === 302 && preg_match('#^location:\s*' . preg_quote($kunde, '#') . '\s*$#mi', $csv['kopf']) === 1
+            && preg_match('/^content-disposition:/mi', $csv['kopf']) !== 1 && $csv['text'] === '',
+            'Kundenmodus: der CSV-Download (' . $name . ') führt danach zur Kundenseite statt zur Datei (' . $csv['status'] . ')');
+        gleich(count($abfrage("SELECT id FROM audit_log WHERE action IN ('statistik.csv', 'bereich.csv')")), $csvVorher, 'Kundenmodus: kein Export im Audit (' . $name . ')');
+        $entsperren('CSV ' . $name);
+    }
+    // Zum Vergleich ohne Kundenmodus: dieselbe Datei kommt.
+    $csv = holen($basis . '/bereiche/' . $bereich . '/csv');
+    pruefe($csv['status'] === 200 && preg_match('/^content-disposition:\s*attachment/mi', $csv['kopf']) === 1, 'ohne Kundenmodus: der CSV-Download des Bereichs kommt');
+
+    // Meldungen einer Anfrage, die wartete, während der Kundenmodus begann
+    // („Prüfen“ in den Einstellungen: InfluxDB-Adresse, Broker, Node-RED),
+    // stehen nicht auf der Kundenseite – sie landeten in der gesperrten
+    // Sitzung, und die Kundenseite zeigte sie.
+    file_put_contents($verzoegerung, '1.5');
+    $lauf = $starten('„Prüfen“ in den Einstellungen auf InfluxDB und Broker wartet', [[$basis . '/system/einstellungen/pruefen', ['_token' => $token]]]);
+    file_put_contents($verzoegerung, '0');
+    gleich($lauf['langsam'][0]['status'], 302, 'Kundenmodus: „Prüfen“ ist nach dem Warten durchgelaufen');
+    $seite = holen($basis . $kunde);
+    gleich([$seite['status'], $meldungen($seite['text'])], [200, []], 'Kundenmodus: keine Meldung von „Prüfen“ auf der Kundenseite');
+    $entsperren('Prüfen');
+    pruefe(!str_contains(implode(' ', $meldungen(holen($basis . '/dashboard')['text'])), 'InfluxDB'), 'Kundenmodus: die Meldung von „Prüfen“ kommt auch nach dem Entsperren nicht');
+
+    // Eine Meldung, die beim Start noch auf ihre Seite wartete (ein Reiter hat
+    // abgeschickt und noch nicht neu geladen), steht ebenso nicht dort.
+    $r = holen($basis . '/profil/passwort', ['_token' => 'veraltet']);
+    gleich($r['status'], 302, 'abgelaufenes Token: Meldung und Weiterleitung, die Seite dazu lädt hier niemand');
+    $r = holen($basis . '/berichte/' . $geprueft . '/kundenmodus', ['_token' => $token]);
+    gleich([$r['status'], parse_url($r['ziel'], PHP_URL_PATH)], [302, $kunde], 'Kundenmodus gestartet, während eine Meldung noch auf ihre Seite wartet');
+    $seite = holen($basis . $kunde);
+    gleich([$seite['status'], $meldungen($seite['text'])], [200, []], 'Kundenmodus: die Meldung von vor dem Start steht nicht auf der Kundenseite');
+    $entsperren('wartende Meldung');
 }
 
 // Grundrisse der übernommenen Standorte (andere Instanz, Repository) aus storage/plans.
@@ -1007,6 +1069,23 @@ if ($node === '') {
     pruefe(($l['strgAbgefangen'] ?? true) === false && ($l['strgDanachAbgefangen'] ?? true) === false, 'Link mit data-laeuft: Strg-Klick (neuer Reiter) bleibt beim Browser');
     pruefe(($l['formularDanachAbgefangen'] ?? false) === true && ($l['anfragen'] ?? 1) === 0 && ($l['gesperrt'] ?? '') === 'true' && ($l['hinweis'] ?? '') !== '',
         'Link mit data-laeuft: Hinweis, gesperrt, kein Formular mit data-laeuft geht dazwischen hinaus');
+    $sf = $b['strgFormular'] ?? [];
+    pruefe(($sf['strgAbgefangen'] ?? true) === false && ($sf['nachStrg']['knopfGesperrt'] ?? true) === false && ($sf['nachStrg']['hinweis'] ?? 'x') === ''
+        && ($sf['umschaltAnderesAbgefangen'] ?? true) === false && ($sf['anfragenUmschalt'] ?? 1) === 0 && ($sf['anfragenDanach'] ?? 0) === 1,
+        'Formular mit data-laeuft: Strg- oder Umschalt-Klick (neuer Reiter) bleibt beim Browser – dieser Reiter bleibt offen, das nächste Formular geht hinaus');
+    pruefe(($sf['normalAbgefangen'] ?? true) === false && ($sf['normalGesperrt'] ?? false) === true && ($sf['normalHinweis'] ?? '') !== '',
+        'Formular mit data-laeuft-seite: nach einem Strg-Klick sperrt ein gewöhnlicher Klick wie sonst');
+    $ab = $b['abbruch'] ?? [];
+    pruefe(($ab['link']['vorher'] ?? false) === true && ($ab['link']['text'] ?? '') === 'Repository abfragen'
+        && array_key_exists('gesperrt', $ab['link'] ?? []) && $ab['link']['gesperrt'] === null && ($ab['link']['hinweis'] ?? 'x') === ''
+        && ($ab['link']['wiederAbgefangen'] ?? true) === false,
+        'Link mit data-laeuft: Navigieren abgebrochen (Stopp, Esc – navigateerror) → Text, Sperre und Hinweis zurück, der nächste Klick geht durch');
+    pruefe(($ab['seite']['vorher'] ?? false) === true && ($ab['seite']['knopfGesperrt'] ?? true) === false && ($ab['seite']['text'] ?? '') === 'Los'
+        && ($ab['seite']['hinweis'] ?? 'x') === '',
+        'Formular mit data-laeuft-seite: Navigieren abgebrochen → Knopf, Beschriftung und Hinweis wie vorher');
+    pruefe(($ab['neuladen']['anfragen'] ?? 0) === 1 && ($ab['neuladen']['neuGeladen'] ?? 0) === 1 && ($ab['neuladen']['vorherGesperrt'] ?? false) === true
+        && ($ab['neuladen']['knopfGesperrt'] ?? true) === false && ($ab['neuladen']['hinweis'] ?? 'x') === '' && ($ab['neuladen']['linkDanachAbgefangen'] ?? true) === false,
+        'Formular mit data-laeuft: Neuladen nach dem fetch abgebrochen → wieder frei, „Repository abfragen“ geht danach durch');
     pruefe(($b['live_kundenmodus']['neuGeladen'] ?? 0) === 1, 'live.js: 423 mit „kundenmodus“ → neu laden, also zur Kundenseite');
     pruefe(($b['live_abgelaufen']['neuGeladen'] ?? 1) === 0 && ($b['live_abgelaufen']['stand'] ?? '') === 'Sitzung abgelaufen', 'live.js: 401 → nur die Meldung, kein Neuladen');
 }

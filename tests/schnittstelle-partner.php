@@ -601,6 +601,11 @@ try {
     pruefe(str_contains($z['text'], 'value="uebernehmen" data-confirm="Änderungen hier auf den verknüpften Etagen werden überschrieben')
         && preg_match('#value="verknuepfen"[^>]*data-confirm#', $z['text']) !== 1 && str_contains($z['text'], 'hier geändert'),
         'Zuordnen bei „hier geändert“: Übernehmen mit derselben Rückfrage wie in der Liste, „Nur verknüpfen“ ohne');
+    // Nach dem Übernehmen geht es zur Übersicht der Instanz. Per fetch (app.js)
+    // lüde der Browser danach diese Seite neu – mit dem Formular, das zum
+    // zweiten Übernehmen einlädt. Also schickt er selbst ab.
+    pruefe(preg_match('#<form method="post" action="/instanzen/' . $pid . '/uebernehmen"[^>]*\sdata-laeuft-seite[\s>]#', $z['text']) === 1,
+        'Zuordnen: das Formular schickt der Browser selbst ab (data-laeuft-seite) und folgt der Weiterleitung zur Übersicht');
     $mitBefugnis(['plaene.vorschlagen', 'feststrom']);
     $zeile = $halleZeile();
     pruefe(str_contains($zeile, 'hier geändert') && str_contains($zeile, 'Als Vorschlag schicken') && !str_contains($zeile, '>Hochladen</button>'),

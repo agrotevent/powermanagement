@@ -169,6 +169,11 @@ final class StatistikController extends Controller
             }
             $zeilen[] = implode(';', $zeile);
         }
+        // Die Messwerte kamen aus der InfluxDB, ohne Sitzungssperre – vielleicht
+        // liegt das Gerät inzwischen beim Kunden.
+        if ($this->kundenmodusSperrt()) {
+            return;
+        }
         Audit::log('statistik.csv', 'messpunkte', implode(',', $request->arr('mp')), ['von' => Zeit::iso($von), 'bis' => Zeit::iso($bis)]);
         $name = 'messwerte-' . date('Ymd-Hi', $von) . '-' . date('Ymd-Hi', $bis) . '.csv';
         header('Content-Type: text/csv; charset=utf-8');

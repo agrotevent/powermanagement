@@ -62,8 +62,9 @@ final class Router
         // falsche Methode führt zurück zur Kundenseite statt auf eine
         // Fehlerseite (die früher die ganze Navigation samt „Abmelden“ zeigte).
         // Beginnt er erst, während eine Anfrage ohne Sitzungssperre wartet
-        // (InfluxDB, git, Geräte), prüft Controller::view() vor der Seite
-        // noch einmal.
+        // (InfluxDB, git, Geräte), prüft Controller::kundenmodusSperrt() vor
+        // der Seite oder dem Download noch einmal, und Flash::add() schreibt
+        // keine Meldung mehr, die dann auf der Kundenseite stünde.
         $gesperrt = Kundenmodus::sperrt($method, $path);
         if ($gesperrt !== null) {
             if (self::willJson()) {
@@ -97,16 +98,22 @@ final class Router
                     Response::redirect('/login?next=' . rawurlencode($path));
                     return;
                 }
-                if (!Auth::can($route['permission'])) {
+                // Kundenseite und Entsperren auch ohne das Recht: Endet die
+                // Rolle, während das Gerät beim Kunden liegt, bliebe es sonst
+                // gesperrt – alle anderen Wege führen ja zur Kundenseite.
+                if (!Auth::can($route['permission']) && !Kundenmodus::ausweg($method, $path)) {
                     Response::forbidden();
                     return;
                 }
             }
 
             // Ein Konto mit vorläufigem Kennwort kommt nur bis zum Profil:
-            // erst ein eigenes Kennwort, dann der Rest.
+            // erst ein eigenes Kennwort, dann der Rest. Nicht im Kundenmodus –
+            // das Profil führte zur Kundenseite, die zum Profil, im Kreis, und
+            // entsperren ließe sich nie. Erst entsperren (mit dem vorläufigen
+            // Kennwort), danach geht es zum Profil.
             if (Auth::check() && (int) (Auth::user()['must_change_password'] ?? 0) === 1
-                && !in_array($path, self::OHNE_NEUES_KENNWORT, true)) {
+                && !in_array($path, self::OHNE_NEUES_KENNWORT, true) && Kundenmodus::aktiv() === null) {
                 Flash::warning('Bitte zuerst ein neues Passwort vergeben.');
                 Response::redirect('/profil');
                 return;

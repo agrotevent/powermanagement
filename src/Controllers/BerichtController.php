@@ -465,9 +465,12 @@ final class BerichtController extends Controller
         $id = ctype_digit((string) ($params['id'] ?? '')) ? (int) $params['id'] : 0;
         $modus = Kundenmodus::aktiv();
         $b = $id > 0 ? BerichtService::find($id) : null;
-        if ($modus !== null && $modus['bericht'] === $id && ($b === null || !BerichtService::sichtbar($b))) {
-            // Gesperrt auf einen Bericht, den dieses Konto (nicht mehr) sieht:
-            // nur das Entsperren – sonst führte jeder Weg ins Leere.
+        if ($modus !== null && $modus['bericht'] === $id && ($b === null || !BerichtService::sichtbar($b) || !Auth::can('berichte.manage'))) {
+            // Gesperrt auf einen Bericht, den dieses Konto (nicht mehr) sieht
+            // oder für den es das Recht der Kundenseite nicht mehr hat (die
+            // Rolle ist abgelaufen; der Router lässt diesen Weg trotzdem durch,
+            // Kundenmodus::ausweg()): nur das Entsperren – sonst führte jeder
+            // Weg ins Leere.
             $this->view('berichte/kunde-gesperrt', ['id' => $id, 'modus' => $modus, 'title' => 'Gerät gesperrt',
                 'firma' => Einstellungen::wert('firma.name')], 'layout/kunde');
             return;

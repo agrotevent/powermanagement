@@ -6,6 +6,7 @@ namespace App\Berichte;
 use App\Auth\Auth;
 use App\Support\Config;
 use App\Support\Database;
+use App\Support\Flash;
 use App\Support\Session;
 
 /**
@@ -85,6 +86,26 @@ final class Kundenmodus
         return in_array($pfad, $offen[strtoupper($methode)] ?? [], true);
     }
 
+    /**
+     * Der Weg aus der Sperre: Kundenseite und Entsperren des gesperrten
+     * Berichts. Der Router lässt sie auch ohne das Recht der Route durch –
+     * endet die Rollenzuweisung, während das Gerät beim Kunden liegt, führte
+     * sonst jeder Weg auf 403 oder zurück zur Kundenseite, und entsperren
+     * ließe sich das Gerät nie mehr. Die Kundenseite zeigt dann nur das
+     * Entsperren (BerichtController::kunde()); entsperrt nur das Kennwort
+     * dessen, der den Kundenmodus gestartet hat.
+     */
+    public static function ausweg(string $methode, string $pfad): bool
+    {
+        $sperre = Auth::check() ? self::aktiv() : null;
+        if ($sperre === null) {
+            return false;
+        }
+        $methode = strtoupper($methode) === 'HEAD' ? 'GET' : strtoupper($methode);
+        $bericht = '/berichte/' . $sperre['bericht'];
+        return ($methode === 'GET' && $pfad === $bericht . '/kunde') || ($methode === 'POST' && $pfad === $bericht . '/kunde/beenden');
+    }
+
     /** Sperren – in der Sitzung und am Gerät (Cookie). */
     public static function starten(int $berichtId): void
     {
@@ -101,6 +122,10 @@ final class Kundenmodus
         self::cookie($token, time() + self::GERAET_TAGE * 86400);
         Session::put(self::SITZUNG, ['bericht' => $berichtId, 'seit' => time(), 'fehl' => 0, 'bis' => 0, 'user' => $userId,
             'name' => trim((string) ($user['full_name'] ?? '')), 'geraet' => $geraet]);
+        // Meldungen, die noch auf ihre Seite warten (ein anderer Reiter hat
+        // abgeschickt und noch nicht neu geladen), gehören nicht auf die
+        // Kundenseite. Was danach noch kommt, schreibt Flash::add() nicht mehr.
+        Flash::pull();
     }
 
     /** Entsperren – Sitzung und Gerät. */

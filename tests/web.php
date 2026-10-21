@@ -1296,6 +1296,40 @@ try {
     aufruf($basis, $geraet, 'POST', '/login', ['username' => $kennung . '-admin', 'password' => $kennwort, '_token' => token($seite['text'])]);
     $r = aufruf($basis, $geraet, 'GET', '/dashboard');
     pruefe($r['status'] === 302 && $r['ziel'] === '/berichte/' . $b3 . '/kunde', 'Kundenmodus am Gerät: nach neuer Anmeldung in diesem Browser weiter gesperrt');
+    // Vorläufiges Kennwort („muss ändern“ – der Prüfer hatte seins vergessen,
+    // das Gerät ist gesperrt): Das Profil führte zur Kundenseite, die zum
+    // Profil, im Kreis, und entsperren ließ sich nie. Die Kundenseite kommt,
+    // das Entsperren landet beim Kennwort, nicht beim Profil.
+    Database::execute('UPDATE users SET must_change_password = 1 WHERE id = ?', [$benutzer['admin']]);
+    $kProfil = aufruf($basis, $geraet, 'GET', '/profil');
+    $kSeite = aufruf($basis, $geraet, 'GET', '/berichte/' . $b3 . '/kunde');
+    $kAntwort = aufruf($basis, $geraet, 'POST', '/berichte/' . $b3 . '/kunde/beenden', ['kennwort' => 'falsch', '_token' => token($kSeite['text'])]);
+    $kDanach = aufruf($basis, $geraet, 'GET', '/berichte/' . $b3 . '/kunde');
+    Database::execute('UPDATE users SET must_change_password = 0 WHERE id = ?', [$benutzer['admin']]);
+    pruefe($kProfil['ziel'] === '/berichte/' . $b3 . '/kunde' && $kSeite['status'] === 200 && str_contains($kSeite['text'], 'action="/berichte/' . $b3 . '/kunde/beenden"'),
+        'Kundenmodus mit vorläufigem Kennwort: Profil → Kundenseite, und die kommt (kein Kreis über /profil) – ' . $kSeite['status'] . ' ' . (string) $kSeite['ziel']);
+    pruefe($kAntwort['status'] === 302 && $kAntwort['ziel'] === '/berichte/' . $b3 . '/kunde' && str_contains($kDanach['text'], 'Kennwort falsch'),
+        'Kundenmodus mit vorläufigem Kennwort: Entsperren prüft das Kennwort, statt zum Profil zu führen – ' . (string) $kAntwort['ziel']);
+    // Die Rolle endet, während das Gerät beim Kunden liegt: Kundenseite und
+    // Entsperren gaben 403, alles andere führte zur Kundenseite – eine
+    // Sackgasse. Jetzt zeigt die Kundenseite nur das Entsperren, und das
+    // Kennwort dessen, der übergeben hat, entsperrt.
+    $rollen = Database::select('SELECT id, gueltig_bis FROM user_roles WHERE user_id = ?', [$benutzer['admin']]);
+    Database::execute('UPDATE user_roles SET gueltig_bis = ? WHERE user_id = ?', [gmdate('c', time() - 60), $benutzer['admin']]);
+    $kSeite = aufruf($basis, $geraet, 'GET', '/berichte/' . $b3 . '/kunde');
+    $kPdf = aufruf($basis, $geraet, 'GET', '/berichte/' . $b3 . '/pdf');
+    $kAntwort = aufruf($basis, $geraet, 'POST', '/berichte/' . $b3 . '/kunde/beenden', ['kennwort' => $kennwort, '_token' => token($kSeite['text'])]);
+    $kDanach = aufruf($basis, $geraet, 'GET', '/profil');
+    foreach ($rollen as $z) {
+        Database::execute('UPDATE user_roles SET gueltig_bis = ? WHERE id = ?', [$z['gueltig_bis'], $z['id']]);
+    }
+    pruefe($rollen !== [] && $kSeite['status'] === 200 && str_contains($kSeite['text'], 'Gerät gesperrt') && str_contains($kSeite['text'], 'action="/berichte/' . $b3 . '/kunde/beenden"')
+        && !str_contains($kSeite['text'], 'data-kunde="') && !str_contains($kSeite['text'], 'class="sidebar'),
+        'Kundenmodus, Rolle abgelaufen: die Kundenseite zeigt nur das Entsperren statt 403 (' . $kSeite['status'] . ')');
+    gleich($kPdf['status'], 403, 'Kundenmodus, Rolle abgelaufen: das PDF bleibt beim Recht der Route');
+    pruefe($kAntwort['status'] === 302 && $kAntwort['ziel'] === '/berichte/' . $b3 && $kDanach['status'] === 200,
+        'Kundenmodus, Rolle abgelaufen: mit dem Kennwort entsperrt, danach wieder das Profil (' . $kAntwort['status'] . ' ' . (string) $kAntwort['ziel'] . ')');
+    pruefe(aufruf($basis, $admin['dose'], 'GET', '/dashboard')['ziel'] === '/berichte/' . $b3 . '/kunde', 'Kundenmodus: die Sitzung, die übergeben hat, bleibt gesperrt');
     $kundeFelder = ['striche' => unterschriftStriche(), 'name' => 'Kim Kunde', 'funktion' => 'Produktion', 'ort' => 'Musterstadt', 'vorbehalte' => '',
         'anfrage' => bin2hex(random_bytes(16)), 'geraet_am' => gmdate('c'), '_token' => $admin['token'], 'inhalt_hash' => (string) BerichtService::find($b3)['inhalt_hash']];
     $r = aufruf($basis, $admin['dose'], 'POST', '/berichte/' . $b3 . '/kunde/unterschreiben', ['inhalt_hash' => str_repeat('0', 64)] + $kundeFelder + ['bestaetigungen' => ['erhalten']], $json);

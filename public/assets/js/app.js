@@ -242,12 +242,43 @@ document.addEventListener('DOMContentLoaded', function () {
      * aufs Bild). Jeder weitere Klick auf so ein Formular oder einen
      * solchen Link wird solange abgefangen – er bräche das erste
      * Navigieren ab, und gezeigt würde die Antwort des zweiten.
+     *
+     * `data-laeuft-seite` braucht auch ein Formular, dessen Weiterleitung
+     * woandershin führt als auf die Seite, auf der es steht („Zuordnen“ →
+     * Übersicht der Instanz). Den Location-Kopf einer abgefangenen
+     * Umleitung sieht fetch nicht; das Neuladen bliebe auf der alten
+     * Adresse – dort stand wieder das Formular, das zum zweiten Übernehmen
+     * einlud.
+     *
+     * Mit Strg, Umschalt oder Mittelklick (neuer Reiter) bleibt es beim
+     * Browser, bei Formularen wie bei Links: Diese Seite bleibt offen.
+     * Bricht das Navigieren ab (Stopp-Knopf, Esc), meldet die Navigation
+     * API das mit `navigateerror` (Chromium: AbortError) – dann ist die
+     * Seite wieder frei, statt jeden weiteren Klick stumm abzufangen. Ohne
+     * Navigation API hilft dort nur neu laden.
      */
     var navigiert = false;
+    var aufheben = null;
+
+    /** Ab jetzt wird navigiert; `zuruecknehmen` stellt die Seite wieder her, falls es abbricht. */
+    function sperren(zuruecknehmen) {
+        navigiert = true;
+        aufheben = zuruecknehmen;
+    }
+
     window.addEventListener('pageshow', function (e) {
         // Zurück aus dem Verlauf (bfcache): frisch laden statt gesperrt stehen.
         if (e.persisted && navigiert) { window.location.reload(); }
     });
+    if (window.navigation && typeof window.navigation.addEventListener === 'function') {
+        window.navigation.addEventListener('navigateerror', function () {
+            if (!navigiert) { return; }
+            var zuruecknehmen = aufheben;
+            navigiert = false;
+            aufheben = null;
+            if (zuruecknehmen) { zuruecknehmen(); }
+        });
+    }
 
     function laeuftAnzeigen(knopf, beschriftung, hinweis) {
         var anzeige = document.createElement('div');
@@ -267,10 +298,25 @@ document.addEventListener('DOMContentLoaded', function () {
         anzeige.appendChild(balken);
         anzeige.appendChild(text);
         knopf.insertAdjacentElement('afterend', anzeige);
-        return { balken: balken, text: text };
+        return { element: anzeige, balken: balken, text: text };
     }
 
     document.querySelectorAll('form[data-laeuft]').forEach(function (formular) {
+        /*
+         * Strg- oder Umschalt-Klick auf den Knopf: Der Browser schickt das
+         * Formular in einen neuen Reiter ab. Das submit-Ereignis kennt die
+         * Tasten nicht, der click unmittelbar davor schon – auch bei Enter
+         * im Feld, dann klickt der Browser selbst auf den ersten Knopf.
+         */
+        var neuerReiter = false;
+        formular.addEventListener('click', function (ereignis) {
+            var ziel = ereignis.target && ereignis.target.closest
+                ? ereignis.target.closest('button, input[type=submit], input[type=image]') : null;
+            if (!ziel || ziel.form !== formular) { return; }
+            neuerReiter = ereignis.button !== 0 || ereignis.ctrlKey || ereignis.metaKey || ereignis.shiftKey || ereignis.altKey;
+            window.setTimeout(function () { neuerReiter = false; }, 0);
+        });
+
         formular.addEventListener('submit', function (ereignis) {
             /*
              * Hat die Rückfrage (`data-confirm`) abgebrochen, wird nichts
@@ -279,6 +325,8 @@ document.addEventListener('DOMContentLoaded', function () {
              * hier nachgesehen werden.
              */
             if (ereignis.defaultPrevented) { return; }
+            // Neuer Reiter: Hier wird nicht navigiert, also auch nichts gesperrt.
+            if (neuerReiter) { return; }
             if (navigiert) { ereignis.preventDefault(); return; }
 
             /*
@@ -300,15 +348,29 @@ document.addEventListener('DOMContentLoaded', function () {
             var hilfe = formular.querySelector('.help');
             var beschriftung = knopf.dataset.laeuft || formular.dataset.laeuft || 'läuft …';
 
+            var vorher = knopf.textContent;
+            knopf.textContent = beschriftung;
+            if (hilfe) { hilfe.hidden = true; }
+            var anzeige = laeuftAnzeigen(knopf, beschriftung, formular.dataset.laeuftHinweis);
+            var balken = anzeige.balken;
+            var text = anzeige.text;
+            // Navigieren abgebrochen: Knöpfe, Beschriftung und Hilfe wie vorher.
+            var freigeben = function () {
+                knoepfe.forEach(function (k) { k.disabled = false; });
+                knopf.textContent = vorher;
+                if (hilfe) { hilfe.hidden = false; }
+                anzeige.element.remove();
+            };
+
             if (formular.hasAttribute('data-laeuft-seite')) {
                 // Der Browser schickt ab (kein preventDefault). Gesperrt
                 // wird erst danach – ein gesperrter Knopf fehlte sonst in
                 // den Formulardaten.
-                navigiert = true;
-                knopf.textContent = beschriftung;
-                if (hilfe) { hilfe.hidden = true; }
-                laeuftAnzeigen(knopf, beschriftung, formular.dataset.laeuftHinweis);
-                window.setTimeout(function () { knoepfe.forEach(function (k) { k.disabled = true; }); }, 0);
+                sperren(freigeben);
+                window.setTimeout(function () {
+                    // Schon abgebrochen und freigegeben? Dann bleibt es so.
+                    if (aufheben === freigeben) { knoepfe.forEach(function (k) { k.disabled = true; }); }
+                }, 0);
                 return;
             }
 
@@ -317,12 +379,6 @@ document.addEventListener('DOMContentLoaded', function () {
             var daten = new FormData(formular);
             if (knopf.name) { daten.append(knopf.name, knopf.value); }
             knoepfe.forEach(function (k) { k.disabled = true; });
-            var vorher = knopf.textContent;
-            knopf.textContent = beschriftung;
-            if (hilfe) { hilfe.hidden = true; }
-            var anzeige = laeuftAnzeigen(knopf, beschriftung, formular.dataset.laeuftHinweis);
-            var balken = anzeige.balken;
-            var text = anzeige.text;
 
             fetch(formular.action, {
                 method: (formular.method || 'post').toUpperCase(),
@@ -364,7 +420,7 @@ document.addEventListener('DOMContentLoaded', function () {
                 }
                 // Das Neuladen ist auch ein Navigieren – „Repository
                 // abfragen“ dazwischen bräche es ab.
-                navigiert = true;
+                sperren(freigeben);
                 window.location.reload();
             }).catch(function (fehler) {
                 knoepfe.forEach(function (k) { k.disabled = false; });
@@ -393,10 +449,15 @@ document.addEventListener('DOMContentLoaded', function () {
             if (ereignis.defaultPrevented || ereignis.button !== 0
                 || ereignis.ctrlKey || ereignis.metaKey || ereignis.shiftKey || ereignis.altKey) { return; }
             if (navigiert) { ereignis.preventDefault(); return; }
-            navigiert = true;
+            var vorher = link.textContent;
             link.setAttribute('aria-disabled', 'true');
             link.textContent = link.dataset.laeuft || 'läuft …';
-            laeuftAnzeigen(link, link.dataset.laeuft, link.dataset.laeuftHinweis);
+            var anzeige = laeuftAnzeigen(link, link.dataset.laeuft, link.dataset.laeuftHinweis);
+            sperren(function () {
+                link.removeAttribute('aria-disabled');
+                link.textContent = vorher;
+                anzeige.element.remove();
+            });
         });
     });
 
