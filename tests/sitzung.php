@@ -14,7 +14,7 @@ declare(strict_types=1);
  * mehrere langsame Live-Abfragen laufen, und die Live-Abfragen liefern
  * trotzdem ihre Antwort. Ebenso die Peilung eines Tanks, die den Rohwert
  * liest (InfluxDB ohne Sitzungssperre) – ihre Meldung kommt danach trotzdem
- * an.
+ * an, und ein Doppelklick trägt nur eine Peilung ein (Sperre des Tanks).
  *
  * Dasselbe für die Eventworx-Abfragen des Berichtsformulars (Suche auf
  * Knopfdruck oder mit Enter, Vorgang laden): Das Autosave des Berichts kommt
@@ -493,15 +493,40 @@ foreach ([
 }
 
 // ------------------------------------------------------------ Tank: Peilung wartet auf den Rohwert, nicht die Sitzung
-// Den Rohwert einer Peilung liest der Server aus der InfluxDB; die Meldung
-// danach kommt trotzdem an.
-$lauf = waehrendLangsam([[$basis . '/anlagen/' . $tank . '/tank/peilung', ['_token' => $token, 'art' => 'hoehe_mm', 'wert' => '650']]], $basis . '/profil');
-gleich([$lauf['antwort']['status'], $lauf['langsam'][0]['status']], [200, 302], 'Peilung: andere Seite, während der Rohwert gelesen wird');
+// Den Rohwert einer Peilung liest der Server aus der InfluxDB – ohne
+// Sitzungssperre (Influx::abfragenAlle()); die Meldung danach kommt an.
+// Ohne Sitzungssperre liefe ein Doppelklick zweimal nebeneinander: Die
+// Sperre des Tanks lässt nur eine Peilung durch, die zweite hört sofort
+// mit einer Meldung auf.
+$peilen = [$basis . '/anlagen/' . $tank . '/tank/peilung', ['_token' => $token, 'art' => 'hoehe_mm', 'wert' => '650']];
+$mehrfach = curl_multi_init();
+$erster = griff($peilen[0], $peilen[1]);
+curl_multi_add_handle($mehrfach, $erster);
+$bis = microtime(true) + 0.6;
+do {
+    curl_multi_exec($mehrfach, $laufend);
+    curl_multi_select($mehrfach, 0.05);
+} while (microtime(true) < $bis);
+// Die erste wartet jetzt auf die InfluxDB: der zweite Klick, dann eine andere Seite.
+$lauf = waehrendLangsam([$peilen], $basis . '/profil');
+do {
+    curl_multi_exec($mehrfach, $laufend);
+    curl_multi_select($mehrfach, 0.1);
+} while ($laufend > 0);
+$ersterStatus = (int) curl_getinfo($erster, CURLINFO_RESPONSE_CODE);
+curl_multi_remove_handle($mehrfach, $erster);
+curl_close($erster);
+curl_multi_close($mehrfach);
+gleich([$lauf['antwort']['status'], $ersterStatus, $lauf['langsam'][0]['status']], [200, 302, 302],
+    'Peilung (Doppelklick): andere Seite, während der Rohwert gelesen wird');
 pruefe($lauf['dauer'] < 2.0, sprintf('Peilung hält die Sitzung nicht (%.1f s)', $lauf['dauer']));
-pruefe($abfrage("SELECT id FROM tank_ereignisse WHERE objekt_id = ? AND art = 'peilung' AND hoehe_mm = 650", [$tank]) !== [], 'Peilung eingetragen');
+gleich(count($abfrage("SELECT id FROM tank_ereignisse WHERE objekt_id = ? AND art = 'peilung' AND hoehe_mm = 650", [$tank])), 1,
+    'Peilung eingetragen – beim Doppelklick nur einmal');
 file_put_contents($verzoegerung, '0');
 $seite = holen($basis . '/anlagen/' . $tank);
 pruefe($seite['status'] === 200 && str_contains($seite['text'], 'Peilstab 650 mm eingetragen'), 'die Meldung zur Peilung kommt nach dem Warten in die Sitzung');
+// Die Meldung des zweiten Klicks zeigt die nächste Seite – hier die andere.
+pruefe(str_contains($lauf['antwort']['text'] . $seite['text'], 'gerade schon eingetragen'), 'der zweite Klick meldet, dass am Tank gerade schon eingetragen wird');
 
 // Die Sitzung bleibt dabei gültig: nach allem noch angemeldet.
 file_put_contents($verzoegerung, '0');
@@ -1033,8 +1058,9 @@ if ($geprueft > 0) {
     $mp = (int) ($abfrage("SELECT id FROM messpunkte WHERE objekt_id = ? AND gueltig_bis IS NULL AND geraet <> '' ORDER BY kanal LIMIT 1", [$id])[0]['id'] ?? 0);
     $bereich = (int) ($abfrage('SELECT b.id FROM bereiche b WHERE EXISTS (SELECT 1 FROM bereich_mitglieder m WHERE m.bereich_id = b.id) ORDER BY b.name LIMIT 1')[0]['id'] ?? 0);
     pruefe($mp > 0 && $bereich > 0, 'Kundenmodus: Messpunkt und Bereich für die CSV-Downloads');
-    foreach (['Messwerte' => '/statistik/csv?mp[]=' . $mp, 'Bereich' => '/bereiche/' . $bereich . '/csv'] as $name => $csvPfad) {
-        $csvVorher = count($abfrage("SELECT id FROM audit_log WHERE action IN ('statistik.csv', 'bereich.csv')"));
+    foreach (['Messwerte' => '/statistik/csv?mp[]=' . $mp, 'Bereich' => '/bereiche/' . $bereich . '/csv',
+        'Tank' => '/anlagen/' . $tank . '/tank/csv?zeitraum=24h', 'Tank je Tag' => '/anlagen/' . $tank . '/tank/csv?inhalt=tage&zeitraum=7d'] as $name => $csvPfad) {
+        $csvVorher = count($abfrage("SELECT id FROM audit_log WHERE action IN ('statistik.csv', 'bereich.csv', 'tank.csv')"));
         file_put_contents($verzoegerung, '1.5');
         $lauf = $starten('der CSV-Download (' . $name . ') auf die InfluxDB wartet', [$basis . $csvPfad]);
         file_put_contents($verzoegerung, '0');
@@ -1042,12 +1068,14 @@ if ($geprueft > 0) {
         pruefe($csv['status'] === 302 && preg_match('#^location:\s*' . preg_quote($kunde, '#') . '\s*$#mi', $csv['kopf']) === 1
             && preg_match('/^content-disposition:/mi', $csv['kopf']) !== 1 && $csv['text'] === '',
             'Kundenmodus: der CSV-Download (' . $name . ') führt danach zur Kundenseite statt zur Datei (' . $csv['status'] . ')');
-        gleich(count($abfrage("SELECT id FROM audit_log WHERE action IN ('statistik.csv', 'bereich.csv')")), $csvVorher, 'Kundenmodus: kein Export im Audit (' . $name . ')');
+        gleich(count($abfrage("SELECT id FROM audit_log WHERE action IN ('statistik.csv', 'bereich.csv', 'tank.csv')")), $csvVorher, 'Kundenmodus: kein Export im Audit (' . $name . ')');
         $entsperren('CSV ' . $name);
     }
     // Zum Vergleich ohne Kundenmodus: dieselbe Datei kommt.
     $csv = holen($basis . '/bereiche/' . $bereich . '/csv');
     pruefe($csv['status'] === 200 && preg_match('/^content-disposition:\s*attachment/mi', $csv['kopf']) === 1, 'ohne Kundenmodus: der CSV-Download des Bereichs kommt');
+    $csv = holen($basis . '/anlagen/' . $tank . '/tank/csv?zeitraum=24h');
+    pruefe($csv['status'] === 200 && preg_match('/^content-disposition:\s*attachment/mi', $csv['kopf']) === 1, 'ohne Kundenmodus: der CSV-Download des Tanks kommt');
 
     // Meldungen einer Anfrage, die wartete, während der Kundenmodus begann
     // („Prüfen“ in den Einstellungen: InfluxDB-Adresse, Broker, Node-RED),

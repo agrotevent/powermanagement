@@ -29,6 +29,14 @@ use App\Tanks\TankService;
  * zum Tank, im Datenfenster – das prüft TankService). Gelesen wird über
  * TankService, und der liest nur über Messdaten – im Datenfenster. Den
  * Rohwert einer Peilung oder Betankung nimmt der Server, nie der Browser.
+ *
+ * Sitzung: Verlauf und Tage (JSON) geben sie frei, bevor sie lesen. Alles
+ * andere wartet auf die InfluxDB ohne Sitzungssperre (Influx::abfragenAlle()
+ * über Session::ohneSperre()) und hat die Sitzung danach wieder offen –
+ * Meldungen kommen an, und die CSV prüft vor der Datei noch einmal den
+ * Kundenmodus. Eingetragen wird je Tank nur einmal zur Zeit
+ * (TankService::gesperrt()): Ohne Sitzungssperre liefe ein Doppelklick
+ * sonst zweimal nebeneinander.
  */
 final class TankController extends Controller
 {
@@ -126,7 +134,9 @@ final class TankController extends Controller
         if ($tank === null) {
             return;
         }
-        Session::freigeben();
+        // Kein Session::freigeben(): Die InfluxDB gibt sie beim Warten selbst
+        // frei und danach wieder – vor der Datei zählt der Kundenmodus, wie
+        // er dann ist (Controller::kundenmodusSperrt()).
         if ($request->str('inhalt') === 'protokoll') {
             $this->protokollCsv($tank);
             return;
@@ -164,6 +174,11 @@ final class TankController extends Controller
                 $zahl($erg['prozent'] ?? null, 2),
             ]);
         }
+        // Die Messwerte kamen aus der InfluxDB, ohne Sitzungssperre – vielleicht
+        // liegt das Gerät inzwischen beim Kunden.
+        if ($this->kundenmodusSperrt()) {
+            return;
+        }
         Audit::log('tank.csv', 'objekt', (string) $tank['id'], ['von' => Zeit::iso($von), 'bis' => Zeit::iso($bis), 'messpunkt' => $mp]);
         header('Content-Type: text/csv; charset=utf-8');
         header('Content-Disposition: attachment; filename="tank-' . (int) $tank['id'] . '-' . date('Ymd-Hi', $von) . '-' . date('Ymd-Hi', $bis) . '.csv"');
@@ -195,6 +210,9 @@ final class TankController extends Controller
                 StatistikController::csvFeld($t['hinweis']),
             ]);
         }
+        if ($this->kundenmodusSperrt()) {
+            return;
+        }
         Audit::log('tank.csv', 'objekt', (string) $tank['id'], ['tage' => true, 'von' => Zeit::iso($d['von']), 'bis' => Zeit::iso($d['bis']), 'messpunkt' => $mp]);
         header('Content-Type: text/csv; charset=utf-8');
         header('Content-Disposition: attachment; filename="tank-' . (int) $tank['id'] . '-tage-' . date('Ymd', $d['von']) . '-' . date('Ymd', $d['bis']) . '.csv"');
@@ -218,6 +236,9 @@ final class TankController extends Controller
                 StatistikController::csvFeld($e['notizen']),
             ]);
         }
+        if ($this->kundenmodusSperrt()) {
+            return;
+        }
         Audit::log('tank.csv', 'objekt', (string) $tank['id'], ['protokoll' => true]);
         header('Content-Type: text/csv; charset=utf-8');
         header('Content-Disposition: attachment; filename="tank-' . (int) $tank['id'] . '-protokoll.csv"');
@@ -237,9 +258,8 @@ final class TankController extends Controller
             ? [$art => $request->str('wert')]
             : ['prozent' => $request->str('prozent'), 'liter' => $request->str('liter'), 'hoehe_mm' => $request->str('hoehe_mm')];
         $daten['notizen'] = $request->str('notizen');
-        // Den Rohwert liest der Server aus der InfluxDB – solange nicht die Sitzung halten.
-        Session::freigeben();
-        $this->fertig($request, $tank, TankService::peilen($tank, $daten));
+        // Den Rohwert liest der Server aus der InfluxDB – ohne Sitzungssperre.
+        $this->fertig($request, $tank, TankService::gesperrt((int) $tank['id'], static fn (): array => TankService::peilen($tank, $daten)));
     }
 
     /** Betankung eintragen – und, liegt sie 30 min zurück, gleich auswerten. */
@@ -255,8 +275,7 @@ final class TankController extends Controller
             // Vorgabe an: Das Formular schickt 0 vor dem Haken, ein Aufruf ohne Feld kalibriert.
             'kalibrieren' => $request->input('kalibrieren') === null || $request->bool('kalibrieren'),
         ];
-        Session::freigeben();
-        $this->fertig($request, $tank, TankService::betankungSpeichern($tank, $daten));
+        $this->fertig($request, $tank, TankService::gesperrt((int) $tank['id'], static fn (): array => TankService::betankungSpeichern($tank, $daten)));
     }
 
     /** „Kalibrieren aus dieser Betankung“ – ein POST; ein GET schreibt nie. */
@@ -266,8 +285,9 @@ final class TankController extends Controller
         if ($tank === null) {
             return;
         }
-        Session::freigeben();
-        $this->fertig($request, $tank, TankService::betankungAuswerten($tank, $request->int('ereignis_id'), $request->bool('trotzdem')));
+        $ereignis = $request->int('ereignis_id');
+        $trotzdem = $request->bool('trotzdem');
+        $this->fertig($request, $tank, TankService::gesperrt((int) $tank['id'], static fn (): array => TankService::betankungAuswerten($tank, $ereignis, $trotzdem)));
     }
 
     /** Eine Peilung oder Betankung löschen (§6.6: nur, solange danach nicht neu kalibriert wurde). */
@@ -277,7 +297,8 @@ final class TankController extends Controller
         if ($tank === null) {
             return;
         }
-        $this->fertig($request, $tank, TankService::ereignisLoeschen($tank, $request->int('ereignis_id')));
+        $ereignis = $request->int('ereignis_id');
+        $this->fertig($request, $tank, TankService::gesperrt((int) $tank['id'], static fn (): array => TankService::ereignisLoeschen($tank, $ereignis)));
     }
 
     /** „Erweitert“: Anker und Steigung von Hand, ab jetzt oder rückwirkend für diesen Einbau. */
@@ -287,11 +308,13 @@ final class TankController extends Controller
         if ($tank === null) {
             return;
         }
-        $this->fertig($request, $tank, TankService::sensorVonHand($tank, [
+        $daten = [
             'messpunkt' => $request->int('messpunkt'),
             'sensor'    => $_POST['sensor'] ?? null,
             'notizen'   => $request->str('notizen'),
-        ], $request->bool('rueckwirkend')));
+        ];
+        $rueckwirkend = $request->bool('rueckwirkend');
+        $this->fertig($request, $tank, TankService::gesperrt((int) $tank['id'], static fn (): array => TankService::sensorVonHand($tank, $daten, $rueckwirkend)));
     }
 
     /** Steigung aus zwei Peilungen setzen – nur mit Haken, nie von selbst. */
@@ -301,15 +324,17 @@ final class TankController extends Controller
         if ($tank === null) {
             return;
         }
+        $ereignis = $request->int('ereignis_id');
         $this->fertig($request, $tank, $request->bool('uebernehmen')
-            ? TankService::steigungSetzen($tank, $request->int('ereignis_id'))
+            ? TankService::gesperrt((int) $tank['id'], static fn (): array => TankService::steigungSetzen($tank, $ereignis))
             : ['ok' => false, 'message' => 'Bitte den Haken setzen – die Steigung wird nur auf ausdrücklichen Wunsch übernommen.']);
     }
 
     /**
      * Antwort nach dem Eintragen: JSON fürs Kartenpanel, sonst Meldung und
-     * zurück zur Seite. Die Sitzung ist dann womöglich schon freigegeben –
-     * die Meldung geht über Session::nachtragen hinein.
+     * zurück zur Seite. Die Sitzung ist dann wieder offen (Session::ohneSperre()
+     * in Influx::abfragenAlle()); begann inzwischen der Kundenmodus, schreibt
+     * Flash::add() nichts, und die Seite danach führt zur Kundenseite.
      *
      * @param array{ok:bool,message:string,warnung?:bool} $ergebnis
      */
@@ -322,13 +347,11 @@ final class TankController extends Controller
                 $ok ? 200 : 422);
             return;
         }
-        Session::nachtragen(static function () use ($ok, $text, $ergebnis): void {
-            match (true) {
-                !$ok                         => Flash::error($text),
-                !empty($ergebnis['warnung']) => Flash::warning($text),
-                default                      => Flash::success($text),
-            };
-        });
+        match (true) {
+            !$ok                         => Flash::error($text),
+            !empty($ergebnis['warnung']) => Flash::warning($text),
+            default                      => Flash::success($text),
+        };
         $this->redirect(Response::zurueckZiel('/anlagen/' . (int) $tank['id']));
     }
 

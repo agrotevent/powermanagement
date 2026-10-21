@@ -258,6 +258,9 @@ Freigabe sieht, ändern, wer „Anlagen ändern“ und eine Freigabe mit
   dann kommt der Verbrauch aus dem Pegel.
 - **Nie schalten**: Aus Tankwerten wird nie geschaltet, und einen Shelly, der
   an einem Tank misst, schaltet niemand – auch nicht die Administration.
+- **Kundenmodus** (Übergabeberichte): Tankseite, Verlauf, Verbrauch je Tag,
+  CSV, Peilung und Betankung sind gesperrt wie alles andere – auch eine CSV,
+  die schon auf die InfluxDB wartete, als der Kundenmodus begann.
 - **Kommandozeile**: `bin/power tank:liste` braucht `--als=<benutzer>` und
   zeigt genau, was dieses Konto sähe; ein gesperrtes oder abgelaufenes Konto
   wird abgelehnt. `tank:rechnen` zeigt nur die Kennlinie, keine Messwerte.

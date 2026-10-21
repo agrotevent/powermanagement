@@ -1158,6 +1158,18 @@ try {
     $roh = TankService::rohJetzt($t($tankE), $mE);
     pruefe($roh !== null && $roh['roh'] > 2.0, 'Prüfbestand: die Demo-Sonde meldet seit dem Einbau (' . ($roh['roh'] ?? '–') . ' V)');
 
+    // ------------------------------------------------ Eintragen je Tank nur einmal zur Zeit (ohne Sitzungssperre)
+    $innen = null;
+    $aussen = TankService::gesperrt($tankE, static function () use (&$innen, $tankE, $tankF): array {
+        $innen = [TankService::gesperrt($tankE, static fn (): array => ['ok' => true, 'message' => 'doppelt']),
+            TankService::gesperrt($tankF, static fn (): array => ['ok' => true, 'message' => 'anderer Tank'])];
+        return ['ok' => true, 'message' => 'erster'];
+    });
+    gleich([$aussen['message'], $innen[0]['ok'] ?? null, $innen[0]['message'] ?? null, $innen[1]['message'] ?? null],
+        ['erster', false, TankService::GERADE_SCHON, 'anderer Tank'], 'Sperre des Tanks: der zweite Versuch hört sofort auf, ein anderer Tank ist frei');
+    gleich(TankService::gesperrt($tankE, static fn (): array => ['ok' => true, 'message' => 'danach'])['message'], 'danach', 'Sperre des Tanks: danach wieder frei');
+    pruefe(glob(dirname(__DIR__) . '/storage/cache/tank-*.sperre') === [], 'Sperre des Tanks: keine Sperrdatei bleibt liegen');
+
     // ------------------------------------------------ Betankung jetzt: erst ab 30 min auswertbar
     $e = TankService::betankungSpeichern($t($tankE), ['liter' => '2000', 'lieferschein' => 'LS-1', 'notizen' => $kennungE]);
     $abText = Zeit::anzeige(Zeit::iso(time() + TankService::AUSWERTEN_NACH_S), 'H:i');

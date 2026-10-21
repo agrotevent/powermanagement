@@ -131,7 +131,8 @@ $datenKarte = (string) ob_get_clean();
             <div class="card">
                 <div class="card-head"><h2>Vor Ort</h2><span class="hint">peilen und betanken</span></div>
                 <div class="card-body grid grid-2 tank-vorort">
-                    <form method="post" action="/anlagen/<?= $id ?>/tank/peilung" class="tank-peilung">
+                    <form method="post" action="/anlagen/<?= $id ?>/tank/peilung" class="tank-peilung" data-laeuft="trägt ein …"
+                          data-laeuft-hinweis="Liest den Rohwert des Sensors. Bitte nicht noch einmal klicken.">
                         <?= Csrf::field() ?>
                         <h3 class="abschnitt">Peilung</h3>
                         <div class="field"><label for="peil_art">Abgelesen</label>
@@ -149,7 +150,8 @@ $datenKarte = (string) ob_get_clean();
                         <p class="help">Zeit: jetzt. Den Rohwert des Sensors nimmt der Server. Der Peilstab setzt den Nullpunkt der Kennlinie;
                             Anzeige oder Inhalt bestimmen beim ersten Mal den Inhalt je mm. Nicht peilen, während getankt wird.</p>
                     </form>
-                    <form method="post" action="/anlagen/<?= $id ?>/tank/betankung" class="tank-betankung">
+                    <form method="post" action="/anlagen/<?= $id ?>/tank/betankung" class="tank-betankung" data-laeuft="trägt ein …"
+                          data-laeuft-hinweis="Liest die Messwerte um das Tanken. Bitte nicht noch einmal klicken.">
                         <?= Csrf::field() ?>
                         <h3 class="abschnitt">Betankung</h3>
                         <div class="field-row">
@@ -248,7 +250,7 @@ $datenKarte = (string) ob_get_clean();
                                     <?php if ($darfEintragen): ?>
                                         <td><div class="btn-row">
                                             <?php if ($e['auswerten_ab'] !== null): ?>
-                                                <form method="post" action="/anlagen/<?= $id ?>/tank/betankung/auswerten" class="btn-row">
+                                                <form method="post" action="/anlagen/<?= $id ?>/tank/betankung/auswerten" class="btn-row" data-laeuft="kalibriert …">
                                                     <?= Csrf::field() ?><input type="hidden" name="ereignis_id" value="<?= (int) $e['id'] ?>">
                                                     <?php if ($e['auswerten_jetzt']): ?>
                                                         <button class="btn btn-sm" type="submit">Kalibrieren aus dieser Betankung</button>

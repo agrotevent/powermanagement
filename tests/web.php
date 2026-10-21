@@ -1615,6 +1615,26 @@ try {
     gleich([(int) Database::scalar('SELECT COUNT(*) FROM api_tokens'), Database::scalar('SELECT status FROM api_vorschlaege WHERE id = ?', [$vorschlagId]),
         Database::first('SELECT verified_at FROM api_partner WHERE id = ?', [$selbstId])], [$tokensVorher, 'offen', $partnerVorher],
         'Kundenmodus: kein Zugang angelegt, kein Vorschlag abgelehnt, keine Instanz geprüft');
+    // Ebenso der Tank: Seite, Verlauf, Tage, CSV, Peilung und Betankung.
+    if (($tankId ?? 0) > 0) {
+        $ereignisseVorher = (int) Database::scalar('SELECT COUNT(*) FROM tank_ereignisse WHERE objekt_id = ?', [$tankId]);
+        foreach (['/anlagen/' . $tankId, '/anlagen/' . $tankId . '/tank/csv', '/anlagen/' . $tankId . '/tank/csv?inhalt=protokoll',
+            '/anlagen/' . $tankId . '/tank/csv?inhalt=tage'] as $pfad) {
+            $r = aufruf($basis, $admin['dose'], 'GET', $pfad);
+            pruefe($r['status'] === 302 && $r['ziel'] === '/berichte/' . $b3 . '/kunde' && !str_contains($r['text'], 'Füllhöhe'), 'Kundenmodus: GET ' . $pfad . ' → Kundenseite');
+        }
+        foreach (['/anlagen/' . $tankId . '/tank/verlauf', '/anlagen/' . $tankId . '/tank/tage', '/anlagen/' . $tankId . '/live'] as $pfad) {
+            $r = aufruf($basis, $admin['dose'], 'GET', $pfad, [], $json);
+            pruefe($r['status'] === 423 && (json_decode($r['text'], true)['kundenmodus'] ?? false) === true, 'Kundenmodus: ' . $pfad . ' mit JSON → 423');
+        }
+        foreach (['peilung' => ['art' => 'liter', 'wert' => '100'], 'betankung' => ['liter' => '100']] as $aktion => $felder) {
+            $r = aufruf($basis, $admin['dose'], 'POST', '/anlagen/' . $tankId . '/tank/' . $aktion, $felder + ['_token' => $admin['token']]);
+            pruefe($r['status'] === 302 && $r['ziel'] === '/berichte/' . $b3 . '/kunde', 'Kundenmodus: ' . $aktion . ' am Tank → Kundenseite');
+            $r = aufruf($basis, $admin['dose'], 'POST', '/anlagen/' . $tankId . '/tank/' . $aktion, $felder + ['_token' => $admin['token']], $json);
+            gleich($r['status'], 423, 'Kundenmodus: ' . $aktion . ' am Tank (Kartenpanel, JSON) → 423');
+        }
+        gleich((int) Database::scalar('SELECT COUNT(*) FROM tank_ereignisse WHERE objekt_id = ?', [$tankId]), $ereignisseVorher, 'Kundenmodus: am Tank nichts eingetragen');
+    }
     // /api/v1 hängt nicht an der Sitzung: mit Token antwortet sie wie sonst,
     // ohne Token mit 401 – nie mit der Kundenseite.
     $r = aufruf($basis, $admin['dose'], 'GET', '/api/v1/info', [], ['Authorization: Bearer ' . (string) ($selbstZugang['token'] ?? '')]);

@@ -74,6 +74,9 @@ final class TankService
     /** Eintragen nur im Datenfenster (darfEintragen). */
     public const AUSSERHALB_FENSTER = 'Eintragen geht nur, solange deine Freigabe für die Messdaten dieses Tanks gilt.';
 
+    /** Meldung, wenn am Tank gerade schon eingetragen wird (gesperrt()). */
+    public const GERADE_SCHON = 'An diesem Tank wird gerade schon eingetragen – nichts doppelt eingetragen. Gleich die Seite neu laden.';
+
     /** Woher die Menge einer Betankung im Verbrauch je Tag stammt (TankRechnung::tagesbilanz). */
     public const BETANKUNG_QUELLEN = [
         'erkannt'      => 'erkannt, ohne Eintrag',
@@ -1430,6 +1433,63 @@ final class TankService
             !self::darfEintragen($tank)     => ['ok' => false, 'message' => self::AUSSERHALB_FENSTER],
             default                         => null,
         };
+    }
+
+    /**
+     * $arbeit unter der Sperre dieses Tanks: Peilen, Betanken, Auswerten,
+     * Löschen und Kennlinie laufen je Tank nur einmal zur Zeit. Sie warten
+     * auf die InfluxDB ohne Sitzungssperre (Influx::abfragenAlle()) – ein
+     * Doppelklick oder ein zweiter Reiter liefe sonst nebeneinander und
+     * trüge zweimal ein, legte zwei Fassungen an oder wertete eine Betankung
+     * zweimal aus.
+     *
+     * Nicht blockierend (wie PartnerAbgleich::gesperrt()): Wer die Sperre
+     * nicht bekommt, hört mit einer Meldung auf. Warten ginge nicht – die
+     * zweite Anfrage hielte dabei die Sitzung, und die erste bekäme sie nach
+     * der InfluxDB nie wieder. Die Datei in storage/cache gilt für diese
+     * Datenbank; wer freigibt, löscht sie vorher, wer sie danach noch über
+     * den alten Eintrag sperrt, merkt das am Inode.
+     *
+     * @param callable():array{ok:bool,message:string} $arbeit
+     * @return array{ok:bool,message:string}
+     */
+    public static function gesperrt(int $tankId, callable $arbeit): array
+    {
+        $datenbank = [];
+        foreach (['driver', 'path', 'host', 'port', 'database'] as $k) {
+            $datenbank[$k] = Config::get('database.' . $k);
+        }
+        $pfad = dirname(__DIR__, 2) . '/storage/cache/tank-' . substr(hash('sha256', json_encode($datenbank) . '|' . $tankId), 0, 40) . '.sperre';
+        if (!is_dir(dirname($pfad))) {
+            @mkdir(dirname($pfad), 0775, true);
+        }
+        $griff = @fopen($pfad, 'c');
+        if ($griff === false) {
+            Logger::error('Tank: Sperrdatei ließ sich nicht anlegen: ' . $pfad);
+            return ['ok' => false, 'message' => 'storage/cache ist nicht beschreibbar – nichts eingetragen.'];
+        }
+        $frei = flock($griff, LOCK_EX | LOCK_NB);
+        if ($frei) {
+            // Noch dieselbe Datei? Sonst hat sie der Vorgänger schon gelöscht.
+            clearstatcache(true, $pfad);
+            $jetzt = @stat($pfad);
+            $meine = fstat($griff);
+            $frei = $jetzt !== false && $meine !== false && $jetzt['ino'] === $meine['ino'] && $jetzt['dev'] === $meine['dev'];
+            if (!$frei) {
+                flock($griff, LOCK_UN);
+            }
+        }
+        if (!$frei) {
+            fclose($griff);
+            return ['ok' => false, 'message' => self::GERADE_SCHON];
+        }
+        try {
+            return $arbeit();
+        } finally {
+            @unlink($pfad);
+            flock($griff, LOCK_UN);
+            fclose($griff);
+        }
     }
 
     // ------------------------------------------------------------ Kalibrieren vor Ort

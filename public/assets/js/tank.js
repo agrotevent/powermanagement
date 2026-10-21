@@ -100,6 +100,12 @@
         fetch(block.dataset.tankTage, { credentials: 'same-origin', headers: { Accept: 'application/json' } })
             .then(function (a) { return a.json(); })
             .then(function (d) {
+                // Kundenmodus, gestartet in einem anderen Reiter, während diese
+                // Seite lud (423): neu laden führt zur Kundenseite – wie live.js.
+                if (d && d.kundenmodus === true) {
+                    window.location.reload();
+                    return;
+                }
                 if (d.ok === false && d.message) {
                     // Als Text: die Meldung kann Teile einer Fehlerantwort der Datenbank enthalten.
                     melden(d.message);
