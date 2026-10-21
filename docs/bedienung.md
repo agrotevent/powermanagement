@@ -779,6 +779,11 @@ Audit-Log*) zeichnet Anmeldungen, Änderungen und Schaltvorgänge auf.
   enden alle anderen Sitzungen dieses Kontos. Eine Sitzung endet außerdem
   nach einer Stunde ohne Aktivität (`security.idle_timeout`) und spätestens
   nach zwölf Stunden (`security.max_session`).
+- Meldet sich nach einer so beendeten Sitzung im selben Browser ein anderes
+  Konto an – ein Kundenzugang etwa –, beginnt es mit einer leeren Sitzung:
+  keine Eingaben, Eventworx-Treffer oder Meldungen des vorigen Kontos.
+  Meldungen, die noch auf ihre Seite warteten, verfallen schon mit der
+  Sitzung; dasselbe Konto findet seine übrigen Eingaben wieder vor.
 - Ein Konto mit vorläufigem Kennwort kommt erst nach dem eigenen Kennwort
   weiter als bis zum Profil.
 - Steht ein TLS-Proxy davor, der kein `X-Forwarded-Proto` schickt, erzwingt

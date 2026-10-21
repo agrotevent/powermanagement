@@ -51,13 +51,14 @@ final class Kundenmodus
      * Die Sperre in der Sitzung gilt nur für das Konto, das sie gestartet
      * hat. Endet dessen Sitzung, ohne dass sie zerstört wird (Kennwort von
      * der Verwaltung zurückgesetzt, Höchstdauer, Ende des Zugangs), bleiben
-     * ihre Daten stehen – Auth::attempt() vergibt nur eine neue Kennung.
-     * Meldete sich dann ein anderes Konto in diesem Browser an, erbte es
-     * sonst die fremde Sperre: Es käme auf die Kundenseite (der Router lässt
-     * sie ohne Recht durch, ausweg()), könnte nicht abmelden, und seine
-     * Fehlversuche bremsten ein Entsperren, das ihm nie gelingt. Die fremde
-     * Sperre kommt also aus der Sitzung; die am Gerät bleibt und gilt
-     * wieder, sobald sich das Konto anmeldet, das sie gestartet hat.
+     * ihre Daten stehen, bis sich jemand anmeldet. Meldet sich ein anderes
+     * Konto an, leert Auth::attempt() die Sitzung; hier wird trotzdem
+     * nachgesehen. Erbte es die fremde Sperre, käme es auf die Kundenseite
+     * (der Router lässt sie ohne Recht durch, ausweg()), könnte nicht
+     * abmelden, und seine Fehlversuche bremsten ein Entsperren, das ihm nie
+     * gelingt. Die fremde Sperre kommt also aus der Sitzung; die am Gerät
+     * bleibt und gilt wieder, sobald sich das Konto anmeldet, das sie
+     * gestartet hat.
      *
      * Kundenzugänge (Kundenbereich) haben nie einen Kundenmodus: Starten
      * kann ihn nur, wer Berichte ausfüllt, und ein Kundenzugang hat keine

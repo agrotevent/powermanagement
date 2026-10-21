@@ -1502,6 +1502,42 @@ try {
         '… und die Sperre am Gerät bleibt beim Prüfer');
     gleich(meldungenDesServers($serverFehler), [], 'Kundenmodus neben dem Kundenbereich ohne PHP-Meldung');
 
+    // Kontowechsel im selben Browser: Endet eine Sitzung, ohne zerstört zu werden (Kennwort zurückgesetzt), bleibt
+    // stehen, was ihr Konto zuletzt tat – eine Meldung, die noch auf ihre Seite wartet, die Eingaben eines
+    // abgelehnten Formulars. Wer sich danach anmeldet, bekommt nichts davon: weder auf der Anmeldeseite noch als
+    // Kundenzugang noch als anderes Konto des Personals. Meldet sich dasselbe Konto wieder an, bleiben die Eingaben.
+    $personal['wechsel'] = BenutzerService::anlegen($kennung . '-wechsel', $kennwort, 'admin', false);
+    $personal['wechsel2'] = BenutzerService::anlegen($kennung . '-wechsel2', $kennwort, 'admin', false);
+    $merkmal = $kennung . '-Eingabe-vorher';
+    $abgelehnt = 'braucht einen Namen';
+    $kennwortWechsel = $kennwort;
+    // Anmelden, eine Meldung und Eingaben hinterlassen (die Weiterleitung lädt niemand), dann endet die Sitzung.
+    $hinterlassen = static function () use ($basis, $kennung, $merkmal, $personal, &$kennwortWechsel, &$dosen): string {
+        $dose = anmeldenAls($basis, $kennung . '-wechsel', $kennwortWechsel, $dosen)['dose'];
+        $r = anfrage($basis, $dose, 'POST', '/kunden/speichern', ['_token' => csrfAus(anfrage($basis, $dose, 'GET', '/profil')['text']),
+            'name' => 'x', 'kundennummer' => $merkmal]);
+        gleich([$r['status'], $r['ziel']], [302, '/kunden#neuer-kunde'], 'Kontowechsel: Personal hinterlässt eine Meldung und abgelehnte Eingaben');
+        $kennwortWechsel = 'Wechsel-' . bin2hex(random_bytes(4)) . '7';
+        Database::update('users', $personal['wechsel'], ['password_hash' => password_hash($kennwortWechsel, PASSWORD_DEFAULT)]);
+        return $dose;
+    };
+    $nachher = static function (string $dose, string $konto, string $kennwortKonto, string $pfad) use ($basis): array {
+        $seite = anfrage($basis, $dose, 'GET', '/login');
+        $r = anfrage($basis, $dose, 'POST', '/login', ['username' => $konto, 'password' => $kennwortKonto, '_token' => csrfAus($seite['text'])]);
+        return [$seite, $r, anfrage($basis, $dose, 'GET', $pfad)];
+    };
+    [$seite, $login, $r] = $nachher($hinterlassen(), $kennung . '-z2', $kennwort, '/kundenbereich');
+    pruefe($seite['status'] === 200 && !str_contains($seite['text'], $abgelehnt), 'Kontowechsel: die Anmeldeseite zeigt die Meldung des abgelaufenen Kontos nicht');
+    pruefe($login['ziel'] === '/kundenbereich' && $r['status'] === 200 && str_contains($r['text'], $kennung . ' Stadtmarketing')
+        && !str_contains($r['text'], $abgelehnt) && !str_contains($r['text'], $merkmal), 'Kontowechsel: der Kundenzugang danach sieht weder Meldung noch Eingaben des Personals');
+    [, , $r] = $nachher($hinterlassen(), $kennung . '-wechsel2', $kennwort, '/kunden');
+    pruefe($r['status'] === 200 && str_contains($r['text'], 'id="neuer-kunde"') && !str_contains($r['text'], $merkmal) && !str_contains($r['text'], $abgelehnt),
+        'Kontowechsel: ein anderes Konto des Personals bekommt die Eingaben des vorigen nicht ins Formular');
+    // Dasselbe Konto (Höchstdauer, Kennwort zurückgesetzt): seine Eingaben warten auf es.
+    [, , $r] = $nachher($hinterlassen(), $kennung . '-wechsel', $kennwortWechsel, '/kunden');
+    pruefe($r['status'] === 200 && str_contains($r['text'], 'value="' . $merkmal . '"'), 'Kontowechsel: dasselbe Konto wieder angemeldet – seine Eingaben sind noch da');
+    gleich(meldungenDesServers($serverFehler), [], 'Kontowechsel ohne PHP-Meldung');
+
     // Kunde beendet: die offenen Sitzungen enden bei der nächsten Anfrage – auch mitten im Plan.
     $zweiteSitzung = anmeldenAls($basis, $kennung . '-z1b', 'Neu-' . $kennwort, $dosen);
     gleich(anfrage($basis, $zweiteSitzung['dose'], 'GET', '/kundenbereich/locations/' . $sites['a'])['status'], 200, 'zweiter Zugang von K1: Location A');

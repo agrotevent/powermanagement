@@ -24,6 +24,13 @@ final class Auth
     private static ?array $user = null;
     private static ?array $permissions = null;
 
+    /**
+     * Sitzungsschlüssel: das Konto, dem die Sitzung zuletzt gehörte. Bleibt
+     * stehen, wenn user() die Anmeldung vergisst – die nächste Anmeldung
+     * erkennt daran einen Kontowechsel (sitzungUebernehmen()).
+     */
+    private const KONTO = 'konto';
+
     public static function attempt(string $username, string $password, string $ip): array
     {
         $max     = max(1, (int) Config::get('security.lockout_attempts', 5));
@@ -106,8 +113,10 @@ final class Auth
             'last_login_ip' => $ip,
         ]);
 
+        self::sitzungUebernehmen((int) $user['id']);
         Session::regenerate();
         Session::put('user_id', (int) $user['id']);
+        Session::put(self::KONTO, (int) $user['id']);
         Session::put('angemeldet', time());
         self::sitzungBinden($hash);
         Csrf::erneuern();
@@ -161,6 +170,43 @@ final class Auth
             "SELECT created_at FROM audit_log WHERE action = 'auth.login_failed' AND {$spalte} = ? AND created_at > ? ORDER BY created_at",
             [$wert, gmdate('c', $seit)]
         ), 'created_at');
+    }
+
+    /**
+     * Vor der Anmeldung von $userId: Gehörte diese Sitzung zuletzt einem
+     * anderen Konto, wird sie geleert.
+     *
+     * Endet eine Sitzung, ohne zerstört zu werden – Kennwort zurückgesetzt,
+     * Höchstdauer, Ende des Zugangs oder seines Kunden –, vergisst user() nur
+     * die Anmeldung; alles andere bliebe stehen und ginge an jeden, der sich
+     * danach in diesem Browser anmeldet: Formulareingaben, Eventworx-Treffer
+     * und geladene Vorgänge, die Rückfrage einer Zuordnung, die Auswahl der
+     * Auswertung, die Sperre des Kundenmodus – einem Kundenzugang etwa, was
+     * das Personal zuletzt eingegeben hat. Meldet sich dasselbe Konto wieder
+     * an, bleibt alles (auch die Bremse des Kundenmodus). Ist nicht bekannt,
+     * wem eine Sitzung gehörte, in der schon jemand angemeldet war (angelegt
+     * vor dieser Regel), wird sie ebenso geleert.
+     */
+    private static function sitzungUebernehmen(int $userId): void
+    {
+        $vorher = Session::get(self::KONTO, Session::get('user_id'));
+        $warAngemeldet = $vorher !== null || Session::get('kennwort') !== null;
+        if ($warAngemeldet && (int) $vorher !== $userId) {
+            Session::leeren();
+        }
+    }
+
+    /**
+     * Die Sitzung gilt nicht mehr (user()): die Anmeldung vergessen – und
+     * Meldungen, die noch auf ihre Seite warten. Sie gehören dem Konto, das
+     * nicht mehr angemeldet ist, und stünden sonst auf der Anmeldeseite vor
+     * dem Nächsten, der sie öffnet. Was danach kommt („bitte neu anmelden“),
+     * bleibt. KONTO bleibt stehen (sitzungUebernehmen()).
+     */
+    private static function sitzungBeenden(): void
+    {
+        Session::forget('user_id');
+        Session::forget('flash');
     }
 
     /**
@@ -241,6 +287,9 @@ final class Auth
         }
         $user = Database::first('SELECT * FROM users WHERE id = ? AND is_active = 1', [(int) $id]);
         if (!$user) {
+            // Deaktiviert oder gelöscht: die Sitzung ist zu Ende – auch wenn
+            // das Konto später wieder aktiv wird.
+            self::sitzungBeenden();
             return null;
         }
         // Kennwort seitdem geändert, oder die Sitzung ist älter als erlaubt:
@@ -248,13 +297,13 @@ final class Auth
         $hoechstens = (int) Config::get('security.max_session', 43200);
         if (!hash_equals(self::kennwortMarke((string) $user['password_hash']), (string) Session::get('kennwort', ''))
             || ($hoechstens > 0 && time() - (int) Session::get('angemeldet', 0) > $hoechstens)) {
-            Session::forget('user_id');
+            self::sitzungBeenden();
             return null;
         }
         // Abgelaufen, während die Sitzung offen war – oder der Kunde eines
         // Kundenzugangs ist beendet: dann ist sie zu Ende.
         if (self::zugangSperre($user) !== null) {
-            Session::forget('user_id');
+            self::sitzungBeenden();
             return null;
         }
         return self::$user = $user;

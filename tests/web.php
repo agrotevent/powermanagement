@@ -1356,8 +1356,9 @@ try {
     pruefe($r['status'] === 302 && $r['ziel'] === '/berichte/' . $b3 . '/kunde', 'Kundenmodus am Gerät: nach neuer Anmeldung in diesem Browser weiter gesperrt');
     // Ein anderes Konto im selben Browser: Endet die Sitzung des Prüfers, ohne
     // zerstört zu werden (die Verwaltung setzt sein Kennwort zurück), bleiben
-    // ihre Daten samt Sperre stehen – die Anmeldung vergibt nur eine neue
-    // Kennung. Wer sich dann anmeldete, erbte die fremde Sperre: kein
+    // ihre Daten samt Sperre stehen, bis sich jemand anmeldet (ein anderes
+    // Konto bekommt eine geleerte Sitzung, Auth::attempt()). Wer sich dann
+    // anmeldete, erbte sonst die fremde Sperre: kein
     // Abmelden, Kundenseite und Entsperren ohne das Recht (Kundenmodus::ausweg()),
     // und seine Fehlversuche bremsten das Entsperren für den Prüfer. Die
     // Sperre gilt nur für das Konto, das sie gestartet hat – am Gerät gilt sie
