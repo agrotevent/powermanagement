@@ -129,6 +129,10 @@
         feld('roh', da(t.roh) ? kurz(t.roh, t.roh_einheit) + (t.stand ? ' · ' + t.stand : '') : '–');
         feld('online', t.online === true ? 'online' : (t.online === false ? 'offline' : '–'));
         feld('kennlinie', t.kennlinie || '–');
+        // Versorgung: Restlaufzeit und „nachbestellen bis“ – sonst der Verbrauch („Generator steht“)
+        feld('rest', t.restlaufzeit_text ? t.restlaufzeit_text + (t.nachbestellen_text ? ' · nachbestellen bis ' + t.nachbestellen_text : '') : (t.verbrauch_text || ''));
+        feld('verbrauch', t.verbrauch_text || '–');
+        feld('leer', t.leer_um_text || '–');
         kachel.querySelectorAll('[data-tank-balken]').forEach(function (b) {
             b.style.width = Math.max(0, Math.min(100, da(t.prozent) ? t.prozent : 0)) + '%';
         });

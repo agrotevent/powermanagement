@@ -81,17 +81,18 @@ $stuecke = static fn (array $s) => $s === [] ? '–' : implode(', ', array_map(s
     </tbody>
 </table></div>
 
-<h2 class="mt">Kabel und Kabelbrücken</h2>
+<h2 class="mt">Kabel, Kabelbrücken und Schläuche</h2>
 <div class="table-wrap"><table class="tabelle-karten">
     <thead><tr><th>Strecke</th><th class="num">Plan</th><th class="num">echt</th><th class="num">Differenz</th><th>Stand</th></tr></thead>
     <tbody>
     <?php if ($g['kabel'] === []): ?><tr><td colspan="5" class="muted">Keine mobilen Kabel geplant.</td></tr><?php endif; ?>
     <?php foreach ($g['kabel'] as $k): ?>
-        <?php $d = $k['art'] === 'kabel' ? $k['differenz'] : null; ?>
-        <tr><td data-label="Strecke"><strong><?= View::e($k['name']) ?></strong><?= $k['art'] === 'kabelbruecke' ? ' <span class="small muted">Kabelbrücke</span>' : '' ?>
+        <?php $mitLaenge = in_array($k['art'], ['kabel', 'kraftstoff'], true); $d = $mitLaenge ? $k['differenz'] : null; ?>
+        <tr><td data-label="Strecke"><strong><?= View::e($k['name']) ?></strong><?= $k['art'] === 'kabelbruecke' ? ' <span class="small muted">Kabelbrücke</span>'
+                : ($k['art'] === 'kraftstoff' ? ' <span class="small muted">Kraftstoffschlauch</span>' : '') ?>
                 <?= $k['notiz'] !== '' ? '<div class="small muted">' . View::e($k['notiz']) . '</div>' : '' ?></td>
-            <td data-label="Plan" class="num"><?= $k['art'] === 'kabel' ? View::e($meter($k['laenge_plan'])) : '' ?></td>
-            <td data-label="echt" class="num"><?= $k['art'] === 'kabel' ? View::e($meter($k['laenge_ist'])) : '' ?></td>
+            <td data-label="Plan" class="num"><?= $mitLaenge ? View::e($meter($k['laenge_plan'])) : '' ?></td>
+            <td data-label="echt" class="num"><?= $mitLaenge ? View::e($meter($k['laenge_ist'])) : '' ?></td>
             <td data-label="Differenz" class="num<?= $d !== null && abs($d) >= 5 ? ' abweichung' : '' ?>"><?= $d !== null ? ($d > 0 ? '+' : '') . View::e($meter($d)) : '' ?></td>
             <td data-label="Stand"><span class="badge <?= $klasse[$k['status']] ?? '' ?>"><?= View::e(AufbauService::POSTEN[$k['status']] ?? $k['status']) ?></span></td></tr>
     <?php endforeach; ?>

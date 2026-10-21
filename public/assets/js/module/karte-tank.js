@@ -18,6 +18,9 @@
  *   betankungFormular(ziel, o, aktionen)
  *                                       Betankung: Liter, Lieferschein, Ende
  *                                       jetzt oder Uhrzeit.
+ *   schlauchPanel(seite, d, aktionen)   Kraftstoffschlauch Tank → Generator:
+ *                                       Schlauchtyp, Kupplung, Anzahl (Vor- und
+ *                                       Rücklauf), Länge, fest/mobil.
  *
  * Alles aus Antworten des Servers kommt per textContent ins Dokument, nie
  * als HTML. Was jemand darf, sagt der Server (o.darf, o.tank.darf); er
@@ -43,7 +46,14 @@ const da = (w) => w !== null && w !== undefined;
 const ganz = (w, einheit) => (da(w) ? PM.format(w, einheit, 0) : '');
 const kurz = (w, einheit) => w.toLocaleString('de-DE', { maximumFractionDigits: 3 }) + (einheit ? ' ' + einheit : '');
 
-/** „80 % · 2.390 l“, ohne Kalibrierung „860 mm“, bei einem Fehler „Fehler“. */
+/** Restlaufzeit kurz: „40 min“, „19 h“, „6 Tage“. */
+export function restKurz(stunden) {
+    if (!da(stunden)) { return ''; }
+    if (stunden < 1) { return Math.round(Math.max(0, stunden) * 60) + ' min'; }
+    return stunden < 48 ? Math.round(stunden) + ' h' : Math.round(stunden / 24) + ' Tage';
+}
+
+/** „80 % · 2.390 l · 19 h“, ohne Kalibrierung „860 mm“, bei einem Fehler „Fehler“. */
 export function tankWertText(t) {
     if (!t || !t.sensor) { return ''; }
     if (t.fehler) { return 'Fehler'; }
@@ -52,6 +62,7 @@ export function tankWertText(t) {
     if (da(t.liter)) { teile.push(ganz(t.liter, 'l')); }
     if (!teile.length && da(t.hoehe_mm)) { teile.push(ganz(t.hoehe_mm, 'mm')); }
     if (!teile.length && da(t.roh)) { teile.push(kurz(t.roh, t.roh_einheit)); }
+    if (teile.length && da(t.restlaufzeit_h)) { teile.push(restKurz(t.restlaufzeit_h)); }
     return teile.join(' · ');
 }
 
@@ -88,8 +99,19 @@ export function tankPanelLive(seite, l) {
             zelle('Füllhöhe', ganz(t.hoehe_mm, 'mm')),
             zelle('Rohwert', da(t.roh) ? kurz(t.roh, t.roh_einheit) + (t.stand ? ' · ' + t.stand : '') : ''),
             zelle('Gerät', t.online === true ? 'online' : (t.online === false ? 'offline' : '')),
+            // Versorgung über den Kraftstoffschlauch
+            t.verbrauch_text ? zelle('Verbrauch', t.verbrauch_text) : null,
+            da(t.restlaufzeit_h) ? zelle('Restlaufzeit', t.restlaufzeit_text) : null,
+            t.leer_um_text ? zelle('Leer um', t.leer_um_text) : null,
+            t.nachbestellen_text ? zelle('Nachbestellen bis', t.nachbestellen_text) : null,
         ));
         kinder.push(el('div', { klasse: 'small' }, 'Kennlinie: ', t.kennlinie || '–'));
+        if (t.generatoren && t.generatoren.length) {
+            kinder.push(el('div', { klasse: 'small' }, 'Am Schlauch: ',
+                t.generatoren.map((g) => g.name + (g.laeuft ? ' (läuft)' : ' (steht)')).join(', '),
+                t.vorrat_tanks > 1 ? ' · Vorrat aus ' + t.vorrat_tanks + ' Tanks: ' + ganz(t.vorrat_l, 'l') : '',
+                da(t.intern_l) ? ' · dazu intern ≈ ' + ganz(t.intern_l, 'l') : ''));
+        }
     } else {
         kinder.push(el('div', { klasse: 'seite-werte tank-werte stufe-' + (l.stufe || 'keine') }, zelle('Füllstand', '')));
     }
@@ -212,6 +234,70 @@ export function betankungFormular(ziel, o, aktionen) {
     });
     ziel.replaceChildren(form);
     liter.focus();
+}
+
+/**
+ * Das Fenster eines Kraftstoffschlauchs – neu (aktionen.neu aus dem Entwurf)
+ * oder vorhanden (d aus /karte/leitung/{id}). Anzahl 2 = Vor- und Rücklauf;
+ * die Kupplung schlägt der Server aus dem Tank vor, wenn sie leer bleibt.
+ *
+ * @param d        null (neu) oder { leitung, darf }
+ * @param aktionen { neu: {von, zu, von_name, zu_name, laenge_plan}, festMoeglich, darf, schlauchtypen, kupplung, meter,
+ *                   speichern: async (felder) => {}, verwerfen: () => {}, loeschen: (id) => {} }
+ */
+export function schlauchPanel(seite, d, aktionen) {
+    const neu = d === null;
+    const l = neu ? Object.assign({ id: 0, name: '', kabeltyp: aktionen.schlauchtypen[0] || '', modell: '', anzahl: 2, laenge_m: null, notizen: '', fest: false, hinweise: [] }, aktionen.neu)
+        : d.leitung;
+    const darf = aktionen.darf;
+    const feld = (beschriftung, id, eingabe) => el('div', { klasse: 'field' }, el('label', { for: id }, beschriftung), eingabe);
+    const aus = darf ? null : true;
+    const typ = el('input', { id: 'schlauch-typ', name: 'kabeltyp', list: 'schlauchtypen', value: l.kabeltyp || '', disabled: aus });
+    const kupplung = el('input', { id: 'schlauch-kupplung', name: 'modell', value: l.modell || '', placeholder: 'leer: aus dem Tank, sonst ' + aktionen.kupplung, disabled: aus });
+    const anzahl = el('select', { id: 'schlauch-anzahl', name: 'anzahl', disabled: aus },
+        el('option', { value: '2', selected: Number(l.anzahl) !== 1 }, '2 – Vor- und Rücklauf'),
+        el('option', { value: '1', selected: Number(l.anzahl) === 1 }, '1 – nur Vorlauf'));
+    const planLaenge = l.laenge_plan;
+    const laenge = el('input', { id: 'schlauch-laenge', name: 'laenge_m', inputmode: 'decimal', disabled: aus,
+        value: da(l.laenge_m) ? String(l.laenge_m).replace('.', ',') : '', placeholder: da(planLaenge) ? 'Plan: ' + aktionen.meter(planLaenge) : 'kein Maßstab' });
+    const name = el('input', { id: 'schlauch-name', name: 'name', value: l.name || '', placeholder: 'z. B. Tank 1 → Aggregat 1', disabled: aus });
+    const notiz = el('input', { id: 'schlauch-notiz', name: 'notizen', value: l.notizen || '', disabled: aus });
+    // Neu zwischen zwei fest installierten Anlagen: von Haus aus fest (wie beim Kabel).
+    const fest = el('input', { type: 'checkbox', id: 'schlauch-fest', name: 'fest', value: '1', checked: neu ? !!aktionen.festMoeglich : !!l.fest, disabled: darf && (aktionen.festMoeglich || l.fest) ? null : true });
+    const datalist = el('datalist', { id: 'schlauchtypen' }, aktionen.schlauchtypen.map((s) => el('option', { value: s })));
+    const knoepfe = el('div', { klasse: 'btn-row' });
+    const form = el('form', { klasse: 'schlauch-form' },
+        feld('Schlauchtyp', 'schlauch-typ', typ),
+        el('div', { klasse: 'field-row' }, feld('Kupplung', 'schlauch-kupplung', kupplung), feld('Stränge', 'schlauch-anzahl', anzahl)),
+        el('div', { klasse: 'field-row' }, feld('Länge (m)', 'schlauch-laenge', laenge), feld('Name', 'schlauch-name', name)),
+        el('div', { klasse: 'check' }, fest, el('label', { for: 'schlauch-fest' }, el('strong', {}, 'Fest verlegt'),
+            ' – gehört zur Location (feste Kraftstoffleitung).', aktionen.festMoeglich ? '' : el('span', { klasse: 'muted' }, ' Nur zwischen fest installierten Anlagen.'))),
+        feld('Notiz', 'schlauch-notiz', notiz),
+        datalist,
+        darf ? knoepfe : null);
+    if (darf) {
+        const speichern = el('button', { type: 'submit', klasse: 'btn btn-primary btn-sm' }, 'Speichern');
+        knoepfe.append(speichern);
+        const weg = el('button', { type: 'button', klasse: neu ? 'btn btn-sm btn-ghost' : 'btn btn-sm btn-danger' }, neu ? 'Verwerfen' : 'Löschen');
+        weg.addEventListener('click', () => (neu ? aktionen.verwerfen() : aktionen.loeschen(l.id)));
+        knoepfe.append(weg);
+        form.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            speichern.disabled = true;
+            try {
+                await aktionen.speichern({ kabeltyp: typ.value, modell: kupplung.value, anzahl: anzahl.value, laenge_m: laenge.value,
+                    name: name.value, notizen: notiz.value, fest: fest.checked ? '1' : '0' });
+            } finally {
+                speichern.disabled = false;
+            }
+        });
+    }
+    seite.replaceChildren(
+        el('h2', {}, neu ? 'Neuer Kraftstoffschlauch' : (l.name || 'Kraftstoffschlauch')),
+        el('p', { klasse: 'small' }, el('strong', {}, l.von_name || '?'), ' → ', el('strong', {}, l.zu_name || '?')),
+        ...(l.hinweise || []).map((h) => el('div', { klasse: 'notice warn small' }, h)),
+        form,
+        el('p', { klasse: 'help' }, 'Der Generator am Ende bestimmt Verbrauch und Restlaufzeit des Tanks (Kennlinie × Last). Je Strang zählt die Materialliste einen Schlauch mit zwei Kupplungen.'));
 }
 
 /**

@@ -380,11 +380,13 @@ final class LocationBundle
         }
 
         // Fest verlegte Kabel und Kabelwege. Ein Ende an einer Anlage, die
-        // nicht (mehr) fest ist, geht als offenes Ende hinaus.
+        // nicht (mehr) fest ist, geht als offenes Ende hinaus. Kabelbrücken
+        // und Kraftstoffschläuche bleiben hier (ältere Gegenstellen kennten
+        // keinen Schlauch).
         $leitungen = [];
         foreach (array_keys($etagenKeys) as $floorId) {
             foreach (LeitungService::fuerEtage($floorId) as $l) {
-                if ($l['fest'] !== 1 || $l['art'] === 'kabelbruecke') {
+                if ($l['fest'] !== 1 || !in_array($l['art'], ['kabel', 'kabelweg'], true)) {
                     continue;
                 }
                 $key = self::schluesselSichern('leitungen', (int) $l['id'], (string) ($l['name'] ?: $l['art']), $l['art'] . '-' . $l['id']);

@@ -8,6 +8,7 @@ use App\Auth\Zugriff;
 use App\Messung\Messdaten;
 use App\Services\AnlagenService;
 use App\Services\InventarService;
+use App\Services\LeitungService;
 use App\Services\LiveService;
 use App\Services\MesspunktService;
 use App\Services\PlanGeoService;
@@ -41,11 +42,21 @@ use App\Support\Zeit;
  * Gelesen wird beim Anzeigen: live() holt den letzten Rohwert seit dem
  * Einbau (Messdaten::tankLetzte – höchstens 7 Tage, nur im Datenfenster),
  * reihe() den Verlauf je Fassung. In der InfluxDB steht nie ein Liter.
+ *
+ * Versorgung: Kraftstoffschläuche (Leitungsart „kraftstoff“) verbinden
+ * Tanks und Generatoren. Was zusammenhängt, hat einen Vorrat (Σ nutzbar) und
+ * einen Verbrauch – aus Kennlinie × Last der Generatoren, wenn jeder davon
+ * sichtbar ist und einen Livewert hat, sonst aus dem Gefälle des Pegels. Daraus
+ * Restlaufzeit, „leer um“ und „nachbestellen bis“. Ein Generator, den der
+ * Betrachter nicht sieht, verrät weder Namen noch Leistung.
  */
 final class TankService
 {
     /** Wie weit Live zurückschaut: Gen2 meldet einen Analogwert nur bei Änderung. */
     public const LIVE_FENSTER_S = 7 * 86400;
+
+    /** Wie weit das Gefälle des Pegels (Verbrauch ohne Generator mit Livewert) zurückschaut. */
+    public const GEFAELLE_FENSTER_S = 6 * 3600;
 
     /** Eine Betankung wird frühestens 30 min nach dem Tanken ausgewertet – vorher fehlen die Werte danach. */
     public const AUSWERTEN_NACH_S = 1800;
@@ -162,6 +173,7 @@ final class TankService
             : [];
         $frueher = $vorlage ? [] : array_values(array_filter(self::sensoren((int) $tank['id']),
             static fn (array $m): bool => $m['gueltig_bis'] !== null && self::zeitraumImFenster($m, $fenster)));
+        $live = $vorlage ? [] : (LiveService::fuerObjekte([$tank])[(int) $tank['id']] ?? []);
         return [
             'objekt'      => $tank,
             'vorlage'     => $vorlage,
@@ -174,7 +186,9 @@ final class TankService
             'kennlinie'   => self::kennlinieText($fassung),
             'hinweise'    => $fassung !== null ? TankRechnung::hinweise($fassung['rechnung']) : [],
             'sensorFrei'  => $frei,
-            'live'        => $vorlage ? [] : (LiveService::fuerObjekte([$tank])[(int) $tank['id']] ?? []),
+            'live'        => $live,
+            // Schläuche, Generatoren mit Kennlinie, Gegenprüfung Pegel ↔ Last
+            'versorgung'  => $vorlage ? null : self::versorgungSeite($tank, $live),
             'fenster'     => $fenster,
             'fassungen'   => $vorlage ? [] : self::fassungenSichtbar($tank),
             'frueher'     => $frueher,
@@ -184,6 +198,19 @@ final class TankService
             'rueckwirkend' => !$vorlage && $darfAendern && $fenster === null,
             'nenn_l'      => TankRechnung::zahlLesen($eigenschaften['inhalt_l'] ?? null),
         ];
+    }
+
+    /**
+     * Die Zeile unter dem Balken: „noch 19 h · nachbestellen bis Mo 02:29“,
+     * ohne Restlaufzeit der Verbrauch („Generator steht“) – sonst leer.
+     * live.js setzt dieselbe Zeile aus den Livewerten.
+     */
+    public static function restZeile(array $t): string
+    {
+        if (is_string($t['restlaufzeit_text'] ?? null)) {
+            return $t['restlaufzeit_text'] . (is_string($t['nachbestellen_text'] ?? null) ? ' · nachbestellen bis ' . $t['nachbestellen_text'] : '');
+        }
+        return (string) ($t['verbrauch_text'] ?? '');
     }
 
     /** „Betankung 16.10.2026 08:10 · geprüft“, „Einbau … · seit Einbau nicht gepeilt“ – die jetzige Kennlinie im Klartext. */
@@ -226,7 +253,24 @@ final class TankService
             return [];
         }
         $jetzt = time();
-        $ids = array_map(static fn (array $t): int => (int) $t['id'], $tanks);
+        $angefragt = [];
+        foreach ($tanks as $t) {
+            $angefragt[(int) $t['id']] = $t;
+        }
+        // Versorgung über Kraftstoffschläuche: Ein Tank derselben Versorgung,
+        // der nicht gefragt ist, zählt zum Vorrat – nur, wenn der Betrachter
+        // ihn sieht.
+        $versorgung = self::versorgungen(array_keys($angefragt));
+        $alle = $angefragt;
+        foreach (array_keys($angefragt) as $id) {
+            foreach ($versorgung[$id]['tanks'] ?? [] as $andere) {
+                if (!isset($alle[$andere]) && ($o = AnlagenService::find($andere)) !== null && $o['art'] === 'tank'
+                    && (int) $o['ist_vorlage'] === 0 && Zugriff::siehtObjekt($o)) {
+                    $alle[$andere] = $o;
+                }
+            }
+        }
+        $ids = array_keys($alle);
         $sensoren = [];
         foreach (Database::select(
             "SELECT m.*, i.kennung, i.eigenschaften AS sensordaten FROM messpunkte m
@@ -238,14 +282,13 @@ final class TankService
             $sensoren[(int) $m['objekt_id']] ??= $m;    // ein neuer ersetzt den alten – stehen doch zwei da, zählt der erste
         }
         $grenzen = self::grenzen();
-        $out = [];
+        $fertig = [];
         $offen = [];
         $abfragen = [];
-        foreach ($tanks as $tank) {
-            $id = (int) $tank['id'];
+        foreach ($alle as $id => $tank) {
             $fenster = Zugriff::datenFenster($tank);
             if (!Zugriff::liveErlaubt($fenster, $jetzt)) {
-                $out[$id] = self::liveAntwort(['stufe' => 'gesperrt', 'hinweis' => 'Livewerte außerhalb des freigegebenen Zeitraums'], null);
+                $fertig[$id] = self::liveAntwort(['stufe' => 'gesperrt', 'hinweis' => 'Livewerte außerhalb des freigegebenen Zeitraums'], null);
                 continue;
             }
             $peilung = self::letztePeilung($tank, $fenster);
@@ -253,7 +296,7 @@ final class TankService
             $eig = (array) $tank['eigenschaften'];
             if ($m === null) {
                 $stufe = TankRechnung::stufe(['sensor' => false, 'peilung' => $peilung, 'jetzt' => $jetzt], $grenzen, $eig);
-                $out[$id] = self::liveAntwort($stufe, ['sensor' => false, 'peilung' => $peilung,
+                $fertig[$id] = self::liveAntwort($stufe, ['sensor' => false, 'peilung' => $peilung,
                     'nenn_l' => TankRechnung::zahlLesen($eig['inhalt_l'] ?? null)]);
                 continue;
             }
@@ -270,8 +313,20 @@ final class TankService
             $offen[$id] = [$tank, $m, $fassung, is_string($feld) ? $feld : null, $peilung];
         }
         $werte = Messdaten::tankLetzte($abfragen);
+        $mitSensor = [];
         foreach ($offen as $id => [$tank, $m, $fassung, $feld, $peilung]) {
-            $out[$id] = self::liveMitSensor($tank, $m, $fassung, $feld, $peilung, $werte[$m['geraet'] . '|' . $m['kanal']] ?? null, $grenzen, $jetzt);
+            $mitSensor[$id] = self::werteMitSensor($tank, $m, $fassung, $feld, $peilung, $werte[$m['geraet'] . '|' . $m['kanal']] ?? null, $jetzt);
+        }
+        // Zweiter Schritt: Verbrauch, Vorrat und Restlaufzeit je Versorgung –
+        // erst dann die Stufe, sie hängt an der Restlaufzeit.
+        self::versorgungRechnen($mitSensor, $versorgung, $generatorLive, $grenzen, $jetzt);
+        $out = [];
+        foreach (array_keys($angefragt) as $id) {
+            if (isset($fertig[$id])) {
+                $out[$id] = $fertig[$id];
+            } elseif (isset($mitSensor[$id])) {
+                $out[$id] = self::liveFertig($mitSensor[$id], $grenzen, $jetzt);
+            }
         }
         return $out;
     }
@@ -314,8 +369,14 @@ final class TankService
         return $g;
     }
 
-    /** Ein Tank mit Sensor: Rohwert → Füllhöhe → Liter, Stufe und Hinweis. */
-    private static function liveMitSensor(array $tank, array $m, ?array $fassung, ?string $feld, ?array $peilung, ?array $w, array $grenzen, int $jetzt): array
+    /**
+     * Ein Tank mit Sensor: Rohwert → Füllhöhe → Liter. Die Stufe folgt erst
+     * in liveFertig(), wenn Verbrauch und Restlaufzeit der Versorgung
+     * feststehen.
+     *
+     * @return array{tank:array,m:array,fassung:?array,r:?array,feld:?string,roh:?float,erg:array,alter:?int,t:array<string,mixed>}
+     */
+    private static function werteMitSensor(array $tank, array $m, ?array $fassung, ?string $feld, ?array $peilung, ?array $w, int $jetzt): array
     {
         $r = $fassung['rechnung'] ?? null;
         $roh = $w['roh'] ?? null;
@@ -346,23 +407,35 @@ final class TankService
             'fehler'        => $erg['fehler'],
             'ueber_grenze'  => $erg['ueber_grenze'],
             'schritt_l'     => $r !== null ? $rund(TankRechnung::schrittLiter($r), 2) : null,
-            // Verbrauch und Restlaufzeit: nur über einen Kraftstoffschlauch zu einem sichtbaren Generator.
-            'verbrauch_l_h' => null, 'verbrauch_quelle' => null, 'restlaufzeit_h' => null, 'leer_um' => null, 'nachbestellen_bis' => null,
+            // Verbrauch und Restlaufzeit: aus der Versorgung (versorgungRechnen)
+            'verbrauch_l_h' => null, 'verbrauch_quelle' => null, 'verbrauch_geschaetzt' => false, 'verbrauch_text' => '',
+            'vorrat_l' => null, 'vorrat_tanks' => 0, 'vorrat_vollstaendig' => false,
+            'restlaufzeit_h' => null, 'restlaufzeit_text' => null, 'leer_um' => null, 'leer_um_text' => null,
+            'nachbestellen_bis' => null, 'nachbestellen_text' => null,
             'generatoren'   => [],
+            'intern_l'      => null,
             'peilung'       => $peilung,
         ];
-        $stufe = TankRechnung::stufe($t + ['alter_s' => $alter, 'grenze_prozent' => $r['tank']['grenze_prozent'] ?? null, 'jetzt' => $jetzt],
-            $grenzen, (array) $tank['eigenschaften']);
-        if ($feld === null) {
+        return ['tank' => $tank, 'm' => $m, 'fassung' => $fassung, 'r' => $r, 'feld' => $feld, 'roh' => $roh, 'erg' => $erg, 'alter' => $alter, 't' => $t];
+    }
+
+    /** Stufe, Hinweis und die Antwort in der Form von LiveService für einen Tank mit Sensor. */
+    private static function liveFertig(array $x, array $grenzen, int $jetzt): array
+    {
+        $t = $x['t'];
+        $r = $x['r'];
+        $stufe = TankRechnung::stufe($t + ['alter_s' => $x['alter'], 'grenze_prozent' => $r['tank']['grenze_prozent'] ?? null, 'jetzt' => $jetzt],
+            $grenzen, (array) $x['tank']['eigenschaften']);
+        if ($x['feld'] === null) {
             $stufe = ['stufe' => 'stumm', 'hinweis' => 'Sensordaten unvollständig – am Tanksensor nachtragen, sonst lässt sich nichts lesen'];
         } elseif ($r === null && $stufe['stufe'] === 'ok') {
-            $stufe['hinweis'] = 'Rohwert ' . ($roh !== null ? TankRechnung::zahl(round($roh, 3)) . ($t['roh_einheit'] !== '' ? ' ' . $t['roh_einheit'] : '') : '–')
+            $stufe['hinweis'] = 'Rohwert ' . ($x['roh'] !== null ? TankRechnung::zahl(round($x['roh'], 3)) . ($t['roh_einheit'] !== '' ? ' ' . $t['roh_einheit'] : '') : '–')
                 . ' – keine Kennlinie: Sensordaten am Tanksensor nachtragen';
         }
         $antwort = self::liveAntwort($stufe, $t);
-        $antwort['alter_s'] = $alter;
-        if ($erg['fehler'] === null || $erg['liter'] !== null) {
-            $antwort['zustand'] = array_filter(['tank_prozent' => $t['prozent'], 'tank_liter' => $t['liter']], static fn ($x) => $x !== null);
+        $antwort['alter_s'] = $x['alter'];
+        if ($x['erg']['fehler'] === null || $x['erg']['liter'] !== null) {
+            $antwort['zustand'] = array_filter(['tank_prozent' => $t['prozent'], 'tank_liter' => $t['liter']], static fn ($v) => $v !== null);
         }
         return $antwort;
     }
@@ -415,6 +488,435 @@ final class TankService
             }
         }
         return null;
+    }
+
+    // ------------------------------------------------------------ Versorgung (Kraftstoffschlauch)
+
+    /**
+     * Die Generatoren an den Kraftstoffschläuchen je Tank – ohne Rechteprüfung
+     * (wer was sieht, entscheiden live() und versorgungSeite()).
+     *
+     * @param list<int> $tankIds
+     * @return array<int,list<array<string,mixed>>> tank_id => Generatoren (AnlagenService::find)
+     */
+    public static function verbraucher(array $tankIds): array
+    {
+        $ids = array_values(array_unique(array_map('intval', $tankIds)));
+        if ($ids === []) {
+            return [];
+        }
+        $out = [];
+        $gesehen = [];
+        foreach (Database::select(
+            "SELECT DISTINCT l.von_objekt_id AS tank, l.zu_objekt_id AS generator FROM leitungen l JOIN objekte o ON o.id = l.zu_objekt_id
+             WHERE l.art = 'kraftstoff' AND o.art = 'generator' AND l.von_objekt_id IN (" . implode(',', array_fill(0, count($ids), '?')) . ')
+             ORDER BY l.zu_objekt_id',
+            $ids
+        ) as $r) {
+            $g = $gesehen[(int) $r['generator']] ??= AnlagenService::find((int) $r['generator']);
+            if ($g !== null) {
+                $out[(int) $r['tank']][] = $g;
+            }
+        }
+        return $out;
+    }
+
+    /**
+     * Die Versorgung eines Tanks: alle Tanks und Generatoren, die über
+     * Kraftstoffschläuche zusammenhängen (ein Generator an zwei Tanks, zwei
+     * Generatoren an einem Tank …). Vorrat, Verbrauch und Restlaufzeit
+     * gelten für alle ihre Tanks gleich. Ohne Rechteprüfung.
+     *
+     * @return array{tanks:list<int>,generatoren:list<int>}
+     */
+    public static function versorgung(int $tankId): array
+    {
+        return self::versorgungen([$tankId])[$tankId];
+    }
+
+    /**
+     * @param list<int> $tankIds
+     * @return array<int,array{tanks:list<int>,generatoren:list<int>}> für jeden gefragten Tank (und die übrigen Tanks seiner Versorgung)
+     */
+    private static function versorgungen(array $tankIds): array
+    {
+        $nachbarn = [];
+        $art = [];
+        foreach (Database::select(
+            "SELECT l.von_objekt_id AS von, l.zu_objekt_id AS zu, ov.art AS von_art, oz.art AS zu_art FROM leitungen l
+             JOIN objekte ov ON ov.id = l.von_objekt_id JOIN objekte oz ON oz.id = l.zu_objekt_id WHERE l.art = 'kraftstoff'"
+        ) as $l) {
+            $von = (int) $l['von'];
+            $zu = (int) $l['zu'];
+            $nachbarn[$von][$zu] = true;
+            $nachbarn[$zu][$von] = true;
+            $art[$von] = (string) $l['von_art'];
+            $art[$zu] = (string) $l['zu_art'];
+        }
+        $out = [];
+        foreach ($tankIds as $id) {
+            $id = (int) $id;
+            if (isset($out[$id])) {
+                continue;
+            }
+            $gesehen = [$id => true];
+            $offen = [$id];
+            while ($offen !== [] && count($gesehen) < 500) {
+                foreach (array_keys($nachbarn[array_pop($offen)] ?? []) as $y) {
+                    if (!isset($gesehen[$y])) {
+                        $gesehen[$y] = true;
+                        $offen[] = $y;
+                    }
+                }
+            }
+            $k = ['tanks' => [], 'generatoren' => []];
+            $alle = array_keys($gesehen);
+            sort($alle);
+            foreach ($alle as $y) {
+                if ($y === $id || ($art[$y] ?? '') === 'tank') {
+                    $k['tanks'][] = $y;
+                } elseif (($art[$y] ?? '') === 'generator') {
+                    $k['generatoren'][] = $y;
+                }
+            }
+            foreach ($k['tanks'] as $t) {
+                $out[$t] = $k;
+            }
+        }
+        return $out;
+    }
+
+    /**
+     * Die Generatoren einer Versorgung jetzt: Läuft er, wie viel verbraucht
+     * er (Kennlinie × Last, ohne Kennlinie Volllast – geschätzt)? Nur, wen
+     * der Betrachter sieht und jetzt live sehen darf – die übrigen zählen als
+     * unbekannt, ohne Name und Leistung.
+     *
+     * Läuft: P ≥ 2 % · kVA · 800 W (ohne kVA 100 W), Drehzahl > 0 oder
+     * Motorzustand „Läuft“. Läuft er ohne bekannte Leistung, gilt der kleinste
+     * Punkt der Kennlinie.
+     *
+     * @param list<int> $ids
+     * @param array<int,array<string,mixed>> $live Livewerte, die schon da sind (LiveService, erster Durchgang)
+     * @return array<int,array{sichtbar:bool,id?:int,name?:string,laeuft?:?bool,l_h?:?float,geschaetzt?:bool,intern_l?:?float}>
+     */
+    private static function generatorWerte(array $ids, array $live): array
+    {
+        $objekte = [];
+        foreach (array_unique(array_map('intval', $ids)) as $id) {
+            $g = AnlagenService::find($id);
+            $objekte[$id] = $g !== null && $g['art'] === 'generator' && Zugriff::siehtObjekt($g) && Zugriff::liveErlaubt(Zugriff::datenFenster($g)) ? $g : null;
+        }
+        $fehlen = array_values(array_filter($objekte, static fn (?array $g): bool => $g !== null && !isset($live[(int) $g['id']])));
+        if ($fehlen !== []) {
+            $live += LiveService::fuerObjekte($fehlen);
+        }
+        $out = [];
+        foreach ($objekte as $id => $g) {
+            if ($g === null) {
+                $out[$id] = ['sichtbar' => false];
+                continue;
+            }
+            $w = $live[$id] ?? null;
+            $z = (array) ($w['zustand'] ?? []);
+            $p = is_numeric($w['p'] ?? null) ? (float) $w['p'] : null;
+            $drehzahl = is_numeric($z['drehzahl'] ?? null) ? (float) $z['drehzahl'] : null;
+            $motor = is_string($z['motorzustand'] ?? null) ? (string) $z['motorzustand'] : null;
+            $hatWert = $w !== null && !in_array((string) ($w['stufe'] ?? ''), ['keine', 'gesperrt', 'stumm'], true)
+                && ($p !== null || $drehzahl !== null || $motor !== null);
+            $kva = TankRechnung::zahlLesen($g['nennleistung_kva'] ?? null);
+            $laeuft = !$hatWert ? null
+                : (($p !== null && $p >= ($kva !== null && $kva > 0 ? 0.02 * $kva * 800 : 100.0)) || ($drehzahl ?? 0.0) > 0 || $motor === 'Läuft');
+            $eig = (array) $g['eigenschaften'];
+            $verbrauch = match ($laeuft) {
+                true    => TankRechnung::verbrauch(TankRechnung::kennlinieLesen((string) ($eig['verbrauch_kennlinie'] ?? '')),
+                    TankRechnung::zahlLesen($eig['verbrauch_l_h'] ?? null), $p !== null ? TankRechnung::last($p, $kva) : null),
+                false   => ['l_h' => 0.0, 'geschaetzt' => false],
+                default => null,
+            };
+            // Ein interner Tank (ComAp meldet tank_prozent) zählt nicht zum Vorrat – der 3-Wege-Hahn schaltet intern oder extern.
+            $internL = TankRechnung::zahlLesen($eig['tank_l'] ?? null);
+            $out[$id] = [
+                'sichtbar'   => true,
+                'id'         => $id,
+                'name'       => (string) $g['name'],
+                'laeuft'     => $laeuft,
+                'l_h'        => $verbrauch['l_h'] ?? null,
+                'geschaetzt' => (bool) ($verbrauch['geschaetzt'] ?? false),
+                'intern_l'   => $internL !== null && is_numeric($z['tank_prozent'] ?? null) ? round($internL * (float) $z['tank_prozent'] / 100, 0) : null,
+            ];
+        }
+        return $out;
+    }
+
+    /**
+     * Verbrauch, Vorrat und Restlaufzeit je Versorgung in die Werte der Tanks
+     * schreiben. Verbrauch aus der Last, wenn jeder Generator der Versorgung
+     * sichtbar ist, einen Livewert und eine Verbrauchsangabe hat – sonst aus
+     * dem Pegel (Gefälle der letzten 6 h, nur bei Bedarf gelesen).
+     *
+     * @param array<int,array<string,mixed>> $tanks werteMitSensor() je Tank
+     * @param array<int,array{tanks:list<int>,generatoren:list<int>}> $versorgung
+     */
+    private static function versorgungRechnen(array &$tanks, array $versorgung, array $generatorLive, array $grenzen, int $jetzt): void
+    {
+        if ($tanks === []) {
+            return;
+        }
+        $genIds = [];
+        foreach (array_keys($tanks) as $id) {
+            foreach ($versorgung[$id]['generatoren'] ?? [] as $g) {
+                $genIds[$g] = true;
+            }
+        }
+        $gen = $genIds !== [] ? self::generatorWerte(array_keys($genIds), $generatorLive) : [];
+        $komponenten = [];
+        $pegel = [];
+        foreach (array_keys($tanks) as $id) {
+            $k = $versorgung[$id] ?? ['tanks' => [$id], 'generatoren' => []];
+            $schluessel = implode(',', $k['tanks']);
+            if (isset($komponenten[$schluessel])) {
+                continue;
+            }
+            $g = array_map(static fn (int $gid): array => $gen[$gid] ?? ['sichtbar' => false], $k['generatoren']);
+            $ausLast = $g !== [] && array_filter($g, static fn (array $x): bool => !$x['sichtbar'] || $x['l_h'] === null) === [];
+            $komponenten[$schluessel] = $k + ['g' => $g, 'last' => $ausLast];
+            if (!$ausLast) {
+                foreach ($k['tanks'] as $tid) {
+                    if (isset($tanks[$tid])) {
+                        $pegel[$tid] = $tanks[$tid];
+                    }
+                }
+            }
+        }
+        $gefaelle = $pegel !== [] ? self::pegelJe($pegel, $jetzt) : [];
+        $vorlaufH = TankRechnung::grenzen($grenzen)['tank_vorlauf_h'];
+        foreach ($komponenten as $k) {
+            $vorrat = null;
+            $gezaehlt = 0;
+            foreach ($k['tanks'] as $tid) {
+                $n = $tanks[$tid]['t']['nutzbar_l'] ?? null;
+                if ($n !== null && ($tanks[$tid]['t']['fehler'] ?? null) === null) {
+                    $vorrat = ($vorrat ?? 0.0) + max(0.0, (float) $n);
+                    $gezaehlt++;
+                }
+            }
+            $sichtbar = array_values(array_filter($k['g'], static fn (array $x): bool => $x['sichtbar']));
+            $intern = array_filter(array_column($sichtbar, 'intern_l'), static fn ($v): bool => $v !== null);
+            if ($k['last']) {
+                $lh = (float) array_sum(array_column($k['g'], 'l_h'));
+                $quelle = 'last';
+                $geschaetzt = in_array(true, array_column($k['g'], 'geschaetzt'), true);
+                $text = $lh <= 0 ? (count($k['g']) === 1 ? 'Generator steht' : 'Generatoren stehen')
+                    : self::zahl(round($lh, 1)) . ' l/h aus der Last' . ($geschaetzt ? ' (geschätzt)' : '');
+            } else {
+                $werte = array_values(array_filter(array_map(static fn (int $tid): ?float => $gefaelle[$tid] ?? null, $k['tanks']), static fn ($v): bool => $v !== null));
+                $lh = $werte !== [] ? (float) array_sum($werte) : null;
+                $quelle = $lh !== null ? 'pegel' : null;
+                $geschaetzt = false;
+                $text = $lh !== null ? '≈ ' . self::zahl(round($lh, 1)) . ' l/h aus dem Pegel (6 h)' : '';
+            }
+            $rest = $lh !== null && $lh > 0 && $vorrat !== null ? $vorrat / $lh : null;
+            $leer = $rest !== null ? $jetzt + (int) round($rest * 3600) : null;
+            $bis = $leer !== null ? $leer - (int) round($vorlaufH * 3600) : null;
+            foreach ($k['tanks'] as $tid) {
+                if (!isset($tanks[$tid])) {
+                    continue;
+                }
+                $tanks[$tid]['t'] = array_merge($tanks[$tid]['t'], [
+                    'verbrauch_l_h'        => $lh !== null ? round($lh, 2) : null,
+                    'verbrauch_quelle'     => $quelle,
+                    'verbrauch_geschaetzt' => $geschaetzt,
+                    'verbrauch_text'       => $text,
+                    'vorrat_l'             => $vorrat !== null ? round($vorrat, 1) : null,
+                    'vorrat_tanks'         => $gezaehlt,
+                    'vorrat_vollstaendig'  => $gezaehlt === count($k['tanks']),
+                    'restlaufzeit_h'       => $rest !== null ? round($rest, 2) : null,
+                    'restlaufzeit_text'    => $rest !== null ? TankRechnung::restText($rest) : null,
+                    'leer_um'              => $leer !== null ? Zeit::iso($leer) : null,
+                    'leer_um_text'         => $leer !== null ? TankRechnung::wann($leer, $jetzt) : null,
+                    'nachbestellen_bis'    => $bis !== null ? Zeit::iso($bis) : null,
+                    'nachbestellen_text'   => $bis !== null ? TankRechnung::wann($bis, $jetzt) : null,
+                    // nur sichtbare Generatoren, ohne Leistung
+                    'generatoren'          => array_map(static fn (array $x): array => ['id' => $x['id'], 'name' => $x['name'], 'laeuft' => $x['laeuft'] === true], $sichtbar),
+                    'intern_l'             => $intern !== [] ? (float) array_sum($intern) : null,
+                ]);
+            }
+        }
+    }
+
+    /**
+     * Verbrauch aus dem Pegel je Tank (l/h, TankRechnung::pegelVerbrauch):
+     * Rohwerte der letzten 6 h seit dem Einbau, im Datenfenster, Median je
+     * 10 Minuten, je Punkt mit der Fassung, die damals galt.
+     *
+     * @param array<int,array<string,mixed>> $tanks werteMitSensor() je Tank
+     * @return array<int,?float>
+     */
+    private static function pegelJe(array $tanks, int $jetzt): array
+    {
+        $abfragen = [];
+        foreach ($tanks as $id => $x) {
+            if ($x['r'] === null || $x['feld'] === null || ($x['t']['liter'] ?? null) === null) {
+                continue;    // ohne Liter kein Verbrauch
+            }
+            $m = $x['m'];
+            $abfragen[$id] = ['geraet' => (string) $m['geraet'], 'kanal' => (string) $m['kanal'], 'feld' => (string) $x['feld'],
+                'ab' => max($jetzt - self::GEFAELLE_FENSTER_S, Zeit::ts($m['gueltig_ab'] ?? null) ?? 0), 'fenster' => MesspunktService::fenster($m, $x['tank'])];
+        }
+        if ($abfragen === []) {
+            return [];
+        }
+        $fehler = null;
+        $roh = Messdaten::tankGefaelle(array_values($abfragen), $fehler);
+        if ($fehler !== null) {
+            Logger::info('Tank-Gefälle: ' . $fehler);
+        }
+        $out = [];
+        foreach ($abfragen as $id => $a) {
+            $f = array_map(static fn (array $x): array => ['id' => $x['id'], 'ab' => $x['ab_ts'], 'rechnung' => $x['rechnung']], self::fassungen((int) $tanks[$id]['m']['id']));
+            $abschnitte = TankRechnung::abschnitte($f, (int) $a['ab'], $jetzt + 1);
+            $liter = [];
+            foreach ($roh[$a['geraet'] . '|' . $a['kanal']] ?? [] as [$ms, $w]) {
+                $s = intdiv((int) $ms, 1000);
+                foreach ($abschnitte as [$von, $bis, $r]) {
+                    if ($s >= $von && $s < $bis) {
+                        $liter[] = [(int) $ms, TankRechnung::umrechnen($r, (float) $w)['liter']];
+                        break;
+                    }
+                }
+            }
+            $out[$id] = TankRechnung::pegelVerbrauch($liter, $tanks[$id]['t']['schritt_l'], $tanks[$id]['t']['nenn_l']);
+        }
+        return $out;
+    }
+
+    /**
+     * Was die Tankseite unter „Versorgung“ zeigt: die Schläuche des Tanks mit
+     * dem Generator am anderen Ende, die Generatoren der Versorgung mit ihrer
+     * Kennlinie und die Gegenprüfung – passt das Gefälle des Pegels (6 h) zum
+     * Verbrauch aus der Last? Generatoren, die der Betrachter nicht sieht,
+     * stehen ohne Namen da.
+     *
+     * @param array<string,mixed> $live Zusammenfassung des Tanks (live())
+     * @return array{schlaeuche:list<array<string,mixed>>,generatoren:list<array<string,mixed>>,verborgen:int,tanks:int,gemessen_l_h:?float,gegenpruefung:?string}
+     */
+    public static function versorgungSeite(array $tank, array $live): array
+    {
+        $id = (int) $tank['id'];
+        $sieht = static function (?int $objektId): ?array {
+            $o = $objektId !== null ? AnlagenService::find($objektId) : null;
+            return $o !== null && Zugriff::siehtObjekt($o) ? $o : null;
+        };
+        $schlaeuche = [];
+        foreach (Database::select("SELECT id FROM leitungen WHERE art = 'kraftstoff' AND von_objekt_id = ? ORDER BY id", [$id]) as $row) {
+            $l = LeitungService::find((int) $row['id']);
+            if ($l === null) {
+                continue;
+            }
+            $g = $sieht($l['zu_objekt_id'] !== null ? (int) $l['zu_objekt_id'] : null);
+            $schlaeuche[] = [
+                'id' => (int) $l['id'], 'name' => (string) $l['name'], 'typ' => (string) $l['kabeltyp'], 'kupplung' => (string) $l['modell'],
+                'anzahl' => (int) $l['anzahl'], 'laenge' => $l['laenge'] !== null ? round((float) $l['laenge'], 1) : null, 'fest' => (int) $l['fest'] === 1,
+                'generator' => $g !== null ? (string) $g['name'] : null, 'generator_id' => $g !== null ? (int) $g['id'] : null,
+                'hinweise' => $l['hinweise'],
+            ];
+        }
+        $v = self::versorgung($id);
+        $laeuft = array_column((array) ($live['tank']['generatoren'] ?? []), 'laeuft', 'id');
+        $generatoren = [];
+        $verborgen = 0;
+        foreach ($v['generatoren'] as $gid) {
+            $g = $sieht($gid);
+            if ($g === null) {
+                $verborgen++;
+                continue;
+            }
+            $eig = (array) $g['eigenschaften'];
+            $kennlinie = trim((string) ($eig['verbrauch_kennlinie'] ?? ''));
+            $vollast = TankRechnung::zahlLesen($eig['verbrauch_l_h'] ?? null);
+            $generatoren[] = [
+                'id' => $gid, 'name' => (string) $g['name'], 'modell' => trim($g['hersteller'] . ' ' . $g['modell']),
+                'laeuft' => $laeuft[$gid] ?? null,
+                'kennlinie' => TankRechnung::kennlinieLesen($kennlinie) !== [] ? $kennlinie . ' (l/h je Last)'
+                    : ($vollast !== null ? 'ohne Kennlinie – Volllastverbrauch ' . self::zahl($vollast) . ' l/h angenommen' : 'kein Verbrauch eingetragen – Restlaufzeit aus dem Pegel'),
+            ];
+        }
+        // Gegenprüfung (nur hier, nicht bei jeder Liveabfrage): das Gefälle des
+        // Pegels neben dem Verbrauch aus der Last – bei einem Tank je Versorgung.
+        $t = (array) ($live['tank'] ?? []);
+        $gemessen = null;
+        $hinweis = null;
+        $m = !empty($t['sensor']) ? self::sensor($id) : null;
+        $fassung = $m !== null ? self::fassungJetzt((int) $m['id']) : null;
+        if ($m !== null && $fassung !== null && ($t['verbrauch_quelle'] ?? null) === 'last' && count($v['tanks']) === 1) {
+            $gemessen = self::pegelJe([$id => ['tank' => $tank, 'm' => $m, 'r' => $fassung['rechnung'], 'feld' => (string) $fassung['rechnung']['feld'], 't' => $t]], time())[$id] ?? null;
+            $erwartet = (float) ($t['verbrauch_l_h'] ?? 0);
+            $schritt = (float) ($t['schritt_l'] ?? 0);
+            if ($gemessen !== null && $erwartet > 0 && abs($gemessen - $erwartet) > 0.5 * $erwartet
+                && abs($gemessen - $erwartet) * self::GEFAELLE_FENSTER_S / 3600 > 3 * $schritt) {
+                $hinweis = 'Verbrauch passt nicht zur Last (Pegel ≈ ' . self::zahl(round($gemessen, 1)) . ' l/h, erwartet ' . self::zahl(round($erwartet, 1))
+                    . ' l/h) – saugt der Generator intern?';
+            }
+        }
+        return ['schlaeuche' => $schlaeuche, 'generatoren' => $generatoren, 'verborgen' => $verborgen, 'tanks' => count($v['tanks']),
+            'gemessen_l_h' => $gemessen !== null ? round($gemessen, 1) : null, 'gegenpruefung' => $hinweis];
+    }
+
+    /**
+     * Was die Generatoren der Versorgung zwischen $von und $bis verbraucht
+     * haben – zum Abziehen bei einer Betankung. Aus der mittleren Leistung
+     * (Messgerät des Generators, im Datenfenster) über Kennlinie × Last. Null
+     * mit Grund, wenn es sich nicht sagen lässt: mehrere Tanks an einem
+     * Generator, ein Generator nicht sichtbar, ohne Messwerte oder ohne
+     * Verbrauchsangabe. Ohne Schlauch: 0.
+     *
+     * @return array{liter:?float,text:string}
+     */
+    private static function verbrauchZwischen(array $tank, int $von, int $bis): array
+    {
+        $v = self::versorgung((int) $tank['id']);
+        if ($v['generatoren'] === []) {
+            return ['liter' => 0.0, 'text' => ''];
+        }
+        if (count($v['tanks']) > 1) {
+            return ['liter' => null, 'text' => 'mehrere Tanks an einem Generator'];
+        }
+        $summe = 0.0;
+        $geschaetzt = false;
+        foreach ($v['generatoren'] as $gid) {
+            $g = AnlagenService::find($gid);
+            if ($g === null || !Zugriff::siehtObjekt($g)) {
+                return ['liter' => null, 'text' => 'ein Generator ist für dich nicht freigegeben'];
+            }
+            $messpunkte = array_values(array_filter(MesspunktService::fuerObjekt($gid, true), static function (array $m) use ($von, $bis): bool {
+                $ab = Zeit::ts($m['gueltig_ab'] ?? null);
+                $ende = Zeit::ts($m['gueltig_bis'] ?? null);
+                return ($ab === null || $ab < $bis) && ($ende === null || $ende > $von);
+            }));
+            $haupt = MesspunktService::haupt($messpunkte);
+            $fehler = null;
+            $reihe = $haupt !== null ? Messdaten::reihe('strom', (string) $haupt['geraet'], (string) $haupt['kanal'], 'p', ['sum'], $von, $bis,
+                MesspunktService::fenster($haupt, $g), 60, 'mean', $fehler) : ['serien' => []];
+            $werte = array_values(array_filter($reihe['serien']['sum'] ?? [], static fn ($w): bool => $w !== null));
+            if ($werte === []) {
+                return ['liter' => null, 'text' => '„' . $g['name'] . '“ ohne Messwerte um diese Zeit'];
+            }
+            $p = array_sum($werte) / count($werte);
+            $kva = TankRechnung::zahlLesen($g['nennleistung_kva'] ?? null);
+            if ($p < ($kva !== null && $kva > 0 ? 0.02 * $kva * 800 : 100.0)) {
+                continue;    // stand
+            }
+            $eig = (array) $g['eigenschaften'];
+            $vb = TankRechnung::verbrauch(TankRechnung::kennlinieLesen((string) ($eig['verbrauch_kennlinie'] ?? '')),
+                TankRechnung::zahlLesen($eig['verbrauch_l_h'] ?? null), TankRechnung::last($p, $kva));
+            if ($vb === null) {
+                return ['liter' => null, 'text' => '„' . $g['name'] . '“ ohne Verbrauchsangabe'];
+            }
+            $summe += $vb['l_h'] * ($bis - $von) / 3600;
+            $geschaetzt = $geschaetzt || $vb['geschaetzt'];
+        }
+        return ['liter' => round($summe, 1), 'text' => $geschaetzt ? 'geschätzt' : 'aus der Last'];
     }
 
     // ------------------------------------------------------------ Verlauf
@@ -892,7 +1394,9 @@ final class TankService
     /**
      * Kalibrieren aus einer Betankung: Im Fenster [Ende − 3 h, Ende + 1 h]
      * sucht TankRechnung::anstieg() den Sprung in den Rohwerten des Sensors,
-     * der damals im Tank war (Median je Minute, im Datenfenster). Gelernt wird
+     * der damals im Tank war (Median je Minute, im Datenfenster). Was ein
+     * Generator am Schlauch währenddessen verbrauchte, geht von der
+     * gelieferten Menge ab (verbrauchZwischen). Gelernt wird
      * der **Inhalt je mm des Tanks**: Er geht in die Eigenschaften des Tanks
      * und – als Fassung „betankung“ ab jetzt – in die Kennlinie des Sensors,
      * der jetzt misst; deren Sensorteil bleibt. Weicht der Wert um mehr als
@@ -948,8 +1452,10 @@ final class TankService
         if ($sprung === null) {
             return ['ok' => false, 'message' => 'Kein deutlicher Anstieg um diese Zeit in den Messwerten – stimmt das Ende des Tankens?'];
         }
-        // Der Verbrauch währenddessen (Generator am Schlauch) zählt erst mit Schritt 7 – bis dahin 0.
-        $erg = TankRechnung::betanken($r, $sprung['roh_vor'], $sprung['roh_nach'], (float) $e['liter'], $trotzdem);
+        // Was die Generatoren am Schlauch zwischen den beiden Medianen (je etwa
+        // 10 min vor und nach dem Sprung) verbraucht haben, kam nie im Tank an.
+        $verbrauch = self::verbrauchZwischen($tank, intdiv($sprung['t_vor'], 1000) - 600, intdiv($sprung['t_nach'], 1000) + 600);
+        $erg = TankRechnung::betanken($r, $sprung['roh_vor'], $sprung['roh_nach'], (float) $e['liter'] - (float) ($verbrauch['liter'] ?? 0.0), $trotzdem);
         if (isset($erg['fehler'])) {
             return ['ok' => false, 'message' => $erg['fehler'], 'trotzdem' => isset($erg['abweichung']) && !isset($erg['rechnung'])];
         }
@@ -981,7 +1487,11 @@ final class TankService
         $abweichung = $erg['abweichung'] ?? null;
         return ['ok' => true, 'kalibriert' => true, 'message' => 'Kalibriert: ' . self::zahl(round($erg['liter_je_mm'], 3)) . ' l je mm ('
             . $sprungText . ($abweichung !== null ? ', ' . ($abweichung > 0 ? '+' : '') . self::zahl($abweichung) . ' % gegenüber bisher' : '') . ').'
-            . ' Der Verbrauch während des Tankens ist nicht abgezogen.'];
+            . match (true) {
+                $verbrauch['liter'] === null => ' Der Verbrauch während des Tankens ist nicht abgezogen (' . $verbrauch['text'] . ').',
+                $verbrauch['liter'] > 0      => ' Abgezogen: ' . self::liter($verbrauch['liter']) . ' Verbrauch während des Tankens (' . $verbrauch['text'] . ').',
+                default                      => '',
+            }];
     }
 
     /**

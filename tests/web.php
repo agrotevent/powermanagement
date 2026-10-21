@@ -297,6 +297,39 @@ try {
         $bereichForm = aufruf($basis, $admin['dose'], 'GET', '/bereiche/neu?standort=' . $siteTank)['text'];
         pruefe(str_contains($bereichForm, htmlspecialchars($kennung . '-mobil')) && !str_contains($bereichForm, htmlspecialchars($kennung . '-tank')), 'Bereich: Tank nicht wählbar');
 
+        // Kraftstoffschlauch über die Karte: Tank ↔ Generator (nicht zur Verteilung), Stand, Fenster, Tankseite, Material
+        $genWeb = (int) ($setzen(['art' => 'generator', 'fest' => 0, 'name' => $kennung . '-gen'])['id'] ?? 0);
+        $schlauch = static fn (array $felder): array => json_decode(aufruf($basis, $admin['dose'], 'POST', '/karte/leitung/speichern',
+            $felder + ['art' => 'kraftstoff', 'floor_id' => $etage, 'punkte' => '[[50,50],[51,51]]', '_token' => $admin['token']], $json)['text'], true) ?? [];
+        $r = $schlauch(['von_objekt_id' => $tankId, 'zu_objekt_id' => (int) ($mobil['id'] ?? 0), 'name' => $kennung . '-schlauch-falsch']);
+        pruefe(($r['ok'] ?? true) === false && str_contains((string) ($r['message'] ?? ''), 'kein Generator'), 'Karte: Schlauch Tank → Verteilung abgelehnt – ' . (string) ($r['message'] ?? ''));
+        $r = $schlauch(['von_objekt_id' => $genWeb, 'zu_objekt_id' => $tankId, 'name' => $kennung . '-schlauch', 'kabeltyp' => 'DN 10 (3/8″)', 'anzahl' => '2',
+            'modell' => '', 'laenge_m' => '', 'fest' => '0', 'notizen' => '']);
+        $schlauchId = (int) ($r['id'] ?? 0);
+        pruefe(($r['ok'] ?? false) && (int) Database::scalar('SELECT von_objekt_id FROM leitungen WHERE id = ?', [$schlauchId]) === $tankId,
+            'Karte: Schlauch vom Generator zum Tank gezogen – „von“ ist der Tank');
+        $stand = json_decode(aufruf($basis, $admin['dose'], 'GET', '/karte/' . $etage . '/stand')['text'], true);
+        $l = array_column($stand['leitungen'] ?? [], null, 'id')[$schlauchId] ?? [];
+        gleich([$l['art'] ?? null, $l['von'] ?? null, $l['zu'] ?? null, $l['modell'] ?? null, $l['anzahl'] ?? null], ['kraftstoff', $tankId, $genWeb, 'HK-A3', 2],
+            'Karte: Stand mit dem Schlauch (Kupplung HK-A3, Vor- und Rücklauf)');
+        $fenster = json_decode(aufruf($basis, $admin['dose'], 'GET', '/karte/leitung/' . $schlauchId)['text'], true);
+        pruefe(($fenster['ok'] ?? false) && ($fenster['leitung']['art'] ?? '') === 'kraftstoff' && ($fenster['enden'] ?? null) === ['von' => [], 'zu' => []] && ($fenster['darf'] ?? false),
+            'Karte: Schlauchfenster ohne Anschlüsse');
+        $r = json_decode(aufruf($basis, $admin['dose'], 'POST', '/karte/leitung/ende', ['id' => $schlauchId, 'ende' => 'zu', 'objekt_id' => 0, 'punkte' => '[[50,50],[52,52]]',
+            '_token' => $admin['token']], $json)['text'], true) ?? [];
+        pruefe(($r['ok'] ?? true) === false && (int) Database::scalar('SELECT zu_objekt_id FROM leitungen WHERE id = ?', [$schlauchId]) === $genWeb, 'Karte: Schlauchende lässt sich nicht lösen');
+        $karteSeite = aufruf($basis, $admin['dose'], 'GET', '/karte?etage=' . $etage)['text'];
+        pruefe(str_contains($karteSeite, 'data-modus="schlauch"') && str_contains($karteSeite, 'data-ebene="kraftstoff"') && str_contains($karteSeite, '"schlauchtypen"'),
+            'Karte: Werkzeug „Schlauch“, Ebene und Schlauchtypen');
+        $seite = aufruf($basis, $admin['dose'], 'GET', '/anlagen/' . $tankId);
+        pruefe($seite['status'] === 200 && phpMeldung($seite['text']) === null && str_contains($seite['text'], 'id="versorgung"') && str_contains($seite['text'], htmlspecialchars($kennung . '-gen'))
+            && str_contains($seite['text'], 'data-tank="rest"'), 'Tankseite: Versorgung mit dem Generator am Schlauch');
+        $material = aufruf($basis, $admin['dose'], 'GET', '/karte/' . $etage . '/material');
+        pruefe($material['status'] === 200 && phpMeldung($material['text']) === null && str_contains($material['text'], 'Kraftstoff') && str_contains($material['text'], 'DN 10 (3/8″)')
+            && str_contains($material['text'], 'HK-A3'), 'Material der Etage: Kraftstoff mit Schlauch und Kupplungen');
+        $genSeite = aufruf($basis, $admin['dose'], 'GET', '/anlagen/' . $genWeb);
+        pruefe($genSeite['status'] === 200 && phpMeldung($genSeite['text']) === null, 'Generator am Schlauch: Seite ohne PHP-Meldung');
+
         // Tanksensor: über das Formular anlegen, in den Tank einbauen (mit Einbaumaß), ausbauen
         $neuTs = aufruf($basis, $admin['dose'], 'GET', '/inventar/neu?art=tanksensor');
         pruefe($neuTs['status'] === 200 && phpMeldung($neuTs['text']) === null && str_contains($neuTs['text'], 'Neuer Tanksensor')
@@ -351,6 +384,8 @@ try {
         $lt = $live['objekte'][$tankId] ?? [];
         pruefe(($lt['tank']['sensor'] ?? null) === true && ($lt['tank']['messpunkt'] ?? 0) === (int) ($mpTs['id'] ?? -1) && ($lt['stufe'] ?? '') === 'stumm'
             && str_contains((string) ($lt['hinweis'] ?? ''), 'seit dem Einbau'), 'Tank live: Sensor eingebaut, noch kein Wert seit dem Einbau – ' . (string) ($lt['hinweis'] ?? ''));
+        gleich([$lt['tank']['generatoren'] ?? null, array_key_exists('restlaufzeit_h', $lt['tank'] ?? []) ? $lt['tank']['restlaufzeit_h'] : 'fehlt'],
+            [[['id' => $genWeb, 'name' => $kennung . '-gen', 'laeuft' => false]], null], 'Tank live: Generator am Schlauch (ohne Messgerät), ohne Restlaufzeit');
         // Eingebaut vor einem Augenblick – im Zeitraum der Statistik läge sonst nichts.
         Database::execute('UPDATE messpunkte SET gueltig_ab = ? WHERE id = ?', [gmdate('c', time() - 600), (int) ($mpTs['id'] ?? 0)]);
         $r = aufruf($basis, $admin['dose'], 'GET', '/statistik?mp[]=' . (int) ($mpTs['id'] ?? 0));
@@ -409,6 +444,8 @@ try {
         pruefe($r['status'] === 200 && phpMeldung($r['text']) === null && str_contains($r['text'], 'id="protokoll"') && !str_contains($r['text'], '/tank/peilung')
             && !str_contains($r['text'], '/tank/betankung') && !str_contains($r['text'], 'Erweitert') && !str_contains($r['text'], '/tank/ereignis/loeschen'),
             'Kunde: Tankseite mit Protokoll, ohne Peilung, Betankung, Erweitert und Löschen');
+        pruefe(str_contains($r['text'], 'id="versorgung"') && str_contains($r['text'], 'Generator (nicht freigegeben)') && !str_contains($r['text'], htmlspecialchars($kennung . '-gen')),
+            'Kunde: Versorgung ohne den Namen des Generators, den er nicht sieht');
         $n = $ereignisse();
         $r = aufruf($basis, $kundeTank['dose'], 'POST', '/anlagen/' . $tankId . '/tank/peilung', ['art' => 'prozent', 'wert' => '60', '_token' => $kundeTank['token']], $json);
         pruefe($r['status'] === 403 && $ereignisse() === $n, 'Kunde: Peilung → 403');

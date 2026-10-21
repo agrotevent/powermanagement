@@ -4,8 +4,10 @@
  *
  * Wie die Live-Kachel einer Anlage: live.js setzt nur die Zahlen
  * ([data-tank], [data-feld="hinweis"]) und die Stufe, die Kachel bleibt
- * stehen. Mit $details (Tankseite) zeigt sie zusätzlich Füllhöhe, Rohwert
- * mit Alter und die Kennlinie.
+ * stehen. Unter dem Balken stehen Restlaufzeit und „nachbestellen bis“
+ * (Versorgung über einen Kraftstoffschlauch oder aus dem Pegel). Mit
+ * $details (Tankseite) zeigt sie zusätzlich Füllhöhe, Rohwert mit Alter, die
+ * Kennlinie und den Verbrauch.
  *
  * @var array<string,mixed> $objekt
  * @var array<string,mixed> $l Zusammenfassung aus LiveService (mit „tank“)
@@ -40,12 +42,15 @@ $roh = is_numeric($t['roh'] ?? null)
     </div>
     <div class="tank-balken" aria-hidden="true"><span data-tank-balken style="width: <?= $prozent !== null ? max(0, min(100, round($prozent, 1))) : 0 ?>%"></span></div>
     <div class="small muted" data-tank="nutzbar"><?= ($n = $zahl($t['nutzbar_l'] ?? null, 'l')) !== '' ? 'nutzbar ' . View::e($n) : '' ?></div>
+    <div class="small tank-rest" data-tank="rest"><?= View::e(TankService::restZeile($t)) ?></div>
     <?php if ($details): ?>
         <dl class="kv small tank-details">
             <dt>Füllhöhe</dt><dd data-tank="hoehe"><?= View::e($zahl($t['hoehe_mm'] ?? null, 'mm') ?: '–') ?></dd>
             <dt>Rohwert</dt><dd data-tank="roh"><?= View::e($roh) ?></dd>
             <dt>Gerät</dt><dd data-tank="online"><?= ($t['online'] ?? null) === true ? 'online' : (($t['online'] ?? null) === false ? 'offline' : '–') ?></dd>
             <dt>Kennlinie</dt><dd data-tank="kennlinie"><?= View::e((string) ($t['kennlinie'] ?? '–')) ?></dd>
+            <dt>Verbrauch</dt><dd data-tank="verbrauch"><?= View::e((string) (($t['verbrauch_text'] ?? '') !== '' ? $t['verbrauch_text'] : '–')) ?></dd>
+            <dt>Leer um</dt><dd data-tank="leer"><?= View::e((string) ($t['leer_um_text'] ?? '–')) ?></dd>
         </dl>
     <?php endif; ?>
     <div class="live-hinweis small muted" data-feld="hinweis"><?= View::e((string) ($l['hinweis'] ?? '')) ?></div>

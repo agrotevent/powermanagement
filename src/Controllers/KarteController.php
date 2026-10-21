@@ -25,7 +25,7 @@ use App\Tanks\TankService;
 
 /**
  * Die Karte: Grundriss (wie in MasterAdmin) mit Anlagen, Kabeln,
- * Kabelwegen und Kabelbrücken.
+ * Kabelwegen, Kabelbrücken und Kraftstoffschläuchen (Tank → Generator).
  *
  * Gelesen wird über JSON (stand, live, objekt, leitung), geschrieben über
  * kleine POSTs – die Karte lädt sich dabei nicht neu, und auf dem Tablet
@@ -370,7 +370,8 @@ final class KarteController extends Controller
                 $l[$ende . '_anschluss'] = null;
                 $l[$ende . '_anschluss_id'] = null;
             }
-            $enden[$ende] = $objektId === null || !$sieht[$ende] ? [] : array_values(array_map(static fn ($a) => [
+            // Ein Kraftstoffschlauch hat keine Anschlüsse – nur Tank und Generator.
+            $enden[$ende] = $objektId === null || !$sieht[$ende] || $l['art'] === 'kraftstoff' ? [] : array_values(array_map(static fn ($a) => [
                 'id' => (int) $a['id'], 'text' => $a['bezeichnung'] . ' · ' . $a['typ_name'] . ($a['leitung'] !== null ? ' (belegt)' : ''),
                 'frei' => $a['leitung'] === null,
             ], array_filter(AnlagenService::anschluesse((int) $objektId), static fn ($a) => $a['richtung'] === $richtung)));

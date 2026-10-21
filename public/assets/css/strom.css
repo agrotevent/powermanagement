@@ -235,6 +235,7 @@ tr.live-zeile.stufe-stumm td:first-child { box-shadow: inset 4px 0 0 var(--stufe
 .legende-form.tank { border-radius: 2px 2px 4px 4px; background: linear-gradient(to top, var(--tank-pegel) 60%, #57534e 0); }
 .legende-linie { display: inline-block; width: 22px; height: 4px; margin-left: .45rem; vertical-align: 2px; background: #94a3b8; border-radius: 2px; }
 .legende-linie.fest { box-shadow: 0 0 0 2px #0f172a; }
+.legende-linie.schlauch { background: repeating-linear-gradient(to right, var(--schlauch) 0 6px, transparent 6px 10px); }
 .legende-punkt.stufe-ok { border-color: var(--stufe-ok); }
 .legende-punkt.stufe-warn { border-color: var(--stufe-warn); }
 .legende-punkt.stufe-bad { border-color: var(--stufe-bad); }
@@ -297,6 +298,9 @@ tr.live-zeile.stufe-stumm td:first-child { box-shadow: inset 4px 0 0 var(--stufe
 .pm-fremd.dose .plabel { display: none; }
 
 .pm-kabel.hinweis { stroke-dasharray: 14 5; filter: drop-shadow(0 0 3px rgba(245, 158, 11, .95)); }
+/* Kraftstoffschlauch: gestrichelt in Kraftstoffbraun, mit Hinweis gelb umleuchtet */
+.pm-schlauch { stroke: var(--schlauch); }
+.pm-schlauch.hinweis { filter: drop-shadow(0 0 3px rgba(245, 158, 11, .95)); }
 
 /* Seitenleiste der Karte */
 .seite-kopf { display: flex; align-items: center; gap: .6rem; }
@@ -508,3 +512,10 @@ tr.abweichung-zeile td { background: var(--warning-light); }
 .karte-seite .pm-phasen { font-size: .74rem; }
 .karte-seite .pm-phasen th, .karte-seite .pm-phasen td { padding: .15rem .25rem; }
 .pm-phasen th { text-transform: none; letter-spacing: normal; }
+
+/* Tank: Restlaufzeit und „nachbestellen bis“ unter dem Balken */
+.tank-rest { font-weight: 600; font-variant-numeric: tabular-nums; }
+.tank-rest:empty { display: none; }
+.stufe-warn .tank-rest { color: var(--stufe-warn); }
+.stufe-bad .tank-rest { color: var(--stufe-bad); }
+.schlaeuche li { padding: .3rem 0; border-bottom: 1px dashed var(--border); }

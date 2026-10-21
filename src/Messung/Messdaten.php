@@ -387,6 +387,70 @@ final class Messdaten
         return $out;
     }
 
+    /** Schritt der Punkte für das Gefälle eines Tanks: Median je 10 Minuten. */
+    public const GEFAELLE_SCHRITT = 600;
+
+    /**
+     * Rohwerte der letzten Stunden je Tanksensor – Grundlage für den
+     * Verbrauch aus dem Pegel (TankRechnung::gefaelle), wenn kein Generator
+     * am Schlauch ihn liefert. Median je 10 Minuten (ein Ausreißer zieht den
+     * Punkt nicht mit), alle Einträge in einer Anfrage an die InfluxDB.
+     *
+     * Je Eintrag gilt [ab, jetzt], zugeschnitten auf das Datenfenster
+     * (Zugriff::begrenzen) – gelesen wird nur der laufende Teil, der bis
+     * jetzt reicht. `ab` setzt der Aufrufer auf den Einbau, höchstens 6 h
+     * zurück (TankService).
+     *
+     * @param list<array{geraet:string,kanal:string,feld:string,ab:int,fenster:?array}> $abfragen
+     * @return array<string,list<array{0:int,1:float}>> „geraet|kanal“ => [[ms, roh], …], aufsteigend
+     */
+    public static function tankGefaelle(array $abfragen, ?string &$fehler = null): array
+    {
+        $jetzt = time();
+        $teile = [];
+        foreach ($abfragen as $a) {
+            if (($a['geraet'] ?? '') === '' || ($a['feld'] ?? '') === '') {
+                continue;
+            }
+            foreach (Zugriff::begrenzen($a['fenster'] ?? null, (int) $a['ab'], $jetzt) as [$von, $bis]) {
+                if ($bis >= $jetzt && $bis > $von) {
+                    $teile[] = $a + ['von' => (int) $von, 'bis' => $jetzt];
+                }
+            }
+        }
+        if ($teile === []) {
+            return [];
+        }
+        $out = [];
+        if (self::demo()) {
+            foreach ($teile as $a) {
+                $roh = Demo::reihe('zustand', (string) $a['geraet'], (string) $a['kanal'], (string) $a['feld'], [], $a['von'], $a['bis'], self::GEFAELLE_SCHRITT, 'median');
+                $out[$a['geraet'] . '|' . $a['kanal']] = array_values(array_filter($roh[$a['feld']] ?? [], static fn ($p) => is_numeric($p[1] ?? null)));
+            }
+            return $out;
+        }
+        $q = [];
+        foreach ($teile as $a) {
+            $q[] = 'SELECT median(' . Influx::name((string) $a['feld']) . ') AS "wert" FROM "zustand" WHERE "geraet" = ' . Influx::text((string) $a['geraet'])
+                . ' AND "kanal" = ' . Influx::text((string) $a['kanal']) . ' AND ' . Influx::zeit($a['von'], $a['bis'] + 1)
+                . ' GROUP BY time(' . self::GEFAELLE_SCHRITT . 's) fill(none)';
+        }
+        $alle = Influx::abfragenAlle(implode(';', $q), $fehler);
+        if ($alle === null) {
+            return [];
+        }
+        foreach ($teile as $n => $a) {
+            $punkte = [];
+            foreach ($alle[$n][0]['values'] ?? [] as $zeile) {
+                if (isset($zeile[0]) && is_numeric($zeile[1] ?? null)) {
+                    $punkte[] = [(int) $zeile[0], (float) $zeile[1]];
+                }
+            }
+            $out[$a['geraet'] . '|' . $a['kanal']] = $punkte;
+        }
+        return $out;
+    }
+
     // ------------------------------------------------------------ Geräte
 
     /**

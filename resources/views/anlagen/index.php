@@ -73,7 +73,8 @@ $neuText = $fest === true && ($filter['art'] === '' || $filter['art'] === 'ansch
                         <?php $t = is_array($l['tank'] ?? null) ? $l['tank'] : []; ?>
                         <td data-label="Inhalt jetzt" class="num" data-tank="menge"><?= is_numeric($t['liter'] ?? null) ? View::e(\App\Tanks\TankService::zahl(round((float) $t['liter']))) . ' l'
                             : (is_numeric($t['hoehe_mm'] ?? null) ? View::e(\App\Tanks\TankService::zahl(round((float) $t['hoehe_mm']))) . ' mm' : '–') ?></td>
-                        <td data-label="Füllstand" class="num" data-tank="prozent"><?= is_numeric($t['prozent'] ?? null) ? View::e(\App\Tanks\TankService::zahl(round((float) $t['prozent']))) . ' %' : '' ?></td>
+                        <td data-label="Füllstand" class="num"><span data-tank="prozent"><?= is_numeric($t['prozent'] ?? null) ? View::e(\App\Tanks\TankService::zahl(round((float) $t['prozent']))) . ' %' : '' ?></span>
+                            <div class="small tank-rest" data-tank="rest"><?= View::e(\App\Tanks\TankService::restZeile($t)) ?></div></td>
                     <?php endif; ?>
                 </tr>
             <?php endforeach; ?>

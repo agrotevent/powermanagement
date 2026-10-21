@@ -13,10 +13,12 @@
  *                  beiden Enden; Länge aus dem Maßstab.
  *   Kabelwege      Trassen ohne feste Enden (gestrichelt).
  *   Kabelbrücken   gelb-schwarz, mit Modell und Anzahl der Elemente.
+ *   Schläuche      Kraftstoffschlauch vom Tank zum Generator, gestrichelt in
+ *                  Kraftstoffbraun (Fenster in karte-tank.js).
  *   MasterAdmin    Racks, Dosen und Accesspoints zur Orientierung (abschaltbar).
  *
  * Werkzeuge: Ansehen, Verschieben, Anlage setzen (auch aus dem Katalog der
- * Standard-Verteiler), Kabel, Kabelweg, Kabelbrücke, Maßstab.
+ * Standard-Verteiler), Kabel, Kabelweg, Kabelbrücke, Schlauch, Maßstab.
  *
  * Geschrieben wird über kleine POSTs; die Seite lädt sich dabei nicht neu,
  * damit der Ausschnitt bleibt, in dem man auf dem Tablet gerade arbeitet.
@@ -45,6 +47,7 @@ const ebenen = {
     kabelweg: L.layerGroup().addTo(map),
     kabelbruecke: L.layerGroup().addTo(map),
     kabel: L.layerGroup().addTo(map),
+    kraftstoff: L.layerGroup().addTo(map),
     fremd: L.layerGroup(),
     // Feststromanschlüsse (gehören zur Location) und mobile Anlagen lassen
     // sich getrennt ausblenden – etwa um nur zu sehen, was vor Ort fest ist.
@@ -64,7 +67,9 @@ let auswahl = null;           // { art: 'objekt'|'leitung', id }
 let entwurf = null;           // { art, punkte: [{x,y}], von, zu }
 let setzenWahl = null;        // { art, fest, vorlage_id, name } oder { objekt_id }
 // Modi, in denen ein Tipp in den Plan einen Punkt setzt.
-const ZEICHNEN = ['setzen', 'kabel', 'kabelweg', 'bruecke', 'massstab', 'geo'];
+const ZEICHNEN = ['setzen', 'kabel', 'kabelweg', 'bruecke', 'schlauch', 'massstab', 'geo'];
+// Leitungen mit Enden an Anlagen (Kabelende umstecken, beim Verschieben folgen).
+const MIT_ENDEN = ['kabel', 'kraftstoff'];
 
 // ------------------------------------------------------------------ Hilfen
 
@@ -180,6 +185,12 @@ function linieZeichnen(l) {
         const weg = karte.linie(punkte, { color: '#64748b', weight: 5, opacity: 0.8, dashArray: l.fest ? null : '10 8', className: 'pm-kabelweg' });
         // Fest verlegt: mit dunklem Rand, wie die Feststromanschlüsse.
         lage = l.fest ? L.layerGroup([karte.linie(punkte, { color: '#0f172a', weight: 9, opacity: 0.9, interactive: true }), weg]) : weg;
+    } else if (l.art === 'kraftstoff') {
+        const schlauch = karte.linie(punkte, {
+            color: '#92400e', weight: 4, opacity: 0.95, dashArray: '8 6', lineCap: 'butt',
+            className: 'pm-schlauch' + (l.hinweise.length ? ' hinweis' : '') + (aufbauStand('l:' + l.id) ? ' aufbau-' + aufbauStand('l:' + l.id) : ''),
+        });
+        lage = l.fest ? L.layerGroup([karte.linie(punkte, { color: '#0f172a', weight: 8, opacity: 0.9 }), schlauch]) : schlauch;
     } else {
         const q = l.querschnitt || 2.5;
         const staerke = Math.max(3, Math.min(9, 2 + Math.log2(q)));
@@ -194,7 +205,9 @@ function linieZeichnen(l) {
         ? `${esc(l.name || 'Kabel')}: ${esc(l.von_name || '?')} → ${esc(l.zu_name || '?')}${l.laenge !== null ? ' · ' + meter(l.laenge) : ''}`
         : l.art === 'kabelbruecke'
             ? `Kabelbrücke${l.modell ? ' ' + esc(l.modell) : ''} × ${l.anzahl}${l.name ? ' · ' + esc(l.name) : ''}`
-            : `Kabelweg${l.name ? ' ' + esc(l.name) : ''}${l.laenge !== null ? ' · ' + meter(l.laenge) : ''}`);
+            : l.art === 'kraftstoff'
+                ? `Kraftstoffschlauch: ${esc(l.von_name || '?')} → ${esc(l.zu_name || '?')} · ${l.anzahl} × ${esc(l.modell || daten.kupplung || '')}${l.laenge !== null ? ' · ' + meter(l.laenge) : ''}`
+                : `Kabelweg${l.name ? ' ' + esc(l.name) : ''}${l.laenge !== null ? ' · ' + meter(l.laenge) : ''}`);
     lage.eachLayer ? lage.eachLayer((x) => x.bindTooltip(text, { sticky: true })) : lage.bindTooltip(text, { sticky: true });
     const klick = (e) => {
         L.DomEvent.stopPropagation(e);
@@ -286,6 +299,7 @@ function setModus(neu) {
         kabel: 'Kabel: zuerst die speisende Anlage antippen, dann den Weg, dann die Anlage am Ende. Esc bricht ab, ⌫ nimmt den letzten Punkt.',
         kabelweg: 'Kabelweg: Punkte setzen, mit „Fertig“ oder Doppeltipp abschließen.',
         bruecke: 'Kabelbrücke: Anfang und Ende quer über den Weg tippen.',
+        schlauch: 'Kraftstoffschlauch: zuerst den Tank (oder den Generator) antippen, dann den Weg, dann das Gegenstück. Esc bricht ab, ⌫ nimmt den letzten Punkt.',
         massstab: 'Maßstab: zwei Punkte mit bekanntem Abstand tippen (z. B. Maßstabsleiste des Plans).',
         geo: 'Georeferenz: zwei gut erkennbare Punkte weit auseinander antippen (Gebäudeecken, Tor, Mast), dann ihre Koordinaten eintragen.',
         aufbau: aufbauText(),
@@ -331,8 +345,8 @@ seite.addEventListener('click', (e) => {
 map.on('click', (e) => {
     const p = karte.zuProzent(e.latlng);
     if (modus === 'setzen') { return setzenKlick(p); }
-    if (modus === 'kabel') {
-        if (!entwurf) { status('Zuerst die speisende Anlage antippen.'); return; }
+    if (modus === 'kabel' || modus === 'schlauch') {
+        if (!entwurf) { status(modus === 'kabel' ? 'Zuerst die speisende Anlage antippen.' : 'Zuerst den Tank oder den Generator antippen.'); return; }
         entwurf.punkte.push(p);
         entwurfZeichnen();
         return;
@@ -364,7 +378,7 @@ map.on('dblclick', () => {
 function entwurfZeichnen() {
     ebenen.entwurf.clearLayers();
     if (!entwurf) { return; }
-    const farbe = { kabel: '#2563eb', kabelweg: '#64748b', bruecke: '#ca8a04', massstab: '#db2777', geo: '#0d9488' }[entwurf.art] || '#2563eb';
+    const farbe = { kabel: '#2563eb', kabelweg: '#64748b', bruecke: '#ca8a04', schlauch: '#92400e', massstab: '#db2777', geo: '#0d9488' }[entwurf.art] || '#2563eb';
     if (entwurf.punkte.length >= 2) {
         karte.linie(entwurf.punkte, { color: farbe, weight: 4, dashArray: '6 6' }).addTo(ebenen.entwurf);
     }
@@ -374,7 +388,7 @@ function entwurfZeichnen() {
     });
     const l = laengeImPlan(entwurf.punkte);
     if (entwurf.art !== 'massstab' && entwurf.art !== 'geo') {
-        status((entwurf.art === 'kabel' ? 'Kabel' : entwurf.art === 'bruecke' ? 'Kabelbrücke' : 'Kabelweg')
+        status(({ kabel: 'Kabel', bruecke: 'Kabelbrücke', schlauch: 'Kraftstoffschlauch' }[entwurf.art] || 'Kabelweg')
             + ': ' + entwurf.punkte.length + ' Punkt(e)' + (l !== null ? ', ' + meter(l) : ''));
     }
 }
@@ -392,6 +406,27 @@ function objektKlick(o, e = null) {
     // (Ein Tank hat keine Phasen – dort öffnet der Wert die Seitenleiste.)
     if ((modus === 'ansehen' || modus === 'verschieben') && o.elektrisch !== false && ziel && ziel.closest && ziel.closest('[data-wert]')) {
         detailZeigen(o);
+        return;
+    }
+    if (modus === 'schlauch') {
+        // Wie der Server: ein Schlauch verbindet einen Tank mit einem Generator.
+        if (!entwurf) {
+            if (o.art !== 'tank' && o.art !== 'generator') {
+                status('Ein Kraftstoffschlauch verbindet einen Tank mit einem Generator – zuerst einen davon antippen.');
+                return;
+            }
+            entwurf = { art: 'schlauch', punkte: [{ x: o.x, y: o.y }], von: o.id, vonArt: o.art };
+            entwurfZeichnen();
+            status('Schlauch ab „' + o.name + '“ – Weg tippen, dann ' + (o.art === 'tank' ? 'den Generator.' : 'den Tank.'));
+            return;
+        }
+        if (o.id === entwurf.von) { return; }
+        const gegen = entwurf.vonArt === 'tank' ? 'generator' : 'tank';
+        if (o.art !== gegen) { status('Am anderen Ende steht ' + (gegen === 'tank' ? 'ein Tank.' : 'ein Generator.')); return; }
+        entwurf.punkte.push({ x: o.x, y: o.y });
+        entwurf.zu = o.id;
+        entwurfZeichnen();
+        schlauchOeffnen(null);
         return;
     }
     if (modus === 'kabel') {
@@ -705,7 +740,60 @@ async function leitungKlick(l) {
     const antwort = await fetch(`/karte/leitung/${l.id}`, { headers: { Accept: 'application/json' }, credentials: 'same-origin' });
     const d = await antwort.json();
     if (!d.ok) { seite.innerHTML = `<p class="muted">${esc(d.message)}</p>`; return; }
-    if (d.leitung.art === 'kabel') { kabelPanel(d); } else { entwurfPanel(d.leitung.art === 'kabelbruecke' ? 'bruecke' : 'kabelweg', false, d); }
+    if (d.leitung.art === 'kabel') {
+        kabelPanel(d);
+    } else if (d.leitung.art === 'kraftstoff') {
+        schlauchOeffnen(d);
+    } else {
+        entwurfPanel(d.leitung.art === 'kabelbruecke' ? 'bruecke' : 'kabelweg', false, d);
+    }
+}
+
+/**
+ * Fenster für einen Kraftstoffschlauch (karte-tank.js) – neu aus dem
+ * Entwurf oder vorhanden. Der Tank steht immer am Anfang: Ist der Schlauch
+ * vom Generator aus gezogen, werden Enden und Weg getauscht (wie auf dem
+ * Server).
+ */
+function schlauchOeffnen(d) {
+    const neu = d === null;
+    let vorgabe = null;
+    if (neu) {
+        const a = objektNachId(entwurf.von) || {};
+        const b = objektNachId(entwurf.zu) || {};
+        const tankZuerst = a.art === 'tank';
+        const tank = tankZuerst ? a : b;
+        const gen = tankZuerst ? b : a;
+        const punkte = tankZuerst ? entwurf.punkte.slice() : entwurf.punkte.slice().reverse();
+        vorgabe = { von: tank.id, zu: gen.id, von_name: tank.name, zu_name: gen.name, punkte, laenge_plan: laengeImPlan(punkte), fest_moeglich: !!tank.fest && !!gen.fest };
+    }
+    const endeFest = (id) => !!(objektNachId(id) || {}).fest;
+    tankModul.schlauchPanel(seite, d, {
+        neu: vorgabe,
+        festMoeglich: neu ? vorgabe.fest_moeglich : endeFest(d.leitung.von) && endeFest(d.leitung.zu),
+        darf: neu ? !!daten.darf.leitung : !!d.darf,
+        schlauchtypen: daten.schlauchtypen || [],
+        kupplung: daten.kupplung || 'HK-A3',
+        meter,
+        speichern: async (felder) => {
+            const anfrage = Object.assign(felder, { art: 'kraftstoff', floor_id: etage });
+            if (neu) {
+                Object.assign(anfrage, { von_objekt_id: vorgabe.von, zu_objekt_id: vorgabe.zu, punkte: JSON.stringify(vorgabe.punkte) });
+            } else {
+                Object.assign(anfrage, { id: d.leitung.id, von_objekt_id: d.leitung.von || 0, zu_objekt_id: d.leitung.zu || 0 });
+            }
+            const erg = await PM.post('/karte/leitung/speichern', anfrage);
+            PM.melden(erg.message, !!erg.ok);
+            if (!erg.ok) { return; }
+            entwurfVerwerfen();
+            await laden();
+            await liveLaden();
+            if (neu) { setModus('schlauch'); }
+            seite.innerHTML = '<p class="muted">Gespeichert. Der Tank rechnet jetzt mit dem Verbrauch des Generators.</p>';
+        },
+        verwerfen: () => { entwurfVerwerfen(); seite.innerHTML = '<p class="muted">Verworfen.</p>'; },
+        loeschen: (id) => leitungLoeschen(id),
+    });
 }
 
 /**
@@ -731,16 +819,22 @@ function griffeZeigen(id) {
         PM.melden(erg.ok ? text : erg.message, !!erg.ok);
         await laden();
     };
-    const istEnde = (i) => l.art === 'kabel' && (i === 0 || i === punkte.length - 1);
+    const istEnde = (i) => MIT_ENDEN.includes(l.art) && (i === 0 || i === punkte.length - 1);
 
     punkte.forEach((p, i) => {
         const g = karte.punkt(p.x, p.y, 'plan-kabel-punkt' + (i === 0 || i === punkte.length - 1 ? ' ende' : ''), '<span class="griff"></span>', { draggable: true });
         g.on('drag', () => { punkte[i] = karte.zuProzent(g.getLatLng()); vorschau(); });
         g.on('dragend', async () => {
             if (!istEnde(i)) { await verlaufSpeichern('Verlauf gespeichert.'); return; }
-            // Kabelende: an der Anlage darunter anstecken, sonst lösen.
+            // Kabelende: an der Anlage darunter anstecken, sonst lösen. Ein
+            // Schlauch bleibt an Tank und Generator – ins Leere gezogen springt er zurück.
             const ende = i === 0 ? 'von' : 'zu';
             const ziel = anlageBei(g.getLatLng());
+            if (l.art === 'kraftstoff' && !ziel) {
+                status('Ein Schlauch endet an Tank und Generator – auf einen anderen ziehen oder den Schlauch löschen.');
+                await laden();
+                return;
+            }
             if (ziel) { punkte[i] = { x: ziel.x, y: ziel.y }; }
             const bisher = l[ende] || null;
             const neu = ziel ? ziel.id : null;
@@ -778,7 +872,7 @@ function griffeZeigen(id) {
     }
 
     // ✥ die ganze Linie: Kabelenden an einer Anlage bleiben dort.
-    const angeschlossen = (i) => l.art === 'kabel' && ((i === 0 && l.von) || (i === punkte.length - 1 && l.zu));
+    const angeschlossen = (i) => MIT_ENDEN.includes(l.art) && ((i === 0 && l.von) || (i === punkte.length - 1 && l.zu));
     const beweglich = punkte.map((_, i) => !angeschlossen(i));
     if (beweglich.some(Boolean)) {
         const m = Math.floor((punkte.length - 1) / 2);
@@ -795,12 +889,14 @@ function griffeZeigen(id) {
             });
             vorschau();
         });
-        h.on('dragend', () => verlaufSpeichern(l.art === 'kabel' ? 'Kabel verschoben.' : (l.art === 'kabelbruecke' ? 'Kabelbrücke verschoben.' : 'Kabelweg verschoben.')));
+        h.on('dragend', () => verlaufSpeichern({ kabel: 'Kabel verschoben.', kabelbruecke: 'Kabelbrücke verschoben.', kraftstoff: 'Schlauch verschoben.' }[l.art] || 'Kabelweg verschoben.'));
         h.addTo(ebenen.griffe);
     }
     status(l.art === 'kabel'
         ? 'Punkte ziehen · ⊕ zieht einen neuen Punkt heraus · Doppeltipp entfernt einen Punkt · ✥ verschiebt das Kabel · ein Ende auf eine Anlage ziehen steckt es dort an.'
-        : 'Punkte ziehen · ⊕ zieht einen neuen Punkt heraus · Doppeltipp entfernt einen Punkt · ✥ verschiebt die ganze Linie.');
+        : l.art === 'kraftstoff'
+            ? 'Punkte ziehen · ⊕ zieht einen neuen Punkt heraus · Doppeltipp entfernt einen Punkt · ✥ verschiebt den Schlauch · ein Ende auf einen anderen Tank oder Generator ziehen.'
+            : 'Punkte ziehen · ⊕ zieht einen neuen Punkt heraus · Doppeltipp entfernt einen Punkt · ✥ verschiebt die ganze Linie.');
 }
 
 /** Die Anlage unter einem Punkt der Karte (bis gut 20 Pixel daneben) – oder null. */
@@ -1093,13 +1189,16 @@ async function aufbauPanel(art, id) {
         seite.innerHTML = `<h2>${esc(o ? o.name : (l && l.name) || 'Kabel')}</h2><p class="small muted">Gehört nicht zum Aufbau (fest installiert oder Kabelweg).</p>`;
         return;
     }
-    const name = o ? o.name : (l.name || (l.art === 'kabelbruecke' ? 'Kabelbrücke' : `${l.von_name || '?'} → ${l.zu_name || 'offenes Ende'}`));
+    const name = o ? o.name : (l.name || (l.art === 'kabelbruecke' ? 'Kabelbrücke'
+        : `${l.art === 'kraftstoff' ? 'Schlauch ' : ''}${l.von_name || '?'} → ${l.zu_name || 'offenes Ende'}`));
+    const mitLaenge = !!l && MIT_ENDEN.includes(l.art);
     const notiz = (a.notizen && a.notizen[schluessel]) || '';
     const laengeIst = a.laengen && a.laengen[schluessel] !== undefined ? a.laengen[schluessel] : null;
     const darf = art === 'objekt' ? !!(o && o.darf) : !!daten.darf.leitung;
     seite.innerHTML = `
         <h2>${esc(name)}</h2>
-        <p class="small">${art === 'objekt' ? esc(o.art_name) : (l.art === 'kabelbruecke' ? 'Kabelbrücke' : 'Kabel' + (l.laenge !== null ? ' · Plan ' + meter(l.laenge) : ''))}
+        <p class="small">${art === 'objekt' ? esc(o.art_name) : (l.art === 'kabelbruecke' ? 'Kabelbrücke'
+            : (l.art === 'kraftstoff' ? 'Kraftstoffschlauch' : 'Kabel') + (l.laenge !== null ? ' · Plan ' + meter(l.laenge) : ''))}
             · <span class="badge ${AUFBAU_KLASSE[st]}">${AUFBAU_TEXT[st]}</span></p>
         ${notiz ? `<p class="small muted">${esc(notiz)}</p>` : ''}
         ${st === 'zusaetzlich' ? '<p class="small muted">Beim Aufbau dazugekommen – nicht im Plan.</p>' : darf ? `
@@ -1110,7 +1209,7 @@ async function aufbauPanel(art, id) {
             ${st !== 'offen' ? '<button type="button" class="btn btn-ghost btn-sm" data-aufbau="offen">↺ zurücknehmen</button>' : ''}
         </div>
         <form class="aufbau-aenderung" hidden>
-            ${art === 'leitung' && l.art === 'kabel' ? `<div class="field"><label for="aufbau-laenge">Echte Länge (m)</label>
+            ${art === 'leitung' && mitLaenge ? `<div class="field"><label for="aufbau-laenge">Echte Länge (m)</label>
                 <input id="aufbau-laenge" name="laenge_ist" inputmode="decimal" value="${laengeIst !== null ? String(laengeIst).replace('.', ',') : ''}" placeholder="${l.laenge !== null ? 'Plan: ' + meter(l.laenge) : ''}"></div>` : ''}
             <div class="field"><label for="aufbau-notiz">Was ist anders?</label>
                 <input id="aufbau-notiz" name="notiz" value="${esc(notiz)}" placeholder="${art === 'objekt' ? 'z. B. 10 m weiter links, PD 63 statt PD 32' : 'z. B. um die Bühne herum'}"></div>

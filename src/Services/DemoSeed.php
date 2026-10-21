@@ -9,9 +9,9 @@ use App\Support\Database;
 use App\Support\Zeit;
 
 /**
- * Ein Demo-Festivalgelände: Netzanschluss, Aggregat, Speicher, Verteilungen
- * mit Sicherungen und RCDs, Kabel, Kabelbrücken, Messgeräte, Benutzer mit
- * zeitlich begrenzten Freigaben.
+ * Ein Demo-Festivalgelände: Netzanschluss, Aggregat mit Tank am
+ * Kraftstoffschlauch, Speicher, Verteilungen mit Sicherungen und RCDs, Kabel,
+ * Kabelbrücken, Messgeräte, Benutzer mit zeitlich begrenzten Freigaben.
  *
  * Grundlage der Screenshots und der Prüfskripte. Die Messwerte dazu
  * erzeugt App\Messung\Demo.
@@ -103,7 +103,9 @@ final class DemoSeed
         AnlagenService::anzahlSetzen($netz, ['abgang' => [$typ['powerlock'] => 1, $typ['cee125'] => 1]]);
 
         $gen = $setzen(['art' => 'generator', 'name' => 'Aggregat 1', 'kennung' => 'G-100-07', 'hersteller' => 'Musteraggregate',
-            'modell' => 'SG 100', 'nennleistung_kva' => 100, 'eigenschaften' => ['steuerung' => 'ComAp InteliGen 200', 'kraftstoff' => 'HVO', 'tank_l' => 400, 'verbrauch_l_h' => 22],
+            'modell' => 'SG 100', 'nennleistung_kva' => 100, 'eigenschaften' => ['steuerung' => 'ComAp InteliGen 200', 'kraftstoff' => 'HVO', 'tank_l' => 400, 'verbrauch_l_h' => 22,
+                // die 100-kVA-Zeile der Strombibel – Verbrauch und Restlaufzeit des Tanks am Schlauch
+                'verbrauch_kennlinie' => '100% 22L / 70% 16L / 50% 12L'],
             'ohne_anschluesse' => true], 88.0, 18.0);
         AnlagenService::anzahlSetzen($gen, ['abgang' => [$typ['powerlock'] => 1, $typ['cee63'] => 2, $typ['cee32'] => 1]]);
         SchutzService::vorschlagen($gen);
@@ -120,6 +122,9 @@ final class DemoSeed
         $licht = $setzen(['art' => 'verteilung', 'name' => 'Licht Gelände', 'kennung' => 'PD32-12', 'vorlage_id' => $pd32, 'nennstrom_a' => 32, 'modell' => 'PD 32/16'], 62.0, 50.0);
         $kasse = $setzen(['art' => 'verteilung', 'name' => 'Kasse Einlass', 'kennung' => 'SV16-03', 'vorlage_id' => $sv16, 'nennstrom_a' => 16, 'modell' => 'SV 16'], 60.0, 93.0);
         $truckV = $setzen(['art' => 'verteilung', 'name' => 'Foodtruck-Verteiler', 'kennung' => 'PD63-07', 'vorlage_id' => $pd63, 'nennstrom_a' => 63, 'modell' => 'PD 63/32/16'], 75.0, 42.0);
+        // Der Tank des Aggregats (doppelwandig, HVO wie das Aggregat)
+        $tankAgg = $setzen(['art' => 'tank', 'name' => 'Tank Aggregat 1', 'kennung' => 'T3000-02', 'modell' => 'QUADRO-AG 3000',
+            'eigenschaften' => ['inhalt_l' => 3000, 'kraftstoff' => 'HVO', 'bauform' => 'Quader', 'sumpf_l' => 140, 'tankanschluss' => '2 Anschlüsse']], 92.0, 22.0);
 
         // ---- Kabel
         $anschluss = static function (int $objekt, string $richtung, string $stecker, int $n = 0) use ($typ): ?int {
@@ -167,6 +172,9 @@ final class DemoSeed
         $offen($truckV, $anschluss($truckV, 'abgang', 'schuko'), 2.5, [[75.0, 42.0], [66.0, 42.0], [66.0, 40.0]], 'Kaffeemobil');
         $offen($gen, $anschluss($gen, 'abgang', 'cee63', 1), 16, [[88.0, 18.0], [95.0, 18.0], [95.0, 42.0], [90.0, 44.0]], 'Grill-Truck');
         LeitungService::speichern(null, ['art' => 'kabelweg', 'floor_id' => $floorId, 'name' => 'Trasse Ost (Reserve)', 'punkte' => [[45.0, 38.0], [80.0, 38.0], [88.0, 30.0]]]);
+        // Kraftstoffschlauch vom Tank zum Aggregat: Vor- und Rücklauf mit Steckkupplungen HK-A3.
+        LeitungService::speichern(null, ['art' => 'kraftstoff', 'floor_id' => $floorId, 'name' => 'Tank → Aggregat 1', 'von_objekt_id' => $tankAgg, 'zu_objekt_id' => $gen,
+            'kabeltyp' => 'DN 10 (3/8″)', 'modell' => 'HK-A3', 'anzahl' => 2, 'punkte' => [[92.0, 22.0], [90.0, 19.0], [88.0, 18.0]]]);
         LeitungService::speichern(null, ['art' => 'kabelbruecke', 'floor_id' => $floorId, 'name' => 'Überfahrt Hauptweg', 'modell' => '5-Kanal', 'anzahl' => 4, 'punkte' => [[20.5, 50.0], [23.5, 50.0]]]);
         LeitungService::speichern(null, ['art' => 'kabelbruecke', 'floor_id' => $floorId, 'name' => 'Rettungsweg', 'modell' => 'Defender Midi', 'anzahl' => 3, 'punkte' => [[43.5, 60.0], [46.5, 60.0]]]);
 

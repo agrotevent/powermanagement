@@ -1218,6 +1218,34 @@ final class TankRechnung
         return round(-($n * $sxy - $sx * $sy) / $nenner, 3);
     }
 
+    /**
+     * Verbrauch aus dem Pegel: das Gefälle der Literreihe [ms, Liter] (Median
+     * je 10 Minuten, die letzten 6 h) in l/h – nur ab der letzten Betankung
+     * (ein Sprung nach oben ≥ max(50 l, 3 % Nennvolumen, 3 Meldeschritte))
+     * und nur, wenn der Inhalt dabei um mindestens 3 Meldeschritte fiel; ein
+     * einzelner Schritt ist Rauschen oder Wärme. Sonst null.
+     *
+     * @param list<array{0:int,1:?float}> $punkte
+     */
+    public static function pegelVerbrauch(array $punkte, ?float $schrittL, ?float $nennL): ?float
+    {
+        $p = array_values(array_filter($punkte, static fn ($x): bool => is_array($x) && isset($x[0]) && is_numeric($x[1] ?? null)));
+        usort($p, static fn (array $a, array $b): int => $a[0] <=> $b[0]);
+        $sprung = max(50.0, 0.03 * (float) ($nennL ?? 0), 3 * (float) ($schrittL ?? 0));
+        for ($i = count($p) - 1; $i > 0; $i--) {
+            if ((float) $p[$i][1] - (float) $p[$i - 1][1] >= $sprung) {
+                $p = array_slice($p, $i);
+                break;
+            }
+        }
+        $n = count($p);
+        if ($n < 3 || (float) $p[0][1] - (float) $p[$n - 1][1] < max(1e-9, 3 * (float) ($schrittL ?? 0))) {
+            return null;
+        }
+        $g = self::gefaelle($p);
+        return $g !== null && $g > 0 ? $g : null;
+    }
+
     // ------------------------------------------------------------ Stufen
 
     /**
@@ -1231,7 +1259,9 @@ final class TankRechnung
      * $t: die Werte aus TankService::live (sensor, alter_s, zeit (ms),
      * online, fehler, prozent, nutzbar_l, liter, hoehe_mm, ueber_grenze,
      * grenze_prozent, restlaufzeit_h, nachbestellen_bis, verbrauch_l_h,
-     * schritt_l, generatoren, peilung, gesperrt, jetzt).
+     * schritt_l, generatoren [{name, laeuft}], peilung, gesperrt, jetzt).
+     * Stehen alle Generatoren der Versorgung (Verbrauch 0), heißt es
+     * „Generator steht“, ohne Restlaufzeit.
      * $grenzen: Einstellungen (GRENZEN), $tank: Eigenschaften des Tanks
      * (warnung_prozent, alarm_prozent gehen vor).
      *
@@ -1312,6 +1342,8 @@ final class TankRechnung
             }
         } elseif ($rest !== null) {
             $text .= ' · ' . self::restText($rest);
+        } elseif ($literJeStunde !== null && $literJeStunde <= 0.0 && ($alle = array_filter((array) ($t['generatoren'] ?? []), 'is_array')) !== []) {
+            $text .= ' · ' . (count($alle) === 1 ? 'Generator steht' : 'Generatoren stehen');
         }
         return ['stufe' => 'ok', 'hinweis' => $text];
     }
@@ -1428,8 +1460,8 @@ final class TankRechnung
         return $davor . 'Stand ' . self::wann(intdiv((int) $t['zeit'], 1000), $jetzt) . ' (' . self::alterText((int) $t['alter_s']) . ')';
     }
 
-    /** Uhrzeit in Ortszeit; an einem anderen Tag mit Datum, in der nächsten Woche mit Wochentag. */
-    private static function wann(int $ts, int $jetzt): string
+    /** Uhrzeit in Ortszeit; an einem anderen Tag mit Datum, in der nächsten Woche mit Wochentag: „14:02“, „Fr 08:44“, „15.10. 08:02“. */
+    public static function wann(int $ts, int $jetzt): string
     {
         $zone = Zeit::zone();
         $dt = (new \DateTimeImmutable('@' . $ts))->setTimezone($zone);

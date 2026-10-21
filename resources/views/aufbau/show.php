@@ -66,7 +66,7 @@ $meter = static fn ($v) => $v === null ? '–' : number_format((float) $v, 1, ',
                 <?php $kabel = $e['art'] === 'leitung'; $darfHier = $laeuft && ($kabel ? $darfKabel : $darf); ?>
                 <tr class="aufbau-<?= $e['status'] ?>">
                     <td data-label="Position"><?php if (!$kabel): ?><a href="/anlagen/<?= (int) $e['id'] ?>"><strong><?= View::e($e['name']) ?></strong></a><?php else: ?><strong><?= View::e($e['name']) ?></strong><?php endif; ?>
-                        <div class="small muted"><?= $kabel ? 'Kabel' : 'Anlage' ?><?= $e['text'] !== '' ? ' · ' . View::e($e['text']) : '' ?></div></td>
+                        <div class="small muted"><?= $kabel ? (['kraftstoff' => 'Kraftstoffschlauch', 'kabelbruecke' => 'Kabelbrücke'][$e['leitung'] ?? ''] ?? 'Kabel') : 'Anlage' ?><?= $e['text'] !== '' ? ' · ' . View::e($e['text']) : '' ?></div></td>
                     <td data-label="Stand"><span class="badge <?= $klasse[$e['status']] ?>"><?= View::e(AufbauService::POSTEN[$e['status']]) ?></span></td>
                     <td data-label="Länge" class="num small"><?= $kabel ? View::e($meter($e['laenge_plan']) . ' / ' . $meter($e['laenge_ist'])) : '' ?></td>
                     <td data-label="Notiz" class="small"><?= View::e($e['notiz']) ?></td>

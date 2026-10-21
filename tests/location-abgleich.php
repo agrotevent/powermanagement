@@ -100,6 +100,9 @@ try {
     $erd = LeitungService::speichern(null, ['art' => 'kabel', 'floor_id' => $floorId, 'name' => 'Erdkabel Halle', 'von_objekt_id' => $an,
         'zu_objekt_id' => $wv, 'zu_anschluss_id' => (int) $wvEin['id'], 'kabeltyp' => 'NYY-J', 'querschnitt_mm2' => 25, 'punkte' => [[5, 5], [60, 5], [60, 10]]]);
     pruefe($erd['ok'] && (int) Database::scalar('SELECT fest FROM leitungen WHERE id = ?', [(int) $erd['id']]) === 1, 'Erdkabel zwischen Feststromanschlüssen ist fest verlegt');
+    // Ein fest verlegter Kraftstoffschlauch bleibt hier – ältere Gegenstellen kennen keinen Schlauch
+    $festerSchlauch = Database::insert('leitungen', ['art' => 'kraftstoff', 'fest' => 1, 'floor_id' => $floorId, 'name' => 'Schlauch Bodentank', 'kabeltyp' => 'DN 25 (1″)',
+        'anzahl' => 2, 'modell' => 'HK-A3', 'punkte' => '[[70,10],[72,12]]', 'farbe' => '', 'notizen' => '', 'created_at' => gmdate('c'), 'updated_at' => gmdate('c')]);
 
     $hoch = LocationSync::locationHochladen($siteId, 'pruefung');
     pruefe($hoch['ok'], 'hochgeladen: ' . $hoch['message']);
@@ -108,7 +111,7 @@ try {
     $namen = array_column($strom['anlagen'] ?? [], 'name');
     sort($namen);
     gleich($namen, ['Hausanschluss Lager', 'Wandverteiler Halle'], 'strom.json enthält nur die Feststromanschlüsse');
-    gleich(array_column($strom['leitungen'] ?? [], 'name'), ['Erdkabel Halle'], 'strom.json enthält nur das fest verlegte Kabel – kein mobiles, keine Kabelbrücke');
+    gleich(array_column($strom['leitungen'] ?? [], 'name'), ['Erdkabel Halle'], 'strom.json enthält nur das fest verlegte Kabel – kein mobiles, keine Kabelbrücke, kein Schlauch');
     $erdJson = $strom['leitungen'][0] ?? [];
     pruefe(($erdJson['fest'] ?? false) === true && $erdJson['von'] !== null && $erdJson['zu'] !== null && ($erdJson['zu_anschluss'] ?? '') === 'eingang:1',
         'festes Kabel mit beiden Enden und Anschluss');
@@ -178,6 +181,7 @@ try {
     gleich((int) Database::scalar('SELECT COUNT(*) FROM objekte WHERE site_id = ? AND fest = 1', [$siteId]), 2, 'erneutes Übernehmen legt nichts doppelt an');
     gleich((int) Database::scalar('SELECT COUNT(*) FROM objekte WHERE site_id = ? AND fest = 0', [$siteId]), 1, 'mobile Anlagen unverändert');
     gleich((int) Database::scalar('SELECT COUNT(*) FROM leitungen WHERE floor_id = ? AND fest = 0', [$floorId]), 2, 'mobile Leitungen unverändert');
+    gleich((string) Database::scalar('SELECT art FROM leitungen WHERE id = ?', [$festerSchlauch]), 'kraftstoff', 'der feste Schlauch bleibt beim Übernehmen stehen');
 
     // Eine strom.json im alten Format 1 (mit ganzer Planung) liefert nur
     // ihre Stromanschlüsse – mobile Anlagen und Kabel daraus kommen nicht an.

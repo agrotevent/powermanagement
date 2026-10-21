@@ -159,6 +159,16 @@ $t0 = intdiv($jetzt - 3 * 86400, 3600) * 3600 + 60;
 Influx::schreiben([$tz($t0, 'u=1.0', 'voltmeter:101'), $tz($t0 + 10, 'u=2.0', 'voltmeter:101'), $tz($t0 + 20, 'u=9.0', 'voltmeter:101')], $fehler);
 $r = Messdaten::reihe('zustand', $uni, 'voltmeter:101', 'u', [], $t0 - 60, $t0 + 3000, null, 3600, 'median', $fehler);
 gleich([$r['serien']['u'][0] ?? null, $fehler], [2.0, null], 'Median als Aggregat (Messdaten::reihe)');
+// Gefälle (Verbrauch aus dem Pegel): Median je 10 min ab „ab“, mehrere Sensoren in einer Anfrage, nur im laufenden Datenfenster
+$b0 = intdiv($jetzt - 5 * 3600, 600) * 600;
+Influx::schreiben([$tz($b0 + 10, 'u=8.0', 'voltmeter:102'), $tz($b0 + 3600 + 10, 'u=7.0', 'voltmeter:102'), $tz($b0 + 3600 + 20, 'u=7.1', 'voltmeter:102'),
+    $tz($b0 + 3600 + 30, 'u=9.9', 'voltmeter:102'), $tz($b0 + 7200 + 10, 'u=6.5', 'voltmeter:102'), $tz($jetzt - 7 * 3600, 'u=9.5', 'voltmeter:102')], $fehler);
+$g = Messdaten::tankGefaelle([['geraet' => $uni, 'kanal' => 'voltmeter:102', 'feld' => 'u', 'ab' => $jetzt - 6 * 3600, 'fenster' => null],
+    ['geraet' => $uni, 'kanal' => 'voltmeter:101', 'feld' => 'u', 'ab' => $jetzt - 6 * 3600, 'fenster' => null]], $fehler);
+gleich([$g[$uni . '|voltmeter:102'] ?? null, $g[$uni . '|voltmeter:101'] ?? null, $fehler],
+    [[[$b0 * 1000, 8.0], [($b0 + 3600) * 1000, 7.1], [($b0 + 7200) * 1000, 6.5]], [], null], 'Gefälle: Median je 10 min ab 6 h zurück, zwei Sensoren in einer Anfrage');
+gleich(Messdaten::tankGefaelle([['geraet' => $uni, 'kanal' => 'voltmeter:102', 'feld' => 'u', 'ab' => $jetzt - 6 * 3600, 'fenster' => [[$jetzt - 86400, $jetzt - 1800]]]], $fehler), [],
+    'Gefälle: Datenfenster vor 30 min zu Ende – nichts');
 $alt = 'pruef-alt-' . bin2hex(random_bytes(3));
 Influx::schreiben(['zustand,geraet=' . $alt . ',kanal=voltmeter:100,typ=shelly u=7.5,sensorfehler=0 ' . (($jetzt - 3 * 86400) * 1000)], $fehler);
 $liste = array_filter(Messdaten::geraete($fehler), static fn ($g) => $g['geraet'] === $alt && $g['kanal'] === 'voltmeter:100');

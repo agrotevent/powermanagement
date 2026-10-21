@@ -16,12 +16,20 @@ use App\Support\Database;
  *                 über das Gelände, bevor klar ist, welche Kabel hineinkommen.
  *   kabelbruecke  Ein Überfahrschutz, gezeichnet als kurze Strecke quer zum
  *                 Weg, mit Modell und Anzahl der Elemente.
+ *   kraftstoff    Kraftstoffschlauch vom Tank (von) zum Generator (zu), ohne
+ *                 Anschlüsse: Schlauchtyp (kabeltyp), Kupplung (modell),
+ *                 Anzahl 2 = Vor- und Rücklauf, 1 = nur Vorlauf. Daraus weiß
+ *                 die App, welcher Generator aus welchem Tank saugt –
+ *                 Verbrauch und Restlaufzeit rechnet TankService. In Verteilbaum,
+ *                 Belegung, Speisung und Spannungsfall zählt er nicht (dort
+ *                 nur „kabel“).
  *
  * Kabel und Kabelwege sind entweder **fest verlegt** (`fest`: Erdkabel vom
  * Hausanschluss zur Energiesäule, Trasse in der Halle – gehören zur Location
  * und gehen beim Location-Abgleich mit) oder mobil (für jede Veranstaltung
- * neu gelegt). Ein festes Kabel endet nur an Feststromanschlüssen;
- * Kabelbrücken sind immer mobil.
+ * neu gelegt). Ein festes Kabel endet nur an Feststromanschlüssen, ein
+ * fester Schlauch nur an fest installierten Anlagen; Kabelbrücken sind
+ * immer mobil.
  *
  * Punkte stehen wie überall im Plan in Prozent (x, y); die Länge rechnet
  * PlanMassstabService aus dem Maßstab der Etage, solange niemand eine
@@ -33,7 +41,14 @@ final class LeitungService
         'kabel'        => 'Kabel',
         'kabelweg'     => 'Kabelweg',
         'kabelbruecke' => 'Kabelbrücke',
+        'kraftstoff'   => 'Kraftstoffschlauch',
     ];
+
+    /** Übliche Kraftstoffschläuche – Vorschläge im Formular, keine Grenze. */
+    public const SCHLAUCHTYPEN = ['DN 10 (3/8″)', 'DN 13 (1/2″)', 'DN 25 (1″)'];
+
+    /** Kupplung eines Schlauchs, wenn der Tank keine nennt (Strombibel: Steckkupplung HK-A3). */
+    public const KUPPLUNG_VORGABE = 'HK-A3';
 
     /** Übliche Kabeltypen – Vorschläge im Formular, keine Grenze. */
     public const KABELTYPEN = ['H07RN-F', 'H07BQ-F', 'NSHXAFÖ', 'NYY-J', 'Powerlock-Einleiter', 'Titanex'];
@@ -153,6 +168,9 @@ final class LeitungService
      */
     public static function hinweise(array $l): array
     {
+        if ((string) $l['art'] === 'kraftstoff') {
+            return self::schlauchHinweise($l);
+        }
         if ((string) $l['art'] !== 'kabel') {
             return [];
         }
@@ -179,6 +197,45 @@ final class LeitungService
     }
 
     /**
+     * Was an einem Kraftstoffschlauch auffällt: offenes Ende, kein Rücklauf,
+     * ein Generator an mehreren Tanks.
+     *
+     * @return list<string>
+     */
+    private static function schlauchHinweise(array $l): array
+    {
+        $out = [];
+        if ($l['von_objekt_id'] === null || $l['zu_objekt_id'] === null) {
+            $out[] = 'Ein Ende ist offen – den Schlauch an Tank und Generator ziehen.';
+        }
+        if ((int) $l['anzahl'] === 1) {
+            $out[] = 'Nur Vorlauf – Rücklauf fehlt? Der Generator führt nicht verbrannten Kraftstoff zurück.';
+        }
+        if ($l['zu_objekt_id'] !== null) {
+            $tanks = (int) Database::scalar(
+                "SELECT COUNT(DISTINCT von_objekt_id) FROM leitungen WHERE art = 'kraftstoff' AND zu_objekt_id = ? AND von_objekt_id IS NOT NULL",
+                [(int) $l['zu_objekt_id']]
+            );
+            if ($tanks > 1) {
+                // ohne Namen – den Hinweis sieht auch, wer den Generator nicht sehen darf
+                $out[] = 'Der Generator hängt an ' . $tanks . ' Tanks – der Rücklauf muss in denselben Tank wie der Vorlauf (3-Wege-Hahn).';
+            }
+        }
+        return $out;
+    }
+
+    /** Die Kupplung, die ein Tank nennt (Katalog: „Steckkupplung HK-A3“) – sonst HK-A3. „2 Anschlüsse“ ist keine Kupplung. */
+    public static function kupplungVorschlag(?array $tank): string
+    {
+        $eigenschaften = $tank['eigenschaften'] ?? [];
+        if (is_string($eigenschaften)) {
+            $eigenschaften = json_decode($eigenschaften, true);
+        }
+        $text = is_array($eigenschaften) && is_scalar($eigenschaften['tankanschluss'] ?? null) ? trim((string) $eigenschaften['tankanschluss']) : '';
+        return $text !== '' && preg_match('/^\d+\s+Anschl/u', $text) !== 1 ? mb_substr($text, 0, 190) : self::KUPPLUNG_VORGABE;
+    }
+
+    /**
      * Leitung speichern.
      *
      * @return array{ok:bool,message:string,id?:int}
@@ -194,7 +251,7 @@ final class LeitungService
         if ($floorId !== null && Database::first('SELECT id FROM floors WHERE id = ?', [$floorId]) === null) {
             return ['ok' => false, 'message' => 'Diese Etage gibt es nicht.'];
         }
-        if ($art !== 'kabel' && count($punkte) < 2) {
+        if (!in_array($art, ['kabel', 'kraftstoff'], true) && count($punkte) < 2) {
             return ['ok' => false, 'message' => 'Ein ' . self::ARTEN[$art] . ' braucht mindestens zwei Punkte.'];
         }
 
@@ -228,6 +285,40 @@ final class LeitungService
                 return ['ok' => false, 'message' => 'Ein Kabel braucht zwei Enden oder einen eingezeichneten Weg.'];
             }
         }
+        if ($art === 'kraftstoff') {
+            // Ein Schlauch hat keinen Querschnitt in mm² und keine Adern; Anzahl
+            // 2 = Vor- und Rücklauf (Vorgabe), 1 = nur Vorlauf.
+            $anzahl = trim((string) ($daten['anzahl'] ?? ''));
+            if ($anzahl !== '' && !in_array((int) $anzahl, [1, 2], true)) {
+                return ['ok' => false, 'message' => 'Ein Kraftstoffschlauch hat einen Strang (nur Vorlauf) oder zwei (Vor- und Rücklauf).'];
+            }
+            $felder['anzahl'] = $anzahl === '' ? 2 : (int) $anzahl;
+            $felder['adern'] = null;
+            $felder['querschnitt_mm2'] = null;
+            $pruefung = self::kraftstoffEnden($daten);
+            if (!$pruefung['ok']) {
+                return $pruefung;
+            }
+            $felder = array_merge($felder, $pruefung['felder']);
+            if ($pruefung['getauscht']) {
+                $punkte = array_reverse($punkte);    // der Weg beginnt am Tank
+            }
+            if (count($punkte) < 2) {
+                // Ohne gezeichneten Weg: gerade vom Tank zum Generator.
+                $punkte = [];
+                foreach ([$felder['von_objekt_id'], $felder['zu_objekt_id']] as $objektId) {
+                    $lage = Database::first('SELECT plan_x, plan_y FROM objekte WHERE id = ? AND plan_x IS NOT NULL', [$objektId]);
+                    if ($lage !== null) {
+                        $punkte[] = ['x' => (float) $lage['plan_x'], 'y' => (float) $lage['plan_y']];
+                    }
+                }
+                $punkte = self::punkteBereinigen($punkte);
+            }
+            $felder['punkte'] = json_encode($punkte);
+            if ($felder['modell'] === '') {
+                $felder['modell'] = self::kupplungVorschlag(AnlagenService::find((int) $felder['von_objekt_id']));
+            }
+        }
 
         $alt = $id !== null ? Database::first('SELECT id, fest FROM leitungen WHERE id = ?', [$id]) : null;
         if ($id !== null && $alt === null) {
@@ -245,19 +336,22 @@ final class LeitungService
         } elseif ($alt !== null) {
             $felder['fest'] = (int) $alt['fest'];
         } else {
-            $felder['fest'] = $art === 'kabel' && $felder['von_objekt_id'] !== null && $felder['zu_objekt_id'] !== null
+            $felder['fest'] = in_array($art, ['kabel', 'kraftstoff'], true) && $felder['von_objekt_id'] !== null && $felder['zu_objekt_id'] !== null
                 && self::endeFest($felder['von_objekt_id']) && self::endeFest($felder['zu_objekt_id']) ? 1 : 0;
         }
-        // Ein festes Kabel endet nur an Feststromanschlüssen. Wer es
-        // ausdrücklich fest haben will, bekommt den Grund gesagt; wird ein
-        // festes Kabel an eine mobile Anlage umgesteckt, wird es mobil.
+        // Ein festes Kabel endet nur an Feststromanschlüssen (ein fester
+        // Schlauch an fest installierten Anlagen). Wer es ausdrücklich fest
+        // haben will, bekommt den Grund gesagt; wird ein festes Kabel an eine
+        // mobile Anlage umgesteckt, wird es mobil.
         $hinweis = '';
-        if ($felder['fest'] === 1 && $art === 'kabel') {
+        if ($felder['fest'] === 1 && in_array($art, ['kabel', 'kraftstoff'], true)) {
             foreach ([$felder['von_objekt_id'], $felder['zu_objekt_id']] as $objektId) {
                 if ($objektId !== null && !self::endeFest($objektId)) {
                     $name = (string) Database::scalar('SELECT name FROM objekte WHERE id = ?', [$objektId]);
                     if ($ausdruecklich) {
-                        return ['ok' => false, 'message' => 'Ein fest verlegtes Kabel endet nur an Feststromanschlüssen – „' . $name . '“ ist mobil.'];
+                        return ['ok' => false, 'message' => ($art === 'kraftstoff'
+                            ? 'Ein fest verlegter Schlauch endet nur an fest installierten Anlagen – „'
+                            : 'Ein fest verlegtes Kabel endet nur an Feststromanschlüssen – „') . $name . '“ ist mobil.'];
                     }
                     $felder['fest'] = 0;
                     $hinweis = ' Es ist jetzt mobil, weil „' . $name . '“ mobil ist.';
@@ -280,17 +374,23 @@ final class LeitungService
      * Ein Kabelende umstecken oder lösen – beim Ziehen des Endpunkts auf der
      * Karte. An einer anderen Anlage ist der Anschluss erst offen und wird im
      * Kabelfenster gewählt; bleibt die Anlage dieselbe, bleibt er stecken.
+     * Ein Kraftstoffschlauch lässt sich an einen anderen Tank oder Generator
+     * ziehen, aber nicht lösen – er endet immer an beiden.
      *
      * @param ?int $objektId neue Anlage am Ende, null = offenes Ende
      */
     public static function endeSetzen(int $id, string $ende, ?int $objektId, mixed $punkte): array
     {
         $l = self::find($id);
-        if ($l === null || $l['art'] !== 'kabel') {
-            return ['ok' => false, 'message' => 'Nur ein Kabel hat Enden zum Umstecken.'];
+        if ($l === null || !in_array($l['art'], ['kabel', 'kraftstoff'], true)) {
+            return ['ok' => false, 'message' => 'Nur ein Kabel oder ein Schlauch hat Enden zum Umstecken.'];
         }
         if (!in_array($ende, ['von', 'zu'], true)) {
             return ['ok' => false, 'message' => 'Unbekanntes Kabelende.'];
+        }
+        $schlauch = $l['art'] === 'kraftstoff';
+        if ($schlauch && $objektId === null) {
+            return ['ok' => false, 'message' => 'Ein Kraftstoffschlauch endet an Tank und Generator – zum Entfernen löschen.'];
         }
         $daten = self::alsDaten($l);
         $daten['punkte'] = $punkte;
@@ -308,6 +408,9 @@ final class LeitungService
         }
         $hinweis = str_contains($ergebnis['message'], 'jetzt mobil') ? ' Es ist jetzt mobil.' : '';
         $name = (string) Database::scalar('SELECT name FROM objekte WHERE id = ?', [$objektId]);
+        if ($schlauch) {
+            return ['ok' => true, 'id' => $id, 'message' => 'Schlauch an „' . $name . '“ angeschlossen.' . $hinweis];
+        }
         return ['ok' => true, 'id' => $id, 'message' => 'Kabel an „' . $name . '“ angeschlossen – den '
             . ($ende === 'von' ? 'Abgang' : 'Eingang') . ' im Kabelfenster wählen.' . $hinweis];
     }
@@ -382,6 +485,49 @@ final class LeitungService
         return ['ok' => true, 'message' => '', 'felder' => $felder];
     }
 
+    /**
+     * Enden eines Kraftstoffschlauchs: ein Tank und ein Generator, beide im
+     * Plan (kein Katalog-Typ), ohne Anschlüsse. Verkehrt herum gezogen wird
+     * getauscht – „von“ ist immer der Tank.
+     *
+     * @return array{ok:bool,message:string,felder:array<string,?int>,getauscht:bool}
+     */
+    private static function kraftstoffEnden(array $daten): array
+    {
+        $fehler = static fn (string $m): array => ['ok' => false, 'message' => $m, 'felder' => [], 'getauscht' => false];
+        $von = (int) ($daten['von_objekt_id'] ?? 0);
+        $zu = (int) ($daten['zu_objekt_id'] ?? 0);
+        if ($von <= 0 || $zu <= 0) {
+            return $fehler('Ein Kraftstoffschlauch verbindet einen Tank mit einem Generator – beide Enden antippen.');
+        }
+        $enden = [];
+        foreach ([$von, $zu] as $objektId) {
+            $o = Database::first('SELECT id, art, name, ist_vorlage FROM objekte WHERE id = ?', [$objektId]);
+            if ($o === null) {
+                return $fehler('Die Anlage am Schlauchende gibt es nicht.');
+            }
+            if ((int) $o['ist_vorlage'] === 1) {
+                return $fehler('„' . $o['name'] . '“ ist ein Katalog-Typ – ein Schlauch endet an einer Anlage im Plan.');
+            }
+            $enden[] = $o;
+        }
+        $arten = [(string) $enden[0]['art'], (string) $enden[1]['art']];
+        $getauscht = $arten === ['generator', 'tank'];
+        if ($getauscht) {
+            [$von, $zu] = [$zu, $von];
+        } elseif ($arten !== ['tank', 'generator']) {
+            $tank = array_search('tank', $arten, true);
+            $generator = array_search('generator', $arten, true);
+            return $fehler('Ein Kraftstoffschlauch verbindet einen Tank mit einem Generator – ' . match (true) {
+                $tank !== false      => '„' . $enden[1 - $tank]['name'] . '“ ist kein Generator.',
+                $generator !== false => '„' . $enden[1 - $generator]['name'] . '“ ist kein Tank.',
+                default              => 'keins der Enden ist ein Tank.',
+            });
+        }
+        return ['ok' => true, 'message' => '', 'getauscht' => $getauscht,
+            'felder' => ['von_objekt_id' => $von, 'von_anschluss_id' => null, 'zu_objekt_id' => $zu, 'zu_anschluss_id' => null]];
+    }
+
     public static function loeschen(int $id): array
     {
         $l = self::find($id);
@@ -435,11 +581,13 @@ final class LeitungService
         return $out;
     }
 
-    /** Summen einer Etage: Kabelmeter je Querschnitt, Brückenelemente. */
+    /** Summen einer Etage: Kabelmeter je Querschnitt, Brückenelemente, Schlauchmeter je Typ und Kupplungen. */
     public static function stueckliste(int $floorId): array
     {
         $kabel = [];
         $bruecken = [];
+        $schlaeuche = [];
+        $kupplungen = [];
         $ohneLaenge = 0;
         foreach (self::fuerEtage($floorId) as $l) {
             if ($l['art'] === 'kabel') {
@@ -455,11 +603,26 @@ final class LeitungService
             } elseif ($l['art'] === 'kabelbruecke') {
                 $schluessel = $l['modell'] !== '' ? $l['modell'] : 'Kabelbrücke';
                 $bruecken[$schluessel] = ($bruecken[$schluessel] ?? 0) + (int) $l['anzahl'];
+            } elseif ($l['art'] === 'kraftstoff') {
+                // Je Strang ein Schlauch, an jedem Ende eine Kupplung.
+                $schluessel = trim((string) $l['kabeltyp']) !== '' ? (string) $l['kabeltyp'] : 'Kraftstoffschlauch';
+                $n = max(1, (int) $l['anzahl']);
+                $schlaeuche[$schluessel] ??= ['anzahl' => 0, 'meter' => 0.0];
+                $schlaeuche[$schluessel]['anzahl'] += $n;
+                if ($l['laenge'] !== null) {
+                    $schlaeuche[$schluessel]['meter'] += (float) $l['laenge'] * $n;
+                } else {
+                    $ohneLaenge++;
+                }
+                $kupplung = trim((string) $l['modell']) !== '' ? (string) $l['modell'] : self::KUPPLUNG_VORGABE;
+                $kupplungen[$kupplung] = ($kupplungen[$kupplung] ?? 0) + 2 * $n;
             }
         }
         ksort($kabel);
         ksort($bruecken);
-        return ['kabel' => $kabel, 'bruecken' => $bruecken, 'ohne_laenge' => $ohneLaenge];
+        ksort($schlaeuche);
+        ksort($kupplungen);
+        return ['kabel' => $kabel, 'bruecken' => $bruecken, 'schlaeuche' => $schlaeuche, 'kupplungen' => $kupplungen, 'ohne_laenge' => $ohneLaenge];
     }
 
     private static function zahl(mixed $wert): ?float

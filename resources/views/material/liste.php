@@ -8,6 +8,11 @@ use App\Support\View;
 
 $m = $material;
 $meter = static fn (float $v): string => number_format($v, 0, ',', '.') . ' m';
+// Eine Liste aus einem älteren Aufbau kennt die Schläuche noch nicht.
+$schlaeuche = (array) ($m['schlaeuche'] ?? []);
+$schlaeucheOhne = (array) ($m['schlaeuche_ohne_laenge'] ?? []);
+$kupplungen = (array) ($m['kupplungen'] ?? []);
+$festeSchlaeuche = (int) ($m['feste_schlaeuche'] ?? 0);
 ?>
 <p class="small muted">Kabel: Länge im Plan (bzw. eingetragene Länge) plus <?= View::e(number_format((float) $m['reserve'], 0, ',', '.')) ?> % Reserve,
     geteilt in 5, 10, 20, 25 und 50 m. 75 und 100 m nur bei 63 A, 125 A und Powerlock und nur, wo sie mindestens zwei Stücke sparen.</p>
@@ -74,10 +79,45 @@ $meter = static fn (float $v): string => number_format($v, 0, ',', '.') . ' m';
 </table></div>
 <?php endif; ?>
 
-<?php if ($m['vorhanden'] !== [] || $m['feste_kabel'] > 0): ?>
+<?php if ($schlaeuche !== [] || $schlaeucheOhne !== []): ?>
+    <h3 class="mt">Kraftstoff</h3>
+    <?php if ($schlaeuche !== []): ?>
+    <div class="table-wrap"><table class="tabelle-karten material-tabelle">
+        <thead><tr><th>Schlauch</th><th class="num">Stränge</th><th class="num">Summe</th><th class="num">im Plan</th></tr></thead>
+        <tbody><?php foreach ($schlaeuche as $s): ?>
+            <tr><td data-label="Schlauch"><strong><?= View::e($s['titel']) ?></strong>
+                    <div class="small muted"><?= (int) $s['schlaeuche'] ?> Strecke(n) · Vor- und Rücklauf je ein Strang</div></td>
+                <td data-label="Stränge" class="num"><?= (int) $s['straenge'] ?></td>
+                <td data-label="Summe" class="num"><?= View::e($meter((float) $s['meter'])) ?></td>
+                <td data-label="im Plan" class="num"><?= View::e($meter((float) $s['meter_plan'])) ?></td></tr>
+        <?php endforeach; ?></tbody>
+    </table></div>
+    <details class="mt"<?= !empty($druck) ? ' open' : '' ?>><summary class="small">Schläuche je Strecke</summary>
+        <div class="table-wrap"><table class="tabelle-karten material-tabelle">
+            <thead><tr><th>Strecke</th><th>Schlauch</th><th class="num">Plan</th><th>mitbringen</th><th>Kupplung</th></tr></thead>
+            <tbody><?php foreach ((array) ($m['schlaeuche_einzeln'] ?? []) as $e): ?>
+                <tr><td data-label="Strecke"><?= View::e($e['name']) ?></td><td data-label="Schlauch" class="small"><?= View::e($e['titel']) ?></td>
+                    <td data-label="Plan" class="num"><?= View::e(number_format((float) $e['laenge'], 1, ',', '.')) ?> m<?= $e['gemessen'] ? '' : ' <span class="small muted">(Plan)</span>' ?></td>
+                    <td data-label="mitbringen"><?= (int) $e['anzahl'] ?> × <?= (int) $e['benoetigt'] ?> m</td>
+                    <td data-label="Kupplung" class="small"><?= View::e($e['kupplung']) ?></td></tr>
+            <?php endforeach; ?></tbody>
+        </table></div>
+    </details>
+    <?php endif; ?>
+    <?php if ($kupplungen !== []): ?>
+        <p class="small mt">Kupplungen (je Strang zwei): <?= View::e(implode(', ', array_map(static fn ($k, $n) => $n . ' × ' . $k, array_keys($kupplungen), $kupplungen))) ?></p>
+    <?php endif; ?>
+    <?php if ($schlaeucheOhne !== []): ?>
+        <div class="notice warn small mt"><?= count($schlaeucheOhne) ?> Schlauch/Schläuche ohne Länge (kein Maßstab und keine eingetragene Länge):
+            <?= View::e(implode(', ', array_map(static fn ($e) => $e['name'] . ' (' . $e['titel'] . ')', $schlaeucheOhne))) ?></div>
+    <?php endif; ?>
+<?php endif; ?>
+
+<?php if ($m['vorhanden'] !== [] || $m['feste_kabel'] > 0 || $festeSchlaeuche > 0): ?>
     <h3 class="mt">Vor Ort vorhanden (fest installiert)</h3>
     <ul class="small">
         <?php foreach ($m['vorhanden'] as $a): ?><li><?= (int) $a['anzahl'] ?> × <?= View::e($a['titel']) ?> – <?= View::e(implode(', ', $a['namen'])) ?></li><?php endforeach; ?>
         <?php if ($m['feste_kabel'] > 0): ?><li><?= (int) $m['feste_kabel'] ?> fest verlegte(s) Kabel</li><?php endif; ?>
+        <?php if ($festeSchlaeuche > 0): ?><li><?= $festeSchlaeuche ?> fest verlegte(r) Kraftstoffschlauch/-schläuche</li><?php endif; ?>
     </ul>
 <?php endif; ?>

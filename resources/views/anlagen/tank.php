@@ -14,6 +14,8 @@
  *   Sensor & Kennlinie der eingebaute Tanksensor, die jetzige Fassung, die
  *                      Fassungen im Datenfenster, „Erweitert“ (Anker und
  *                      Steigung von Hand), frühere Sensoren
+ *   Versorgung         Kraftstoffschläuche, Generatoren mit Kennlinie, Vorrat,
+ *                      Verbrauch und Restlaufzeit, Gegenprüfung Pegel ↔ Last
  *   Daten              die Eigenschaften in den Gruppen des Formulars
  *
  * Felder je Peilart und das Einbaumaß je Messprinzip blendet tank.js um
@@ -38,6 +40,7 @@
  * @var ?array<string,mixed> $steigung Angebot aus zwei Peilungen (TankService::steigungAngebot)
  * @var bool $rueckwirkend „rückwirkend für diesen Einbau“ erlaubt (unbegrenztes Datenfenster)
  * @var ?float $nenn_l Nennvolumen
+ * @var ?array<string,mixed> $versorgung Schläuche, Generatoren, Gegenprüfung (TankService::versorgungSeite)
  * @var int $von
  * @var int $bis
  * @var string $vorgabe Zeitraum (1h, 6h, heute, 24h, 7d, 30d, frei)
@@ -370,6 +373,62 @@ $datenKarte = (string) ob_get_clean();
                             <?php endforeach; ?>
                         </ul>
                     <?php endif; ?>
+                </div>
+            </div>
+        <?php endif; ?>
+        <?php if (!$vorlage && $versorgung !== null): ?>
+            <?php $tl = (array) ($live['tank'] ?? []); $zahlL = static fn (mixed $w): string => is_numeric($w) ? TankService::liter((float) $w) : '–'; ?>
+            <div class="card" id="versorgung">
+                <div class="card-head"><h2>Versorgung</h2><span class="hint">Kraftstoffschlauch zum Generator</span></div>
+                <div class="card-body">
+                    <?php if ($versorgung['schlaeuche'] === []): ?>
+                        <p class="small muted">Kein Kraftstoffschlauch. Verbrauch und Restlaufzeit kommen dann aus dem Pegel (Gefälle der letzten 6 h),
+                            sobald der Tank kalibriert ist. Den Schlauch zieht man auf der Karte (Werkzeug „Schlauch“) vom Tank zum Generator.</p>
+                    <?php else: ?>
+                        <ul class="liste-schlicht small schlaeuche">
+                            <?php foreach ($versorgung['schlaeuche'] as $s): ?>
+                                <li><strong><?= $s['generator_id'] !== null
+                                        ? '→ <a href="/anlagen/' . (int) $s['generator_id'] . '">' . View::e((string) $s['generator']) . '</a>'
+                                        : '→ Generator (nicht freigegeben)' ?></strong>
+                                    <div class="muted"><?= View::e(implode(' · ', array_filter([
+                                        $s['name'],
+                                        $s['anzahl'] . ' × ' . trim($s['typ'] . ' ' . $s['kupplung']),
+                                        $s['anzahl'] === 1 ? 'nur Vorlauf' : 'Vor- und Rücklauf',
+                                        $s['laenge'] !== null ? TankService::zahl((float) $s['laenge']) . ' m' : '',
+                                        $s['fest'] ? 'fest verlegt' : '',
+                                    ]))) ?></div>
+                                    <?php foreach ($s['hinweise'] as $h): ?><div class="notice warn small"><?= View::e($h) ?></div><?php endforeach; ?></li>
+                            <?php endforeach; ?>
+                        </ul>
+                    <?php endif; ?>
+                    <?php if ($versorgung['generatoren'] !== [] || $versorgung['verborgen'] > 0): ?>
+                        <h3 class="abschnitt">Generatoren</h3>
+                        <ul class="liste-schlicht small">
+                            <?php foreach ($versorgung['generatoren'] as $g): ?>
+                                <li><a href="/anlagen/<?= (int) $g['id'] ?>"><strong><?= View::e($g['name']) ?></strong></a>
+                                    <?= $g['laeuft'] === true ? '<span class="badge ok">läuft</span>' : ($g['laeuft'] === false ? '<span class="badge">steht</span>' : '') ?>
+                                    <div class="muted"><?= View::e(trim($g['modell'] . ' · ' . $g['kennlinie'], ' ·')) ?></div></li>
+                            <?php endforeach; ?>
+                            <?php if ($versorgung['verborgen'] > 0): ?>
+                                <li class="muted"><?= (int) $versorgung['verborgen'] ?> Generator(en) ohne Freigabe – der Verbrauch kommt dann aus dem Pegel.</li>
+                            <?php endif; ?>
+                        </ul>
+                    <?php endif; ?>
+                    <?php if (!empty($tl['sensor'])): ?>
+                        <dl class="kv small mt">
+                            <dt>Vorrat</dt><dd><?= View::e($zahlL($tl['vorrat_l'] ?? null)) ?><?= ($tl['vorrat_tanks'] ?? 0) > 1 ? ' aus ' . (int) $tl['vorrat_tanks'] . ' Tanks' : '' ?>
+                                <?= empty($tl['vorrat_vollstaendig']) && $versorgung['tanks'] > 1 ? ' <span class="muted">(nicht jeder Tank hat einen Wert)</span>' : '' ?></dd>
+                            <dt>Verbrauch</dt><dd><?= View::e(($tl['verbrauch_text'] ?? '') !== '' ? (string) $tl['verbrauch_text'] : 'unbekannt') ?></dd>
+                            <dt>Restlaufzeit</dt><dd><?= View::e((string) ($tl['restlaufzeit_text'] ?? '–')) ?></dd>
+                            <dt>Leer um</dt><dd><?= View::e((string) ($tl['leer_um_text'] ?? '–')) ?></dd>
+                            <dt>Nachbestellen bis</dt><dd><?= View::e((string) ($tl['nachbestellen_text'] ?? '–')) ?></dd>
+                            <?php if (is_numeric($tl['intern_l'] ?? null)): ?><dt>Intern im Generator</dt><dd>≈ <?= View::e($zahlL($tl['intern_l'])) ?> (zählt nicht mit)</dd><?php endif; ?>
+                            <?php if ($versorgung['gemessen_l_h'] !== null): ?><dt>Aus dem Pegel (6 h)</dt><dd>≈ <?= View::e(TankService::zahl((float) $versorgung['gemessen_l_h'])) ?> l/h</dd><?php endif; ?>
+                        </dl>
+                    <?php endif; ?>
+                    <?php if ($versorgung['gegenpruefung'] !== null): ?><div class="notice warn small mt"><?= View::e($versorgung['gegenpruefung']) ?></div><?php endif; ?>
+                    <p class="help">Verbrauch aus Kennlinie × Last, wenn jeder Generator am Schlauch sichtbar ist und Livewerte hat – ohne Kennlinie
+                        gilt der Volllastverbrauch (eher zu viel). Sonst aus dem Pegel. „Nachbestellen bis“ = leer um minus Lieferzeit.</p>
                 </div>
             </div>
         <?php endif; ?>

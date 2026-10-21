@@ -37,6 +37,17 @@ declare(strict_types=1);
  * Inhalt je mm wie vorher), Steigung aus zwei Peilungen nur auf Wunsch, Anker
  * und Steigung von Hand (rückwirkend nur ohne Datengrenze, keine fremden
  * Schlüssel, nur endliche Zahlen), Rechte; Fassungen werden nie geändert.
+ *
+ * F – Kraftstoffschlauch und Versorgung (Demo-Modus): Schlauch nur zwischen
+ * Tank und Generator (verkehrt herum getauscht, ohne Anschlüsse, Vorgaben
+ * Vor- und Rücklauf und HK-A3, Enden umstecken, nicht lösen), Hinweise
+ * „Rücklauf fehlt?“ und „Rücklauf muss in denselben Tank“, nicht in Belegung
+ * und Speisung; Verbrauch aus Kennlinie × Last (80 % → 18 l/h), Vorrat zweier
+ * Tanks, Restlaufzeit, leer um, nachbestellen bis, Stufen (rot, „meldet
+ * nicht“), Generator steht, ohne Kennlinie, ohne Livewert, Demo-Aggregat im
+ * zweiten Durchgang; ein Generator ohne Freigabe verrät weder Namen noch
+ * Leistung; Verbrauch aus dem Pegel; Betankung mit abgezogenem Verbrauch;
+ * Material mit Schläuchen und Kupplungen.
  */
 
 require __DIR__ . '/hilfen/pruefung.php';
@@ -52,6 +63,7 @@ use App\Services\InventarService;
 use App\Services\LeitungService;
 use App\Services\LiveService;
 use App\Services\LocationBundle;
+use App\Services\MaterialService;
 use App\Services\MesspunktService;
 use App\Services\SchutzService;
 use App\Services\SiteService;
@@ -494,6 +506,15 @@ gleich([TankRechnung::last(48000.0, 100.0), TankRechnung::last(null, 100.0), Tan
 $t0 = 1_760_000_000_000;
 nahe(TankRechnung::gefaelle(array_map(static fn (int $i): array => [$t0 + $i * 600_000, 2000.0 - 20.0 * $i / 6], range(0, 36))), 20.0, 0.001, 'Gefälle: 20 l/h');
 gleich(TankRechnung::gefaelle([[$t0, 1.0], [$t0 + 1000, 2.0]]), null, 'Gefälle: zu wenig Punkte');
+// Verbrauch aus dem Pegel: nur ab der letzten Betankung, erst ab drei Meldeschritten Abfall in den 6 h
+$pegel = static fn (callable $liter): array => array_map(static fn (int $i): array => [$t0 + $i * 600_000, $liter($i)], range(0, 36));
+nahe(TankRechnung::pegelVerbrauch($pegel(static fn (int $i): float => 2000.0 - 20.0 * $i / 6), 40.0, 3000.0), 20.0, 0.001, 'Pegel: 20 l/h über 6 h (120 l = 3 Schritte zu 40 l)');
+nahe(TankRechnung::pegelVerbrauch($pegel(static fn (int $i): float => $i < 12 ? 1000.0 - 20.0 * $i / 6 : 2500.0 - 20.0 * ($i - 12) / 6), 10.0, 3000.0), 20.0, 0.001,
+    'Pegel: erst ab der Betankung (Sprung +1.500 l nach 2 h)');
+gleich(TankRechnung::pegelVerbrauch($pegel(static fn (int $i): float => 2000.0 - 20.0 * $i / 6), 45.0, 3000.0), null, 'Pegel: 120 l sind keine drei Schritte zu 45 l – nichts');
+gleich(TankRechnung::pegelVerbrauch($pegel(static fn (int $i): float => 2000.0 + ($i % 2) * 42.4), 42.4, 3000.0), null, 'Pegel: Rauschen ±1 Schritt – nichts');
+gleich(TankRechnung::pegelVerbrauch($pegel(static fn (int $i): float => 1000.0 + 20.0 * $i / 6), 10.0, 3000.0), null, 'Pegel: steigender Inhalt ist kein Verbrauch');
+pruefe(TankRechnung::pegelVerbrauch($pegel(static fn (int $i): ?float => $i % 3 === 0 ? null : 2000.0 - 20.0 * $i / 6), 10.0, null) !== null, 'Pegel: Lücken übergangen');
 
 // Fassungen über der Zeit: es gilt die größte id unter allen mit ab ≤ t.
 [$ta, $tb, $tc] = [1000, 2000, 3000];
@@ -1287,6 +1308,254 @@ try {
     foreach ([$tankE ?? 0, $tankF ?? 0, $ohneE ?? 0] as $id) {
         Database::execute("DELETE FROM audit_log WHERE target_type = 'objekt' AND target_id = ?", [(string) $id]);
     }
+}
+
+// ------------------------------------------------ F – Kraftstoffschlauch, Versorgung und Restlaufzeit (Demo-Modus)
+Config::set('app.demo', true);
+$kennungF = 'pm-tank-' . bin2hex(random_bytes(3));
+$siteF = SiteService::saveSite(null, ['name' => 'Prüfung Versorgung ' . $kennungF]);
+$floorF = SiteService::saveFloor(null, ['site_id' => $siteF, 'name' => 'Wiese']);
+// quadratischer Plan, 1 % = 2 m – Schläuche haben eine Länge
+Database::update('floors', $floorF, ['massstab_ax' => 0.0, 'massstab_ay' => 50.0, 'massstab_bx' => 50.0, 'massstab_by' => 50.0,
+    'massstab_m' => 100.0, 'massstab_verhaeltnis' => 1.0, 'massstab_von' => 'test', 'massstab_am' => gmdate('c')]);
+$adminF = BenutzerService::anlegen($kennungF, 'Pruefung2026!!', 'admin', false);
+$kundeF = BenutzerService::anlegen($kennungF . '-kunde', 'Pruefung2026!!', 'kunde', false);
+
+try {
+    alsBenutzer($adminF);
+    $jetzt = time();
+    $eigF = ['inhalt_l' => '3000', 'kraftstoff' => 'HVO', 'bauform' => 'Quader', 'sumpf_l' => '140', 'liter_je_mm' => '2,78'];
+    $sensorF = ['prinzip' => 'hydrostatisch', 'feld' => 'u', 'signal' => '4-20mA', 'buerde_ohm' => 500, 'bereich_von' => 0, 'bereich_bis' => 100,
+        'bereich_einheit' => 'mbar', 'schritt_roh' => 0.1];
+    $neuF = static fn (array $d): int => (int) AnlagenService::speichern(null, $d + ['floor_id' => $floorF, 'plan_x' => 40.0, 'plan_y' => 40.0])['id'];
+    // Zwei Tanks an der Demo-Sonde (Einbau vor drei Tagen, kalibriert mit 2,78 l/mm), ein Generator mit Kennlinie, eine Verteilung
+    $tankMit = static function (string $name) use ($neuF, $eigF, $sensorF, $kennungF, $jetzt): int {
+        $id = $neuF(['art' => 'tank', 'name' => $kennungF . ' ' . $name, 'eigenschaften' => $eigF]);
+        $mp = Database::insert('messpunkte', ['objekt_id' => $id, 'geraet' => 'shellyplusuni-tank1', 'kanal' => 'voltmeter:100', 'rolle' => 'fuellstand',
+            'bezeichnung' => $kennungF . '-' . $name, 'gueltig_ab' => Zeit::iso($jetzt - 3 * 86400), 'created_at' => gmdate('c')]);
+        $r = TankRechnung::rechnung($sensorF, ['offset_mm' => 20], $eigF, ['kennung' => $kennungF . '-' . $name, 'text' => 'Einbau'])['rechnung'];
+        TankService::fassungAnlegen(Database::first('SELECT * FROM messpunkte WHERE id = ?', [$mp]), $r, 'einsatz', Zeit::iso($jetzt - 3 * 86400), true);
+        return $id;
+    };
+    $t1 = $tankMit('Tank 1');
+    $t2 = $tankMit('Tank 2');
+    $gen = $neuF(['art' => 'generator', 'name' => $kennungF . ' Aggregat', 'nennleistung_kva' => 100, 'ohne_anschluesse' => true,
+        'eigenschaften' => ['verbrauch_kennlinie' => '100% 22L / 70% 16L / 50% 12L', 'verbrauch_l_h' => 22, 'tank_l' => 400]]);
+    $gen2 = $neuF(['art' => 'generator', 'name' => $kennungF . ' Reserve-Aggregat', 'nennleistung_kva' => 40, 'ohne_anschluesse' => true]);
+    $vert = $neuF(['art' => 'verteilung', 'name' => $kennungF . ' Verteilung']);
+    $o = static fn (int $id): array => AnlagenService::find($id);
+    $schlauch = static fn (array $d): array => LeitungService::speichern(null, $d + ['art' => 'kraftstoff', 'floor_id' => $floorF, 'name' => $kennungF . ' Schlauch']);
+
+    // ------------------------------------------------ Schlauch nur zwischen Tank und Generator
+    gleich(LeitungService::ARTEN['kraftstoff'] ?? null, 'Kraftstoffschlauch', 'Leitungsart Kraftstoffschlauch');
+    pruefe(in_array('DN 10 (3/8″)', LeitungService::SCHLAUCHTYPEN, true), 'Schlauchtypen als Vorschlag');
+    $e = $schlauch(['von_objekt_id' => $gen, 'zu_objekt_id' => $t1, 'punkte' => [[50, 50], [45, 45], [40, 40]]]);
+    $s1 = (int) ($e['id'] ?? 0);
+    $l = LeitungService::find($s1);
+    pruefe($e['ok'] && (int) $l['von_objekt_id'] === $t1 && (int) $l['zu_objekt_id'] === $gen && $l['punkte'][0] === ['x' => 40.0, 'y' => 40.0],
+        'Schlauch Generator → Tank gezogen: getauscht, „von“ ist der Tank, der Weg beginnt dort – ' . $e['message']);
+    gleich([$l['anzahl'], $l['modell'], $l['von_anschluss_id'], $l['zu_anschluss_id'], $l['querschnitt_mm2'], $l['adern'], $l['fest']], [2, 'HK-A3', null, null, null, null, 0],
+        'Vorgaben: Vor- und Rücklauf, Kupplung HK-A3, keine Anschlüsse, kein Querschnitt, mobil');
+    gleich($l['hinweise'], [], 'Schlauch mit Vor- und Rücklauf ohne Hinweis');
+    foreach ([
+        'Tank ↔ Verteilung'   => [['von_objekt_id' => $t1, 'zu_objekt_id' => $vert], 'ist kein Generator'],
+        'Generator ↔ Verteilung' => [['von_objekt_id' => $vert, 'zu_objekt_id' => $gen], 'ist kein Tank'],
+        'Tank ↔ Tank'         => [['von_objekt_id' => $t1, 'zu_objekt_id' => $t2], 'ist kein Generator'],
+        'ein Ende offen'      => [['von_objekt_id' => $t1, 'zu_objekt_id' => 0], 'beide Enden'],
+        'drei Stränge'        => [['von_objekt_id' => $t1, 'zu_objekt_id' => $gen, 'anzahl' => 3], 'zwei'],
+    ] as $was => [$daten, $text]) {
+        $e = $schlauch($daten + ['punkte' => [[1, 1], [2, 2]]]);
+        pruefe(!$e['ok'] && str_contains($e['message'], $text), 'Schlauch abgelehnt (' . $was . '): ' . $e['message']);
+    }
+    $typT = $neuF(['art' => 'tank', 'name' => $kennungF . ' Tank-Typ', 'ist_vorlage' => 1]);
+    pruefe(!$schlauch(['von_objekt_id' => $typT, 'zu_objekt_id' => $gen])['ok'], 'Schlauch an einem Katalog-Typ abgelehnt');
+    gleich([LeitungService::kupplungVorschlag(['eigenschaften' => ['tankanschluss' => 'Steckkupplung HK-A3']]),
+        LeitungService::kupplungVorschlag(['eigenschaften' => ['tankanschluss' => '2 Anschlüsse']]), LeitungService::kupplungVorschlag(null)],
+        ['Steckkupplung HK-A3', 'HK-A3', 'HK-A3'], 'Kupplung aus dem Tankanschluss, „2 Anschlüsse“ ist keine');
+    pruefe(!LeitungService::speichern(null, ['art' => 'kabel', 'floor_id' => $floorF, 'von_objekt_id' => $gen, 'zu_objekt_id' => $t1, 'punkte' => [[1, 1], [2, 2]]])['ok'],
+        'ein Kabel endet weiterhin nicht am Tank');
+    // ohne gezeichneten Weg: gerade vom Tank zum Generator; nur Vorlauf ergibt einen Hinweis
+    $e = $schlauch(['von_objekt_id' => $t2, 'zu_objekt_id' => $gen2, 'anzahl' => '1', 'kabeltyp' => 'DN 13 (1/2″)']);
+    $s2 = (int) ($e['id'] ?? 0);
+    $l = LeitungService::find($s2);
+    pruefe($e['ok'] && count($l['punkte']) === 2 && in_array('Nur Vorlauf – Rücklauf fehlt? Der Generator führt nicht verbrannten Kraftstoff zurück.', $l['hinweise'], true),
+        'Schlauch ohne Weg: gerade Linie; nur Vorlauf – „Rücklauf fehlt?“');
+    // Enden umstecken: an einen anderen Generator ja, ins Leere oder an eine Verteilung nicht
+    pruefe(!LeitungService::endeSetzen($s2, 'zu', null, [[1, 1], [2, 2]])['ok'], 'Schlauchende lässt sich nicht lösen');
+    pruefe(!LeitungService::endeSetzen($s2, 'zu', $vert, [[1, 1], [2, 2]])['ok'], 'Schlauchende nicht an eine Verteilung');
+    $e = LeitungService::endeSetzen($s2, 'zu', $gen, [[40, 40], [45, 45]]);
+    pruefe($e['ok'] && (int) LeitungService::find($s2)['zu_objekt_id'] === $gen && str_contains($e['message'], 'Schlauch an'), 'Schlauchende an den anderen Generator: ' . $e['message']);
+    // Ein Generator an zwei Tanks: Rücklauf in denselben Tank
+    pruefe(array_filter(LeitungService::find($s1)['hinweise'], static fn ($h) => str_contains($h, 'Rücklauf muss in denselben Tank')) !== []
+        && !str_contains(implode(' ', LeitungService::find($s1)['hinweise']), 'Aggregat'),
+        'Generator an zwei Tanks: „Rücklauf muss in denselben Tank“ – ohne Namen (die Karte zeigt Hinweise jedem, der den Schlauch sieht)');
+    gleich(TankService::versorgung($t1), ['tanks' => [$t1, $t2], 'generatoren' => [$gen]], 'Versorgung: beide Tanks am selben Generator');
+    gleich(array_map(static fn ($g) => (int) $g['id'], TankService::verbraucher([$t1])[$t1] ?? []), [$gen], 'Verbraucher am Schlauch des Tanks');
+    // Schlauch zählt nicht als Kabel
+    gleich([AnlagenService::belegung($gen), AnlagenService::speisung($gen), LeitungService::anObjekt($gen)], [[], [], []], 'Schlauch nicht in Belegung, Speisung und Kabeln des Generators');
+    gleich(LeitungService::stueckliste($floorF)['schlaeuche']['DN 13 (1/2″)']['anzahl'] ?? null, 1, 'Stückliste: Schläuche je Typ');
+    gleich(LeitungService::stueckliste($floorF)['kupplungen']['HK-A3'] ?? null, 6, 'Stückliste: zwei Kupplungen je Strang (2 + 1 Stränge)');
+
+    // ------------------------------------------------ Restlaufzeit aus Kennlinie × Last
+    $gLive = static fn (float $p, array $zustand = []): array => [$gen => ['stufe' => 'ok', 'p' => $p, 'zustand' => $zustand, 'alter_s' => 2]];
+    $l = TankService::live([$o($t1)], $gLive(64000.0))[$t1];
+    $t = $l['tank'];
+    $n1 = (float) $t['nutzbar_l'];
+    pruefe(abs($t['verbrauch_l_h'] - 18.0) < 1e-6 && $t['verbrauch_quelle'] === 'last' && $t['verbrauch_text'] === '18 l/h aus der Last',
+        'Aggregat 64 kW bei 100 kVA = 80 % Last → 18 l/h aus der Kennlinie');
+    $n2 = (float) (TankService::live([$o($t2)], $gLive(64000.0))[$t2]['tank']['nutzbar_l'] ?? 0);
+    nahe($t['vorrat_l'], $n1 + $n2, 0.2, 'Vorrat = Σ nutzbar beider Tanks');
+    nahe($t['restlaufzeit_h'], ($n1 + $n2) / 18, 0.1, 'Restlaufzeit = Vorrat / 18 l/h');
+    gleich([(int) Zeit::ts($t['leer_um']) - (int) Zeit::ts($t['nachbestellen_bis']), $t['vorrat_tanks'], $t['vorrat_vollstaendig']], [24 * 3600, 2, true],
+        'nachbestellen bis = leer um − 24 h Lieferzeit');
+    pruefe(abs((int) Zeit::ts($t['leer_um']) - ($jetzt + $t['restlaufzeit_h'] * 3600)) < 120 && is_string($t['nachbestellen_text']) && is_string($t['leer_um_text']),
+        'leer um = jetzt + Restlaufzeit (' . $t['leer_um_text'] . ', nachbestellen bis ' . $t['nachbestellen_text'] . ')');
+    gleich($t['generatoren'], [['id' => $gen, 'name' => $kennungF . ' Aggregat', 'laeuft' => true]], 'Generatoren der Versorgung: Name und „läuft“, keine Leistung');
+    pruefe(!str_contains(json_encode($l), '64000'), 'Die Antwort des Tanks nennt die Leistung des Generators nicht');
+    pruefe(str_contains($l['hinweis'], 'noch ') && in_array($l['stufe'], ['ok', 'warn'], true), 'Hinweis mit Restlaufzeit: ' . $l['hinweis']);
+    $beide = TankService::live([$o($t1), $o($t2)], $gLive(64000.0));
+    gleich([$beide[$t1]['tank']['restlaufzeit_h'], $beide[$t1]['tank']['vorrat_l']], [$beide[$t2]['tank']['restlaufzeit_h'], $beide[$t2]['tank']['vorrat_l']],
+        'zwei Tanks an einem Generator: gleiche Restlaufzeit, gleicher Vorrat');
+    gleich(array_keys($beide), [$t1, $t2], 'Antwort in der gefragten Reihenfolge');
+    // Viel Verbrauch, aber der Pegel meldet seit Stunden nichts: „meldet nicht“
+    AnlagenService::eigenschaftSetzen($gen, ['verbrauch_kennlinie' => '100% 900L'], true);
+    $l = TankService::live([$o($t1)], $gLive(80000.0))[$t1];
+    // Die Demo-Sonde meldet etwa alle zwei Stunden einen neuen Schritt: Ist ihr Wert älter als 1 h (bei 900 l/h
+    // müssten es 20 Schritte je Stunde sein), meldet sie nicht; sonst ist die Restlaufzeit (5 h) zu knapp für die Lieferzeit.
+    pruefe($l['stufe'] === 'warn' && str_contains($l['hinweis'], $l['alter_s'] > 3600 ? 'meldet nicht, obwohl ' . $kennungF . ' Aggregat läuft' : 'nachbestellen'),
+        'Generator verbraucht 900 l/h, letzter Wert ' . $l['tank']['stand'] . ': gelb – ' . $l['hinweis']);
+    AnlagenService::eigenschaftSetzen($gen, ['verbrauch_kennlinie' => '100% 22L / 70% 16L / 50% 12L'], true);
+    // Wenig Vorrat (Sumpf fast so groß wie der Inhalt): Restlaufzeit unter 4 h – rot; die Tankdaten ergeben je eine neue Fassung
+    $liter = (float) $l['tank']['liter'];
+    foreach ([$t1, $t2] as $id) {
+        AnlagenService::eigenschaftSetzen($id, ['sumpf_l' => round($liter - 30)]);
+    }
+    $l = TankService::live([$o($t1)], $gLive(64000.0))[$t1];
+    pruefe($l['stufe'] === 'bad' && str_contains($l['hinweis'], 'sofort nachtanken') && $l['tank']['restlaufzeit_h'] < 4 && abs($l['tank']['vorrat_l'] - 60) < 1,
+        'Vorrat 60 l bei 18 l/h: Restlaufzeit unter 4 h, rot – ' . $l['hinweis']);
+    foreach ([$t1, $t2] as $id) {
+        AnlagenService::eigenschaftSetzen($id, ['sumpf_l' => 140]);
+    }
+
+    // Generator steht: kein Verbrauch, keine Restlaufzeit
+    $l = TankService::live([$o($t1)], $gLive(0.0))[$t1];
+    pruefe(str_contains($l['hinweis'], 'Generator steht') && $l['tank']['restlaufzeit_h'] === null && $l['tank']['verbrauch_l_h'] == 0.0
+        && $l['tank']['generatoren'][0]['laeuft'] === false, 'Generator steht (0 W): „Generator steht“, keine Restlaufzeit – ' . $l['hinweis']);
+    // läuft ohne bekannte Leistung (nur Drehzahl): kleinster Punkt der Kennlinie, geschätzt
+    $l = TankService::live([$o($t1)], [$gen => ['stufe' => 'ok', 'p' => null, 'zustand' => ['drehzahl' => 1500.0]]])[$t1];
+    gleich([$l['tank']['verbrauch_l_h'], $l['tank']['verbrauch_geschaetzt']], [12.0, true], 'läuft ohne Leistung: kleinster Kennlinienpunkt, geschätzt');
+    // ohne Kennlinie: Volllastverbrauch, geschätzt; ganz ohne Angabe: aus dem Pegel
+    AnlagenService::eigenschaftSetzen($gen, ['verbrauch_kennlinie' => null], true);
+    $l = TankService::live([$o($t1)], $gLive(40000.0))[$t1];
+    gleich([$l['tank']['verbrauch_l_h'], $l['tank']['verbrauch_quelle'], $l['tank']['verbrauch_geschaetzt']], [22.0, 'last', true], 'ohne Kennlinie: 22 l/h Volllast, geschätzt');
+    AnlagenService::eigenschaftSetzen($gen, ['verbrauch_l_h' => null], true);
+    $l = TankService::live([$o($t1)], $gLive(40000.0))[$t1];
+    pruefe(in_array($l['tank']['verbrauch_quelle'], ['pegel', null], true), 'ohne Verbrauchsangabe: aus dem Pegel – ' . var_export($l['tank']['verbrauch_quelle'], true));
+    AnlagenService::eigenschaftSetzen($gen, ['verbrauch_kennlinie' => '100% 22L / 70% 16L / 50% 12L', 'verbrauch_l_h' => 22], true);
+    // ohne Livewert des Generators (kein Messgerät): aus dem Pegel
+    $l = LiveService::fuerObjekte([$o($t1)])[$t1];
+    pruefe(in_array($l['tank']['verbrauch_quelle'], ['pegel', null], true) && $l['tank']['generatoren'][0]['laeuft'] === false,
+        'Generator ohne Messgerät: Verbrauch aus dem Pegel, nicht aus der Last');
+    // mit Messgerät (Demo-Aggregat): der zweite Durchgang von LiveService liest den Generator nach
+    $mpGen = Database::insert('messpunkte', ['objekt_id' => $gen, 'geraet' => 'ig200-aggregat1', 'kanal' => 'generator', 'rolle' => 'erzeugung',
+        'bezeichnung' => $kennungF . '-gen', 'gueltig_ab' => Zeit::iso($jetzt - 3 * 86400), 'created_at' => gmdate('c')]);
+    $l = LiveService::fuerObjekte([$o($t1)])[$t1];
+    $erwartet = TankRechnung::verbrauch(TankRechnung::kennlinieLesen('100% 22L / 70% 16L / 50% 12L'), 22.0,
+        TankRechnung::last((float) (LiveService::fuerObjekte([$o($gen)])[$gen]['p'] ?? 0), 100.0))['l_h'];
+    pruefe($l['tank']['verbrauch_quelle'] === 'last' && abs((float) $l['tank']['verbrauch_l_h'] - $erwartet) < 1.0 && $l['tank']['generatoren'][0]['laeuft'] === true,
+        'Demo-Aggregat mit Messgerät: Verbrauch aus der Last (' . $l['tank']['verbrauch_l_h'] . ' l/h)');
+    $l = LiveService::fuerObjekte([$o($t1), $o($gen)]);
+    gleich(array_keys($l), [$gen, $t1], 'Übersicht mit Tank und Generator: beide, der Generator aus dem ersten Durchgang');
+    pruefe(str_contains(json_encode(TankService::seitenDaten($o($t1))['versorgung']), $kennungF . ' Aggregat'), 'Tankseite: Versorgung nennt den Generator');
+
+    // ------------------------------------------------ Generator unsichtbar: keine Leistung, kein Name
+    BenutzerService::freigabeSpeichern(['subject_type' => 'user', 'subject_id' => $kundeF, 'ziel_art' => 'objekt', 'ziel_id' => $t1]);
+    \App\Auth\Zugriff::vergessen();
+    alsBenutzer($kundeF);
+    pruefe(Zugriff::siehtObjekt($o($t1)) && !Zugriff::siehtObjekt($o($gen)), 'Kunde sieht den Tank, nicht den Generator');
+    foreach (['LiveService' => LiveService::fuerObjekte([$o($t1)])[$t1], 'mit Livewert des Generators' => TankService::live([$o($t1)], $gLive(64000.0))[$t1]] as $wie => $l) {
+        $text = json_encode($l, JSON_UNESCAPED_UNICODE);
+        pruefe(array_key_exists('verbrauch_quelle', $l['tank']) && in_array($l['tank']['verbrauch_quelle'], ['pegel', null], true) && $l['tank']['generatoren'] === []
+            && !str_contains($text, 'Aggregat') && !str_contains($text, '64000') && !str_contains($text, '"' . $gen . '"') && ($l['tank']['vorrat_tanks'] ?? 0) === 1,
+            'Kunde (' . $wie . '): Verbrauch nur aus dem Pegel, ohne Generator, ohne Tank 2 im Vorrat');
+    }
+    $seite = TankService::seitenDaten($o($t1))['versorgung'];
+    pruefe($seite['generatoren'] === [] && $seite['verborgen'] === 1 && count($seite['schlaeuche']) === 1 && $seite['schlaeuche'][0]['generator'] === null
+        && !str_contains(json_encode($seite, JSON_UNESCAPED_UNICODE), 'Aggregat'), 'Kunde: Tankseite nennt den Generator am Schlauch nicht');
+    alsBenutzer($adminF);
+
+    // ------------------------------------------------ Verbrauch aus dem Pegel (Demo-Sonde, ohne Schlauch)
+    $roh = Messdaten::tankGefaelle([['geraet' => 'shellyplusuni-tank1', 'kanal' => 'voltmeter:100', 'feld' => 'u', 'ab' => $jetzt - 6 * 3600, 'fenster' => null]]);
+    $punkte = $roh['shellyplusuni-tank1|voltmeter:100'] ?? [];
+    $zeiten = array_column($punkte, 0);
+    $sortiert = $zeiten;
+    sort($sortiert);
+    pruefe(count($punkte) >= 30 && $zeiten === $sortiert && $zeiten[1] - $zeiten[0] === 600_000, 'Rohwerte fürs Gefälle: Median je 10 min, aufsteigend (' . count($punkte) . ')');
+    gleich(Messdaten::tankGefaelle([['geraet' => 'shellyplusuni-tank1', 'kanal' => 'voltmeter:100', 'feld' => 'u', 'ab' => $jetzt - 6 * 3600,
+        'fenster' => [[$jetzt - 86400, $jetzt - 3600]]]]), [], 'Gefälle nur im laufenden Teil des Datenfensters');
+    $feinT = $neuF(['art' => 'tank', 'name' => $kennungF . ' fein', 'eigenschaften' => $eigF]);
+    $mpFein = Database::insert('messpunkte', ['objekt_id' => $feinT, 'geraet' => 'shellyplusuni-tank1', 'kanal' => 'voltmeter:100', 'rolle' => 'fuellstand',
+        'bezeichnung' => $kennungF . '-fein', 'gueltig_ab' => Zeit::iso($jetzt - 3 * 86400), 'created_at' => gmdate('c')]);
+    // Meldeschritt laut Sensordaten 0,01 V (4,5 l): 3 Schritte Abfall in 6 h sind dann sicher erreicht
+    $rFein = TankRechnung::rechnung(['schritt_roh' => 0.01] + $sensorF, ['offset_mm' => 20], $eigF, ['kennung' => 'fein', 'text' => 'Einbau'])['rechnung'];
+    TankService::fassungAnlegen(Database::first('SELECT * FROM messpunkte WHERE id = ?', [$mpFein]), $rFein, 'einsatz', Zeit::iso($jetzt - 3 * 86400), true);
+    $l = LiveService::fuerObjekte([$o($feinT)])[$feinT];
+    $seitSechs = $jetzt - (new DateTimeImmutable('@' . $jetzt))->setTimezone(Zeit::zone())->setTime(6, 0)->getTimestamp();
+    $seitSechs = $seitSechs < 0 ? $seitSechs + 86400 : $seitSechs;
+    if ($seitSechs >= 7 * 3600) {
+        pruefe($l['tank']['verbrauch_quelle'] === 'pegel' && $l['tank']['verbrauch_l_h'] > 12 && $l['tank']['verbrauch_l_h'] < 32 && $l['tank']['restlaufzeit_h'] > 0,
+            'ohne Schlauch: Verbrauch aus dem Pegel ≈ 22 l/h (' . var_export($l['tank']['verbrauch_l_h'], true) . ') und Restlaufzeit');
+    } else {
+        pruefe(in_array($l['tank']['verbrauch_quelle'], ['pegel', null], true), 'ohne Schlauch, kurz nach der Demo-Betankung: Pegel oder noch nichts');
+    }
+    gleich($l['tank']['generatoren'], [], 'ohne Schlauch keine Generatoren');
+
+    // ------------------------------------------------ Betankung: Verbrauch des Generators währenddessen abgezogen
+    $sechs = (new DateTimeImmutable('@' . $jetzt))->setTimezone(Zeit::zone())->setTime(6, 0);
+    if ($sechs->getTimestamp() > $jetzt - TankService::AUSWERTEN_NACH_S) {
+        $sechs = $sechs->modify('-1 day');
+    }
+    LeitungService::loeschen($s2);
+    $tb = $neuF(['art' => 'tank', 'name' => $kennungF . ' Betankung', 'eigenschaften' => array_diff_key($eigF, ['liter_je_mm' => 1])]);
+    $mpB = Database::insert('messpunkte', ['objekt_id' => $tb, 'geraet' => 'shellyplusuni-tank1', 'kanal' => 'voltmeter:100', 'rolle' => 'fuellstand',
+        'bezeichnung' => $kennungF . '-B', 'gueltig_ab' => Zeit::iso($jetzt - 3 * 86400), 'created_at' => gmdate('c')]);
+    $rB = TankRechnung::rechnung($sensorF, ['offset_mm' => 20], array_diff_key($eigF, ['liter_je_mm' => 1]), ['kennung' => 'B', 'text' => 'Einbau'])['rechnung'];
+    TankService::fassungAnlegen(Database::first('SELECT * FROM messpunkte WHERE id = ?', [$mpB]), $rB, 'einsatz', Zeit::iso($jetzt - 3 * 86400), false);
+    LeitungService::loeschen($s1);
+    $sB = (int) ($schlauch(['von_objekt_id' => $tb, 'zu_objekt_id' => $gen, 'kabeltyp' => 'DN 10 (3/8″)', 'punkte' => [[1, 1], [2, 2]]])['id'] ?? 0);
+    $e = TankService::betankungSpeichern($o($tb), ['liter' => '528', 'zeit' => $sechs->format('Y-m-d\TH:i'), 'lieferschein' => $kennungF]);
+    $ev = Database::first('SELECT * FROM tank_ereignisse WHERE id = ?', [(int) ($e['id'] ?? 0)]);
+    $dh = (float) TankRechnung::hoehe($rB, (float) ($ev['roh_nach'] ?? 0)) - (float) TankRechnung::hoehe($rB, (float) ($ev['roh_vor'] ?? 0));
+    $ljm = (float) ($o($tb)['eigenschaften']['liter_je_mm'] ?? 0);
+    pruefe($e['ok'] && !empty($e['kalibriert']) && str_contains($e['message'], 'Abgezogen:') && $dh > 0 && $ljm < 528 / $dh - 0.005 && $ljm > (528 - 30) / $dh,
+        'Betankung mit Generator am Schlauch: Verbrauch während des Tankens abgezogen (' . round($ljm, 3) . ' statt ' . round(528 / max($dh, 1), 3) . ' l/mm) – ' . $e['message']);
+    Database::execute('DELETE FROM messpunkte WHERE id = ?', [$mpGen]);
+    // Zwei Tanks am Generator: nicht abziehbar, das sagt die Meldung
+    $s3 = (int) ($schlauch(['von_objekt_id' => $t1, 'zu_objekt_id' => $gen, 'kabeltyp' => 'DN 10 (3/8″)', 'punkte' => [[1, 1], [2, 2]]])['id'] ?? 0);
+    Database::execute('UPDATE tank_ereignisse SET roh_vor = NULL, roh_nach = NULL WHERE id = ?', [(int) $ev['id']]);
+    Database::execute('DELETE FROM tank_kennlinien WHERE ereignis_id = ?', [(int) $ev['id']]);
+    $a = TankService::betankungAuswerten($o($tb), (int) $ev['id'], true);
+    pruefe($a['ok'] && str_contains($a['message'], 'nicht abgezogen (mehrere Tanks an einem Generator)'), 'zwei Tanks am Generator: nicht abgezogen, mit Grund – ' . $a['message']);
+    pruefe($s3 > 0 && $sB > 0, 'Prüfbestand: Schläuche angelegt');
+
+    // ------------------------------------------------ Material und Aufbau
+    $mat = MaterialService::fuerEtage($floorF);
+    gleich(array_column($mat['schlaeuche'], 'straenge', 'titel'), ['DN 10 (3/8″)' => 4], 'Material: Schläuche je Typ (2 Schläuche × 2 Stränge)');
+    gleich($mat['kupplungen'], ['HK-A3' => 8], 'Material: zwei Kupplungen je Strang');
+    pruefe(in_array('Tank · ohne Typangabe', array_column($mat['anlagen'], 'titel'), true), 'Material: Tanks stehen als Anlagen da');
+} finally {
+    alsBenutzer(null);
+    Database::execute('DELETE FROM leitungen WHERE name LIKE ?', [$kennungF . '%']);
+    foreach (Database::select('SELECT id FROM objekte WHERE name LIKE ?', [$kennungF . '%']) as $obj) {
+        AnlagenService::loeschen((int) $obj['id']);
+    }
+    SiteService::deleteSite($siteF);
+    foreach ([$adminF, $kundeF] as $u) {
+        Database::execute("DELETE FROM freigaben WHERE subject_type = 'user' AND subject_id = ?", [$u]);
+        Database::execute('DELETE FROM user_roles WHERE user_id = ?', [$u]);
+        Database::execute('DELETE FROM users WHERE id = ?', [$u]);
+    }
+    Database::execute('DELETE FROM audit_log WHERE username LIKE ? OR details LIKE ?', [$kennungF . '%', '%' . $kennungF . '%']);
 }
 
 ende('tanks');
