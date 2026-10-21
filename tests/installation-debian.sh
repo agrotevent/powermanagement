@@ -752,6 +752,22 @@ pruefe "Titel aus der Oberfläche bleibt (kam: $(einstellung_wert app.name))" \
 pruefe "influx.org aus der Oberfläche bleibt" test "$(einstellung_wert influx.org)" = "org-aus-der-oberflaeche"
 pruefe "Zusammenfassung nennt, was bleibt" grep -qx '  Beibehalten:  app.name influx.org' "$LAUF"
 pruefe "Zugang zum Broker im Container passt wieder zur Kennwortdatei" test "$(mqtt_zugang_passt)" = ja
+# Sitzungsdateien (Befund 9): Debians php.ini schaltet die GC ab, für
+# storage/sessions schaltet Session::start() sie ein – Lebensdauer aus
+# idle_timeout/max_session (Vorgabe 43200 s). Wie im Pool: als www-data, mit
+# dessen Verzeichnis. Die GC selbst läuft nur bei jedem tausendsten Start,
+# hier einmal ausdrücklich (session_gc()).
+SITZUNGEN="$ZIEL/storage/sessions"
+runuser -u www-data -- touch -d '13 hours ago' "$SITZUNGEN/sess_pruefungalt"
+runuser -u www-data -- touch -d '1 hour ago' "$SITZUNGEN/sess_pruefungjung"
+GC="$(cd "$ZIEL" && runuser -u www-data -- php -d "session.save_path=$SITZUNGEN" -r 'require "src/bootstrap.php";
+    \App\Support\Session::start();
+    echo ini_get("session.gc_probability"), "/", ini_get("session.gc_divisor"), " ", ini_get("session.gc_maxlifetime"), " ", var_export(session_gc(), true);' 2>&1)" || true
+pruefe "Sitzungen: GC für storage/sessions eingeschaltet, Lebensdauer 43200 s (kam: $GC)" \
+    bash -c '[[ "$1" =~ ^1/1000\ 43200\ [1-9][0-9]*$ ]]' _ "$GC"
+pruefe "Sitzungsdatei älter als 12 h weggeräumt" test ! -e "$SITZUNGEN/sess_pruefungalt"
+pruefe "Sitzungsdatei von vor 1 h bleibt" test -e "$SITZUNGEN/sess_pruefungjung"
+rm -f "$SITZUNGEN/sess_pruefungjung"
 pruefe_installation
 abschluss "zweiter Lauf"
 
