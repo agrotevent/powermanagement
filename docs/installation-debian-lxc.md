@@ -270,8 +270,10 @@ wiederholbar: Ein zweiter Lauf verwendet die Kennwörter aus dieser Datei
 weiter, ändert nichts an `config.php` und überschreibt keine eigenen
 Änderungen an Flows, Node-RED-Einstellungen, nginx-Site oder Mosquitto-ACL –
 neue Fassungen solcher Dateien legt es mit `powermanagement-neu` im Namen
-daneben. Auch was in der Oberfläche eingetragen ist (*System →
-Einstellungen*: Titel, InfluxDB, MQTT), bleibt: In eine vorhandene Datenbank
+daneben. Wer eine davon unverändert an ihren Platz kopiert, hat wieder die
+ausgelieferte Fassung; spätere Läufe und Updates ersetzen sie dann wieder.
+Auch was in der Oberfläche eingetragen ist (*System → Einstellungen*: Titel,
+InfluxDB, MQTT), bleibt: In eine vorhandene Datenbank
 trägt das Skript nur ein, was dort noch fehlt, und nennt in der
 Zusammenfassung unter „Beibehalten“, wo seine Optionen deshalb nicht
 gegriffen haben. Nur den Zugang der Anwendung zum Broker im Container
@@ -877,7 +879,9 @@ schiebt dann). Danach bricht PowerManagement mit einer Meldung ab, statt
 dass nginx mit 504 aufgibt. Über eine sehr langsame Leitung (unter rund
 5 Mbit/s bei Plänen mit 100 MB) übernimmt
 `bin/power location:uebernehmen <schlüssel>` auf dem Server ohne diese
-Frist.
+Frist. Die Kacheln neuer Pläne rechnet es danach gleich mit, nie neben
+einem anderen Bau („Ein anderer Prozess rechnet gerade Kacheln …“);
+eingetragen (Abgleich-Vermerk, Audit) ist die Location schon vorher.
 
 Ersetzte Grundrisse löscht der Upload samt Kacheln, sobald keine Etage
 sie mehr nutzt. Pläne, die der Location- oder Partner-Abgleich ersetzt
@@ -1223,8 +1227,9 @@ wieder da), und der Location- und Verteiler-Abgleich, solange er noch auf
 das Repository wartet (Holen und Hochladen dürfen zusammen bis zu 285 s
 dauern): Beginnt das Update beim Holen, übernimmt bzw. schiebt er nichts
 („… nichts hochgeladen …“); beginnt es während des Hochladens, ist der
-Stand im Repository, hier fehlt nur der Vermerk – das nächste Hochladen
-meldet „schon derselbe Stand“ und trägt ihn nach. Ein Grundriss trägt
+Stand im Repository, hier fehlt nur der Vermerk – bei einer Location trägt
+ihn das nächste Hochladen nach, im Verteiler-Abgleich das nächste
+„Repository abfragen“. Ein Grundriss trägt
 Etage und Audit ein, bevor er kachelt, Sekunden nach dem Hochladen; das
 Kacheln danach schreibt nur Dateien. Ist ein Grundriss größer, als PHP
 annimmt (`post_max_size`), nennt die Meldung auch während der Sperre die
@@ -1503,7 +1508,8 @@ Wenn etwas nicht klappt:
   eigenen Änderungen entbehrlich sind, die neue Fassung ganz:
   `cp /etc/nginx/powermanagement.powermanagement-neu /etc/nginx/sites-available/powermanagement` –,
   dann `nginx -t && systemctl reload nginx` (*Größe der Uploads*,
-  Abschnitt 9).
+  Abschnitt 9). So übernommen gilt die Site wieder als unverändert –
+  spätere Updates pflegen sie wieder selbst.
 - *Schon umgestellt?* Der Befehl schadet nicht – beide Läufe melden dann
   „aktuell“.
 - *Anderer Ort als /opt/powermanagement:* steht in

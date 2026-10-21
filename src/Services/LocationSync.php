@@ -629,11 +629,27 @@ final class LocationSync
      * – Doppelklick, zweiter Reiter – legte sonst, während beide auf das
      * Repository warten, einen zweiten Standort an.
      *
+     * Die Kacheln neuer Pläne erst danach, wenn Vermerk und Audit stehen,
+     * und ohne die Sperre der Arbeitskopie (die Pläne liegen dann schon
+     * unter storage/plans): Auf der Kommandozeile – bin/power
+     * location:uebernehmen, empfohlen über eine langsame Leitung – rechnet
+     * LocationBundle::kachelnBauen() hier und jetzt, bei 100 MB Minuten. Die
+     * Kommandozeile meldet sich bei einem Update nicht an
+     * (UpdateService::anfrageAnmelden()), es wartet nicht auf sie; was nach
+     * dem Kacheln noch eingetragen würde, käme womöglich nach der Sicherung
+     * und ginge beim Zurückrollen verloren, während die Etagen blieben.
+     *
      * @return array{ok:bool,message:string}
      */
     public static function uebernehmen(string $schluessel): array
     {
-        return self::gesperrt(static fn (): array => self::uebernehmenGesperrt($schluessel));
+        $ergebnis = self::gesperrt(static fn (): array => self::uebernehmenGesperrt($schluessel));
+        $kacheln = $ergebnis['kacheln'] ?? [];
+        unset($ergebnis['kacheln']);
+        if ($kacheln !== []) {
+            LocationBundle::kachelnBauen($kacheln);
+        }
+        return $ergebnis;
     }
 
     /** uebernehmen() unter der Sperre der Arbeitskopie – vom Holen bis zum Eintragen. */
@@ -664,7 +680,8 @@ final class LocationSync
             return ($ziel !== false && str_starts_with($ziel, $basis . '/') && is_file($ziel)) ? $ziel : null;
         };
 
-        $ergebnis = LocationBundle::locationAnwenden($daten, $datei);
+        // Kacheln baut uebernehmen() nach dem Vermerk (siehe dort).
+        $ergebnis = LocationBundle::locationAnwenden($daten, $datei, ['kacheln' => false]);
         if (!$ergebnis['ok']) {
             return $ergebnis;
         }
@@ -679,7 +696,7 @@ final class LocationSync
             [gmdate('c'), self::kopfCommit(), (int) $ergebnis['site_id']]
         );
         Audit::log('location.uebernehmen', 'site', (string) $ergebnis['site_id'], ['schluessel' => $schluessel, 'strom' => $strom !== null]);
-        return ['ok' => true, 'message' => $meldung];
+        return ['ok' => true, 'message' => $meldung, 'kacheln' => $ergebnis['kacheln']];
     }
 
     /**
@@ -694,8 +711,10 @@ final class LocationSync
      * Zurückrollen still – also unmittelbar vor dem ersten Schreiben nach
      * dem Warten noch einmal fragen, wie LocationUebertrag::anwenden() und
      * VerteilerSync. Nach einem Push hat das Repository den neuen Stand
-     * schon; dann fehlt hier nur der Vermerk, und das nächste Hochladen
-     * („schon derselbe Stand“) trägt ihn nach.
+     * schon; dann fehlt hier nur der Vermerk. Bei einer Location trägt ihn
+     * das nächste Hochladen nach (mit einem neuen Commit – strom.json trägt
+     * die Zeit), beim Verteiler-Abgleich das nächste „Repository abfragen“
+     * (VerteilerSync::liste() hält fest, was hier und dort gleich ist).
      *
      * @return array{ok:false,wartung:true,message:string}|null
      */

@@ -457,7 +457,7 @@ final class VerteilerSync
             $wo = ' ' . (count($pfade) === 1 ? $ergebnis['wo'] : str_replace($pfade[0], 'verteiler/', $ergebnis['wo']));
         }
         // Geschoben ist es – die Vermerke hier nur ohne Update, das inzwischen begann.
-        if (($sperre = LocationSync::updateBegonnen(UpdateService::VERMERK_FEHLT)) !== null) {
+        if (($sperre = LocationSync::updateBegonnen(UpdateService::VERMERK_FEHLT_VERTEILER)) !== null) {
             Logger::info('Verteiler hochgeladen, während ein Update begann – Vermerke und Audit fehlen.', ['typen' => $zahl['typ'], 'inventar' => $zahl['inventar']]);
             return ['ok' => true, 'wartung' => true, 'message' => ($pfade !== [] ? self::zahlText($zahl['typ'], $zahl['inventar']) . ' hochgeladen.' . $wo . ' ' : '')
                 . $sperre['message']];

@@ -62,8 +62,14 @@ final class UpdateService
     public const NICHTS_UEBERNOMMEN = 'Gerade läuft ein Update – nichts übernommen, bitte in etwa einer Minute noch einmal.';
     /** … dasselbe vor dem Hochladen ins Repository (LocationSync, VerteilerSync): nichts geschoben, nichts eingetragen. */
     public const NICHTS_HOCHGELADEN = 'Gerade läuft ein Update – nichts hochgeladen, bitte in etwa einer Minute noch einmal.';
-    /** … und nach dem Hochladen: Das Repository hat es, der Vermerk hier fehlt (LocationSync, VerteilerSync). */
-    public const VERMERK_FEHLT = 'Während des Hochladens hat hier ein Update begonnen – der Vermerk, was abgeglichen ist, fehlt deshalb noch. Nach dem Update noch einmal hochladen: Es meldet dann „schon derselbe Stand“ und trägt ihn nach.';
+    /**
+     * … und nach dem Hochladen: Das Repository hat es, der Vermerk hier fehlt.
+     * Bei einer Location (LocationSync) trägt ihn das nächste Hochladen nach –
+     * meist mit einem neuen Commit, denn strom.json trägt die Zeit („stand“).
+     */
+    public const VERMERK_FEHLT = 'Während des Hochladens hat hier ein Update begonnen – der Vermerk, was abgeglichen ist, fehlt deshalb noch. Nach dem Update noch einmal hochladen – das trägt ihn nach.';
+    /** … beim Verteiler-Abgleich (VerteilerSync) das nächste Abfragen: Was hier und dort gleich ist, hält VerteilerSync::liste() als abgeglichen fest. */
+    public const VERMERK_FEHLT_VERTEILER = 'Während des Hochladens hat hier ein Update begonnen – der Vermerk, was abgeglichen ist, fehlt deshalb noch. Nach dem Update einmal „Repository abfragen“ – das trägt ihn nach.';
     /** Abgewiesene Änderung (wartungsSperre()) – für das Personal … */
     public const GESPERRT = 'Gerade läuft ein Update – Änderungen sind in etwa einer Minute wieder möglich.';
     /** … und im Kundenbereich (Kundenzugänge, Einrichtungslink): im Ton des Kundenbereichs, ohne Technik. */

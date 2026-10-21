@@ -451,6 +451,14 @@ vorlage_uebernehmen() {
         VORLAGE_ERGEBNIS="ersetzt"
     elif [[ -f "$merk" ]] && cmp -s "$merk" "$ziel"; then
         VORLAGE_ERGEBNIS="ersetzt"
+    elif [[ -f "$neu" && ! -L "$neu" ]] && cmp -s "$neu" "$ziel"; then
+        # Die daneben gelegte neue Fassung ganz übernommen („cp …-neu“, wie
+        # die Hinweise es anbieten): ausgeliefert, nicht von Hand verändert.
+        # Der Merker stand noch auf der Fassung davor – ohne diesen Fall
+        # bliebe die Datei beim nächsten Update, das die Vorlage ändert, als
+        # „verändert“ stehen. Kein Verweis: -neu liegt teils in Ordnern, die
+        # nicht root gehören (Node-RED).
+        VORLAGE_ERGEBNIS="ersetzt"
     else
         install -o "${besitzer%%:*}" -g "${besitzer##*:}" -m "$modus" "$quelle" "$neu"
         VORLAGE_ERGEBNIS="behalten"

@@ -1788,6 +1788,60 @@ stream_wrapper_register("langsam", LangsamAttrappe::class);
     $zp = null;
     gleich($zlZeilen(), 'vorher,danach', 'db_zuruecklegen zum zweiten Mal: was danach gespeichert wurde, bleibt');
 
+    // vorlage_uebernehmen aus update-debian.sh und install-debian.sh (gleiche
+    // Logik): Ersetzt wird nur, was seit der letzten Auslieferung niemand
+    // verändert hat. Wer nach „von Hand verändert“ die daneben gelegte neue
+    // Fassung ganz übernimmt (cp …-neu, wie die Hinweise und die Anleitung
+    // es anbieten), hat keine eigene Fassung mehr – das nächste Update mit
+    // geänderter Vorlage ersetzt sie, statt sie wieder als verändert stehen
+    // zu lassen (site_behalten). Ein Verweis als -neu zählt nicht.
+    file_put_contents($ordner . '/vorlage.sh', <<<'SH'
+        set -Eeuo pipefail
+        VORLAGEN="$2/vorlagen"
+        neu_merken() { :; }
+        verschoben_merken() { :; }
+        eval "$(sed -n '/^vorlage_uebernehmen() {$/,/^}$/p' "$1")"
+        declare -F vorlage_uebernehmen > /dev/null || { echo "vorlage_uebernehmen fehlt in $1"; exit 9; }
+        VORLAGE_ERGEBNIS=""
+        vorlage_uebernehmen "$3" "$4" "$(id -un):$(id -gn)" 644 "$5"
+        printf '%s' "$VORLAGE_ERGEBNIS"
+        SH);
+    foreach (['update-debian.sh', 'install-debian.sh'] as $vSkript) {
+        $vw = $ordner . '/vorlage-' . $vSkript;
+        mkdir($vw, 0700, true);
+        $vZiel = $vw . '/site';
+        $vNeu = $vw . '/powermanagement.powermanagement-neu';
+        $vMerk = $vw . '/vorlagen/' . strtr($vZiel, '/', '_');
+        $vorlage = static function (string $inhalt) use ($ordner, $wurzel, $vSkript, $vw, $vZiel, $vNeu): string {
+            $quelle = $vw . '/quelle';
+            file_put_contents($quelle, $inhalt);
+            exec('bash ' . escapeshellarg($ordner . '/vorlage.sh') . ' ' . escapeshellarg($wurzel . '/deploy/' . $vSkript) . ' '
+                . escapeshellarg($vw) . ' ' . escapeshellarg($quelle) . ' ' . escapeshellarg($vZiel) . ' ' . escapeshellarg($vNeu) . ' 2>&1', $aus, $rc);
+            clearstatcache();
+            return $rc === 0 ? implode("\n", $aus) : 'rc ' . $rc . ': ' . implode(' ', $aus);
+        };
+        $inhalt = static fn (string $pfad): ?string => is_file($pfad) ? (string) file_get_contents($pfad) : null;
+        gleich($vorlage("v1\n"), 'neu', $vSkript . ' vorlage_uebernehmen: neu angelegt');
+        pruefe($vorlage("v2\n") === 'ersetzt' && $inhalt($vZiel) === "v2\n" && $inhalt($vMerk) === "v2\n", $vSkript . ' vorlage_uebernehmen: unverändert, neue Vorlage – ersetzt');
+        file_put_contents($vZiel, "v2 mit eigener Zeile\n");
+        pruefe($vorlage("v3\n") === 'behalten' && $inhalt($vZiel) === "v2 mit eigener Zeile\n" && $inhalt($vNeu) === "v3\n" && $inhalt($vMerk) === "v2\n",
+            $vSkript . ' vorlage_uebernehmen: von Hand verändert – behalten, die neue Fassung daneben');
+        copy($vNeu, $vZiel);
+        pruefe($vorlage("v4\n") === 'ersetzt' && $inhalt($vZiel) === "v4\n" && $inhalt($vMerk) === "v4\n" && !file_exists($vNeu),
+            $vSkript . ' vorlage_uebernehmen: die daneben gelegte Fassung ganz übernommen, Vorlage wieder geändert – ersetzt, nicht „verändert“');
+        file_put_contents($vZiel, "v4 mit eigener Zeile\n");
+        gleich($vorlage("v5\n"), 'behalten', $vSkript . ' vorlage_uebernehmen: wieder von Hand verändert – behalten');
+        copy($vNeu, $vZiel);
+        file_put_contents($vZiel, "eigene Zeile darunter\n", FILE_APPEND);
+        pruefe($vorlage("v6\n") === 'behalten' && $inhalt($vNeu) === "v6\n", $vSkript . ' vorlage_uebernehmen: übernommen und danach verändert – behalten');
+        file_put_contents($vw . '/anderswo', (string) $inhalt($vZiel));
+        unlink($vNeu);
+        symlink($vw . '/anderswo', $vNeu);
+        pruefe($vorlage("v7\n") === 'behalten' && $inhalt($vZiel) === "v5\neigene Zeile darunter\n" && !is_link($vNeu) && $inhalt($vNeu) === "v7\n"
+            && $inhalt($vw . '/anderswo') === "v5\neigene Zeile darunter\n",
+            $vSkript . ' vorlage_uebernehmen: -neu als Verweis auf eine gleiche Datei zählt nicht (behalten, der Verweis ersetzt)');
+    }
+
     // Eine andere Instanz hinter einer langsamen Leitung (wie in tests/sitzung.php)
     $partnerVerzoegerung = $ordner . '/partner-verzoegerung';
     file_put_contents($partnerVerzoegerung, '0');

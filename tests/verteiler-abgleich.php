@@ -197,13 +197,20 @@ try {
     $r = VerteilerSync::hochladen([['inventar', $vKey]], 'pruefung');
     putenv('PATH=' . $pfadVorher);
     Programm::vergessen();
-    pruefe($r['ok'] && ($r['wartung'] ?? false) === true && str_contains($r['message'], UpdateService::VERMERK_FEHLT) && $fernKopf() !== $kopfVorher
+    pruefe($r['ok'] && ($r['wartung'] ?? false) === true && str_contains($r['message'], UpdateService::VERMERK_FEHLT_VERTEILER) && $fernKopf() !== $kopfVorher
         && ($dortDatei('verteiler/inventar/' . $vKey . '.json')['stueck']['name'] ?? '') === 'Foodtruck (Update)', 'Update beginnt beim Push: dort angekommen – ' . $r['message']);
     gleich($vermerk(), $vermerkVorher, 'Update beginnt beim Push: hier kein Vermerk');
     $sperre(false);
+    // Nach dem Update, wie die Meldung sagt: Ohne Abfrage gilt das Stück als
+    // hier geändert (Knöpfe zum Hochladen gibt es dann nicht); „Repository
+    // abfragen“ findet hier und dort gleich und trägt den Vermerk nach.
+    gleich($eintrag(VerteilerSync::liste(null), 'inventar', $vKey)['status'] ?? '', 'geaendert', 'nach dem Update, ohne Abfrage: „geändert“');
+    gleich($vermerk(), $vermerkVorher, 'nach dem Update, ohne Abfrage: noch kein Vermerk');
+    pruefe($status('inventar', $vKey) === 'aktuell' && $vermerk() !== $vermerkVorher, 'nach dem Update „Repository abfragen“: „aktuell“, der Vermerk ist nachgetragen');
     $r = VerteilerSync::hochladen([['inventar', $vKey]], 'pruefung');
-    pruefe($r['ok'] && str_contains($r['message'], 'nichts zu tun') && $vermerk() !== $vermerkVorher && $status('inventar', $vKey) === 'aktuell',
-        'nach dem Update: Vermerk nachgetragen, „aktuell“');
+    pruefe($r['ok'] && str_contains($r['message'], 'nichts zu tun') && $status('inventar', $vKey) === 'aktuell', 'danach hochladen: nichts zu tun, „aktuell“');
+    pruefe(str_contains(UpdateService::VERMERK_FEHLT_VERTEILER, '„Repository abfragen“') && !str_contains(UpdateService::VERMERK_FEHLT_VERTEILER, 'noch einmal hochladen'),
+        'die Meldung schickt zum Abfragen, nicht zum Hochladen (dafür gibt es nach der Abfrage keinen Knopf)');
     Database::execute('UPDATE inventar SET name = ? WHERE id = ?', ['Foodtruck', $vId]);
     $r = VerteilerSync::hochladen([['inventar', $vKey]], 'pruefung');
     pruefe($r['ok'] && $status('inventar', $vKey) === 'aktuell', 'Name wieder wie vorher hochgeladen');

@@ -57,6 +57,7 @@ $alterZweig = Settings::get('inventory.branch');
 $siteId = null;
 $kopieId = null;
 $inventarId = null;
+$pdfSiteId = null;
 try {
     mkdir($tmp, 0775, true);
     $sh('git init -q --bare -b main ' . escapeshellarg($fern));
@@ -218,11 +219,89 @@ try {
         && $fernKopf() !== $kopfVorher && is_file($updOrdner . '/ist/wartung'), 'Update beginnt beim Push: dort angekommen, Meldung nennt den fehlenden Vermerk – ' . $erg['message']);
     pruefe($vermerk() === $vermerkVorher && $auditZahl('location.hochladen') === $hochVorher, 'Update beginnt beim Push: hier weder Vermerk noch Audit');
     $sperre(false);
+    // Nach dem Update – Minuten später – noch einmal hochladen, wie die
+    // Meldung sagt. strom.json trägt die Zeit („stand“), also gibt es einen
+    // neuen Commit; erst in der nächsten Sekunde, sonst hinge die Prüfung
+    // davon ab, ob beide Läufe in dieselbe Sekunde fallen (dann „schon
+    // derselbe Stand“, ebenfalls mit Vermerk).
+    time_sleep_until(floor(microtime(true)) + 1.05);
+    $kopfVorher = $fernKopf();
     $erg = LocationSync::locationHochladen($siteId, 'pruefung');
-    pruefe($erg['ok'] && str_contains($erg['message'], 'schon derselbe Stand') && ($vermerk()['synced_commit'] ?? '') !== ($vermerkVorher['synced_commit'] ?? '')
-        && str_starts_with($fernKopf(), (string) ($vermerk()['synced_commit'] ?? '-')), 'nach dem Update: „schon derselbe Stand“, der Vermerk ist nachgetragen');
+    pruefe($erg['ok'] && !isset($erg['wartung']) && str_contains($erg['message'], 'ist hochgeladen') && $fernKopf() !== $kopfVorher
+        && ($vermerk()['synced_commit'] ?? '') !== ($vermerkVorher['synced_commit'] ?? '')
+        && str_starts_with($fernKopf(), (string) ($vermerk()['synced_commit'] ?? '-')), 'nach dem Update noch einmal hochgeladen: der Vermerk ist nachgetragen – ' . $erg['message']);
+    gleich($auditZahl('location.hochladen'), $hochVorher + 1, 'nach dem Update noch einmal hochgeladen: mit Audit');
+    pruefe(!str_contains(UpdateService::VERMERK_FEHLT, 'schon derselbe Stand'), 'die Meldung verspricht kein „schon derselbe Stand“ (strom.json trägt die Zeit)');
     Database::execute('UPDATE objekte SET name = ? WHERE id = ?', [$hausName, $an]);
     pruefe(LocationSync::locationHochladen($siteId, 'pruefung')['ok'], 'Name wieder wie vorher hochgeladen');
+
+    // bin/power location:uebernehmen – empfohlen über eine langsame Leitung –
+    // kachelt einen PDF-Grundriss hier und jetzt, bei 100 MB Minuten lang.
+    // Die Kommandozeile meldet sich beim Update nicht an, es wartet nicht auf
+    // sie: Vermerk und Audit stehen deshalb vor dem Kacheln, und das Kacheln
+    // hält die Sperre von nacheinander() – kein Bau daneben, und die Automatik
+    // sieht ihn (rechnetImHintergrund(), verschoben:kacheln). Eine Attrappe
+    // von pdftoppm sichert beim ersten Aufruf die Datenbank und setzt die
+    // Schreibsperre – wie ein Update, das mitten im Kacheln beginnt.
+    if (!\App\Services\PdfRasterService::verfuegbar() || !extension_loaded('gd')) {
+        fwrite(STDOUT, "  (ohne poppler-utils oder gd: location:uebernehmen mitten im Kacheln übersprungen)\n");
+    } else {
+        require_once __DIR__ . '/hilfen/grundriss-dateien.php';
+        $pdfKey = 'halle-pdf-' . bin2hex(random_bytes(3));
+        $git($mo, 'pull -q origin main');
+        mkdir($mo . '/locations/' . $pdfKey . '/plaene', 0775, true);
+        pruefPdf($mo . '/locations/' . $pdfKey . '/plaene/eg.pdf', 1);
+        file_put_contents($mo . '/locations/' . $pdfKey . '/location.json', json_encode([
+            'format' => 1, 'art' => 'location', 'schluessel' => $pdfKey, 'name' => 'Prüfung Halle ' . $pdfKey, 'adresse' => '', 'notizen' => '',
+            'etagen' => [['schluessel' => 'eg', 'name' => 'EG', 'ebene' => 0, 'reihenfolge' => 0, 'massstab' => '', 'notizen' => '',
+                'plan' => ['datei' => 'plaene/eg.pdf', 'typ' => 'pdf', 'seite' => 1, 'originalname' => 'eg.pdf']]],
+        ], JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE));
+        $git($mo, 'add -A');
+        $git($mo, 'commit -q -m "Halle mit PDF-Grundriss"');
+        $git($mo, 'push -q origin main');
+
+        $schnapp = $tmp . '/sicherung-mitten-im-kacheln.sqlite';
+        $hgStand = $tmp . '/hintergrund-beim-kacheln';
+        $popplerAttrappe = $tmp . '/poppler-attrappe';
+        mkdir($popplerAttrappe, 0700, true);
+        file_put_contents($popplerAttrappe . '/pdftoppm', "#!/bin/sh\nif [ ! -e " . escapeshellarg($schnapp) . " ]; then\n  "
+            . escapeshellarg(PHP_BINARY) . " -r '\$p = new PDO(\"sqlite:\" . \$argv[1]); \$p->exec(\"VACUUM INTO \" . \$p->quote(\$argv[2]));"
+            . " \$h = fopen(\$argv[3], \"r\"); echo \$h !== false && !flock(\$h, LOCK_SH | LOCK_NB) ? \"gehalten\" : \"frei\";' "
+            . escapeshellarg((string) Config::get('database.path')) . ' ' . escapeshellarg($schnapp) . ' '
+            . escapeshellarg(\App\Services\PlanTileService::hintergrundSperre()) . ' > ' . escapeshellarg($hgStand) . "\n"
+            . "  printf '%s\\nseit %s\\nkennung -\\n' " . escapeshellarg(UpdateService::KOPF_WARTUNG) . ' "$(date +%s)" > ' . escapeshellarg($updOrdner . '/ist/wartung') . "\n"
+            . "fi\nexec " . escapeshellarg((string) Programm::finden('pdftoppm', ['-v'])) . ' "$@"' . "\n");
+        chmod($popplerAttrappe . '/pdftoppm', 0700);
+        $pfadVorher = (string) getenv('PATH');
+        putenv('PATH=' . $popplerAttrappe . ':' . $pfadVorher);
+        Programm::vergessen();
+        $uebVorher = $auditZahl('location.uebernehmen');
+        $erg = LocationSync::uebernehmen($pdfKey);
+        putenv('PATH=' . $pfadVorher);
+        Programm::vergessen();
+        $pdfSite = Database::first('SELECT id, synced_commit FROM sites WHERE sync_key = ?', [$pdfKey]);
+        $pdfSiteId = (int) ($pdfSite['id'] ?? 0);
+        $pdfEtage = Database::first('SELECT * FROM floors WHERE site_id = ?', [$pdfSiteId]);
+        pruefe($erg['ok'] && $pdfEtage !== null && \App\Services\PlanTileService::meta($pdfEtage) !== null && is_file($schnapp) && UpdateService::wartungAktiv(),
+            'location:uebernehmen mit PDF: gekachelt, die Attrappe sicherte mitten darin und setzte die Sperre – ' . $erg['message']);
+        gleich((string) @file_get_contents($hgStand), 'gehalten', 'location:uebernehmen kachelt unter der Sperre von nacheinander() (die Automatik sieht es)');
+        $gesichert = new PDO('sqlite:' . $schnapp);
+        $q = $gesichert->prepare('SELECT synced_commit FROM sites WHERE id = ?');
+        $q->execute([$pdfSiteId]);
+        $commitGesichert = (string) $q->fetchColumn();
+        pruefe($commitGesichert !== '' && $commitGesichert === (string) ($pdfSite['synced_commit'] ?? ''),
+            'Sicherung mitten im Kacheln: der Vermerk steht darin (vor dem Kacheln geschrieben)');
+        $q = $gesichert->prepare("SELECT COUNT(*) FROM audit_log WHERE action = 'location.uebernehmen' AND target_id = ?");
+        $q->execute([(string) $pdfSiteId]);
+        gleich((int) $q->fetchColumn(), 1, 'Sicherung mitten im Kacheln: auch der Audit-Eintrag');
+        gleich($auditZahl('location.uebernehmen'), $uebVorher + 1, 'location:uebernehmen: ein Audit-Eintrag, nicht zwei');
+        $gesichert = null;
+        $sperre(false);
+        if ($pdfSiteId > 0) {
+            SiteService::deleteSite($pdfSiteId);   // mit Plandatei und Kacheln (planAufraeumen)
+        }
+        $pdfSiteId = null;
+    }
     Config::set('app.demo', $demoVorher);
 
     // MasterAdmin ändert location.json (neue Dose) – strom.json bleibt
@@ -610,6 +689,9 @@ try {
     gleich(LocationBundle::festeLeitungen(['format' => 2, 'leitungen' => [['schluessel' => 'x', 'art' => 'kraftstoff', 'fest' => true]]]), [],
         'ein Schlauch in einer Datei zählt nicht zu den festen Leitungen');
 } finally {
+    if ($pdfSiteId !== null && $pdfSiteId > 0) {
+        SiteService::deleteSite($pdfSiteId);
+    }
     if ($inventarId !== null) {
         foreach (Database::select('SELECT id FROM einsaetze WHERE inventar_id = ? AND bis IS NULL', [$inventarId]) as $e) {
             InventarService::beenden((int) $e['id']);
