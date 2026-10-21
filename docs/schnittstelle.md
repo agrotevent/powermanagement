@@ -49,10 +49,13 @@ Hinaus geht genau das, was auch über Git geht:
 - die **Georeferenz** der Etagen,
 - mit `feststrom` die **Feststromanschlüsse** mit Schutzorganen und
   Anschlüssen, die **fest verlegten Kabel und Kabelwege** dazwischen und
-  die Steckertypen, die sie brauchen.
+  die Steckertypen, die sie brauchen – und, wie über Git, **feste Tanks**
+  (Bodentank der Location) mit ihren Eigenschaften, ohne Anschlüsse,
+  Schutzorgane und Tanksensor.
 
 **Nie** hinaus gehen Messgeräte und Messpunkte (sie brächten Schaltrechte
-mit), mobile Anlagen, mobile Kabel, Kabelbrücken, Bereiche, Aufbau,
+mit), mobile Anlagen, mobile Kabel, Kabelbrücken, Kraftstoffschläuche,
+Kennlinien, Peilungen und Betankungen der Tanks, Bereiche, Aufbau,
 Inventar und Einsätze – und auch nicht die Dosen, Racks und Accesspoints,
 die PowerManagement aus MasterAdmin als graue Orientierung kennt. Die
 gehören MasterAdmin; eine leere Liste würde dort alle Dosen löschen.
@@ -200,7 +203,12 @@ unveränderte Plandatei wird nicht noch einmal geladen. Dabei bleibt hier:
 - die **Namen** von Standort und Etagen, ihre Reihenfolge,
 - eine **Schaltsperre** an einer Anlage – sie wird nie aufgehoben,
 - **Messpunkte**, Einsätze und Inventar an den Anlagen, auch an ihren
-  Abgängen,
+  Abgängen; an einem **Tank** der Inhalt je mm, den seine Kennlinie hier
+  gelernt oder von Hand bekommen hat (samt Herkunft) – Nennvolumen, Bauform
+  und die übrigen Eigenschaften kommen von dort,
+- die **Art**: Meint ein Schlüssel dort eine Verteilung und hier einen Tank
+  (oder umgekehrt), wird der Eintrag übergangen; ein **Kraftstoffschlauch**
+  hier wird nie zum Kabel, auch wenn ein Kabel dort seinen Schlüssel trägt,
 - ein **Maßstab** und eine **Georeferenz**, wenn dort keiner gesetzt ist,
 - was hier aus einer übernommenen Anlage oder einem Kabel **mobil** gemacht
   wurde: es bleibt mobil, wo es ist,
@@ -245,7 +253,10 @@ sie inzwischen geändert (etwa `schreiben` dazugegeben, sodass ein
 „Vorschlag“ gleich übernommen würde), geht nichts hinaus – „Seite neu
 laden“.
 
-Feststrom geht so hinüber:
+Feststrom geht so hinüber (ein fester Tank mit; eine ältere
+PowerManagement-Instanz ohne Tanks übergeht ihn beim Übernehmen, lehnt
+einen Vorschlag mit ihm aber als „unbekannte Art“ ab – erst alle Instanzen
+aktualisieren):
 
 - verknüpfte Anlagen und Kabel unter ihrem Schlüssel bei A – aber nur,
   solange es sie bei A noch gibt. Was A gelöscht hat, bleibt hier, kommt
@@ -278,7 +289,8 @@ Feststrom geht so hinüber:
   Standort.
 
 Bei A gelten dieselben Schutzregeln wie beim Übernehmen hier: Namen,
-Schaltsperre und Messpunkte bleiben; ein Maßstab oder eine Georeferenz bei A
+Schaltsperre, Messpunkte und der gelernte Inhalt je mm eines Tanks bleiben;
+ein Maßstab oder eine Georeferenz bei A
 wird nie gelöscht (fehlt er in der Sendung, bleibt der dortige); gelöscht
 wird nichts. Neue Steckertypen legt ein Token bei A nie an – fehlt dort
 einer, lehnt A das Hochladen ab und nennt ihn.

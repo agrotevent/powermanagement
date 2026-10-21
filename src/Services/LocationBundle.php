@@ -5,6 +5,7 @@ namespace App\Services;
 
 use App\Support\Config;
 use App\Support\Database;
+use App\Tanks\TankService;
 
 /**
  * Locations als Dateien: location.json (MasterAdmin) und strom.json (hier).
@@ -759,7 +760,9 @@ final class LocationBundle
      *                       Georeferenz hier unberührt
      *   sperre_behalten     true: eine Schaltsperre hier bleibt, auch wenn die
      *                       Datei keine hat
-     *   ohne_messpunkte     true: Messpunkte hier bleiben, wie sie sind
+     *   ohne_messpunkte     true: Messpunkte hier bleiben, wie sie sind – und
+     *                       an einem Tank hier, was seine Kennlinie gelernt
+     *                       hat (TankService::KENNLINIE_HIER)
      *   stecker_anlegen     false: fehlende Steckertypen nicht anlegen (deren
      *                       Anschlüsse fallen weg – vorher prüfen)
      *
@@ -769,6 +772,15 @@ final class LocationBundle
      * über „richtung:nr“. Findet sich nichts, behält ein vorhandenes Kabel
      * sein bisheriges Ende; geleert wird es nur, wenn die Anlage dieses Endes
      * in diesem Lauf angewandt wurde und den Anschluss nicht mehr hat.
+     *
+     * Tanks: Ein fester Tank (Bodentank der Location) ist feste
+     * Infrastruktur wie ein Feststromanschluss – ohne Anschlüsse, Schutzorgane
+     * und Messpunkte (belegungErsetzen()). Trifft ein Schlüssel hier einen
+     * Tank, die Datei aber meint eine elektrische Anlage (oder umgekehrt),
+     * wird er übergangen: AnlagenService::speichern() wechselt nie zwischen
+     * beiden. Kraftstoffschläuche stehen in keiner Datei (festeLeitungen());
+     * trifft der Schlüssel eines Kabels hier einen Schlauch, wird auch er
+     * übergangen – der Schlauch bleibt ein Schlauch.
      *
      * @param array{etagen?:array<string,int>,zuordnung?:string,token_id?:int,georeferenz_leeren?:bool,sperre_behalten?:bool,ohne_messpunkte?:bool,stecker_anlegen?:bool} $optionen
      * @return array{ok:bool,message:string,anlagen:int,leitungen:int,uebergangen:int,schluessel:array{anlagen:array<string,string>,leitungen:array<string,string>}}
@@ -846,6 +858,19 @@ final class LocationBundle
             }
             $gesperrt = !empty($a['steuerung_gesperrt'])
                 || ($sperreBehalten && $vorhanden !== null && (int) $vorhanden['steuerung_gesperrt'] === 1);
+            $eigenschaften = (array) ($a['eigenschaften'] ?? []);
+            if ($ohneMesspunkte && $vorhanden !== null && !AnlagenService::elektrisch((string) $a['art'])) {
+                // Was die Kennlinie des Tanks hier gelernt hat (Peilung,
+                // Betankung, von Hand), bleibt – wie die Messpunkte. Sonst
+                // rechnete sein Tanksensor ab jetzt mit Werten von dort.
+                $hier = (array) (AnlagenService::find((int) $vorhanden['id'])['eigenschaften'] ?? []);
+                foreach (TankService::KENNLINIE_HIER as $k) {
+                    unset($eigenschaften[$k]);
+                    if (($hier[$k] ?? '') !== '' && $hier[$k] !== null) {
+                        $eigenschaften[$k] = $hier[$k];
+                    }
+                }
+            }
             $ergebnis = AnlagenService::speichern($vorhanden !== null ? (int) $vorhanden['id'] : null, [
                 'art' => $a['art'], 'name' => (string) ($a['name'] ?? $key), 'kennung' => (string) ($a['kennung'] ?? ''),
                 'site_id' => $siteId, 'floor_id' => $floorId,
@@ -853,7 +878,7 @@ final class LocationBundle
                 'seriennummer' => (string) ($a['seriennummer'] ?? ''),
                 'nennleistung_kva' => $a['nennleistung_kva'] ?? '', 'nennstrom_a' => $a['nennstrom_a'] ?? '',
                 'spannung_v' => $a['spannung_v'] ?? 400, 'phasen' => $a['phasen'] ?? 3, 'status' => (string) ($a['status'] ?? 'geplant'),
-                'eigenschaften' => (array) ($a['eigenschaften'] ?? []),
+                'eigenschaften' => $eigenschaften,
                 'steuerung_gesperrt' => $gesperrt,
                 'notizen' => (string) ($a['notizen'] ?? ''),
                 'fest' => 1,
@@ -900,7 +925,9 @@ final class LocationBundle
                 continue;
             }
             $vorhanden = self::leitungFinden($siteId, $key, $zuordnung, $tokenId, $gesendetAls($l));
-            if ($vorhanden !== null && $zuordnung !== 'git' && ((int) $vorhanden['fest'] !== 1 || (string) $vorhanden['art'] === 'kabelbruecke')) {
+            // Ein Kraftstoffschlauch hier wird nie zum Kabel – auch nicht über Git.
+            if ($vorhanden !== null && ((string) $vorhanden['art'] === 'kraftstoff'
+                || ($zuordnung !== 'git' && ((int) $vorhanden['fest'] !== 1 || (string) $vorhanden['art'] === 'kabelbruecke')))) {
                 $uebergangen++;
                 continue;
             }
@@ -1056,7 +1083,8 @@ final class LocationBundle
     /**
      * Die Leitung hier zu einem Schlüssel aus einer Datei – Regeln wie bei
      * anlageFinden(); innerhalb eines Schritts geht ein festes Kabel oder ein
-     * fester Kabelweg vor (Spalten fest, art für den Aufrufer).
+     * fester Kabelweg vor – vor Kabelbrücken und Kraftstoffschläuchen
+     * (Spalten fest, art für den Aufrufer).
      *
      * @return array<string,mixed>|null id, fest, art, sync_key und die Enden
      */
@@ -1081,7 +1109,7 @@ final class LocationBundle
         }
         foreach ($schritte as [$bedingung, $werte]) {
             $z = Database::first($spalten . 'JOIN floors f ON f.id = l.floor_id WHERE f.site_id = ? AND ' . $bedingung
-                . " ORDER BY CASE WHEN l.fest = 1 AND l.art <> 'kabelbruecke' THEN 0 ELSE 1 END, l.id LIMIT 1", [$siteId, ...$werte]);
+                . " ORDER BY CASE WHEN l.fest = 1 AND l.art IN ('kabel', 'kabelweg') THEN 0 ELSE 1 END, l.id LIMIT 1", [$siteId, ...$werte]);
             if ($z !== null) {
                 return $z;
             }

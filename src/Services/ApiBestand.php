@@ -16,8 +16,12 @@ use App\Support\Fingerabdruck;
  * Feststromanschlüssen, fest verlegten Kabeln und Kabelwegen und ihren
  * Steckertypen.
  *
+ * Ein fester Tank (Bodentank) gehört wie über Git dazu – ohne Anschlüsse,
+ * Schutzorgane und Tanksensor (LocationBundle::stromLesen()).
+ *
  * Nie hinaus: Messpunkte (sie brächten auf der anderen Seite Schaltrechte
- * mit), mobile Anlagen und Kabel, Kabelbrücken, Bereiche, Aufbau, Einsätze,
+ * mit), mobile Anlagen und Kabel, Kabelbrücken, Kraftstoffschläuche,
+ * Kennlinien und Ereignisse der Tanks, Bereiche, Aufbau, Einsätze,
  * Inventar, der Fremdbestand (Dosen, Racks, APs von MasterAdmin) – und auf
  * den Etagen weder „dosen“ noch „racks“ noch „aps“: eine leere Liste hieße
  * bei MasterAdmin „hier gibt es keine“ und löschte dort die Dosen. Was fehlt,

@@ -187,7 +187,7 @@ Ein Token mit `plaene.schreiben` ändert hier ohne Bestätigung – aber nur auf
 Standorten, die ihm *zum Bearbeiten* freigegeben sind, nur auf dem Stand,
 den die andere Seite zuletzt abgerufen hat (oder ausdrücklich darüber
 hinweg), und mit denselben Schutzregeln wie beim Annehmen: Namen,
-Schaltsperre und Messpunkte bleiben; ein Maßstab oder eine Georeferenz hier
+Schaltsperre, Messpunkte und der gelernte Inhalt je mm eines Tanks bleiben; ein Maßstab oder eine Georeferenz hier
 wird nie gelöscht (fehlt er in der Sendung, bleibt der hiesige); gelöscht
 wird nichts, Steckertypen legt es nie an. Im Audit-Log steht das als
 `api.schreiben` mit dem Akteur `api:<Name des Zugangs>`.

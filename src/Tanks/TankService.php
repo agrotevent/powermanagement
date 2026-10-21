@@ -74,6 +74,15 @@ final class TankService
     /** Eintragen nur im Datenfenster (darfEintragen). */
     public const AUSSERHALB_FENSTER = 'Eintragen geht nur, solange deine Freigabe für die Messdaten dieses Tanks gilt.';
 
+    /**
+     * Eigenschaften eines Tanks, die seine Kennlinie hier gelernt (Peilung,
+     * Betankung) oder von Hand bekommen hat. Eine Location von einer anderen
+     * Instanz überschreibt sie an einem Tank hier nicht
+     * (LocationBundle::stromAnwenden() mit ohne_messpunkte) – wie die
+     * Messpunkte bleiben sie, wie sie sind.
+     */
+    public const KENNLINIE_HIER = ['liter_je_mm', 'liter_je_mm_herkunft'];
+
     /** Meldung, wenn am Tank gerade schon eingetragen wird (gesperrt()). */
     public const GERADE_SCHON = 'An diesem Tank wird gerade schon eingetragen – nichts doppelt eingetragen. Gleich die Seite neu laden.';
 

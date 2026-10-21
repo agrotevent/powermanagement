@@ -520,7 +520,7 @@ final class VorschlagService
             }
             $schon[$key] = true;
             if (!in_array($l['art'] ?? null, ['kabel', 'kabelweg'], true)) {
-                self::ab(sprintf('Leitung „%s“: nur Kabel und Kabelwege – keine Kabelbrücken.', $key));
+                self::ab(sprintf('Leitung „%s“: nur Kabel und Kabelwege – keine Kabelbrücken, keine Kraftstoffschläuche.', $key));
             }
             if (($l['fest'] ?? null) !== true) {
                 self::ab(sprintf('Leitung „%s“ ist nicht fest verlegt („fest“: true) – mobile Kabel nimmt die Schnittstelle nicht an.', $key));

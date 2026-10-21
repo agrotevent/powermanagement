@@ -124,9 +124,13 @@ keine Build-Schritte. JS-Bibliotheken liegen fertig unter `public/assets/vendor`
   Kraftstoffschlauch braucht *bearbeiten* an beiden Enden. Ein Tank ist nicht
   elektrisch (`AnlagenService::elektrisch()`): keine Anschlüsse, Schutzorgane,
   Kabel und kein Wechsel der Art. Aus Tankwerten wird nie geschaltet, ein
-  Gerät am Tank schaltet niemand. Die Restlaufzeit verrät von Generatoren
-  ohne Freigabe weder Namen noch Leistung; Tankwerte auf der Kommandozeile
-  nur mit `--als=<benutzer>`.
+  Gerät am Tank schaltet niemand. Ein fester Tank geht über Git und die
+  Schnittstelle mit (ohne Anschlüsse und Messpunkte), ein Kraftstoffschlauch
+  nie; ein Schlüssel wechselt dabei nie zwischen Tank und elektrischer
+  Anlage oder Schlauch und Kabel, und über die Schnittstelle bleibt, was die
+  Kennlinie hier gelernt hat (`TankService::KENNLINIE_HIER`). Die
+  Restlaufzeit verrät von Generatoren ohne Freigabe weder Namen noch
+  Leistung; Tankwerte auf der Kommandozeile nur mit `--als=<benutzer>`.
 - **Übergabeberichte ändern nur über `App\Berichte\BerichtService`.** Nach
   der Prüfer-Unterschrift ist der Inhalt eingefroren, eine Korrektur ist eine
   neue Fassung. Der Inhalt ist ein JSON-Dokument nur aus Strings
@@ -176,7 +180,7 @@ bash -n deploy/*.sh tests/*.sh && shellcheck -S warning -e SC2016,SC1111 deploy/
 | `tests/zeitfenster.php` | Freigaben, Gültigkeit, Datenfenster, Schalt-Freigaben, ganzer Standort sichtbar |
 | `tests/anschluesse.php` | Anschlüsse, Standard-Verteiler, Schutzorgane, Kabel, Spannungsfall, fest/mobil (Anlagen und Kabel), Messpunkte und Einsätze bleiben beim Ersetzen der Anschlüsse; Kraftstoffschlauch ohne Anschlüsse, nicht in Belegung, Speisung, Baum und Spannungsfall, Hinweise „nur Vorlauf“ und „Rücklauf muss in denselben Tank“ |
 | `tests/inventar.php` | Inventar, Einsatz/Abbau, Gültigkeit der Messpunkte, Bereiche über wechselnde Geräte, Schalten nach Abbau; Stellen des Tanksensors, Stecker-Pflicht nur beim Zwischenstecker |
-| `tests/location-abgleich.php` | Git-Location-Abgleich mit MasterAdmin-Format; nur Feststromanschlüsse und feste Kabel, mobile Planung bleibt; fehlende Dosen bleiben, Messpunkte nach erneutem Holen; Übertrag der Schnittstelle (`LocationUebertrag`), freie Schlüssel; fester Tank mit Eigenschaften hin und zurück, Schläuche nicht |
+| `tests/location-abgleich.php` | Git-Location-Abgleich mit MasterAdmin-Format; nur Feststromanschlüsse und feste Kabel, mobile Planung bleibt; fehlende Dosen bleiben, Messpunkte nach erneutem Holen; Übertrag der Schnittstelle (`LocationUebertrag`), freie Schlüssel; Schläuche nicht über Git; über die Schnittstelle fester Tank hinaus und herüber (ohne Anschlüsse/Messpunkte), gelernter Inhalt je mm bleibt, Tank ↔ Verteilung und Schlauch ↔ Kabel übergangen (auch über Git) |
 | `tests/katalog-import.php` | Katalog-Import: Format (kein JSON, falsche Art, Format 2, leer, doppelter Schlüssel, unbekannte Art, Stecker ohne Beschreibung, neuer Stecker ohne Werte, Auswahl, Spannung …), neu → übernommen → schon da, keine Messpunkte am Typ (auch im Verteiler-Abgleich), bearbeitbar, „hier anders“ nur mit Auswahl und nur im Stand der Vorschau überschrieben, Typwechsel mit Eigenschaften, Tank-Typ (nur Eigenschaften, feste elektrische Werte, Anschlüsse in der Datei abgelehnt, gelernter Inhalt je mm → „hier anders“), Rechte, alles oder nichts, Vorschau ablegen, Kommandozeile und jedes Paket unter `resources/kataloge` (je eigene leere Instanz) |
 | `tests/verteiler-abgleich.php` | Verteiler-Abgleich: Standard-Verteiler und Inventar hochladen/übernehmen, hier/dort/beide geändert, Shelly-Tausch im Einsatz, Rechte, Entfernen; Tanksensor mit Sensordaten und Tank-Typ ohne Anschlüsse, Fingerabdruck vorhandener Stücke unverändert |
 | `tests/aufbau.php` | Aufbau: Plan festhalten, bestätigen/geändert/entfallen/zusätzlich, fertig, beenden, Abgleich (Versatz, Längen, Material, Last); Schlauch als Posten, Last ohne Tanks |
