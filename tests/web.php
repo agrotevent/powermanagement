@@ -113,6 +113,10 @@ foreach (array_keys(Einstellungen::VORGABEN) as $s) {
     $eventworxVorher[$s] = Settings::get($s);
 }
 $bSite = 0;
+// Audit-Einträge dieses Laufs zu eigenen Rollen, Standorten, Etagen und Anlagen
+// tragen die Kennung nicht im Text – am Ende über ihr Ziel weg.
+$auditVorher = (int) Database::scalar('SELECT COALESCE(MAX(id), 0) FROM audit_log');
+$auditZiele = [];
 // Nummernzähler der Übergabeberichte: die Prüfung vergibt Nummern im laufenden Jahr – am Ende zurück.
 $nummernVorher = array_column(Database::select('SELECT jahr, laufnr FROM bericht_nummern'), 'laufnr', 'jahr');
 
@@ -737,6 +741,7 @@ try {
         $werkEtage = \App\Services\SiteService::saveFloor(null, ['site_id' => $werk, 'name' => 'Halle']);
         $eigen = (int) \App\Services\AnlagenService::speichern(null, ['art' => 'verteilung', 'name' => $kennung . ' eigen', 'floor_id' => $werkEtage,
             'plan_x' => 10, 'plan_y' => 10, 'ohne_anschluesse' => true])['id'];
+        array_push($auditZiele, ['site', $werk], ['floor', $werkEtage], ['objekt', $eigen]);
         BenutzerService::freigabeSpeichern(['subject_type' => 'user', 'subject_id' => $benutzer['planer'], 'ziel_art' => 'site', 'ziel_id' => $werk, 'darf_bearbeiten' => 1]);
         BenutzerService::freigabeSpeichern(['subject_type' => 'user', 'subject_id' => $benutzer['planer'], 'ziel_art' => 'site', 'ziel_id' => (int) $fremd['site_id']]);
         $planer = anmelden($basis, $kennung . '-planer', $kennwort);
@@ -775,6 +780,7 @@ try {
     $bEtage = \App\Services\SiteService::saveFloor(null, ['site_id' => $bSite, 'name' => 'Wiese']);
     $bVert = (int) \App\Services\AnlagenService::speichern(null, ['art' => 'verteilung', 'name' => $kennung . ' Bühne', 'site_id' => $bSite,
         'floor_id' => $bEtage, 'ohne_anschluesse' => true])['id'];
+    array_push($auditZiele, ['site', $bSite], ['floor', $bEtage], ['objekt', $bVert]);
     \App\Services\AnlagenService::anzahlSetzen($bVert, ['eingang' => [$typen['cee63'] => 1], 'abgang' => [$typen['cee32'] => 1, $typen['schuko'] => 2]]);
     \App\Services\SchutzService::vorschlagen($bVert);
     $bAufbau = (int) \App\Services\AufbauService::starten($bSite, $kennung . ' Sommerfest')['id'];
@@ -1001,19 +1007,6 @@ try {
 
     // ---------------------------------------------------- Übergabeberichte: Unterschriften, Kundenmodus, Korrektur
     Database::update('users', $benutzer['admin'], ['pruefer_qualifikation' => 'Elektrofachkraft ' . $kennung, 'full_name' => 'Pia Prüferin']);
-    /** Eine gültige Unterschrift aus ganzen Zahlen – jedes Mal andere Striche. */
-    $striche = static function (): string {
-        $versatz = random_int(0, 400);
-        $s = [];
-        for ($zug = 0; $zug < 2; $zug++) {
-            $linie = [];
-            for ($x = 1000; $x <= 8600; $x += 380) {
-                $linie[] = [$x + $versatz, 2500 + intdiv($x, 380) % 2 * 4000 + $zug * 300];
-            }
-            $s[] = $linie;
-        }
-        return json_encode(['s' => $s]);
-    };
     /** Einen Bericht so ausfüllen, dass nur noch die Warnung zur Kalibrierung offen ist; Antwort von „Prüfen“. */
     $ausfuellen = static function (int $id) use ($basis, &$admin, $json, $kennung, $geraet): array {
         $b = BerichtService::find($id);
@@ -1046,9 +1039,9 @@ try {
         aufruf($basis, $admin['dose'], 'POST', '/berichte/anlegen', ['site_id' => $bSite, 'objekte' => [$bVert], '_token' => $admin['token']]);
         return (int) Database::scalar('SELECT id FROM berichte WHERE site_id = ? ORDER BY id DESC LIMIT 1', [$bSite]);
     };
-    $unterschreiben = static function (int $id, array $felder = []) use ($basis, &$admin, $json, $striche): array {
+    $unterschreiben = static function (int $id, array $felder = []) use ($basis, &$admin, $json): array {
         $r = aufruf($basis, $admin['dose'], 'POST', '/berichte/' . $id . '/unterschreiben', $felder + ['version' => BerichtService::find($id)['version'],
-            'striche' => $striche(), 'name' => 'Pia Prüferin', 'ort' => 'Musterstadt', 'anfrage' => bin2hex(random_bytes(16)),
+            'striche' => unterschriftStriche(), 'name' => 'Pia Prüferin', 'ort' => 'Musterstadt', 'anfrage' => bin2hex(random_bytes(16)),
             'geraet_am' => gmdate('c'), '_token' => $admin['token']], $json);
         return ['status' => $r['status'], 'j' => json_decode($r['text'], true) ?? []];
     };
@@ -1157,7 +1150,7 @@ try {
     aufruf($basis, $geraet, 'POST', '/login', ['username' => $kennung . '-admin', 'password' => $kennwort, '_token' => token($seite['text'])]);
     $r = aufruf($basis, $geraet, 'GET', '/dashboard');
     pruefe($r['status'] === 302 && $r['ziel'] === '/berichte/' . $b3 . '/kunde', 'Kundenmodus am Gerät: nach neuer Anmeldung in diesem Browser weiter gesperrt');
-    $kundeFelder = ['striche' => $striche(), 'name' => 'Kim Kunde', 'funktion' => 'Produktion', 'ort' => 'Musterstadt', 'vorbehalte' => '',
+    $kundeFelder = ['striche' => unterschriftStriche(), 'name' => 'Kim Kunde', 'funktion' => 'Produktion', 'ort' => 'Musterstadt', 'vorbehalte' => '',
         'anfrage' => bin2hex(random_bytes(16)), 'geraet_am' => gmdate('c'), '_token' => $admin['token'], 'inhalt_hash' => (string) BerichtService::find($b3)['inhalt_hash']];
     $r = aufruf($basis, $admin['dose'], 'POST', '/berichte/' . $b3 . '/kunde/unterschreiben', ['inhalt_hash' => str_repeat('0', 64)] + $kundeFelder + ['bestaetigungen' => ['erhalten']], $json);
     pruefe($r['status'] === 409 && BerichtService::find($b3)['status'] === 'geprueft', 'Kunde hat einen anderen Stand gesehen → 409, nichts gespeichert');
@@ -1258,12 +1251,13 @@ try {
         Database::execute("DELETE FROM audit_log WHERE target_type = 'api_partner' AND target_id = ?", [(string) $p['id']]);
     }
     foreach (Database::select('SELECT id FROM sites WHERE name LIKE ?', [$kennung . '%']) as $s) {
-        $etagen = array_column(Database::select('SELECT id FROM floors WHERE site_id = ?', [(int) $s['id']]), 'id');
-        \App\Services\SiteService::deleteSite((int) $s['id']);
-        Database::execute("DELETE FROM audit_log WHERE action = 'site.delete' AND target_id = ?", [(string) $s['id']]);
-        foreach ($etagen as $etage) {
-            Database::execute("DELETE FROM audit_log WHERE action = 'floor.delete' AND target_id = ?", [(string) $etage]);
+        $auditZiele[] = ['site', (int) $s['id']];
+        foreach (['floor' => 'floors', 'objekt' => 'objekte'] as $typ => $tabelle) {
+            foreach (Database::select("SELECT id FROM {$tabelle} WHERE site_id = ?", [(int) $s['id']]) as $z) {
+                $auditZiele[] = [$typ, (int) $z['id']];
+            }
         }
+        \App\Services\SiteService::deleteSite((int) $s['id']);
     }
     foreach (Database::select('SELECT id FROM api_tokens WHERE name LIKE ?', [$kennung . '%']) as $t) {
         foreach (Database::select('SELECT id FROM api_vorschlaege WHERE token_id = ?', [(int) $t['id']]) as $v) {
@@ -1280,6 +1274,7 @@ try {
     }
     Database::execute('DELETE FROM steckertypen WHERE name LIKE ?', [$kennung . '%']);
     foreach (Database::select('SELECT id FROM roles WHERE name LIKE ?', [$kennung . '%']) as $rolle) {
+        $auditZiele[] = ['role', (int) $rolle['id']];
         BenutzerService::rolleLoeschen((int) $rolle['id']);
     }
     Database::execute('DELETE FROM leitungen WHERE name LIKE ?', [$kennung . '%']);
@@ -1293,6 +1288,7 @@ try {
         BereichService::loeschen((int) $b['id']);
     }
     foreach (Database::select('SELECT id FROM objekte WHERE name LIKE ?', [$kennung . '%']) as $o) {
+        $auditZiele[] = ['objekt', (int) $o['id']];
         \App\Services\AnlagenService::loeschen((int) $o['id']);
     }
     foreach ($benutzer as $id) {
@@ -1314,7 +1310,6 @@ try {
     Database::execute('DELETE FROM pruefgeraete WHERE fabrikat LIKE ?', [$kennung . '%']);
     if ($bSite > 0) {
         \App\Services\SiteService::deleteSite($bSite);
-        Database::execute("DELETE FROM audit_log WHERE target_type = 'site' AND target_id = ?", [(string) $bSite]);
     }
     foreach ($benutzer as $id) {
         Database::execute('DELETE FROM schaltvorgaenge WHERE user_id = ?', [$id]);
@@ -1324,10 +1319,15 @@ try {
     foreach ($benutzer as $id) {
         Database::execute("DELETE FROM audit_log WHERE target_type = 'user' AND target_id = ?", [(string) $id]);
     }
+    foreach ($auditZiele as [$typ, $id]) {
+        Database::execute('DELETE FROM audit_log WHERE id > ? AND target_type = ? AND target_id = ?', [$auditVorher, $typ, (string) $id]);
+    }
     foreach ($dosen as $d) {
         @unlink($d);
     }
 }
 @unlink($serverFehler);
+gleich(array_map(static fn (array $z): string => $z['action'] . ' ' . $z['target_type'] . ' ' . $z['target_id'],
+    Database::select('SELECT action, target_type, target_id FROM audit_log WHERE id > ? ORDER BY id', [$auditVorher])), [], 'aufgeräumt: kein Audit-Eintrag dieses Laufs übrig');
 
 ende('web');

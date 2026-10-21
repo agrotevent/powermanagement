@@ -193,3 +193,24 @@ function alsBenutzer(?int $id): void
 {
     \App\Auth\Auth::alsBenutzer($id);
 }
+
+/**
+ * Eine gültige Unterschrift aus ganzen Zahlen (`Unterschrift::pruefen`) –
+ * jedes Mal andere Striche. Der Server nimmt dieselben Striche nur einmal
+ * an, über alle Berichte der Datenbank (auch Reste abgebrochener Läufe).
+ * Ein Versatz allein gäbe nur ein paar hundert Unterschriften, die schon
+ * nach wenigen Berichten zusammenstoßen; darum wackelt jeder Punkt für sich.
+ */
+function unterschriftStriche(): string
+{
+    $versatz = random_int(0, 400);
+    $s = [];
+    for ($zug = 0; $zug < 3; $zug++) {
+        $linie = [];
+        for ($x = 1000; $x <= 8600; $x += 380) {
+            $linie[] = [$x + $versatz, 2500 + intdiv($x, 380) % 2 * 4000 + $zug * 300 + random_int(0, 199)];
+        }
+        $s[] = $linie;
+    }
+    return json_encode(['s' => $s]);
+}
