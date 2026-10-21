@@ -13,6 +13,7 @@
  * @var list<array<string,mixed>> $vorgaenge
  * @var list<array<string,mixed>> $inventar
  * @var array<string,mixed> $eingabe
+ * @var bool $eingerichtet Eventworx eingerichtet
  */
 use App\Kunden\Kundenbereich;
 use App\Kunden\Pruefnachweise;
@@ -107,6 +108,27 @@ $felder = ['standorte' => $standorte, 'vorgaenge' => $vorgaenge, 'inventar' => $
     </div>
     <div class="card-footer"><button class="btn btn-primary" type="submit">Hinterlegen</button></div>
 </form>
+<div class="card mt" id="aus-eventworx">
+    <div class="card-head"><h2>Aus Eventworx übernehmen</h2><span class="hint">PDFs am Auftrag oder Lieferschein</span></div>
+    <div class="card-body">
+        <?php if (!$eingerichtet): ?>
+            <p class="muted mb0">Eventworx ist nicht eingerichtet (Systemeinstellungen).</p>
+        <?php elseif ($vorgaenge === []): ?>
+            <p class="muted mb0">Erst unter „Vorgänge“ einen Eventworx-Auftrag oder -Lieferschein dieses Kunden verknüpfen.</p>
+        <?php else: ?>
+            <div class="aktionen-zeile">
+                <?php foreach ($vorgaenge as $vg): ?>
+                    <form method="post" action="<?= View::e($basis . 'eventworx') ?>">
+                        <?= Csrf::field() ?><input type="hidden" name="vorgang" value="<?= (int) $vg['id'] ?>">
+                        <button class="btn btn-sm" type="submit"><?= View::e((\App\Services\Eventworx::ART_NAMEN[(string) $vg['ewx_art']] ?? 'Vorgang') . ' ' . (string) $vg['ewx_nummer']) ?></button></form>
+                <?php endforeach; ?>
+            </div>
+        <?php endif; ?>
+        <p class="help">Gezeigt werden Dateien, die in Eventworx am Auftrag oder Lieferschein hochgeladen sind. Prüfberichte aus
+            „Werkstatt → Prüfungen“ (am Gerät) sind über die Schnittstelle noch nicht nachgewiesen – bitte von Hand hinterlegen.
+            Übernommen wird nur, was du auswählst; Prüfdatum und Frist trägst du aus dem Protokoll ein.</p>
+    </div>
+</div>
 <?php else: ?>
     <p class="notice mt">Prüfnachweise hinterlegen und freigeben darf, wer das Recht „Prüfnachweise (DGUV V3) …“ hat.</p>
 <?php endif; ?>

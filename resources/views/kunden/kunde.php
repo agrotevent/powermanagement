@@ -1,7 +1,7 @@
 <?php
 /**
- * Ein Kunde – Reiter Übersicht, Stammdaten, Zugänge, Freigaben, Protokolle,
- * Prüfnachweise, Abrufe (Zugänge, Freigaben und Abrufe nur mit
+ * Ein Kunde – Reiter Übersicht, Stammdaten, Zugänge, Freigaben, Vorgänge,
+ * Protokolle, Prüfnachweise, Abrufe (Zugänge, Freigaben und Abrufe nur mit
  * „kunden.manage“). Die Zahl an den Reitern Protokolle und Prüfnachweise:
  * was der Kunde davon sieht.
  *
@@ -38,6 +38,7 @@ $id = (int) $kunde['id'];
             echo match ($k) {
                 'zugaenge'  => ' (' . (int) $zahlen['zugaenge'] . ')',
                 'freigaben' => ' (' . (int) $zahlen['freigaben'] . ')',
+                'vorgaenge' => ' (' . (int) $zahlen['vorgaenge'] . ')',
                 'protokolle' => ' (' . (int) $zahlen['berichte'] . ')',
                 'nachweise' => ' (' . (int) $zahlen['nachweise'] . ')',
                 default     => '',

@@ -10,6 +10,7 @@
  * @var list<array{id:int,name:string}> $standorte Pruefnachweise::standorte()
  * @var list<array<string,mixed>> $vorgaenge Pruefnachweise::vorgaenge()
  * @var list<array<string,mixed>> $inventar Pruefnachweise::inventar()
+ * @var bool $bezeichnungOptional (aus Eventworx: leer = der Dateiname)
  */
 use App\Kunden\Pruefnachweise;
 use App\Support\View;
@@ -23,9 +24,10 @@ if ($site > 0 && !in_array($site, array_column($orte, 'id'), true)) {
     $orte[] = ['id' => $site, 'name' => $v('standort_name') !== '' ? $v('standort_name') : 'Location #' . $site];
 }
 $art = static fn (string $a): string => match ($a) { 'order' => 'Auftrag', 'deliverynote' => 'Lieferschein', default => 'Vorgang' };
+$optional = !empty($bezeichnungOptional);
 ?>
-<div class="field"><label for="<?= View::e($p) ?>-bez">Gerät / Bezeichnung</label>
-    <input id="<?= View::e($p) ?>-bez" name="bezeichnung" required minlength="2" maxlength="255" value="<?= View::e($v('bezeichnung')) ?>"
+<div class="field"><label for="<?= View::e($p) ?>-bez">Gerät / Bezeichnung<?= $optional ? ' (leer: der Dateiname)' : '' ?></label>
+    <input id="<?= View::e($p) ?>-bez" name="bezeichnung"<?= $optional ? '' : ' required minlength="2"' ?> maxlength="255" value="<?= View::e($v('bezeichnung')) ?>"
         placeholder="z. B. Verteiler PD63-07 oder Sammelnachweis 32 Geräte"></div>
 <div class="field-row">
     <div class="field"><label for="<?= View::e($p) ?>-inv">Inventarnummer</label>

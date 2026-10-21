@@ -88,6 +88,24 @@ try {
             pruefe(!str_contains((string) file_get_contents(dirname(__DIR__) . '/' . $datei), 'Eventworx::'), $datei . ' fragt Eventworx nicht');
         }
     }
+    // Eventworx nur lesend: jede Anfrage ein GET; die Lese-Probe hat keinen eigenen Netzweg und keinen Download;
+    // wer auf Eventworx wartet (Kundenverwaltung), hält die Sitzung nicht.
+    $ewxQuelle = (string) file_get_contents(dirname(__DIR__) . '/src/Services/Eventworx.php');
+    preg_match_all('/Http::anfrage\(\s*([^,]+),/', $ewxQuelle, $m);
+    gleich($m[1], ["'GET'"], 'Eventworx: genau ein Netzweg, und der mit GET');
+    $probeQuelle = (string) file_get_contents(dirname(__DIR__) . '/src/Services/EventworxProbe.php');
+    pruefe(!str_contains($probeQuelle, 'Http::') && preg_match(\App\Services\EventworxProbe::PFADE, 'file/0123456789abcdef01234567') !== 1
+        && preg_match(\App\Services\EventworxProbe::PFADE, 'stock/update') !== 1 && preg_match(\App\Services\EventworxProbe::PFADE, 'file/delete/0123456789abcdef01234567') !== 1,
+        'Lese-Probe: kein eigener Netzweg, kein Download, kein update/delete');
+    foreach (['src/Controllers/KundenController.php' => ['KundenService::eventworxSuchen', 'KundenService::vorgangVerknuepfen'],
+        'src/Controllers/PruefnachweiseController.php' => ['Pruefnachweise::eventworxKandidaten', 'Pruefnachweise::eventworxUebernehmen']] as $datei => $aufrufe) {
+        $quelle = (string) file_get_contents(dirname(__DIR__) . '/' . $datei);
+        foreach ($aufrufe as $aufruf) {
+            $zeilen = array_values(array_filter(explode("\n", $quelle), static fn (string $z): bool => str_contains($z, $aufruf . '(')));
+            pruefe($zeilen !== [] && array_filter($zeilen, static fn (string $z): bool => !str_contains($z, 'ohneSitzungssperre(')) === [],
+                $datei . ': ' . $aufruf . ' nur ohne Sitzungssperre');
+        }
+    }
     gleich(Response::sichererDateiname("Muster Events GmbH & Co. KG \"ü\"\r\nX.pdf"), 'Muster-Events-GmbH-Co.-KG-X.pdf',
         'Dateiname in Content-Disposition nur ASCII ohne Anführungszeichen und Zeilenumbruch');
     gleich(Response::sichererDateiname('../..'), 'dokument.pdf', 'leerer Dateiname: Ersatz');

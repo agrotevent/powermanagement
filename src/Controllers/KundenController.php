@@ -12,6 +12,7 @@ use App\Kunden\KundenEinstellungen;
 use App\Kunden\KundenService;
 use App\Kunden\Pruefnachweise;
 use App\Services\BenutzerService;
+use App\Services\Eventworx;
 use App\Services\SiteService;
 use App\Support\EinmalMarke;
 use App\Support\Flash;
@@ -38,6 +39,12 @@ use App\Support\View;
  * Bericht ab, erst nach einer Rückfrage. Prüfnachweise (Reiter
  * Prüfnachweise) hinterlegt und gibt frei, wer „kunden.nachweise“ hat
  * (PruefnachweiseController).
+ *
+ * Eventworx-Vorgänge (Reiter Vorgänge): suchen und verknüpfen mit
+ * „kunden.manage“ und „berichte.eventworx“ (die Suche zeigt alle Vorgänge
+ * des Mandanten). Beides wartet auf Eventworx und hält dabei die Sitzung
+ * nicht (ohneSitzungssperre). Die Treffer stehen direkt in der Antwort;
+ * die Sitzung merkt sich nur ihre Kennungen, Nummern und Arten.
  */
 final class KundenController extends Controller
 {
@@ -49,6 +56,7 @@ final class KundenController extends Controller
         'stammdaten' => ['Stammdaten', false],
         'zugaenge'   => ['Zugänge', true],
         'freigaben'  => ['Freigaben', true],
+        'vorgaenge'  => ['Vorgänge', false],
         'protokolle' => ['Protokolle', false],
         'nachweise'  => ['Prüfnachweise', false],
         'abrufe'     => ['Abrufe', true],
@@ -98,47 +106,7 @@ final class KundenController extends Controller
         if ($kunde === null) {
             return;
         }
-        $id = (int) $kunde['id'];
-        $tab = array_key_exists($request->str('tab'), self::REITER) ? $request->str('tab') : 'uebersicht';
-        $pflegen = Auth::can('kunden.manage');
-        if (self::REITER[$tab][1] && !$pflegen) {
-            Response::forbidden('Zugänge und Freigaben eines Kunden sieht nur, wer Kunden pflegen darf.');
-            return;
-        }
-        $eingabe = $this->eingabe((string) $id);
-        $daten = [
-            'kunde'      => $kunde,
-            'tab'        => $tab,
-            'reiter'     => array_filter(self::REITER, static fn (array $r): bool => !$r[1] || $pflegen),
-            'pflegen'    => $pflegen,
-            'zahlen'     => KundenService::zahlen($id),
-            'eingabe'    => $eingabe,
-        ];
-        if ($tab === 'uebersicht') {
-            $daten['uebersicht'] = KundenService::uebersicht($id);
-        } elseif ($tab === 'zugaenge') {
-            $daten['zugaenge'] = KundenService::zugaenge($id);
-            $daten['einmal'] = EinmalMarke::ausgeben(self::EINMAL);
-            $daten['adresse'] = KundenEinstellungen::adresse();
-        } elseif ($tab === 'freigaben') {
-            $alles = BenutzerService::darfFreigabeVergeben('site', false);
-            $daten['freigaben'] = KundenService::freigaben($id);
-            $daten['darfFreigeben'] = $alles;
-            $daten['standorte'] = $alles ? SiteService::all() : [];
-        } elseif ($tab === 'protokolle') {
-            $daten['protokolle'] = KundenService::protokolle($id);
-            $daten['rueckfrage'] = $pflegen ? KundenService::rueckfrage(null, $id) : null;
-        } elseif ($tab === 'nachweise') {
-            $darf = Auth::can('kunden.nachweise');
-            $daten['nachweise'] = Pruefnachweise::fuerPersonal($id);
-            $daten['darfNachweise'] = $darf;
-            $daten['standorte'] = $darf ? Pruefnachweise::standorte($id) : [];
-            $daten['vorgaenge'] = $darf ? Pruefnachweise::vorgaenge($id) : [];
-            $daten['inventar'] = $darf ? Pruefnachweise::inventar() : [];
-        } elseif ($tab === 'abrufe') {
-            $daten['abrufe'] = Abrufe::fuerKunde($id);
-        }
-        $this->view('kunden/kunde', $daten);
+        $this->seite($kunde, $request->str('tab'));
     }
 
     public function loeschen(Request $request, array $params): void
@@ -258,6 +226,84 @@ final class KundenController extends Controller
         $this->redirect(self::ZIEL . '/' . $id . '?tab=freigaben');
     }
 
+    // ------------------------------------------------------------ Vorgänge (Eventworx)
+
+    /**
+     * Aufträge und Lieferscheine in Eventworx suchen (q). Die Treffer stehen
+     * direkt in dieser Antwort (nicht zwischengespeichert); gemerkt werden
+     * nur Kennung, Nummer und Art – Verknüpfen nimmt nur diese.
+     */
+    public function eventworxSuche(Request $request, array $params): void
+    {
+        $kunde = $this->kunde($params);
+        if ($kunde === null) {
+            return;
+        }
+        $id = (int) $kunde['id'];
+        $text = mb_substr($request->str('q'), 0, 100);
+        [$r, $angemeldet] = $this->ohneSitzungssperre(static fn (): array => KundenService::eventworxSuchen($id, $text));
+        if (!$angemeldet) {
+            $this->abgemeldet();
+            return;
+        }
+        if (!$r['ok']) {
+            Flash::error($r['message']);
+            $this->redirect(self::ZIEL . '/' . $id . '?tab=vorgaenge#eventworx-suche');
+            return;
+        }
+        KundenService::trefferMerken($id, $r['treffer']);
+        header('Cache-Control: no-store');
+        $this->seite($kunde, 'vorgaenge', ['suche' => ['text' => $text, 'treffer' => $r['treffer'], 'message' => $r['message']]]);
+    }
+
+    /**
+     * Einen Treffer der Suche verknüpfen: job_id (nur aus den gemerkten
+     * Treffern), bestaetigt, stammdaten. Braucht es eine Bestätigung, steht
+     * die Rückfrage – mit dem Namen aus Eventworx – direkt in der Antwort.
+     */
+    public function eventworxVerknuepfen(Request $request, array $params): void
+    {
+        $kunde = $this->kunde($params);
+        if ($kunde === null) {
+            return;
+        }
+        $id = (int) $kunde['id'];
+        $jobId = $request->str('job_id');
+        $bestaetigt = $request->bool('bestaetigt');
+        $stammdaten = $request->bool('stammdaten');
+        [$r, $angemeldet] = $this->ohneSitzungssperre(static fn (): array => KundenService::vorgangVerknuepfen($id, $jobId, $bestaetigt, $stammdaten));
+        if (!$angemeldet) {
+            $this->abgemeldet();
+            return;
+        }
+        if (!empty($r['bestaetigen'])) {
+            header('Cache-Control: no-store');
+            $treffer = KundenService::treffer($id)[$jobId] ?? ['nummer' => '', 'art' => ''];
+            $this->seite(KundenService::find($id) ?? $kunde, 'vorgaenge', ['rueckfrage' => ['job_id' => $jobId, 'text' => $r['message'],
+                'nummer' => $treffer['nummer'], 'stammdaten' => $stammdaten]]);
+            return;
+        }
+        $r['ok'] ? Flash::success($r['message']) : Flash::error($r['message']);
+        $this->redirect(self::ZIEL . '/' . $id . '?tab=vorgaenge');
+    }
+
+    public function vorgangLoesen(Request $request, array $params): void
+    {
+        $kunde = $this->kunde($params);
+        if ($kunde === null) {
+            return;
+        }
+        $id = (int) $kunde['id'];
+        $vid = ctype_digit((string) ($params['vid'] ?? '')) ? (int) $params['vid'] : 0;
+        if (KundenService::vorgang($id, $vid) === null) {
+            Response::notFound('Diesen Vorgang gibt es nicht.');
+            return;
+        }
+        $r = KundenService::vorgangLoesen($id, $vid);
+        $r['ok'] ? Flash::success($r['message']) : Flash::error($r['message']);
+        $this->redirect(self::ZIEL . '/' . $id . '?tab=vorgaenge');
+    }
+
     /**
      * Bericht ↔ Kunde: kunde_id (leer = aus dem Kundenbereich nehmen),
      * bestaetigt (bei abweichendem Namen), zurueck (Kunden-ID: zurück zum
@@ -293,6 +339,75 @@ final class KundenController extends Controller
     }
 
     // ------------------------------------------------------------ Hilfen
+
+    /**
+     * Eine Kundenseite mit einem Reiter (Liste geprüft; ohne „kunden.manage“
+     * nur die Reiter ohne Zugänge, Freigaben, Abrufe). $extra kommt dazu –
+     * Treffer einer Suche, eine Rückfrage –, nur für diese Antwort.
+     *
+     * @param array<string,mixed> $kunde
+     * @param array<string,mixed> $extra
+     */
+    private function seite(array $kunde, string $tab, array $extra = []): void
+    {
+        $id = (int) $kunde['id'];
+        $tab = array_key_exists($tab, self::REITER) ? $tab : 'uebersicht';
+        $pflegen = Auth::can('kunden.manage');
+        if (self::REITER[$tab][1] && !$pflegen) {
+            Response::forbidden('Zugänge und Freigaben eines Kunden sieht nur, wer Kunden pflegen darf.');
+            return;
+        }
+        $eingabe = $this->eingabe((string) $id);
+        $daten = [
+            'kunde'      => $kunde,
+            'tab'        => $tab,
+            'reiter'     => array_filter(self::REITER, static fn (array $r): bool => !$r[1] || $pflegen),
+            'pflegen'    => $pflegen,
+            'zahlen'     => KundenService::zahlen($id),
+            'eingabe'    => $eingabe,
+        ];
+        if ($tab === 'uebersicht') {
+            $daten['uebersicht'] = KundenService::uebersicht($id);
+        } elseif ($tab === 'zugaenge') {
+            $daten['zugaenge'] = KundenService::zugaenge($id);
+            $daten['einmal'] = EinmalMarke::ausgeben(self::EINMAL);
+            $daten['adresse'] = KundenEinstellungen::adresse();
+        } elseif ($tab === 'freigaben') {
+            $alles = BenutzerService::darfFreigabeVergeben('site', false);
+            $daten['freigaben'] = KundenService::freigaben($id);
+            $daten['darfFreigeben'] = $alles;
+            $daten['standorte'] = $alles ? SiteService::all() : [];
+        } elseif ($tab === 'vorgaenge') {
+            $daten['vorgaenge'] = KundenService::vorgaenge($id);
+            $daten['darfSuchen'] = $pflegen && Auth::can('berichte.eventworx');
+            $daten['darfNachweise'] = Auth::can('kunden.nachweise');
+            $daten['eingerichtet'] = Eventworx::eingerichtet();
+            $daten['links'] = Auth::can('berichte.eventworx');
+            $daten['suche'] = $extra['suche'] ?? null;
+            $daten['rueckfrage'] = $extra['rueckfrage'] ?? null;
+        } elseif ($tab === 'protokolle') {
+            $daten['protokolle'] = KundenService::protokolle($id);
+            $daten['rueckfrage'] = $pflegen ? KundenService::rueckfrage(null, $id) : null;
+        } elseif ($tab === 'nachweise') {
+            $darf = Auth::can('kunden.nachweise');
+            $daten['nachweise'] = Pruefnachweise::fuerPersonal($id);
+            $daten['darfNachweise'] = $darf;
+            $daten['standorte'] = $darf ? Pruefnachweise::standorte($id) : [];
+            $daten['vorgaenge'] = $darf ? Pruefnachweise::vorgaenge($id) : [];
+            $daten['inventar'] = $darf ? Pruefnachweise::inventar() : [];
+            $daten['eingerichtet'] = Eventworx::eingerichtet();
+        } elseif ($tab === 'abrufe') {
+            $daten['abrufe'] = Abrufe::fuerKunde($id);
+        }
+        $this->view('kunden/kunde', $daten);
+    }
+
+    /** Während des Wartens abgemeldet (oder Kennwort geändert): zur Anmeldung, ohne etwas zu zeigen. */
+    private function abgemeldet(): void
+    {
+        Flash::warning('Sitzung beendet – bitte neu anmelden.');
+        $this->redirect('/login');
+    }
 
     /**
      * Der Kunde aus der Adresse – nur eine ganze Zahl, sonst und wenn es ihn

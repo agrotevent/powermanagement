@@ -25,6 +25,15 @@ declare(strict_types=1);
  * im Kundenbereich die Liste (nur Freigegebenes, Filter je Location) und das
  * PDF (Anhang, neutraler Name, Kopfzeilen, Prüfsumme, Abruf festgehalten).
  *
+ * Aus Eventworx (Attrappe bzw. die Eventworx-Demo des Servers): Reiter
+ * Vorgänge und „aus Eventworx“ (Rechte, fremde Vorgänge 404, ohne
+ * CSRF-Token nichts), Suche mit den Treffern direkt in der Antwort, Rückfrage
+ * vor dem Verknüpfen, Kandidaten nur hochgeladene PDFs, Übernahme nur
+ * gezeigt ∩ gemerkt ∩ frisch gelesen (sonst ohne Netz abgelehnt), Kunde in
+ * Eventworx gewechselt → nichts, schon übernommen (auch bei einem anderen
+ * Kunden), höchstens fünf je Durchgang, Herkunft ohne Inhalt, Lösen lässt
+ * die Nachweise beim Kunden.
+ *
  * Eigene Kunden, Konten, Rollen, Standorte, Inventar und Dateien mit
  * eindeutiger Kennung; am Ende ist alles weg.
  */
@@ -36,7 +45,9 @@ use App\Kunden\Kundenbereich;
 use App\Kunden\KundenService;
 use App\Kunden\KundenSicht;
 use App\Kunden\Pruefnachweise;
+use App\Messung\Http;
 use App\Services\BenutzerService;
+use App\Services\Eventworx;
 use App\Services\InventarService;
 use App\Services\SiteService;
 use App\Support\Config;
@@ -60,6 +71,11 @@ $inventar = [];
 $auditVorher = (int) Database::scalar('SELECT COALESCE(MAX(id), 0) FROM audit_log');
 $jahreVorher = Settings::get('kundenbereich.nachweise_jahre');
 $zoneVorher = (string) Config::get('app.timezone', 'Europe/Berlin');
+$konfigVorher = ['app.demo' => Config::get('app.demo'), 'eventworx.basis' => Config::get('eventworx.basis')];
+$ewxVorher = [];
+foreach ([Eventworx::EINSTELLUNG_HOST, Eventworx::EINSTELLUNG_TOKEN_HOST, Settings::GEHEIM_EVENTWORX_TOKEN] as $s) {
+    $ewxVorher[$s] = Settings::get($s);
+}
 $logDatei = dirname(__DIR__) . '/storage/logs/app.log';
 $logVorher = is_file($logDatei) ? (int) filesize($logDatei) : 0;
 
@@ -573,6 +589,222 @@ try {
         anfrage($basis, $kunde['dose'], 'GET', '/kundenbereich/pruefnachweise/' . $nh . '/pdf')['status']], [null, 0, 0, 404], 'gelöscht: Nachweis, Datei, Abrufe; Kunde 404');
     gleich(meldungenDesServers($serverFehler), [], 'Löschen ohne PHP-Meldung');
 
+    // ------------------------------------------------ Vorgänge und Nachweise aus Eventworx über HTTP (Eventworx der Demo)
+    $vReiter = '/kunden/' . $k1 . '?tab=vorgaenge';
+    $s = anfrage($basis, $planung['dose'], 'GET', $vReiter);
+    pruefe($s['status'] === 200 && str_contains($s['text'], 'id="vorgang-' . $v1 . '"') && str_contains($s['text'], 'action="/kunden/' . $k1 . '/eventworx/suche"')
+        && str_contains($s['text'], 'action="/kunden/' . $k1 . '/vorgang/' . $v1 . '/loesen"') && str_contains($s['text'], 'action="/kunden/' . $k1 . '/nachweise/eventworx"')
+        && str_contains($s['text'], 'Vorgänge (1)') && !str_contains($s['text'], 'onclick='), 'Reiter Vorgänge: Liste, Suche, Lösen, Dateien ansehen');
+    $s = anfrage($basis, $planung['dose'], 'GET', $reiter);
+    pruefe(str_contains($s['text'], 'id="aus-eventworx"') && str_contains($s['text'], 'name="vorgang" value="' . $v1 . '"'), 'Reiter Prüfnachweise: aus Eventworx je Vorgang');
+    $technik = anmeldenAls($basis, $kennung . '-technik', $kennwort, $dosen);
+    $s = anfrage($basis, $technik['dose'], 'GET', $vReiter);
+    $tt = csrfAus($s['text']);
+    pruefe($s['status'] === 200 && !str_contains($s['text'], '/eventworx/suche"') && !str_contains($s['text'], '/loesen"') && str_contains($s['text'], 'PDF-Dateien ansehen'),
+        'Elektrotechnik: Vorgänge ansehen und Dateien ansehen, nicht suchen und nicht lösen');
+    gleich([anfrage($basis, $technik['dose'], 'POST', '/kunden/' . $k1 . '/eventworx/suche', ['_token' => $tt, 'q' => 'AU-1042'])['status'],
+        anfrage($basis, $technik['dose'], 'POST', '/kunden/' . $k1 . '/eventworx/verknuepfen', ['_token' => $tt, 'job_id' => (string) Eventworx::demo()[0]['id']])['status'],
+        anfrage($basis, $technik['dose'], 'POST', '/kunden/' . $k1 . '/vorgang/' . $v1 . '/loesen', ['_token' => $tt])['status']], [403, 403, 403],
+        'Elektrotechnik: suchen, verknüpfen, lösen 403');
+    foreach ([['/kunden/' . $k1 . '/nachweise/eventworx', ['vorgang' => (string) $v2]], ['/kunden/' . $k1 . '/nachweise/eventworx', ['vorgang' => '999999999']],
+        ['/kunden/' . $k1 . '/nachweise/eventworx', ['vorgang' => $v1 . 'x']], ['/kunden/' . $kunden['k2'] . '/nachweise/eventworx', ['vorgang' => (string) $v1]],
+        ['/kunden/' . $k1 . '/nachweise/eventworx/uebernehmen', ['vorgang' => (string) $v2, 'datei' => ['aaaaaaaaaaaaaaaaaaaaaaaa']]],
+        ['/kunden/' . $k1 . '/vorgang/' . $v2 . '/loesen', []], ['/kunden/' . $kunden['k2'] . '/vorgang/' . $v1 . '/loesen', []]] as [$pfad, $f]) {
+        gleich(anfrage($basis, $planung['dose'], 'POST', $pfad, ['_token' => $token] + $f)['status'], 404, 'Vorgang eines anderen Kunden bzw. kaputt: ' . $pfad . ' → 404');
+    }
+    $vorgangDa = static fn (int $v): bool => Database::first('SELECT id FROM kunden_vorgaenge WHERE id = ?', [$v]) !== null;
+    anfrage($basis, $planung['dose'], 'POST', '/kunden/' . $k1 . '/vorgang/' . $v1 . '/loesen', []);
+    $ohneToken = anfrage($basis, $planung['dose'], 'POST', '/kunden/' . $k1 . '/eventworx/suche', ['q' => 'AU-1042']);
+    pruefe($vorgangDa($v1) && $vorgangDa($v2) && !str_contains($ohneToken['text'], 'eventworx-treffer'), 'ohne CSRF-Token: nicht gelöst, nicht gesucht');
+    anfrage($basis, $planung['dose'], 'GET', $vReiter);   // Meldungen abholen
+
+    $demoJob = Eventworx::demo()[0];
+    $r = anfrage($basis, $planung['dose'], 'POST', '/kunden/' . $k1 . '/eventworx/suche', ['_token' => $token, 'q' => 'AU-1042']);
+    pruefe($r['status'] === 200 && kopfzeile($r, 'Cache-Control') === 'no-store' && str_contains($r['text'], 'id="eventworx-treffer"') && str_contains($r['text'], 'AU-1042')
+        && str_contains($r['text'], 'Sommerfestival 2026') && !str_contains($r['text'], 'AN-1050'), 'Demo-Suche: Treffer direkt in der Antwort, no-store, kein Angebot');
+    $demoHost = (string) Settings::get(Eventworx::EINSTELLUNG_HOST, '');
+    $belegt = Database::first('SELECT k.name FROM kunden_vorgaenge v JOIN kunden k ON k.id = v.kunde_id WHERE v.ewx_host = ? AND v.ewx_id = ?', [$demoHost, $demoJob['id']]);
+    $refBelegt = Database::first('SELECT name FROM kunden WHERE ewx_host = ? AND ewx_kunde_ref = ?', [$demoHost, $demoJob['customerRefId']]);
+    $r = anfrage($basis, $planung['dose'], 'POST', '/kunden/' . $k1 . '/eventworx/verknuepfen', ['_token' => $token, 'job_id' => (string) $demoJob['id']]);
+    $demoVorgang = static fn (): ?int => ($z = Database::first('SELECT id FROM kunden_vorgaenge WHERE kunde_id = ? AND ewx_id = ?', [$k1, $demoJob['id']])) !== null ? (int) $z['id'] : null;
+    if ($belegt !== null || $refBelegt !== null) {
+        // Die Demo hat den Auftrag schon einem Demo-Kunden gegeben.
+        pruefe($r['status'] === 302 && str_contains(meldungen(anfrage($basis, $planung['dose'], 'GET', $vReiter)['text']), 'schon Kunde')
+            && $demoVorgang() === null, 'Demo-Auftrag gehört schon einem anderen Kunden → nicht verknüpft');
+    } else {
+        pruefe($r['status'] === 200 && str_contains($r['text'], 'id="eventworx-rueckfrage"') && str_contains($r['text'], 'Muster Events GmbH &amp; Co. KG')
+            && $demoVorgang() === null, 'Demo: Rückfrage mit dem Namen aus Eventworx, noch nichts verknüpft');
+        $r = anfrage($basis, $planung['dose'], 'POST', '/kunden/' . $k1 . '/eventworx/verknuepfen', ['_token' => $token, 'job_id' => (string) $demoJob['id'], 'bestaetigt' => '1']);
+        $vDemo = $demoVorgang();
+        pruefe($r['status'] === 302 && $vDemo !== null, 'Demo: bestätigt → verknüpft');
+        $r = anfrage($basis, $planung['dose'], 'POST', '/kunden/' . $k1 . '/nachweise/eventworx', ['_token' => $token, 'vorgang' => (string) $vDemo]);
+        $dateiId = preg_match('/name="datei\[\]" value="([0-9a-f]{24})"/', $r['text'], $m) === 1 ? $m[1] : '';
+        pruefe($r['status'] === 200 && kopfzeile($r, 'Cache-Control') === 'no-store' && str_contains($r['text'], 'DGUV V3 Prüfprotokolle Verteiler und Kabel 2026.pdf')
+            && !str_contains($r['text'], 'Auftrag AU-1042.pdf') && $dateiId !== '', 'Demo: Dateien am Auftrag zum Auswählen, ohne den Beleg');
+        $zahlE = static fn (): int => (int) Database::scalar("SELECT COUNT(*) FROM pruefnachweise WHERE kunde_id = ? AND quelle = 'ewx_vorgang'", [$k1]);
+        $uebernehmen = static fn (array $f): array => anfrage($basis, $planung['dose'], 'POST', '/kunden/' . $k1 . '/nachweise/eventworx/uebernehmen',
+            $f + ['_token' => $token, 'vorgang' => (string) $vDemo, 'datei' => [$dateiId], 'bezeichnung' => '', 'naechste_pruefung' => $tagIn(200), 'freigeben' => '1']);
+        $r = $uebernehmen(['geprueft_am' => '']);
+        pruefe($r['status'] === 200 && str_contains(meldungen($r['text']), 'Prüfdatum fehlt') && str_contains($r['text'], 'value="' . $dateiId . '" checked') && $zahlE() === 0,
+            'Demo: Übernehmen ohne Prüfdatum → dieselbe Liste mit Meldung, Auswahl bleibt, nichts übernommen');
+        $r = $uebernehmen(['geprueft_am' => $tagIn(-3)]);
+        $ne = (int) Database::scalar("SELECT id FROM pruefnachweise WHERE kunde_id = ? AND quelle = 'ewx_vorgang'", [$k1]);
+        pruefe($r['status'] === 302 && $r['ziel'] === '/kunden/' . $k1 . '?tab=nachweise' && $ne > 0 && ($nachweis($ne)['status'] ?? '') === 'freigegeben'
+            && ($nachweis($ne)['bezeichnung'] ?? '') === 'DGUV V3 Prüfprotokolle Verteiler und Kabel 2026', 'Demo: übernommen und freigegeben, Bezeichnung aus dem Dateinamen');
+        $liste = anfrage($basis, $kunde['dose'], 'GET', '/kundenbereich/pruefnachweise');
+        $kp = anfrage($basis, $kunde['dose'], 'GET', '/kundenbereich/pruefnachweise/' . $ne . '/pdf');
+        pruefe(str_contains($liste['text'], 'aus Eventworx-Auftrag AU-1042') && $kp['status'] === 200 && str_starts_with($kp['text'], '%PDF-'),
+            'Kundenbereich: der Nachweis aus Eventworx mit Quelle, PDF');
+        $r = $uebernehmen(['geprueft_am' => $tagIn(-3)]);
+        pruefe($zahlE() === 1 && str_contains(meldungen(anfrage($basis, $planung['dose'], 'GET', $reiter)['text']), 'schon übernommen'), 'Demo: dieselbe Datei zweimal → schon übernommen');
+    }
+    // Lösen über HTTP: Nachweise aus dem Vorgang bleiben, ohne Verweis.
+    gleich((int) ($nachweis($n2)['vorgang_id'] ?? 0), $v1, 'vor dem Lösen: Nachweis n2 nennt den Vorgang');
+    $r = anfrage($basis, $planung['dose'], 'POST', '/kunden/' . $k1 . '/vorgang/' . $v1 . '/loesen', ['_token' => $token]);
+    pruefe($r['status'] === 302 && !$vorgangDa($v1) && $nachweis($n2) !== null && $nachweis($n2)['vorgang_id'] === null, 'gelöst: Vorgang weg, Nachweis bleibt ohne Verweis');
+    $r = Pruefnachweise::speichern($k1, $n2, $angaben(['bezeichnung' => $kennung . ' Kabeltrommel KT-12', 'geprueft_am' => '2026-03-12', 'site_id' => (string) $sites['c']]));
+    pruefe($r['ok'], 'Nachweis aus einem gelösten Vorgang lässt sich weiter bearbeiten: ' . $r['message']);
+    gleich(meldungenDesServers($serverFehler), [], 'Vorgänge und Eventworx-Seiten ohne PHP-Meldung');
+
+    // ------------------------------------------------ Prüfnachweise aus Eventworx (Dienst, Http-Attrappe)
+    alsBenutzer($personal['planung']);
+    Config::set('app.demo', false);
+    Config::set('eventworx.basis', '');
+    $ewxHost = $kennung . '.eventworx.biz';
+    $uhr = microtime(true) - 2000.0;
+    Eventworx::$uhr = static function () use (&$uhr): float {
+        return $uhr;
+    };
+    Eventworx::$schlafen = static function (float $s) use (&$uhr): void {
+        $uhr += $s;
+    };
+    pruefe(Eventworx::einstellungenSpeichern($ewxHost, 'tok-' . $kennung . '-' . bin2hex(random_bytes(8)))['ok'], 'Eventworx für die Prüfung eingerichtet');
+    $jobE = bin2hex(random_bytes(12));
+    $refE = bin2hex(random_bytes(12));
+    $jobRef = $refE;
+    $ewxDateien = [];
+    $ewxPfade = [];
+    $neueDatei = static function (string $name, array $mehr = [], ?string $bytes = null) use (&$ewxDateien, $jobE, $pdf): string {
+        $id = bin2hex(random_bytes(12));
+        $ewxDateien[$id] = ['meta' => $mehr + ['id' => $id, 'documentName' => $name, 'contentType' => 'application/pdf', 'timeStamp' => 1783720800000,
+            'path' => '/job/documents/P-77', 'ownerDocumentId' => $jobE, 'description' => ''], 'bytes' => $bytes ?? $pdf($name)];
+        return $id;
+    };
+    Http::$attrappe = static function (string $methode, string $url, array $optionen) use (&$ewxPfade, &$ewxDateien, &$jobRef, $jobE): array {
+        $pfad = substr((string) parse_url($url, PHP_URL_PATH), strlen('/backend/'));
+        $ewxPfade[] = $pfad;
+        $json = static fn (array $d): array => ['ok' => true, 'status' => 200, 'fehler' => '', 'rumpf' => (string) json_encode($d)];
+        if ($pfad === 'job/' . $jobE) {
+            return $json(['success' => true, 'data' => ['id' => $jobE, 'docType' => 'order', 'jobNumber' => 'AU-9901', 'title' => 'Fest']
+                + ($jobRef !== null ? ['customerRefId' => $jobRef] : [])]);
+        }
+        if ($pfad === 'file/list') {
+            return $json(['success' => true, 'total' => count($ewxDateien), 'data' => array_values(array_column($ewxDateien, 'meta'))]);
+        }
+        if (str_starts_with($pfad, 'file/') && isset($ewxDateien[substr($pfad, 5)])) {
+            return ['ok' => true, 'status' => 200, 'fehler' => '', 'rumpf' => $ewxDateien[substr($pfad, 5)]['bytes']];
+        }
+        return ['ok' => true, 'status' => 404, 'fehler' => '', 'rumpf' => '{"success":false,"errorCode":"NOT_FOUND"}'];
+    };
+    Database::update('kunden', $k1, ['ewx_host' => $ewxHost, 'ewx_kunde_ref' => $refE, 'ewx_kunde_name' => 'Firma']);
+    KundenService::vergessen();
+    $vE = Database::insert('kunden_vorgaenge', ['kunde_id' => $k1, 'ewx_host' => $ewxHost, 'ewx_id' => $jobE, 'ewx_art' => 'order', 'ewx_nummer' => 'AU-9901',
+        'ewx_kunde_ref' => $refE, 'titel' => $kennung, 'von' => $tagIn(-3), 'bis' => $tagIn(3), 'verknuepft_am' => gmdate('c')]);
+    $d1 = $neueDatei('Prüfprotokoll Verteiler.pdf');
+    $d2 = $neueDatei('Prüfprotokoll Kabel.pdf');
+    $neueDatei('Auftrag AU-9901.pdf', ['metaDocType' => 'order']);
+    $neueDatei('rechnung.xml', ['contentType' => 'application/xml']);
+    $ewxPfade = [];
+    $kand = Pruefnachweise::eventworxKandidaten($k1, $vE);
+    $ids = array_column($kand['dateien'], 'id');
+    sort($ids);
+    $soll = [$d1, $d2];
+    sort($soll);
+    pruefe($kand['ok'] && $ids === $soll && array_column($kand['dateien'], 'schon') === [null, null], 'Kandidaten: nur die hochgeladenen PDFs, noch nicht übernommen');
+    gleich($ewxPfade, ['job/' . $jobE, 'file/list'], 'Kandidaten: Vorgang frisch gelesen, dann seine Dateiliste');
+    pruefe(Database::scalar('SELECT dokumente_am FROM kunden_vorgaenge WHERE id = ?', [$vE]) !== null, 'Kandidaten: „Dateien zuletzt gelesen“ gesetzt');
+    Pruefnachweise::dateienMerken($k1, $vE, $kand['dateien']);
+    gleich(array_keys(Pruefnachweise::gemerkteDateien($k1, $vE)[$d1] ?? []), ['name', 'zeit'], 'Merkliste: nur Name und Zeit je Datei');
+    $ewxAngaben = static fn (array $mehr = []): array => $mehr + ['bezeichnung' => '', 'geprueft_am' => $tagIn(-5), 'naechste_pruefung' => $tagIn(360), 'norm' => 'DIN EN 50699 (VDE 0702)'];
+    $ewxZahl = static fn (): int => (int) Database::scalar("SELECT COUNT(*) FROM pruefnachweise WHERE quelle = 'ewx_vorgang' AND ewx_host = ?", [$ewxHost]);
+    $ewxPfade = [];
+    $r = Pruefnachweise::eventworxUebernehmen($k1, $vE, [bin2hex(random_bytes(12))], $ewxAngaben(), false);
+    pruefe(!$r['ok'] && $ewxPfade === [] && $ewxZahl() === 0, 'Datei nicht aus der gezeigten Liste → abgelehnt, ohne Eventworx zu fragen');
+    $r = Pruefnachweise::eventworxUebernehmen($k1, $vE, [$d1], $ewxAngaben(['geprueft_am' => '']), false);
+    pruefe(!$r['ok'] && !empty($r['angaben']) && $ewxPfade === [], 'Angaben falsch → abgelehnt, ohne Eventworx zu fragen');
+    $jobRef = bin2hex(random_bytes(12));
+    $r = Pruefnachweise::eventworxUebernehmen($k1, $vE, [$d1], $ewxAngaben(), false);
+    pruefe(!$r['ok'] && str_contains($r['message'], 'inzwischen zu einem anderen Kunden') && !in_array('file/' . $d1, $ewxPfade, true) && $ewxZahl() === 0,
+        'Vorgang gehört in Eventworx inzwischen einem anderen Kunden → nichts geladen, nichts übernommen');
+    pruefe(!Pruefnachweise::eventworxKandidaten($k1, $vE)['ok'], '… und keine Kandidaten');
+    $jobRef = $refE;
+    $ewxPfade = [];
+    $r = Pruefnachweise::eventworxUebernehmen($k1, $vE, [$d1], $ewxAngaben(), false);
+    $ne = (int) Database::scalar('SELECT id FROM pruefnachweise WHERE ewx_host = ? AND ewx_datei_id = ?', [$ewxHost, $d1]);
+    $z = $nachweis($ne) ?? [];
+    pruefe($r['ok'] && $ewxPfade === ['job/' . $jobE, 'file/list', 'file/' . $d1], 'übernommen: Vorgang und Liste frisch, dann genau die gewählte Datei: ' . $r['message']);
+    gleich([$z['quelle'] ?? '', $z['status'] ?? '', (int) ($z['kunde_id'] ?? 0), (int) ($z['vorgang_id'] ?? 0), $z['bezeichnung'] ?? '', $z['einsatz_von'] ?? '', $z['einsatz_bis'] ?? '',
+        $z['datei_name'] ?? '', (int) ($z['erstellt_von'] ?? 0)],
+        ['ewx_vorgang', 'entwurf', $k1, $vE, 'Prüfprotokoll Verteiler', $tagIn(-3), $tagIn(3), 'Pruefprotokoll-Verteiler.pdf', $personal['planung']],
+        'Nachweis aus Eventworx: Quelle, Entwurf, Vorgang, Bezeichnung aus dem Dateinamen, Mietzeit des Vorgangs, Dateiname bereinigt');
+    $herkunft = json_decode((string) ($z['herkunft'] ?? ''), true) ?? [];
+    gleich(array_keys($herkunft), ['art', 'host', 'job_id', 'job_nummer', 'datei_id', 'name', 'zeit', 'abgerufen_am', 'abgerufen_von'], 'Herkunft vollständig');
+    gleich([$herkunft['host'] ?? '', $herkunft['job_id'] ?? '', $herkunft['job_nummer'] ?? '', $herkunft['datei_id'] ?? '', $herkunft['name'] ?? '', $herkunft['abgerufen_von'] ?? 0],
+        [$ewxHost, $jobE, 'AU-9901', $d1, 'Prüfprotokoll Verteiler.pdf', $personal['planung']], 'Herkunft: Mandant, Vorgang, Datei, Name, wer');
+    pruefe(strlen((string) $z['herkunft']) < 600 && !str_contains((string) $z['herkunft'], 'PDF-'), 'Herkunft ohne Inhalt');
+    gleich(Pruefnachweise::datei($z)['bytes'] ?? null, $ewxDateien[$d1]['bytes'], 'die Bytes aus Eventworx, Byte für Byte');
+    gleich(json_decode((string) (Database::first("SELECT details FROM audit_log WHERE action = 'kunden.nachweis_eventworx' AND target_id = ? ORDER BY id DESC LIMIT 1",
+        [(string) $k1])['details'] ?? '{}'), true), ['kunde_id' => $k1, 'vorgang_id' => $vE, 'anzahl' => 1, 'freigegeben' => false], 'Audit: nur IDs und Anzahl');
+    $ewxPfade = [];
+    $r = Pruefnachweise::eventworxUebernehmen($k1, $vE, [$d1], $ewxAngaben(), false);
+    pruefe(!$r['ok'] && str_contains($r['message'], 'schon übernommen') && $ewxPfade === [] && $ewxZahl() === 1, 'dieselbe Datei zweimal → schon übernommen, ohne Eventworx zu fragen');
+    gleich(array_column(Pruefnachweise::eventworxKandidaten($k1, $vE)['dateien'], 'schon', 'id')[$d1] ?? null, 'dieser', 'Kandidaten: „schon übernommen“');
+    // In Eventworx inzwischen weg → nicht geladen; kein PDF → diese Datei nicht, die übrigen schon.
+    $weg = $ewxDateien[$d2];
+    unset($ewxDateien[$d2]);
+    $ewxPfade = [];
+    $r = Pruefnachweise::eventworxUebernehmen($k1, $vE, [$d2], $ewxAngaben(), false);
+    pruefe(!$r['ok'] && str_contains($r['message'], 'nicht mehr an diesem Vorgang') && !in_array('file/' . $d2, $ewxPfade, true), 'Datei in Eventworx inzwischen weg → nicht geladen');
+    $ewxDateien[$d2] = ['meta' => $weg['meta'], 'bytes' => '<html>Anmeldung</html>'];
+    $r = Pruefnachweise::eventworxUebernehmen($k1, $vE, [$d2], $ewxAngaben(), false);
+    pruefe(!$r['ok'] && str_contains($r['message'], 'keine PDF-Datei') && $ewxZahl() === 1, 'HTML statt PDF → nicht übernommen');
+    $ewxDateien[$d2] = $weg;
+    // Sechs gewählt → höchstens fünf; gleiche Bytes nur einmal gespeichert.
+    $gleicheBytes = $pdf('gleich');
+    $sechs = [];
+    for ($i = 1; $i <= 6; $i++) {
+        $sechs[] = $neueDatei('Sammel ' . $i . '.pdf', [], $i <= 2 ? $gleicheBytes : null);
+    }
+    Pruefnachweise::dateienMerken($k1, $vE, Pruefnachweise::eventworxKandidaten($k1, $vE)['dateien']);
+    $r = Pruefnachweise::eventworxUebernehmen($k1, $vE, $sechs, $ewxAngaben(['bezeichnung' => $kennung . ' Sammelnachweis']), true);
+    pruefe($r['ok'] && count($r['ids']) === Pruefnachweise::EWX_JE_ANFRAGE && str_contains($r['message'], 'Höchstens 5') && $ewxZahl() === 6,
+        'sechs gewählt → fünf übernommen, Hinweis auf den Rest: ' . $r['message']);
+    gleich((int) Database::scalar('SELECT COUNT(DISTINCT datei_id) FROM pruefnachweise WHERE ewx_datei_id IN (?, ?)', [$sechs[0], $sechs[1]]), 1, 'gleiche Bytes aus zwei Dateien: eine Datei');
+    $sicht = array_column(KundenSicht::nachweise($k1), 'quelle', 'id');
+    pruefe(($sicht[$r['ids'][0] ?? 0] ?? '') === 'aus Eventworx-Auftrag AU-9901' && !isset($sicht[$ne]), 'freigegeben: der Kunde sieht sie mit Quelle, den Entwurf nicht');
+    // Dieselbe Datei für einen anderen Kunden: abgelehnt (der Vorgang zog um).
+    KundenService::vorgangLoesen($k1, $vE);
+    Database::update('kunden', $k1, ['ewx_host' => '', 'ewx_kunde_ref' => null, 'ewx_kunde_name' => '']);
+    Database::update('kunden', $kunden['k2'], ['ewx_host' => $ewxHost, 'ewx_kunde_ref' => $refE, 'ewx_kunde_name' => 'Firma']);
+    KundenService::vergessen();
+    $zn = $nachweis($ne);
+    pruefe($zn !== null && $zn['vorgang_id'] === null, 'Vorgang gelöst: Nachweise aus Eventworx bleiben beim Kunden');
+    $vE2 = Database::insert('kunden_vorgaenge', ['kunde_id' => $kunden['k2'], 'ewx_host' => $ewxHost, 'ewx_id' => $jobE, 'ewx_art' => 'order', 'ewx_nummer' => 'AU-9901',
+        'ewx_kunde_ref' => $refE, 'titel' => $kennung, 'verknuepft_am' => gmdate('c')]);
+    $kand = Pruefnachweise::eventworxKandidaten($kunden['k2'], $vE2);
+    gleich(array_column($kand['dateien'], 'schon', 'id')[$d1] ?? null, 'anderer', 'anderer Kunde: Datei „bei einem anderen Kunden übernommen“');
+    Pruefnachweise::dateienMerken($kunden['k2'], $vE2, $kand['dateien']);
+    $ewxPfade = [];
+    $r = Pruefnachweise::eventworxUebernehmen($kunden['k2'], $vE2, [$d1], $ewxAngaben(), false);
+    pruefe(!$r['ok'] && str_contains($r['message'], 'anderen Kunden') && $ewxPfade === [] && Pruefnachweise::fuerKunde($kunden['k2'], false) !== []
+        && !in_array($d1, array_column(Pruefnachweise::fuerKunde($kunden['k2']), 'ewx_datei_id'), true), 'dieselbe Datei für einen anderen Kunden → abgelehnt');
+    pruefe(Pruefnachweise::eventworxUebernehmen($kunden['k2'], $vE, [$d2], $ewxAngaben(), false)['ok'] === false, 'Vorgang eines anderen Kunden → abgelehnt');
+    Http::$attrappe = null;
+    Eventworx::$uhr = null;
+    Eventworx::$schlafen = null;
+    Eventworx::vergessen();
+    alsBenutzer(null);
+
     // Datenschutz: keine Kundennamen und Dateinamen im Audit.
     $treffer = 0;
     foreach (Database::select('SELECT details FROM audit_log WHERE id > ?', [$auditVorher]) as $a) {
@@ -581,6 +813,15 @@ try {
     gleich($treffer, 0, 'kein Kundenname und kein Dateiname in audit_log.details');
 } finally {
     alsBenutzer(null);
+    Http::$attrappe = null;
+    Eventworx::$uhr = null;
+    Eventworx::$schlafen = null;
+    foreach ($konfigVorher as $k => $wert) {
+        Config::set($k, $wert);
+    }
+    foreach ($ewxVorher as $s => $wert) {
+        $wert === null ? Settings::forget($s) : Settings::put($s, $wert);
+    }
     Config::set('app.timezone', $zoneVorher);
     $jahreVorher === null ? Settings::forget('kundenbereich.nachweise_jahre') : Settings::put('kundenbereich.nachweise_jahre', (string) $jahreVorher);
     foreach ($kunden as $id) {
@@ -606,8 +847,8 @@ try {
     foreach ($rollen as $id) {
         BenutzerService::rolleLoeschen($id);
     }
-    Database::execute('DELETE FROM audit_log WHERE id > ? AND (username LIKE ? OR username = ? OR details LIKE ? OR target_type IN (?, ?, ?, ?, ?, ?))',
-        [$auditVorher, $kennung . '%', 'cli', '%' . $kennung . '%', 'pruefnachweis', 'nachweis', 'inventar', 'site', 'role', 'user']);
+    Database::execute('DELETE FROM audit_log WHERE id > ? AND (username LIKE ? OR username = ? OR details LIKE ? OR target_type IN (?, ?, ?, ?, ?, ?, ?))',
+        [$auditVorher, $kennung . '%', 'cli', '%' . $kennung . '%', 'pruefnachweis', 'nachweis', 'inventar', 'site', 'role', 'user', 'kunde']);
     foreach ($dosen as $d) {
         @unlink($d);
     }

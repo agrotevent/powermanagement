@@ -93,9 +93,11 @@ $router->post('/kundenbereich/einrichten/{token}', [KundenbereichController::cla
  * Die Kundenverwaltung: ansehen mit „kunden.view“, pflegen mit
  * „kunden.manage“. Zugänge und Freigaben sieht nur, wer pflegen darf;
  * Standorte freigeben zusätzlich nur, wer alles sieht (prüft
- * KundenService). Jede {uid}, {fid} und {nid} wird gegen den Kunden {id} geprüft.
+ * KundenService). Jede {uid}, {fid}, {vid} und {nid} wird gegen den Kunden {id} geprüft.
  * Ein Link oder vorläufiges Kennwort steht nur in der Antwort auf das
- * Anlegen (no-store).
+ * Anlegen (no-store). Eventworx suchen und verknüpfen zusätzlich nur mit
+ * „berichte.eventworx“ (prüft KundenService); beides wartet auf Eventworx,
+ * ohne die Sitzung zu halten.
  */
 $router->get('/kunden', [KundenController::class, 'index'], 'kunden.view');
 $router->post('/kunden/speichern', [KundenController::class, 'speichern'], 'kunden.manage');
@@ -105,10 +107,16 @@ $router->post('/kunden/{id}/zugang', [KundenController::class, 'zugangAnlegen'],
 $router->post('/kunden/{id}/zugang/{uid}', [KundenController::class, 'zugang'], 'kunden.manage');
 $router->post('/kunden/{id}/freigabe', [KundenController::class, 'freigabeSpeichern'], 'kunden.manage');
 $router->post('/kunden/{id}/freigabe/{fid}/loeschen', [KundenController::class, 'freigabeLoeschen'], 'kunden.manage');
+$router->post('/kunden/{id}/eventworx/suche', [KundenController::class, 'eventworxSuche'], 'kunden.manage');
+$router->post('/kunden/{id}/eventworx/verknuepfen', [KundenController::class, 'eventworxVerknuepfen'], 'kunden.manage');
+$router->post('/kunden/{id}/vorgang/{vid}/loesen', [KundenController::class, 'vorgangLoesen'], 'kunden.manage');
 // Prüfnachweise (DGUV V3) des Kunden: hinterlegen, korrigieren, freigeben,
 // zurückziehen, löschen mit „kunden.nachweise“; die Datei ansehen mit
-// „kunden.view“. Jede {nid} wird gegen den Kunden {id} geprüft.
+// „kunden.view“. Jede {nid} wird gegen den Kunden {id} geprüft. Aus
+// Eventworx nur an einem Vorgang dieses Kunden, ausgewählt von einer Person.
 $router->post('/kunden/{id}/nachweise/hochladen', [PruefnachweiseController::class, 'hochladen'], 'kunden.nachweise');
+$router->post('/kunden/{id}/nachweise/eventworx', [PruefnachweiseController::class, 'eventworx'], 'kunden.nachweise');
+$router->post('/kunden/{id}/nachweise/eventworx/uebernehmen', [PruefnachweiseController::class, 'eventworxUebernehmen'], 'kunden.nachweise');
 $router->post('/kunden/{id}/nachweise/{nid}/speichern', [PruefnachweiseController::class, 'speichern'], 'kunden.nachweise');
 $router->post('/kunden/{id}/nachweise/{nid}/status', [PruefnachweiseController::class, 'status'], 'kunden.nachweise');
 $router->post('/kunden/{id}/nachweise/{nid}/loeschen', [PruefnachweiseController::class, 'loeschen'], 'kunden.nachweise');

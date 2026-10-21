@@ -4,10 +4,14 @@ declare(strict_types=1);
 namespace App\Kunden;
 
 use App\Auth\Auth;
+use App\Services\Eventworx;
+use App\Services\EventworxFehler;
 use App\Support\Audit;
 use App\Support\Database;
 use App\Support\Logger;
 use App\Support\Response;
+use App\Support\Session;
+use App\Support\Settings;
 use App\Support\Zeit;
 
 /**
@@ -35,6 +39,15 @@ use App\Support\Zeit;
  * kundenbereich.nachweise_jahre (Vorgabe 3). Gelöscht wird nur mit
  * `bin/power kunden:aufbewahrung --ausfuehren`; „wartung“ meldet nur.
  *
+ * Aus Eventworx kommen nur PDFs, die Benutzer an einem mit dem Kunden
+ * verknüpften Auftrag oder Lieferschein hochgeladen haben – und nur, wenn
+ * eine Person sie auswählt und die Daten aus dem Protokoll einträgt
+ * (eventworxKandidaten, eventworxUebernehmen). Jede Übernahme liest den
+ * Vorgang und seine Dateiliste in diesem Prozess neu; geladen wird nur, was
+ * die gezeigte Liste UND die frische Liste enthalten. Eine Datei aus
+ * Eventworx gibt es hier höchstens einmal (auch nie für zwei Kunden). Der
+ * Kundenbereich selbst fragt Eventworx nie.
+ *
  * Rechte prüft die Route (kunden.nachweise, ansehen kunden.view); jede
  * Nachweis-ID wird hier gegen den Kunden geprüft – fremd ist nicht
  * vorhanden. Im Audit stehen nur IDs, nie Dateinamen oder Kundennamen.
@@ -52,6 +65,13 @@ final class Pruefnachweise
 
     /** Vorschläge für das Feld „Norm“ (frei, höchstens 120 Zeichen). */
     public const NORMEN = ['DIN EN 50699 (VDE 0702)', 'DIN EN 50678 (VDE 0701)', 'DGUV Vorschrift 3'];
+
+    /** Sitzung: die Dateien, die die Liste eines Vorgangs zeigte – nur Kennung, Name, Zeit (keine Inhalte). */
+    public const EWX_DATEIEN = 'ewx_dateien';
+    private const EWX_DATEIEN_HOECHSTENS = 200;
+
+    /** Höchstens so viele Dateien je Übernahme (je bis 10 MB und 30 s Download). */
+    public const EWX_JE_ANFRAGE = 5;
 
     /** Ab wie vielen Tagen bis zur nächsten Prüfung „läuft bald ab“. */
     public const BALD_TAGE = 30;
@@ -413,6 +433,285 @@ final class Pruefnachweise
         }
         $felder['hinweis'] = $hinweis;
         return ['ok' => true, 'message' => '', 'felder' => $felder + $daten + ['aufbewahren_bis' => self::aufbewahrenBis($daten['geprueft_am'])]];
+    }
+
+    // ------------------------------------------------------------ Aus Eventworx
+
+    /**
+     * Die PDF-Dateien am verknüpften Vorgang, die als Nachweis in Frage
+     * kommen (wartet auf Eventworx – der Aufrufer gibt die Sitzung vorher
+     * frei und merkt sie danach mit dateienMerken()). Der Vorgang wird
+     * frisch gelesen: Art, Mandant und Kunde in Eventworx müssen noch passen.
+     * Jede Datei sagt, ob sie schon übernommen ist (für diesen oder einen
+     * anderen Kunden).
+     *
+     * @return array{ok:bool,message:string,vorgang?:array<string,mixed>,dateien:list<array<string,mixed>>,mehr:bool}
+     */
+    public static function eventworxKandidaten(int $kundeId, int $vorgangId): array
+    {
+        $v = KundenService::vorgang($kundeId, $vorgangId);
+        if ($v === null) {
+            return ['ok' => false, 'message' => 'Diesen Vorgang hat der Kunde nicht.', 'dateien' => [], 'mehr' => false];
+        }
+        try {
+            $dok = self::eventworxLesen($kundeId, $v);
+        } catch (EventworxFehler $e) {
+            return ['ok' => false, 'message' => $e->getMessage(), 'vorgang' => $v, 'dateien' => [], 'mehr' => false];
+        }
+        Database::update('kunden_vorgaenge', $vorgangId, ['dokumente_am' => gmdate('c')]);
+        $dateien = self::mitStand($kundeId, $v, $dok['dateien']);
+        return [
+            'ok'      => true,
+            'message' => $dateien === [] ? 'An diesem Vorgang sind in Eventworx keine hochgeladenen PDF-Dateien.' : '',
+            'vorgang' => $v,
+            'dateien' => $dateien,
+            'mehr'    => $dok['mehr'],
+        ];
+    }
+
+    /**
+     * Die gezeigte Liste merken (mit offener Sitzung): höchstens 200 Dateien,
+     * nur Kennung, Name und Zeit – je Kunde nur der zuletzt gezeigte Vorgang.
+     *
+     * @param list<array<string,mixed>> $dateien
+     */
+    public static function dateienMerken(int $kundeId, int $vorgangId, array $dateien): void
+    {
+        $alle = Session::get(self::EWX_DATEIEN, []);
+        $alle = is_array($alle) ? $alle : [];
+        $je = [];
+        foreach (array_slice($dateien, 0, self::EWX_DATEIEN_HOECHSTENS) as $d) {
+            $id = (string) ($d['id'] ?? '');
+            if (preg_match(Eventworx::OID, $id) === 1) {
+                $je[$id] = ['name' => mb_substr((string) ($d['name'] ?? ''), 0, 190), 'zeit' => is_string($d['zeit'] ?? null) ? $d['zeit'] : null];
+            }
+        }
+        $alle[$kundeId] = [$vorgangId => $je];
+        Session::put(self::EWX_DATEIEN, $alle);
+    }
+
+    /** @return array<string,array{name:string,zeit:?string}> die gemerkte Liste dieses Vorgangs */
+    public static function gemerkteDateien(int $kundeId, int $vorgangId): array
+    {
+        $alle = Session::get(self::EWX_DATEIEN, []);
+        $je = is_array($alle) && is_array($alle[$kundeId][$vorgangId] ?? null) ? $alle[$kundeId][$vorgangId] : [];
+        $out = [];
+        foreach ($je as $id => $d) {
+            if (is_array($d) && preg_match(Eventworx::OID, (string) $id) === 1) {
+                $out[(string) $id] = ['name' => (string) ($d['name'] ?? ''), 'zeit' => is_string($d['zeit'] ?? null) ? $d['zeit'] : null];
+            }
+        }
+        return $out;
+    }
+
+    /**
+     * Die gemerkte Liste noch einmal zeigen (nach einem Fehler in den
+     * Angaben) – ohne Eventworx zu fragen.
+     *
+     * @return list<array<string,mixed>>
+     */
+    public static function gemerkteKandidaten(int $kundeId, int $vorgangId): array
+    {
+        $v = KundenService::vorgang($kundeId, $vorgangId);
+        if ($v === null) {
+            return [];
+        }
+        $liste = [];
+        foreach (self::gemerkteDateien($kundeId, $vorgangId) as $id => $d) {
+            $liste[] = ['id' => $id, 'name' => $d['name'], 'zeit' => $d['zeit'], 'beschreibung' => ''];
+        }
+        return self::mitStand($kundeId, $v, $liste);
+    }
+
+    /**
+     * Gewählte Dateien eines Vorgangs als Nachweise übernehmen – wartet auf
+     * Eventworx (der Aufrufer gibt die Sitzung vorher frei). Übernommen wird
+     * nur, was in der gezeigten (gemerkten) Liste stand; der Vorgang und
+     * seine Dateien werden dann in diesem Prozess neu gelesen und nur, was
+     * auch dort steht, geladen – höchstens EWX_JE_ANFRAGE Dateien. Eine
+     * Datei, die es hier schon gibt (auch bei einem anderen Kunden), kommt
+     * nicht noch einmal. Die Angaben gelten für alle gewählten Dateien; ohne
+     * Bezeichnung gilt der Dateiname. Ein Fehler bei einer Datei bricht nur
+     * diese ab.
+     *
+     * @param list<mixed> $dateiIds
+     * @param array<string,mixed> $angaben
+     * @return array{ok:bool,message:string,ids?:list<int>,fehler?:list<string>,angaben?:bool}
+     */
+    public static function eventworxUebernehmen(int $kundeId, int $vorgangId, array $dateiIds, array $angaben, bool $freigeben): array
+    {
+        $v = KundenService::vorgang($kundeId, $vorgangId);
+        if ($v === null) {
+            return ['ok' => false, 'message' => 'Diesen Vorgang hat der Kunde nicht.'];
+        }
+        $gemerkt = self::gemerkteDateien($kundeId, $vorgangId);
+        $auswahl = [];
+        foreach ($dateiIds as $d) {
+            if (is_string($d) && isset($gemerkt[$d]) && !in_array($d, $auswahl, true)) {
+                $auswahl[] = $d;
+            }
+        }
+        if ($auswahl === []) {
+            return ['ok' => false, 'message' => $dateiIds === [] ? 'Bitte mindestens eine Datei wählen.'
+                : 'Die gewählten Dateien stehen nicht in der Liste dieses Vorgangs – bitte die Dateien des Vorgangs neu anzeigen lassen.'];
+        }
+        $uebrig = max(0, count($auswahl) - self::EWX_JE_ANFRAGE);
+        $auswahl = array_slice($auswahl, 0, self::EWX_JE_ANFRAGE);
+        $angaben['vorgang_id'] = (string) $vorgangId;
+        // Die Angaben vorab prüfen – ohne Eventworx zu fragen.
+        $vorab = self::angaben($kundeId, self::mitBezeichnung($angaben, $gemerkt[$auswahl[0]]['name']), null);
+        if (!$vorab['ok']) {
+            return $vorab + ['angaben' => true];
+        }
+        $fehler = [];
+        $offen = [];
+        foreach ($auswahl as $d) {
+            $schon = self::schonUebernommen((string) $v['ewx_host'], $d);
+            if ($schon !== null) {
+                $fehler[] = $gemerkt[$d]['name'] . ': ' . ($schon === $kundeId ? 'schon übernommen.' : 'schon bei einem anderen Kunden übernommen – nicht noch einmal.');
+                continue;
+            }
+            $offen[] = $d;
+        }
+        if ($offen === []) {
+            return ['ok' => false, 'message' => implode(' ', $fehler), 'fehler' => $fehler];
+        }
+        @set_time_limit(200);
+        try {
+            $frisch = self::eventworxLesen($kundeId, $v);
+        } catch (EventworxFehler $e) {
+            return ['ok' => false, 'message' => $e->getMessage()];
+        }
+        $liste = array_column($frisch['dateien'], null, 'id');
+        $ids = [];
+        foreach ($offen as $d) {
+            $name = isset($liste[$d]) ? (string) $liste[$d]['name'] : $gemerkt[$d]['name'];
+            if (!isset($liste[$d])) {
+                $fehler[] = $name . ': steht in Eventworx nicht mehr an diesem Vorgang – nicht übernommen.';
+                continue;
+            }
+            $a = self::angaben($kundeId, self::mitBezeichnung($angaben, $name), null);
+            if (!$a['ok']) {
+                $fehler[] = $name . ': ' . $a['message'];
+                continue;
+            }
+            try {
+                $bytes = Eventworx::datei($d);
+            } catch (EventworxFehler $e) {
+                $fehler[] = $name . ': ' . $e->getMessage();
+                continue;
+            }
+            $pdf = self::pdfPruefen($bytes);
+            if ($pdf !== null) {
+                $fehler[] = $name . ': ' . $pdf;
+                continue;
+            }
+            $jetzt = gmdate('c');
+            $dateiName = self::dateiname($name);
+            try {
+                $ids[] = (int) self::transaktion(static function () use ($a, $kundeId, $v, $d, $bytes, $dateiName, $name, $liste, $freigeben, $jetzt): int {
+                    return Database::insert('pruefnachweise', $a['felder'] + [
+                        'kunde_id'        => $kundeId,
+                        'status'          => $freigeben ? 'freigegeben' : 'entwurf',
+                        'quelle'          => 'ewx_vorgang',
+                        'datei_id'        => self::dateiSpeichern($bytes),
+                        'datei_name'      => $dateiName,
+                        'ewx_host'        => (string) $v['ewx_host'],
+                        'ewx_datei_id'    => $d,
+                        // Woher genau – nie Inhalte.
+                        'herkunft'        => json_encode([
+                            'art'           => 'eventworx',
+                            'host'          => (string) $v['ewx_host'],
+                            'job_id'        => (string) $v['ewx_id'],
+                            'job_nummer'    => (string) $v['ewx_nummer'],
+                            'datei_id'      => $d,
+                            'name'          => mb_substr($name, 0, 190),
+                            'zeit'          => $liste[$d]['zeit'],
+                            'abgerufen_am'  => $jetzt,
+                            'abgerufen_von' => Auth::id(),
+                        ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES),
+                        'erstellt_von'    => Auth::id(),
+                        'freigegeben_von' => $freigeben ? Auth::id() : null,
+                        'freigegeben_am'  => $freigeben ? $jetzt : null,
+                        'created_at'      => $jetzt,
+                    ]);
+                });
+            } catch (\PDOException) {
+                // UNIQUE (ewx_host, ewx_datei_id): ein zweiter Prozess war schneller.
+                $fehler[] = $name . ': schon übernommen.';
+            }
+        }
+        if ($ids !== []) {
+            Audit::log('kunden.nachweis_eventworx', 'kunde', (string) $kundeId,
+                ['kunde_id' => $kundeId, 'vorgang_id' => $vorgangId, 'anzahl' => count($ids), 'freigegeben' => $freigeben]);
+        }
+        $text = $ids === [] ? 'Nichts übernommen.' : (count($ids) === 1 ? 'Ein Prüfnachweis' : count($ids) . ' Prüfnachweise') . ' aus Eventworx übernommen'
+            . ($freigeben ? ' und für den Kunden freigegeben.' : ' – als Entwurf; der Kunde sieht sie erst nach der Freigabe.');
+        if ($uebrig > 0) {
+            $text .= ' Höchstens ' . self::EWX_JE_ANFRAGE . ' Dateien je Durchgang – ' . $uebrig . ' bitte danach noch einmal wählen.';
+        }
+        return ['ok' => $ids !== [], 'message' => trim($text . ($fehler !== [] ? ' ' . implode(' ', $fehler) : '')), 'ids' => $ids, 'fehler' => $fehler];
+    }
+
+    /**
+     * Den verknüpften Vorgang frisch lesen und prüfen – derselbe Mandant,
+     * noch Auftrag bzw. Lieferschein, noch derselbe Kunde in Eventworx –,
+     * dann seine Dateien.
+     *
+     * @return array{dateien:list<array<string,mixed>>,mehr:bool}
+     * @throws EventworxFehler
+     */
+    private static function eventworxLesen(int $kundeId, array $v): array
+    {
+        if ((string) Settings::get(Eventworx::EINSTELLUNG_HOST, '') !== (string) $v['ewx_host']) {
+            throw new EventworxFehler('Eventworx ist inzwischen mit einem anderen Mandanten verbunden – an diesem Vorgang wird nichts gelesen.', 0, 'HOST');
+        }
+        $job = Eventworx::vorgang((string) $v['ewx_id']);
+        $art = (string) $job['verweis']['art'];
+        if ($art !== (string) $v['ewx_art'] || !in_array($art, KundenService::EWX_ARTEN, true)) {
+            throw new EventworxFehler('Der Vorgang ist in Eventworx kein Auftrag bzw. Lieferschein mehr – nichts übernommen.', 0, 'ART');
+        }
+        $jobRef = (string) $job['verweis']['kunde_ref'];
+        $vorgangRef = (string) $v['ewx_kunde_ref'];
+        $kundeRef = (string) (KundenService::find($kundeId)['ewx_kunde_ref'] ?? '');
+        // Mit Kennung verknüpft: sie muss bleiben. Ohne: darf keine dazukommen, außer der des Kunden.
+        $passt = $vorgangRef !== '' ? $jobRef === $vorgangRef : ($jobRef === '' || ($kundeRef !== '' && $jobRef === $kundeRef));
+        if (!$passt) {
+            throw new EventworxFehler('Der Vorgang gehört in Eventworx inzwischen zu einem anderen Kunden – nichts übernommen.', 0, 'KUNDE');
+        }
+        return Eventworx::dokumente((string) $v['ewx_id']);
+    }
+
+    /**
+     * @param list<array<string,mixed>> $dateien
+     * @return list<array<string,mixed>> mit „schon“: null, 'dieser' oder 'anderer'
+     */
+    private static function mitStand(int $kundeId, array $v, array $dateien): array
+    {
+        foreach ($dateien as &$d) {
+            $schon = self::schonUebernommen((string) $v['ewx_host'], (string) $d['id']);
+            $d['schon'] = $schon === null ? null : ($schon === $kundeId ? 'dieser' : 'anderer');
+        }
+        unset($d);
+        return $dateien;
+    }
+
+    /** Für welchen Kunden diese Eventworx-Datei schon übernommen ist – oder null. */
+    private static function schonUebernommen(string $host, string $dateiId): ?int
+    {
+        $k = Database::scalar('SELECT kunde_id FROM pruefnachweise WHERE ewx_host = ? AND ewx_datei_id = ?', [$host, $dateiId]);
+        return $k === false || $k === null ? null : (int) $k;
+    }
+
+    /** Ohne eigene Bezeichnung: der Dateiname (ohne .pdf). */
+    private static function mitBezeichnung(array $angaben, string $name): array
+    {
+        $eigene = is_scalar($angaben['bezeichnung'] ?? null) ? trim((string) $angaben['bezeichnung']) : '';
+        if ($eigene === '') {
+            $aus = trim((string) preg_replace('/\.pdf$/i', '', $name));
+            $angaben['bezeichnung'] = mb_strlen($aus) >= 2 ? mb_substr($aus, 0, 255) : 'Prüfnachweis';
+        }
+        return $angaben;
     }
 
     // ------------------------------------------------------------ Dateien

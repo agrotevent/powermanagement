@@ -59,6 +59,11 @@ declare(strict_types=1);
  *   bin/power berichte:aufbewahrung [--ausfuehren]
  *                                   Berichte über der Aufbewahrungsfrist zeigen, mit --ausfuehren löschen
  *   bin/power eventworx:pruefen     Verbindung zu Eventworx prüfen (nur lesend)
+ *   bin/power eventworx:sonde [--stock=OID] [--job=OID] [--serie=TEXT] [--json]
+ *                                   (auch eventworx:geraete-pruefen) Lese-Probe: was liefert die
+ *                                   Schnittstelle zu Geräten, Prüfungen und Dateien am Vorgang? Nur GET
+ *                                   auf einer festen Liste, höchstens 25 Anfragen; Ausgabe ohne Inhalte
+ *                                   (nur Arten und Kennwerte). Ergebnis in docs/eventworx.md festhalten
  *   bin/power kunden:liste          Kunden des Kundenbereichs: ID, Name, aktiv, Zugänge, Locations, Nachweise
  *   bin/power kunden:zugang <kunde-id> <benutzer> [--kennwort] [--name=…] [--email=…]
  *                                   Kundenzugang ohne Oberfläche: Einrichtungslink (braucht app.url)
@@ -94,6 +99,7 @@ use App\Services\AnlagenService;
 use App\Services\BenutzerService;
 use App\Services\DemoSeed;
 use App\Services\Eventworx;
+use App\Services\EventworxProbe;
 use App\Services\KatalogImport;
 use App\Services\LocationSync;
 use App\Services\PartnerAbgleich;
@@ -112,7 +118,7 @@ $befehl = array_shift($argumente) ?? 'hilfe';
 $optionen = [];
 $werte = [];
 // Optionen mit Wert gehen als --name=wert oder --name wert.
-$mitWert = ['fassung', 'name', 'email'];
+$mitWert = ['fassung', 'name', 'email', 'stock', 'job', 'serie'];
 for ($i = 0; $i < count($argumente); $i++) {
     $a = $argumente[$i];
     if (str_starts_with($a, '--')) {
@@ -635,6 +641,33 @@ switch ($befehl) {
         $erg = Eventworx::verbindungTesten();
         $erg['ok'] ? $aus($erg['message']) : $fehler($erg['message']);
         break;
+
+    case 'eventworx:sonde':
+    case 'eventworx:geraete-pruefen':
+        $wert = static fn (string $k): ?string => isset($optionen[$k]) ? (is_string($optionen[$k]) ? $optionen[$k] : '') : null;
+        $erg = EventworxProbe::lauf($wert('stock'), $wert('job'), $wert('serie'));
+        if (isset($optionen['json'])) {
+            $aus((string) json_encode($erg, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES));
+            exit($erg['ok'] ? 0 : 1);
+        }
+        // Nur Arten, Zahlen und Kennwerte – keine Namen, Seriennummern, Dateinamen.
+        foreach ($erg['schritte'] as $s) {
+            $aus(sprintf('%-4s %-14s HTTP %3d%s%s', $s['schritt'], $s['pfad'], $s['status'], $s['code'] !== '' ? '  ' . $s['code'] : '',
+                $s['total'] !== null ? '  total ' . $s['total'] : ''));
+            foreach ($s['schluessel'] as $k => $art) {
+                $aus('       ' . (in_array($k, $s['pruef'], true) ? '* ' : '  ') . $k . ': ' . $art . (isset($s['kennwerte'][$k]) ? ' = ' . $s['kennwerte'][$k] : ''));
+            }
+            foreach ($s['kennwerte'] as $k => $v) {
+                if (!isset($s['schluessel'][$k])) {
+                    $aus('         ' . $k . ' = ' . $v);
+                }
+            }
+            foreach ($s['hinweise'] as $h) {
+                $aus('       → ' . $h);
+            }
+        }
+        $aus($erg['meldung'] . ' ' . $erg['anfragen'] . ' Anfrage(n). „*“: Schlüssel, die nach Prüfung oder Frist klingen.');
+        exit($erg['ok'] ? 0 : 1);
 
     case 'kunden:liste':
         $kunden = KundenService::alle();

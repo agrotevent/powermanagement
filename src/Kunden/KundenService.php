@@ -7,10 +7,13 @@ use App\Auth\Auth;
 use App\Auth\Zugriff;
 use App\Berichte\BerichtService;
 use App\Services\BenutzerService;
+use App\Services\Eventworx;
+use App\Services\EventworxFehler;
 use App\Support\Audit;
 use App\Support\Crypto;
 use App\Support\Database;
 use App\Support\Session;
+use App\Support\Settings;
 use App\Support\Zeit;
 
 /**
@@ -55,6 +58,13 @@ final class KundenService
 
     /** Sitzung: Rückfrage nach einer Zuordnung mit abweichendem Namen (nur IDs und der Satz dazu). */
     private const RUECKFRAGE = 'kunden_rueckfrage';
+
+    /** Sitzung: Treffer der Eventworx-Suche je Kunde – nur Kennung, Nummer, Art (keine Kundendaten). */
+    public const EWX_TREFFER = 'ewx_kunde_treffer';
+    private const EWX_TREFFER_HOECHSTENS = 20;
+
+    /** Was mit einem Kunden verknüpft wird: Aufträge und Lieferscheine (ein Angebot ist noch keine Lieferung). */
+    public const EWX_ARTEN = ['order', 'deliverynote'];
 
     // ------------------------------------------------------------ Kunden
 
@@ -582,6 +592,241 @@ final class KundenService
         Database::execute('UPDATE pruefnachweise SET site_id = NULL WHERE site_id = ?', [$siteId]);
         Zugriff::vergessen();
         Kundenbereich::vergessen();
+    }
+
+    // ------------------------------------------------------------ Vorgänge (Eventworx)
+
+    /**
+     * Die mit dem Kunden verknüpften Eventworx-Vorgänge (Aufträge,
+     * Lieferscheine) – Quelle für Prüfnachweise am Vorgang und Vorschlag für
+     * die Zuordnung von Übergabeberichten. Dazu, wie viele Nachweise aus dem
+     * Vorgang stammen.
+     *
+     * @return list<array<string,mixed>>
+     */
+    public static function vorgaenge(int $kundeId): array
+    {
+        return Database::select('SELECT v.*, s.name AS standort_name,
+                (SELECT COUNT(*) FROM pruefnachweise n WHERE n.vorgang_id = v.id AND n.kunde_id = v.kunde_id) AS nachweise
+            FROM kunden_vorgaenge v LEFT JOIN sites s ON s.id = v.site_id
+            WHERE v.kunde_id = ? ORDER BY v.von DESC, v.id DESC', [$kundeId]);
+    }
+
+    /** Ein Vorgang dieses Kunden – einer eines anderen ist „nicht vorhanden“. @return array<string,mixed>|null */
+    public static function vorgang(int $kundeId, int $vorgangId): ?array
+    {
+        return $vorgangId > 0 ? Database::first('SELECT * FROM kunden_vorgaenge WHERE id = ? AND kunde_id = ?', [$vorgangId, $kundeId]) : null;
+    }
+
+    /**
+     * Aufträge und Lieferscheine in Eventworx suchen (wartet auf Eventworx –
+     * der Aufrufer gibt die Sitzung vorher frei). Jeder Treffer sagt, ob er
+     * schon mit diesem oder einem anderen Kunden verknüpft ist. Die Treffer
+     * merkt sich danach trefferMerken() – nur Kennung, Nummer, Art.
+     *
+     * Braucht „berichte.eventworx“: die Suche zeigt alle Vorgänge des
+     * Mandanten, nicht nur die dieses Kunden.
+     *
+     * @return array{ok:bool,message:string,treffer:list<array<string,mixed>>}
+     */
+    public static function eventworxSuchen(int $kundeId, string $text): array
+    {
+        if (self::find($kundeId) === null) {
+            return ['ok' => false, 'message' => 'Diesen Kunden gibt es nicht.', 'treffer' => []];
+        }
+        if (!Auth::can('berichte.eventworx')) {
+            return ['ok' => false, 'message' => 'Eventworx durchsuchen darf nur, wer das Recht „Kundendaten aus Eventworx suchen und übernehmen“ hat.', 'treffer' => []];
+        }
+        if (!Eventworx::eingerichtet()) {
+            return ['ok' => false, 'message' => 'Eventworx ist nicht eingerichtet (Systemeinstellungen).', 'treffer' => []];
+        }
+        try {
+            $treffer = Eventworx::suchen($text, self::EWX_ARTEN);
+        } catch (EventworxFehler $e) {
+            return ['ok' => false, 'message' => $e->getMessage(), 'treffer' => []];
+        }
+        $host = (string) Settings::get(Eventworx::EINSTELLUNG_HOST, '');
+        foreach ($treffer as &$t) {
+            $v = Database::first('SELECT v.kunde_id, k.name FROM kunden_vorgaenge v JOIN kunden k ON k.id = v.kunde_id WHERE v.ewx_host = ? AND v.ewx_id = ?',
+                [$host, (string) $t['id']]);
+            $t['verknuepft'] = $v === null ? null : ((int) $v['kunde_id'] === $kundeId ? 'dieser' : (string) $v['name']);
+        }
+        unset($t);
+        return ['ok' => true, 'message' => $treffer === [] ? 'Kein Auftrag und kein Lieferschein gefunden – am sichersten mit der Nummer suchen.' : '',
+            'treffer' => $treffer];
+    }
+
+    /**
+     * Die Treffer einer Suche für diesen Kunden merken (nach dem Warten, mit
+     * offener Sitzung): höchstens 20, nur Kennung, Nummer und Art. Nur diese
+     * Kennungen nimmt vorgangVerknuepfen() an.
+     *
+     * @param list<array<string,mixed>> $treffer
+     */
+    public static function trefferMerken(int $kundeId, array $treffer): void
+    {
+        $alle = Session::get(self::EWX_TREFFER, []);
+        $alle = is_array($alle) ? $alle : [];
+        $je = [];
+        foreach (array_slice($treffer, 0, self::EWX_TREFFER_HOECHSTENS) as $t) {
+            $id = (string) ($t['id'] ?? '');
+            if (preg_match('/^[A-Za-z0-9]{8,40}$/', $id) === 1) {
+                $je[$id] = ['nummer' => mb_substr((string) ($t['nummer'] ?? ''), 0, 64), 'art' => mb_substr((string) ($t['art'] ?? ''), 0, 24)];
+            }
+        }
+        $alle[$kundeId] = $je;
+        Session::put(self::EWX_TREFFER, $alle);
+    }
+
+    /** @return array<string,array{nummer:string,art:string}> die gemerkten Treffer dieses Kunden */
+    public static function treffer(int $kundeId): array
+    {
+        $alle = Session::get(self::EWX_TREFFER, []);
+        return is_array($alle) && is_array($alle[$kundeId] ?? null) ? $alle[$kundeId] : [];
+    }
+
+    /**
+     * Einen Eventworx-Vorgang mit dem Kunden verknüpfen (wartet auf Eventworx
+     * – der Aufrufer gibt die Sitzung vorher frei; geschrieben wird nur in
+     * die Datenbank). Die Kennung nur aus den gemerkten Treffern; der
+     * Vorgang wird frisch gelesen.
+     *
+     * Kundenprüfung über die Kennung des Kunden in Eventworx (customerRefId):
+     *   Kunde ohne Kennung, Vorgang mit  → nur bestätigt; der Kunde bekommt sie
+     *   gleiche Kennung                  → verknüpft
+     *   andere Kennung                   → abgelehnt
+     *   Vorgang ohne Kennung             → nur bestätigt
+     * Eine Kennung gehört höchstens einem Kunden, ein Vorgang auch. Mit
+     * $stammdaten kommt eine fehlende Kundennummer aus Eventworx.
+     *
+     * @return array{ok:bool,message:string,bestaetigen?:bool,id?:int}
+     */
+    public static function vorgangVerknuepfen(int $kundeId, string $jobId, bool $bestaetigt, bool $stammdaten): array
+    {
+        $kunde = self::find($kundeId);
+        if ($kunde === null) {
+            return ['ok' => false, 'message' => 'Diesen Kunden gibt es nicht.'];
+        }
+        if (!Auth::can('berichte.eventworx')) {
+            return ['ok' => false, 'message' => 'Vorgänge verknüpfen darf nur, wer das Recht „Kundendaten aus Eventworx suchen und übernehmen“ hat.'];
+        }
+        if (!array_key_exists($jobId, self::treffer($kundeId))) {
+            return ['ok' => false, 'message' => 'Bitte den Vorgang über die Suche wählen.'];
+        }
+        try {
+            $v = Eventworx::vorgang($jobId);
+        } catch (EventworxFehler $e) {
+            return ['ok' => false, 'message' => $e->getMessage()];
+        }
+        $verweis = $v['verweis'];
+        if (!in_array($verweis['art'], self::EWX_ARTEN, true)) {
+            return ['ok' => false, 'message' => 'Nur Aufträge und Lieferscheine – ein Angebot ist noch keine Lieferung.'];
+        }
+        $host = (string) $verweis['host'];
+        $nummer = (string) $verweis['nummer'];
+        $jobRef = (string) $verweis['kunde_ref'];
+        $firma = (string) $v['gruppen']['kunde']['firma'];
+        $vorhanden = Database::first('SELECT v.id, v.kunde_id, k.name FROM kunden_vorgaenge v JOIN kunden k ON k.id = v.kunde_id WHERE v.ewx_host = ? AND v.ewx_id = ?', [$host, $jobId]);
+        if ($vorhanden !== null) {
+            return ['ok' => false, 'message' => (int) $vorhanden['kunde_id'] === $kundeId ? 'Der Vorgang ' . $nummer . ' ist schon mit diesem Kunden verknüpft.'
+                : 'Der Vorgang ' . $nummer . ' ist schon Kunde „' . $vorhanden['name'] . '“ zugeordnet.'];
+        }
+        $kundeRef = (string) ($kunde['ewx_kunde_ref'] ?? '');
+        if ($kundeRef !== '' && (string) $kunde['ewx_host'] !== $host) {
+            return ['ok' => false, 'message' => 'Der Kunde ist mit einem Kunden eines anderen Eventworx-Mandanten verknüpft – nichts verknüpft.'];
+        }
+        $refSetzen = false;
+        if ($jobRef !== '' && $kundeRef !== '' && $jobRef !== $kundeRef) {
+            return ['ok' => false, 'message' => 'Der Vorgang gehört in Eventworx zu einem anderen Kunden.'];
+        }
+        if ($jobRef !== '' && $kundeRef === '') {
+            $anderer = Database::first('SELECT id, name FROM kunden WHERE ewx_host = ? AND ewx_kunde_ref = ? AND id <> ?', [$host, $jobRef, $kundeId]);
+            if ($anderer !== null) {
+                return ['ok' => false, 'message' => 'Dieser Kunde in Eventworx („' . $firma . '“) ist schon Kunde „' . $anderer['name'] . '“ zugeordnet.'];
+            }
+            if (!$bestaetigt) {
+                return ['ok' => false, 'bestaetigen' => true, 'message' => 'Eventworx nennt als Kunden des Vorgangs ' . $nummer . ' „' . ($firma !== '' ? $firma : 'ohne Namen')
+                    . '“. Ist das dieser Kunde? Dann gehören auch alle weiteren Vorgänge dieses Eventworx-Kunden hierher – und keine anderen.'];
+            }
+            $refSetzen = true;
+        }
+        if ($jobRef === '' && !$bestaetigt) {
+            return ['ok' => false, 'bestaetigen' => true, 'message' => 'Eventworx nennt beim Vorgang ' . $nummer . ' keine Kunden-Kennung; als Kunde steht dort „'
+                . ($firma !== '' ? $firma : 'nichts') . '“. Gehört der Vorgang zu diesem Kunden?'];
+        }
+        $tag = static fn (?string $iso): ?string => $iso === null ? null : Zeit::anzeige($iso, 'Y-m-d');
+        $zeitraum = $v['gruppen']['zeitraum'];
+        $kundennummer = mb_substr((string) $v['gruppen']['kunde']['kundennummer'], 0, 64);
+        try {
+            $id = 0;
+            self::transaktion(static function () use (&$id, $kundeId, $kunde, $host, $jobId, $verweis, $nummer, $jobRef, $v, $tag, $zeitraum, $refSetzen, $firma, $stammdaten, $kundennummer): void {
+                $id = Database::insert('kunden_vorgaenge', [
+                    'kunde_id'       => $kundeId,
+                    'ewx_host'       => $host,
+                    'ewx_id'         => $jobId,
+                    'ewx_art'        => (string) $verweis['art'],
+                    'ewx_nummer'     => $nummer,
+                    'ewx_kunde_ref'  => $jobRef,
+                    'titel'          => mb_substr((string) $v['gruppen']['veranstaltung']['veranstaltung'], 0, 255),
+                    'von'            => $tag($zeitraum['von'] ?? null) ?? $tag($zeitraum['bis'] ?? null),
+                    'bis'            => $tag($zeitraum['bis'] ?? null) ?? $tag($zeitraum['von'] ?? null),
+                    'verknuepft_von' => Auth::id(),
+                    'verknuepft_am'  => gmdate('c'),
+                ]);
+                $felder = [];
+                if ($refSetzen) {
+                    $felder += ['ewx_host' => $host, 'ewx_kunde_ref' => $jobRef, 'ewx_kunde_name' => mb_substr($firma, 0, 255)];
+                }
+                if ($stammdaten && (string) $kunde['kundennummer'] === '' && $kundennummer !== '') {
+                    $doppelt = false;
+                    foreach (Database::select("SELECT id, kundennummer FROM kunden WHERE kundennummer <> '' AND id <> ?", [$kundeId]) as $andere) {
+                        $doppelt = $doppelt || mb_strtolower((string) $andere['kundennummer']) === mb_strtolower($kundennummer);
+                    }
+                    if (!$doppelt) {
+                        $felder['kundennummer'] = $kundennummer;
+                    }
+                }
+                if ($felder !== []) {
+                    Database::update('kunden', $kundeId, $felder + ['updated_at' => gmdate('c')]);
+                }
+            });
+        } catch (\PDOException) {
+            // Ein zweiter Prozess war schneller (UNIQUE Vorgang bzw. Eventworx-Kunde).
+            return ['ok' => false, 'message' => 'Der Vorgang oder dieser Eventworx-Kunde ist inzwischen einem Kunden zugeordnet – bitte die Seite neu laden.'];
+        }
+        self::vergessen();
+        Audit::log('kunden.vorgang_verknuepft', 'kunde', (string) $kundeId, ['kunde_id' => $kundeId, 'vorgang_id' => $id, 'ewx_nummer' => $nummer]
+            + ($refSetzen ? ['kunde_ref' => 'gesetzt'] : []));
+        return ['ok' => true, 'message' => 'Vorgang ' . $nummer . ' verknüpft.', 'id' => $id];
+    }
+
+    /**
+     * Die Verknüpfung lösen. Prüfnachweise aus dem Vorgang bleiben beim
+     * Kunden (mit ihrer Herkunft), nur ohne Verweis. Mit dem letzten Vorgang
+     * geht auch die Eventworx-Kennung des Kunden – sie kam mit dem ersten.
+     *
+     * @return array{ok:bool,message:string}
+     */
+    public static function vorgangLoesen(int $kundeId, int $vorgangId): array
+    {
+        $v = self::vorgang($kundeId, $vorgangId);
+        if ($v === null) {
+            return ['ok' => false, 'message' => 'Diesen Vorgang hat der Kunde nicht.'];
+        }
+        $refWeg = false;
+        self::transaktion(static function () use ($kundeId, $vorgangId, &$refWeg): void {
+            Database::execute('UPDATE pruefnachweise SET vorgang_id = NULL WHERE vorgang_id = ?', [$vorgangId]);
+            Database::delete('kunden_vorgaenge', $vorgangId);
+            if ((int) Database::scalar('SELECT COUNT(*) FROM kunden_vorgaenge WHERE kunde_id = ?', [$kundeId]) === 0
+                && (string) (self::find($kundeId)['ewx_kunde_ref'] ?? '') !== '') {
+                Database::update('kunden', $kundeId, ['ewx_host' => '', 'ewx_kunde_ref' => null, 'ewx_kunde_name' => '', 'updated_at' => gmdate('c')]);
+                $refWeg = true;
+            }
+        });
+        self::vergessen();
+        Audit::log('kunden.vorgang_geloest', 'kunde', (string) $kundeId, ['kunde_id' => $kundeId, 'vorgang_id' => $vorgangId,
+            'ewx_nummer' => (string) $v['ewx_nummer']] + ($refWeg ? ['kunde_ref' => 'entfernt'] : []));
+        return ['ok' => true, 'message' => 'Vorgang ' . $v['ewx_nummer'] . ' gelöst.' . ($refWeg ? ' Es war der letzte – die Verknüpfung mit dem Kunden in Eventworx ist damit auch weg.' : '')];
     }
 
     // ------------------------------------------------------------ Protokolle (Übergabeberichte)
