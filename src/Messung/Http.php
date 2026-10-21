@@ -39,10 +39,13 @@ final class Http
      * curl-Fehlernummer (0 ohne Fehler und bei PHP-Streams), damit der
      * Aufrufer sagen kann, *was* nicht ging (Name unbekannt, abgewiesen …).
      *
+     * $optionen ist #[\SensitiveParameter]: Kopfzeilen und Rumpf tragen Tokens
+     * und Secrets (Eventworx, SSO) – sie gehören in keinen Stack-Trace.
+     *
      * @param array{kopf?:array<string,string>,rumpf?:string,zeit?:int,verbindung?:int,max?:int} $optionen
      * @return array{ok:bool,status:int,rumpf:string,fehler:string,nummer:int}
      */
-    public static function anfrage(string $methode, string $url, array $optionen = []): array
+    public static function anfrage(string $methode, string $url, #[\SensitiveParameter] array $optionen = []): array
     {
         if (is_callable(self::$attrappe)) {
             $antwort = (self::$attrappe)($methode, $url, $optionen);

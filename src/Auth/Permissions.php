@@ -74,6 +74,7 @@ final class Permissions
             'system.users.manage'=> 'Benutzer, Rollen und Freigaben verwalten',
             'settings.manage'    => 'Systemeinstellungen ändern (InfluxDB, MQTT, Repository)',
             'audit.view'         => 'Audit-Log ansehen',
+            'sso.manage'         => 'Anmeldung über SSO (OpenID Connect, etwa Authentik) einrichten: Verbindung, Gruppen → Rollen, Anmeldeanfragen – Rollen zuordnen und Konten freischalten nur, wer sie selbst vergeben bzw. verwalten darf; Verwaltung per SSO, MFA und „nur SSO“ nur mit allen Rechten',
         ],
     ];
 

@@ -87,6 +87,16 @@ try {
         'Rechte der Übergabeberichte nur, wer sie selbst hat');
     pruefe(!BenutzerService::darfVergeben(['kunden.view']) && !BenutzerService::darfVergeben(['kunden.manage'])
         && !BenutzerService::darfVergeben(['kunden.nachweise']), 'Rechte des Kundenbereichs nur, wer sie selbst hat');
+    // Anmeldung über SSO: einrichten (Gruppen → Rollen, Anmeldeanfragen) nur, wer es selbst darf.
+    pruefe(Permissions::exists('sso.manage') && !BenutzerService::darfVergeben(['sso.manage']), '„SSO einrichten“ vergibt nur, wer es hat');
+    foreach (Permissions::standardRollen() as $schluessel => $rolle) {
+        if ($schluessel !== 'admin') {
+            pruefe(!in_array('sso.manage', $rolle['permissions'], true), 'Standardrolle ' . $schluessel . ' ohne sso.manage');
+        }
+    }
+    // Wohin das SSO-Secret geht und wohin die Anmeldung zurückkehrt, ändert nie die Oberfläche.
+    pruefe(preg_grep('/^sso\./', array_keys(Settings::OVERRIDABLE)) === [] && !array_key_exists('app.url', Settings::OVERRIDABLE),
+        'Settings::OVERRIDABLE ohne sso.* und app.url');
     // Kundenbereich: Standorte für Kunden gibt nur frei, wer selbst alles sieht (was sie
     // speichert – nur Standort, nur sehen –, prüft kundenbereich.php).
     pruefe(!BenutzerService::freigabeFuerKunde(1, ['site_id' => 1, 'gueltig_ab' => '2026-01-01', 'gueltig_bis' => '2026-01-02',
