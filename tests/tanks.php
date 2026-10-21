@@ -1521,10 +1521,11 @@ try {
     pruefe($l['stufe'] === 'warn' && str_contains($l['hinweis'], $l['alter_s'] > 3600 ? 'meldet nicht, obwohl ' . $kennungF . ' Aggregat läuft' : 'nachbestellen'),
         'Generator verbraucht 900 l/h, letzter Wert ' . $l['tank']['stand'] . ': gelb – ' . $l['hinweis']);
     AnlagenService::eigenschaftSetzen($gen, ['verbrauch_kennlinie' => '100% 22L / 70% 16L / 50% 12L'], true);
-    // Wenig Vorrat (Sumpf fast so groß wie der Inhalt): Restlaufzeit unter 4 h – rot; die Tankdaten ergeben je eine neue Fassung
+    // Wenig Vorrat (Sumpf fast so groß wie der Inhalt): Restlaufzeit unter 4 h – rot; die Tankdaten ergeben je eine neue Fassung.
+    // Der Sumpf ungerundet: Steht die Demo-Sonde gerade auf ,5 l (etwa 2.372,5 l), hielte jeder Tank sonst 29,5 l – zusammen 59 statt 60 l.
     $liter = (float) $l['tank']['liter'];
     foreach ([$t1, $t2] as $id) {
-        AnlagenService::eigenschaftSetzen($id, ['sumpf_l' => round($liter - 30)]);
+        AnlagenService::eigenschaftSetzen($id, ['sumpf_l' => $liter - 30]);
     }
     $l = TankService::live([$o($t1)], $gLive(64000.0))[$t1];
     pruefe($l['stufe'] === 'bad' && str_contains($l['hinweis'], 'sofort nachtanken') && $l['tank']['restlaufzeit_h'] < 4 && abs($l['tank']['vorrat_l'] - 60) < 1,

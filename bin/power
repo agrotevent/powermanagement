@@ -67,12 +67,28 @@ declare(strict_types=1);
  *   bin/power berichte:aufbewahrung [--ausfuehren]
  *                                   Berichte über der Aufbewahrungsfrist zeigen, mit --ausfuehren löschen
  *   bin/power eventworx:pruefen     Verbindung zu Eventworx prüfen (nur lesend)
+ *   bin/power eventworx:sonde [--stock=OID] [--job=OID] [--serie=TEXT] [--json]
+ *                                   (auch eventworx:geraete-pruefen) Lese-Probe: was liefert die
+ *                                   Schnittstelle zu Geräten, Prüfungen und Dateien am Vorgang? Nur GET
+ *                                   auf einer festen Liste, höchstens 25 Anfragen; Ausgabe ohne Inhalte
+ *                                   (nur Arten und Kennwerte). Ergebnis in docs/eventworx.md festhalten
+ *   bin/power kunden:liste          Kunden des Kundenbereichs: ID, Name, aktiv, Zugänge, Locations, Nachweise
+ *   bin/power kunden:zugang <kunde-id> <benutzer> [--kennwort] [--name=…] [--email=…]
+ *                                   Kundenzugang ohne Oberfläche: Einrichtungslink (braucht app.url)
+ *                                   oder mit --kennwort ein vorläufiges Kennwort – genau einmal ausgegeben
+ *   bin/power kunden:aufbewahrung [--ausfuehren]
+ *                                   Prüfnachweise über der Aufbewahrungsfrist zeigen, mit --ausfuehren löschen
+ *   bin/power kunden:nachweise-pruefen
+ *                                   Dateien der Prüfnachweise nachrechnen (Prüfsumme, Größe, Verweise,
+ *                                   unbenutzte Dateien). Exit 1 bei einem Befund
  *   bin/power demo:seed [--reset]   Demo-Gelände mit Anlagen, Tanks, Kabeln, Benutzern und Übergabeberichten anlegen
  *   bin/power wartung               Protokolle aufräumen, abgebrochene MQTT-Prüfungen
  *                                   zurücksetzen, alte Import-Vorschauen löschen, fällige
  *                                   Übergabeberichte melden, entschiedene Änderungsvorschläge
  *                                   (älter als 400 Tage) und verwaiste Vorschlags- und
- *                                   Temp-Ordner entfernen (täglich per Timer)
+ *                                   Temp-Ordner entfernen, abgelaufene Einrichtungslinks des
+ *                                   Kundenbereichs unbrauchbar machen, fällige Prüfnachweise
+ *                                   melden (täglich per Timer)
  */
 
 require dirname(__DIR__) . '/src/bootstrap.php';
@@ -80,6 +96,9 @@ require dirname(__DIR__) . '/src/bootstrap.php';
 use App\Auth\Auth;
 use App\Auth\Zugriff;
 use App\Berichte\BerichtService;
+use App\Kunden\Einrichtung;
+use App\Kunden\KundenService;
+use App\Kunden\Pruefnachweise;
 use App\Messung\Influx;
 use App\Messung\Messdaten;
 use App\Messung\Mqtt;
@@ -90,6 +109,7 @@ use App\Services\AnlagenService;
 use App\Services\BenutzerService;
 use App\Services\DemoSeed;
 use App\Services\Eventworx;
+use App\Services\EventworxProbe;
 use App\Services\KatalogImport;
 use App\Services\LiveService;
 use App\Services\LocationSync;
@@ -112,7 +132,7 @@ $befehl = array_shift($argumente) ?? 'hilfe';
 $optionen = [];
 $werte = [];
 // Optionen mit Wert gehen als --name=wert oder --name wert.
-$mitWert = ['fassung'];
+$mitWert = ['fassung', 'name', 'email', 'stock', 'job', 'serie'];
 for ($i = 0; $i < count($argumente); $i++) {
     $a = $argumente[$i];
     if (str_starts_with($a, '--')) {
@@ -749,6 +769,105 @@ switch ($befehl) {
         $erg['ok'] ? $aus($erg['message']) : $fehler($erg['message']);
         break;
 
+    case 'eventworx:sonde':
+    case 'eventworx:geraete-pruefen':
+        $wert = static fn (string $k): ?string => isset($optionen[$k]) ? (is_string($optionen[$k]) ? $optionen[$k] : '') : null;
+        $erg = EventworxProbe::lauf($wert('stock'), $wert('job'), $wert('serie'));
+        if (isset($optionen['json'])) {
+            $aus((string) json_encode($erg, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES));
+            exit($erg['ok'] ? 0 : 1);
+        }
+        // Nur Arten, Zahlen und Kennwerte – keine Namen, Seriennummern, Dateinamen.
+        foreach ($erg['schritte'] as $s) {
+            $aus(sprintf('%-4s %-14s HTTP %3d%s%s', $s['schritt'], $s['pfad'], $s['status'], $s['code'] !== '' ? '  ' . $s['code'] : '',
+                $s['total'] !== null ? '  total ' . $s['total'] : ''));
+            foreach ($s['schluessel'] as $k => $art) {
+                $aus('       ' . (in_array($k, $s['pruef'], true) ? '* ' : '  ') . $k . ': ' . $art . (isset($s['kennwerte'][$k]) ? ' = ' . $s['kennwerte'][$k] : ''));
+            }
+            foreach ($s['kennwerte'] as $k => $v) {
+                if (!isset($s['schluessel'][$k])) {
+                    $aus('         ' . $k . ' = ' . $v);
+                }
+            }
+            foreach ($s['hinweise'] as $h) {
+                $aus('       → ' . $h);
+            }
+        }
+        $aus($erg['meldung'] . ' ' . $erg['anfragen'] . ' Anfrage(n). „*“: Schlüssel, die nach Prüfung oder Frist klingen.');
+        exit($erg['ok'] ? 0 : 1);
+
+    case 'kunden:liste':
+        $kunden = KundenService::alle();
+        if ($kunden === []) {
+            $aus('Keine Kunden.');
+            break;
+        }
+        // Nur, was zur Übersicht gehört – keine Personendaten der Zugänge.
+        $aus(sprintf('  %5s  %-40s %-9s %7s %10s %10s', 'ID', 'Name', 'Zustand', 'Zugänge', 'Locations', 'Nachweise'));
+        foreach ($kunden as $k) {
+            $aus(sprintf('  %5d  %-40s %-9s %7d %10d %10d', (int) $k['id'], mb_strimwidth((string) $k['name'], 0, 40, '…'),
+                $k['sperre'] === null ? 'aktiv' : ((int) $k['aktiv'] === 1 ? 'abgelaufen' : 'beendet'),
+                (int) $k['zugaenge'], (int) $k['locations_aktiv'], (int) $k['nachweise']));
+        }
+        break;
+
+    case 'kunden:zugang':
+        [$kundeId, $name] = array_pad($werte, 2, null);
+        if ($kundeId === null || $name === null || !ctype_digit((string) $kundeId)) {
+            $fehler('Aufruf: bin/power kunden:zugang <kunde-id> <benutzer> [--kennwort] [--name=…] [--email=…]');
+        }
+        Audit::akteur('cli');
+        $erg = KundenService::zugangAnlegen((int) $kundeId, [
+            'username'  => $name,
+            'full_name' => is_string($optionen['name'] ?? null) ? $optionen['name'] : '',
+            'email'     => is_string($optionen['email'] ?? null) ? $optionen['email'] : '',
+        ], isset($optionen['kennwort']) ? 'kennwort' : 'link', true);
+        if (!$erg['ok']) {
+            $fehler($erg['message']);
+        }
+        $aus($erg['message'] . ' Nur jetzt sichtbar – nicht per unverschlüsselter Mail weitergeben.');
+        if (isset($erg['kennwort'])) {
+            $aus('Vorläufiges Kennwort: ' . $erg['kennwort'] . ' (bei der ersten Anmeldung ändern)');
+        } elseif (($erg['link'] ?? null) !== null) {
+            $aus('Einrichtungslink (gilt einmal, bis ' . \App\Support\Zeit::anzeige((string) $erg['bis']) . '): ' . $erg['link']);
+        } else {
+            $aus('app.url fehlt oder ist ungültig – Pfad des Einrichtungslinks (vor ihn gehört die Adresse der Oberfläche): ' . $erg['pfad']);
+        }
+        break;
+
+    case 'kunden:aufbewahrung':
+        // Ausgabe ohne Kundendaten: Nachweis- und Kunden-ID, Status, Fristen.
+        $faellig = Pruefnachweise::faellig();
+        if ($faellig === []) {
+            $aus('Kein Prüfnachweis über der Aufbewahrungsfrist.');
+            break;
+        }
+        foreach ($faellig as $n) {
+            $aus(sprintf('  Nachweis #%-6d Kunde #%-5d %-14s geprüft %-10s aufbewahren bis %s', $n['id'], $n['kunde_id'],
+                Pruefnachweise::STATUS[$n['status']] ?? $n['status'], $n['geprueft_am'] ?? '–', $n['aufbewahren_bis']));
+        }
+        if (!isset($optionen['ausfuehren'])) {
+            $aus(count($faellig) . ' über der Aufbewahrungsfrist. Löschen (Nachweis, Abrufe, Datei wenn unbenutzt) mit --ausfuehren.');
+            break;
+        }
+        Audit::akteur('cli');
+        $geloescht = 0;
+        foreach ($faellig as $n) {
+            $geloescht += Pruefnachweise::aufbewahrungLoeschen($n['id']) ? 1 : 0;
+        }
+        $aus($geloescht . ' gelöscht.');
+        break;
+
+    case 'kunden:nachweise-pruefen':
+        $befunde = Pruefnachweise::pruefen();
+        $dateien = (int) Database::scalar('SELECT COUNT(*) FROM pruefnachweis_dateien');
+        $nachweise = (int) Database::scalar('SELECT COUNT(*) FROM pruefnachweise');
+        foreach ($befunde as $text) {
+            $aus('BEFUND   ' . $text);
+        }
+        $aus(sprintf('%d Datei(en) und %d Prüfnachweis(e) geprüft, %d Befund(e).', $dateien, $nachweise, count($befunde)));
+        exit($befunde === [] ? 0 : 1);
+
     case 'demo:seed':
         // Die Demo legt Konten mit bekannten Kennwörtern an (technik darf
         // schalten) und löscht mit --reset gleichnamige – nie im Betrieb.
@@ -777,6 +896,14 @@ switch ($befehl) {
         }
         // Übergabeberichte nur melden – gelöscht wird mit berichte:aufbewahrung.
         foreach (BerichtService::wartungHinweise() as $meldung) {
+            $aus($meldung);
+        }
+        $links = Einrichtung::aufraeumen();
+        if ($links > 0) {
+            $aus("Aufgeräumt: {$links} abgelaufene(r) Einrichtungslink(s) des Kundenbereichs.");
+        }
+        // Prüfnachweise nur melden – gelöscht wird mit kunden:aufbewahrung.
+        foreach (Pruefnachweise::wartungHinweise() as $meldung) {
             $aus($meldung);
         }
         break;

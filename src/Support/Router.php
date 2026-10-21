@@ -5,6 +5,7 @@ namespace App\Support;
 
 use App\Auth\Auth;
 use App\Berichte\Kundenmodus;
+use App\Kunden\Kundenbereich;
 
 /** Minimaler Router mit Rechteprüfung pro Route. */
 final class Router
@@ -12,8 +13,9 @@ final class Router
     /** @var array<int,array{method:string,pattern:string,handler:callable|array,permission:?string}> */
     private array $routes = [];
 
-    /** Was ein Konto mit vorläufigem Kennwort erreicht. */
-    private const OHNE_NEUES_KENNWORT = ['/profil', '/profil/passwort', '/logout', '/login', '/manifest'];
+    /** Was ein Konto mit vorläufigem Kennwort erreicht (Kundenzugänge: nur ihr Konto im Kundenbereich). */
+    private const OHNE_NEUES_KENNWORT = ['/profil', '/profil/passwort', '/logout', '/login', '/manifest',
+                                         Kundenbereich::KONTO, Kundenbereich::KONTO . '/kennwort'];
 
     public function get(string $path, array|callable $handler, ?string $permission = null): void
     {
@@ -65,13 +67,38 @@ final class Router
         // (InfluxDB, git, Geräte), prüft Controller::kundenmodusSperrt() vor
         // der Seite oder dem Download noch einmal, und Flash::add() schreibt
         // keine Meldung mehr, die dann auf der Kundenseite stünde.
-        $gesperrt = Kundenmodus::sperrt($method, $path);
+        //
+        // Kundenzugänge (Kundenbereich, eigene Anmeldung des Kunden) haben
+        // keinen Kundenmodus – starten kann ihn nur, wer Berichte ausfüllt,
+        // und Kundenmodus::aktiv() ist für sie immer null. Eine Sperre, die
+        // aus einer abgelaufenen Sitzung des Prüfers stammt, gilt für sie
+        // also nicht (sie schickte sie sonst im Kreis: Kundenmodus → Bericht,
+        // Tor → Kundenbereich) – ebenso wenig die Sperre am Gerät.
+        $angemeldet = Auth::check();
+        $kundenzugang = $angemeldet && Kundenbereich::istKundenzugang();
+        $gesperrt = $kundenzugang ? null : Kundenmodus::sperrt($method, $path);
         if ($gesperrt !== null) {
             if (self::willJson()) {
                 Response::json(['ok' => false, 'kundenmodus' => true, 'message' => 'Kundenmodus aktiv – erst mit dem Kennwort des Prüfers entsperren.'], 423);
                 return;
             }
             Response::redirect('/berichte/' . $gesperrt . '/kunde');
+            return;
+        }
+
+        // Kundenbereich-Tor: Kundenzugänge (users.kunde_id) erreichen nur den
+        // Kundenbereich und die offenen Wege (anmelden, abmelden, Manifest).
+        // Vor der Rechteprüfung – es geht nicht um Rechte („*“ erfüllte
+        // jedes), und auch Routen ohne Recht (/, /profil) müssen zu sein.
+        // Eine Allowlist vor der Suche nach der Route: jede künftige Route,
+        // jede unbekannte Adresse und jede falsche Methode ist für Kunden von
+        // selbst zu – auch ein POST läuft nie bis zu seinem Handler.
+        if ($kundenzugang && !Kundenbereich::erlaubt($path)) {
+            if (self::willJson()) {
+                Response::json(['ok' => false, 'message' => 'Nur im Kundenbereich.'], 403);
+                return;
+            }
+            Response::redirect(Kundenbereich::PFAD);
             return;
         }
 
@@ -107,15 +134,21 @@ final class Router
                 }
             }
 
-            // Ein Konto mit vorläufigem Kennwort kommt nur bis zum Profil:
-            // erst ein eigenes Kennwort, dann der Rest. Nicht im Kundenmodus –
-            // das Profil führte zur Kundenseite, die zum Profil, im Kreis, und
+            // Ein Konto mit vorläufigem Kennwort kommt nur bis zum Profil –
+            // ein Kundenzugang bis zu seinem Konto im Kundenbereich: erst ein
+            // eigenes Kennwort, dann der Rest. Nicht im Kundenmodus – das
+            // Profil führte zur Kundenseite, die zum Profil, im Kreis, und
             // entsperren ließe sich nie. Erst entsperren (mit dem vorläufigen
-            // Kennwort), danach geht es zum Profil.
+            // Kennwort), danach geht es zum Profil. Kundenzugänge haben keinen
+            // Kundenmodus (Kundenmodus::aktiv() ist für sie null).
             if (Auth::check() && (int) (Auth::user()['must_change_password'] ?? 0) === 1
-                && !in_array($path, self::OHNE_NEUES_KENNWORT, true) && Kundenmodus::aktiv() === null) {
-                Flash::warning('Bitte zuerst ein neues Passwort vergeben.');
-                Response::redirect('/profil');
+                && !in_array($path, self::OHNE_NEUES_KENNWORT, true)
+                && ($kundenzugang || Kundenmodus::aktiv() === null)) {
+                // Das Konto im Kundenbereich sagt es selbst (ein Hinweis, nicht zwei).
+                if (!$kundenzugang) {
+                    Flash::warning('Bitte zuerst ein neues Passwort vergeben.');
+                }
+                Response::redirect($kundenzugang ? Kundenbereich::KONTO : '/profil');
                 return;
             }
 

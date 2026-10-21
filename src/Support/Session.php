@@ -218,6 +218,16 @@ final class Session
         unset($_SESSION[$key]);
     }
 
+    /**
+     * Alles aus der Sitzung entfernen, sie selbst bleibt (anders als
+     * destroy()) – nur die Zeit der letzten Aktivität bleibt stehen. Für den
+     * Kontowechsel bei der Anmeldung (Auth::attempt()), vor regenerate().
+     */
+    public static function leeren(): void
+    {
+        $_SESSION = isset($_SESSION['last_activity']) ? ['last_activity' => $_SESSION['last_activity']] : [];
+    }
+
     public static function destroy(): void
     {
         $_SESSION = [];

@@ -18,6 +18,12 @@
  * geöffnet und mit dem Kennwort wieder entsperrt (im Lebenslauf steht dann
  * „an den Kunden übergeben“).
  *
+ * Den Kundenbereich nimmt das Skript als Demo-Kunde `muster-events` auf (am
+ * Telefon und am Rechner), die Kundenverwaltung als Administrator. Die Seite
+ * „Prüfnachweise aus Auftrag AU-1042“ liest nur die Dateiliste des
+ * Demo-Vorgangs (Eventworx wird im Demo-Modus nie gefragt); übernommen wird
+ * nichts, geladen auch nicht – im Kundenbereich gibt es danach keinen Abruf.
+ *
  * Für den Verteiler-Abgleich braucht es ein Repository. Das Skript legt sich
  * dafür ein eigenes an (git init --bare im Temp-Ordner) – kein Token, kein
  * Netz, auf GitHub landet nichts. Deshalb muss der Server diese Arbeitskopie
@@ -560,6 +566,36 @@ return $c;
     } finally {
         rmSync(tmp, { recursive: true, force: true });
     }
+}
+
+// ------------------------------------------------------------ Kundenbereich
+{
+    // Der Kunde: Übersicht und ein Protokoll am Telefon, Prüfnachweise am Rechner – nur ansehen, nichts laden.
+    const KUNDE = { name: 'muster-events', wort: 'Kundenbereich2026!' };
+    const handy = await sitzung(HANDY, { hasTouch: true, isMobile: true }, KUNDE);
+    await oeffnen(handy.page, '/kundenbereich', 600);
+    await foto(handy.page, 'kundenbereich-uebersicht-handy');
+    await oeffnen(handy.page, '/kundenbereich/protokolle');
+    await oeffnen(handy.page, await handy.page.locator('a[href^="/kundenbereich/protokolle/"]').first().getAttribute('href'), 600);
+    await foto(handy.page, 'kundenbereich-protokolle');
+    await handy.ctx.close();
+    const kunde = await sitzung(DESKTOP, {}, KUNDE);
+    await oeffnen(kunde.page, '/kundenbereich/pruefnachweise');
+    await foto(kunde.page, 'kundenbereich-pruefnachweise', { fullPage: true });
+    await kunde.ctx.close();
+
+    // Das Personal: der Kunde in der Kundenverwaltung, die Dateien am Eventworx-Auftrag.
+    const { ctx, page } = await sitzung(DESKTOP);
+    await oeffnen(page, '/kunden');
+    const seite = await link(page, 'Muster Events');
+    await oeffnen(page, seite);
+    await foto(page, 'kunden-kunde');
+    await oeffnen(page, seite + '?tab=vorgaenge');
+    await Promise.all([page.waitForNavigation(), page.locator('button', { hasText: 'PDF-Dateien ansehen' }).first().click()]);
+    await page.waitForLoadState('networkidle');
+    await page.waitForTimeout(300);
+    await foto(page, 'kunden-nachweise-eventworx', { fullPage: true });
+    await ctx.close();
 }
 
 // ------------------------------------------------------------ Verteiler-Abgleich

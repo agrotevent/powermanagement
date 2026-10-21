@@ -37,6 +37,8 @@ use App\Auth\Permissions;
 use App\Auth\Zugriff;
 use App\Controllers\StatistikController;
 use App\Controllers\TankController;
+use App\Kunden\Einrichtung;
+use App\Kunden\KundenEinstellungen;
 use App\Messung\Datenquellen;
 use App\Messung\Http;
 use App\Messung\Influx;
@@ -52,6 +54,7 @@ use App\Support\Crypto;
 use App\Support\Database;
 use App\Support\Request;
 use App\Support\Response;
+use App\Support\Settings;
 use App\Support\View;
 use App\Support\Zeit;
 use App\Tanks\TankRechnung;
@@ -82,6 +85,103 @@ try {
     pruefe(BenutzerService::darfVergeben(['dashboard.view', 'system.users.manage']), 'eigene Rechte darf man vergeben');
     pruefe(!BenutzerService::darfVergeben(['berichte.view']) && !BenutzerService::darfVergeben(['berichte.pruefen']),
         'Rechte der Übergabeberichte nur, wer sie selbst hat');
+    pruefe(!BenutzerService::darfVergeben(['kunden.view']) && !BenutzerService::darfVergeben(['kunden.manage'])
+        && !BenutzerService::darfVergeben(['kunden.nachweise']), 'Rechte des Kundenbereichs nur, wer sie selbst hat');
+    // Kundenbereich: Standorte für Kunden gibt nur frei, wer selbst alles sieht (was sie
+    // speichert – nur Standort, nur sehen –, prüft kundenbereich.php).
+    pruefe(!BenutzerService::freigabeFuerKunde(1, ['site_id' => 1, 'gueltig_ab' => '2026-01-01', 'gueltig_bis' => '2026-01-02',
+        'daten_wie_gueltig' => 1])['ok'], 'Kunden-Freigabe ohne „Alle Standorte …“ abgelehnt');
+    // Der Kundenbereich fragt Eventworx nie – Dateien aus Eventworx übernimmt eine Person.
+    foreach (['src/Controllers/KundenbereichController.php', 'src/Kunden/Kundenbereich.php', 'src/Kunden/KundenSicht.php'] as $datei) {
+        if (is_file(dirname(__DIR__) . '/' . $datei)) {
+            pruefe(!str_contains((string) file_get_contents(dirname(__DIR__) . '/' . $datei), 'Eventworx::'), $datei . ' fragt Eventworx nicht');
+        }
+    }
+    // Eventworx nur lesend: jede Anfrage ein GET; die Lese-Probe hat keinen eigenen Netzweg und keinen Download;
+    // wer auf Eventworx wartet (Kundenverwaltung), hält die Sitzung nicht.
+    $ewxQuelle = (string) file_get_contents(dirname(__DIR__) . '/src/Services/Eventworx.php');
+    preg_match_all('/Http::anfrage\(\s*([^,]+),/', $ewxQuelle, $m);
+    gleich($m[1], ["'GET'"], 'Eventworx: genau ein Netzweg, und der mit GET');
+    $probeQuelle = (string) file_get_contents(dirname(__DIR__) . '/src/Services/EventworxProbe.php');
+    pruefe(!str_contains($probeQuelle, 'Http::') && preg_match(\App\Services\EventworxProbe::PFADE, 'file/0123456789abcdef01234567') !== 1
+        && preg_match(\App\Services\EventworxProbe::PFADE, 'stock/update') !== 1 && preg_match(\App\Services\EventworxProbe::PFADE, 'file/delete/0123456789abcdef01234567') !== 1,
+        'Lese-Probe: kein eigener Netzweg, kein Download, kein update/delete');
+    foreach (['src/Controllers/KundenController.php' => ['KundenService::eventworxSuchen', 'KundenService::vorgangVerknuepfen'],
+        'src/Controllers/PruefnachweiseController.php' => ['Pruefnachweise::eventworxKandidaten', 'Pruefnachweise::eventworxUebernehmen']] as $datei => $aufrufe) {
+        $quelle = (string) file_get_contents(dirname(__DIR__) . '/' . $datei);
+        foreach ($aufrufe as $aufruf) {
+            $zeilen = array_values(array_filter(explode("\n", $quelle), static fn (string $z): bool => str_contains($z, $aufruf . '(')));
+            pruefe($zeilen !== [] && array_filter($zeilen, static fn (string $z): bool => !str_contains($z, 'ohneSitzungssperre(')) === [],
+                $datei . ': ' . $aufruf . ' nur ohne Sitzungssperre');
+        }
+    }
+    gleich(Response::sichererDateiname("Muster Events GmbH & Co. KG \"ü\"\r\nX.pdf"), 'Muster-Events-GmbH-Co.-KG-X.pdf',
+        'Dateiname in Content-Disposition nur ASCII ohne Anführungszeichen und Zeilenumbruch');
+    gleich(Response::sichererDateiname('../..'), 'dokument.pdf', 'leerer Dateiname: Ersatz');
+    // Prüfnachweise: der hochgeladene Name ohne Pfad und Sonderzeichen; der Kunde bekommt einen neutralen.
+    gleich(\App\Kunden\Pruefnachweise::dateiname("..\\..\\Prüfung \"x\"\r\nContent-Type: text/html<script>.PDF"), 'html-script.pdf',
+        'Dateiname eines Prüfnachweises: ohne Pfad, nur ASCII, endet auf .pdf');
+    gleich(\App\Kunden\Pruefnachweise::kundenDateiname(['id' => 7, 'inventarnummer' => "Ä\"; filename=x", 'seriennummer' => '', 'geprueft_am' => '2026-07-01']),
+        'Pruefnachweis-Ae-filename-x-2026-07-01.pdf', 'Dateiname für den Kunden: neutral, nur ASCII');
+    pruefe(preg_match('/^[A-Za-z0-9._-]+$/', \App\Kunden\Pruefnachweise::dateiname('../../')) === 1, 'leerer Name eines Prüfnachweises: Ersatz');
+    // Einrichtungslinks: gespeichert nur ein HMAC – mit eigenem, aus app.key abgeleitetem Schlüssel.
+    gleich(Einrichtung::hash('x'), hash_hmac('sha256', 'x', Crypto::ableiten('kunden-einrichtung')), 'Einrichtungslink: HMAC mit abgeleitetem Schlüssel');
+    pruefe(Einrichtung::hash('x') !== hash('sha256', 'x') && Einrichtung::hash('x') !== hash_hmac('sha256', 'x', (string) Config::get('app.key')),
+        'Einrichtungslink: weder SHA-256 noch app.key selbst');
+    pruefe(Einrichtung::finden(str_repeat('A', 42) . '=') === null && Einrichtung::finden("' OR 1=1 --") === null, 'Einrichtungslink: nur das Format eines Tokens');
+    // Die Adresse eines Links kommt nur aus app.url, nie aus dem Host-Kopf der Anfrage.
+    $urlVorher = (string) Config::get('app.url', '');
+    $hostVorher = $_SERVER['HTTP_HOST'] ?? null;
+    $_SERVER['HTTP_HOST'] = 'evil.example';
+    Config::set('app.url', '');
+    gleich(Einrichtung::link('t'), null, 'ohne app.url kein Link – auch nicht aus dem Host-Kopf');
+    foreach (['javascript:alert(1)//', 'https://a@evil.example', 'https://strom.example.de/?u=1', 'https://strom.example.de/#x', "https://strom.example.de\n.evil",
+        'https://strom example.de', '//evil.example', 'file:///etc/passwd'] as $url) {
+        Config::set('app.url', $url);
+        gleich(KundenEinstellungen::adresse(), null, 'app.url „' . $url . '“ abgelehnt');
+    }
+    Config::set('app.url', 'https://strom.example.de:8443/pm/');
+    gleich(Einrichtung::link('t'), 'https://strom.example.de:8443/pm/kundenbereich/einrichten/t', 'Link aus app.url (mit Port und Pfad)');
+    Config::set('app.url', $urlVorher);
+    if ($hostVorher === null) {
+        unset($_SERVER['HTTP_HOST']);
+    } else {
+        $_SERVER['HTTP_HOST'] = $hostVorher;
+    }
+    // Der Datenschutzhinweis ist Text: ein <script> darin erscheint auf der Einrichtungsseite maskiert.
+    alsBenutzer($benutzer['admin']);
+    $datenschutzVorher = Settings::get('kundenbereich.datenschutz');
+    pruefe(KundenEinstellungen::speichern(['kundenbereich.datenschutz' => '<script>alert(1)</script> Verantwortlich: {firma.name}'])['ok'], 'Datenschutzhinweis gespeichert');
+    $html = View::render('kundenbereich/einrichten', ['zustand' => 'formular', 'konto' => ['username' => '<b>' . $k . '</b>'], 'aktion' => Einrichtung::PFAD . 'x',
+        'datenschutz' => KundenEinstellungen::datenschutz(), 'absender' => '<i>Firma</i>', 'flashes' => []], 'layout/blank');
+    pruefe(str_contains($html, '&lt;script&gt;alert(1)&lt;/script&gt;') && !str_contains($html, '<script>alert') && !str_contains($html, '<b>' . $k)
+        && !str_contains($html, '<i>Firma'), 'Einrichtungsseite: Datenschutzhinweis, Benutzername und Firma maskiert');
+    // Hilfe des Kundenbereichs: Markdown ohne eigenes HTML, Links nur in den Kundenbereich (das Tor ließe
+    // /handbuch nicht durch), Datenschutzhinweis maskiert; Ansprechpartner als Text, tel: nur aus Ziffern.
+    $kontaktVorher = Settings::get('kundenbereich.kontakt');
+    pruefe(KundenEinstellungen::speichern(['kundenbereich.kontakt' => '<b>Bereitschaft</b> javascript:alert(1) Tel. +49 (0)171 / 123 45-67'])['ok'], 'Ansprechpartner gespeichert');
+    gleich(KundenEinstellungen::kontakt()['telefon'], '+491711234567', 'Ansprechpartner: Nummer zum Antippen nur aus Ziffern und „+“');
+    $hilfe = \App\Support\Markdown::toHtml((string) file_get_contents(dirname(__DIR__) . '/resources/hilfe/kundenbereich.md'));
+    preg_match_all('/href="([^"]*)"/', $hilfe, $ziele);
+    pruefe($hilfe !== '' && preg_match('/<script|\son[a-z]+\s*=/i', $hilfe) !== 1
+        && array_filter($ziele[1], static fn (string $z): bool => !str_starts_with($z, '/kundenbereich') && !str_starts_with($z, '#')) === [],
+        'Hilfe des Kundenbereichs: ohne Skript, Links nur in den Kundenbereich');
+    $html = View::render('kundenbereich/hilfe', ['hilfe' => $hilfe, 'datenschutz' => KundenEinstellungen::datenschutz(), 'kontakt' => KundenEinstellungen::kontakt()], '');
+    pruefe(str_contains($html, '&lt;script&gt;alert(1)') && !str_contains($html, '<script>alert') && str_contains($html, '&lt;b&gt;Bereitschaft')
+        && str_contains($html, 'href="tel:+491711234567"') && !str_contains($html, 'href="javascript'), 'Hilfeseite: Datenschutzhinweis und Ansprechpartner maskiert');
+    pruefe(KundenEinstellungen::speichern(['kundenbereich.kontakt' => 'Mo–Fr, Rückruf bis 24.09.2026'])['ok'] && KundenEinstellungen::kontakt()['telefon'] === null,
+        'Ansprechpartner: ein Datum ist keine Telefonnummer');
+    $kontaktVorher === null ? Settings::forget('kundenbereich.kontakt') : Settings::put('kundenbereich.kontakt', $kontaktVorher);
+    foreach (['kundenbereich.einrichtung_stunden' => ['0', '169', 'x', '-1'], 'kundenbereich.nachweise_jahre' => ['0', '31', '3.5']] as $schluessel => $falsche) {
+        foreach ($falsche as $falsch) {
+            pruefe(!KundenEinstellungen::speichern([$schluessel => $falsch])['ok'], $schluessel . ' „' . $falsch . '“ abgelehnt');
+        }
+    }
+    Settings::put('kundenbereich.einrichtung_stunden', '9999');   // von Hand in die Datenbank geschrieben
+    gleich(KundenEinstellungen::einrichtungStunden(), 72, 'Unsinn in der Datenbank: Vorgabe 72 Stunden');
+    Settings::forget('kundenbereich.einrichtung_stunden');
+    $datenschutzVorher === null ? Settings::forget('kundenbereich.datenschutz') : Settings::put('kundenbereich.datenschutz', $datenschutzVorher);
+    alsBenutzer($benutzer['verwalter']);
     // Texte aus Antworten (Eventworx, Bewertung, Prüfen) nur per textContent – nie als HTML.
     $js = dirname(__DIR__) . '/public/assets/js/';
     foreach (array_merge(glob($js . 'bericht*.js') ?: [], [$js . 'unterschrift.js']) as $datei) {
@@ -178,8 +278,19 @@ try {
         && ApiZugang::pruefen('Bearer ' . strtoupper($schreibt['token']), '127.0.0.1') === null, 'nur genau das Token im Kopf „Bearer“');
     // Die Ansichten der Schnittstelle: kein Skript ohne Nonce, keine on…=, kein javascript:
     $ansichten = array_merge(glob(dirname(__DIR__) . '/resources/views/schnittstelle/*.php') ?: [], glob(dirname(__DIR__) . '/resources/views/instanzen/*.php') ?: [],
-        glob(dirname(__DIR__) . '/resources/views/vorschlaege/*.php') ?: [], [dirname(__DIR__) . '/resources/views/partials/token-standorte.php']);
-    pruefe(count($ansichten) >= 10, 'Ansichten der Schnittstelle, der anderen Instanzen und der Vorschläge gefunden');
+        glob(dirname(__DIR__) . '/resources/views/vorschlaege/*.php') ?: [], [dirname(__DIR__) . '/resources/views/partials/token-standorte.php'],
+        glob(dirname(__DIR__) . '/resources/views/kunden/*.php') ?: [], [dirname(__DIR__) . '/resources/views/berichte/_kundenbereich.php']);
+    pruefe(count($ansichten) >= 16, 'Ansichten der Schnittstelle, der anderen Instanzen, der Vorschläge und der Kundenverwaltung gefunden');
+    // … und die des Kundenbereichs (dort gar kein Inline-Skript).
+    $kundenAnsichten = array_merge(glob(dirname(__DIR__) . '/resources/views/kundenbereich/*.php') ?: [],
+        [dirname(__DIR__) . '/resources/views/layout/kundenbereich.php']);
+    pruefe(count($kundenAnsichten) >= 3, 'Ansichten des Kundenbereichs gefunden');
+    foreach ($kundenAnsichten as $datei) {
+        $text = (string) file_get_contents($datei);
+        $name = basename(dirname($datei)) . '/' . basename($datei);
+        pruefe(preg_match('/<script(?![^>]*\bsrc=)/i', $text) !== 1, $name . ': kein Inline-Skript');
+        pruefe(preg_match('/\son[a-z]+\s*=/i', $text) !== 1 && stripos($text, 'javascript:') === false, $name . ': kein on…= und kein javascript:');
+    }
     // Eine Vorschlagsdatei nur über ihren Zufallsnamen im eigenen Ordner – auch ein verfälschter Eintrag führt nicht hinaus.
     foreach (['../../config/config.php', '/etc/passwd', 'abc.svg', str_repeat('a', 24) . '.php'] as $falsch) {
         pruefe(\App\Services\VorschlagService::datei(['id' => 1, 'dateien' => ['plaene/x.svg' => ['datei' => $falsch]]], 'plaene/x.svg') === null,

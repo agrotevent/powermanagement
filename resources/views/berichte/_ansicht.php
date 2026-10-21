@@ -7,6 +7,8 @@
  * @var array $inhalt vollständig (BerichtSchema::vollstaendig)
  * @var array $bewertung
  * @var ?array $unterschriften je Rolle (BerichtService::unterschriften) – ohne: kein Block
+ * @var ?bool $fuerKunde Kundenbereich: nur, was auch im PDF steht – kein Benutzername des
+ *            Personals (Lebenslauf, Integrität und Knöpfe stehen ohnehin nicht hier)
  */
 use App\Berichte\Felder;
 use App\Berichte\Katalog;
@@ -154,6 +156,7 @@ foreach ($inhalt['kreise'] as $k) {
     </div>
 
     <?php if (isset($unterschriften) && is_array($unterschriften) && ($unterschriften !== [] || (string) ($bericht['status'] ?? 'entwurf') !== 'entwurf')): ?>
-        <?= View::partial('berichte/_unterschriften', ['bericht' => $bericht ?? [], 'inhalt' => $inhalt, 'unterschriften' => $unterschriften]) ?>
+        <?= View::partial('berichte/_unterschriften', ['bericht' => $bericht ?? [], 'inhalt' => $inhalt, 'unterschriften' => $unterschriften,
+            'fuerKunde' => !empty($fuerKunde)]) ?>
     <?php endif; ?>
 </div>
