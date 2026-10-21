@@ -630,7 +630,11 @@ geringerer Auflösung exportiert werden.
   rund einer halben Minute und rechnet im Hintergrund weiter – gemessen
   ein bis vier Minuten für eine Seite mit 100 MB, länger für viele Seiten.
   Bis dahin zeichnet der Browser den Plan selbst (langsamer, weniger
-  scharf); danach die Karte neu laden.
+  scharf); danach die Karte neu laden. Pläne aus dem Location-Abgleich oder
+  von einer anderen Instanz rechnet immer der Hintergrund; mehrere große
+  Pläne kommen nacheinander dran.
+- **Ersetzen:** Ein neuer Plan auf einer Etage ersetzt den alten; wird der
+  alte von keiner Etage mehr genutzt, löscht der Server ihn samt Kacheln.
 - **Große Bilder:** PNG und JPEG über 50 Megapixel rechnet der Server mit
   poppler herunter, ohne sie ganz in den Speicher zu laden. Dafür muss ein
   JPEG *nicht progressiv* und in RGB oder Graustufen gespeichert sein, ein
@@ -699,7 +703,10 @@ geändert*:
 - Die Schnittstelle nimmt wie MasterAdmin **höchstens 30 MB je Plan** an
   (zusammen rund 33 MB je Sendung). Ein größerer Grundriss geht beim
   Zurückschicken nicht mit: Der Rest wird geschickt, dort bleibt der
-  bisherige Plan, und die Meldung nennt ihn. Übernehmen geht dagegen bis
+  bisherige Plan samt seinem Maßstab und seiner Georeferenz (die hier sind
+  am neuen Plan gemessen), und die Meldung nennt ihn. Hier gilt der
+  Standort danach weiter als *hier geändert* – **Übernehmen** fragt also
+  nach, bevor es den alten Plan von dort zurückholt. Übernehmen geht dagegen bis
   100 MB – Pläne holt B als Datei, nicht im Körper einer Sendung.
 
 Vorschläge prüft A unter **Standorte → Änderungsvorschläge**: je Etage, was

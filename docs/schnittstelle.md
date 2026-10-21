@@ -333,10 +333,13 @@ bevor feststeht, ob das Token gilt). Deshalb:
   Zeitgrenze für eine Antwort ist 60 Sekunden, sein Speicher 256 MB.
 - **Zurückschicken** (B an A): Ein Grundriss über 30 MiB – oder einer, der
   nicht mehr in die Sendung passt (zusammen rund 33 MiB) – geht nicht mit.
-  Seine Etage geht ohne Plan hinüber, und das heißt bei A wie bei
-  MasterAdmin „Grundriss unverändert“; alles andere wird geschickt. Die
-  Meldung nennt jeden ausgelassenen Plan. Früher scheiterte an einem
-  solchen Plan die ganze Sendung.
+  Seine Etage geht ohne Plan hinüber – und ohne `referenz` und
+  Georeferenz, die am neuen Plan gemessen sind –, und das heißt bei A wie
+  bei MasterAdmin „unverändert“; alles andere wird geschickt. Die Meldung
+  nennt jeden ausgelassenen Plan. B merkt sich danach nicht den neuen
+  Fingerabdruck (`partner_hash`), auch wenn A direkt übernimmt: Der Standort
+  bleibt „hier geändert“, und Übernehmen fragt, bevor es den alten Plan
+  zurückholt. Früher scheiterte an einem solchen Plan die ganze Sendung.
 Beim Eingang wird nichts gerendert oder gekachelt, die Dateien liegen mit
 Zufallsnamen unter `storage/vorschlaege/`. Ein ersetzter Vorschlag und
 direkt Geschriebenes behalten nur ihre Eckdaten (Location, Etagen, Zahlen)

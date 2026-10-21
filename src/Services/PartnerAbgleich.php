@@ -747,6 +747,7 @@ final class PartnerAbgleich
          * sagt, welcher fehlt. Früher scheiterte daran die ganze Sendung.
          */
         $ausgelassen = [];
+        $planFehlt = [];
         foreach ($hier['location']['etagen'] as $e) {
             $dk = $nachDort[(string) $e['schluessel']] ?? null;
             $gegen = $dk !== null ? ($dortEtagen[$dk] ?? null) : null;
@@ -797,7 +798,15 @@ final class PartnerAbgleich
                     }
                 }
             }
-            if (array_key_exists('referenz', $e)) {
+            /*
+             * Ohne ihren Plan auch ohne Maßstab und Georeferenz: Beide sind am
+             * Plan hier gemessen, dort läge aber weiter der alte – „referenz“
+             * und „georeferenz“ fehlen, und das heißt dort „unverändert“.
+             */
+            $ohnePlan = is_array($e['plan']) && $etage['plan'] === null;
+            if ($ohnePlan) {
+                $planFehlt[(string) $e['schluessel']] = true;
+            } elseif (array_key_exists('referenz', $e)) {
                 $etage['referenz'] = $e['referenz'];
             }
             $etagen[] = $etage;
@@ -824,7 +833,7 @@ final class PartnerAbgleich
         if ($pm) {
             $geo = [];
             foreach ((array) $hier['strom']['georeferenz'] as $hk => $g) {
-                if (isset($gesendet[(string) $hk]) && is_array($g)) {
+                if (isset($gesendet[(string) $hk]) && !isset($planFehlt[(string) $hk]) && is_array($g)) {
                     $geo[$gesendet[(string) $hk]] = $g;
                 }
             }
@@ -954,7 +963,8 @@ final class PartnerAbgleich
         if ($ausgelassen !== []) {
             $details['ausgelassen'] = count($ausgelassen);
             $hinweis .= sprintf(' Nicht mitgeschickt – größer, als die Schnittstelle annimmt (höchstens %s je Plan, %s zusammen): Grundriss von %s.'
-                . ' Dort bleibt der bisherige; den Plan dort von Hand hinterlegen oder kleiner exportieren.',
+                . ' Dort bleibt der bisherige, mit seinem Maßstab und seiner Georeferenz; den Plan dort von Hand hinterlegen oder kleiner exportieren.'
+                . ' Bis dahin gilt der Standort hier als geändert – Übernehmen fragt vorher nach.',
                 // zusammen: was als base64 in den Körper passt, umgerechnet auf die Dateien
                 SiteService::mb(ApiBestand::MAX_DATEI_BYTES), SiteService::mb(intdiv((VorschlagService::MAX_KOERPER - self::PLATZ_FUER_JSON) * 3, 4)),
                 implode(', ', $ausgelassen));
@@ -968,7 +978,16 @@ final class PartnerAbgleich
             if ($passte && is_string($stand) && preg_match('/^[0-9a-f]{1,64}$/', $stand) === 1) {
                 Database::execute('UPDATE sites SET partner_stand = ?, partner_at = ? WHERE id = ?', [$stand, gmdate('c'), $siteId]);
             }
-            Database::execute('UPDATE sites SET partner_hash = ? WHERE id = ?', [self::hierStand($siteId, true), $siteId]);
+            /*
+             * Der Fingerabdruck hier gilt als „dort angekommen“ – aber nur,
+             * wenn alles mitging. Fehlt ein Plan (zu groß), läge dort der
+             * alte: Mit dem neuen Fingerabdruck hieße das „aktuell“, und das
+             * nächste Übernehmen holte ohne Rückfrage den alten Plan zurück.
+             * So bleibt es bei „hier geändert“ (bzw. „beide“).
+             */
+            if ($ausgelassen === []) {
+                Database::execute('UPDATE sites SET partner_hash = ? WHERE id = ?', [self::hierStand($siteId, true), $siteId]);
+            }
             Audit::log('api.partner.hochgeladen', 'site', (string) $siteId, $details + ($passte ? [] : ['erzwungen' => true]));
             return ['ok' => true, 'uebernommen' => true, 'id' => $id,
                 'message' => sprintf('Bei „%s“ übernommen (%s).', (string) $partner['name'], $was)

@@ -37,6 +37,7 @@ use App\Services\PlanGeoService;
 use App\Services\PlanMassstabService;
 use App\Services\SchutzService;
 use App\Services\SiteService;
+use App\Support\Anfragezeit;
 use App\Support\Crypto;
 use App\Support\Database;
 
@@ -808,6 +809,45 @@ try {
     pruefe($r['ok'] && $aAbriss === 0 && (float) AnlagenService::find($ha)['plan_x'] === 61.0 && str_contains($r['message'], 'nicht mehr'),
         'B lädt hoch: der in A gelöschte Kabelweg kommt nicht zurück – ' . $r['message']);
 
+    // Ein Plan über 30 MiB geht beim Hochladen nicht mit (die Schnittstelle
+    // nimmt wie MasterAdmin nicht mehr an) – dann auch nicht Maßstab und
+    // Georeferenz, die an ihm gemessen sind; A behält alle drei. Und B gilt
+    // danach weiter als geändert: Mit dem Fingerabdruck des neuen Plans hieße
+    // es „aktuell“, und das nächste Übernehmen holte ohne Rückfrage den alten.
+    gleich($zustand($halleKey), 'aktuell', 'vorher aktuell');
+    $vorA = SiteService::floor($f1);
+    $r = inBAls($bAdmin, <<<'PHP'
+        $alt = (string) Database::scalar('SELECT plan_file FROM floors WHERE id = ?', [$f]);
+        $name = 'pruefung-' . bin2hex(random_bytes(4)) . '.svg';
+        $griff = fopen(SiteService::planDir() . '/' . $name, 'wb');
+        fwrite($griff, '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><!--');
+        ftruncate($griff, \App\Services\ApiBestand::MAX_DATEI_BYTES + 1);
+        fseek($griff, 0, SEEK_END);
+        fwrite($griff, '--></svg>');
+        fclose($griff);
+        Database::update('floors', $f, ['plan_file' => $name, 'plan_sha256' => '', 'plan_sha_marke' => '']);
+        PlanMassstabService::speichern($f, ['x' => 1.0, 'y' => 50.0], ['x' => 51.0, 'y' => 50.0], 77.0, 1.0);
+        $geo = PlanGeoService::speichern($f, ['x' => 1.0, 'y' => 50.0, 'lat' => 10.0, 'lon' => 10.0],
+            ['x' => 51.0, 'y' => 50.0, 'lat' => 10.0, 'lon' => 10.0 + 77 / (6371008.8 * M_PI / 180 * cos(deg2rad(10.0)))], 1.0);
+        $z = PartnerAbgleich::zurueckschicken($halle, '', false, 'hochladen');
+        $l = array_column(PartnerAbgleich::locations(PartnerService::find($pid))['locations'], null, 'schluessel');
+        return ['z' => $z, 'geo' => $geo['ok'], 'zustand' => $l[$key]['zustand'] ?? null, 'name' => $name, 'alt' => $alt];
+        PHP, ['f' => $bF1, 'halle' => $bHalle, 'pid' => $pid, 'key' => $halleKey]);
+    $nachA = SiteService::floor($f1);
+    pruefe($r['geo'] && $r['z']['ok'] && ($r['z']['uebernommen'] ?? false) && str_contains($r['z']['message'], 'Nicht mitgeschickt')
+        && $nachA['plan_file'] === $vorA['plan_file'] && PlanMassstabService::lesen($nachA) == PlanMassstabService::lesen($vorA)
+        && PlanGeoService::lesen($nachA) == PlanGeoService::lesen($vorA),
+        'Plan über 30 MiB beim Hochladen ausgelassen: A behält Plan, Maßstab und Georeferenz dieser Etage – ' . $r['z']['message']);
+    pruefe(in_array($r['zustand'], ['hier', 'beide'], true) && PartnerAbgleich::rueckfrage((string) $r['zustand'], true) !== '',
+        'B danach „' . (string) $r['zustand'] . '“ statt „aktuell“ – Übernehmen fragt vor dem Überschreiben');
+    $r = inBAls($bAdmin, <<<'PHP'
+        $u = PartnerAbgleich::uebernehmen(PartnerService::find($pid), $key, null, null, true);
+        @unlink(SiteService::planDir() . '/' . $name);
+        return ['u' => $u, 'plan' => (string) Database::scalar('SELECT plan_file FROM floors WHERE id = ?', [$f])];
+        PHP, ['f' => $bF1, 'pid' => $pid, 'key' => $halleKey, 'name' => $r['name']]);
+    pruefe($r['u']['ok'] && $r['plan'] !== '' && !str_starts_with($r['plan'], 'pruefung-'), 'B übernimmt (nach der Rückfrage): der Plan von A ist wieder da');
+    gleich($zustand($halleKey), 'aktuell', '… danach aktuell');
+
     // Was B mobil gemacht hat, bleibt beim Übernehmen mobil
     $wirdMobil = (int) AnlagenService::speichern(null, ['art' => 'verteilung', 'fest' => 1, 'name' => $marke . ' wird mobil', 'floor_id' => $f1, 'plan_x' => 90, 'plan_y' => 90])['id'];
     inBAls($bAdmin, 'return PartnerAbgleich::uebernehmen(PartnerService::find($pid), $key, null, null, true);', ['pid' => $pid, 'key' => $halleKey]);
@@ -999,8 +1039,11 @@ try {
         }
         return $loc;
     };
-    Http::$attrappe = static function (string $m, string $url, array $o) use ($maKey, $maToken, $maLocation, $svg, &$maDatei, &$maGesendet): array {
+    $maDirekt = false;
+    $maZeit = null;
+    Http::$attrappe = static function (string $m, string $url, array $o) use ($maKey, $maToken, $maLocation, $svg, &$maDatei, &$maGesendet, &$maDirekt, &$maZeit): array {
         $json = static fn (int $s, array $d): array => ['ok' => true, 'status' => $s, 'rumpf' => (string) json_encode($d), 'fehler' => ''];
+        $maZeit = $o['zeit'] ?? null;
         if (($o['kopf']['Authorization'] ?? '') !== 'Bearer ' . $maToken) {
             return $json(401, ['ok' => false, 'message' => 'Kein gültiges Token.']);
         }
@@ -1014,8 +1057,13 @@ try {
                     'dosen' => count((array) ($e['dosen'] ?? [])), 'racks' => count((array) ($e['racks'] ?? []))], $loc['etagen'])]]]),
             $pfad === '/locations/' . $maKey => $json(200, ['ok' => true, 'location' => $loc, 'stand' => substr(hash('sha256', json_encode($loc)), 0, 16),
                 'strom' => ['art' => 'strom', 'format' => 2, 'anlagen' => [['schluessel' => 'x', 'art' => 'anschluss', 'fest' => true, 'name' => 'darf nicht kommen']]]]),
-            $m === 'POST' && $pfad === '/locations/' . $maKey . '/vorschlaege' => (function () use ($o, $json, &$maGesendet): array {
+            $m === 'POST' && $pfad === '/locations/' . $maKey . '/vorschlaege' => (function () use ($o, $json, &$maGesendet, $maDirekt, $loc): array {
                 $maGesendet = json_decode((string) ($o['rumpf'] ?? ''), true);
+                if ($maDirekt) {
+                    // Wie eine Gegenseite, die direkt übernimmt – ohne Plan bleibt dort alles beim Alten.
+                    return $json(201, ['ok' => true, 'id' => 8, 'uebernommen' => true, 'basis_passte' => true,
+                        'stand' => substr(hash('sha256', json_encode($loc)), 0, 16)]);
+                }
                 return $json(201, ['ok' => true, 'message' => 'Vorschlag eingegangen – er wird übernommen, sobald ihn dort jemand bestätigt.', 'id' => 7]);
             })(),
             $pfad === '/locations/' . $maKey . '/datei?pfad=plaene%2Fgrundriss.svg' => (function () use ($svg, &$maDatei): array {
@@ -1097,12 +1145,37 @@ try {
             && str_contains($r['message'], 'Grundriss von „Heißt hier anders“ (30,1 MB)'),
             'Plan über 30 MiB: der Rest geht hinüber, die Meldung nennt den ausgelassenen Plan – ' . $r['message']);
         pruefe(($gesendet['dateien'] ?? null) === [] && array_key_exists($fixKey, $gEtagen) && $gEtagen[$fixKey]['plan'] === null
-            && (float) ($gEtagen[$fixKey]['referenz']['meter'] ?? 0) === 44.0,
-            'an MasterAdmin: die Etage ohne Plan (dort „unverändert“), Maßstab trotzdem dabei');
+            && !array_key_exists('referenz', $gEtagen[$fixKey]),
+            'an MasterAdmin: die Etage ohne Plan und ohne den Maßstab, der an ihm gemessen ist (dort beides „unverändert“)');
+        // Übernimmt die Gegenseite direkt, gilt der ausgelassene Plan nicht als abgeglichen.
+        $maDirekt = true;
+        try {
+            $r = PartnerAbgleich::zurueckschicken($maSite, 'direkt');
+        } finally {
+            $maDirekt = false;
+        }
+        $z = PartnerAbgleich::locations($ma)['locations'][0]['zustand'] ?? null;
+        pruefe($r['ok'] && ($r['uebernommen'] ?? false) && in_array($z, ['hier', 'beide'], true) && str_contains($r['message'], 'Übernehmen fragt vorher nach'),
+            'dort direkt übernommen, aber ohne den großen Plan: „' . (string) $z . '“ statt „aktuell“ – ' . $r['message']);
     } finally {
         @unlink(SiteService::planDir() . '/' . $grossName);
         Database::update('floors', $maHaupt, ['plan_file' => $planVorher, 'plan_sha256' => '', 'plan_sha_marke' => '']);
     }
+    // Die Frist der ganzen Anfrage (Anfragezeit): keine Anfrage dorthin
+    // über sie hinaus – Übernehmen holt die Location und jede Plandatei.
+    Anfragezeit::$beginn = microtime(true) - (Anfragezeit::SEKUNDEN - 30);
+    try {
+        $a = PartnerService::anfrage($ma, 'GET', '/locations/' . $maKey . '/datei?pfad=' . rawurlencode('plaene/grundriss.svg'), null, true);
+        $zeitKnapp = $maZeit;
+        Anfragezeit::$beginn = microtime(true) - Anfragezeit::SEKUNDEN;
+        $um = PartnerAbgleich::uebernehmen($ma, $maKey, $maSite, null, false);
+    } finally {
+        Anfragezeit::$beginn = null;
+    }
+    pruefe($a['ok'] && is_int($zeitKnapp) && $zeitKnapp >= 28 && $zeitKnapp <= 30,
+        sprintf('Plandatei 30 s vor Schluss der Anfrage: höchstens %s s statt %d', var_export($zeitKnapp, true), PartnerService::DATEI_ZEITLIMIT));
+    pruefe(!$um['ok'] && str_contains($um['message'], 'Die Zeit für diese Anfrage ist um'), 'Frist um: Übernehmen fragt nicht mehr dort an und sagt es – ' . $um['message']);
+
     $maLang = true;
     $etagenDort = count(PartnerAbgleich::locations($ma)['locations'][0]['etagen'] ?? []);
     $r = PartnerAbgleich::uebernehmen($ma, $maKey, $maSite, [$fixKey => (string) $maHaupt, 'aussen' => (string) $maFloors[1]['id'], $maLangKey => 'neu'], false);

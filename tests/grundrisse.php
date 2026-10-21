@@ -2,9 +2,12 @@
 declare(strict_types=1);
 
 /**
- * Grundrisse bis 100 MB: Grenzen, Prüfung beim Hochladen, große Bilder über
- * poppler statt gd (Speicher), Kacheln im Upload nur bis zur Zeitgrenze und
- * danach im Hintergrund, Streifenhöhe und die nächtliche Nachrechnung.
+ * Grundrisse bis 100 MB: Grenzen (auch wie nginx sie anwendet), Prüfung beim
+ * Hochladen, Seiten zählen und PNG-Kopf lesen ohne Speicher zu sprengen,
+ * große Bilder über poppler statt gd (Speicher), Kacheln im Upload nur bis
+ * zur Zeitgrenze und danach im Hintergrund – nacheinander –, übernommene
+ * Pläne in einer Web-Anfrage gleich dort, Abbruch und gelöschte Etage ohne
+ * Reste, ersetzte Pläne weg, Streifenhöhe und die nächtliche Wartung.
  *
  * Große Dateien entstehen dünn belegt (hilfen/grundriss-dateien.php) – ein
  * PDF mit 100 MB kostet so weder Zeit noch Platte.
@@ -12,11 +15,14 @@ declare(strict_types=1);
 
 require __DIR__ . '/hilfen/pruefung.php';
 require __DIR__ . '/hilfen/grundriss-dateien.php';
+require __DIR__ . '/hilfen/nginx-vorlage.php';
 
 use App\Services\BildPdf;
+use App\Services\LocationBundle;
 use App\Services\PdfRasterService;
 use App\Services\PlanTileService;
 use App\Services\SiteService;
+use App\Support\Anfragezeit;
 use App\Support\Database;
 
 $kennung = 'pm-grundriss-' . bin2hex(random_bytes(3));
@@ -52,9 +58,13 @@ try {
     pruefe(str_contains($vorlage, 'php_admin_value[upload_max_filesize] = 100M') && str_contains($vorlage, 'php_admin_value[post_max_size] = 105M'),
         'PHP-FPM-Vorlage: 100M / 105M');
     $site = (string) file_get_contents(dirname(__DIR__) . '/deploy/nginx-powermanagement.conf');
-    pruefe(preg_match('#location = /standorte/grundriss \{\s*client_max_body_size 105m;#', $site) === 1
-        && preg_match('#location ~ \^/index\\\\\.php\$ \{[^}]*client_max_body_size 105m;#s', $site) === 1
-        && preg_match('#\n    client_max_body_size 16m;#', $site) === 1, 'nginx-Vorlage: 105m nur für den Grundriss (und index.php dahinter), sonst 16m');
+    $block = static fn (string $kopf): string => preg_match('#\n    location ' . preg_quote($kopf, '#') . ' \{(.*?)\n    \}#s', $site, $m) === 1 ? $m[1] : '';
+    pruefe(str_contains($block('= /standorte/grundriss'), 'client_max_body_size 105m;') && str_contains($block('= /standorte/grundriss'), 'fastcgi_pass ')
+        && !str_contains($block('= /standorte/grundriss'), 'try_files')
+        && str_contains($block('^~ /api/'), 'client_max_body_size 50m;') && str_contains($block('^~ /api/'), 'fastcgi_pass ')
+        && !str_contains($block('~ ^/index\\.php$'), 'client_max_body_size') && $block('~ ^/index\\.php$') !== ''
+        && preg_match('#\n    client_max_body_size 16m;#', $site) === 1,
+        'nginx-Vorlage: Grundriss (105m) und Schnittstelle (50m) mit eigenem FastCGI-Block, index.php mit der Grenze der Site (16m)');
 
     // ------------------------------------------------ Prüfung beim Hochladen
     $vorher = $planDateien();
@@ -80,6 +90,28 @@ try {
         $r = SiteService::uploadPlan($siteId, $datei($pfad, $name), ['neue_etagen' => true]);
         pruefe(!$r['ok'] && str_contains($r['message'], $grund) && str_contains($r['message'], 'Megapixel'), $name . ' → abgelehnt mit Grund: ' . $r['message']);
     }
+    // PNG aus mehr Teilen (Chunks), als BildPdf liest: abgelehnt, ohne sie alle zu merken.
+    // Mit Millionen davon (100 MB) hielt die Liste gemessen über 2 GB.
+    $teile = fopen($tmp . '/teile.png', 'wb');
+    fwrite($teile, "\x89PNG\r\n\x1A\n" . pruefPngChunk('IHDR', pack('NNCCCCC', 10000, 6000, 8, 0, 0, 0, 0)));
+    $zehntausend = str_repeat(pruefPngChunk('IDAT', "\0"), 10_000);
+    for ($i = 0; $i < 2 * BildPdf::MAX_CHUNKS / 10_000; $i++) {
+        fwrite($teile, $zehntausend);
+    }
+    fwrite($teile, pruefPngChunk('IEND', ''));
+    fclose($teile);
+    if (function_exists('memory_reset_peak_usage')) {
+        memory_reset_peak_usage();
+    }
+    $sockel = memory_get_usage();
+    $start = microtime(true);
+    $p = BildPdf::pruefen($tmp . '/teile.png');
+    $mb = (memory_get_peak_usage() - $sockel) / 1048576;
+    pruefe(!$p['ok'] && str_contains($p['grund'], 'Teilen (Chunks)') && microtime(true) - $start < 5 && $mb < 64,
+        sprintf('PNG aus %d Teilen: abgelehnt nach %d, %.1f MB, %.2f s – %s', 2 * BildPdf::MAX_CHUNKS, BildPdf::MAX_CHUNKS, $mb, microtime(true) - $start, $p['grund']));
+    $r = SiteService::uploadPlan($siteId, $datei($tmp . '/teile.png', 'teile.png'), ['neue_etagen' => true]);
+    pruefe(!$r['ok'] && str_contains($r['message'], 'Teilen (Chunks)'), 'Upload eines solchen PNG → abgelehnt mit Grund: ' . $r['message']);
+
     // Kopf mit 0 × 0 Pixeln: libmagic hält es für ein PNG, lesen lässt es sich nicht.
     pruefPngKopf($tmp . '/kaputt.png', 0, 0);
     $r = SiteService::uploadPlan($siteId, $datei($tmp . '/kaputt.png', 'kaputt.png'), ['neue_etagen' => true]);
@@ -88,6 +120,47 @@ try {
     if (extension_loaded('gd')) {
         imagepng(imagecreatetruecolor(640, 480), $tmp . '/klein.png');
         gleich(SiteService::bildPruefen($tmp . '/klein.png'), null, 'ein gewöhnliches kleines Bild passt');
+    }
+
+    // ------------------------------------------------ Seiten zählen, ohne Treffer zu sammeln
+    // Als Liste hielten fast zehn Millionen „/Type/Page“ über 512 MB – der
+    // Upload starb an memory_limit, die Datei blieb ohne Etage liegen.
+    $zaehlen = static fn (string $pfad): string => trim((string) shell_exec(escapeshellarg(PHP_BINARY) . ' -d memory_limit=512M -r '
+        . escapeshellarg('require "' . dirname(__DIR__) . '/src/bootstrap.php"; echo App\Services\SiteService::countPdfPages($argv[1]), " ", '
+            . 'round(memory_get_peak_usage(true) / 1048576);') . ' ' . escapeshellarg($pfad) . ' 2>&1'));
+    foreach (['/Type/Page' => '60', '/Count 1' => '1'] as $muster => $soll) {
+        $f = fopen($tmp . '/seiten.pdf', 'wb');
+        fwrite($f, "%PDF-1.4\n");
+        $block = str_repeat($muster . "\n", 100_000);
+        for ($n = 9; $n + strlen($block) <= SiteService::MAX_UPLOAD_BYTES; $n += strlen($block)) {
+            fwrite($f, $block);
+        }
+        fclose($f);
+        [$seiten, $mb] = explode(' ', $zaehlen($tmp . '/seiten.pdf') . ' ');
+        pruefe($seiten === $soll && (int) $mb < 256, sprintf('PDF mit 100 MB aus lauter „%s“: %s Seite(n), %s MB (memory_limit 512M)', $muster, mb_substr($seiten, 0, 120), $mb));
+        @unlink($tmp . '/seiten.pdf');
+    }
+    file_put_contents($tmp . '/zahl.pdf', "%PDF-1.5\n1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj\n2 0 obj << /Kids [] /Count 7 >> endobj\n%%EOF\n");
+    pruefPdf($tmp . '/drei.pdf', 3);
+    gleich([SiteService::countPdfPages($tmp . '/drei.pdf'), SiteService::countPdfPages($tmp . '/zahl.pdf')], [3, 7], 'gewöhnliches PDF mit drei Seiten; nur /Count 7 lesbar → 7');
+
+    // ------------------------------------------------ nginx: die Grenze je Adresse, auch in Stücken
+    $mib = 1024 * 1024;
+    $ng = pruefNginxGrenzen(dirname(__DIR__) . '/deploy/nginx-powermanagement.conf', $tmp, [
+        'login'         => ['/login', 17 * $mib, false],
+        'login-stuecke' => ['/login', 17 * $mib, true],
+        'api-stuecke'   => ['/api/v1/locations/x/vorschlaege', 51 * $mib, true],
+        'api-20'        => ['/api/v1/locations/x/vorschlaege', 20 * $mib, true],
+        'plan-100'      => ['/standorte/grundriss', 100 * $mib, true],
+        'plan-106'      => ['/standorte/grundriss', 106 * $mib, true],
+    ]);
+    if ($ng === null) {
+        fwrite(STDOUT, "  (ohne nginx: Grenzen der Vorlage im Betrieb übersprungen – das prüft tests/installation-debian.sh)\n");
+    } elseif ($ng !== []) {
+        gleich(array_map(static fn (array $r): int => $r[0], $ng), ['login' => 413, 'login-stuecke' => 413, 'api-stuecke' => 413, 'api-20' => 502, 'plan-100' => 502, 'plan-106' => 413],
+            'nginx mit der Vorlage (502 = an PHP weitergereicht): 16m für /login, 50m für /api/, 105m nur für den Grundriss – auch in Stücken (chunked)');
+        pruefe(str_contains($ng['api-stuecke'][1], '"ok":false') && str_contains($ng['plan-106'][1], 'Grundrisse lassen sich bis 100 MB hochladen'),
+            'nginx: 413 in Stücken mit der eigenen Antwort (JSON für /api/, Seite für den Grundriss)');
     }
 
     // ------------------------------------------------ Streifen
@@ -132,6 +205,58 @@ try {
             }
             pruefe($ok && $rc === 0 && $abweichung === 0, 'BildPdf: PNG (' . $art . ') unverändert eingehüllt, poppler liest dieselben Farben (Abweichung ' . $abweichung . ')');
         }
+    }
+
+    // ------------------------------------------------ Wartung: was liegen blieb
+    // Zwischendateien eines getöteten Baus, Pläne und Kacheln ohne Etage –
+    // nur, was älter ist als ein Tag, nur unter eigenen Namen.
+    $alt = time() - 2 * 86400;
+    $tmpAlt = PdfRasterService::tempName('bild') . '.pdf';
+    $tmpNeu = PdfRasterService::tempName('streifen') . '-1.png';
+    file_put_contents($tmpAlt, str_repeat('x', 4096));
+    file_put_contents($tmpNeu, 'x');
+    touch($tmpAlt, $alt);
+    $hex = static fn (): string => bin2hex(random_bytes(8));
+    $waise = SiteService::planDir() . '/site' . $siteId . '_' . $hex() . '.pdf';
+    $benutzt = 'site' . $siteId . '_' . $hex() . '.svg';
+    $fremd = SiteService::planDir() . '/' . $kennung . '-eigener-name.pdf';
+    foreach ([$waise, SiteService::planDir() . '/' . $benutzt, $fremd] as $f) {
+        file_put_contents($f, '%PDF-1.4');
+        touch($f, $alt);
+    }
+    $benutztId = SiteService::saveFloor(null, ['site_id' => $siteId, 'name' => 'Mit altem Plan']);
+    Database::update('floors', $benutztId, ['plan_file' => $benutzt, 'plan_type' => 'svg', 'plan_page' => 1]);
+    $ordnerWaise = PlanTileService::dir() . '/site' . $siteId . '_' . $hex() . '_s2';
+    $ordnerFrisch = PlanTileService::dir() . '/site' . $siteId . '_' . $hex();
+    $ordnerGesperrt = PlanTileService::dir() . '/site' . $siteId . '_' . $hex();
+    foreach ([$ordnerWaise, $ordnerFrisch, $ordnerGesperrt] as $o) {
+        mkdir($o . '/0/0', 0775, true);
+        file_put_contents($o . '/0/0/0.png', 'x');
+    }
+    $griff = fopen($ordnerGesperrt . '/.sperre', 'c');
+    flock($griff, LOCK_EX);
+    touch($ordnerWaise, $alt);
+    touch($ordnerGesperrt, $alt);
+    try {
+        $zeilen = PlanTileService::wartung();
+    } finally {
+        flock($griff, LOCK_UN);
+        fclose($griff);
+    }
+    pruefe(!is_file($tmpAlt) && is_file($tmpNeu), 'Wartung: alte Zwischendatei in .tmp weg, eine frische bleibt');
+    pruefe(!is_file($waise) && is_file(SiteService::planDir() . '/' . $benutzt) && is_file($fremd),
+        'Wartung: alte Plandatei ohne Etage weg; benutzte und fremd benannte bleiben');
+    pruefe(!is_dir($ordnerWaise) && is_dir($ordnerFrisch) && is_dir($ordnerGesperrt),
+        'Wartung: alter Kachelordner ohne Etage weg; frischer und gerade gesperrter bleiben');
+    pruefe(array_filter($zeilen, static fn (string $z): bool => str_starts_with($z, 'Aufgeräumt: ')) !== [], 'Wartung meldet es: ' . implode(' | ', $zeilen));
+    @unlink($tmpNeu);
+    @unlink($fremd);
+    foreach ([$ordnerFrisch, $ordnerGesperrt] as $o) {
+        @unlink($o . '/0/0/0.png');
+        @unlink($o . '/.sperre');
+        @rmdir($o . '/0/0');
+        @rmdir($o . '/0');
+        @rmdir($o);
     }
 
     if (!$poppler) {
@@ -180,13 +305,43 @@ try {
         $log = (string) @file_get_contents(dirname(__DIR__) . '/storage/logs/kacheln.log');
         pruefe(str_contains($log, $kennung . ' / Etage (Seite 2): '), 'storage/logs/kacheln.log nennt Standort und Etage');
 
-        // Abbruch mitten im Bau: keine halbe Pyramide, kein meta
+        // Im Hintergrund nie zwei Bauten nebeneinander: Hält einer die Sperre,
+        // wartet der nächste (und sagt es im Protokoll), statt mitzurechnen.
+        $logPfad = dirname(__DIR__) . '/storage/logs/kacheln.log';
+        $zweite = SiteService::floor($neu[1]);
+        PlanTileService::aufraeumen($zweite);
+        $sperre = fopen(PlanTileService::hintergrundSperre(), 'c');
+        flock($sperre, LOCK_EX);
+        try {
+            clearstatcache(true, $logPfad);
+            $logVorher = (int) @filesize($logPfad);
+            PlanTileService::imHintergrund([(int) $zweite['id']]);
+            $wartet = false;
+            for ($i = 0; $i < 200 && !$wartet; $i++) {
+                usleep(100_000);
+                $wartet = str_contains(substr((string) @file_get_contents($logPfad), $logVorher), 'Ein anderer Prozess rechnet gerade Kacheln');
+            }
+            usleep(500_000);
+            pruefe($wartet && PlanTileService::meta(SiteService::floor($neu[1])) === null, 'zweiter Bau im Hintergrund wartet, solange ein anderer die Sperre hält');
+        } finally {
+            flock($sperre, LOCK_UN);
+            fclose($sperre);
+        }
+        for ($i = 0; $i < 600 && PlanTileService::meta(SiteService::floor($neu[1])) === null; $i++) {
+            usleep(100_000);
+        }
+        pruefe(PlanTileService::meta(SiteService::floor($neu[1])) !== null, '… und rechnet, sobald sie frei ist');
+
+        // Abbruch über einer fertigen Pyramide (der Upload und früher der
+        // Abgleich mit Frist, auf einem Namen, der schon Kacheln hat): keine
+        // halbe Pyramide und kein kacheln.json, das auf fehlende Kacheln zeigt.
         $eine = SiteService::floor($neu[0]);
-        PlanTileService::aufraeumen($eine);
+        pruefe(PlanTileService::meta($eine) !== null, 'vorher: fertige Pyramide');
         $b = PlanTileService::bauen($eine, true, true, microtime(true) - 1);
         $reste = glob(PlanTileService::planDir($eine) . '/[0-9]*', GLOB_ONLYDIR) ?: [];
-        pruefe(!$b['ok'] && ($b['abgebrochen'] ?? false) === true && PlanTileService::meta($eine) === null && $reste === [],
-            'bauen() mit abgelaufener Frist: abgebrochen, keine Kacheln, kein meta');
+        pruefe(!$b['ok'] && ($b['abgebrochen'] ?? false) === true && PlanTileService::meta($eine) === null && $reste === []
+            && (PlanTileService::quelle($eine)['art'] ?? '') === 'pdf',
+            'bauen() mit abgelaufener Frist: abgebrochen, keine Kacheln, kein kacheln.json – die Karte zeichnet im Browser statt ins Leere');
 
         // Die nächtliche Wartung rechnet nach, was fehlt
         $zeilen = PlanTileService::fehlendeNachrechnen();
@@ -195,6 +350,64 @@ try {
             'Wartung: fehlende Kacheln nachgerechnet – ' . implode(' | ', array_filter($zeilen, static fn (string $z): bool => str_contains($z, $kennung))));
         pruefe(array_filter(PlanTileService::fehlendeNachrechnen(), static fn (string $z): bool => str_contains($z, $kennung)) === [],
             'Wartung: ein zweiter Lauf hat nichts mehr zu tun');
+
+        // Etage gelöscht, während ihr Plan rechnet (im Hintergrund Minuten):
+        // SiteService räumt die Kacheln weg, der Bau schriebe danach weiter.
+        // Er sieht am Ende nach, ob noch eine Etage auf sie zeigt.
+        $wegId = SiteService::saveFloor(null, ['site_id' => $siteId, 'name' => 'Gleich weg']);
+        $wegName = 'site' . $siteId . '_' . bin2hex(random_bytes(8)) . '.pdf';
+        pruefPdf(SiteService::planDir() . '/' . $wegName, 1);
+        Database::update('floors', $wegId, ['plan_file' => $wegName, 'plan_type' => 'pdf', 'plan_page' => 1]);
+        $weg = SiteService::floor($wegId);
+        Database::execute('DELETE FROM floors WHERE id = ?', [$wegId]);
+        $b = PlanTileService::bauen($weg, true);
+        pruefe(!$b['ok'] && !is_dir(PlanTileService::planDir($weg)), 'Etage während des Baus gelöscht: kein Kachelordner bleibt – ' . $b['message']);
+        @unlink(SiteService::planDir() . '/' . $wegName);
+
+        // Neuer Plan auf einer Etage, die schon einen hat: Der alte geht samt
+        // Kacheln, sobald keine Etage ihn mehr nutzt – bei einem PDF je Seite.
+        $seite1 = SiteService::floor($neu[0]);
+        $seite2 = SiteService::floor($neu[1]);
+        $pdfAlt = (string) SiteService::planPath($seite1);
+        pruefe(PlanTileService::meta($seite1) !== null && PlanTileService::meta($seite2) !== null, 'vorher: beide Seiten gekachelt');
+        imagepng(imagecreatetruecolor(2000, 1400), $tmp . '/ersatz1.png');
+        $r = SiteService::uploadPlan($siteId, $datei($tmp . '/ersatz1.png', 'ersatz1.png'), ['floor_ids' => [$neu[0]]]);
+        pruefe($r['ok'] && is_file($pdfAlt) && !is_dir(PlanTileService::planDir($seite1)) && is_dir(PlanTileService::planDir($seite2)),
+            'neuer Plan für Seite 1: deren Kacheln weg, das PDF bleibt für Seite 2');
+        $ersatz1 = SiteService::floor($neu[0]);
+        pruefe(is_file(SiteService::planDir() . '/' . $ersatz1['plan_file']) && is_dir(PlanTileService::planDir($ersatz1)), 'der erste Ersatz liegt samt Kacheln da');
+        imagepng(imagecreatetruecolor(2000, 1400), $tmp . '/ersatz2.png');
+        $r = SiteService::uploadPlan($siteId, $datei($tmp . '/ersatz2.png', 'ersatz2.png'), ['floor_ids' => [$neu[0], $neu[1]]]);
+        pruefe($r['ok'] && !is_file($pdfAlt) && !is_dir(PlanTileService::planDir($seite2)) && !is_file(SiteService::planDir() . '/' . $ersatz1['plan_file'])
+            && !is_dir(PlanTileService::planDir($ersatz1)) && PlanTileService::meta(SiteService::floor($neu[0])) !== null,
+            'neuer Plan für beide: das PDF und der erste Ersatz samt Kacheln weg, der neue gekachelt');
+
+        // Übernommene Pläne (Git, andere Instanz, Vorschlag): In einer
+        // Web-Anfrage rechnet kachelnBauen() nicht selbst – das hielte die
+        // Sitzung und liefe in die Frist von nginx –, sondern gibt sie gleich
+        // an den Hintergrund. Auf der Kommandozeile rechnet es selbst.
+        $syncId = SiteService::saveFloor(null, ['site_id' => $siteId, 'name' => 'Übernommen']);
+        $syncName = 'sync' . $syncId . '_' . bin2hex(random_bytes(8)) . '.pdf';
+        pruefPdf(SiteService::planDir() . '/' . $syncName, 1);
+        Database::update('floors', $syncId, ['plan_file' => $syncName, 'plan_type' => 'pdf', 'plan_page' => 1]);
+        Anfragezeit::$beginn = microtime(true);
+        try {
+            $start = microtime(true);
+            $spaeter = LocationBundle::kachelnBauen([$syncId]);
+            $dauer = microtime(true) - $start;
+            $sofort = PlanTileService::meta(SiteService::floor($syncId));
+        } finally {
+            Anfragezeit::$beginn = null;
+        }
+        pruefe($spaeter === [$syncId] && $sofort === null && $dauer < 2,
+            sprintf('Web-Anfrage: übernommener Plan geht gleich in den Hintergrund (%.2f s, nichts selbst gerechnet)', $dauer));
+        for ($i = 0; $i < 600 && PlanTileService::meta(SiteService::floor($syncId)) === null; $i++) {
+            usleep(100_000);
+        }
+        pruefe(PlanTileService::meta(SiteService::floor($syncId)) !== null, '… dort gekachelt');
+        PlanTileService::aufraeumen(SiteService::floor($syncId));
+        $spaeter = LocationBundle::kachelnBauen([$syncId]);
+        pruefe($spaeter === [] && PlanTileService::meta(SiteService::floor($syncId)) !== null, 'Kommandozeile: kachelnBauen() rechnet selbst');
     }
 
 } finally {

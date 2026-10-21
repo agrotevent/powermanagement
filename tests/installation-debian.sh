@@ -17,8 +17,9 @@
 #      danach ein Update ohne Neues
 #
 # Bei jedem Schritt dazu die Grenzen für Grundrisse bis 100 MB, wie nginx
-# und PHP-FPM sie wirklich anwenden; vor dem Update stehen Pool und Site auf
-# den alten Werten (64M), danach wird über beide hochgeladen.
+# und PHP-FPM sie wirklich anwenden – mit angekündigter Länge und in Stücken
+# (chunked); vor dem Update stehen Pool und Site auf den alten Werten (64M),
+# danach wird über beide hochgeladen.
 #
 # Aufruf:  tests/installation-debian.sh
 #          PM_BEHALTEN=1 tests/installation-debian.sh   Container bleibt stehen
@@ -228,6 +229,17 @@ pruefe_grenzen() {
     code="$(head -c $((100 * 1024 * 1024)) /dev/zero | curl -s -o /dev/null -w '%{http_code}' --max-time 60 -H 'Host: powermanagement.lan' \
         -H 'Expect:' -H 'Content-Type: application/octet-stream' --data-binary @- http://127.0.0.1/standorte/grundriss 2>/dev/null)" || true
     pruefe "nginx und PHP: 100 MiB an /standorte/grundriss angenommen (ohne Anmeldung → 302, kam: ${code:-000})" test "${code:-000}" = 302
+    # In Stücken (Transfer-Encoding: chunked) zählt nur die location, in der
+    # nginx den Körper liest – jede Adresse muss ihre eigene Grenze haben.
+    code="$(head -c $((17 * 1024 * 1024)) /dev/zero | curl -s -o /dev/null -w '%{http_code}' --max-time 60 -H 'Host: powermanagement.lan' \
+        -H 'Expect:' -H 'Transfer-Encoding: chunked' -H 'Content-Type: application/octet-stream' --data-binary @- http://127.0.0.1/login 2>/dev/null)" || true
+    pruefe "nginx: 17 MiB in Stücken an /login → 413 (kam: ${code:-000})" test "${code:-000}" = 413
+    seite="$(head -c $((51 * 1024 * 1024)) /dev/zero | curl -s --max-time 60 -H 'Host: powermanagement.lan' -H 'Expect:' \
+        -H 'Transfer-Encoding: chunked' -H 'Content-Type: application/json' --data-binary @- http://127.0.0.1/api/v1/locations/x/vorschlaege 2>/dev/null)" || true
+    pruefe "nginx: 51 MiB in Stücken an /api/ → 413 als JSON" grep -q 'Der Körper ist zu groß' <<<"$seite"
+    code="$(head -c $((100 * 1024 * 1024)) /dev/zero | curl -s -o /dev/null -w '%{http_code}' --max-time 60 -H 'Host: powermanagement.lan' \
+        -H 'Expect:' -H 'Transfer-Encoding: chunked' -H 'Content-Type: application/octet-stream' --data-binary @- http://127.0.0.1/standorte/grundriss 2>/dev/null)" || true
+    pruefe "nginx und PHP: 100 MiB in Stücken an /standorte/grundriss angenommen (→ 302, kam: ${code:-000})" test "${code:-000}" = 302
 
     [[ "${1:-}" == "hochladen" ]] || return 0
     benutzer="pruefung-upload-$$"

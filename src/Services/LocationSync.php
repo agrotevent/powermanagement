@@ -3,6 +3,7 @@ declare(strict_types=1);
 
 namespace App\Services;
 
+use App\Support\Anfragezeit;
 use App\Support\Audit;
 use App\Support\Config;
 use App\Support\Crypto;
@@ -58,13 +59,19 @@ final class LocationSync
     private const ZEITGRENZE = 120;
 
     /**
-     * Wie lange Klonen, Holen und Hochladen dauern dürfen.
+     * Wie lange Klonen, Holen und Hochladen je Aufruf dauern dürfen.
      *
      * Ein Grundriss hat bis zu 100 MB (SiteService::MAX_UPLOAD_BYTES); über
-     * eine Leitung mit 5 Mbit/s sind das fast drei Minuten. Knapp unter
-     * fastcgi_read_timeout (300 s), damit der Browser die Meldung noch sieht.
+     * eine Leitung mit 5 Mbit/s sind das fast drei Minuten. Eine Anfrage
+     * macht aber oft mehrere Aufrufe – Hochladen holt erst und schiebt dann –,
+     * deshalb gilt in der Oberfläche zusätzlich die Frist der ganzen Anfrage
+     * (Anfragezeit, knapp unter fastcgi_read_timeout): Was danach noch
+     * fehlt, scheitert mit einer Meldung, statt dass nginx mit 504 aufgibt.
      */
     private const ZEITGRENZE_UEBERTRAGUNG = 280;
+
+    /** Git-Befehle, die über die Leitung gehen – nur für sie gilt die Frist der Anfrage. */
+    private const NETZ_BEFEHLE = ['clone', 'fetch', 'ls-remote', 'push'];
 
     /**
      * Ab dieser Größe einer Plandatei warnt GitHub beim Hochladen – und jede
@@ -1021,6 +1028,19 @@ final class LocationSync
         if ($git === null) {
             return ['ok' => false, 'ausgabe' => '', 'message' => 'git ist nicht vorhanden.'];
         }
+        /*
+         * Was über die Leitung geht, nie über die Frist der ganzen Anfrage
+         * hinaus (Anfragezeit) – sonst gäbe nginx auf, und die Meldung käme
+         * nicht mehr an. Örtliche Befehle sind schnell und bleiben davon
+         * unberührt: Scheiterte etwa `remote get-url`, hielte holen() die
+         * Arbeitskopie für fremd und holte sie ganz neu.
+         */
+        $netz = in_array($argumente[0] ?? '', self::NETZ_BEFEHLE, true);
+        $frist = $netz ? Anfragezeit::hoechstens((float) $zeit) : (float) $zeit;
+        $knapp = $frist < $zeit;
+        if ($frist < 1.0) {
+            return ['ok' => false, 'ausgabe' => '', 'message' => self::fristMeldung()];
+        }
 
         $umgebung = [
             'PATH'                 => (string) (getenv('PATH') ?: '/usr/bin:/bin'),
@@ -1049,7 +1069,7 @@ final class LocationSync
         stream_set_blocking($rohre[2], false);
         $ausgabe = '';
         $fehler  = '';
-        $ende    = microtime(true) + $zeit;
+        $ende    = microtime(true) + $frist;
         $rc      = -1;
 
         while (true) {
@@ -1071,7 +1091,7 @@ final class LocationSync
                 fclose($rohre[1]);
                 fclose($rohre[2]);
                 proc_close($prozess);
-                return ['ok' => false, 'ausgabe' => $ausgabe, 'message' => 'git hat zu lange gebraucht.'];
+                return ['ok' => false, 'ausgabe' => $ausgabe, 'message' => $knapp ? self::fristMeldung() : 'git hat zu lange gebraucht.'];
             }
             usleep(50_000);
         }
@@ -1094,6 +1114,15 @@ final class LocationSync
         }
 
         return ['ok' => true, 'ausgabe' => $ausgabe, 'message' => ''];
+    }
+
+    /** Die Anfrage ist an ihrer Frist (Anfragezeit) angekommen. */
+    private static function fristMeldung(): string
+    {
+        return sprintf('git brauchte länger, als eine Anfrage hier dauern darf (zusammen höchstens %d Sekunden, danach gibt der Webserver auf). '
+            . 'Noch einmal versuchen – was schon vollständig geholt ist, geht dabei nicht noch einmal über die Leitung. '
+            . 'Übernehmen über eine sehr langsame Leitung geht auf dem Server ohne diese Frist: bin/power location:uebernehmen <schlüssel>.',
+            Anfragezeit::SEKUNDEN);
     }
 
     /** Ein Token, das doch einmal in einer Meldung landet, wird unkenntlich. */

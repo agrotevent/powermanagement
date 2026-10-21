@@ -34,6 +34,17 @@ final class BildPdf
     private const SEITE_MAX = 14400.0;
 
     /**
+     * Mehr Chunks liest pruefen() aus einem PNG nicht.
+     *
+     * Jeder IDAT-Chunk wird als Block gemerkt. Ein PNG mit 100 MB aus
+     * Millionen leerer Chunks (12 Byte je Stück) hielt so gemessen über 2 GB
+     * Speicher und 16 Sekunden – über Git kommt so eine Datei ohne Prüfung
+     * herein, und die Wartung läse sie jede Nacht. Gewöhnliche Programme
+     * schreiben IDAT in Stücken von 8 KB und mehr: bei 100 MB keine 13 000.
+     */
+    public const MAX_CHUNKS = 100_000;
+
+    /**
      * Was im Kopf des Bildes steht – und ob es sich einhüllen lässt.
      *
      * Gelesen wird nur der Kopf (JPEG bis zum Bildanfang, PNG die Chunks bis
@@ -212,7 +223,15 @@ final class BildPdf
         $palette = '';
         $durchsichtig = false;
         $gesehen = false;
+        $chunks = 0;
         while (true) {
+            if (++$chunks > self::MAX_CHUNKS) {
+                // Weiterlesen lohnt nicht: so ein Bild geht nicht über poppler.
+                $ergebnis['grund'] = sprintf('Das PNG besteht aus über %s Teilen (Chunks) – so speichert es kein gewöhnliches Programm. '
+                    . 'Mit einem Bildprogramm neu speichern.', number_format(self::MAX_CHUNKS, 0, ',', '.'));
+                $ergebnis['bloecke'] = [];
+                break;
+            }
             $kopf = fread($griff, 8);
             if ($kopf === false || strlen($kopf) < 8) {
                 break;
@@ -243,7 +262,7 @@ final class BildPdf
             }
             fseek($griff, $daten + $laenge + 4);
         }
-        if (!$gesehen || $ergebnis['breite'] === 0 || $ergebnis['hoehe'] === 0 || $ergebnis['laenge'] === 0) {
+        if (!$gesehen || $ergebnis['breite'] === 0 || $ergebnis['hoehe'] === 0 || ($ergebnis['laenge'] === 0 && $ergebnis['grund'] === '')) {
             return null;
         }
         $farben = match ($typ) {
@@ -252,6 +271,7 @@ final class BildPdf
             default => 0,
         };
         $ergebnis['grund'] = match (true) {
+            $ergebnis['grund'] !== '' => $ergebnis['grund'],
             $zeilensprung !== 0 => 'Das PNG ist mit Zeilensprung (interlaced) gespeichert.',
             $typ === 4 || $typ === 6 || $durchsichtig => 'Das PNG hat Transparenz.',
             $farben === 0 => 'Das PNG hat einen unbekannten Farbtyp.',

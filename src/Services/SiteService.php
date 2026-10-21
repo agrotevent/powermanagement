@@ -5,6 +5,7 @@ namespace App\Services;
 
 use App\Auth\Auth;
 use App\Berichte\BerichtService;
+use App\Support\Anfragezeit;
 use App\Support\Audit;
 use App\Support\Database;
 
@@ -194,13 +195,34 @@ final class SiteService
 
         // Plandatei nur löschen, wenn keine andere Etage sie benutzt.
         if ($floor && $floor['plan_file'] !== '') {
-            $stillUsed = (int) Database::scalar('SELECT COUNT(*) FROM floors WHERE plan_file = ?', [$floor['plan_file']]);
-            if ($stillUsed === 0) {
-                @unlink(self::planDir() . '/' . basename((string) $floor['plan_file']));
-                PlanTileService::aufraeumen($floor);
-            }
+            self::planAufraeumen([$floor]);
         }
         Audit::log('floor.delete', 'floor', (string) $id);
+    }
+
+    /**
+     * Pläne, die diese Etagen bisher hatten, wegräumen – soweit keine Etage
+     * sie noch benutzt: die Kacheln, wenn keine mehr auf sie zeigt (bei
+     * einem PDF je Seite), die Datei, wenn keine Etage sie mehr nennt.
+     * Gerechnet wird gerade daran? Dann räumt der Bau am Ende selbst auf
+     * (PlanTileService::verwaist()).
+     *
+     * @param list<array<string,mixed>> $etagen Zeilen von floors, wie sie vorher waren
+     */
+    public static function planAufraeumen(array $etagen): void
+    {
+        foreach ($etagen as $f) {
+            $datei = basename((string) ($f['plan_file'] ?? ''));
+            if ($datei === '') {
+                continue;
+            }
+            if (PlanTileService::verwaist($f)) {
+                PlanTileService::aufraeumen($f);
+            }
+            if ((int) Database::scalar('SELECT COUNT(*) FROM floors WHERE plan_file = ?', [$datei]) === 0) {
+                @unlink(self::planDir() . '/' . $datei);
+            }
+        }
     }
 
     /**
@@ -282,6 +304,12 @@ final class SiteService
             ];
         }
 
+        // Die Seiten zählen, solange die Datei noch im Upload-Ordner liegt:
+        // Scheitert es hart, räumt PHP sie dort selbst weg – in storage/plans
+        // bliebe sie ohne Etage liegen, bei jedem Versuch 100 MB mehr.
+        $pages = $extension === 'pdf' ? self::countPdfPages((string) $file['tmp_name']) : 1;
+        $type  = $extension === 'pdf' ? 'pdf' : 'image';
+
         $name = sprintf('site%d_%s.%s', $siteId, bin2hex(random_bytes(8)), $extension);
         $target = self::planDir() . '/' . $name;
 
@@ -292,9 +320,6 @@ final class SiteService
             return ['ok' => false, 'message' => 'Datei konnte nicht gespeichert werden.', 'pages' => 0, 'floors' => []];
         }
         chmod($target, 0640);
-
-        $pages = $extension === 'pdf' ? self::countPdfPages($target) : 1;
-        $type  = $extension === 'pdf' ? 'pdf' : 'image';
 
         $floorIds = $floorIdsGewaehlt;
         $created  = [];
@@ -312,6 +337,11 @@ final class SiteService
             }
         }
 
+        // Was die Etagen bisher hatten – wird es danach von keiner mehr
+        // benutzt, kommt es weg (planAufraeumen()).
+        $vorher = array_values(array_filter(array_map(static fn ($id) => self::floor((int) $id), $floorIds),
+            static fn (?array $f): bool => $f !== null && (string) $f['plan_file'] !== ''));
+
         $page = 1;
         foreach ($floorIds as $floorId) {
             Database::update('floors', (int) $floorId, [
@@ -325,6 +355,7 @@ final class SiteService
             ]);
             $page++;
         }
+        self::planAufraeumen($vorher);
 
         /*
          * Pläne gleich in Kacheln zerlegen – dann ist der erste Aufruf der
@@ -341,7 +372,7 @@ final class SiteService
         $namen   = [];
         $spaeter = [];
         $grossesBild = $extension !== 'pdf' && $extension !== 'svg' && PlanTileService::ueberGd($target);
-        $bis = microtime(true) + (float) ($options['kachelzeit'] ?? self::KACHELZEIT_IM_UPLOAD);
+        $bis = microtime(true) + Anfragezeit::hoechstens((float) ($options['kachelzeit'] ?? self::KACHELZEIT_IM_UPLOAD));
         foreach ($floorIds as $floorId) {
             $etage = self::floor((int) $floorId);
             if ($etage === null) {
@@ -477,27 +508,31 @@ final class SiteService
      * Seitenzahl eines PDFs ohne externe Werkzeuge bestimmen.
      * Reicht für die üblichen CAD-Exporte; im Zweifel korrigiert der Browser
      * die Anzeige und die Seite lässt sich je Etage von Hand setzen.
+     *
+     * Gezählt wird ohne Liste der Treffer: Ein PDF mit 100 MB aus lauter
+     * „/Type/Page“ hat fast zehn Millionen davon, und als Array hielten sie
+     * gemessen über 512 MB – die Anfrage starb an memory_limit. So bleibt es
+     * bei der Datei selbst im Speicher (100 MB) und einer Drittelsekunde.
      */
     public static function countPdfPages(string $path): int
     {
         $content = (string) file_get_contents($path);
 
-        if (preg_match_all('/\/Type\s*\/Page\b(?!s)/', $content, $matches)) {
-            $count = count($matches[0]);
-            if ($count > 0) {
-                return min($count, self::MAX_PDF_SEITEN);
-            }
+        $count = (int) preg_match_all('/\/Type\s*\/Page\b(?!s)/', $content);
+        if ($count > 0) {
+            return min($count, self::MAX_PDF_SEITEN);
         }
-        if (preg_match_all('/\/Count\s+(\d+)/', $content, $matches)) {
-            $counts = array_map('intval', $matches[1]);
-            $max = $counts === [] ? 0 : max($counts);
-            if ($max > 0) {
-                // Die Zahl steht im PDF – „/Count 99999999“ legte sonst so
-                // viele Etagen an und kachelte jede.
-                return min($max, self::MAX_PDF_SEITEN);
-            }
+        // Die größte Zahl hinter /Count – der Reihe nach, höchstens so viele
+        // Treffer, wie ein echtes PDF Seitenbäume hat. Die Zahl steht im PDF:
+        // „/Count 99999999“ legte sonst so viele Etagen an und kachelte jede.
+        $max = 0;
+        $ab = 0;
+        for ($i = 0; $i < 10_000 && $max < self::MAX_PDF_SEITEN
+            && preg_match('/\/Count\s+(\d+)/', $content, $m, PREG_OFFSET_CAPTURE, $ab) === 1; $i++) {
+            $max = max($max, (int) $m[1][0]);
+            $ab = (int) $m[0][1] + strlen((string) $m[0][0]);
         }
-        return 1;
+        return $max > 0 ? min($max, self::MAX_PDF_SEITEN) : 1;
     }
 
     /** Mehr Seiten werden aus einem PDF nicht auf Etagen verteilt. */

@@ -252,9 +252,10 @@ Bei einer vorhandenen **InfluxDB 1.8** mit Anmeldung ist das „Token“
    dürfen bis **100 MB** groß sein – die Grenzen dafür stehen unten unter
    *Größe der Uploads*.
 8. **Dienste:** `powermanagement-nodered`, `powermanagement-sammler`,
-   `powermanagement-wartung.timer` (täglich; räumt Protokolle auf, rechnet
-   fehlende Kacheln von Grundrissen nach und meldet Übergabeberichte über
-   der Aufbewahrungsfrist – gelöscht wird nur mit
+   `powermanagement-wartung.timer` (täglich; räumt Protokolle auf, räumt
+   bei Grundrissen Liegengebliebenes weg – Pläne und Kacheln ohne Etage,
+   Zwischendateien abgebrochener Bauten –, rechnet fehlende Kacheln nach und
+   meldet Übergabeberichte über der Aufbewahrungsfrist – gelöscht wird nur mit
    `bin/power berichte:aufbewahrung --ausfuehren`),
    `powermanagement-mqtt-zugaenge.path` und `.timer` (eigene MQTT-Zugänge,
    nur mit Mosquitto im Container), Logrotate.
@@ -774,16 +775,26 @@ muss jede Stufe davor mindestens so viel annehmen:
 |-------|-------------|---------|
 | PHP-FPM-Pool | `upload_max_filesize` / `post_max_size` | `100M` / `105M` (der Rest für die übrigen Formularfelder) |
 | nginx, `location = /standorte/grundriss` | `client_max_body_size` | `105m` |
-| nginx, alles andere | `client_max_body_size` | `16m` (Formulare, Katalog-Import bis 5 MB), `/api/` `50m` |
+| nginx, `location ^~ /api/` | `client_max_body_size` | `50m` (die App nimmt höchstens 48 MiB an) |
+| nginx, alles andere | `client_max_body_size` | `16m` (Formulare, Katalog-Import bis 5 MB) |
 | Proxy oder Tunnel davor | seine eigene Grenze | siehe unten |
+
+Die beiden Blöcke für `/standorte/grundriss` und `/api/` reichen die
+Anfrage **selbst** an PHP-FPM weiter (eigene `fastcgi_…`-Zeilen), nicht
+über `try_files` an `index.php`. Das hat einen Grund: Kommt ein Körper in
+Stücken (`Transfer-Encoding: chunked`), prüft nginx ihn nur gegen die
+Grenze der location, in der es ihn liest. Liefe alles über `index.php`,
+bräuchte die dort 105m – und jede Adresse nähme so große Körper an, auch
+ohne Anmeldung.
 
 Den Pool schreibt jedes Update neu, die nginx-Site nur, solange sie niemand
 verändert hat. Fehlt einer von Hand veränderten Site der Block für
 `/standorte/grundriss`, sagt das Update es und legt die neue Fassung
-daneben – dann den Block von dort übernehmen. Ohne ihn gilt die Grenze der
-Site, und nginx lehnt größere Pläne ab. Das Formular nennt die Grenze, die
-PHP tatsächlich annimmt, und der Browser prüft die Größe **vor** dem
-Hochladen – eine zu große Datei geht gar nicht erst über die Leitung.
+daneben – dann den Block von dort übernehmen (samt seinen
+`fastcgi_…`-Zeilen). Ohne ihn gilt die Grenze der Site, und nginx lehnt
+größere Pläne ab. Das Formular nennt die Grenze, die PHP tatsächlich
+annimmt, und der Browser prüft die Größe **vor** dem Hochladen – eine zu
+große Datei geht gar nicht erst über die Leitung.
 
 Zeiten: Das Hochladen selbst puffert nginx; `client_body_timeout` (60 s)
 gilt je Lesevorgang, nicht für die ganze Datei – auch eine langsame Leitung
@@ -793,15 +804,36 @@ kachelt der Upload höchstens rund 30 Sekunden selbst und antwortet; was
 dann noch fehlt (ein Vektorplan mit 100 MB braucht gemessen gut vier
 Minuten, ein PDF mit 60 Seiten länger), rechnet ein eigener Prozess
 (`bin/power plan:kacheln --etage=…`, Protokoll in
-`storage/logs/kacheln.log`). Bricht der ab – etwa weil php-fpm beim Update
-neu startet –, holt die nächtliche Wartung es nach.
+`storage/logs/kacheln.log`). Pläne aus dem Location-Abgleich, von einer
+anderen Instanz oder aus einem angenommenen Vorschlag rechnet immer dieser
+Prozess – die Anfrage selbst wartet nicht darauf. Solche Prozesse rechnen
+**nacheinander**, nie zwei Pläne zugleich (jeder hält bei einem großen Plan
+150–200 MB, dazu pdftoppm); wer warten muss, sagt es im Protokoll. Bricht
+einer ab – etwa weil php-fpm beim Update neu startet –, holt die
+nächtliche Wartung es nach und räumt seine Zwischendateien weg.
+
+Holen und Hochladen über Git und das Übernehmen von einer anderen Instanz
+dürfen in der Oberfläche zusammen höchstens **285 Sekunden** dauern
+(`App\Support\Anfragezeit`, knapp unter `fastcgi_read_timeout` 300 s) –
+auch wenn eine Anfrage mehrere Schritte macht (Hochladen holt erst und
+schiebt dann). Danach bricht PowerManagement mit einer Meldung ab, statt
+dass nginx mit 504 aufgibt. Über eine sehr langsame Leitung (unter rund
+5 Mbit/s bei Plänen mit 100 MB) übernimmt
+`bin/power location:uebernehmen <schlüssel>` auf dem Server ohne diese
+Frist.
+
+Ersetzte Grundrisse löscht der Upload samt Kacheln, sobald keine Etage
+sie mehr nutzt. Pläne, die der Location- oder Partner-Abgleich ersetzt
+hat, und Kacheln ohne Etage räumt die nächtliche Wartung weg (nach einem
+Tag).
 
 **Hinter einem Proxy oder Tunnel** gilt zusätzlich dessen Grenze, und die
 kommt zuerst:
 
 - **nginx** als Proxy: im `location`- oder `server`-Block
   `client_max_body_size 105m;` (Vorgabe sind 1 MB), dazu
-  `proxy_read_timeout 300s;` – der Upload antwortet erst nach dem Kacheln.
+  `proxy_read_timeout 300s;` – der Upload antwortet erst nach dem Kacheln
+  (höchstens rund 30 s), Git- und Partner-Abgleich nach höchstens 285 s.
 - **Traefik** (auch unter Pangolin) begrenzt Körper von sich aus nicht; nur
   eine `buffering`-Middleware mit `maxRequestBodyBytes` tut es.
 - **Cloudflare** (auch Tunnel) nimmt bei Free und Pro höchstens 100 MB
@@ -852,7 +884,13 @@ Andere PowerManagement- oder MasterAdmin-Instanzen holen Standorte über
        client_max_body_size 50m;
        error_page 429 = @pm_api_429;
        error_page 413 = @pm_api_413;
-       try_files $uri /index.php$is_args$args;
+       # direkt an PHP – sonst gälte für Körper in Stücken die Grenze von index.php
+       include fastcgi_params;
+       fastcgi_param SCRIPT_FILENAME $document_root/index.php;
+       fastcgi_param SCRIPT_NAME /index.php;
+       fastcgi_param HTTPS $pm_https;
+       fastcgi_pass unix:/run/php/powermanagement.sock;
+       fastcgi_read_timeout 300;
    }
    ```
 
@@ -1098,7 +1136,8 @@ printf 'Authorization: Token %s\n' "$T" | curl -sG -H @- http://127.0.0.1:8086/q
 | Speichern auf einer Anlagen-Seite mit Livewerten hängt bis zum Timeout, im Audit-Log steht nichts | Ältere Fassungen: jede Live-Abfrage hielt die Sitzung, bis die InfluxDB antwortete – bei einer trägen InfluxDB stauten sie sich, und alles Weitere aus demselben Browser wartete. Neuen Stand einspielen (Abschnitt 10). Wie schnell die InfluxDB antwortet: `grep 'InfluxDB antwortet langsam' /opt/powermanagement/storage/logs/app.log`, `systemctl status influxdb`. |
 | `502 Bad Gateway` | PHP-FPM läuft nicht: `systemctl status php8.4-fpm`, Socket `/run/php/powermanagement.sock`. |
 | Grundriss-Upload: englisches „413 Request Entity Too Large“, „Die Anfrage ist für den Webserver zu groß“ oder Abbruch ohne Meldung | Ein Proxy davor oder eine von Hand veränderte nginx-Site begrenzt die Größe – Abschnitt 9, *Größe der Uploads*. Die Meldung „größer, als der Server annimmt“ kommt von PHP: Pool prüfen (`grep -e upload_max -e post_max /etc/php/8.4/fpm/pool.d/powermanagement.conf`). |
-| Großer Grundriss hochgeladen, die Karte zeichnet ihn unscharf und langsam | Die Kacheln rechnen noch im Hintergrund – `tail /opt/powermanagement/storage/logs/kacheln.log`. Von Hand: `cd /opt/powermanagement && runuser -u www-data -- php bin/power plan:kacheln`. |
+| Großer Grundriss hochgeladen (oder über den Abgleich übernommen), die Karte zeichnet ihn unscharf und langsam | Die Kacheln rechnen noch im Hintergrund – `tail /opt/powermanagement/storage/logs/kacheln.log`; mehrere Pläne rechnen nacheinander („Ein anderer Prozess rechnet gerade Kacheln“). Von Hand: `cd /opt/powermanagement && runuser -u www-data -- php bin/power plan:kacheln`. |
+| Location-Abgleich oder andere Instanz: „… länger, als eine Anfrage hier dauern darf (zusammen höchstens 285 Sekunden …)“ | Die Leitung ist für die Größe der Pläne zu langsam. Noch einmal versuchen (bei Git kommt, was schon vollständig geholt ist, nicht noch einmal); für Git sonst auf dem Server `cd /opt/powermanagement && runuser -u www-data -- php bin/power location:uebernehmen <schlüssel>`, bei einer anderen Instanz die Pläne dort kleiner exportieren. |
 | „Welcome to nginx“ statt Anmeldung | `rm -f /etc/nginx/sites-enabled/default && systemctl reload nginx` |
 | Andere Instanz: „Das Token wird dort nicht (mehr) angenommen“, obwohl es stimmt | Ein Proxy (oder Apache ohne `CGIPassAuth On`) verschluckt den Kopf `Authorization` – Abschnitt 9, *Schnittstelle für andere Instanzen*. Sonst ist es widerrufen oder abgelaufen: bei der Gegenseite unter *System → Schnittstelle (API)* nachsehen. |
 | Andere Instanz: „Zu viele Anfragen“ | Die Bremse in nginx (zehn je Sekunde und Adresse). Stehen alle Instanzen hinter demselben Proxy ohne `set_real_ip_from`, teilen sie sich die Bremse. |

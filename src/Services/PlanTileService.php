@@ -3,6 +3,7 @@ declare(strict_types=1);
 
 namespace App\Services;
 
+use App\Support\Database;
 use App\Support\Logger;
 use App\Support\Programm;
 
@@ -244,7 +245,13 @@ final class PlanTileService
      */
     public static function laeuft(array $floor): bool
     {
-        $pfad = self::planDir($floor) . '/.sperre';
+        return self::ordnerGesperrt(self::planDir($floor));
+    }
+
+    /** Hält jemand die Sperrdatei dieses Kachelordners (siehe laeuft())? */
+    private static function ordnerGesperrt(string $ordner): bool
+    {
+        $pfad = $ordner . '/.sperre';
         if (!is_file($pfad)) {
             return false;
         }
@@ -396,10 +403,54 @@ final class PlanTileService
         }
 
         try {
-            return self::schneiden($floor, $quelle, $ordner, $bis);
+            $ergebnis = self::schneiden($floor, $quelle, $ordner, $bis);
         } finally {
             flock($sperre, LOCK_UN);
             fclose($sperre);
+        }
+
+        /*
+         * Wurde die Etage gelöscht (oder bekam sie einen anderen Plan),
+         * während hier gerechnet wurde – im Hintergrund dauert das Minuten –,
+         * hat SiteService die Kacheln schon weggeräumt; geschrieben wurde
+         * danach weiter, der Ordner entstand neu. Ohne Etage, die auf ihn
+         * zeigt, kommt er wieder weg.
+         */
+        if (self::verwaist($floor)) {
+            self::aufraeumen($floor);
+            return ['ok' => false, 'message' => 'Den Plan gibt es nicht mehr – die Etage wurde gelöscht oder hat einen anderen bekommen.', 'kacheln' => 0, 'meta' => null];
+        }
+        return $ergebnis;
+    }
+
+    /**
+     * Zeigt keine Etage mehr auf die Kacheln dieser Etage (Plandatei und,
+     * bei einem PDF, Seite)? Gefragt wird die Datenbank, nicht $floor –
+     * der kann älter sein als die Etage.
+     */
+    public static function verwaist(array $floor): bool
+    {
+        $datei = basename((string) ($floor['plan_file'] ?? ''));
+        if ($datei === '') {
+            return false;
+        }
+        $ordner = self::planDir($floor);
+        foreach (Database::select('SELECT plan_file, plan_page FROM floors WHERE plan_file = ?', [$datei]) as $f) {
+            if (self::planDir($f) === $ordner) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /** Ein abgebrochener oder gescheiterter Bau: Zoomstufen und kacheln.json weg. */
+    private static function teilbauWeg(array $floor): void
+    {
+        // Erst das meta – ohne es zeigt die Karte keine Kacheln mehr an,
+        // die gleich darauf fehlen; der Bau beginnt beim nächsten Mal von vorn.
+        @unlink(self::metaPfad($floor));
+        foreach (glob(self::planDir($floor) . '/[0-9]*', GLOB_ONLYDIR) ?: [] as $teil) {
+            self::verzeichnisWeg($teil);
         }
     }
 
@@ -591,9 +642,7 @@ final class PlanTileService
             if ($bis !== null && microtime(true) > $bis) {
                 // Der Aufrufer wartet nicht länger (Upload): ein halber Plan
                 // hilft niemandem, also weg damit – imHintergrund() rechnet ihn.
-                foreach (glob($ordner . '/[0-9]*', GLOB_ONLYDIR) ?: [] as $teil) {
-                    self::verzeichnisWeg($teil);
-                }
+                self::teilbauWeg($floor);
                 return ['ok' => false, 'abgebrochen' => true, 'message' => 'Die Zeit im Upload ist um – der Plan wird im Hintergrund fertig gerechnet.', 'kacheln' => 0, 'meta' => null];
             }
             $nummer   = $y + 1;
@@ -614,6 +663,10 @@ final class PlanTileService
                     $streifenHoch = $jeStreifen * self::KACHEL;
                     continue;
                 }
+                // Was bis hierher geschnitten ist, passt zu keiner Pyramide.
+                if ($anzahl > 0) {
+                    self::teilbauWeg($floor);
+                }
                 return ['ok' => false, 'message' => 'Streifen ab Zeile ' . $nummer . ': ' . $streifen['message'], 'kacheln' => 0, 'meta' => null];
             }
 
@@ -632,6 +685,9 @@ final class PlanTileService
             $bild = @imagecreatefrompng($streifen['pfad']);
             PdfRasterService::aufraeumen($ziel);
             if (!$bild instanceof \GdImage) {
+                if ($anzahl > 0) {
+                    self::teilbauWeg($floor);
+                }
                 return ['ok' => false, 'message' => 'Streifen ab Zeile ' . $nummer . ' ließ sich nicht lesen.', 'kacheln' => 0, 'meta' => null];
             }
 
@@ -768,10 +824,163 @@ final class PlanTileService
             if ($pfad === null || self::meta($etage) !== null || !self::lohnt($pfad) || self::laeuft($etage)) {
                 continue;
             }
-            $ergebnis = self::bauen($etage, false, false);
+            // Wie im Hintergrund nie neben einem anderen Bau (nacheinander()).
+            $ergebnis = self::nacheinander(static function () use ($etage): ?array {
+                // Während gewartet wurde, kann die Etage gelöscht oder schon gerechnet sein.
+                $jetzt = SiteService::floor((int) $etage['id']);
+                return $jetzt === null || self::meta($jetzt) !== null ? null : self::bauen($jetzt, false, false);
+            });
+            if ($ergebnis === null) {
+                continue;
+            }
             $meldungen[] = ($ergebnis['ok'] ? 'Kacheln nachgerechnet: ' : 'Kacheln fehlen weiter: ')
                 . $etage['site_name'] . ' / ' . $etage['name'] . ' – ' . $ergebnis['message'];
         }
+        return $meldungen;
+    }
+
+    /** Wo die Prozesse im Hintergrund aufeinander warten (nacheinander()). */
+    public static function hintergrundSperre(): string
+    {
+        return self::dir() . '/.hintergrund';
+    }
+
+    /**
+     * $arbeit rechnen, aber nie neben einem anderen Bau im Hintergrund – für
+     * bin/power plan:kacheln (so rechnet imHintergrund()) und die Wartung.
+     *
+     * Jeder Bau eines großen Plans hält gemessen 150–200 MB im PHP-Prozess
+     * (gd außerhalb von memory_limit, auf der Kommandozeile ohnehin ohne
+     * Grenze) und 70–210 MB bei pdftoppm. Lädt jemand Halle für Halle vier
+     * große Pläne hoch, liefen sonst vier solcher Prozesse nebeneinander –
+     * über 1 GB, in einem Container mit 2 GB samt InfluxDB ein Fall für den
+     * OOM-Killer –, und jeder einzelne würde langsamer. pm.max_children
+     * zählt sie nicht: Sie laufen außerhalb des Pools.
+     *
+     * Die Sperre ist ein flock auf hintergrundSperre(): Der nächste wartet,
+     * bis der vorige fertig ist; stirbt einer, ist sie frei. $warten bekommt
+     * eine Zeile, wenn gewartet werden muss.
+     *
+     * @template T
+     * @param callable():T $arbeit
+     * @param (callable(string):void)|null $warten
+     * @return T
+     */
+    public static function nacheinander(callable $arbeit, ?callable $warten = null): mixed
+    {
+        // Zum Sperren genügt Lesen – auch wenn root die Datei einmal angelegt hat.
+        $griff = @fopen(self::hintergrundSperre(), 'c') ?: @fopen(self::hintergrundSperre(), 'r');
+        if ($griff === false) {
+            // Ohne Sperrdatei lieber rechnen als gar nicht – der Bau selbst
+            // meldet, wenn der Ordner nicht beschreibbar ist.
+            return $arbeit();
+        }
+        try {
+            if (!flock($griff, LOCK_EX | LOCK_NB)) {
+                if ($warten !== null) {
+                    $warten('Ein anderer Prozess rechnet gerade Kacheln – es geht weiter, sobald er fertig ist.');
+                }
+                flock($griff, LOCK_EX);
+            }
+            return $arbeit();
+        } finally {
+            flock($griff, LOCK_UN);
+            fclose($griff);
+        }
+    }
+
+    /** So heißen Plandateien, die der Upload und der Abgleich ablegen (site3_…, sync12_…). */
+    private const PLANDATEI_NAME = '/^[a-z]+\d+_[0-9a-f]{16}\.(pdf|png|jpe?g|svg)$/';
+
+    /** … und ihre Kachelordner (bei einem PDF mit der Seite). */
+    private const KACHELORDNER_NAME = '/^[a-z]+\d+_[0-9a-f]{16}(_s\d+)?$/';
+
+    /**
+     * Was beim Kacheln liegen geblieben ist – für die nächtliche Wartung.
+     *
+     *  - Zwischendateien in kacheln/.tmp (die Hülle eines großen Bildes,
+     *    Streifen von poppler): Wird ein Bau getötet – systemctl restart
+     *    php-fpm beendet auch die Prozesse im Hintergrund –, räumt sein
+     *    finally nicht mehr auf; bei einem Bild mit 100 MB sind das je Mal
+     *    über 100 MB.
+     *  - Plandateien, auf die keine Etage mehr zeigt: Der Git- und
+     *    Partner-Abgleich ersetzt einen Plan in einer Transaktion, die noch
+     *    scheitern kann – den alten löscht er deshalb nicht selbst.
+     *  - Kachelordner ohne Etage: die Seite eines PDF, deren Etage gelöscht
+     *    wurde, ein ersetzter Plan.
+     *
+     * Nur was seit $alter Sekunden unverändert ist: Was gerade entsteht (ein
+     * Upload zwischen Ablegen und Eintragen, eine Übernahme vor dem Commit),
+     * bleibt – ebenso ein Ordner, an dem gerade gerechnet wird. Andere Namen
+     * als die, die PowerManagement selbst vergibt, werden nie angefasst.
+     *
+     * @return list<string> je Art eine Zeile, wenn etwas weg ist
+     */
+    public static function wartung(int $alter = 86400): array
+    {
+        $grenze = time() - $alter;
+        $meldungen = [];
+        $zeile = static function (string $was, int $zahl, int $bytes) use (&$meldungen): void {
+            if ($zahl > 0) {
+                $meldungen[] = sprintf('Aufgeräumt: %d %s (%s).', $zahl, $was, SiteService::mb($bytes));
+            }
+        };
+
+        $zahl = $bytes = 0;
+        foreach (glob(self::dir() . '/.tmp/*') ?: [] as $datei) {
+            clearstatcache(true, $datei);
+            if (is_file($datei) && (int) filemtime($datei) < $grenze) {
+                $groesse = (int) filesize($datei);
+                if (@unlink($datei)) {
+                    $zahl++;
+                    $bytes += $groesse;
+                }
+            }
+        }
+        $zeile('Zwischendatei(en) vom Kacheln, älter als ein Tag', $zahl, $bytes);
+
+        $dateien = $ordner = [];
+        foreach (Database::select("SELECT plan_file, plan_page FROM floors WHERE plan_file <> ''") as $f) {
+            $dateien[basename((string) $f['plan_file'])] = true;
+            $ordner[basename(self::planDir($f))] = true;
+        }
+
+        $zahl = $bytes = 0;
+        foreach (scandir(SiteService::planDir()) ?: [] as $name) {
+            $pfad = SiteService::planDir() . '/' . $name;
+            clearstatcache(true, $pfad);
+            if (preg_match(self::PLANDATEI_NAME, $name) !== 1 || isset($dateien[$name]) || !is_file($pfad) || is_link($pfad)
+                || (int) filemtime($pfad) >= $grenze) {
+                continue;
+            }
+            $groesse = (int) filesize($pfad);
+            if (@unlink($pfad)) {
+                $zahl++;
+                $bytes += $groesse;
+            }
+        }
+        $zeile('Plandatei(en) ohne Etage', $zahl, $bytes);
+
+        $zahl = $bytes = 0;
+        foreach (glob(self::dir() . '/*', GLOB_ONLYDIR) ?: [] as $pfad) {
+            $name = basename($pfad);
+            clearstatcache(true, $pfad);
+            if (preg_match(self::KACHELORDNER_NAME, $name) !== 1 || isset($ordner[$name]) || is_link($pfad)
+                || (int) filemtime($pfad) >= $grenze || self::ordnerGesperrt($pfad)) {
+                continue;
+            }
+            $groesse = 0;
+            foreach (new \RecursiveIteratorIterator(new \RecursiveDirectoryIterator($pfad, \FilesystemIterator::SKIP_DOTS)) as $eintrag) {
+                $groesse += $eintrag->isFile() ? (int) $eintrag->getSize() : 0;
+            }
+            self::verzeichnisWeg($pfad);
+            if (!is_dir($pfad)) {
+                $zahl++;
+                $bytes += $groesse;
+            }
+        }
+        $zeile('Kachelordner ohne Etage', $zahl, $bytes);
+
         return $meldungen;
     }
 

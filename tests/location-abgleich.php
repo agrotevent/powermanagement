@@ -20,6 +20,7 @@ use App\Services\MesspunktService;
 use App\Services\PlanGeoService;
 use App\Services\SchutzService;
 use App\Services\SiteService;
+use App\Support\Anfragezeit;
 use App\Support\Config;
 use App\Support\Database;
 use App\Support\Programm;
@@ -456,6 +457,27 @@ try {
     $groesseDort = $planDort !== '' ? (int) $sh('git --git-dir=' . escapeshellarg($fern) . ' cat-file -s ' . escapeshellarg('main:locations/lager/' . $planDort)) : 0;
     pruefe($hoch['ok'] && str_contains($hoch['message'], 'Hinweis: Der Grundriss von „Außenfläche“ (50,1 MB) ist größer als 50 MB.')
         && $groesseDort === LocationSync::GIT_DATEI_WARNUNG + 1, 'Plan über 50 MB: hochgeladen, mit Hinweis – ' . $hoch['message']);
+
+    // Die Frist der ganzen Anfrage (Anfragezeit): Jeder Git-Aufruf darf bis zu
+    // 280 s, Hochladen holt aber erst und schiebt dann – zusammen über dem,
+    // was nginx wartet (300 s). In der Oberfläche zählt deshalb die Zeit seit
+    // Beginn der Anfrage; ist sie um, scheitert es mit Meldung statt mit 504.
+    Anfragezeit::$beginn = microtime(true) - (Anfragezeit::SEKUNDEN - 20);
+    $knapp = Anfragezeit::hoechstens(280.0);
+    Anfragezeit::$beginn = null;
+    pruefe($knapp > 18 && $knapp <= 20 && Anfragezeit::hoechstens(280.0) === 280.0, sprintf('Frist: 20 s vor Schluss bekommt git noch %.1f s statt 280, auf der Kommandozeile 280', $knapp));
+    $dortVorher = LocationSync::fernerStand();
+    Database::update('floors', $aussen, ['notes' => 'nach der Frist']);
+    Anfragezeit::$beginn = microtime(true) - Anfragezeit::SEKUNDEN;
+    try {
+        $hoch = LocationSync::locationHochladen($siteId, 'pruefung');
+        $holen = LocationSync::uebernehmen('lager');
+    } finally {
+        Anfragezeit::$beginn = null;
+    }
+    pruefe(!$hoch['ok'] && str_contains($hoch['message'], 'länger, als eine Anfrage hier dauern darf (zusammen höchstens 285 Sekunden')
+        && LocationSync::fernerStand() === $dortVorher, 'Frist der Anfrage um: Hochladen meldet es, nichts hochgeladen – ' . $hoch['message']);
+    pruefe(!$holen['ok'] && str_contains($holen['message'], 'bin/power location:uebernehmen'), 'Frist der Anfrage um: Übernehmen meldet es, mit dem Weg über die Kommandozeile');
 } finally {
     if ($inventarId !== null) {
         foreach (Database::select('SELECT id FROM einsaetze WHERE inventar_id = ? AND bis IS NULL', [$inventarId]) as $e) {
