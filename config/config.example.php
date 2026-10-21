@@ -26,7 +26,9 @@ return [
         // Anfrage – entstehen die Einrichtungslinks des Kundenbereichs;
         // leer gibt es dort nur vorläufige Kennwörter. Die Schnittstelle
         // (System → Schnittstelle) nennt daraus ihre Adresse; leer rät sie
-        // sie aus der Anfrage.
+        // sie aus der Anfrage. Pflicht für die Anmeldung über SSO: dann
+        // https und ohne Pfad (die Rückruf-Adresse ist app.url +
+        // /login/sso/rueckruf).
         'url'       => '',
     ],
 
@@ -119,5 +121,27 @@ return [
      */
     'eventworx' => [
         'basis' => '',
+    ],
+
+    /*
+     * Anmeldung über SSO (OpenID Connect, etwa Authentik) – eingerichtet wird
+     * sie unter System → Anmeldung (SSO) bzw. mit bin/power sso:einrichten.
+     * Hier steht nur, was bestimmt, wohin das Client-Secret geht – darum nie
+     * aus der Oberfläche. Siehe docs/anmeldung-sso.md.
+     */
+    'sso' => [
+        // Erreicht dieser Server den öffentlichen Namen des Ausstellers nicht
+        // (kein Hairpin-NAT), etwa 'auth.example.com:443:10.20.0.20:443':
+        // Die Verbindung geht an 10.20.0.20:443, Name, SNI und
+        // Zertifikatsprüfung bleiben auth.example.com (curl CONNECT_TO).
+        // Host und Port vorn müssen die des Ausstellers sein. Braucht php-curl.
+        'verbinden_ueber' => '',
+        // Eigene CA (PEM) für den Aussteller, etwa eine interne CA – sonst die
+        // des Systems. Unter PHP-FPM (open_basedir) nur innerhalb des
+        // Programmordners, z. B. __DIR__ . '/authentik-ca.pem'. Braucht php-curl.
+        'ca_datei' => '',
+        // NUR für Prüfskripte: http://127.0.0.1 bzw. localhost als Aussteller
+        // und app.url erlauben. Im Betrieb immer false.
+        'lokal_http' => false,
     ],
 ];

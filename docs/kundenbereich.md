@@ -453,11 +453,41 @@ einen fremden Nachweis bekommen:
   beim Kennwort.
 - Keine Karte, keine Statistik, keine Messwerte, keine Tanks, keine mobile
   Planung, kein Aufbau – auch wenn ein Datenzeitraum freigegeben ist.
-- Kundenzugänge melden sich nie über SSO an.
+- Kundenzugänge melden sich mit Benutzername und Kennwort an – über SSO
+  nur, wenn „Kunden über Authentik“ ausdrücklich eingeschaltet ist (siehe
+  unten, Vorgabe aus).
 - Keine ZIP aller Nachweise und keine Übernahme von Prüfdaten aus einer
   Prüfsoftware oder aus *Werkstatt → Prüfungen* in Eventworx.
 - Das Personal sieht den Kundenbereich nicht „als Kunde“; „Der Kunde sieht
   derzeit …“ rechnet aber mit denselben Regeln.
+
+## Kunden über Authentik
+
+Haben Kunden Konten im eigenen Authentik, können sie sich darüber anmelden
+– **Vorgabe aus**, eingeschaltet unter *System → Anmeldung (SSO) → Kunden*
+(Recht „Anmeldung über SSO einrichten“ und „Kunden pflegen“; Einzelheiten
+in [anmeldung-sso.md](anmeldung-sso.md#kunden-über-authentik)):
+
+- Je Kunde eine **Kundengruppe** in Authentik (etwa
+  `pm-kunde-muster-events`), hier dem Kunden zugeordnet. Zuordnen darf nur,
+  wer die Zugänge dieses Kunden selbst ausgeben dürfte (dieselbe Regel wie
+  oben: „Kunden pflegen“ und alles sehen, was der Kunde sieht).
+- Wer in genau dieser Gruppe ist, bekommt bei der ersten Anmeldung einen
+  Zugang dieses Kunden – ohne Kennwort, „über Authentik“. In der Liste der
+  Zugänge steht er so markiert, ohne Einrichtungslink und ohne vorläufiges
+  Kennwort; im Konto des Kunden steht statt „Kennwort ändern“ „Anmeldung
+  über Authentik“. Am Zugang lassen sich seine SSO-Sitzungen beenden.
+- Was er sieht, kommt wie immer nur aus den **Freigaben am Kunden** und
+  der Zuordnung – nie aus der Gruppe.
+- Zwei Kundengruppen, Kunden- und Personalgruppe zugleich oder ein
+  beendeter Kunde lehnen die Anmeldung ab. Wechselt jemand in Authentik zu
+  einem anderen Kunden, ändert sich der Zugang nicht von selbst: Zugang
+  löschen, die nächste Anmeldung legt ihn beim neuen Kunden an.
+- Lokale Zugänge (mit Kennwort) bleiben, wie sie sind, und werden nie mit
+  einer Anmeldung bei Authentik verknüpft. Ein neuer lokaler Zugang darf
+  nicht so heißen wie eine Anmeldung bei Authentik.
+- Ausschalten beendet die SSO-Sitzungen der Kundenzugänge; ein Kunde, der
+  gelöscht wird, nimmt seine Kundengruppen mit.
 
 ## Übergang: Konten mit der Rolle „Kunde / Veranstalter“
 

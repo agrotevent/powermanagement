@@ -50,8 +50,17 @@ declare(strict_types=1);
  *    sso.kunden aus und Gruppe entfernen beenden die SSO-Sitzungen; die Haken
  *    im Kundenbereich (Einrichtungslink, Kennwort, Name, Liste, Löschen).
  * M. Keine Geheimnisse (Code, Access-/ID-Token) in Sitzung, Audit und Log.
- *
- * Abschnitt N (Kommandozeile) kommt mit dem nächsten Schritt dazu.
+ * N. Kommandozeile (Kindprozesse in der Instanz, die Attrappe über
+ *    auto_prepend_file): sso:zustand ohne Secret, sso:pruefen (Exit 1 bei ✗),
+ *    sso:einrichten nur über die Standardeingabe (nie als Argument),
+ *    sso:an/aus, sso:verknuepfungen (Subjekt gekürzt), sso:aussteller-
+ *    umstellen (nur mit --ja, Zusammenstoß → nichts, danach geht die
+ *    Anmeldung), user:password bei „nur SSO“, pruefen mit SSO-Zeile,
+ *    sso:loesen; Wartung (abgelaufene Rollen aus Gruppen, alte Anfragen,
+ *    sso.inaktiv_tage – im Prozess, siehe dort); verbinden_ueber und
+ *    ca_datei aus config.php bis Http, mit echtem curl gegen einen TLS-Server
+ *    (openssl s_server): Verbindung über 127.0.0.1, Zertifikat und Name
+ *    geprüft, ohne curl abgelehnt.
  */
 
 require __DIR__ . '/hilfen/instanz.php';
@@ -1772,6 +1781,325 @@ Http::$attrappe = $idp->http();
 pruefe($r['code'] === 'intern' && $r['meldung'] === Anmeldung::T_INTERN && Auth::id() === null, 'M.4: Ausnahme beim Einlösen → intern, nicht angemeldet');
 $abmelden();
 $geheimAblauf = [$ssoCode, (string) ($zurueck['code'] ?? '-'), 'at-' . $kennung, $idSignatur];
+
+// ================================================================ N. Kommandozeile (Kindprozesse in der Instanz)
+// Die Kindprozesse erreichen die Attrappe wie dieser Prozess über
+// Http::$attrappe – gesetzt per auto_prepend_file, ihr Zustand liegt in ihrem
+// Ordner. Alles andere (Datenbank, Einstellungen) ist die der Instanz.
+$abmelden();
+alsBenutzer(null);
+$idp->zuruecksetzen();
+$umleitung = $instanzOrdner . '/oidc-umleitung.php';
+file_put_contents($umleitung, "<?php\n// tests/sso.php: Anfragen dieses Kindprozesses gehen an die OIDC-Attrappe.\n"
+    . 'require ' . var_export(APP_ROOT . '/src/Messung/Http.php', true) . ";\n"
+    . 'require ' . var_export(APP_ROOT . '/tests/hilfen/oidc-attrappe.php', true) . ";\n"
+    . '\App\Messung\Http::$attrappe = OidcAttrappe::laden(' . var_export($instanzOrdner . '/oidc', true) . ")->http();\n");
+/** bin/power in der Instanz: Ausgabe (stdout und stderr) und Rückgabewert; $eingabe kommt auf die Standardeingabe. */
+$cli = static function (array $argumente, string $eingabe = '', array $umgebung = []) use ($umleitung): array {
+    $p = proc_open(array_merge([PHP_BINARY, '-d', 'auto_prepend_file=' . $umleitung, APP_ROOT . '/bin/power'], $argumente),
+        [0 => ['pipe', 'r'], 1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $rohre, APP_ROOT, $umgebung + getenv());
+    if (!is_resource($p)) {
+        return ['rc' => -1, 'aus' => ''];
+    }
+    fwrite($rohre[0], $eingabe);
+    fclose($rohre[0]);
+    $aus = (string) stream_get_contents($rohre[1]) . (string) stream_get_contents($rohre[2]);
+    $rc = proc_close($p);
+    Settings::vergessen();
+    Zugriff::vergessen();
+    Auth::rechteVergessen();
+    return ['rc' => $rc, 'aus' => $aus];
+};
+$ohneSecret = static fn (string $text): bool => !str_contains($text, $client['secret']) && !str_contains($text, rawurlencode($client['secret']))
+    && !str_contains($text, (string) Settings::get(Settings::GEHEIM_SSO_SECRET, '-'));
+pruefe(Einstellungen::aktiv(), 'N: SSO an');
+
+// N.1 sso:zustand – ohne Secret
+$r = $cli(['sso:zustand']);
+pruefe($r['rc'] === 0 && str_contains($r['aus'], 'Aussteller:      ' . $iss) && str_contains($r['aus'], 'Client-ID:       ' . $client['id'])
+    && str_contains($r['aus'], 'hinterlegt (verschlüsselt') && str_contains($r['aus'], 'RS256') && str_contains($r['aus'], 'rsa-1')
+    && str_contains($r['aus'], 'Notzugänge:') && str_contains($r['aus'], 'Verknüpfungen:') && str_contains($r['aus'], 'Anfragen:'),
+    'N.1: sso:zustand nennt Aussteller, Client-ID, Secret hinterlegt, Algorithmen, Schlüssel, Verknüpfungen, Anfragen und Notzugänge');
+pruefe($ohneSecret($r['aus']), 'N.1: sso:zustand ohne Secret (weder Klartext noch verschlüsselt)');
+pruefe(preg_match('/^Notzugänge:\s+.*' . preg_quote($kennung . '-admin', '/') . '/mu', $r['aus']) === 1, 'N.1: der Notzugang mit Namen');
+
+// N.2 sso:pruefen – Exit 0, mit falschem Secret Exit 1
+$r = $cli(['sso:pruefen']);
+pruefe($r['rc'] === 0 && str_contains($r['aus'], '✓ Client-Zugang angenommen') && str_contains($r['aus'], 'Verbindung in Ordnung') && $ohneSecret($r['aus']),
+    'N.2: sso:pruefen → Befunde zeilenweise, Exit 0, ohne Secret');
+
+// N.3 sso:einrichten – das Secret nur von der Standardeingabe
+$r = $cli(['sso:einrichten']);
+pruefe($r['rc'] === 1 && str_contains($r['aus'], 'Aufruf:'), 'N.3: sso:einrichten ohne Angaben → Aufruf');
+$r = $cli(['sso:einrichten', $iss, $client['id'], 'ein-secret-als-argument-' . $kennung]);
+pruefe($r['rc'] === 1 && str_contains($r['aus'], 'nie als Argument') && Einstellungen::secret() === $client['secret'],
+    'N.3: ein Secret als Argument wird abgelehnt, nichts geändert');
+$falsch = 'falsch-' . $kennung . '-' . bin2hex(random_bytes(8));
+$marke = Einstellungen::marke();
+$r = $cli(['sso:einrichten', $iss, $client['id']], $falsch . "\n");
+pruefe($r['rc'] === 0 && Einstellungen::secret() === $falsch && Einstellungen::marke() !== $marke && !str_contains($r['aus'], $falsch)
+    && str_contains($r['aus'], 'Redirect URI in Authentik (Strict): https://pm.example.test/login/sso/rueckruf'),
+    'N.3: sso:einrichten über die Standardeingabe – Secret gesetzt, Marke neu, nicht in der Ausgabe, Rückruf-Adresse genannt');
+gleich($letztesAudit('einstellungen.sso'), ['aussteller' => $iss, 'client_id' => $client['id'], 'secret' => 'gesetzt'], 'N.3: Audit ohne Secret');
+pruefe((string) Database::scalar("SELECT username FROM audit_log WHERE action = 'einstellungen.sso' ORDER BY id DESC LIMIT 1") === 'cli', 'N.3: Akteur im Audit: cli');
+$r = $cli(['sso:pruefen']);
+pruefe($r['rc'] === 1 && str_contains($r['aus'], '✗ Client-ID oder Secret falsch') && !str_contains($r['aus'], $falsch), 'N.2: mit falschem Secret → ✗, Exit 1');
+$r = $cli(['sso:einrichten', $iss, $client['id'], '--name=Authentik'], '');
+pruefe($r['rc'] === 0 && Einstellungen::secret() === $falsch, 'N.3: leere Eingabe lässt das Secret, wie es ist');
+$r = $cli(['sso:einrichten', $iss, $client['id']], $client['secret'] . "\r\n");
+pruefe($r['rc'] === 0 && Einstellungen::secret() === $client['secret'] && $ohneSecret($r['aus']), 'N.3: das Secret mit Sonderzeichen über die Standardeingabe');
+
+// N.4 sso:aus / sso:an
+$r = $cli(['sso:aus']);
+pruefe($r['rc'] === 0 && !Einstellungen::aktiv(), 'N.4: sso:aus → aus');
+$r = $cli(['sso:an']);
+pruefe($r['rc'] === 0 && Einstellungen::aktiv() && str_contains($r['aus'], '✓ Client-Zugang angenommen') && str_contains($r['aus'], 'eingeschaltet'),
+    'N.4: sso:an → frisch geprüft und an');
+Settings::put(Einstellungen::GEPRUEFT_AM, '');
+$idp->steuern(['discovery_404' => true]);
+$r = $cli(['sso:aus']);
+$r = $cli(['sso:an']);
+$idp->zuruecksetzen();
+pruefe($r['rc'] === 1 && !Einstellungen::aktiv() && str_contains($r['aus'], 'Discovery nicht gefunden'), 'N.4: sso:an bei fehlschlagender Prüfung → bleibt aus, Exit 1');
+pruefe($cli(['sso:an'])['rc'] === 0 && Einstellungen::aktiv(), 'N.4: wieder an');
+
+// N.5 sso:verknuepfungen – Subjekt nur gekürzt
+$r = $cli(['sso:verknuepfungen', $kennung . '-planer']);
+pruefe($r['rc'] === 0 && str_contains($r['aus'], $kennung . '-planer') && str_contains($r['aus'], 'planer-dort') && str_contains($r['aus'], 'cli')
+    && str_contains($r['aus'], substr($subPlaner, 0, 8) . '…') && !str_contains($r['aus'], $subPlaner),
+    'N.5: sso:verknuepfungen <benutzer> → Weg, Name dort, Subjekt gekürzt');
+$r = $cli(['sso:verknuepfungen']);
+pruefe($r['rc'] === 0 && str_contains($r['aus'], $kennung . '-planer') && str_contains($r['aus'], $kennung . '-chef'), 'N.5: ohne Benutzer alle');
+
+// N.6 sso:aussteller-umstellen – derselbe Anmeldedienst unter neuem Issuer
+$alt = 'https://idp.example.test/application/o/vorher/';
+Database::execute('UPDATE sso_identitaeten SET aussteller = ?, schluessel = ? WHERE user_id = ?', [$alt, Konten::schluessel($alt, $subPlaner), $planer]);
+$r = $ablauf($person($subPlaner, 'planer-dort'));
+pruefe(!$r['ok'] && Auth::id() !== $planer, 'N.6: Identität bei einem anderen Aussteller → die Anmeldung findet das Konto nicht');
+$abmelden();
+pruefe(str_contains($cli(['sso:zustand'])['aus'], 'bei einem anderen Aussteller – bin/power sso:aussteller-umstellen'), 'N.6: sso:zustand nennt die fremden Verknüpfungen');
+$r = $cli(['sso:aussteller-umstellen', $iss]);
+pruefe($r['rc'] === 1 && str_contains($r['aus'], 'DERSELBEN') && str_contains($r['aus'], '1 Verknüpfung(en) bei ' . $alt)
+    && (string) Database::scalar('SELECT aussteller FROM sso_identitaeten WHERE user_id = ?', [$planer]) === $alt,
+    'N.6: ohne --ja nur die Übersicht und die Warnung, nichts umgestellt');
+// Ein Zusammenstoß: dasselbe Subjekt gehört beim neuen Aussteller schon einem anderen Konto.
+$zweiter = BenutzerService::anlegen($kennung . '-zweiter', $pw, 'planung', false);
+Konten::verknuepfen($zweiter, $iss, $subPlaner, 'cli', 'zweiter-dort', []);
+$r = $cli(['sso:aussteller-umstellen', $iss, '--ja']);
+pruefe($r['rc'] === 1 && str_contains($r['aus'], 'zusammen') && (string) Database::scalar('SELECT aussteller FROM sso_identitaeten WHERE user_id = ?', [$planer]) === $alt,
+    'N.6: Zusammenstoß mit einer Verknüpfung beim neuen Aussteller → nichts umgestellt');
+Konten::loesen($zweiter);
+$r = $cli(['sso:aussteller-umstellen', $iss, '--ja']);
+$i = Database::first('SELECT * FROM sso_identitaeten WHERE user_id = ?', [$planer]);
+pruefe($r['rc'] === 0 && str_contains($r['aus'], '1 Verknüpfung(en) auf ' . $iss . ' umgestellt') && $i !== null && $i['aussteller'] === $iss
+    && $i['schluessel'] === Konten::schluessel($iss, $subPlaner), 'N.6: --ja → Aussteller und schluessel umgeschrieben');
+pruefe(($letztesAudit('sso.aussteller_umgestellt')['anzahl'] ?? null) === 1, 'N.6: Audit sso.aussteller_umgestellt');
+$r = $ablauf($person($subPlaner, 'planer-dort'));
+pruefe($r['ok'] && Auth::id() === $planer, 'N.6: danach meldet sich das Konto wieder an');
+pruefe(Database::first('SELECT id FROM sso_anfragen WHERE subjekt = ?', [$subPlaner]) === null, 'N.6: die Anfrage des gescheiterten Versuchs ist mit der Anmeldung weg');
+$abmelden();
+$r = $cli(['sso:aussteller-umstellen', $iss, '--ja']);
+pruefe($r['rc'] === 0 && str_contains($r['aus'], 'nichts zu tun'), 'N.6: ein zweites Mal: nichts zu tun');
+
+// N.7 user:password bei „nur SSO“
+$nurSsoKonto = BenutzerService::anlegen($kennung . '-nursso', $pw, 'planung', false);
+Database::execute('UPDATE users SET nur_sso = 1 WHERE id = ?', [$nurSsoKonto]);
+$r = $cli(['user:password', $kennung . '-nursso', 'Neu-' . $pw]);
+pruefe($r['rc'] === 0 && str_contains($r['aus'], 'Passwort gesetzt.') && str_contains($r['aus'], 'Das Kennwort gilt erst ohne „nur SSO“ am Konto'),
+    'N.7: user:password für ein Konto „nur über SSO“ → Hinweis');
+Settings::put(Einstellungen::NUR_SSO, '1');
+$r = $cli(['user:password', $kennung . '-planer', $pw]);
+Settings::put(Einstellungen::NUR_SSO, '0');
+pruefe($r['rc'] === 0 && str_contains($r['aus'], 'sso:aus --nur-sso'), 'N.7: user:password für ein verknüpftes Konto bei „nur SSO“ → Hinweis auf den Notausgang');
+$r = $cli(['user:password', $kennung . '-admin', $pw]);
+pruefe($r['rc'] === 0 && !str_contains($r['aus'], 'Hinweis'), 'N.7: user:password sonst ohne Hinweis');
+
+// N.8 pruefen – mit SSO eine eigene Zeile (Demo-Modus: ohne InfluxDB/MQTT)
+$demoConfig = $instanzOrdner . '/config-demo.php';
+file_put_contents($demoConfig, "<?php\n\$c = require " . var_export((string) getenv('POWERMANAGEMENT_CONFIG'), true) . ";\n\$c['app']['demo'] = true;\nreturn \$c;\n");
+$r = $cli(['pruefen'], '', ['POWERMANAGEMENT_CONFIG' => $demoConfig]);
+pruefe($r['rc'] === 0 && preg_match('/^SSO:\s+OK – ' . preg_quote($iss, '/') . ', \d+ Schlüssel, Client-Zugang angenommen$/mu', $r['aus']) === 1,
+    'N.8: bin/power pruefen → „SSO: OK – <Issuer>, n Schlüssel, Client-Zugang angenommen“ (' . trim($r['aus']) . ')');
+$idp->steuern(['token_fehler' => 'invalid_client']);
+$r = $cli(['pruefen'], '', ['POWERMANAGEMENT_CONFIG' => $demoConfig]);
+$idp->zuruecksetzen();
+pruefe($r['rc'] === 1 && preg_match('/^SSO:\s+FEHLER – /mu', $r['aus']) === 1, 'N.8: bei einem Fehler „SSO: FEHLER – …“ und Exit 1');
+$cli(['sso:pruefen']);
+$r = $cli(['sso:aus']);
+$r = $cli(['pruefen'], '', ['POWERMANAGEMENT_CONFIG' => $demoConfig]);
+pruefe($r['rc'] === 0 && !str_contains($r['aus'], 'SSO:'), 'N.8: ohne SSO keine Zeile');
+pruefe($cli(['sso:an'])['rc'] === 0, 'N.8: wieder an');
+
+// N.9 sso:loesen
+$r = $cli(['sso:loesen', $kennung . '-planer']);
+pruefe($r['rc'] === 1 && str_contains($r['aus'], '--ja') && Konten::identitaet($planer) !== null, 'N.9: sso:loesen ohne --ja → nichts gelöst');
+$r = $cli(['sso:loesen', $kennung . '-planer', '--ja']);
+pruefe($r['rc'] === 0 && Konten::identitaet($planer) === null && ($letztesAudit('sso.geloest')['user_id'] ?? null) === $planer, 'N.9: sso:loesen --ja → gelöst, Audit');
+$r = $cli(['sso:loesen', $kennung . '-planer', '--ja']);
+pruefe($r['rc'] === 1 && str_contains($r['aus'], 'mit keiner SSO-Anmeldung verknüpft'), 'N.9: ein zweites Mal → nicht verknüpft');
+Konten::verknuepfen($planer, $iss, $subPlaner, 'cli', 'planer-dort', []);
+
+// N.10 Wartung: abgelaufene Rollen aus Gruppen, alte Anfragen, inaktive Konten „nur über SSO“.
+// Im Prozess: bin/power wartung räumte in einem Kindprozess auch storage/ der
+// Arbeitskopie gegen die (leere) Datenbank der Instanz auf.
+$jetzt = time();
+Database::execute("DELETE FROM user_roles WHERE quelle = 'sso'");
+Database::insert('user_roles', ['user_id' => $planer, 'role_id' => $rolleA, 'gueltig_ab' => null, 'gueltig_bis' => Zeit::iso($jetzt - 2 * 86400), 'quelle' => 'sso']);
+Database::insert('user_roles', ['user_id' => $verwalter, 'role_id' => $rolleA, 'gueltig_ab' => null, 'gueltig_bis' => Zeit::iso($jetzt - 3600), 'quelle' => 'sso']);
+Database::insert('user_roles', ['user_id' => $zweiter, 'role_id' => $rolleA, 'gueltig_ab' => null, 'gueltig_bis' => Zeit::iso($jetzt - 2 * 86400), 'quelle' => 'hand']);
+Database::execute('DELETE FROM sso_anfragen');
+$uhr = $jetzt - (Konten::ANFRAGE_TAGE + 1) * 86400;
+Konten::anfrageMerken(['sub' => 'alt-' . $kennung], [], 'kein_konto');
+$uhr = $jetzt - (Konten::ANFRAGE_TAGE - 1) * 86400;
+Konten::anfrageMerken(['sub' => 'neu-' . $kennung], [], 'kein_konto');
+$uhr = $jetzt;
+$vor40 = Zeit::iso($jetzt - 40 * 86400);
+$inaktiv = BenutzerService::anlegen($kennung . '-inaktiv', $pw, 'planung', false);
+$frisch = BenutzerService::anlegen($kennung . '-frisch', $pw, 'planung', false);
+$lokal = BenutzerService::anlegen($kennung . '-lokal', $pw, 'planung', false);
+Database::execute('UPDATE users SET nur_sso = 1, created_at = ? WHERE id IN (?, ?)', [$vor40, $inaktiv, $frisch]);
+Database::execute('UPDATE users SET created_at = ? WHERE id = ?', [$vor40, $lokal]);
+Konten::verknuepfen($frisch, $iss, 'frisch-' . $kennung, 'cli', 'frisch-dort', []);
+Database::execute('UPDATE sso_identitaeten SET zuletzt_am = ? WHERE user_id = ?', [Zeit::iso($jetzt - 5 * 86400), $frisch]);
+Konten::verknuepfen($inaktiv, $iss, 'inaktiv-' . $kennung, 'cli', 'inaktiv-dort', []);
+Database::execute('UPDATE sso_identitaeten SET zuletzt_am = ? WHERE user_id = ?', [Zeit::iso($jetzt - 31 * 86400), $inaktiv]);
+Settings::put(Einstellungen::INAKTIV_TAGE, '0');
+$m = Konten::wartung($jetzt);
+$aktiv = static fn (int $id): bool => (int) Database::scalar('SELECT is_active FROM users WHERE id = ?', [$id]) === 1;
+$rollenDa = static fn (int $id, string $quelle): bool => Database::first('SELECT id FROM user_roles WHERE user_id = ? AND role_id = ? AND quelle = ?', [$id, $rolleA, $quelle]) !== null;
+pruefe(!$rollenDa($planer, 'sso') && $rollenDa($verwalter, 'sso') && $rollenDa($zweiter, 'hand'),
+    'N.10: wartung löscht Rollen aus Gruppen, die seit über einem Tag abgelaufen sind – die seit einer Stunde und Rollen von Hand bleiben');
+pruefe(Database::first('SELECT id FROM sso_anfragen WHERE subjekt = ?', ['alt-' . $kennung]) === null
+    && Database::first('SELECT id FROM sso_anfragen WHERE subjekt = ?', ['neu-' . $kennung]) !== null, 'N.10: Anfragen älter als 30 Tage weg, jüngere bleiben');
+pruefe($aktiv($inaktiv) && $aktiv($frisch) && $aktiv($lokal), 'N.10: ohne sso.inaktiv_tage wird niemand deaktiviert');
+pruefe(count($m) === 1 && str_contains($m[0], '1 abgelaufene Rolle(n)') && str_contains($m[0], '1 Anmeldeanfrage(n)'), 'N.10: Meldung (' . implode(' ', $m) . ')');
+Settings::put(Einstellungen::INAKTIV_TAGE, '30');
+$m = Konten::wartung($jetzt);
+pruefe(!$aktiv($inaktiv) && $aktiv($frisch) && $aktiv($lokal), 'N.10: sso.inaktiv_tage 30 → das Konto „nur über SSO“ ohne Anmeldung seit 31 Tagen ist deaktiviert, die anderen nicht');
+pruefe(($letztesAudit('sso.konto_deaktiviert') === ['user_id' => $inaktiv, 'tage' => 30]) && str_contains(implode(' ', $m), $kennung . '-inaktiv'),
+    'N.10: Audit sso.konto_deaktiviert {user_id, tage} und der Name in der Meldung');
+Database::execute('UPDATE users SET is_active = 1 WHERE id = ?', [$inaktiv]);
+Database::execute('DELETE FROM sso_identitaeten WHERE user_id = ?', [$inaktiv]);
+Database::execute('UPDATE users SET created_at = ? WHERE id = ?', [Zeit::iso($jetzt - 10 * 86400), $inaktiv]);
+Konten::wartung($jetzt);
+pruefe($aktiv($inaktiv), 'N.10: ohne Identität zählt das Anlegen (vor 10 Tagen) – bleibt aktiv');
+Database::execute('UPDATE users SET created_at = ? WHERE id = ?', [$vor40, $inaktiv]);
+Konten::wartung($jetzt);
+pruefe(!$aktiv($inaktiv), 'N.10: ohne Identität, angelegt vor 40 Tagen → deaktiviert');
+Settings::put(Einstellungen::INAKTIV_TAGE, '0');
+pruefe(Konten::wartung($jetzt) === [], 'N.10: nichts zu tun → keine Meldung');
+$quelle = (string) file_get_contents(APP_ROOT . '/bin/power');
+$wartung = (string) substr($quelle, (int) strpos($quelle, "case 'wartung':"));
+pruefe(str_contains(substr($wartung, 0, (int) strpos($wartung, 'break;' . "\n\n    default:")), 'SsoKonten::wartung()'), 'N.10: bin/power wartung ruft Konten::wartung()');
+
+// N.11 Netzweg: verbinden_ueber und ca_datei (config.php → Einstellungen::verbindung → Http)
+Config::set('sso.verbinden_ueber', 'kaputt');
+pruefe(Einstellungen::verbindung() === [] && str_contains(implode(' ', Einstellungen::verbindungFehler()), 'host:port:ziel:zielport'), 'N.11: verbinden_ueber kaputt → nicht benutzt, Fehler genannt');
+$p = Anbieter::pruefen();
+pruefe(!$p['ok'] && str_contains((string) json_encode($p['befunde'], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES), 'sso.verbinden_ueber in config/config.php'), 'N.11: „Prüfen“ scheitert daran');
+Config::set('sso.verbinden_ueber', 'andere.example.test:443:10.20.0.20:443');
+pruefe(str_contains(implode(' ', Einstellungen::verbindungFehler()), 'idp.example.test:443'), 'N.11: verbinden_ueber für einen anderen Host als den Aussteller → Fehler');
+Config::set('sso.verbinden_ueber', 'IDP.example.test:443:10.20.0.20:443');
+$gesehen = [];
+Http::$attrappe = static function (string $m, string $u, #[\SensitiveParameter] array $o) use ($idp, &$gesehen): array {
+    $gesehen[] = $o['verbinden_ueber'] ?? '-';
+    return ($idp->http())($m, $u, $o);
+};
+$p = Anbieter::pruefen();
+pruefe($p['ok'] && Einstellungen::verbindungFehler() === [] && $gesehen !== [] && array_unique($gesehen) === ['IDP.example.test:443:10.20.0.20:443']
+    && str_contains((string) json_encode($p['befunde'], JSON_UNESCAPED_UNICODE), 'Verbindung über 10.20.0.20:443'),
+    'N.11: gültiges verbinden_ueber geht mit jeder Anfrage an den Anmeldedienst mit, „Prüfen“ nennt es');
+Http::$attrappe = $idp->http();
+Config::set('sso.verbinden_ueber', '');
+foreach (['ca.pem' => 'braucht einen absoluten Pfad', $instanzOrdner . '/fehlt.pem' => 'nicht lesbar', $umleitung => 'kein Zertifikat'] as $pfad => $erwartet) {
+    Config::set('sso.ca_datei', $pfad);
+    pruefe(str_contains(implode(' ', Einstellungen::verbindungFehler()), $erwartet) && Einstellungen::verbindung() === [], 'N.11: ca_datei ' . basename($pfad) . ' → ' . $erwartet);
+}
+Config::set('sso.ca_datei', '');
+
+$netz = $instanzOrdner . '/netz';
+@mkdir($netz, 0700);
+$name = 'idp-netz.example.test';
+$openssl = trim((string) shell_exec('command -v openssl 2>/dev/null'));
+$erzeugt = false;
+if ($openssl !== '') {
+    exec(escapeshellarg($openssl) . ' req -x509 -newkey rsa:2048 -nodes -days 1 -subj ' . escapeshellarg('/CN=' . $name)
+        . ' -addext ' . escapeshellarg('subjectAltName=DNS:' . $name) . ' -keyout ' . escapeshellarg($netz . '/schluessel.pem')
+        . ' -out ' . escapeshellarg($netz . '/zertifikat.pem') . ' 2>/dev/null', $_aus, $rc);
+    $erzeugt = $rc === 0 && is_file($netz . '/zertifikat.pem');
+}
+if (!$erzeugt || !function_exists('curl_init')) {
+    fwrite(STDOUT, "  N.11: echter Netzweg übersprungen – openssl oder php-curl fehlt\n");
+} else {
+    $port = freierPort();
+    hintergrund([$openssl, 's_server', '-accept', '127.0.0.1:' . $port, '-cert', $netz . '/zertifikat.pem', '-key', $netz . '/schluessel.pem', '-www', '-quiet']);
+    for ($i = 0; $i < 50 && !erreichbar('127.0.0.1', $port); $i++) {
+        usleep(100_000);
+    }
+    // Ein Proxy aus der Umgebung (curl liest https_proxy) gehört nicht in diese Prüfung.
+    foreach (['no_proxy', 'NO_PROXY'] as $v) {
+        putenv($v . '=' . $name . ',falsch.example.test,127.0.0.1');
+    }
+    Http::$attrappe = null;
+    $url = 'https://' . $name . ':' . $port . '/';
+    $ueber = $name . ':' . $port . ':127.0.0.1:' . $port;
+    $ca = $netz . '/zertifikat.pem';
+    $a = Http::anfrage('GET', $url, ['zeit' => 5]);
+    pruefe(!$a['ok'], 'N.11: ohne verbinden_ueber ist ' . $name . ' nicht erreichbar (' . $a['fehler'] . ')');
+    $a = Http::anfrage('GET', $url, ['zeit' => 5, 'verbinden_ueber' => $ueber, 'ca_datei' => $ca]);
+    pruefe($a['ok'] && $a['status'] === 200, 'N.11: verbinden_ueber + ca_datei → über 127.0.0.1 verbunden, Zertifikat für ' . $name . ' geprüft (' . $a['fehler'] . ')');
+    $a = Http::anfrage('GET', $url, ['zeit' => 5, 'verbinden_ueber' => $ueber]);
+    pruefe(!$a['ok'] && $a['nummer'] === 60, 'N.11: ohne die eigene CA scheitert die Zertifikatsprüfung (curl 60: ' . $a['fehler'] . ')');
+    $a = Http::anfrage('GET', 'https://falsch.example.test:' . $port . '/', ['zeit' => 5, 'verbinden_ueber' => 'falsch.example.test:' . $port . ':127.0.0.1:' . $port, 'ca_datei' => $ca]);
+    pruefe(!$a['ok'] && in_array($a['nummer'], [51, 60], true), 'N.11: anderer Name auf demselben Ziel → Name passt nicht zum Zertifikat (curl ' . $a['nummer'] . ')');
+    Http::$ohneCurl = true;
+    $a = Http::anfrage('GET', $url, ['zeit' => 5, 'verbinden_ueber' => $ueber]);
+    $b = Http::anfrage('GET', $url, ['zeit' => 5, 'ca_datei' => $ca]);
+    Http::$ohneCurl = false;
+    pruefe(!$a['ok'] && !$b['ok'] && $a['fehler'] === 'Für diese Einstellung ist php-curl nötig.' && $b['fehler'] === $a['fehler'],
+        'N.11: über PHP-Streams → „php-curl nötig“ statt still anders zu verbinden');
+    $a = Http::anfrage('GET', $url, ['zeit' => 5, 'verbinden_ueber' => $ueber . "\r\nX: y", 'ca_datei' => $ca]);
+    pruefe(!$a['ok'] && str_contains($a['fehler'], 'verbinden_ueber'), 'N.11: verbinden_ueber mit Zeilenumbruch → abgelehnt');
+    Config::set('sso.ca_datei', $ca);
+    pruefe(Einstellungen::verbindungFehler() === [] && (Einstellungen::verbindung()['ca_datei'] ?? '') === $ca, 'N.11: ca_datei mit Zertifikat taugt');
+    Config::set('sso.ca_datei', '');
+    Http::$attrappe = $idp->http();
+}
+
+// N.12 Demo: eingetragen, aber aus – und nie über eine echte Einrichtung
+$demoSso = new ReflectionMethod(App\Services\DemoSeed::class, 'sso');
+$demoReset = new ReflectionMethod(App\Services\DemoSeed::class, 'ssoZuruecksetzen');
+$demoIss = App\Services\DemoSeed::SSO_AUSSTELLER;
+$zaehlen = static fn (): array => [(int) Database::scalar('SELECT COUNT(*) FROM sso_identitaeten'), (int) Database::scalar('SELECT COUNT(*) FROM sso_anfragen'),
+    (int) Database::scalar("SELECT COUNT(*) FROM sso_zuordnungen WHERE gruppe LIKE 'pm-%'")];
+$vorher = $zaehlen();
+pruefe($demoSso->invoke(null, $planer) === false && $zaehlen() === $vorher && Einstellungen::aussteller() === $iss,
+    'N.12: Demo über einer echten Einrichtung → nichts angelegt, Aussteller bleibt');
+$demoReset->invoke(null);
+pruefe($zaehlen() === $vorher, 'N.12: Demo-Reset über einer echten Einrichtung → nichts gelöscht');
+$gesichert = [Einstellungen::AUSSTELLER => $iss, Einstellungen::CLIENT_ID => Einstellungen::clientId(), Einstellungen::NAME => Einstellungen::name(),
+    Einstellungen::AKTIV => '1'];
+Settings::forget(Einstellungen::AUSSTELLER);
+$demoKonto = BenutzerService::anlegen($kennung . '-demo', $pw, 'technik', false);
+pruefe($demoSso->invoke(null, $demoKonto) === true && Einstellungen::aussteller() === $demoIss && Einstellungen::clientId() === 'demo-powermanagement'
+    && !Einstellungen::schalter(Einstellungen::AKTIV) && Einstellungen::secretZustand() !== 'hinterlegt', 'N.12: Demo trägt Authentik ein – aus, ohne passendes Secret');
+$i = Konten::identitaet($demoKonto);
+pruefe($i !== null && $i['weg'] === 'freischaltung' && $i['name_dort'] === 'technik@example.com' && preg_match('/^[0-9a-f]{64}$/', (string) $i['subjekt']) === 1
+    && $i['schluessel'] === Konten::schluessel($demoIss, (string) $i['subjekt']), 'N.12: Demo-Verknüpfung (Weg freischaltung, Subjekt wie hashed user ID)');
+$demoZaehlung = $zaehlen();
+pruefe($demoZaehlung[1] === $vorher[1] + 1 && $demoZaehlung[2] === $vorher[2] + 2
+    && Database::first("SELECT id FROM sso_anfragen WHERE voller_name = 'Erika Beispiel' AND aussteller = ?", [$demoIss]) !== null,
+    'N.12: Demo-Anfrage „Erika Beispiel“ und die Gruppen pm-planung/pm-technik');
+$demoSso->invoke(null, $demoKonto);
+pruefe($zaehlen() === $demoZaehlung, 'N.12: ein zweites Mal nichts doppelt');
+$demoReset->invoke(null);
+pruefe(Konten::identitaet($demoKonto) === null && Database::first('SELECT id FROM sso_anfragen WHERE aussteller = ?', [$demoIss]) === null
+    && (int) Database::scalar("SELECT COUNT(*) FROM sso_zuordnungen WHERE gruppe IN ('pm-planung', 'pm-technik')") === 0
+    && Database::first('SELECT id FROM sso_identitaeten WHERE user_id = ?', [$planer]) !== null, 'N.12: Demo-Reset räumt nur die Demo weg');
+foreach ($gesichert as $k => $w) {
+    Settings::put($k, $w);
+}
+pruefe(Einstellungen::aktiv() && Einstellungen::secretZustand() === 'hinterlegt', 'N.12: Einrichtung wiederhergestellt');
 
 // ================================================================ Geheimnisse
 $audit = Database::select("SELECT username, action, target_id, details FROM audit_log WHERE action LIKE 'einstellungen.sso%'");

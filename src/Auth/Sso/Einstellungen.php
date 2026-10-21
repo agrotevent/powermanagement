@@ -331,6 +331,8 @@ final class Einstellungen
             'inaktiv_tage'       => self::inaktivTage(),
             'sitzung_dauer'      => self::sitzungDauer(),
             'fremde_identitaeten'=> $fremde,
+            // Aus config.php: wohin die Anfragen an den Anmeldedienst gehen
+            'verbindung'         => self::verbindung() + ['fehler' => self::verbindungFehler()],
         ];
     }
 
@@ -715,12 +717,93 @@ final class Einstellungen
     }
 
     /**
-     * Http-Optionen aus config.php (verbinden_ueber, ca_datei) – kommt mit
-     * Schritt 6 (Http: CURLOPT_CONNECT_TO, CURLOPT_CAINFO); bis dahin [].
+     * Http-Optionen aus config.php für jede Anfrage an den Anmeldedienst:
+     * `sso.verbinden_ueber` (curl CONNECT_TO – ohne Hairpin-NAT an eine
+     * interne Adresse, Name, SNI und Zertifikat bleiben die des Ausstellers)
+     * und `sso.ca_datei` (eigene CA). Nur gültige Werte – was nicht taugt,
+     * nennt verbindungFehler(), und „Verbindung prüfen“ scheitert daran.
+     *
+     * @return array{verbinden_ueber?:string, ca_datei?:string}
      */
     public static function verbindung(): array
     {
-        return [];
+        $o = [];
+        $ueber = self::configText('sso.verbinden_ueber');
+        if ($ueber !== '' && self::verbindenUeberFehler($ueber) === null) {
+            $o['verbinden_ueber'] = $ueber;
+        }
+        $ca = self::configText('sso.ca_datei');
+        if ($ca !== '' && self::caDateiFehler($ca) === null) {
+            $o['ca_datei'] = $ca;
+        }
+        return $o;
+    }
+
+    /**
+     * Was an `sso.verbinden_ueber` und `sso.ca_datei` in config.php nicht
+     * taugt – leer, wenn alles passt (oder nichts eingetragen ist).
+     *
+     * @return list<string>
+     */
+    public static function verbindungFehler(): array
+    {
+        $fehler = [];
+        foreach (['verbinden_ueber' => [self::class, 'verbindenUeberFehler'], 'ca_datei' => [self::class, 'caDateiFehler']] as $name => $pruefen) {
+            $roh = Config::get('sso.' . $name);
+            if ($roh === null || $roh === '') {
+                continue;
+            }
+            $f = is_string($roh) ? $pruefen(trim($roh)) : 'muss ein Text sein';
+            if ($f !== null) {
+                $fehler[] = 'sso.' . $name . ' in config/config.php: ' . $f;
+            }
+        }
+        return $fehler;
+    }
+
+    /**
+     * „host:port:ziel:zielport“ – host und port müssen die des Ausstellers
+     * sein (sonst wendet curl es nie an), ziel ein Name, eine IPv4- oder
+     * eine [IPv6]-Adresse. null = taugt.
+     */
+    private static function verbindenUeberFehler(string $wert): ?string
+    {
+        if (preg_match('/^([A-Za-z0-9.-]{1,253}):(\d{1,5}):([A-Za-z0-9.-]{1,253}|\[[0-9A-Fa-f:.]{2,45}\]):(\d{1,5})$/', $wert, $m) !== 1
+            || (int) $m[2] < 1 || (int) $m[2] > 65535 || (int) $m[4] < 1 || (int) $m[4] > 65535) {
+            return 'erwartet „host:port:ziel:zielport“, etwa auth.example.com:443:10.20.0.20:443';
+        }
+        $soll = self::herkunft(self::aussteller());
+        if ($soll !== null) {
+            $host = (string) parse_url($soll, PHP_URL_HOST);
+            $port = (string) parse_url($soll, PHP_URL_PORT);
+            if (strcasecmp($m[1], $host) !== 0 || $m[2] !== $port) {
+                return 'beginnt nicht mit Host und Port des Ausstellers (' . $host . ':' . $port . ') – so wirkt es nie';
+            }
+        }
+        return null;
+    }
+
+    /** Eine lesbare PEM-Datei mit absolutem Pfad – null = taugt. */
+    private static function caDateiFehler(string $pfad): ?string
+    {
+        if (!str_starts_with($pfad, '/') || preg_match('/[\x00-\x1F\x7F]/', $pfad) === 1) {
+            return 'braucht einen absoluten Pfad';
+        }
+        // Unter PHP-FPM gilt open_basedir: dann nur im Programmordner (etwa config/).
+        if (!@is_file($pfad) || !@is_readable($pfad)) {
+            return 'Datei fehlt oder ist nicht lesbar (unter PHP-FPM nur innerhalb des Programmordners, etwa config/)';
+        }
+        $inhalt = (string) @file_get_contents($pfad, false, null, 0, 1048576);
+        if (!str_contains($inhalt, '-----BEGIN CERTIFICATE-----')) {
+            return 'enthält kein Zertifikat im PEM-Format';
+        }
+        return null;
+    }
+
+    private static function configText(string $schluessel): string
+    {
+        $wert = Config::get($schluessel);
+        return is_string($wert) ? trim($wert) : '';
     }
 
     // ------------------------------------------------------------ intern

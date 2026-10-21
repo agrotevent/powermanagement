@@ -24,6 +24,12 @@
  * Demo-Vorgangs (Eventworx wird im Demo-Modus nie gefragt); übernommen wird
  * nichts, geladen auch nicht – im Kundenbereich gibt es danach keinen Abruf.
  *
+ * Für die Anmeldung über SSO (Anmeldeseite, System → Anmeldung (SSO))
+ * schaltet das Skript die Demo-Verbindung zu Authentik vorübergehend ein –
+ * mit Platzhalter-Secret und Zwischenspeicher, ohne Netz – und startet dafür
+ * einen eigenen PHP-Server mit app.url auf derselben Datenbank; danach
+ * stehen alle sso.*-Einstellungen wieder wie vorher.
+ *
  * Für den Verteiler-Abgleich braucht es ein Repository. Das Skript legt sich
  * dafür ein eigenes an (git init --bare im Temp-Ordner) – kein Token, kein
  * Netz, auf GitHub landet nichts. Deshalb muss der Server diese Arbeitskopie
@@ -596,6 +602,95 @@ return $c;
     await page.waitForTimeout(300);
     await foto(page, 'kunden-nachweise-eventworx', { fullPage: true });
     await ctx.close();
+}
+
+// ------------------------------------------------------------ Anmeldung über SSO
+{
+    // Die Demo trägt Authentik nur ein (aus, ohne Secret). Für die Bilder
+    // gilt vorübergehend: eingeschaltet, ein Platzhalter-Secret für genau
+    // diese Verbindung, Discovery und Schlüssel im Zwischenspeicher und eine
+    // gelungene Prüfung – ins Netz geht nichts, geklickt wird nicht. Ein
+    // eigener PHP-Server mit app.url (https, ohne die gibt es keinen Knopf)
+    // auf derselben Datenbank. Danach stehen alle sso.*-Einstellungen wie vorher.
+    const php = (code, ...argumente) => execFileSync('php', ['-r', `require 'src/bootstrap.php'; ${code}`, ...argumente], { cwd: wurzel, encoding: 'utf8' });
+    const tmp = mkdtempSync(join(tmpdir(), 'pm-bilder-sso-'));
+    const sicherung = join(tmp, 'vorher.json');
+    const konfig = join(tmp, 'config.php');
+    writeFileSync(konfig, `<?php
+$c = require ${phpText(join(wurzel, 'config/config.php'))};
+$c['app']['url'] = 'https://pm.example.com';
+return $c;
+`);
+    const port = await freierPort();
+    let server = null;
+    php(`use App\\Auth\\Sso\\Einstellungen as E; use App\\Support\\Database as D; use App\\Support\\Settings as S;
+        $vorher = [];
+        foreach (D::select("SELECT setting_key, setting_value FROM settings WHERE setting_key LIKE 'sso.%'") as $z) { $vorher[$z['setting_key']] = $z['setting_value']; }
+        file_put_contents($argv[1], json_encode($vorher));
+        $iss = (string) S::get(E::AUSSTELLER, '');
+        if ($iss === '') { fwrite(STDERR, "Kein Aussteller – erst bin/power demo:seed\n"); exit(1); }
+        $basis = 'https://' . parse_url($iss, PHP_URL_HOST);
+        $k = openssl_pkey_new(['private_key_type' => OPENSSL_KEYTYPE_RSA, 'private_key_bits' => 2048]);
+        $kid = substr(hash('sha256', 'demo-signing-key'), 0, 32);
+        S::geheimnisSetzen(S::GEHEIM_SSO_SECRET, 'bilder-platzhalter-' . bin2hex(random_bytes(16)));
+        S::put(E::SECRET_FUER, hash('sha256', $iss . "\n" . E::clientId()));
+        S::put(E::DISCOVERY, json_encode(['issuer' => $iss, 'authorization_endpoint' => $basis . '/application/o/authorize/',
+            'token_endpoint' => $basis . '/application/o/token/', 'userinfo_endpoint' => $basis . '/application/o/userinfo/',
+            'jwks_uri' => $iss . 'jwks/', 'end_session_endpoint' => $iss . 'end-session/', 'algs' => ['RS256'], 'auth_methode' => 'basic', 's256' => true], JSON_UNESCAPED_SLASHES));
+        S::put(E::DISCOVERY_AM, (string) (time() - 1800));
+        S::put(E::JWKS, json_encode([['kid' => $kid, 'kty' => 'RSA', 'alg' => 'RS256', 'pem' => openssl_pkey_get_details($k)['key']]], JSON_UNESCAPED_SLASHES));
+        S::put(E::JWKS_AM, (string) (time() - 1800));
+        S::put(E::GEPRUEFT_AM, (string) (time() - 1800));
+        S::put(E::BEFUND, json_encode(array_map(static fn (string $t): array => ['ok' => true, 'text' => $t], [
+            'Aussteller: ' . $iss, 'Rückruf-Adresse: https://pm.example.com/login/sso/rueckruf', 'Discovery gelesen – Endpunkte auf ' . parse_url($iss, PHP_URL_HOST),
+            'Signatur: RS256', 'PKCE mit S256 angeboten', 'Client-Anmeldung am Token-Endpunkt: client_secret_basic', 'Abmelden beim Anmeldedienst wird angeboten',
+            '1 Signaturschlüssel: ' . $kid . ' (RSA)', 'Client-Zugang angenommen (Probe: invalid_grant)']), JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE));
+        S::put(E::AKTIV, '1');`, sicherung);
+    try {
+        server = spawn('php', ['-S', `127.0.0.1:${port}`, '-t', 'public'], { cwd: wurzel, env: { ...process.env, POWERMANAGEMENT_CONFIG: konfig }, stdio: 'ignore' });
+        const url = `http://127.0.0.1:${port}`;
+        for (let i = 0; i < 100; i++) {
+            try {
+                if ((await fetch(url + '/login')).ok) {
+                    break;
+                }
+            } catch {
+                // noch nicht da
+            }
+            await new Promise((r) => setTimeout(r, 100));
+        }
+        // Die Anmeldeseite am Telefon, wie sie jemand sieht, der nicht angemeldet ist
+        const ctx = await browser.newContext({ viewport: HANDY, deviceScaleFactor: 1, locale: 'de-DE', timezoneId: 'Europe/Berlin', hasTouch: true, isMobile: true });
+        const page = await ctx.newPage();
+        page.on('pageerror', (e) => fehler.push(page.url() + ': ' + e.message));
+        await oeffnen(page, '/login', 300, url);
+        if (!(await page.locator('a.sso-knopf').count())) {
+            fehler.push('Anmeldung über SSO: kein Knopf auf der Anmeldeseite');
+        }
+        await foto(page, 'anmeldung-sso');
+        await ctx.close();
+
+        // Die Einstellungsseite als Administrator
+        const admin = await sitzung(DESKTOP, {}, { url });
+        await oeffnen(admin.page, '/system/sso', 400, url);
+        // bis einschließlich der Anmeldeanfragen
+        await oben(admin.page, 'sso-einstellungen', await admin.page.evaluate(() => {
+            const h = [...document.querySelectorAll('h2')].find((e) => e.textContent.trim() === 'Schutz');
+            return h ? Math.round(h.closest('.card').getBoundingClientRect().top + window.scrollY) - 16 : 2400;
+        }));
+        await admin.ctx.close();
+    } finally {
+        if (server !== null) {
+            server.kill('SIGTERM');
+        }
+        php(`use App\\Support\\Database as D; use App\\Support\\Settings as S; $v = json_decode((string) file_get_contents($argv[1]), true);
+            if (!is_array($v)) { return; }
+            foreach (D::select("SELECT setting_key FROM settings WHERE setting_key LIKE 'sso.%'") as $z) {
+                if (!array_key_exists($z['setting_key'], $v)) { S::forget($z['setting_key']); }
+            }
+            foreach ($v as $k => $w) { $w === null ? S::forget($k) : S::put($k, (string) $w); }`, sicherung);
+        rmSync(tmp, { recursive: true, force: true });
+    }
 }
 
 // ------------------------------------------------------------ Verteiler-Abgleich

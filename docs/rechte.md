@@ -358,6 +358,44 @@ Dazu gilt jeweils:
   ansehen“ hat.
 - Rechte vergibt auch hier nur, wer sie selbst hat.
 
+## Rollen aus Authentik-Gruppen
+
+Mit der Anmeldung über SSO ([anmeldung-sso.md](anmeldung-sso.md)) können
+Rollen auch aus **Gruppen beim Anmeldedienst** kommen:
+
+- Unter *System → Anmeldung (SSO) → Gruppen → Rollen* wird je Gruppe eine
+  Rolle zugeordnet. Bei jeder Anmeldung über SSO bekommt das Konto genau
+  die Rollen seiner Gruppen – als eigene Zuweisung mit der **Quelle
+  „über Gruppe“** und *bis* = Ende dieser Sitzung (höchstens
+  `security.max_session`, ohne sie 12 Stunden). Fehlt eine Gruppe beim
+  nächsten Mal, fehlt die Rolle. Eine Anmeldung **mit Kennwort** entfernt
+  sie, Ausschalten von SSO auch.
+- In der Benutzerverwaltung stehen sie ausgegraut; dort lassen sie sich
+  nicht abwählen, und Speichern lässt sie stehen.
+- Rollen, die ein Konto **von Hand** hat, bleiben immer unberührt.
+- **Freigaben kommen nie aus Gruppen.** Sollen alle aus `pm-technik` einen
+  Standort sehen, bekommt die Rolle die Freigabe – mit allen Zeitfenstern
+  wie sonst auch. Wer eine Gruppe nur für einen Kunden oder ein Gelände
+  will, legt eine eigene Rolle mit Rollen-Freigaben an.
+- **Rechte vergibt nur, wer sie hat** – auch hier: Eine Gruppe einer Rolle
+  zuordnen darf nur, wer „Benutzer verwalten“ hat und die Rolle selbst
+  vergeben dürfte. Eine Rolle mit „alle Rechte“ nur mit allen Rechten, eine
+  mit einer Freigabe auf „alles“ ebenso.
+- **Verwaltende Rollen** (mit „alle Rechte“, „Benutzer verwalten“,
+  „Einstellungen“, „Anmeldung über SSO einrichten“ oder „Schnittstelle“)
+  lassen sich nur zuordnen, wenn „Verwaltung per SSO“ an ist; sonst
+  übergeht die Anmeldung sie (Audit `sso.rolle_uebergangen`), und Konten
+  mit solchen Rechten melden sich nur mit Kennwort an. Wer in Authentik
+  Gruppen pflegt, vergibt damit Rollen hier.
+
+| Recht | erlaubt | ab Werk |
+|---|---|---|
+| „Anmeldung über SSO einrichten …“ (`sso.manage`) | *System → Anmeldung (SSO)*: Verbindung, Prüfen, Ein-/Ausschalten, Optionen; zusammen mit „Benutzer verwalten“ Gruppen → Rollen und Anmeldeanfragen (nur Rollen, die man selbst vergeben darf; nur Konten, die man verwalten darf); mit „Kunden pflegen“ die Kundengruppen. „Verwaltung per SSO“, zweiter Faktor und „nur SSO“ nur mit allen Rechten | nur Administration (`*`) |
+
+Lösen, „Sitzungen beenden“ und „nur über SSO“ am Konto gehen in der
+Benutzerverwaltung mit „Benutzer verwalten“ – für Konten, die man verwalten
+darf, auch ohne `sso.manage`.
+
 ## Demo-Zugänge
 
 Im Demo-Modus legt `bin/power demo:seed` diese Beispielkonten an:
@@ -365,6 +403,6 @@ Im Demo-Modus legt `bin/power demo:seed` diese Beispielkonten an:
 | Benutzer | Kennwort | zeigt |
 |----------|----------|-------|
 | `veranstalter` | `Veranstalter2026!` | Rolle Kunde. Freigabe nur für das Festivalgelände und nur für die Festivalwoche. Konto läuft nach 10 Tagen ab. |
-| `technik` | `Technik2026!!` | Rolle Elektrotechnik. Bearbeiten auf dem Festivalgelände (auch peilen und betanken), schalten nur beim Shelly der Geländebeleuchtung. Mit Prüfer-Qualifikation: unterschreibt Übergabeberichte. |
+| `technik` | `Technik2026!!` | Rolle Elektrotechnik. Bearbeiten auf dem Festivalgelände (auch peilen und betanken), schalten nur beim Shelly der Geländebeleuchtung. Mit Prüfer-Qualifikation: unterschreibt Übergabeberichte. Mit einer (Demo-)Anmeldung bei Authentik verknüpft – SSO selbst ist in der Demo aus. |
 | `muster-events` | `Kundenbereich2026!` | Kundenzugang von „Muster Events GmbH & Co. KG“: im Kundenbereich das Festivalgelände während des Sommerfestivals, ein Protokoll, Prüfnachweise. |
 | `stadtmarketing` | `Stadtmarketing2026!` | Kundenzugang von „Stadtmarketing Musterstadt e. V.“: dasselbe Gelände erst in einem Monat, nichts von Muster Events. |

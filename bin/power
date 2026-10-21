@@ -17,11 +17,14 @@ declare(strict_types=1);
  *   bin/power einstellung <schlüssel> <wert> | --stdin
  *                                   Einstellung setzen; influx.token, influx.password,
  *                                   mqtt.password und inventory.token werden verschlüsselt abgelegt
- *   bin/power pruefen               Datenbank, InfluxDB, MQTT und Node-RED prüfen
+ *   bin/power pruefen               Datenbank, InfluxDB, MQTT und Node-RED prüfen – mit SSO
+ *                                   auch die Verbindung zum Anmeldedienst
  *   bin/power sammler [--einmal] [--gespraechig]
  *                                   Modbus-Geräte und Clouds abfragen (Dauerdienst)
  *   bin/power user:add <name> <rolle> [passwort]
  *   bin/power user:password <name> <passwort>
+ *                                   (ein Konto „nur über SSO“ meldet sich damit erst an, wenn
+ *                                   „nur SSO“ am Konto bzw. sso:aus --nur-sso aus ist)
  *   bin/power titel "Titel" [untertitel] [kürzel]
  *   bin/power plan:kacheln [--neu]  Kacheln aller Grundrisse berechnen
  *   bin/power location:liste        Locations im gemeinsamen Repository anzeigen
@@ -81,9 +84,26 @@ declare(strict_types=1);
  *   bin/power kunden:nachweise-pruefen
  *                                   Dateien der Prüfnachweise nachrechnen (Prüfsumme, Größe, Verweise,
  *                                   unbenutzte Dateien). Exit 1 bei einem Befund
+ *   bin/power sso:zustand           Anmeldung über SSO (OpenID Connect, etwa Authentik): Verbindung,
+ *                                   Schlüssel, Schalter, Verknüpfungen, Anfragen, Notzugänge – ohne Secret
+ *   bin/power sso:pruefen           Verbindung frisch prüfen (Discovery, Schlüssel, Client-Zugang);
+ *                                   Exit 1 bei einem Fehler
+ *   bin/power sso:einrichten <aussteller> <client-id> [--name=Authentik]
+ *                                   Verbindung eintragen; das Client-Secret kommt nur von der
+ *                                   Standardeingabe (printf '%s' "$SECRET" | …) – nie in die
+ *                                   Prozessliste. Schaltet nicht ein
+ *   bin/power sso:an                Frisch prüfen und nur bei Erfolg einschalten
  *   bin/power sso:aus [--nur-sso]   Anmeldung über SSO ausschalten (laufende SSO-Sitzungen enden,
  *                                   Rollen aus Gruppen weg, „nur SSO“ aus); --nur-sso schaltet nur
  *                                   „nur SSO“ aus – der Notausgang, wenn niemand mehr hineinkommt
+ *   bin/power sso:verknuepfungen [<benutzer>]
+ *                                   Verknüpfte Konten: Weg, Name beim Anmeldedienst, zuletzt, Subjekt gekürzt
+ *   bin/power sso:loesen <benutzer> --ja
+ *                                   Verknüpfung lösen (beendet dessen SSO-Sitzungen, Rollen aus Gruppen weg)
+ *   bin/power sso:aussteller-umstellen <neuer-aussteller> --ja
+ *                                   Verknüpfungen auf einen neuen Aussteller DERSELBEN Authentik-
+ *                                   Installation umschreiben (Slug oder Issuer-Modus geändert) –
+ *                                   nie für einen anderen Anmeldedienst (falsche Zuordnung)
  *   bin/power demo:seed [--reset]   Demo-Gelände mit Anlagen, Tanks, Kabeln, Benutzern und Übergabeberichten anlegen
  *   bin/power wartung               Protokolle aufräumen, abgebrochene MQTT-Prüfungen
  *                                   zurücksetzen, alte Import-Vorschauen löschen, fällige
@@ -91,12 +111,19 @@ declare(strict_types=1);
  *                                   (älter als 400 Tage) und verwaiste Vorschlags- und
  *                                   Temp-Ordner entfernen, abgelaufene Einrichtungslinks des
  *                                   Kundenbereichs unbrauchbar machen, fällige Prüfnachweise
- *                                   melden (täglich per Timer)
+ *                                   melden, abgelaufene Rollen aus SSO-Gruppen und alte
+ *                                   Anmeldeanfragen löschen, mit sso.inaktiv_tage Konten „nur
+ *                                   über SSO“ ohne Anmeldung deaktivieren (täglich per Timer)
  */
 
 require dirname(__DIR__) . '/src/bootstrap.php';
 
 use App\Auth\Auth;
+use App\Auth\Sso\Anbieter;
+use App\Auth\Sso\Einstellungen as SsoEinstellungen;
+use App\Auth\Sso\Konten as SsoKonten;
+use App\Auth\Sso\Schutz as SsoSchutz;
+use App\Auth\Sso\SsoFehler;
 use App\Auth\Zugriff;
 use App\Berichte\BerichtService;
 use App\Kunden\Einrichtung;
@@ -274,9 +301,20 @@ switch ($befehl) {
             $aus('Schlüssel:  ' . Crypto::schluesselFehler());
             $ok = false;
         }
+        // SSO nur, wenn eingeschaltet: frisch geprüft wie „Verbindung prüfen“ (ohne Geheimnisse).
+        if (SsoEinstellungen::schalter(SsoEinstellungen::AKTIV)) {
+            $p = Anbieter::pruefen();
+            if ($p['ok']) {
+                $aus('SSO:        OK – ' . SsoEinstellungen::aussteller() . ', ' . count(Anbieter::zwischenspeicher()['kids']) . ' Schlüssel, Client-Zugang angenommen');
+            } else {
+                $erster = array_values(array_filter($p['befunde'], static fn (array $b): bool => !$b['ok']))[0]['text'] ?? 'unbekannt';
+                $aus('SSO:        FEHLER – ' . $erster . ' (Einzelheiten: bin/power sso:pruefen)');
+                $ok = false;
+            }
+        }
         if (Config::isDemo()) {
             $aus('Demo-Modus: InfluxDB und MQTT werden nicht gebraucht.');
-            break;
+            exit($ok ? 0 : 1);
         }
         $influx = Influx::pruefen();
         $aus('InfluxDB:   ' . ($influx['ok'] ? 'OK – ' : 'FEHLER – ') . $influx['message']);
@@ -357,6 +395,17 @@ switch ($befehl) {
         }
         $n = Database::execute('UPDATE users SET password_hash = ?, failed_logins = 0, locked_until = NULL WHERE username = ?', [password_hash($kennwort, PASSWORD_DEFAULT), $name]);
         $n > 0 ? $aus('Passwort gesetzt.') : $fehler('Benutzer nicht gefunden.');
+        // Gesetzt ist es – ob es gilt, entscheidet „nur SSO“ (am Konto bzw. für verknüpfte Konten).
+        $konto = Database::first('SELECT * FROM users WHERE username = ?', [$name]);
+        if ($konto !== null && SsoSchutz::kennwortVerboten($konto) !== null) {
+            $aus('Hinweis: ' . match (true) {
+                $konto['kunde_id'] !== null && (int) $konto['nur_sso'] === 1
+                    => 'Dieser Kundenzugang meldet sich nur über ' . SsoEinstellungen::name() . ' an – das Kennwort gilt dafür nicht.',
+                (int) $konto['nur_sso'] === 1
+                    => 'Das Kennwort gilt erst ohne „nur SSO“ am Konto (System → Benutzer).',
+                default => 'Mit „nur SSO“ gilt es für verknüpfte Konten nicht – Notausgang: bin/power sso:aus --nur-sso.',
+            });
+        }
         break;
 
     case 'titel':
@@ -871,10 +920,182 @@ switch ($befehl) {
         $aus(sprintf('%d Datei(en) und %d Prüfnachweis(e) geprüft, %d Befund(e).', $dateien, $nachweise, count($befunde)));
         exit($befunde === [] ? 0 : 1);
 
-    case 'sso:aus':
-        // Wie user:password: wer die Kommandozeile hat, darf das.
-        $r = \App\Auth\Sso\Einstellungen::ausschalten(isset($optionen['nur-sso']));
+    // ---- Anmeldung über SSO. Wie user:password: wer die Kommandozeile hat,
+    // darf das (volles Vertrauen). Ausgaben ohne Secret, Code oder Token.
+    case 'sso:zustand':
+        $z = SsoEinstellungen::zustand();
+        $alter = static fn (?int $s): string => $s === null ? '–' : ($s < 120 ? 'vor ' . $s . ' s' : ($s < 7200 ? 'vor ' . intdiv($s, 60) . ' min' : 'vor ' . intdiv($s, 3600) . ' h'));
+        $janein = static fn (bool $b): string => $b ? 'an' : 'aus';
+        $aus('SSO:             ' . ($z['aktiv'] ? ($z['wirksam'] ? 'an' : 'an, aber nicht vollständig eingerichtet – wirkt nicht') : 'aus'));
+        $aus('Beschriftung:    Mit ' . $z['name'] . ' anmelden');
+        $aus('Aussteller:      ' . ($z['aussteller'] === '' ? '–' : $z['aussteller']) . ($z['aussteller_warnung'] !== null ? '  (' . $z['aussteller_warnung'] . ')' : ''));
+        $aus('Client-ID:       ' . ($z['client_id'] === '' ? '–' : $z['client_id']));
+        $aus('Client-Secret:   ' . match ($z['secret']) {
+            'hinterlegt'        => 'hinterlegt (verschlüsselt, passt zu dieser Verbindung)',
+            'andere_verbindung' => 'gehört zu einer anderen Verbindung – neu eingeben',
+            'unlesbar'          => 'nicht lesbar (app.key geändert?) – neu eingeben',
+            default             => 'fehlt',
+        });
+        $aus('Rückruf:         ' . ($z['app_url_fehler'] ?? $z['rueckruf']));
+        $aus('Algorithmen:     ' . ($z['algs'] === [] ? '–' : implode(', ', $z['algs'])) . ($z['endpunkte'] !== null ? '   Endpunkte auf ' . $z['endpunkte'] : ''));
+        $aus('Schlüssel:       ' . ($z['kids'] === [] ? '–' : implode(', ', $z['kids'])) . '   (Discovery ' . $alter($z['discovery_alter']) . ', JWKS ' . $alter($z['jwks_alter']) . ')');
+        if (isset($z['verbindung']['verbinden_ueber'])) {
+            $aus('Verbindung über: ' . $z['verbindung']['verbinden_ueber'] . ' (config.php)');
+        }
+        if (isset($z['verbindung']['ca_datei'])) {
+            $aus('Eigene CA:       ' . $z['verbindung']['ca_datei'] . ' (config.php)');
+        }
+        foreach ($z['verbindung']['fehler'] as $f) {
+            $aus('FEHLER:          ' . $f);
+        }
+        $aus('Zuletzt geprüft: ' . ($z['geprueft_am'] === null ? 'nie' : Zeit::anzeige(Zeit::iso($z['geprueft_am']))));
+        foreach ($z['befund'] as $b) {
+            $aus('                 ' . ($b['ok'] ? '✓ ' : '✗ ') . $b['text']);
+        }
+        $aus('Schalter:        anlegen ' . $janein($z['schalter']['anlegen']) . ', Verwaltung per SSO ' . $janein($z['schalter']['admins'])
+            . ', MFA-Pflicht ' . $janein($z['schalter']['mfa_verwaltung']) . ', nur SSO ' . $janein($z['schalter']['nur_sso'])
+            . ', Kunden ' . $janein($z['schalter']['kunden']) . ', Rücksprung ' . $janein($z['schalter']['abmelde_rueckkehr']));
+        $aus('Scopes:          ' . $z['scopes'] . '   Gruppen-Claim: ' . $z['gruppen_claim']
+            . '   Pflichtgruppen: ' . ($z['pflichtgruppen'] === [] ? '–' : implode(', ', $z['pflichtgruppen'])));
+        $aus('Sitzung:         höchstens ' . intdiv($z['sitzung_dauer'], 3600) . ' h' . ($z['inaktiv_tage'] > 0 ? '; Konten „nur über SSO“ ohne Anmeldung nach ' . $z['inaktiv_tage'] . ' Tagen deaktivieren' : ''));
+        $aus('Verknüpfungen:   ' . (int) Database::scalar('SELECT COUNT(*) FROM sso_identitaeten')
+            . ($z['fremde_identitaeten'] > 0 ? ' (davon ' . $z['fremde_identitaeten'] . ' bei einem anderen Aussteller – bin/power sso:aussteller-umstellen)' : ''));
+        $aus('Zuordnungen:     ' . (int) Database::scalar("SELECT COUNT(*) FROM sso_zuordnungen WHERE art = 'rolle'") . ' Gruppe(n) → Rolle, '
+            . (int) Database::scalar("SELECT COUNT(*) FROM sso_zuordnungen WHERE art = 'kunde'") . ' Gruppe(n) → Kunde');
+        $aus('Anfragen:        ' . (int) Database::scalar('SELECT COUNT(*) FROM sso_anfragen') . ' offen');
+        $not = array_column(SsoSchutz::notzugaenge(), 'username');
+        $aus('Notzugänge:      ' . ($not === [] ? 'keiner' : implode(', ', $not)));
+        break;
+
+    case 'sso:pruefen':
+        Audit::akteur('cli');
+        $p = Anbieter::pruefen();
+        foreach ($p['befunde'] as $b) {
+            $aus(($b['ok'] ? '  ✓ ' : '  ✗ ') . $b['text']);
+        }
+        $aus($p['ok'] ? 'Verbindung in Ordnung.' : 'Die Prüfung hat Fehler gefunden.');
+        exit($p['ok'] ? 0 : 1);
+
+    case 'sso:einrichten':
+        [$aussteller, $clientId] = array_pad($werte, 2, null);
+        if ($aussteller === null || $clientId === null) {
+            $fehler("Aufruf: printf '%s' \"\$SECRET\" | bin/power sso:einrichten <aussteller> <client-id> [--name=Authentik]");
+        }
+        // Das Secret nie als Argument (Prozessliste, Shell-Verlauf) – nur von der Standardeingabe.
+        if (count($werte) > 2) {
+            $fehler('Das Client-Secret nie als Argument (es stünde in der Prozessliste und im Verlauf der Shell) – nur über die Standardeingabe. '
+                . 'In Authentik ein neues Secret erzeugen, wenn es so schon eingegeben wurde.');
+        }
+        $tty = stream_isatty(STDIN);
+        if ($tty) {
+            fwrite(STDERR, 'Client-Secret (leer: unverändert, „-“: entfernen; Eingabe unsichtbar): ');
+            @shell_exec('stty -echo 2>/dev/null');
+        }
+        $secret = $eingabe();
+        if ($tty) {
+            @shell_exec('stty echo 2>/dev/null');
+            fwrite(STDERR, PHP_EOL);
+        }
+        Audit::akteur('cli');
+        $name = isset($optionen['name']) && is_string($optionen['name']) ? $optionen['name'] : SsoEinstellungen::name();
+        $r = SsoEinstellungen::verbindungSpeichern($aussteller, $clientId, $secret, $name);
+        unset($secret);
+        if (!$r['ok']) {
+            $fehler($r['message']);
+        }
         $aus($r['message']);
+        $z = SsoEinstellungen::zustand();
+        $aus('Redirect URI in ' . $z['name'] . ' (Strict): ' . ($z['app_url_fehler'] ?? $z['rueckruf']));
+        $aus('Secret: ' . ($z['secret'] === 'hinterlegt' ? 'hinterlegt' : 'fehlt noch') . '. Prüfen: bin/power sso:pruefen – einschalten: bin/power sso:an');
+        break;
+
+    case 'sso:an':
+        Audit::akteur('cli');
+        $r = SsoEinstellungen::einschalten();
+        foreach ($r['befunde'] ?? [] as $b) {
+            $aus(($b['ok'] ? '  ✓ ' : '  ✗ ') . $b['text']);
+        }
+        $r['ok'] ? $aus($r['message']) : $fehler($r['message']);
+        break;
+
+    case 'sso:aus':
+        Audit::akteur('cli');
+        $r = SsoEinstellungen::ausschalten(isset($optionen['nur-sso']));
+        $aus($r['message']);
+        break;
+
+    case 'sso:verknuepfungen':
+        $liste = SsoKonten::verknuepfungen();
+        if (isset($werte[0])) {
+            $liste = array_values(array_filter($liste, static fn (array $i): bool => strcasecmp((string) $i['username'], (string) $werte[0]) === 0));
+        }
+        if ($liste === []) {
+            $aus(isset($werte[0]) ? 'Dieses Konto ist mit keiner SSO-Anmeldung verknüpft.' : 'Keine Verknüpfungen.');
+            break;
+        }
+        // Das Subjekt nur gekürzt – zum Wiedererkennen, nicht zum Abschreiben.
+        $aus(sprintf('  %-24s %-14s %-28s %-17s %-10s %s', 'Benutzer', 'Weg', 'Name dort', 'zuletzt', 'Subjekt', ''));
+        foreach ($liste as $i) {
+            $merkmale = array_filter([
+                (int) $i['nur_sso'] === 1 ? 'nur SSO' : '',
+                $i['kunde_id'] !== null ? 'Kundenzugang' : '',
+                !hash_equals(SsoEinstellungen::aussteller(), (string) $i['aussteller']) ? 'anderer Aussteller: ' . $i['aussteller'] : '',
+            ]);
+            $aus(sprintf('  %-24s %-14s %-28s %-17s %-10s %s', mb_strimwidth((string) $i['username'], 0, 24, '…'), $i['weg'],
+                mb_strimwidth((string) $i['name_dort'], 0, 28, '…'), $i['zuletzt_am'] === null ? 'noch nie' : Zeit::anzeige((string) $i['zuletzt_am']),
+                substr((string) $i['subjekt'], 0, 8) . '…', implode(', ', $merkmale)));
+        }
+        break;
+
+    case 'sso:loesen':
+        $konto = isset($werte[0]) ? Database::first('SELECT * FROM users WHERE username = ?', [$werte[0]]) : null;
+        if ($konto === null) {
+            $fehler('Aufruf: bin/power sso:loesen <benutzer> --ja (Benutzer nicht gefunden)');
+        }
+        if (Database::first('SELECT id FROM sso_identitaeten WHERE user_id = ?', [(int) $konto['id']]) === null) {
+            $fehler('Dieses Konto ist mit keiner SSO-Anmeldung verknüpft.');
+        }
+        if (!isset($optionen['ja'])) {
+            $fehler('Laufende SSO-Sitzungen des Kontos enden, Rollen aus Gruppen fallen weg. Bestätigen mit --ja.');
+        }
+        Audit::akteur('cli');
+        SsoKonten::loesen((int) $konto['id']);
+        $aus('Verknüpfung von ' . $konto['username'] . ' gelöst.');
+        if ((int) $konto['nur_sso'] === 1) {
+            $aus('Hinweis: Das Konto meldet sich nur über SSO an – ohne Verknüpfung kommt es erst wieder herein, wenn es sich neu verbindet'
+                . ($konto['kunde_id'] === null ? ' oder „nur SSO“ am Konto aus ist und ein Kennwort hat (bin/power user:password).' : '.'));
+        }
+        break;
+
+    case 'sso:aussteller-umstellen':
+        $neu = (string) ($werte[0] ?? '');
+        if ($neu === '') {
+            $fehler('Aufruf: bin/power sso:aussteller-umstellen <neuer-aussteller> --ja');
+        }
+        $bisher = Database::select('SELECT aussteller, COUNT(*) AS n FROM sso_identitaeten GROUP BY aussteller ORDER BY aussteller');
+        $andere = array_values(array_filter($bisher, static fn (array $r): bool => !hash_equals($neu, (string) $r['aussteller'])));
+        if ($andere === []) {
+            $aus('Alle Verknüpfungen gehören schon zu ' . $neu . ' – nichts zu tun.');
+            break;
+        }
+        foreach ($andere as $r) {
+            $aus('  ' . (int) $r['n'] . ' Verknüpfung(en) bei ' . $r['aussteller']);
+        }
+        if (!isset($optionen['ja'])) {
+            $fehler('Nur für einen neuen Aussteller DERSELBEN Authentik-Installation (das Subjekt „hashed user ID“ gilt dort installationsweit) – '
+                . 'bei einem anderen Anmeldedienst gehörten die Konten danach fremden Personen. Bestätigen mit --ja.');
+        }
+        Audit::akteur('cli');
+        try {
+            $n = SsoKonten::ausstellerUmstellen($neu);
+        } catch (SsoFehler $e) {
+            $fehler($e->getMessage());
+        }
+        $aus($n . ' Verknüpfung(en) auf ' . $neu . ' umgestellt.');
+        if (!hash_equals(SsoEinstellungen::aussteller(), $neu)) {
+            $aus('Hinweis: Eingetragen ist ' . (SsoEinstellungen::aussteller() === '' ? 'noch kein Aussteller' : SsoEinstellungen::aussteller())
+                . ' – die Anmeldung findet diese Konten erst, wenn der Aussteller auch dort ' . $neu . ' heißt (bin/power sso:einrichten).');
+        }
         break;
 
     case 'demo:seed':
@@ -913,6 +1134,11 @@ switch ($befehl) {
         }
         // Prüfnachweise nur melden – gelöscht wird mit kunden:aufbewahrung.
         foreach (Pruefnachweise::wartungHinweise() as $meldung) {
+            $aus($meldung);
+        }
+        // SSO: abgelaufene Rollen aus Gruppen, alte Anmeldeanfragen, inaktive Konten „nur über SSO“
+        Audit::akteur('wartung');
+        foreach (SsoKonten::wartung() as $meldung) {
             $aus($meldung);
         }
         break;

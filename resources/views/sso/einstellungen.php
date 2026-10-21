@@ -109,6 +109,13 @@ $gruppenListe = static function (array $gruppen): string {
                 <dd><?= $z['endpunkte'] !== null ? View::e((string) $z['endpunkte']) : '–' ?><?= $z['endpunkte'] !== null && !$z['abmelden_angeboten'] ? ' <span class="small muted">(ohne Abmelden beim Anmeldedienst)</span>' : '' ?></dd>
                 <dt>Zwischenspeicher</dt>
                 <dd>Discovery <?= View::e($alter($z['discovery_alter'])) ?> · Schlüssel <?= View::e($alter($z['jwks_alter'])) ?></dd>
+                <?php $verbindung = (array) ($z['verbindung'] ?? []); ?>
+                <?php if (isset($verbindung['verbinden_ueber']) || isset($verbindung['ca_datei']) || !empty($verbindung['fehler'])): ?>
+                    <dt>Verbindung (config.php)</dt>
+                    <dd><?php if (isset($verbindung['verbinden_ueber'])): ?><div>über <code><?= View::e((string) $verbindung['verbinden_ueber']) ?></code></div><?php endif; ?>
+                        <?php if (isset($verbindung['ca_datei'])): ?><div>eigene CA <code><?= View::e(basename((string) $verbindung['ca_datei'])) ?></code></div><?php endif; ?>
+                        <?php foreach ((array) ($verbindung['fehler'] ?? []) as $f): ?><div class="small text-bad"><?= View::e((string) $f) ?></div><?php endforeach; ?></dd>
+                <?php endif; ?>
                 <dt>Sitzung über SSO</dt>
                 <dd>höchstens <?= View::e(rtrim(rtrim(number_format((int) $z['sitzung_dauer'] / 3600, 1, ',', ''), '0'), ',')) ?> h – so lange gelten auch die Rollen aus Gruppen</dd>
             </dl>
@@ -300,7 +307,8 @@ $gruppenListe = static function (array $gruppen): string {
                 <?php if (!$kunden['darf']): ?>
                     <p class="muted mb0">Kundengruppen ordnet zu, wer Kunden pflegen darf.</p>
                 <?php elseif (!$kundenAn): ?>
-                    <p class="muted mb0">Kundengruppen gibt es, sobald „Kundenzugänge über Gruppen“ an ist.</p>
+                    <p class="muted mb0"><?= $kunden['gruppen'] === [] ? 'Kundengruppen gibt es, sobald „Kundenzugänge über Gruppen“ an ist.'
+                        : 'Neue Kundengruppen gibt es erst, wenn „Kundenzugänge über Gruppen“ an ist – bis dahin wirken auch die vorhandenen nicht.' ?></p>
                 <?php elseif ($kunden['waehlbar'] === []): ?>
                     <p class="muted mb0">Es gibt keinen aktiven Kunden, dessen Zugänge du ausgeben darfst.</p>
                 <?php else: ?>

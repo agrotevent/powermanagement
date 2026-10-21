@@ -318,6 +318,33 @@ Grenzwerte prüfen.
    Ansprechpartner eintragen.
 3. Wer Kunden von außen hereinlässt: Abschnitt 9.
 
+**Für die Anmeldung über SSO** (optional, etwa mit Authentik –
+[anmeldung-sso.md](anmeldung-sso.md)):
+
+1. **`app.url`** in `config/config.php` mit **https** und ohne Pfad (etwa
+   `'url' => 'https://strom.example.de'`) – Pflicht für SSO; daraus entsteht
+   die Rückruf-Adresse `…/login/sso/rueckruf`, nie aus der Anfrage.
+2. Ausgehend **HTTPS zum Authentik-Host** über seine öffentliche Adresse
+   (Hairpin-NAT oder interner DNS-Eintrag auf denselben Proxy). Geht das
+   nicht, in `config/config.php` unter `sso` → `verbinden_ueber` die interne
+   Adresse eintragen (Name und Zertifikatsprüfung bleiben), für eine
+   interne CA `ca_datei` (im Programmordner, etwa unter `config/` –
+   PHP-FPM darf wegen `open_basedir` nicht nach `/etc/ssl`).
+3. **Uhrzeit**: Der Container nutzt die Uhr des Proxmox-Hosts – dort chrony
+   prüfen. Mehr als 60 Sekunden Abweichung lassen jede Anmeldung scheitern.
+4. Einrichten unter *System → Anmeldung (SSO)* oder auf der Kommandozeile
+   (das Secret nur über die Standardeingabe):
+
+   ```bash
+   cd /opt/powermanagement
+   printf '%s' "$SECRET" | runuser -u www-data -- php bin/power sso:einrichten https://auth.example.com/application/o/powermanagement/ <client-id>
+   runuser -u www-data -- php bin/power sso:an
+   ```
+
+   Danach meldet `bin/power pruefen` eine Zeile `SSO: OK – …`.
+5. Vorher einen **Notzugang** anlegen (`bin/power user:add notfall admin`,
+   nie verknüpfen, Kennwort offline verwahren), wenn „nur SSO“ kommen soll.
+
 Prüfnachweise liegen als PDF (bis 10 MB) in der Datenbank. SQLite braucht
 dafür nichts; bei MySQL/MariaDB muss `max_allowed_packet` mindestens
 16 MiB sein (die Vorgabe von MariaDB) – eine 10-MB-Datei wird base64 rund
@@ -742,7 +769,9 @@ Welche Ports offen sein müssen – und für wen:
 | 22 | SSH | Verwaltungsnetz |
 
 Ausgehend braucht der Container nur das Übliche (DNS, Updates, Git) und –
-wenn Eventworx angebunden ist – HTTPS (443) zu `<mandant>.eventworx.biz`.
+wenn Eventworx angebunden ist – HTTPS (443) zu `<mandant>.eventworx.biz`,
+mit Anmeldung über SSO HTTPS zum Host des Anmeldedienstes (etwa
+`auth.example.com`).
 
 Beispiel mit nftables im Container (Netze anpassen: `10.10.0.0/24` LAN,
 `10.99.0.0/24` Tunnel):
@@ -799,7 +828,13 @@ nginx auf einem anderen Host), der **getrennt** läuft und auf
    `/login`, `/logout`, `/kundenbereich`, `/manifest` und
    `/assets/` durchlässt. Die App bremst Fehlversuche selbst, und ein
    Kundenzugang erreicht ohnehin nur `/kundenbereich`. `app.url` (siehe
-   unten) ist dann diese Adresse, und sie sollte **https** sein.
+   unten) ist dann diese Adresse, und sie sollte **https** sein. Melden sich
+   Kunden über SSO an ([anmeldung-sso.md](anmeldung-sso.md#kunden-über-authentik)),
+   gehören `/login/sso`, `/login/sso/rueckruf` und `/abgemeldet` dazu.
+6. **Anmeldung über SSO** statt einer zusätzlichen Anmeldung am Proxy:
+   dann nimmt PowerManagement die Anmeldung selbst von Authentik entgegen
+   ([anmeldung-sso.md](anmeldung-sso.md)); `app.url` muss die äußere
+   https-Adresse sein, unter der auch die Rückruf-Adresse erreichbar ist.
 
 Die nginx-Site passt das Update-Skript nie ungefragt an; eigene Zeilen
 bleiben also erhalten.
@@ -1088,6 +1123,7 @@ printf 'Authorization: Token %s\n' "$T" | curl -sG -H @- http://127.0.0.1:8086/q
 | Andere Instanz: „Zu viele Anfragen“ | Die Bremse in nginx (zehn je Sekunde und Adresse). Stehen alle Instanzen hinter demselben Proxy ohne `set_real_ip_from`, teilen sie sich die Bremse. |
 | Update bricht mit „could not read Username“ ab | Privates Repository ohne Token – `/etc/powermanagement/git.conf` anlegen (Abschnitt 3). |
 | Update meldet „lokale Änderungen“ | Jemand hat Dateien in `/opt/powermanagement` geändert. Sichern, dann `--erzwingen`. |
+| Anmeldung über SSO scheitert | `runuser -u www-data -- php bin/power sso:pruefen` zeigt jeden Schritt; die Meldungen und ihre Abhilfe stehen in [anmeldung-sso.md](anmeldung-sso.md#fehlersuche). Niemand kommt mehr hinein („nur SSO“, Authentik weg): `bin/power sso:aus --nur-sso`. |
 
 ## 13 · Grafana daneben
 

@@ -309,6 +309,17 @@ final class Anbieter
             return self::befundSpeichern(false, $befunde);
         }
         $gut('Aussteller: ' . $aussteller);
+        foreach (Einstellungen::verbindungFehler() as $f) {
+            $schlecht($f);
+        }
+        $verbindung = Einstellungen::verbindung();
+        if (isset($verbindung['verbinden_ueber'])) {
+            $teile = explode(':', $verbindung['verbinden_ueber'], 3);
+            $gut('Verbindung über ' . $teile[2] . ' (sso.verbinden_ueber) – Name, SNI und Zertifikat bleiben die von ' . $teile[0]);
+        }
+        if (isset($verbindung['ca_datei'])) {
+            $gut('Eigene CA: ' . basename($verbindung['ca_datei']) . ' (sso.ca_datei)');
+        }
         $fehler = Einstellungen::appUrlFehler();
         $fehler === null ? $gut('Rückruf-Adresse: ' . Einstellungen::rueckrufAdresse()) : $schlecht($fehler);
         $clientId = Einstellungen::clientId();

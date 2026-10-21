@@ -741,6 +741,11 @@ final class Konten
      * Authentik-Installation umschreiben (schluessel neu). Nur dort, wo das
      * Subjekt installationsweit gilt (hashed user id) – sonst entstünde eine
      * falsche Zuordnung. Gibt die Zahl der umgeschriebenen zurück.
+     *
+     * Identitäten, die schon beim neuen Aussteller stehen, bleiben. Stieße
+     * eine umgeschriebene mit einer dort zusammen (dasselbe Konto oder
+     * dasselbe Subjekt), wird nichts umgestellt (SsoFehler) – erst lösen.
+     * Offene Anmeldeanfragen ziehen mit um (eine doppelte fällt weg).
      */
     public static function ausstellerUmstellen(string $neu): int
     {
@@ -750,13 +755,110 @@ final class Konten
         }
         $anzahl = 0;
         Database::transaktion(static function () use ($neu, &$anzahl): void {
-            foreach (Database::select('SELECT id, subjekt FROM sso_identitaeten') as $i) {
-                Database::update('sso_identitaeten', (int) $i['id'], ['aussteller' => $neu, 'schluessel' => self::schluessel($neu, (string) $i['subjekt'])]);
+            $alle = Database::select('SELECT id, user_id, aussteller, subjekt FROM sso_identitaeten ORDER BY id');
+            $konten = [];
+            $schluessel = [];
+            foreach ($alle as $i) {
+                if (hash_equals($neu, (string) $i['aussteller'])) {
+                    $konten[(int) $i['user_id']] = true;
+                    $schluessel[self::schluessel($neu, (string) $i['subjekt'])] = true;
+                }
+            }
+            $umstellen = [];
+            $zusammen = 0;
+            foreach ($alle as $i) {
+                if (hash_equals($neu, (string) $i['aussteller'])) {
+                    continue;
+                }
+                $k = self::schluessel($neu, (string) $i['subjekt']);
+                if (isset($konten[(int) $i['user_id']]) || isset($schluessel[$k])) {
+                    $zusammen++;
+                    continue;
+                }
+                $konten[(int) $i['user_id']] = true;
+                $schluessel[$k] = true;
+                $umstellen[(int) $i['id']] = $k;
+            }
+            if ($zusammen > 0) {
+                throw new SsoFehler('aussteller', $zusammen . ' Verknüpfung(en) stießen mit einer beim neuen Aussteller zusammen (dasselbe Konto oder dasselbe Subjekt) – erst lösen (bin/power sso:loesen), dann umstellen.');
+            }
+            foreach ($umstellen as $id => $k) {
+                Database::update('sso_identitaeten', $id, ['aussteller' => $neu, 'schluessel' => $k]);
                 $anzahl++;
+            }
+            foreach (Database::select('SELECT id, aussteller, subjekt FROM sso_anfragen ORDER BY id') as $a) {
+                if (hash_equals($neu, (string) $a['aussteller'])) {
+                    continue;
+                }
+                $k = self::schluessel($neu, (string) $a['subjekt']);
+                if (Database::first('SELECT id FROM sso_anfragen WHERE schluessel = ?', [$k]) !== null) {
+                    Database::delete('sso_anfragen', (int) $a['id']);
+                } else {
+                    Database::update('sso_anfragen', (int) $a['id'], ['aussteller' => $neu, 'schluessel' => $k]);
+                }
             }
         });
         Audit::log('sso.aussteller_umgestellt', 'settings', '', ['aussteller' => $neu, 'anzahl' => $anzahl]);
         return $anzahl;
+    }
+
+    /**
+     * Für bin/power wartung: Rollen aus Gruppen, die seit mehr als einem Tag
+     * abgelaufen sind; Anmeldeanfragen nach ANFRAGE_TAGE; mit
+     * `sso.inaktiv_tage` > 0 Konten „nur über SSO“, die sich so lange nicht
+     * über SSO angemeldet haben (zuletzt_am, ohne Identität seit created_at),
+     * deaktivieren – Audit `sso.konto_deaktiviert`. Das gilt auch, während
+     * SSO aus ist: Wer so lange nicht hereinkam, wird nicht wieder aktiv,
+     * nur weil SSO wieder angeht.
+     *
+     * @return list<string> Meldungen (nur, wenn etwas geschah)
+     */
+    public static function wartung(?int $jetzt = null): array
+    {
+        $jetzt ??= Einstellungen::jetzt();
+        $meldungen = [];
+        $rollen = 0;
+        foreach (Database::select("SELECT user_id, role_id, gueltig_bis FROM user_roles WHERE quelle = 'sso' AND gueltig_bis IS NOT NULL") as $z) {
+            $bis = Zeit::ts((string) $z['gueltig_bis']);
+            if ($bis !== null && $bis < $jetzt - 86400) {
+                $rollen += Database::execute("DELETE FROM user_roles WHERE user_id = ? AND role_id = ? AND quelle = 'sso'", [(int) $z['user_id'], (int) $z['role_id']]);
+            }
+        }
+        $anfragen = 0;
+        foreach (Database::select('SELECT id, letzte_am FROM sso_anfragen') as $a) {
+            $am = Zeit::ts((string) $a['letzte_am']);
+            if ($am === null || $am < $jetzt - self::ANFRAGE_TAGE * 86400) {
+                Database::delete('sso_anfragen', (int) $a['id']);
+                $anfragen++;
+            }
+        }
+        if ($rollen > 0 || $anfragen > 0) {
+            $meldungen[] = "SSO: aufgeräumt {$rollen} abgelaufene Rolle(n) aus Gruppen, {$anfragen} Anmeldeanfrage(n) (älter als " . self::ANFRAGE_TAGE . ' Tage).';
+        }
+        $tage = Einstellungen::inaktivTage();
+        if ($tage > 0) {
+            $namen = [];
+            foreach (Database::select('SELECT * FROM users WHERE nur_sso = 1 AND is_active = 1 ORDER BY username') as $u) {
+                $zuletzt = null;
+                foreach (Database::select('SELECT zuletzt_am FROM sso_identitaeten WHERE user_id = ?', [(int) $u['id']]) as $i) {
+                    $ts = Zeit::ts($i['zuletzt_am'] === null ? null : (string) $i['zuletzt_am']);
+                    $zuletzt = $ts !== null && ($zuletzt === null || $ts > $zuletzt) ? $ts : $zuletzt;
+                }
+                $zuletzt ??= Zeit::ts((string) $u['created_at']);
+                if ($zuletzt !== null && $zuletzt >= $jetzt - $tage * 86400) {
+                    continue;
+                }
+                Database::update('users', (int) $u['id'], ['is_active' => 0]);
+                Audit::log('sso.konto_deaktiviert', 'user', (string) $u['id'], ['user_id' => (int) $u['id'], 'tage' => $tage]);
+                $namen[] = (string) $u['username'];
+            }
+            if ($namen !== []) {
+                Zugriff::vergessen();
+                Auth::rechteVergessen();
+                $meldungen[] = 'SSO: ' . count($namen) . ' Konto/Konten „nur über SSO“ ohne Anmeldung seit ' . $tage . ' Tagen deaktiviert: ' . implode(', ', $namen) . '.';
+            }
+        }
+        return $meldungen;
     }
 
     // ------------------------------------------------------------ intern
