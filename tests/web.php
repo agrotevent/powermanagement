@@ -1265,7 +1265,10 @@ try {
     $bEtage = \App\Services\SiteService::saveFloor(null, ['site_id' => $bSite, 'name' => 'Wiese']);
     $bVert = (int) \App\Services\AnlagenService::speichern(null, ['art' => 'verteilung', 'name' => $kennung . ' Bühne', 'site_id' => $bSite,
         'floor_id' => $bEtage, 'ohne_anschluesse' => true])['id'];
-    array_push($auditZiele, ['site', $bSite], ['floor', $bEtage], ['objekt', $bVert]);
+    // Ein Tank auf demselben Standort gehört in keinen Übergabebericht.
+    $bTank = (int) \App\Services\AnlagenService::speichern(null, ['art' => 'tank', 'name' => $kennung . ' Bühnentank', 'site_id' => $bSite,
+        'floor_id' => $bEtage, 'eigenschaften' => ['inhalt_l' => '1000']])['id'];
+    array_push($auditZiele, ['site', $bSite], ['floor', $bEtage], ['objekt', $bVert], ['objekt', $bTank]);
     \App\Services\AnlagenService::anzahlSetzen($bVert, ['eingang' => [$typen['cee63'] => 1], 'abgang' => [$typen['cee32'] => 1, $typen['schuko'] => 2]]);
     \App\Services\SchutzService::vorschlagen($bVert);
     $bAufbau = (int) \App\Services\AufbauService::starten($bSite, $kennung . ' Sommerfest')['id'];
@@ -1283,11 +1286,17 @@ try {
     $r = aufruf($basis, $admin['dose'], 'GET', '/berichte/neu?aufbau=' . $bAufbau);
     pruefe($r['status'] === 200 && str_contains($r['text'], 'value="' . $bVert . '" checked') && phpMeldung($r['text']) === null,
         'Neuer Bericht aus dem Aufbau: mobile Anlagen vorausgewählt');
+    pruefe(!str_contains($r['text'], 'value="' . $bTank . '"'), 'Neuer Bericht: der Tank steht nicht zur Wahl');
+    $r = aufruf($basis, $admin['dose'], 'POST', '/berichte/anlegen', ['site_id' => $bSite, 'objekte' => [$bVert, $bTank], '_token' => $admin['token']]);
+    pruefe($r['status'] === 302 && str_starts_with((string) $r['ziel'], '/berichte/neu')
+        && (int) Database::scalar('SELECT COUNT(*) FROM berichte WHERE site_id = ?', [$bSite]) === 0
+        && str_contains(aufruf($basis, $admin['dose'], 'GET', (string) $r['ziel'])['text'], 'ist ein Tank'), 'Bericht mit Tank abgelehnt, mit Meldung');
     $r = aufruf($basis, $admin['dose'], 'POST', '/berichte/anlegen', ['site_id' => $bSite, 'aufbau_id' => $bAufbau, 'objekte' => [$bVert], '_token' => $admin['token']]);
     $bId = (int) Database::scalar('SELECT id FROM berichte WHERE site_id = ? ORDER BY id DESC LIMIT 1', [$bSite]);
     pruefe($bId > 0 && $r['status'] === 302 && $r['ziel'] === '/berichte/' . $bId, 'Bericht angelegt → Formular ' . $r['ziel']);
     $form = aufruf($basis, $admin['dose'], 'GET', '/berichte/' . $bId);
     pruefe($form['status'] === 200 && str_contains($form['text'], 'data-bericht="' . $bId . '"') && phpMeldung($form['text']) === null, 'Formular des Entwurfs');
+    pruefe(str_contains($form['text'], $kennung . ' Bühne') && !str_contains($form['text'], $kennung . ' Bühnentank'), 'Formular: Anlagen zum Ergänzen ohne den Tank');
     gleich(substr_count($form['text'], 'data-zeile="k'), 3, 'je Abgang ein Stromkreis im Formular');
     pruefe(str_contains($form['text'], 'data-feld="kopf.kunde.firma"') && str_contains($form['text'], 'id="kreis-vorlage"'), 'Felder mit data-feld, Vorlage für neue Zeilen');
     pruefe(str_contains($form['text'], 'href="/berichte/' . $bId . '/pdf"'), 'Formular: Link zur PDF-Vorschau');

@@ -67,6 +67,7 @@ declare(strict_types=1);
 require __DIR__ . '/hilfen/pruefung.php';
 
 use App\Auth\Zugriff;
+use App\Berichte\BerichtService;
 use App\Messung\Datenquellen;
 use App\Messung\Messdaten;
 use App\Messung\Steuerung;
@@ -1638,6 +1639,12 @@ try {
     gleich(array_column($mat['schlaeuche'], 'straenge', 'titel'), ['DN 10 (3/8″)' => 4], 'Material: Schläuche je Typ (2 Schläuche × 2 Stränge)');
     gleich($mat['kupplungen'], ['HK-A3' => 8], 'Material: zwei Kupplungen je Strang');
     pruefe(in_array('Tank · ohne Typangabe', array_column($mat['anlagen'], 'titel'), true), 'Material: Tanks stehen als Anlagen da');
+
+    // ------------------------------------------------ Übergabeberichte gelten der elektrischen Anlage
+    $berichteVorher = (int) Database::scalar('SELECT COUNT(*) FROM berichte');
+    $b = BerichtService::anlegen($siteF, null, [$gen, $t1]);
+    pruefe(!$b['ok'] && str_contains($b['message'], 'ist ein Tank'), 'Übergabebericht: ein Tank lässt sich nicht als Anlage wählen – ' . $b['message']);
+    gleich((int) Database::scalar('SELECT COUNT(*) FROM berichte'), $berichteVorher, '… und es entsteht kein Bericht');
 } finally {
     alsBenutzer(null);
     Database::execute('DELETE FROM leitungen WHERE name LIKE ?', [$kennungF . '%']);
@@ -1985,7 +1992,7 @@ try {
     $c = $zeileMit($out, $kennungH . ' Tank C');
     pruefe($rc === 0 && substr_count(trim($out), "\n") === 2, 'tank:liste: drei Tanks am Standort, Rückgabewert 0');
     pruefe(str_starts_with($a, 'ok ') && preg_match('/ \d[\d.]* l  \d+ %/u', $a) === 1 && str_contains($a, '(Prüfung Kommandozeile ' . $kennungH . ')')
-        && str_contains($a, 'Stand vor'), 'Zeile mit Liter, Prozent, Standort und Alter: ' . $a);
+        && preg_match('/\(Stand (vor |gerade eben)/u', $a) === 1, 'Zeile mit Liter, Prozent, Standort und Alter: ' . $a);
     pruefe(str_starts_with($b, 'bad ') && str_contains($b, '– nur noch'), 'Alarm des Tanks (unter 99 %) mit Grund: ' . $b);
     pruefe(str_starts_with($c, 'keine ') && str_contains($c, 'kein Tanksensor'), 'Tank ohne Sensor: ' . $c);
     [$rc, $out] = $power(['tank:liste', '--als=' . $kennungH, '--standort=' . $siteH, '--warnungen']);
