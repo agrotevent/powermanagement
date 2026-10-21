@@ -5,9 +5,11 @@ namespace App\Controllers;
 
 use App\Auth\Auth;
 use App\Auth\Zugriff;
+use App\Berichte\BerichtService;
 use App\Messung\Messdaten;
 use App\Services\AnlagenService;
 use App\Services\InventarService;
+use App\Services\KatalogImport;
 use App\Services\LeitungService;
 use App\Services\LiveService;
 use App\Services\MesspunktService;
@@ -72,7 +74,14 @@ final class AnlagenController extends Controller
             $v['schutz'] = count(SchutzService::liste((int) $v['id']));
         }
         unset($v);
-        $this->view('anlagen/katalog', ['vorlagen' => $vorlagen]);
+        // Was der letzte Import angelegt oder ersetzt hat – einmal markiert.
+        $importiert = Session::get('katalog_importiert');
+        Session::forget('katalog_importiert');
+        $this->view('anlagen/katalog', [
+            'vorlagen'   => $vorlagen,
+            'importiert' => is_array($importiert) ? $importiert : [],
+            'darfImport' => KatalogImport::erlaubt()['katalog'],
+        ]);
     }
 
     public function baum(Request $request): void
@@ -213,6 +222,9 @@ final class AnlagenController extends Controller
                 : [],
             'auswertung'   => MesspunktService::auswertung(),
             'reiter'       => $request->str('reiter', 'uebersicht'),
+            'letztePruefung' => (int) $objekt['ist_vorlage'] === 0 && Auth::can('berichte.view') ? BerichtService::letzteAnObjekt($id) : null,
+            'berichtNeu'   => (int) $objekt['ist_vorlage'] === 0 && $objekt['site_id'] !== null && Auth::can('berichte.manage')
+                && Zugriff::darfStandortAendern((int) $objekt['site_id']),
             'scripts'      => ['/assets/js/live.js'],
         ]);
     }

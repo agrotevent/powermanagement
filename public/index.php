@@ -4,27 +4,46 @@ declare(strict_types=1);
 require dirname(__DIR__) . '/src/bootstrap.php';
 
 use App\Controllers\AnlagenController;
+use App\Controllers\ApiController;
 use App\Controllers\AuditController;
 use App\Controllers\AufbauController;
 use App\Controllers\AuthController;
 use App\Controllers\BereichController;
+use App\Controllers\BerichtController;
 use App\Controllers\BenutzerController;
 use App\Controllers\DashboardController;
 use App\Controllers\DatenquellenController;
+use App\Controllers\InstanzenController;
 use App\Controllers\InventarController;
 use App\Controllers\EinstellungenController;
 use App\Controllers\KarteController;
+use App\Controllers\KatalogImportController;
 use App\Controllers\LocationController;
 use App\Controllers\ManifestController;
+use App\Controllers\PruefgeraeteController;
 use App\Controllers\MqttZugaengeController;
+use App\Controllers\SchnittstelleController;
 use App\Controllers\StandortController;
 use App\Controllers\StatistikController;
 use App\Controllers\SteckerController;
 use App\Controllers\SteuerungController;
 use App\Controllers\VerteilerAbgleichController;
+use App\Controllers\VorschlaegeController;
 use App\Support\Request;
 use App\Support\Router;
 use App\Support\Session;
+
+/*
+ * Die Schnittstelle für andere Instanzen (/api/v1) läuft vor Sitzung und
+ * Router: ohne Cookie, ohne CSRF-Token, ohne Weiterleitung auf die
+ * Anmeldung – jede Anfrage meldet sich mit ihrem Token selbst an und
+ * bekommt JSON zurück.
+ */
+$anfrage = new Request();
+if (ApiController::zustaendig($anfrage->path())) {
+    (new ApiController())->bearbeiten($anfrage);
+    return;
+}
 
 Session::start();
 
@@ -73,6 +92,12 @@ $router->get('/grundriss/{id}/kachel/{z}/{x}/{y}', [KarteController::class, 'pla
 $router->get('/anlagen', [AnlagenController::class, 'index'], 'anlagen.view');
 $router->get('/anlagen/baum', [AnlagenController::class, 'baum'], 'anlagen.view');
 $router->get('/anlagen/katalog', [AnlagenController::class, 'katalog'], 'anlagen.view');
+// Katalog importieren (Standard-Verteiler und Aggregate aus einer Datei):
+// dazu alle Standorte, für neue Steckertypen „stecker.manage“ – prüft der Controller.
+$router->get('/anlagen/katalog/import', [KatalogImportController::class, 'index'], 'anlagen.manage');
+$router->post('/anlagen/katalog/import/vorschau', [KatalogImportController::class, 'vorschau'], 'anlagen.manage');
+$router->post('/anlagen/katalog/import/uebernehmen', [KatalogImportController::class, 'uebernehmen'], 'anlagen.manage');
+$router->post('/anlagen/katalog/import/verwerfen', [KatalogImportController::class, 'verwerfen'], 'anlagen.manage');
 $router->get('/anlagen/neu', [AnlagenController::class, 'neu'], 'anlagen.manage');
 $router->post('/anlagen/speichern', [AnlagenController::class, 'speichern'], 'anlagen.manage');
 $router->get('/anlagen/{id}', [AnlagenController::class, 'show'], 'anlagen.view');
@@ -96,6 +121,34 @@ $router->post('/aufbau/{id}/beenden', [AufbauController::class, 'beenden'], 'anl
 $router->post('/aufbau/{id}/loeschen', [AufbauController::class, 'loeschen'], 'anlagen.manage');
 $router->get('/aufbau/{id}/abgleich', [AufbauController::class, 'abgleich'], 'anlagen.view');
 $router->get('/aufbau/{id}/druck', [AufbauController::class, 'druck'], 'anlagen.view');
+
+// Übergabeberichte – das Recht prüft die Route, „woran“ BerichtService::sichtbar/darf*.
+// Feste Pfade vor /berichte/{id}: {id} passt auf jedes Wort.
+$router->get('/berichte', [BerichtController::class, 'index'], 'berichte.view');
+$router->get('/berichte/neu', [BerichtController::class, 'neu'], 'berichte.manage');
+$router->post('/berichte/anlegen', [BerichtController::class, 'anlegen'], 'berichte.manage');
+$router->get('/berichte/pruefgeraete', [PruefgeraeteController::class, 'index'], 'berichte.view');
+$router->post('/berichte/pruefgeraete/speichern', [PruefgeraeteController::class, 'speichern'], 'berichte.manage');
+$router->get('/berichte/{id}', [BerichtController::class, 'show'], 'berichte.view');
+$router->get('/berichte/{id}/pdf', [BerichtController::class, 'pdf'], 'berichte.view');
+$router->post('/berichte/{id}/speichern', [BerichtController::class, 'speichern'], 'berichte.manage');
+$router->post('/berichte/{id}/kreise', [BerichtController::class, 'kreise'], 'berichte.manage');
+$router->post('/berichte/{id}/kunde-aus', [BerichtController::class, 'kundeAus'], 'berichte.manage');
+$router->post('/berichte/{id}/eventworx/suche', [BerichtController::class, 'eventworxSuche'], 'berichte.eventworx');
+$router->post('/berichte/{id}/eventworx/vorgang', [BerichtController::class, 'eventworxVorgang'], 'berichte.eventworx');
+$router->post('/berichte/{id}/pruefen', [BerichtController::class, 'pruefen'], 'berichte.manage');
+// Unterschriften: Prüfer friert ein und vergibt die Nummer; der Kunde unterschreibt im
+// Kundenmodus am Gerät des Prüfers (der Router sperrt dann alles andere, siehe Kundenmodus).
+$router->post('/berichte/{id}/unterschreiben', [BerichtController::class, 'unterschreiben'], 'berichte.pruefen');
+$router->post('/berichte/{id}/zurueckziehen', [BerichtController::class, 'zurueckziehen'], 'berichte.pruefen');
+$router->post('/berichte/{id}/kundenmodus', [BerichtController::class, 'kundenmodus'], 'berichte.manage');
+$router->get('/berichte/{id}/kunde', [BerichtController::class, 'kunde'], 'berichte.manage');
+$router->post('/berichte/{id}/kunde/unterschreiben', [BerichtController::class, 'kundeUnterschreiben'], 'berichte.manage');
+$router->post('/berichte/{id}/kunde/beenden', [BerichtController::class, 'kundeBeenden'], 'berichte.manage');
+$router->post('/berichte/{id}/ohne-kunde', [BerichtController::class, 'ohneKunde'], 'berichte.pruefen');
+$router->post('/berichte/{id}/korrektur', [BerichtController::class, 'korrektur'], 'berichte.pruefen');
+$router->post('/berichte/{id}/verwerfen', [BerichtController::class, 'verwerfen'], 'berichte.pruefen');
+$router->post('/berichte/{id}/loeschen', [BerichtController::class, 'loeschen'], 'berichte.manage');
 
 // Inventar: Verteiler und Zwischenstecker mit Shellys, Einsatz beim Aufbau.
 $router->get('/inventar', [InventarController::class, 'index'], 'datenquellen.view');
@@ -198,7 +251,42 @@ $router->post('/system/einstellungen/pruefen', [EinstellungenController::class, 
 // Adresse und Zweig des Repositorys: nur mit „Einstellungen ändern“ – wer die
 // Adresse umstellt, lenkt das hinterlegte Token dorthin.
 $router->post('/system/einstellungen/location', [EinstellungenController::class, 'location'], 'settings.manage');
+// Firma & Übergabeberichte: Firmendaten für Kopf und Fuß, Nummernkürzel, Vorgaben, Texte.
+$router->post('/system/einstellungen/firma', [EinstellungenController::class, 'firma'], 'settings.manage');
+// Eventworx (Kundendaten für Übergabeberichte, nur lesend): Mandant, Token, Verbindungstest.
+$router->post('/system/einstellungen/eventworx', [EinstellungenController::class, 'eventworx'], 'settings.manage');
+$router->post('/system/einstellungen/eventworx/pruefen', [EinstellungenController::class, 'eventworxPruefen'], 'settings.manage');
+
+// Schnittstelle (API): Zugänge für andere Instanzen. Anlegen, Ändern,
+// Anzeigen und Löschen zusätzlich nur mit „Alle Standorte …“ (prüft der
+// Controller); widerrufen darf jeder mit dem Recht – das nimmt nur weg.
+$router->get('/system/schnittstelle', [SchnittstelleController::class, 'index'], 'api.manage');
+$router->post('/system/schnittstelle/anlegen', [SchnittstelleController::class, 'anlegen'], 'api.manage');
+$router->get('/system/schnittstelle/{id}', [SchnittstelleController::class, 'zugang'], 'api.manage');
+foreach (['speichern', 'anzeigen', 'widerrufen', 'loeschen'] as $aktion) {
+    $router->post('/system/schnittstelle/{id}/' . $aktion, [SchnittstelleController::class, $aktion], 'api.manage');
+}
+
+// Andere Instanzen (Seite B): Locations von dort übernehmen, zuordnen,
+// verknüpfen, lösen und zurückschicken – woran, prüft PartnerAbgleich
+// (Standort mit „bearbeiten“, Pläne, Anlagen, Kabel, Steckertypen).
+$router->get('/instanzen', [InstanzenController::class, 'index'], 'api.partner');
+$router->post('/instanzen/anlegen', [InstanzenController::class, 'anlegen'], 'api.partner');
+$router->get('/instanzen/{id}', [InstanzenController::class, 'instanz'], 'api.partner');
+$router->get('/instanzen/{id}/zuordnen', [InstanzenController::class, 'zuordnen'], 'api.partner');
+foreach (['pruefen', 'loeschen', 'uebernehmen', 'loesen', 'zurueck'] as $aktion) {
+    $router->post('/instanzen/{id}/' . $aktion, [InstanzenController::class, $aktion], 'api.partner');
+}
+
+// Änderungsvorschläge anderer Instanzen (Seite A): sehen nur mit dem ganzen
+// Standort, annehmen nur mit „bearbeiten“ – prüft VorschlagService.
+$router->get('/vorschlaege', [VorschlaegeController::class, 'index'], 'api.vorschlaege');
+$router->get('/vorschlaege/{id}', [VorschlaegeController::class, 'vorschlag'], 'api.vorschlaege');
+$router->get('/vorschlaege/{id}/datei', [VorschlaegeController::class, 'datei'], 'api.vorschlaege');
+foreach (['annehmen', 'ablehnen'] as $aktion) {
+    $router->post('/vorschlaege/{id}/' . $aktion, [VorschlaegeController::class, $aktion], 'api.vorschlaege');
+}
 
 $router->get('/audit', [AuditController::class, 'index'], 'audit.view');
 
-$router->dispatch(new Request());
+$router->dispatch($anfrage);

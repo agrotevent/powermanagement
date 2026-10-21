@@ -261,11 +261,22 @@ final class VerteilerSync
      * Repository mit. Wer den Katalog oder das Inventar nicht pflegen darf,
      * übernimmt dort nichts.
      *
+     * Unter der Sperre der Arbeitskopie (LocationSync::gesperrt()): Ein
+     * zweites Übernehmen – Doppelklick, zweiter Reiter – spielte sonst
+     * dieselben Stücke noch einmal ein, während beide auf das Repository
+     * warten.
+     *
      * @param list<array{0:string,1:string}>|null $auswahl [bereich, schlüssel]; null = alles, was dort neu oder neuer ist
      * @param array{typ:bool,inventar:bool} $erlaubt
      * @return array{ok:bool,message:string}
      */
     public static function uebernehmen(?array $auswahl, array $erlaubt): array
+    {
+        return LocationSync::gesperrt(static fn (): array => self::uebernehmenGesperrt($auswahl, $erlaubt));
+    }
+
+    /** uebernehmen() unter der Sperre der Arbeitskopie – vom Holen bis zum Eintragen. */
+    private static function uebernehmenGesperrt(?array $auswahl, array $erlaubt): array
     {
         $holen = LocationSync::holen();
         if (!$holen['ok']) {
@@ -364,10 +375,21 @@ final class VerteilerSync
      * schon genauso steht, wird nicht neu geschrieben (sonst entstünde ein
      * Commit, in dem sich nur der Zeitstempel ändert).
      *
+     * Unter der Sperre der Arbeitskopie (LocationSync::gesperrt()): vom
+     * Holen über das Schreiben der Dateien bis zum Hochladen. Sonst setzte
+     * ein zweiter Abgleich die Arbeitskopie zurück, während dieser noch
+     * nicht eingecheckt hat.
+     *
      * @param list<array{0:string,1:string}>|null $auswahl null = alles, was nur hier steht oder hier geändert wurde
      * @return array{ok:bool,message:string}
      */
     public static function hochladen(?array $auswahl, string $wer): array
+    {
+        return LocationSync::gesperrt(static fn (): array => self::hochladenGesperrt($auswahl, $wer));
+    }
+
+    /** hochladen() unter der Sperre der Arbeitskopie. */
+    private static function hochladenGesperrt(?array $auswahl, string $wer): array
     {
         $holen = LocationSync::holen();
         if (!$holen['ok']) {
@@ -448,9 +470,17 @@ final class VerteilerSync
      * Stück. Hier bleibt er stehen; die anderen Installationen sehen ihn
      * danach als „nur hier“ bzw. „dort entfernt“ und entscheiden selbst.
      *
+     * Unter der Sperre der Arbeitskopie (LocationSync::gesperrt()).
+     *
      * @return array{ok:bool,message:string}
      */
     public static function entfernen(string $bereich, string $schluessel, string $wer): array
+    {
+        return LocationSync::gesperrt(static fn (): array => self::entfernenGesperrt($bereich, $schluessel, $wer));
+    }
+
+    /** entfernen() unter der Sperre der Arbeitskopie. */
+    private static function entfernenGesperrt(string $bereich, string $schluessel, string $wer): array
     {
         $pfad = self::pfad($bereich, $schluessel);
         if ($pfad === null) {

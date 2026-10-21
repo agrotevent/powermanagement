@@ -9,6 +9,7 @@ use App\Support\Crypto;
 use App\Support\Database;
 use App\Support\Logger;
 use App\Support\Programm;
+use App\Support\Session;
 use App\Support\Settings;
 
 /**
@@ -56,6 +57,15 @@ final class LocationSync
 
     /** Wie lange ein Git-Aufruf höchstens dauern darf. */
     private const ZEITGRENZE = 120;
+
+    /** Die git-Befehle, die das Repository fragen – auf die wird gewartet, ohne die Sitzung zu halten. */
+    private const UEBERS_NETZ = ['clone', 'fetch', 'ls-remote', 'push'];
+
+    /** Was ein zweiter Abgleich meldet, während einer läuft. */
+    public const BELEGT = 'Das Repository wird gerade schon abgeglichen (anderer Reiter oder anderer Benutzer) – nichts doppelt gemacht. Gleich die Seite neu laden.';
+
+    /** Wie tief diese Anfrage in gesperrt() steckt – darin geht es ohne zweite Sperre weiter. */
+    private static int $sperrTiefe = 0;
 
     // ---------------------------------------------------------- Einrichtung
 
@@ -240,6 +250,53 @@ final class LocationSync
         return self::hindernis() === null;
     }
 
+    /**
+     * $arbeit unter der Sperre der Arbeitskopie: Holen, Lesen, Einchecken
+     * und Hochladen laufen nur einmal zur Zeit – Location- und
+     * Verteiler-Abgleich teilen sich die eine Arbeitskopie. Seit git auf das
+     * Repository wartet, ohne die Sitzung zu halten (git()), liefen zwei
+     * Klicks aus demselben Browser sonst nebeneinander: zweimal dieselbe
+     * Location übernommen (im ungünstigen Fall als zwei Standorte), ein
+     * `reset --hard` mitten in einem Hochladen, ein Klonen, das ein anderes
+     * wegräumt.
+     *
+     * Nicht blockierend wie PartnerAbgleich::gesperrt(): Wer die Sperre
+     * nicht bekommt, hört mit BELEGT auf. Warten ginge nicht – die zweite
+     * Anfrage hielte dabei die Sitzung, und die erste bekäme sie nach dem
+     * nächsten git-Aufruf nicht wieder. Innerhalb einer gesperrten Arbeit
+     * (uebernehmen() ruft holen()) geht es ohne zweite Sperre weiter.
+     *
+     * @param callable():array<string,mixed> $arbeit
+     * @return array<string,mixed> das Ergebnis von $arbeit – oder ['ok' => false, 'message' => …]
+     */
+    public static function gesperrt(callable $arbeit): array
+    {
+        if (self::$sperrTiefe > 0) {
+            return $arbeit();
+        }
+        $pfad = dirname(self::arbeitsKopie()) . '/abgleich.sperre';
+        if (!is_dir(dirname($pfad))) {
+            @mkdir(dirname($pfad), 0775, true);
+        }
+        $griff = @fopen($pfad, 'c');
+        if ($griff === false) {
+            Logger::error('Inventar-Abgleich: Sperrdatei ließ sich nicht anlegen: ' . $pfad);
+            return ['ok' => false, 'message' => 'storage/inventar ist nicht beschreibbar – nichts abgeglichen.'];
+        }
+        if (!flock($griff, LOCK_EX | LOCK_NB)) {
+            fclose($griff);
+            return ['ok' => false, 'message' => self::BELEGT];
+        }
+        self::$sperrTiefe++;
+        try {
+            return $arbeit();
+        } finally {
+            self::$sperrTiefe--;
+            flock($griff, LOCK_UN);
+            fclose($griff);
+        }
+    }
+
     // ------------------------------------------------------------- Holen
 
     /**
@@ -249,9 +306,19 @@ final class LocationSync
      * gesetzt. Hart, weil die Arbeitskopie kein Arbeitsplatz ist, sondern
      * ein Spiegel: was hier von Hand geändert wurde, war ein Versehen.
      *
+     * Unter der Sperre der Arbeitskopie (gesperrt()). Wer danach noch darin
+     * liest oder schreibt, nimmt die Sperre selbst vorher – sonst setzte ein
+     * anderer Abgleich sie zwischendurch zurück.
+     *
      * @return array{ok:bool,message:string,commit:string}
      */
     public static function holen(): array
+    {
+        return self::gesperrt(static fn (): array => self::holenGesperrt()) + ['commit' => ''];
+    }
+
+    /** holen() unter der Sperre der Arbeitskopie. */
+    private static function holenGesperrt(): array
     {
         $fehlt = self::hindernis();
         if ($fehlt !== null) {
@@ -425,9 +492,18 @@ final class LocationSync
      *
      * Status je Location: neu | aktuell | neuer | eingespielt (wie MasterAdmin).
      *
+     * Unter der Sperre der Arbeitskopie (gesperrt()): vom Holen bis zum Lesen.
+     *
      * @return array{ok:bool,message:string,zweig:string,commit:string,hinweis:string,locations:list<array<string,mixed>>}
      */
     public static function locationsImRepo(): array
+    {
+        return self::gesperrt(static fn (): array => self::locationsImRepoGesperrt())
+            + ['zweig' => self::zweig(), 'commit' => '', 'hinweis' => '', 'locations' => []];
+    }
+
+    /** locationsImRepo() unter der Sperre der Arbeitskopie. */
+    private static function locationsImRepoGesperrt(): array
     {
         $antwort = ['ok' => false, 'message' => '', 'zweig' => self::zweig(), 'commit' => '', 'hinweis' => '', 'locations' => []];
         $holen = self::holen();
@@ -519,9 +595,19 @@ final class LocationSync
      * Eine Location aus dem Repository übernehmen: Etagen, Grundrisse und
      * Maßstab aus location.json, die Feststromanschlüsse aus strom.json.
      *
+     * Unter der Sperre der Arbeitskopie (gesperrt()): Ein zweites Übernehmen
+     * – Doppelklick, zweiter Reiter – legte sonst, während beide auf das
+     * Repository warten, einen zweiten Standort an.
+     *
      * @return array{ok:bool,message:string}
      */
     public static function uebernehmen(string $schluessel): array
+    {
+        return self::gesperrt(static fn (): array => self::uebernehmenGesperrt($schluessel));
+    }
+
+    /** uebernehmen() unter der Sperre der Arbeitskopie – vom Holen bis zum Eintragen. */
+    private static function uebernehmenGesperrt(string $schluessel): array
     {
         $holen = self::holen();
         if (!$holen['ok']) {
@@ -576,9 +662,18 @@ final class LocationSync
      * ergänzt (neue Etagen, ein Plan oder Maßstab, der dort fehlt). Dosen,
      * Racks und Accesspoints aus MasterAdmin bleiben unberührt.
      *
+     * Unter der Sperre der Arbeitskopie (gesperrt()): vom Holen über das
+     * Schreiben der Dateien bis zum Hochladen.
+     *
      * @return array{ok:bool,message:string}
      */
     public static function locationHochladen(int $siteId, string $wer): array
+    {
+        return self::gesperrt(static fn (): array => self::locationHochladenGesperrt($siteId, $wer));
+    }
+
+    /** locationHochladen() unter der Sperre der Arbeitskopie. */
+    private static function locationHochladenGesperrt(int $siteId, string $wer): array
     {
         $site = SiteService::find($siteId);
         if ($site === null) {
@@ -969,6 +1064,27 @@ final class LocationSync
             'GIT_CONFIG_NOSYSTEM'  => '1',
         ];
 
+        /*
+         * Holen, Hochladen und Nachsehen dort warten auf das Repository – bis
+         * zu ZEITGRENZE Sekunden. Solange stünden sonst alle anderen Anfragen
+         * desselben Browsers an der Sitzung an: andere Reiter, Live-Abfragen,
+         * das Speichern eines Formulars. Also ohne Sitzungssperre wie
+         * PartnerService::anfrage(); die Aufrufer schreiben ihre Meldungen
+         * erst danach, und zwei Abgleiche hält gesperrt() auseinander.
+         */
+        $lauf = static fn (): array => self::starten($git, $argumente, $verzeichnis, $umgebung);
+        return in_array($argumente[0] ?? '', self::UEBERS_NETZ, true) ? Session::ohneSperre($lauf) : $lauf();
+    }
+
+    /**
+     * git starten und auf sein Ende warten – höchstens ZEITGRENZE Sekunden.
+     *
+     * @param list<string> $argumente
+     * @param array<string,string> $umgebung
+     * @return array{ok:bool,ausgabe:string,message:string}
+     */
+    private static function starten(string $git, array $argumente, string $verzeichnis, array $umgebung): array
+    {
         $prozess = @proc_open(
             array_merge([$git], $argumente),
             [1 => ['pipe', 'w'], 2 => ['pipe', 'w']],

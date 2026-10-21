@@ -22,6 +22,7 @@ use App\Services\VerteilerBundle;
 use App\Services\VerteilerSync;
 use App\Support\Config;
 use App\Support\Database;
+use App\Support\Fingerabdruck;
 use App\Support\Programm;
 use App\Support\Settings;
 
@@ -332,12 +333,30 @@ try {
     Settings::put('inventory.repo_url', 'file://' . $fern);
     Config::set('inventory.repo_url', 'file://' . $fern);
 
+    // ------------------------------------------------ Fingerabdruck (gemeinsam mit der Schnittstelle)
+    // Derselbe Inhalt gibt denselben Wert wie vor dem Umzug nach
+    // Support\Fingerabdruck – sonst gälte nach einem Update jeder Verteiler
+    // als „hier geändert“.
+    $festerTyp = ['format' => 1, 'art' => 'verteiler-typ', 'schluessel' => 'x', 'stand' => '2026-01-01T00:00:00+00:00', 'von' => 'A',
+        'typ' => ['name' => 'Prüf-Typ', 'art' => 'verteilung', 'nennstrom_a' => 63.0, 'eigenschaften' => ['schutzart' => 'IP44', 'fi_typ' => 'A'],
+            'schutzorgane' => [['ref' => 's1', 'art' => 'rcd', 'vor' => null], ['ref' => 's2', 'art' => 'ls', 'vor' => 's1']],
+            'anschluesse' => [['richtung' => 'abgang', 'nr' => 2, 'stecker' => 'cee16'], ['richtung' => 'eingang', 'nr' => 1, 'stecker' => 'cee63'],
+                ['richtung' => 'abgang', 'nr' => 1, 'stecker' => 'schuko']]]];
+    gleich(VerteilerBundle::fingerabdruck($festerTyp), '0e4afd7584060417d6a977402b9fa961269f6f2bdfa94ef2154a44508546c60b', 'Fingerabdruck eines Typs unverändert');
+    $umsortiert = $festerTyp;
+    $umsortiert['typ'] = array_reverse($umsortiert['typ'], true);
+    $umsortiert['typ']['anschluesse'] = array_reverse($umsortiert['typ']['anschluesse']);
+    gleich(VerteilerBundle::fingerabdruck($umsortiert), VerteilerBundle::fingerabdruck($festerTyp), 'Reihenfolge von Feldern und Anschlüssen zählt nicht');
+    gleich(Fingerabdruck::geordnet(['b' => 1, 'a' => [3, 1, 2]]), ['a' => [3, 1, 2], 'b' => 1], 'Maps sortiert, Listen nicht');
+    pruefe(Fingerabdruck::von(['m' => 40, 'g' => (object) ['x' => 1]]) === Fingerabdruck::von(['g' => ['x' => 1], 'm' => 40.0])
+        && Fingerabdruck::von([1, 2]) !== Fingerabdruck::von([2, 1]), 'Fingerabdruck: 40 = 40.0, Objekt = Map, Listenfolge zählt');
+
     // ------------------------------------------------ Location-Abgleich lässt Katalog-Typen in Ruhe
     $strom = LocationBundle::stromAnwenden($siteId, ['format' => 2, 'art' => 'strom', 'anlagen' => [[
         'schluessel' => $typSchluessel, 'art' => 'anschluss', 'fest' => true, 'name' => $k . ' Säule', 'etage' => null,
         'schutzorgane' => [], 'anschluesse' => [],
     ]]]);
-    pruefe($strom['ok'], 'strom.json mit gleichem Schlüssel angewandt');
+    pruefe($strom['ok'] && ($strom['anlagen'] ?? null) === 1, 'strom.json mit gleichem Schlüssel angewandt: ' . $strom['message']);
     $typDanach = AnlagenService::find($typId);
     gleich([(int) $typDanach['ist_vorlage'], $typDanach['name'], $typDanach['site_id']], [1, $k . ' Foodtruck-Typ XL', null], 'Katalog-Typ unverändert');
     pruefe(Database::first('SELECT id FROM objekte WHERE site_id = ? AND name = ? AND ist_vorlage = 0', [$siteId, $k . ' Säule']) !== null, 'Feststromanschluss daneben angelegt');

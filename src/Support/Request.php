@@ -75,9 +75,74 @@ final class Request
         return substr((string) ($_SERVER['HTTP_USER_AGENT'] ?? ''), 0, 255);
     }
 
+    /**
+     * Erwartet die Anfrage JSON? Nur der Accept-Kopf zählt, wie im Router –
+     * nicht X-Requested-With. Damit schickte `data-laeuft` (app.js) seine
+     * Formulare ab; Controller::antwort() gab dann JSON statt Meldung und
+     * Weiterleitung zurück, und das Neuladen danach zeigte keine Meldung –
+     * auch keinen Fehler (Verteiler-Abgleich, MQTT-Zugänge). Wer JSON will
+     * (PMNetz.post, PM.post, live.js, karte.js), sagt es mit Accept.
+     */
     public function wantsJson(): bool
     {
-        return str_contains((string) ($_SERVER['HTTP_ACCEPT'] ?? ''), 'application/json')
-            || ($_SERVER['HTTP_X_REQUESTED_WITH'] ?? '') === 'XMLHttpRequest';
+        return str_contains((string) ($_SERVER['HTTP_ACCEPT'] ?? ''), 'application/json');
+    }
+
+    /**
+     * Ein Kopf der Anfrage, gleich wie geschrieben („authorization“ ist
+     * „Authorization“); '' wenn er fehlt.
+     *
+     * Authorization reicht nicht jeder Server als HTTP_AUTHORIZATION durch:
+     * Apache nach einer Umschreibung als REDIRECT_HTTP_AUTHORIZATION, manche
+     * nur über getallheaders().
+     */
+    public function kopf(string $name): string
+    {
+        $schluessel = strtoupper(str_replace('-', '_', $name));
+        $kandidaten = ['HTTP_' . $schluessel];
+        if ($schluessel === 'AUTHORIZATION') {
+            $kandidaten[] = 'REDIRECT_HTTP_AUTHORIZATION';
+        }
+        // Inhaltstyp und -länge stehen unter CGI/FPM ohne „HTTP_“ davor.
+        if (in_array($schluessel, ['CONTENT_TYPE', 'CONTENT_LENGTH'], true)) {
+            $kandidaten[] = $schluessel;
+        }
+        foreach ($kandidaten as $k) {
+            if (isset($_SERVER[$k]) && is_scalar($_SERVER[$k]) && (string) $_SERVER[$k] !== '') {
+                return trim((string) $_SERVER[$k]);
+            }
+        }
+        if (function_exists('getallheaders')) {
+            foreach ((array) getallheaders() as $kopf => $wert) {
+                if (strcasecmp((string) $kopf, $name) === 0 && is_scalar($wert)) {
+                    return trim((string) $wert);
+                }
+            }
+        }
+        return '';
+    }
+
+    /**
+     * Der Körper der Anfrage (etwa JSON) – höchstens $max Bytes.
+     *
+     * null, wenn er größer ist: schon angekündigt (Content-Length) oder beim
+     * Lesen bemerkt (ohne Längenangabe). Gelesen wird nie mehr als $max + 1.
+     */
+    public function koerper(int $max): ?string
+    {
+        $laenge = $this->kopf('Content-Length');
+        if (ctype_digit($laenge) && (strlen($laenge) > 18 || (int) $laenge > $max)) {
+            return null;
+        }
+        $ein = @fopen('php://input', 'rb');
+        if ($ein === false) {
+            return '';
+        }
+        $daten = stream_get_contents($ein, $max + 1);
+        fclose($ein);
+        if ($daten === false) {
+            return '';
+        }
+        return strlen($daten) > $max ? null : $daten;
     }
 }

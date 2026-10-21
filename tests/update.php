@@ -1286,6 +1286,33 @@ stream_wrapper_register("langsam", LangsamAttrappe::class);
     $seite = $aufruf($port, $leer, 'GET', '/login');
     $r = $aufruf($port, $leer, 'POST', '/login', ['username' => $kennung . '-kunde', 'password' => $kennwort, '_token' => $token($seite['text'])]);
     pruefe($r['status'] === 302 && $r['ziel'] !== '/login', 'Schreibsperre: Anmelden geht');
+
+    // Kundenmodus während der Schreibsperre: Was er sperrt, beantwortet weiter
+    // der Router (423 bzw. zur Kundenseite) – nur seine offenen Wege bekommen 503.
+    $km = $ordner . '/dose-kundenmodus';
+    $seite = $aufruf($port, $km, 'GET', '/login');
+    $r = $aufruf($port, $km, 'POST', '/login', ['username' => $kennung . '-admin', 'password' => $kennwort, '_token' => $token($seite['text'])]);
+    pruefe($r['status'] === 302 && $r['ziel'] !== '/login', 'Kundenmodus: Anmeldung in eigener Dose');
+    $kmBericht = Database::insert('berichte', ['titel' => $kennung . ' Kundenmodus', 'pruefdatum' => date('Y-m-d'), 'inhalt' => '{}',
+        'erstellt_von' => $admin, 'created_at' => gmdate('c')]);
+    $kmToken = $token($aufruf($port, $km, 'GET', '/profil')['text']);
+    $geraetToken = bin2hex(random_bytes(32));
+    $kmGeraet = Database::insert('kundenmodus_geraete', ['token_hash' => hash('sha256', $geraetToken), 'bericht_id' => $kmBericht, 'user_id' => $admin, 'seit' => gmdate('c')]);
+    // Die Sperre am Gerät (Cookie), wie nach „Kundenmodus starten“ und neuer Anmeldung.
+    file_put_contents($km, "127.0.0.1\tFALSE\t/\tFALSE\t0\tpm_kundenmodus\t{$geraetToken}\n", FILE_APPEND);
+    $r = $aufruf($port, $km, 'POST', '/system/update/automatik', ['_token' => $kmToken] + $sperrFelder, ['Accept: application/json']);
+    pruefe($r['status'] === 423 && (json_decode($r['text'], true)['kundenmodus'] ?? false) === true, 'Kundenmodus + Schreibsperre: gesperrter Weg (JSON) → 423, nicht 503 (' . $r['status'] . ')');
+    $r = $aufruf($port, $km, 'POST', '/system/update/automatik', ['_token' => $kmToken] + $sperrFelder);
+    pruefe($r['status'] === 302 && $r['ziel'] === '/berichte/' . $kmBericht . '/kunde', 'Kundenmodus + Schreibsperre: gesperrter Weg (Formular) → Kundenseite');
+    $r = $aufruf($port, $km, 'GET', '/system/update/stand', [], ['Accept: application/json']);
+    gleich($r['status'], 423, 'Kundenmodus: stand → 423 (update.js lädt dann neu)');
+    $r = $aufruf($port, $km, 'POST', '/berichte/' . $kmBericht . '/kunde/unterschreiben', ['_token' => $kmToken], ['Accept: application/json']);
+    pruefe($r['status'] === 503 && (json_decode($r['text'], true)['wartung'] ?? false) === true && preg_match('/^Retry-After: 30\r?$/mi', $r['kopf']) === 1,
+        'Kundenmodus + Schreibsperre: offener Weg (Unterschrift) → 503 mit Retry-After');
+    gleich($modus(), null, 'Kundenmodus + Schreibsperre: Einstellung unverändert');
+    Database::execute('DELETE FROM kundenmodus_geraete WHERE id = ?', [$kmGeraet]);
+    Database::execute('DELETE FROM berichte WHERE id = ?', [$kmBericht]);
+
     $schreiben('wartung', UpdateService::KOPF_WARTUNG . "\nseit " . (time() - 4000) . "\nkennung -\n");
     $r = $aufruf($port, $a['dose'], 'POST', '/system/update/automatik', $sperrFelder, ['Accept: application/json']);
     pruefe($r['status'] === 200 && (json_decode($r['text'], true)['ok'] ?? false) === true && $modus() === 'aus', 'Schreibsperre älter als 60 min ohne Puls: wirkungslos');

@@ -15,6 +15,7 @@ use App\Support\Database;
 use App\Support\Flash;
 use App\Support\Request;
 use App\Support\Response;
+use App\Support\Session;
 
 final class DatenquellenController extends Controller
 {
@@ -69,7 +70,9 @@ final class DatenquellenController extends Controller
             $this->redirect('/datenquellen');
             return;
         }
-        $ergebnis = Abfrage::ausfuehren($quelle);
+        // Modbus bis sammler.modbus_timeout je Block, VRM und ComAp bis 20 s
+        // je Anfrage – ohne die Sitzung zu halten; die Meldung kommt danach.
+        $ergebnis = Session::ohneSperre(static fn (): array => Abfrage::ausfuehren($quelle));
         Datenquellen::kontakt((int) $quelle['id'], $ergebnis['ok'] ? null : (string) $ergebnis['fehler']);
         if (!$ergebnis['ok']) {
             Flash::error($quelle['name'] . ': ' . $ergebnis['fehler']);
@@ -100,7 +103,8 @@ final class DatenquellenController extends Controller
             return;
         }
         try {
-            $einheiten = ComapCloud::einheiten($quelle);
+            // Anmeldung und Abfrage bei ComAp – ohne die Sitzung zu halten.
+            $einheiten = Session::ohneSperre(static fn (): array => ComapCloud::einheiten($quelle));
             Flash::success('Einheiten in WebSupervisor: ' . implode(' · ', array_map(static fn ($e) => $e['name'] . ' = ' . $e['unitGuid'], $einheiten)));
         } catch (\Throwable $e) {
             Flash::error($e->getMessage());

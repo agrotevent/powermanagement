@@ -3,6 +3,7 @@ declare(strict_types=1);
 
 namespace App\Services;
 
+use App\Berichte\Kundenmodus;
 use App\Support\Config;
 use App\Support\Database;
 use App\Support\Flash;
@@ -875,19 +876,28 @@ final class UpdateService
      * POSTs (außer An- und Abmelden). Wer JSON will (Accept), bekommt 503
      * zum Wiederholen; Formulare eine Meldung und zurück. Kosten: ein
      * is_file je POST.
+     *
+     * Was der Kundenmodus ohnehin sperrt, beantwortet weiter der Router: Er
+     * prüft das vor allem anderen (423 bzw. zur Kundenseite). Sonst bekäme
+     * ein anderer Reiter während des Updates 503 statt 423 und zeigte
+     * weiter, was er geladen hat. Geschrieben wird so oder so nichts.
      */
     public static function wartungsSperre(): void
     {
         if (strtoupper((string) ($_SERVER['REQUEST_METHOD'] ?? 'GET')) !== 'POST') {
             return;
         }
-        if (in_array((new Request())->path(), ['/login', '/logout'], true) || !self::wartungAktiv()) {
+        $pfad = (new Request())->path();
+        if (in_array($pfad, ['/login', '/logout'], true) || !self::wartungAktiv()) {
+            return;
+        }
+        if (Kundenmodus::sperrt('POST', $pfad) !== null) {
             return;
         }
         $text = 'Gerade läuft ein Update – Änderungen sind in etwa einer Minute wieder möglich.';
         header('Cache-Control: no-store');
-        // Nur der Accept-Kopf: Formulare mit data-laeuft schicken
-        // X-Requested-With und sollen Meldung und Weiterleitung bekommen.
+        // Nur der Accept-Kopf, wie im Router: Formulare mit data-laeuft
+        // (fetch ohne Accept) sollen Meldung und Weiterleitung bekommen.
         if (str_contains((string) ($_SERVER['HTTP_ACCEPT'] ?? ''), 'application/json')) {
             header('Retry-After: 30');
             Response::json(['ok' => false, 'wartung' => true, 'message' => $text], 503);

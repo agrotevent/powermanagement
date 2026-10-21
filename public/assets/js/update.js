@@ -7,8 +7,9 @@
  * Nur bei „angefordert“ und „läuft“ wird abgefragt, alle 2 s, immer erst
  * nach der vorigen Antwort. Während des Updates starten die Dienste neu:
  * Netzfehler, 502/503/504 oder eine Antwort ohne JSON (Fehlerseite) sind
- * dann kein Fehler – es geht in größerem Abstand weiter. Texte nur per
- * textContent; Suchen und Starten sind gewöhnliche Formulare.
+ * dann kein Fehler – es geht in größerem Abstand weiter. 423 (Kundenmodus
+ * in einem anderen Reiter) lädt neu – das führt zur Kundenseite. Texte nur
+ * per textContent; Suchen und Starten sind gewöhnliche Formulare.
  */
 (function () {
     'use strict';
@@ -176,6 +177,13 @@
         }).then(function (antwort) {
             if (antwort.status === 401 || antwort.status === 419 || (antwort.redirected && /\/login/.test(antwort.url))) {
                 abgemeldet();
+                return null;
+            }
+            // Kundenmodus, gestartet in einem anderen Reiter (423): neu laden
+            // führt zur Kundenseite, statt hier weiter den Stand zu zeigen.
+            if (antwort.status === 423) {
+                beendet = true;
+                window.location.reload();
                 return null;
             }
             var art = antwort.headers.get('Content-Type') || '';

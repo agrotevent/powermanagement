@@ -204,6 +204,92 @@ Feststromanschluss-Typ“*), etwa die Energiesäulen eines Geländes, die
 
 ![Katalog der Standard-Verteiler mit Anschlüssen und Bestückung](bilder/katalog.png)
 
+### Katalog importieren
+
+Viele Standard-Verteiler und Aggregate auf einmal – etwa alle
+Stromverteiler und Generatoren eines Verleihkatalogs wie der
+BSS-Strombibel – kommen über **Standard-Verteiler → Importieren …** in den
+Katalog. Das darf, wer Anlagen ändern darf und alle Standorte sieht; neue
+Steckertypen legt der Import nur an, wenn man auch den
+Steckverbinder-Katalog pflegen darf.
+
+**Format.** Ein Katalog-Paket ist eine JSON-Datei (höchstens 5 MB,
+höchstens 500 Typen):
+
+```json
+{ "format": 1, "art": "verteiler-typen", "quelle": "BSS Strombibel (Stand 18.03.2025)",
+  "typen": [
+    { "format": 1, "art": "verteiler-typ", "schluessel": "pd-63-32",
+      "typ": { "art": "verteilung", "name": "PD 63/32", "hersteller": "…", "modell": "…",
+               "nennstrom_a": 63, "spannung_v": 400, "phasen": 3,
+               "eigenschaften": { "artikelnummer": "…", "gehaeuse": "…", "gewicht_kg": 38.5, "zuleitung": "2,0 m 5G16" },
+               "schutzorgane": [ { "ref": "s1", "art": "hauptschalter", "nennstrom_a": 63, "pole": 3 },
+                                 { "ref": "s2", "art": "rcd", "fehlerstrom_ma": 30, "rcd_typ": "A", "vor": "s1" } ],
+               "anschluesse": [ { "richtung": "eingang", "stecker": "cee63", "nr": 1 },
+                                { "richtung": "abgang", "stecker": "cee32", "nr": 1, "schutz": "s2" } ] },
+      "steckertypen": [ { "schluessel": "cee63", "name": "CEE 63 A", "strom_a": 63, "phasen": 3, "spannung_v": 400 } ] } ] }
+```
+
+Jeder Typ ist eine Datei im Format des [Verteiler-Abgleichs](#verteiler-abgleich)
+(`verteiler-typ`) – eine solche Datei allein lässt sich ebenfalls
+importieren. Der `schluessel` ist eindeutig im Paket (a–z, 0–9,
+Bindestriche); an ihm erkennt ein späterer Import den Typ wieder. Jeden
+Stecker aus `anschluesse` gibt es hier schon, oder er ist unter
+`steckertypen` beschrieben – ein neuer vollständig mit `name`, `strom_a`,
+`phasen` (1 oder 3) und `spannung_v`, denn mit diesen Werten rechnen Kabel,
+Schutzorgane und Auslastung. Zu den Eigenschaften gehören bei Verteilungen Artikelnummer,
+Gehäuse, Schutzart, Zuleitung und Gewicht, bei Generatoren Artikelnummer,
+Gewicht leer und Abmessungen (L × B × H in mm) neben Kraftstoff (Diesel,
+HVO, Gas oder Benzin – Groß- und Kleinschreibung egal), Tank und Verbrauch.
+`spannung_v` ist eine Zahl oder fehlt ganz (dann 400 V). Messpunkte gehören
+nicht zu einem Katalog-Typ und bleiben weg.
+
+**Mitgelieferte Kataloge** liegen unter `resources/kataloge/*.json` und
+stehen auf der Import-Seite zur Auswahl – mit Quelle und Anzahl der Typen.
+Eigene Pakete werden hochgeladen.
+
+**Vorschau.** Nichts wird sofort übernommen. Die Vorschau zeigt je Typ
+Name, Art, Bestückung und Zustand:
+
+| Zustand | Bedeutung | vorausgewählt |
+|---------|-----------|---------------|
+| **neu** | gibt es hier noch nicht | ja |
+| **schon da** | steht hier genauso | – |
+| **hier anders** | steht hier anders als in der Datei – meist, weil jemand einen Fehler korrigiert hat; aufklappbar, was genau anders ist | nein („überschreiben“) |
+| **Fehler** | die Datei taugt für diesen Typ nicht (Grund steht dabei: unbekannte Art, Stecker ohne Beschreibung, neuer Stecker ohne Nennstrom, Kraftstoff, den die Auswahl nicht kennt, Abgang an einem Schutzorgan, das es nicht gibt …) | – |
+
+Darüber stehen die Steckertypen, die neu angelegt würden, mit Nennstrom,
+Phasen, Spannung und den Typen, die sie brauchen. Wer den
+Steckverbinder-Katalog nicht pflegen darf, sieht diese Typen ohne Haken und
+mit dem Hinweis, welcher Stecker fehlt. *alle neuen* und
+*keine* setzen die Haken; **Ausgewählte übernehmen** legt an bzw. ersetzt –
+alles in einem Zug: geht ein Typ schief, wird nichts übernommen. Die
+Meldung im Katalog nennt die Typen, die neuen und überschriebenen Einträge
+sind dort einmal markiert. Eine Vorschau liegt eine Stunde bereit.
+
+**Ein Import überschreibt nie still eine Korrektur.** Was hier anders
+steht, bleibt, wie es ist – auch beim nächsten Import desselben Pakets –,
+solange niemand ausdrücklich *überschreiben* anhakt. Der Haken gilt für den
+Stand, den die Vorschau gezeigt hat: korrigiert jemand den Typ, während die
+Vorschau offen ist, bleibt seine Korrektur stehen. Wird so nichts
+übernommen, bleibt die Vorschau offen und zeigt den Stand von jetzt.
+
+**Danach** sind die Typen gewöhnliche Standard-Verteiler: Name,
+Nennwerte, Eigenschaften, Anschlüsse und Sicherungen lassen sich bearbeiten,
+der Typ lässt sich kopieren und löschen. Fehlerhafte Einträge aus der
+Vorlage korrigiert man also einfach im Katalog. Ein gelöschter Typ ist beim
+nächsten Import wieder *neu*.
+
+Auf der Kommandozeile:
+
+```bash
+php bin/power katalog:import resources/kataloge/bss-strombibel.json --pruefen   # nur ansehen
+php bin/power katalog:import resources/kataloge/bss-strombibel.json             # neue anlegen
+php bin/power katalog:import paket.json --ueberschreiben                        # auch „hier anders“ ersetzen
+```
+
+![Vorschau eines Katalog-Imports: neue Typen vorausgewählt, ein hier korrigierter Typ mit aufgeklappten Unterschieden, ein Typ mit fehlendem Steckertyp](bilder/katalog-import.png)
+
 ### Verteilbaum und Steckverbinder
 
 - **Verteilbaum**: wer speist wen, aus den eingezeichneten Kabeln
@@ -258,6 +344,30 @@ was das für die nächste Planung heißt:
 ![Abgleich: Kennzahlen, Last im Betrieb mit Hinweisen für die nächste Planung, Bereiche und Anlagen](bilder/abgleich.png)
 
   gegen ihre Grenze.
+
+## Übergabeberichte
+
+Nach dem Aufbau prüft die Elektrofachkraft die Anlage und übergibt sie mit
+einem **Übergabebericht** – Prüfprotokoll nach DIN VDE 0100-600 und
+Errichterbestätigung nach DGUV Vorschrift 3 in einem (*Übersicht →
+Übergabeberichte*, im Aufbau oder an der Anlage *Übergabebericht*):
+
+1. Anlagen wählen – Abgänge, Sicherungen, RCDs und Kabel kommen aus dem
+   Plan, **Messwerte nie**.
+2. Am Tablet oder Telefon ausfüllen; das Formular speichert selbst, auch
+   bei schwacher Verbindung. Die Bewertung je Stromkreis kommt vom Server.
+3. *Prüfen*, dann **als Prüfer unterschreiben** – der Bericht ist
+   eingefroren und hat seine Nummer.
+4. **An Kunden übergeben**: Das Gerät zeigt nur noch diesen Bericht, der
+   Kunde bestätigt den Erhalt und unterschreibt. Zurück mit dem Kennwort des
+   Prüfers.
+5. Das PDF ist gespeichert – ansehen, herunterladen, teilen.
+
+![Formular eines Übergabeberichts am Tablet](bilder/bericht-formular.png)
+
+Alles Weitere – Felder, Grenzwerte, Kundenmodus, Korrektur, Integrität,
+Datenschutz, Aufbewahrung – steht in [berichte.md](berichte.md);
+Kundendaten aus Eventworx in [eventworx.md](eventworx.md).
 
 ## Inventar
 
@@ -533,6 +643,44 @@ PDF (wird serverseitig gerastert und gekachelt), PNG/JPG oder SVG.
 
 Adresse und Token des Repositorys stehen unter **System → Einstellungen →
 Location- und Verteiler-Abgleich**.
+
+## Andere Instanzen (Schnittstelle)
+
+Ohne gemeinsames Repository geht dasselbe direkt von Installation zu
+Installation – auch mit MasterAdmin. Die Instanz, die einen Standort teilt
+(A), gibt unter **System → Schnittstelle (API)** einen Zugang aus: ein Token
+mit Befugnissen und den Standorten, die es sehen bzw. bearbeiten darf.
+
+![Zugänge für andere Instanzen](bilder/schnittstelle.png)
+
+Die Instanz, die übernimmt (B), trägt A unter **Standorte → Andere
+Instanzen** mit Adresse und Token ein. Ihre Seite zeigt je Location von A
+die Etagen, welche Etage hier dazugehört, und wie es steht – *noch nicht
+hier*, *passt zu …*, *aktuell*, *dort geändert*, *hier geändert*, *beide
+geändert*:
+
+![Locations von A, gesehen von B](bilder/instanz.png)
+
+- **Übernehmen** holt Grundrisse, Maßstab und Georeferenz, zwischen zwei
+  PowerManagement-Instanzen mit dem Kästchen *Feststrom* daneben (in der
+  Liste und beim Zuordnen, vorgewählt) auch die Feststromanschlüsse und
+  festen Kabel. Namen, Schaltsperren und Messpunkte hier bleiben, gelöscht
+  wird nichts; die mobile Planung der Veranstaltung bleibt unberührt.
+- **Zuordnen …** wählt Standort und Etagen hier einzeln; **Nur
+  verknüpfen** merkt sich die Zuordnung, ohne etwas zu holen; **Lösen**
+  nimmt sie wieder weg.
+- Zurück geht es je nach Befugnis bei A: **Hochladen** (A übernimmt gleich,
+  aber nur, wenn sich dort seit dem letzten Übernehmen nichts geändert hat)
+  oder **Als Vorschlag schicken** (bei A bestätigt es jemand).
+
+Vorschläge prüft A unter **Standorte → Änderungsvorschläge**: je Etage, was
+sich ändern würde, dann **Annehmen** (gewählte Etagen und Teile) oder
+**Ablehnen**.
+
+![Ein Änderungsvorschlag mit den Unterschieden je Etage](bilder/vorschlag.png)
+
+Alles Weitere – Befugnisse, Zustände, Zusammenspiel mit MasterAdmin,
+Endpunkte für Skripte – steht in [schnittstelle.md](schnittstelle.md).
 
 ## Verteiler-Abgleich
 

@@ -246,10 +246,13 @@ Bei einer vorhandenen **InfluxDB 1.8** mit Anmeldung ist das „Token“
    (gehört dem Systembenutzer `nodered`). Editor nur über nginx unter
    `/node-red/`, Anmeldung `admin` mit zufälligem Kennwort; nginx lässt je
    Adresse nur fünf Anmeldeversuche in der Minute durch.
-7. **Oberfläche:** PHP-FPM-Pool, nginx-Site, Datenbank, Administrator,
+7. **Oberfläche:** PHP-FPM-Pool, nginx-Site (mit Bremse für die
+   Schnittstelle `/api/`, Abschnitt 9), Datenbank, Administrator,
    InfluxDB- und MQTT-Zugang (verschlüsselt in der Datenbank).
 8. **Dienste:** `powermanagement-nodered`, `powermanagement-sammler`,
-   `powermanagement-wartung.timer` (täglich),
+   `powermanagement-wartung.timer` (täglich; räumt Protokolle auf und meldet
+   Übergabeberichte über der Aufbewahrungsfrist – gelöscht wird nur mit
+   `bin/power berichte:aufbewahrung --ausfuehren`),
    `powermanagement-mqtt-zugaenge.path` und `.timer` (eigene MQTT-Zugänge,
    nur mit Mosquitto im Container), `powermanagement-update.path` und
    `.timer` sowie `powermanagement-update-zeitplan.timer` (Update aus der
@@ -298,6 +301,26 @@ auch keinen gelöschten oder umbenannten `admin`.
 
 Danach in der Oberfläche unter **System → Einstellungen** Titel und
 Grenzwerte prüfen.
+
+**Für Übergabeberichte** ([berichte.md](berichte.md)):
+
+1. *System → Einstellungen → Firma & Übergabeberichte*: Firmenname (Pflicht
+   vor der ersten Prüfer-Unterschrift), Anschrift, Kontakt, Bank, Register –
+   sie stehen im Fuß jeder PDF-Seite. Das Repository bringt keine
+   Firmendaten mit; dazu Kürzel der Nummer, Texte und Aufbewahrung.
+2. *System → Benutzer & Freigaben*: bei den Prüfern die
+   **Prüfer-Qualifikation** eintragen.
+3. *Übergabeberichte → Prüfgeräte*: Installationstester mit Seriennummer
+   und Kalibrierdatum.
+4. Optional **Eventworx** (*System → Einstellungen → Eventworx*): Mandant
+   und ein Token „REST API Lesen“, dann *Verbindung prüfen* – oder auf der
+   Kommandozeile `sudo -u www-data php /opt/powermanagement/bin/power
+   eventworx:pruefen`. Der Container braucht dafür ausgehend HTTPS zu
+   `<mandant>.eventworx.biz`. Details: [eventworx.md](eventworx.md).
+
+Die Schrift für die PDF (Liberation Sans, SIL Open Font License) liegt im
+Repository unter `resources/fonts` – PHP-FPM darf wegen `open_basedir`
+nicht nach `/usr/share/fonts`. Weitere Pakete braucht die PDF nicht.
 
 Im Node-RED-Editor gibt es vier Tabs: **PowerManagement** (Überblick,
 Eingang `pm/messwert/#`), **Shelly Gen2+**, **Shelly Gen1** und
@@ -693,6 +716,9 @@ Welche Ports offen sein müssen – und für wen:
 | 1880 | Node-RED direkt | nur lokal (lauscht ohnehin nur auf 127.0.0.1) |
 | 22 | SSH | Verwaltungsnetz |
 
+Ausgehend braucht der Container nur das Übliche (DNS, Updates, Git) und –
+wenn Eventworx angebunden ist – HTTPS (443) zu `<mandant>.eventworx.biz`.
+
 Beispiel mit nftables im Container (Netze anpassen: `10.10.0.0/24` LAN,
 `10.99.0.0/24` Tunnel):
 
@@ -738,12 +764,83 @@ nginx auf einem anderen Host), der **getrennt** läuft und auf
    PowerManagement setzt das Sitzungscookie dann auf `secure`.
 3. **Zusätzliche Anmeldung** am Proxy (SSO, PIN) ist empfehlenswert.
    `/node-red/` von außen am besten gar nicht freigeben – der Editor kann
-   alles, was Node-RED kann.
+   alles, was Node-RED kann. `/api/` davon ausnehmen, wenn andere Instanzen
+   über den Proxy kommen (siehe unten): sie melden sich nur mit ihrem Token.
 4. **MQTT nicht über den Proxy ins Internet** stellen. Entfernte Shellys
    kommen über WireGuard (Abschnitt 7).
 
 Die nginx-Site passt das Update-Skript nie ungefragt an; eigene Zeilen
 bleiben also erhalten.
+
+### Schnittstelle für andere Instanzen
+
+Andere PowerManagement- oder MasterAdmin-Instanzen holen Standorte über
+`/api/v1` und schicken Änderungen zurück
+([schnittstelle.md](schnittstelle.md)). Dafür:
+
+1. **`app.url`** in `config/config.php` auf die Adresse setzen, unter der
+   die **anderen Instanzen** diese erreichen – nicht unbedingt die, die der
+   eigene Browser benutzt:
+
+   ```php
+   'app' => [
+       // …
+       'url' => 'https://strom.messe-nord.de',   // oder http://10.10.0.60
+   ],
+   ```
+
+   *System → Schnittstelle (API)* nennt daraus die Adresse für die
+   Gegenseite (`…/api/v1`). Ohne den Eintrag rät die Seite aus der
+   Anfrage – hinter einem Proxy stimmt das selten.
+2. **nginx:** Die Vorlage `deploy/nginx-powermanagement.conf` bringt den
+   Block für `/api/` mit – je Adresse zehn Anfragen in der Sekunde (mit
+   Puffer für eine Liste samt Plandateien), Körper bis 50 MB (die App nimmt
+   höchstens 48 MiB an), Antworten von nginx selbst (429, 413) als JSON:
+
+   ```nginx
+   limit_req_zone $binary_remote_addr zone=pm_api:1m rate=10r/s;   # oben in der Datei
+
+   location ^~ /api/ {                                              # im server-Block
+       limit_req zone=pm_api burst=40 nodelay;
+       limit_req_status 429;
+       client_max_body_size 50m;
+       error_page 429 = @pm_api_429;
+       error_page 413 = @pm_api_413;
+       try_files $uri /index.php$is_args$args;
+   }
+   ```
+
+   Ist die Site von Hand verändert, ersetzt das Update sie nicht und legt
+   die neue Fassung daneben (`/etc/nginx/powermanagement.powermanagement-neu`).
+   Dann die Zeilen für `pm_api` und die drei `location`-Blöcke (`/api/`,
+   `@pm_api_429`, `@pm_api_413`) von dort übernehmen,
+   `nginx -t && systemctl reload nginx`. Ohne den Block geht die
+   Schnittstelle auch, aber ohne Bremse und mit der Größengrenze der Site.
+3. **Hinter einem Proxy** muss er den Kopf **`Authorization`**
+   unverändert durchreichen (nginx tut das von sich aus; eine Anmeldung
+   des Proxys davor – SSO, PIN – darf `/api/` nicht abfangen) und Körper
+   bis 50 MB annehmen. Mit `set_real_ip_from` und `security.trusted_proxies`
+   (Punkt 1 oben) gilt die Bremse je anfragender Instanz, und unter
+   *Zuletzt* steht deren Adresse statt der des Proxys. Wer PHP statt hinter
+   nginx unter Apache betreibt, braucht `CGIPassAuth On` – sonst kommt das
+   Token bei PHP nicht an, und jede Anfrage ist 401.
+4. **Firewall:** Die Verbindung baut der **Server** der anderen Instanz auf,
+   nicht ihr Browser – Port 80 bzw. 443 muss von dort erreichbar sein.
+   Holt diese Instanz selbst von anderen, braucht sie den Weg nach draußen.
+5. **https** zwischen den Instanzen ist dringend empfohlen. http geht, das
+   Token und die Pläne gehen dann aber lesbar über das Netz – die
+   Oberfläche markiert solche Verbindungen als *unverschlüsselt*.
+
+Prüfen von der anderen Instanz aus (ohne Token):
+
+```bash
+curl -i http://10.10.0.60/api/v1/info
+# HTTP/1.1 401 … WWW-Authenticate: Bearer … {"ok":false,"message":"Kein gültiges Token."}
+```
+
+Eine 401 als JSON heißt: erreichbar, nginx und PHP antworten. Mit dem
+Token (`-H 'Authorization: Bearer mtma_…'`) kommt 200 mit den Befugnissen.
+Kommt mit Token weiter 401, reicht etwas dazwischen den Kopf nicht durch.
 
 ## 10 · Update
 
@@ -1269,8 +1366,8 @@ ausschalten
 
 | Was | Wo | Warum |
 |-----|----|-------|
-| `config/config.php` | `/opt/powermanagement/config/` | enthält `app.key` – **ohne ihn sind alle hinterlegten Zugänge (Modbus, Cloud, InfluxDB-Token) verloren** |
-| Datenbank | `/opt/powermanagement/storage/database.sqlite` | Anlagen, Standorte, Benutzer, Einstellungen |
+| `config/config.php` | `/opt/powermanagement/config/` | enthält `app.key` – **ohne ihn sind alle hinterlegten Zugänge (Modbus, Cloud, InfluxDB-Token, Eventworx) verloren**, und die Siegel der Übergabeberichte lassen sich nicht mehr prüfen |
+| Datenbank | `/opt/powermanagement/storage/database.sqlite` | Anlagen, Standorte, Benutzer, Einstellungen, Übergabeberichte samt Unterschriften und PDF |
 | Grundrisse | `/opt/powermanagement/storage/plans/` | hochgeladene Pläne |
 | Zugänge | `/etc/powermanagement/` | Kennwörter, Tokens, Node-RED-Umgebung |
 | Node-RED | `/var/lib/powermanagement/node-red/` | Flows, `flows_cred.json`, eigene Paletten-Nodes |
@@ -1391,6 +1488,8 @@ printf 'Authorization: Token %s\n' "$T" | curl -sG -H @- http://127.0.0.1:8086/q
 | Speichern auf einer Anlagen-Seite mit Livewerten hängt bis zum Timeout, im Audit-Log steht nichts | Ältere Fassungen: jede Live-Abfrage hielt die Sitzung, bis die InfluxDB antwortete – bei einer trägen InfluxDB stauten sie sich, und alles Weitere aus demselben Browser wartete. Neuen Stand einspielen (Abschnitt 10). Wie schnell die InfluxDB antwortet: `grep 'InfluxDB antwortet langsam' /opt/powermanagement/storage/logs/app.log`, `systemctl status influxdb`. |
 | `502 Bad Gateway` | PHP-FPM läuft nicht: `systemctl status php8.4-fpm`, Socket `/run/php/powermanagement.sock`. |
 | „Welcome to nginx“ statt Anmeldung | `rm -f /etc/nginx/sites-enabled/default && systemctl reload nginx` |
+| Andere Instanz: „Das Token wird dort nicht (mehr) angenommen“, obwohl es stimmt | Ein Proxy (oder Apache ohne `CGIPassAuth On`) verschluckt den Kopf `Authorization` – Abschnitt 9, *Schnittstelle für andere Instanzen*. Sonst ist es widerrufen oder abgelaufen: bei der Gegenseite unter *System → Schnittstelle (API)* nachsehen. |
+| Andere Instanz: „Zu viele Anfragen“ | Die Bremse in nginx (zehn je Sekunde und Adresse). Stehen alle Instanzen hinter demselben Proxy ohne `set_real_ip_from`, teilen sie sich die Bremse. |
 | Update bricht mit „could not read Username“ ab | Privates Repository ohne Token – `/etc/powermanagement/git.conf` anlegen (Abschnitt 3). |
 | Update meldet „lokale Änderungen“ | Jemand hat Dateien in `/opt/powermanagement` geändert. Sichern, dann `--erzwingen`. |
 | System → Update: „Die Update-Funktion ist … noch nicht eingerichtet“ (`update:stand`: „nicht eingerichtet“) | Noch das alte Update-Skript – einmal umsteigen (Abschnitt 10, *Erstes Update auf die Fassung mit Update-Funktion*). Sonst hat sich der Update-Dienst nie gemeldet: `systemctl status powermanagement-update.path powermanagement-update.timer`, `journalctl -a -u powermanagement-update -n 50`. Steht dort „Code nicht root-eigen …“, hat jemand in `/opt/powermanagement` Besitz oder Rechte geändert – `update-debian.sh --nur-abgleichen` setzt sie zurück. Fehlende Einheiten und Ordner holt `update-debian.sh` (ohne Option) nach. |

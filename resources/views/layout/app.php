@@ -73,7 +73,7 @@ try {
             <div class="userbox">
                 <div class="avatar"><?= View::e($initials) ?></div>
                 <div class="userbox-name">
-                    <div style="font-weight:600"><?= View::e($user['full_name'] ?: $user['username'] ?? '') ?></div>
+                    <div style="font-weight:600"><?= View::e($user !== null ? (string) ($user['full_name'] ?: $user['username']) : '') ?></div>
                     <div class="small muted"><a href="/profil">Profil</a></div>
                 </div>
                 <form method="post" action="/logout" style="margin:0">

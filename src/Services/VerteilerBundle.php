@@ -5,6 +5,7 @@ namespace App\Services;
 
 use App\Support\Config;
 use App\Support\Database;
+use App\Support\Fingerabdruck;
 
 /**
  * Verteiler als Dateien – für den Abgleich über das gemeinsame Repository.
@@ -54,8 +55,8 @@ final class VerteilerBundle
         'inventar' => ['ordner' => 'verteiler/inventar', 'art' => 'verteiler-inventar', 'inhalt' => 'stueck', 'name' => 'Inventar'],
     ];
 
-    /** Wie die Felder heißen – für „was ist anders“. */
-    private const FELDNAMEN = [
+    /** Wie die Felder heißen – für „was ist anders“ (auch im Katalog-Import). */
+    public const FELDNAMEN = [
         'art' => 'Art', 'fest' => 'fest/mobil', 'name' => 'Name', 'hersteller' => 'Hersteller', 'modell' => 'Modell',
         'nennleistung_kva' => 'Nennleistung', 'nennstrom_a' => 'Nennstrom', 'spannung_v' => 'Spannung', 'phasen' => 'Phasen',
         'eigenschaften' => 'Eigenschaften', 'steuerung_gesperrt' => 'Schaltsperre', 'notizen' => 'Notizen',
@@ -115,30 +116,48 @@ final class VerteilerBundle
     /** Ein Standard-Verteiler als Datei – oder null, wenn es ihn nicht gibt. */
     public static function typLesen(int $vorlageId): ?array
     {
+        $benutzt = [];
+        $typ = self::typInhalt($vorlageId, $benutzt);
+        if ($typ === null) {
+            return null;
+        }
+        return self::kopf('typ', self::typSchluessel($vorlageId)) + [
+            'typ'          => $typ,
+            'steckertypen' => LocationBundle::steckertypenFuerDatei($benutzt),
+        ];
+    }
+
+    /**
+     * Nur der Inhalt eines Standard-Verteilers (`typ` der Datei) – ohne Kopf
+     * und ohne einen Schlüssel zu vergeben. Zum Vergleichen, ohne dabei
+     * etwas zu ändern (der Katalog-Import findet einen Typ ohne Schlüssel
+     * über seinen Namen; ein dabei vergebener Schlüssel ließe ihn doppelt
+     * anlegen).
+     *
+     * @param array<int,array<string,mixed>> $benutzt sammelt die vorkommenden Steckertypen
+     */
+    public static function typInhalt(int $vorlageId, array &$benutzt = []): ?array
+    {
         $v = AnlagenService::find($vorlageId);
         if ($v === null || (int) $v['ist_vorlage'] !== 1) {
             return null;
         }
-        $benutzt = [];
         $belegung = LocationBundle::belegungLesen($vorlageId, AnlagenService::steckertypenNachId(), $benutzt);
-        return self::kopf('typ', self::typSchluessel($vorlageId)) + [
-            'typ' => [
-                'art'                => (string) $v['art'],
-                'fest'               => (int) $v['fest'] === 1,
-                'name'               => (string) $v['name'],
-                'hersteller'         => (string) $v['hersteller'],
-                'modell'             => (string) $v['modell'],
-                'nennleistung_kva'   => $v['nennleistung_kva'] !== null ? (float) $v['nennleistung_kva'] : null,
-                'nennstrom_a'        => $v['nennstrom_a'] !== null ? (float) $v['nennstrom_a'] : null,
-                'spannung_v'         => (int) $v['spannung_v'],
-                'phasen'             => (int) $v['phasen'],
-                'eigenschaften'      => $v['eigenschaften'],
-                'steuerung_gesperrt' => (int) $v['steuerung_gesperrt'] === 1,
-                'notizen'            => (string) ($v['notizen'] ?? ''),
-                'schutzorgane'       => $belegung['schutzorgane'],
-                'anschluesse'        => $belegung['anschluesse'],
-            ],
-            'steckertypen' => LocationBundle::steckertypenFuerDatei($benutzt),
+        return [
+            'art'                => (string) $v['art'],
+            'fest'               => (int) $v['fest'] === 1,
+            'name'               => (string) $v['name'],
+            'hersteller'         => (string) $v['hersteller'],
+            'modell'             => (string) $v['modell'],
+            'nennleistung_kva'   => $v['nennleistung_kva'] !== null ? (float) $v['nennleistung_kva'] : null,
+            'nennstrom_a'        => $v['nennstrom_a'] !== null ? (float) $v['nennstrom_a'] : null,
+            'spannung_v'         => (int) $v['spannung_v'],
+            'phasen'             => (int) $v['phasen'],
+            'eigenschaften'      => $v['eigenschaften'],
+            'steuerung_gesperrt' => (int) $v['steuerung_gesperrt'] === 1,
+            'notizen'            => (string) ($v['notizen'] ?? ''),
+            'schutzorgane'       => $belegung['schutzorgane'],
+            'anschluesse'        => $belegung['anschluesse'],
         ];
     }
 
@@ -253,16 +272,10 @@ final class VerteilerBundle
         return $inhalt;
     }
 
+    /** Maps nach Schlüssel sortiert, Listen wie sie sind – siehe Fingerabdruck. */
     private static function geordnet(mixed $wert): mixed
     {
-        if (!is_array($wert)) {
-            return $wert;
-        }
-        $wert = array_map([self::class, 'geordnet'], $wert);
-        if (!array_is_list($wert)) {
-            ksort($wert);
-        }
-        return $wert;
+        return Fingerabdruck::geordnet($wert);
     }
 
     /**
@@ -357,7 +370,8 @@ final class VerteilerBundle
      * Typ, der hier und dort unabhängig angelegt wurde, wird nicht doppelt).
      * Anschlüsse und Schutzorgane stehen danach so da wie in der Datei.
      * Anlagen, die früher aus dem Typ entstanden sind, bleiben, wie sie sind
-     * – sie sind Kopien und werden einzeln angepasst.
+     * – sie sind Kopien und werden einzeln angepasst. Messpunkte einer Datei
+     * bleiben weg (siehe unten).
      *
      * @return array{ok:bool,message:string,id?:int}
      */
@@ -385,7 +399,13 @@ final class VerteilerBundle
             return $ergebnis;
         }
         $id = (int) $ergebnis['id'];
-        LocationBundle::belegungErsetzen($id, $t, LocationBundle::steckertypenSichern((array) ($daten['steckertypen'] ?? [])));
+        // Ein Katalog-Typ misst nichts: Messpunkte gehören zu einer Anlage, die
+        // irgendwo steht, und entstehen nur über den MesspunktService (mit
+        // Gültigkeit und Audit). Ein Messpunkt aus einer Datei am Typ zählte
+        // das Gerät still als zugeordnet und verschöbe die Rechte daran
+        // (Zugriff::objekteZuGeraet).
+        LocationBundle::belegungErsetzen($id, array_diff_key($t, ['messpunkte' => true]),
+            LocationBundle::steckertypenSichern((array) ($daten['steckertypen'] ?? [])));
         Database::execute('UPDATE objekte SET sync_key = ? WHERE id = ?', [$schluessel, $id]);
         return ['ok' => true, 'message' => 'Standard-Verteiler „' . (string) ($t['name'] ?? $schluessel) . '“ übernommen.', 'id' => $id];
     }

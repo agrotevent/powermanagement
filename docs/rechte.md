@@ -17,10 +17,10 @@ und Stromplanung haben es.
 
 | Rolle | gedacht für | Rechte (Auszug) |
 |-------|-------------|-----------------|
-| **Administration** | Betreiber | alles (`*`) |
-| **Stromplanung** | Planer im Büro | Anlagen, Stecker, Karte, Grundrisse, Kabel, Statistik und Export, Datenquellen ansehen, Inventar pflegen, Locations holen. Sieht alle Standorte, **schaltet nicht**. |
-| **Elektrotechnik vor Ort** | Elektriker auf dem Gelände | Anlagen und Kabel dokumentieren, Statistik, Datenquellen ansehen, **schalten** und Schaltprotokoll – nur auf freigegebenen Standorten |
-| **Kunde / Veranstalter** | Auftraggeber | Übersicht, Anlagen, Karte, Statistik und CSV-Export – nur Freigegebenes im freigegebenen Zeitraum |
+| **Administration** | Betreiber | alles (`*`), auch die Schnittstelle zu anderen Instanzen |
+| **Stromplanung** | Planer im Büro | Anlagen, Stecker, Karte, Grundrisse, Kabel, Statistik und Export, Datenquellen ansehen, Inventar pflegen, Locations holen, Übergabeberichte anlegen und ausfüllen (mit Eventworx). Sieht alle Standorte, **schaltet nicht**, **unterschreibt nicht als Prüfer**. |
+| **Elektrotechnik vor Ort** | Elektriker auf dem Gelände | Anlagen und Kabel dokumentieren, Statistik, Datenquellen ansehen, **schalten** und Schaltprotokoll, Übergabeberichte ausfüllen und **als Prüfer unterschreiben** – nur auf freigegebenen Standorten |
+| **Kunde / Veranstalter** | Auftraggeber | Übersicht, Anlagen, Karte, Statistik und CSV-Export – nur Freigegebenes im freigegebenen Zeitraum. Keine Übergabeberichte (siehe unten). |
 
 Rollen und ihre Rechte lassen sich unter **System → Rollen & Rechte** anpassen oder
 neu anlegen. Die Rolle *Administration* behält immer alle Rechte.
@@ -167,6 +167,43 @@ Standorten), für das Inventar „Inventar pflegen“. Was jemand nicht pflegen
 darf, wird übergangen und in der Meldung genannt. Hochladen und aus dem
 Repository entfernen braucht „… ins Repository hochladen“.
 
+## Schnittstelle (API)
+
+Drei Rechte, ab Werk nur in der Rolle *Administration*. Was eine andere
+Instanz mit einem Token sieht und darf, regeln **nicht** die Freigaben eines
+Benutzers, sondern die Befugnisse und Standorte des Tokens – Einzelheiten in
+[schnittstelle.md](schnittstelle.md).
+
+| Recht | erlaubt | zusätzlich geprüft |
+|-------|---------|--------------------|
+| „Zugänge (Tokens) für andere Instanzen …“ (`api.manage`) | *System → Schnittstelle (API)*: Zugänge ansehen und widerrufen | Anlegen, Ändern, Anzeigen und Löschen nur mit „Alle Standorte, Anlagen und Messdaten“. Eine Befugnis vergibt nur, wer die Rechte dahinter hat: `plaene.lesen` „Karte ansehen“, `plaene.vorschlagen` und `plaene.schreiben` dazu „Grundrisse pflegen“, `feststrom` „Anlagen ansehen“, `plaene.schreiben` mit `feststrom` dazu „Anlagen ändern“ und „Kabel zeichnen“. Binden nur an das eigene Konto oder eines, das man verwalten darf; eine Bindung lösen oder umbinden nur, wer den bisher gebundenen Benutzer verwalten darf. Anzeigen nur mit dem eigenen Kennwort und nur, wer das Token mit allen Befugnissen und seiner Bindung selbst anlegen dürfte. Ohne „Alle Standorte …“ zeigt die Liste nur die Namen der eigenen Standorte, die übrigen als Anzahl. |
+| „Andere Instanzen eintragen …“ (`api.partner`) | *Standorte → Andere Instanzen*: eintragen, prüfen, austragen, die Locations dort ansehen | Übernehmen, Zuordnen, Verknüpfen, Hochladen und Zurückschicken nur mit „Grundrisse pflegen“ und *bearbeiten* am Standort hier (ein neuer Standort: nur „Grundrisse pflegen“); Lösen mit *bearbeiten*, Austragen mit *bearbeiten* an allen verknüpften Standorten. Feststrom dazu „Anlagen ändern“, „Kabel zeichnen“ und Anlegen auf dem Standort, fehlende Steckertypen „Steckverbinder-Katalog pflegen“ – sonst wird gar nichts übernommen. Jede gewählte Etage muss zum Standort gehören. |
+| „Änderungsvorschläge anderer Instanzen …“ (`api.vorschlaege`) | *Standorte → Änderungsvorschläge*: Vorschläge zu Standorten, die man **ganz** sieht (eine Freigabe für eine einzelne Anlage genügt nicht) | Annehmen: „Grundrisse pflegen“ und *bearbeiten* am Standort, für Feststrom dazu „Anlagen ändern“, „Kabel zeichnen“ und Anlegen auf dem Standort, für neue Steckertypen „Steckverbinder-Katalog pflegen“. Ablehnen: *bearbeiten* am Standort (ist er gelöscht: alle Standorte). |
+
+Wer `api.partner` hat, lässt den Server Adressen abrufen, die er selbst
+einträgt – auch im eigenen Netz. Das Recht nur vergeben, wo man das will.
+
+Ein Token mit `plaene.schreiben` ändert hier ohne Bestätigung – aber nur auf
+Standorten, die ihm *zum Bearbeiten* freigegeben sind, nur auf dem Stand,
+den die andere Seite zuletzt abgerufen hat (oder ausdrücklich darüber
+hinweg), und mit denselben Schutzregeln wie beim Annehmen: Namen,
+Schaltsperre und Messpunkte bleiben; ein Maßstab oder eine Georeferenz hier
+wird nie gelöscht (fehlt er in der Sendung, bleibt der hiesige); gelöscht
+wird nichts, Steckertypen legt es nie an. Im Audit-Log steht das als
+`api.schreiben` mit dem Akteur `api:<Name des Zugangs>`.
+
+## Katalog importieren
+
+Einen Katalog importieren (*Standard-Verteiler → Importieren …*) darf, wer
+„Anlagen ändern“ **und** „Alle Standorte, Anlagen und Messdaten“ hat – der
+Katalog gilt für alle Standorte. Benutzt ein ausgewählter Typ einen
+Steckertyp, den es hier noch nicht gibt, braucht es dazu
+„Steckverbinder-Katalog pflegen“ – sonst wird nichts übernommen, und die
+Meldung nennt die Steckertypen und die Typen, die sie brauchen. Ohne dieses
+Recht stehen solche Typen in der Vorschau ohne Haken da; Typen ohne neue
+Stecker lassen sich trotzdem übernehmen. Danach gelten für die Typen
+dieselben Rechte wie für jeden Standard-Verteiler.
+
 ## MQTT-Zugänge
 
 Die Liste *Messtechnik → MQTT-Zugänge* sieht, wer „Datenquellen ansehen“
@@ -217,6 +254,36 @@ Kachel („… nicht freigegeben – die Summe ist unvollständig“). Anlegen,
 Standort Anlagen anlegen darf. Verlauf und CSV brauchen wie sonst
 „Statistik“ bzw. „Export“.
 
+## Übergabeberichte
+
+| Recht | erlaubt |
+|-------|---------|
+| „Übergabeberichte ansehen“ (`berichte.view`) | Liste, Bericht und PDF. Ohne „ausfüllen“ nur **abgeschlossene** Berichte, nur mit Freigabe für den Standort und nur, wenn das Prüfdatum im Datenzeitraum der Freigabe liegt. |
+| „… anlegen, ausfüllen, vom Kunden unterschreiben lassen“ (`berichte.manage`) | Entwürfe anlegen und ausfüllen und den Kundenmodus starten – nur auf Standorten mit Freigabe *bearbeiten* –, dazu die Prüfgeräte pflegen |
+| „Als Prüfer unterschreiben …“ (`berichte.pruefen`) | unterschreiben, ohne Kunde abschließen, zurückziehen, Korrektur anlegen, verwerfen – nur mit hinterlegter **Prüfer-Qualifikation** im Konto und *bearbeiten* für den Standort |
+| „Kundendaten aus Eventworx …“ (`berichte.eventworx`) | im Formular nach Aufträgen und Angeboten suchen und übernehmen. Eventworx zeigt dabei alle Vorgänge des Mandanten – deshalb nie für Kunden-Rollen. |
+
+**Sehen ist nicht ändern** gilt auch hier: Wer einen Standort nur sieht,
+sieht dort (im Datenzeitraum) abgeschlossene Berichte, aber keine Entwürfe,
+und kann nichts ausfüllen oder unterschreiben. Ein Bericht ohne Standort gehört dem, der ihn
+angelegt hat (und wer „alle Standorte“ hat). Wird ein Standort gelöscht,
+bleiben seine Berichte – sichtbar dann **nur noch mit „alle Standorte“**,
+auch nicht mehr für den, der sie angelegt hat (seine Freigabe für den
+Standort ist mit ihm weg). Wer „alle Standorte“ hat, sieht
+und ändert Berichte überall – Freigaben braucht er dafür nicht.
+
+**Kunden zeigen.** Die Rolle *Kunde / Veranstalter* hat das Recht nicht:
+Auf einem Gelände arbeiten viele Veranstalter, und Berichte enthalten
+Kundendaten. Wer seine Berichte sehen soll, bekommt „Übergabeberichte
+ansehen“ einzeln (eigene Rolle) und eine Freigabe für den Standort **mit
+Datenzeitraum** – etwa genau die Festivalwoche. Dann sieht er nur Berichte,
+deren Prüfdatum darin liegt. Eine Freigabe ohne Datenzeitraum zeigt alle
+abgeschlossenen Berichte des Standorts, auch die anderer Veranstalter.
+
+Die Qualifikation („Elektrofachkraft für Veranstaltungstechnik“) trägt die
+Benutzerverwaltung ein; im Profil ist sie nur zu lesen. Ändert jemand sie,
+steht das im Audit-Log. Rechte vergibt auch hier nur, wer sie selbst hat.
+
 ## Demo-Zugänge
 
 Im Demo-Modus legt `bin/power demo:seed` zwei Beispielkonten an:
@@ -224,4 +291,4 @@ Im Demo-Modus legt `bin/power demo:seed` zwei Beispielkonten an:
 | Benutzer | Kennwort | zeigt |
 |----------|----------|-------|
 | `veranstalter` | `Veranstalter2026!` | Rolle Kunde. Freigabe nur für das Festivalgelände und nur für die Festivalwoche. Konto läuft nach 10 Tagen ab. |
-| `technik` | `Technik2026!!` | Rolle Elektrotechnik. Bearbeiten auf dem Festivalgelände, schalten nur beim Shelly der Geländebeleuchtung. |
+| `technik` | `Technik2026!!` | Rolle Elektrotechnik. Bearbeiten auf dem Festivalgelände, schalten nur beim Shelly der Geländebeleuchtung. Mit Prüfer-Qualifikation: unterschreibt Übergabeberichte. |

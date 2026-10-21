@@ -42,6 +42,8 @@ final class Settings
     public const GEHEIM_INFLUX_KENNWORT = 'influx.password_enc';
     public const GEHEIM_MQTT_KENNWORT  = 'mqtt.password_enc';
     public const GEHEIM_REPO_TOKEN     = 'inventory.token_enc';
+    /** API-Token für Eventworx – gilt nur für `eventworx.token_host` (App\Services\Eventworx). */
+    public const GEHEIM_EVENTWORX_TOKEN = 'eventworx.token_enc';
 
     private static ?array $cache = null;
 

@@ -9,21 +9,34 @@ declare(strict_types=1);
  * ohne fremde Vorgeschichte; Schalt-Freigaben für einen Kanal gelten nur für
  * ihn; am Standort ändern braucht „bearbeiten“; Schlüssel aus dem Repository
  * werden keine Pfade; Namen brechen kein Line Protocol; CSV ohne Formeln;
- * nur http(s); kein öffentlicher Schlüssel; PDF-Werkzeuge hängen nicht.
+ * nur http(s); Umleitungen nehmen keine Kopfzeilen (Tokens) mit, auf
+ * beiden Wegen von Http; kein öffentlicher Schlüssel; PDF-Werkzeuge hängen
+ * nicht.
+ *
+ * Schnittstelle: Befugnisse und Standorte eines Tokens vergibt nur, wer die
+ * Rechte dazu hat; ein verfälschtes Token wird nie angezeigt, ein fremdes
+ * nur, wer seine Befugnisse und seine Bindung selbst vergeben dürfte; eine
+ * Bindung löst nur, wer den Benutzer verwalten darf; die Ansichten kommen
+ * ohne Inline-Skript aus; was eine andere Instanz schickt (Meldungen, Namen),
+ * kommt nur maskiert auf die Seite, und ein verknüpfter Standort, den man
+ * nicht sieht, verrät dort weder Etagen noch Zustand.
  *
  * Die Prüfungen über HTTP (Weiterleitungen, Sitzung, Token, Benutzer-
- * verwaltung) stehen in web.php.
+ * verwaltung) stehen in web.php und schnittstelle.php.
  */
 
 require __DIR__ . '/hilfen/pruefung.php';
 
+use App\Auth\ApiZugang;
 use App\Auth\Auth;
+use App\Auth\Permissions;
 use App\Auth\Zugriff;
 use App\Controllers\StatistikController;
 use App\Messung\Datenquellen;
 use App\Messung\Http;
 use App\Messung\Influx;
 use App\Services\AnlagenService;
+use App\Services\ApiZugaenge;
 use App\Services\BenutzerService;
 use App\Services\LocationBundle;
 use App\Services\LocationSync;
@@ -33,6 +46,7 @@ use App\Support\Config;
 use App\Support\Crypto;
 use App\Support\Database;
 use App\Support\Response;
+use App\Support\View;
 
 $k = 'pm-sich-' . bin2hex(random_bytes(3));
 $ip = '198.51.100.' . random_int(1, 254);
@@ -41,6 +55,7 @@ $rollen = [];
 $sites = [];
 $quellen = [];
 $alterSchluessel = Config::get('app.key');
+$umleitung = sys_get_temp_dir() . '/' . $k . '-umleitung';
 
 try {
     // ------------------------------------------------ Rechte vergeben
@@ -56,6 +71,43 @@ try {
     pruefe(!BenutzerService::darfVergeben(['*']), 'ohne Administration kein „*“');
     pruefe(!BenutzerService::darfVergeben(['anlagen.scope.all']), 'kein Recht, das man selbst nicht hat');
     pruefe(BenutzerService::darfVergeben(['dashboard.view', 'system.users.manage']), 'eigene Rechte darf man vergeben');
+    pruefe(!BenutzerService::darfVergeben(['berichte.view']) && !BenutzerService::darfVergeben(['berichte.pruefen']),
+        'Rechte der Übergabeberichte nur, wer sie selbst hat');
+    // Texte aus Antworten (Eventworx, Bewertung, Prüfen) nur per textContent – nie als HTML.
+    $js = dirname(__DIR__) . '/public/assets/js/';
+    foreach (array_merge(glob($js . 'bericht*.js') ?: [], [$js . 'unterschrift.js']) as $datei) {
+        $quelle = (string) file_get_contents($datei);
+        pruefe(!str_contains($quelle, 'innerHTML') && !str_contains($quelle, 'insertAdjacentHTML') && !str_contains($quelle, 'outerHTML'),
+            basename($datei) . ' setzt kein HTML aus Daten');
+    }
+    // Unterschriften nur als Linie: keine Zeit, kein Druck, keine Neigung im Erfassungscode.
+    pruefe(preg_match('/pressure|timeStamp|Date\.now|performance\.now|tiltX|tiltY|twist|tangential/', (string) file_get_contents($js . 'unterschrift.js')) === 0,
+        'unterschrift.js liest weder Zeit noch Druck');
+    // Abmelden: bericht.js hört vorher (Capture) und schreibt danach nichts mehr zurück – sonst
+    // legte pagehide den gerade gelöschten Entwurf mit Kundendaten wieder ab.
+    pruefe(preg_match('/document\.addEventListener\(\'submit\', function \(e\) \{[^}]*form\[action="\/logout"\][\s\S]{0,600}?uebernahme = true;[\s\S]{0,200}?\}, true\);/',
+        (string) file_get_contents($js . 'bericht.js')) === 1, 'bericht.js: Abmelden im Capture, danach kein lokaler Entwurf mehr');
+    // Netz: jede Anfrage der Berichte mit Zeitgrenze (PMNetz, AbortController) – kein fetch ohne.
+    $app = (string) file_get_contents($js . 'app.js');
+    pruefe(str_contains($app, 'window.PMNetz') && str_contains($app, 'AbortController') && str_contains($app, "BroadcastChannel('pm-kundenmodus')"),
+        'app.js: POST mit Zeitgrenze, Sperre anderer Tabs im Kundenmodus');
+    foreach (['bericht.js', 'bericht-kunde.js', 'unterschrift.js'] as $datei) {
+        pruefe(!str_contains((string) file_get_contents($js . $datei), 'fetch('), $datei . ': kein fetch ohne Zeitgrenze');
+    }
+    pruefe(str_contains((string) file_get_contents($js . 'bericht-kunde.js'), "BroadcastChannel('pm-kundenmodus')"), 'bericht-kunde.js meldet den Kundenmodus an andere Tabs');
+    // Die Fläche selbst: Handballen zuerst, dann Stift; viele Punkte mit großen Koordinaten.
+    $node = trim((string) shell_exec('command -v node 2>/dev/null'));
+    if ($node !== '') {
+        $flaeche = json_decode((string) shell_exec(escapeshellarg($node) . ' ' . escapeshellarg(__DIR__ . '/hilfen/unterschrift-flaeche.cjs') . ' '
+            . escapeshellarg($js . 'unterschrift.js')), true) ?? [];
+        pruefe(($flaeche['handballen']['striche'] ?? 0) === 1 && ($flaeche['handballen']['punkte'][0] ?? 0) > 20 && ($flaeche['handballen']['gueltig'] ?? false) === true,
+            'unterschrift.js: liegt der Handballen zuerst auf, zählt der Stiftstrich (nicht der Handballen) ' . json_encode($flaeche['handballen'] ?? null));
+        pruefe(($flaeche['gross']['bytes'] ?? PHP_INT_MAX) <= \App\Berichte\Unterschrift::MAX_BYTES && ($flaeche['gross']['punkte'] ?? PHP_INT_MAX) <= \App\Berichte\Unterschrift::MAX_PUNKTE,
+            'unterschrift.js: nimmt nie mehr auf, als der Server annimmt (Punkte und Bytes) ' . json_encode($flaeche['gross'] ?? null));
+    }
+    $svg = \App\Berichte\Unterschrift::svg([[['"><script>alert(1)</script>', 5], [5000, 'x" onload="y']], [['1e400', [1, 2]]]]);
+    pruefe(!str_contains($svg, 'script') && !str_contains($svg, 'onload') && preg_match('/ d="[MQLl0-9 ]*"/', $svg) === 1,
+        'Unterschrift::svg aus manipulierten Strichen: nur Zahlen');
     pruefe(!BenutzerService::darfVerwalten($benutzer['admin']), 'den Administrator verwaltet nur die Administration');
     pruefe(!BenutzerService::darfVerwalten($benutzer['technik']), 'ein Konto mit mehr Rechten nicht');
     pruefe(BenutzerService::darfVerwalten($benutzer['klein']), 'ein Konto mit weniger Rechten schon');
@@ -65,6 +117,173 @@ try {
     pruefe(BenutzerService::darfVergeben(['*']) && BenutzerService::darfVerwalten($benutzer['technik'])
         && BenutzerService::darfFreigabeVergeben('alles', true), 'die Administration darf alles vergeben');
     alsBenutzer(null);
+
+    // ------------------------------------------------ Schnittstelle: Zugänge vergeben
+    foreach (Permissions::standardRollen() as $schluessel => $rolle) {
+        if ($schluessel !== 'admin') {
+            pruefe(preg_grep('/^api\./', $rolle['permissions']) === [], 'Standardrolle ' . $schluessel . ' ohne api.*');
+        }
+    }
+    gleich((int) Database::scalar("SELECT COUNT(*) FROM role_permissions rp JOIN roles r ON r.id = rp.role_id
+        WHERE rp.permission LIKE 'api.%' AND r.role_key IN ('planung', 'technik', 'kunde')"), 0, 'die api.*-Rechte hat nur die Administration (*)');
+    $rollen['api'] = (int) BenutzerService::rolleSpeichern(null, $k . ' api', '', ['api.manage', 'karte.view'])['id'];
+    $rollen['apialles'] = (int) BenutzerService::rolleSpeichern(null, $k . ' apialles', '',
+        ['api.manage', 'karte.view', 'plans.manage', 'anlagen.view', 'anlagen.scope.all'])['id'];
+    $benutzer['api'] = BenutzerService::anlegen($k . '-api', 'Pruefung2026!!', $rolleKey($rollen['api']), false);
+    $benutzer['apialles'] = BenutzerService::anlegen($k . '-apialles', 'Pruefung2026!!', $rolleKey($rollen['apialles']), false);
+    $sites['api'] = SiteService::saveSite(null, ['name' => $k . ' API']);
+    alsBenutzer($benutzer['api']);
+    $r = ApiZugaenge::anlegen(['name' => $k . ' Zugang', 'befugnisse' => ['plaene.lesen'], 'sehen' => [$sites['api']]]);
+    pruefe(!$r['ok'] && str_contains($r['message'], 'Alle Standorte'), 'Standorte für ein Token nur mit „Alle Standorte …“');
+    $r = ApiZugaenge::anlegen(['name' => $k . ' Zugang', 'befugnisse' => ['feststrom']]);
+    pruefe(!$r['ok'] && str_contains($r['message'], 'feststrom'), 'Feststrom nur, wer Anlagen sehen darf');
+    pruefe(!ApiZugaenge::anlegen(['name' => $k . ' Zugang', 'befugnisse' => ['plaene.vorschlagen']])['ok'], 'vorschlagen nur mit „Standorte pflegen“');
+    pruefe(!ApiZugaenge::anlegen(['name' => $k . ' Zugang', 'befugnisse' => ['plaene.lesen'], 'user_id' => $benutzer['admin']])['ok'],
+        'an ein Konto mit mehr Rechten lässt sich kein Token binden');
+    gleich((int) Database::scalar('SELECT COUNT(*) FROM api_tokens WHERE name LIKE ?', [$k . '%']), 0, 'nichts davon gespeichert');
+    alsBenutzer($benutzer['apialles']);
+    $r = ApiZugaenge::anlegen(['name' => $k . ' schreibt fest', 'befugnisse' => ['plaene.schreiben', 'feststrom'], 'sehen' => [$sites['api']]]);
+    pruefe(!$r['ok'] && str_contains($r['message'], 'Feststrom'), 'schreiben mit Feststrom nur mit „Anlagen ändern“ und „Kabel einzeichnen“');
+    $schreibt = ApiZugaenge::anlegen(['name' => $k . ' schreibt', 'befugnisse' => ['plaene.schreiben'], 'bearbeiten' => [$sites['api']]]);
+    pruefe($schreibt['ok'] && ApiZugaenge::anlegen(['name' => $k . ' schlägt vor', 'befugnisse' => ['plaene.vorschlagen', 'feststrom']])['ok'],
+        'schreiben allein und vorschlagen mit Feststrom schon');
+    $tokenZeile = ApiZugang::pruefen('Bearer ' . $schreibt['token'], '127.0.0.1');
+    pruefe($tokenZeile !== null && !isset($tokenZeile['token_hash']) && !isset($tokenZeile['token_enc']), 'geprüftes Token ohne Hash und Verschlüsseltes');
+    pruefe(ApiZugang::bearbeitet($tokenZeile, $sites['api']), 'mit „schreiben“ und Freigabe „bearbeiten“: bearbeiten');
+    Database::execute("UPDATE api_tokens SET befugnisse = '[\"plaene.lesen\"]' WHERE id = ?", [(int) $schreibt['id']]);
+    pruefe(ApiZugang::sieht(ApiZugang::pruefen('Bearer ' . $schreibt['token'], '127.0.0.1'), $sites['api'])
+        && !ApiZugang::bearbeitet(ApiZugang::pruefen('Bearer ' . $schreibt['token'], '127.0.0.1'), $sites['api']), 'nur lesen: sehen ja, bearbeiten nein');
+    // Ein verfälschtes token_enc zeigt nichts an
+    alsBenutzer($benutzer['admin']);
+    $falsch = Crypto::encrypt('mtma_' . str_repeat('B', 40));
+    Database::execute('UPDATE api_tokens SET token_enc = ? WHERE id = ?', [$falsch, (int) $schreibt['id']]);
+    $r = ApiZugaenge::klartext((int) $schreibt['id'], 'Pruefung2026!!');
+    pruefe(!$r['ok'] && !isset($r['token']), 'verfälschtes token_enc (anderes Token): nichts angezeigt');
+    Database::execute("UPDATE api_tokens SET token_enc = 'kaputt' WHERE id = ?", [(int) $schreibt['id']]);
+    pruefe(!isset(ApiZugaenge::klartext((int) $schreibt['id'], 'Pruefung2026!!')['token']), 'unlesbares token_enc: nichts angezeigt');
+    pruefe(!isset(ApiZugaenge::klartext((int) $schreibt['id'], 'falsch')['token']), 'falsches Kennwort: nichts angezeigt');
+    alsBenutzer($benutzer['apialles']);
+    pruefe(!ApiZugaenge::loeschen((int) $schreibt['id'])['ok'], 'ein gültiger Zugang lässt sich nicht löschen');
+    alsBenutzer(null);
+    pruefe(ApiZugang::pruefen('Bearer ' . $schreibt['token'] . 'x', '127.0.0.1') === null && ApiZugang::pruefen('Token ' . $schreibt['token'], '127.0.0.1') === null
+        && ApiZugang::pruefen('Bearer ' . strtoupper($schreibt['token']), '127.0.0.1') === null, 'nur genau das Token im Kopf „Bearer“');
+    // Die Ansichten der Schnittstelle: kein Skript ohne Nonce, keine on…=, kein javascript:
+    $ansichten = array_merge(glob(dirname(__DIR__) . '/resources/views/schnittstelle/*.php') ?: [], glob(dirname(__DIR__) . '/resources/views/instanzen/*.php') ?: [],
+        glob(dirname(__DIR__) . '/resources/views/vorschlaege/*.php') ?: [], [dirname(__DIR__) . '/resources/views/partials/token-standorte.php']);
+    pruefe(count($ansichten) >= 10, 'Ansichten der Schnittstelle, der anderen Instanzen und der Vorschläge gefunden');
+    // Eine Vorschlagsdatei nur über ihren Zufallsnamen im eigenen Ordner – auch ein verfälschter Eintrag führt nicht hinaus.
+    foreach (['../../config/config.php', '/etc/passwd', 'abc.svg', str_repeat('a', 24) . '.php'] as $falsch) {
+        pruefe(\App\Services\VorschlagService::datei(['id' => 1, 'dateien' => ['plaene/x.svg' => ['datei' => $falsch]]], 'plaene/x.svg') === null,
+            'Vorschlagsdatei „' . $falsch . '“ wird nicht ausgeliefert');
+    }
+    foreach ($ansichten as $datei) {
+        $text = (string) file_get_contents($datei);
+        $name = basename(dirname($datei)) . '/' . basename($datei);
+        pruefe(preg_match('/<script(?![^>]*\bnonce=)/i', $text) !== 1, $name . ': kein <script> ohne Nonce');
+        pruefe(preg_match('/\son[a-z]+\s*=/i', $text) !== 1 && stripos($text, 'javascript:') === false, $name . ': kein on…= und kein javascript:');
+    }
+
+    // Was eine andere Instanz schickt, kommt in der Instanzseite nur maskiert an:
+    // ihre Meldung, Namen von Locations und Etagen; ein Schlüssel, der keiner
+    // ist, wird übergangen.
+    $gegenseite = ['id' => 0, 'name' => $k . ' Gegenseite', 'base_url' => 'http://gegenseite.example', 'token' => 'mtma_' . str_repeat('g', 40),
+        'remote_name' => '<b>fett</b>', 'remote_produkt' => '', 'befugnisse' => ['plaene.lesen'], 'unverschluesselt' => true, 'powermanagement' => false,
+        'verified_at' => null, 'token_prefix' => 'mtma_ggggggg', 'letzter_fehler' => '<script>alert(2)</script>'];
+    $dortAntwort = ['ok' => true, 'status' => 403, 'rumpf' => json_encode(['ok' => false, 'message' => '<script>alert(1)</script>']), 'fehler' => ''];
+    Http::$attrappe = static function () use (&$dortAntwort): array {
+        return $dortAntwort;
+    };
+    $seite = View::partial('instanzen/instanz', ['partner' => $gegenseite, 'locations' => \App\Services\PartnerAbgleich::locations($gegenseite), 'planen' => true]);
+    pruefe(str_contains($seite, '&lt;script&gt;alert(1)&lt;/script&gt;') && !str_contains($seite, '<script>alert(1)'), 'Meldung von dort maskiert');
+    pruefe(!str_contains($seite, '<script>alert(2)') && !str_contains($seite, '<b>fett</b>'), 'gespeicherter Fehler und Name von dort maskiert');
+    $dortAntwort = ['ok' => true, 'status' => 200, 'fehler' => '', 'rumpf' => json_encode(['ok' => true, 'locations' => [
+        ['schluessel' => 'halle', 'name' => '<img src=x onerror=alert(3)>', 'stand' => 'abc', 'etagen' => [['schluessel' => 'eg', 'name' => '<svg onload=alert(4)>', 'plan' => true]]],
+        ['schluessel' => '../../etc', 'name' => 'Pfad', 'stand' => 'abc', 'etagen' => []],
+    ]])];
+    $liste = \App\Services\PartnerAbgleich::locations($gegenseite);
+    $seite = View::partial('instanzen/instanz', ['partner' => $gegenseite, 'locations' => $liste, 'planen' => true]);
+    pruefe(count($liste['locations']) === 1 && $liste['uebergangen'] === 1, 'Location mit ungültigem Schlüssel übergangen');
+    pruefe(str_contains($seite, '&lt;img src=x onerror=alert(3)&gt;') && !str_contains($seite, '<img src=x') && !str_contains($seite, '<svg onload'),
+        'Namen von dort maskiert');
+    Http::$attrappe = null;
+
+    // Anzeigen nur, wer das Token mit allen Befugnissen selbst vergeben dürfte:
+    // „alle Standorte“ genügt nicht, sonst holte sich jemand ohne „Karte“
+    // und „Grundrisse pflegen“ ein Token, das Pläne, Anlagen und Kabel schreibt.
+    $rollen['zeiger'] = (int) BenutzerService::rolleSpeichern(null, $k . ' zeiger', '', ['api.manage', 'anlagen.scope.all', 'dashboard.view', 'karte.view'])['id'];
+    $benutzer['zeiger'] = BenutzerService::anlegen($k . '-zeiger', 'Pruefung2026!!', $rolleKey($rollen['zeiger']), false);
+    alsBenutzer($benutzer['admin']);
+    $sites['zeigen'] = SiteService::saveSite(null, ['name' => $k . ' Zeigen']);
+    $stark = ApiZugaenge::anlegen(['name' => $k . ' stark', 'befugnisse' => ['plaene.schreiben', 'feststrom'], 'bearbeiten' => [$sites['zeigen']]]);
+    $lesend = ApiZugaenge::anlegen(['name' => $k . ' lesend', 'befugnisse' => ['plaene.lesen'], 'sehen' => [$sites['zeigen']]]);
+    pruefe($stark['ok'] && $lesend['ok'], 'Admin legt ein schreibendes und ein lesendes Token an');
+    alsBenutzer($benutzer['zeiger']);
+    $anzeigenVorher = (int) Database::scalar("SELECT COUNT(*) FROM audit_log WHERE action = 'api.token.angezeigt' AND target_id = ?", [(string) $stark['id']]);
+    $r = ApiZugaenge::klartext((int) $stark['id'], 'Pruefung2026!!');
+    pruefe(!$r['ok'] && !isset($r['token']) && str_contains($r['message'], 'nicht vergeben'),
+        'alle Standorte, aber ohne „Grundrisse pflegen“/„Anlagen ändern“: ein schreibendes Token wird nicht angezeigt – ' . $r['message']);
+    gleich((int) Database::scalar("SELECT COUNT(*) FROM audit_log WHERE action = 'api.token.angezeigt' AND target_id = ?", [(string) $stark['id']]), $anzeigenVorher,
+        '… und kein Audit „api.token.angezeigt“');
+    $r = ApiZugaenge::klartext((int) $lesend['id'], 'Pruefung2026!!');
+    pruefe($r['ok'] && ($r['token'] ?? '') === $lesend['token'], 'ein Token nur mit „lesen“ zeigt er an (er hat „Karte ansehen“)');
+    $liste = array_column(ApiZugaenge::alle(), null, 'id');
+    pruefe(($liste[(int) $stark['id']]['verwaltbar'] ?? null) === false && ($liste[(int) $lesend['id']]['verwaltbar'] ?? null) === true,
+        'Liste: „Anzeigen“ nur beim Token, das er selbst vergeben dürfte');
+    alsBenutzer($benutzer['admin']);
+    $gebunden = ApiZugaenge::anlegen(['name' => $k . ' gebunden', 'befugnisse' => ['plaene.lesen'], 'sehen' => [$sites['zeigen']], 'user_id' => $benutzer['admin']]);
+    alsBenutzer($benutzer['zeiger']);
+    pruefe(!ApiZugaenge::klartext((int) $gebunden['id'], 'Pruefung2026!!')['ok'], 'an einen Administrator gebunden: nicht angezeigt');
+
+    // Die Bindung an jemanden, den man nicht verwalten darf, löst man nicht
+    $r = ApiZugaenge::speichern((int) $gebunden['id'], ['name' => $k . ' gebunden', 'befugnisse' => ['plaene.lesen'], 'sehen' => [$sites['zeigen']], 'user_id' => 0]);
+    pruefe(!$r['ok'] && str_contains($r['message'], 'Bindung') && (int) Database::scalar('SELECT user_id FROM api_tokens WHERE id = ?', [(int) $gebunden['id']]) === $benutzer['admin'],
+        'Bindung an einen Administrator lösen: abgelehnt, sie bleibt – ' . $r['message']);
+    $r = ApiZugaenge::speichern((int) $gebunden['id'], ['name' => $k . ' gebunden', 'befugnisse' => ['plaene.lesen'], 'sehen' => [$sites['zeigen']], 'user_id' => $benutzer['zeiger']]);
+    pruefe(!$r['ok'] && (int) Database::scalar('SELECT user_id FROM api_tokens WHERE id = ?', [(int) $gebunden['id']]) === $benutzer['admin'],
+        '… und auch nicht auf sich selbst umbinden');
+    $r = ApiZugaenge::speichern((int) $gebunden['id'], ['name' => $k . ' gebunden, umbenannt', 'befugnisse' => ['plaene.lesen'], 'sehen' => [$sites['zeigen']],
+        'user_id' => $benutzer['admin']]);
+    pruefe($r['ok'] && (string) Database::scalar('SELECT name FROM api_tokens WHERE id = ?', [(int) $gebunden['id']]) === $k . ' gebunden, umbenannt',
+        'bleibt die Bindung, lassen sich Name und Rest ändern – ' . $r['message']);
+    alsBenutzer(null);
+    Database::update('users', $benutzer['admin'], ['is_active' => 0]);
+    pruefe(ApiZugang::pruefen('Bearer ' . $gebunden['token'], '127.0.0.1') === null, 'der gebundene Administrator ist gesperrt: das Token ruht');
+    Database::update('users', $benutzer['admin'], ['is_active' => 1]);
+
+    // Die Instanzseite verrät nichts über einen verknüpften Standort, den man nicht sieht
+    $rollen['partner'] = (int) BenutzerService::rolleSpeichern(null, $k . ' partner', '', ['api.partner', 'karte.view', 'dashboard.view', 'plans.manage'])['id'];
+    $benutzer['partner'] = BenutzerService::anlegen($k . '-partner', 'Pruefung2026!!', $rolleKey($rollen['partner']), false);
+    $sites['verborgen'] = SiteService::saveSite(null, ['name' => $k . ' Verborgen']);
+    $geheimeEtage = SiteService::saveFloor(null, ['site_id' => $sites['verborgen'], 'name' => 'Geheime Etage ' . $k]);
+    $partnerId = Database::insert('api_partner', ['name' => $k . ' Gegenseite', 'base_url' => 'http://gegenseite.example', 'token_enc' => 'x',
+        'token_prefix' => 'mtma_ggggggg', 'remote_befugnisse' => '["plaene.lesen","plaene.vorschlagen"]', 'created_at' => gmdate('c')]);
+    Database::execute("UPDATE sites SET partner_id = ?, partner_schluessel = 'halle-dort', partner_stand = 'abc', partner_hash = 'veraltet' WHERE id = ?",
+        [$partnerId, $sites['verborgen']]);
+    Database::execute("UPDATE floors SET partner_schluessel = 'eg-dort' WHERE id = ?", [$geheimeEtage]);
+    $dortAntwort = ['ok' => true, 'status' => 200, 'fehler' => '', 'rumpf' => json_encode(['ok' => true, 'locations' => [
+        ['schluessel' => 'halle-dort', 'name' => 'Halle dort', 'stand' => 'def', 'etagen' => [['schluessel' => 'eg-dort', 'name' => 'EG dort', 'plan' => true, 'bearbeiten' => true]]],
+    ]])];
+    Http::$attrappe = static function () use (&$dortAntwort): array {
+        return $dortAntwort;
+    };
+    $partnerZeile = ['id' => $partnerId, 'token' => 'mtma_' . str_repeat('g', 40)] + $gegenseite;
+    alsBenutzer($benutzer['partner']);
+    Zugriff::vergessen();
+    pruefe(!Zugriff::siehtStandort($sites['verborgen']), 'der Planer hat keine Freigabe am verknüpften Standort');
+    $liste = \App\Services\PartnerAbgleich::locations($partnerZeile);
+    $l = $liste['locations'][0] ?? [];
+    gleich([$l['sichtbar'] ?? null, $l['zustand'] ?? null, $l['etagen'][0]['ziel'] ?? null, $l['aendern'] ?? null, $l['bearbeitbar'] ?? null],
+        [false, 'verborgen', ['grund' => 'verknuepft'], false, 0], 'Location an einem nicht sichtbaren Standort: kein Ziel mit Namen, kein Zustand, nichts zu tun');
+    $seite = View::partial('instanzen/instanz', ['partner' => $partnerZeile, 'locations' => $liste, 'planen' => true]);
+    pruefe(!str_contains($seite, 'Geheime Etage') && !str_contains($seite, $k . ' Verborgen') && !str_contains($seite, 'hier geändert')
+        && !str_contains($seite, 'beide geändert') && !str_contains($seite, 'dort geändert') && str_contains($seite, 'den du nicht siehst'),
+        'Instanzseite: weder Etagen- noch Standortname noch Zustand des verborgenen Standorts');
+    pruefe(!str_contains($seite, '/zuordnen?') && !str_contains($seite, '/uebernehmen"') && !str_contains($seite, '/loesen"'),
+        '… und keine Knöpfe dafür');
+    alsBenutzer(null);
+    Http::$attrappe = null;
+    Database::execute("UPDATE sites SET partner_id = NULL, partner_schluessel = '' WHERE id = ?", [$sites['verborgen']]);
+    Database::execute('DELETE FROM api_partner WHERE id = ?', [$partnerId]);
 
     // ------------------------------------------------ Anmeldung
     $unbekannt = $k . '-niemand';
@@ -159,6 +378,27 @@ try {
     gleich([StatistikController::csvFeld('=HYPERLINK(1)'), StatistikController::csvFeld('-5.2'), StatistikController::csvFeld('Name')],
         ['"\'=HYPERLINK(1)"', '"-5.2"', '"Name"'], 'CSV: Formeln werden Text, Zahlen bleiben');
     pruefe(!Http::anfrage('GET', 'file:///etc/passwd')['ok'] && !Http::anfrage('GET', 'gopher://127.0.0.1:1/')['ok'], 'Anfragen nur über http(s)');
+    // Eine Umleitung wird nicht verfolgt – sonst ginge das Token (S-API-TOKEN,
+    // X-Authorization …) an das neue Ziel. Beide Wege: curl und PHP-Streams.
+    mkdir($umleitung, 0700);
+    file_put_contents($umleitung . '/index.php', '<?php if ($_SERVER["REQUEST_URI"] === "/ziel") { file_put_contents(__DIR__ . "/gerufen", '
+        . '(string) ($_SERVER["HTTP_X_PRUEF_TOKEN"] ?? "-")); echo "ziel"; return; } header("Location: /ziel", true, 302); echo "weiter";');
+    $port = freierPort();
+    hintergrund(['php', '-S', '127.0.0.1:' . $port, '-t', $umleitung]);
+    for ($i = 0; $i < 50 && !erreichbar('127.0.0.1', $port); $i++) {
+        usleep(100_000);
+    }
+    foreach (['curl' => false, 'PHP-Streams' => true] as $weg => $ohneCurl) {
+        Http::$ohneCurl = $ohneCurl;
+        @unlink($umleitung . '/gerufen');
+        $a = Http::anfrage('GET', 'http://127.0.0.1:' . $port . '/', ['kopf' => ['X-Pruef-Token' => 'geheim-' . $k], 'zeit' => 5]);
+        pruefe($a['ok'] && $a['status'] === 302 && $a['rumpf'] === 'weiter' && !is_file($umleitung . '/gerufen'),
+            $weg . ': eine Umleitung wird nicht verfolgt, das Token geht nicht ans Ziel (Status ' . $a['status'] . ')');
+    }
+    Http::$ohneCurl = false;
+    pruefe(!Http::anfrage('GET', 'http://127.0.0.1:' . $port . '/', ['kopf' => ['X-Pruef' => "a\r\nX-Eingeschleust: 1"]])['ok']
+        && !Http::anfrage('GET', 'http://127.0.0.1:' . $port . '/', ['kopf' => ["X-Pruef: a\r\nB" => '1']])['ok'], 'kein Umbruch in einer Kopfzeile');
+
     $ziel = new ReflectionMethod(\App\Support\Markdown::class, 'ziel');
     gleich([$ziel->invoke(null, 'JavaScript:alert(1)'), $ziel->invoke(null, 'data:text/html,x'), $ziel->invoke(null, 'https://example.org')],
         ['#', '#', 'https://example.org'], 'Links im Handbuch nur zu http(s), mailto und eigenen Seiten');
@@ -183,7 +423,23 @@ try {
     @unlink($pdf);
 } finally {
     alsBenutzer(null);
+    Http::$ohneCurl = false;
+    foreach (['index.php', 'gerufen'] as $datei) {
+        @unlink($umleitung . '/' . $datei);
+    }
+    @rmdir($umleitung);
     Config::set('app.key', $alterSchluessel);
+    Http::$attrappe = null;
+    Database::execute('UPDATE users SET is_active = 1 WHERE username LIKE ?', [$k . '%']);
+    foreach (Database::select('SELECT id FROM api_partner WHERE name LIKE ?', [$k . '%']) as $p) {
+        Database::execute('UPDATE sites SET partner_id = NULL WHERE partner_id = ?', [(int) $p['id']]);
+        Database::execute('DELETE FROM api_partner WHERE id = ?', [(int) $p['id']]);
+    }
+    foreach (Database::select('SELECT id FROM api_tokens WHERE name LIKE ?', [$k . '%']) as $t) {
+        Database::execute('DELETE FROM api_token_standorte WHERE token_id = ?', [(int) $t['id']]);
+        Database::execute('DELETE FROM api_tokens WHERE id = ?', [(int) $t['id']]);
+        Database::execute("DELETE FROM audit_log WHERE target_type = 'api_token' AND target_id = ?", [(string) $t['id']]);
+    }
     foreach ($sites as $siteId) {
         foreach (Database::select('SELECT id FROM objekte WHERE site_id = ?', [$siteId]) as $o) {
             AnlagenService::loeschen((int) $o['id']);

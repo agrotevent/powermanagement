@@ -14,6 +14,7 @@ $groups = [
         ['/dashboard', 'Übersicht & Live', null, 'dashboard.view'],
         ['/karte',     'Karte',            null, 'karte.view'],
         ['/aufbau',    'Aufbau & Abgleich', null, 'anlagen.view'],
+        ['/berichte',  'Übergabeberichte', null, 'berichte.view'],
     ],
     'Anlagen' => [
         ['/anlagen',              'Alle Anlagen',        null, 'anlagen.view'],
@@ -40,11 +41,14 @@ $groups = [
     'Standorte' => [
         ['/standorte',            'Standorte & Etagen',  null, 'plans.manage'],
         ['/location',             'Location-Abgleich',   null, 'inventory.pull'],
+        ['/instanzen',            'Andere Instanzen',    null, 'api.partner'],
+        ['/vorschlaege',          'Änderungsvorschläge', null, 'api.vorschlaege'],
     ],
     'System' => [
         ['/system/benutzer',      'Benutzer & Freigaben', null, 'system.users.manage'],
         ['/system/rollen',        'Rollen & Rechte',      null, 'system.users.manage'],
         ['/system/einstellungen', 'Einstellungen',        null, 'settings.manage'],
+        ['/system/schnittstelle', 'Schnittstelle (API)',  null, 'api.manage'],
         ['/audit',                'Audit-Log',            null, 'audit.view'],
         ['/system/update',        'Update',               null, 'system.update'],
     ],
