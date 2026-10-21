@@ -30,6 +30,9 @@ require __DIR__ . '/hilfen/pruefung.php';
 
 use App\Auth\ApiZugang;
 use App\Auth\Auth;
+use App\Kunden\Einrichtung;
+use App\Kunden\KundenService;
+use App\Kunden\Pruefnachweise;
 use App\Services\BenutzerService;
 use App\Services\LocationBundle;
 use App\Services\LocationUebertrag;
@@ -85,9 +88,50 @@ echo json_encode(["results" => [["statement_id" => 0], ["statement_id" => 1], ["
 $influxPort = freierPort();
 hintergrund(['php', '-S', '127.0.0.1:' . $influxPort, $ordner . '/influx.php'], ['PHP_CLI_SERVER_WORKERS' => '4']);
 
+// ------------------------------------------------------------ träges Eventworx
+// Wie in tests/sitzung.php: der Mandant als Attrappe (job, job/<id>, file/list,
+// file/<id>), jede Antwort so spät, wie in der Datei steht. Die
+// Kundenverwaltung wartet darauf – auch, wenn währenddessen ein Update beginnt.
+$ewxVerzoegerung = $ordner . '/eventworx-verzoegerung';
+file_put_contents($ewxVerzoegerung, '0');
+$ewxToken = 'pruefung-' . bin2hex(random_bytes(12));
+$ewxJob = App\Services\Eventworx::demo()[0];
+$ewxDatei = '6650a1f2c9e77a1b000000bb';
+file_put_contents($ordner . '/eventworx-job.json', json_encode($ewxJob));
+file_put_contents($ordner . '/eventworx.php', '<?php
+usleep((int) ((float) @file_get_contents(' . var_export($ewxVerzoegerung, true) . ') * 1000000));
+$pfad = (string) parse_url((string) $_SERVER["REQUEST_URI"], PHP_URL_PATH);
+header("Content-Type: application/json");
+if (($_SERVER["HTTP_S_API_TOKEN"] ?? "") !== ' . var_export($ewxToken, true) . ') {
+    http_response_code(401);
+    echo json_encode(["success" => false, "errorCode" => "ACCESS_DENIED"]);
+    return;
+}
+$job = json_decode((string) file_get_contents(' . var_export($ordner . '/eventworx-job.json', true) . '), true);
+if ($pfad === "/backend/check/ping") {
+    echo json_encode(["success" => true, "data" => "pong"]);
+} elseif ($pfad === "/backend/job") {
+    echo json_encode(["success" => true, "total" => 1, "data" => [$job]]);
+} elseif ($pfad === "/backend/job/" . $job["id"]) {
+    echo json_encode(["success" => true, "data" => $job]);
+} elseif ($pfad === "/backend/file/list") {
+    echo json_encode(["success" => true, "total" => 1, "data" => [["id" => ' . var_export($ewxDatei, true) . ', "documentName" => "Pruefprotokoll Update.pdf",
+        "contentType" => "application/pdf", "path" => "/job/documents/P-1", "ownerDocumentId" => $job["id"]]]]);
+} elseif ($pfad === "/backend/file/" . ' . var_export($ewxDatei, true) . ') {
+    header("Content-Type: application/pdf");
+    echo "%PDF-1.4\n% Update\n1 0 obj\n<< /Type /Catalog >>\nendobj\ntrailer\n<< /Root 1 0 R >>\n%%EOF\n";
+} else {
+    http_response_code(404);
+    echo json_encode(["success" => false, "errorCode" => "NOT_FOUND"]);
+}
+');
+$ewxPort = freierPort();
+hintergrund(['php', '-S', '127.0.0.1:' . $ewxPort, $ordner . '/eventworx.php'], ['PHP_CLI_SERVER_WORKERS' => '4']);
+$ewxBasis = 'http://127.0.0.1:' . $ewxPort;
+
 // ------------------------------------------------------------ Instanz
 $vorlage = is_file($wurzel . '/config/config.php') ? $wurzel . '/config/config.php' : $wurzel . '/config/config.example.php';
-$konfig = static function (bool $demo, string $verzeichnis) use ($vorlage, $ordner, $git, $influxPort): string {
+$konfig = static function (bool $demo, string $verzeichnis) use ($vorlage, $ordner, $git, $influxPort, $ewxBasis): string {
     return '<?php
 $c = require ' . var_export($vorlage, true) . ';
 $c["app"]["demo"] = ' . var_export($demo, true) . ';
@@ -98,6 +142,7 @@ $c["database"]["driver"] = "sqlite";
 $c["database"]["path"] = ' . var_export($ordner . '/datenbank.sqlite', true) . ';
 $c["update"]["verzeichnis"] = ' . var_export($verzeichnis, true) . ';
 $c["update"]["git_verzeichnis"] = ' . var_export($git, true) . ';
+$c["eventworx"]["basis"] = ' . var_export($ewxBasis, true) . ';
 return $c;
 ';
 };
@@ -1489,6 +1534,55 @@ stream_wrapper_register("langsam", LangsamAttrappe::class);
     pruefe($dauer < 1.5 && !str_contains($aus, 'Warte'), sprintf('wartung_an: ohne laufende Änderung kein Warten (%.1f s)', $dauer));
     $schreiben('wartung', null);
 
+    // db_zuruecklegen aus deploy/update-debian.sh: der Schnappschuss (VACUUM INTO vor der
+    // Migration, etwa von 016) als harter Verweis an die Stelle der Datenbank, ohne alte
+    // WAL. Ein zweites Mal – das Zurückrollen starb, bevor „migriert nein“ in der Marke
+    // stand, --wiederaufnehmen legt noch einmal zurück – ist nichts mehr zu tun: Die
+    // Datenbank ist schon der Schnappschuss, und was die Anwendung seither schrieb (WAL),
+    // bleibt. mv brach dort früher mit „the same file“ ab, nachdem -wal/-shm schon weg waren.
+    file_put_contents($ordner . '/zuruecklegen.sh', <<<'SH'
+        set -Eeuo pipefail
+        SCHNAPPSCHUSS="$1"; DB="$2"
+        as_app() { "$@"; }
+        eval "$(sed -n '/^db_zuruecklegen() {$/,/^}$/p' "$3")"
+        declare -F db_zuruecklegen > /dev/null || { echo 'db_zuruecklegen fehlt in update-debian.sh'; exit 9; }
+        db_zuruecklegen
+        SH);
+    $zl = $ordner . '/zuruecklegen';
+    mkdir($zl . '/.schnappschuss', 0700, true);
+    $zlDb = $zl . '/database.sqlite';
+    $zlSnap = $zl . '/.schnappschuss/database.sqlite';
+    $zlZeilen = static fn (): string => (string) (new PDO('sqlite:' . $zlDb))->query('SELECT group_concat(x, \',\') FROM t')->fetchColumn();
+    $zuruecklegen = static function () use ($ordner, $zlSnap, $zlDb, $wurzel): int {
+        exec('bash ' . escapeshellarg($ordner . '/zuruecklegen.sh') . ' ' . escapeshellarg($zlSnap) . ' ' . escapeshellarg($zlDb) . ' '
+            . escapeshellarg($wurzel . '/deploy/update-debian.sh') . ' 2>&1', $aus, $rc);
+        return $rc;
+    };
+    $zp = new PDO('sqlite:' . $zlDb);
+    $zp->exec('PRAGMA journal_mode = WAL');
+    $zp->exec('CREATE TABLE t (x TEXT)');
+    $zp->exec("INSERT INTO t VALUES ('vorher')");
+    $zp->exec('VACUUM INTO ' . $zp->quote($zlSnap));
+    $zp->exec('CREATE TABLE kunden_probe (x TEXT)');   // „migriert“
+    $zp->exec("INSERT INTO t VALUES ('nach der Sicherung')");
+    $zp = null;
+    $rc = $zuruecklegen();
+    clearstatcache();
+    pruefe($rc === 0 && $zlZeilen() === 'vorher' && fileinode($zlDb) === fileinode($zlSnap) && !is_file($zlDb . '-wal') && !is_file($zlDb . '.zurueck'),
+        'db_zuruecklegen: Schnappschuss als harter Verweis zurück, ohne alte WAL (rc ' . $rc . ')');
+    $zp = new PDO('sqlite:' . $zlDb);
+    $zp->exec('PRAGMA journal_mode = WAL');
+    $zp->exec('PRAGMA wal_autocheckpoint = 0');
+    $zp->exec("INSERT INTO t VALUES ('danach')");       // die Anwendung schreibt wieder, die WAL ist offen
+    clearstatcache();
+    $walVorher = is_file($zlDb . '-wal');
+    $rc = $zuruecklegen();
+    clearstatcache();
+    pruefe($walVorher && $rc === 0 && is_file($zlDb . '-wal') && !is_file($zlDb . '.zurueck') && fileinode($zlDb) === fileinode($zlSnap),
+        'db_zuruecklegen zum zweiten Mal (Wiederaufnehmen): rc 0, WAL und Datenbank unangetastet (rc ' . $rc . ')');
+    $zp = null;
+    gleich($zlZeilen(), 'vorher,danach', 'db_zuruecklegen zum zweiten Mal: was danach gespeichert wurde, bleibt');
+
     // Eine andere Instanz hinter einer langsamen Leitung (wie in tests/sitzung.php)
     $partnerVerzoegerung = $ordner . '/partner-verzoegerung';
     file_put_contents($partnerVerzoegerung, '0');
@@ -1534,7 +1628,7 @@ echo json_encode($antwort, JSON_UNESCAPED_UNICODE);
     pruefe(($angelegt['ok'] ?? false) === true, 'andere Instanz eingetragen – ' . (string) ($angelegt['message'] ?? ''));
     $partnerId = (int) ($angelegt['id'] ?? 0);
 
-    /** POST $pfad; nach $nach Sekunden wartung_an mit $warten – Zeiten ab dem Start des POST. */
+    /** POST $pfad; nach $nach Sekunden wartung_an mit $warten – Zeiten ab dem Start des POST, dazu Status und Antwort. */
     $waehrendWartungAn = static function (string $pfad, array $felder, float $nach, int $warten) use ($port, $a, $belegt, $wartungAnStarten, $wartungAnEnde): array {
         $mehr = curl_multi_init();
         $h = curl_init('http://127.0.0.1:' . $port . $pfad);
@@ -1562,6 +1656,7 @@ echo json_encode($antwort, JSON_UNESCAPED_UNICODE);
             $laufend > 0 ? curl_multi_select($mehr, 0.02) : usleep(20_000);
         } while (($erg['post'] === null || $erg['skript'] === null) && microtime(true) - $start < 60);
         $erg['status'] = (int) curl_getinfo($h, CURLINFO_RESPONSE_CODE);
+        $erg['text'] = (string) curl_multi_getcontent($h);
         $erg['ausgabe'] = $w !== null ? (string) @file_get_contents($w['aus']) : '';
         curl_multi_remove_handle($mehr, $h);
         curl_close($h);
@@ -1672,6 +1767,133 @@ echo json_encode($antwort, JSON_UNESCAPED_UNICODE);
     Database::execute('DELETE FROM objekte WHERE id = ?', [$tank]);
     Database::execute('DELETE FROM floors WHERE id = ?', [$tankEtage]);
     Database::execute('DELETE FROM sites WHERE id = ?', [$tankStandort]);
+
+    // ------------------------------------------------------------ Kundenbereich
+    // Kundenzugänge (users.kunde_id) lesen während eines Updates weiter. Jede
+    // Änderung weist die Tür ab – mit der Meldung des Kundenbereichs in dessen
+    // Layout, nie mit Seiten, Abzeichen oder Meldungen des Personals. Was das
+    // Tor ohnehin sperrt (Adressen des Personals), beantwortet weiter das Tor.
+    $eingerichtet();
+    $wartungAn = static fn () => $schreiben('wartung', UpdateService::KOPF_WARTUNG . "\nseit " . time() . "\nkennung -\n");
+    $kdId = Database::insert('kunden', ['name' => $kennung . ' Kunde', 'kundennummer' => '', 'aktiv' => 1, 'created_at' => gmdate('c')]);
+    $kdKonto = KundenService::kontoErzeugen($kdId, $kennung . '-kundenzugang', 'Kundin Update', '', password_hash($kennwort, PASSWORD_DEFAULT), false);
+    $kdHash = static fn (int $id): string => (string) Database::scalar('SELECT password_hash FROM users WHERE id = ?', [$id]);
+    $kdHashVorher = $kdHash($kdKonto);
+    $nw = Pruefnachweise::pdfAnlegen($kdId, "%PDF-1.4\n% " . $kennung . "\n1 0 obj\n<< /Type /Catalog >>\nendobj\ntrailer\n<< /Root 1 0 R >>\n%%EOF\n", 'Nachweis Update.pdf',
+        ['bezeichnung' => $kennung . ' Verteiler', 'geprueft_am' => date('Y-m-d', time() - 5 * 86400), 'naechste_pruefung' => date('Y-m-d', time() + 300 * 86400)], true);
+    pruefe($nw['ok'] ?? false, 'Kundenbereich: Kunde, Zugang und freigegebener Prüfnachweis angelegt – ' . (string) ($nw['message'] ?? ''));
+    $kdDose = $ordner . '/dose-kundenzugang';
+    $seite = $aufruf($port, $kdDose, 'GET', '/login');
+    $r = $aufruf($port, $kdDose, 'POST', '/login', ['username' => $kennung . '-kundenzugang', 'password' => $kennwort, '_token' => $token($seite['text'])]);
+    pruefe($r['status'] === 302 && $r['ziel'] !== '/login', 'Kundenbereich: Kundenzugang angemeldet (' . $r['status'] . ' ' . (string) $r['ziel'] . ')');
+    $konto = $aufruf($port, $kdDose, 'GET', '/kundenbereich/konto');
+    $kdToken = $token($konto['text']);
+    pruefe($konto['status'] === 200 && $kdToken !== '', 'Kundenbereich: Konto mit Formular');
+    pruefe(str_contains($aufruf($port, $a['dose'], 'GET', '/dashboard')['text'], 'class="update-zeichen'), 'Vorbedingung: die Administration sieht gerade das Abzeichen des Updates');
+    foreach (['/kundenbereich', '/kundenbereich/konto', '/kundenbereich/pruefnachweise', '/kundenbereich/hilfe'] as $pfad) {
+        $r = $aufruf($port, $kdDose, 'GET', $pfad);
+        pruefe($r['status'] === 200 && str_contains($r['text'], 'class="kundenbereich"') && !str_contains($r['text'], 'update-zeichen') && !str_contains($r['text'], 'nav-hinweis')
+            && !str_contains($r['text'], '/system/update') && !str_contains($r['text'], 'class="sidebar"'), 'Kundenbereich ' . $pfad . ': kein Abzeichen, kein Weg zum Update');
+    }
+    $r = $aufruf($port, $kdDose, 'GET', '/system/update');
+    pruefe($r['status'] === 302 && $r['ziel'] === '/kundenbereich', 'Kundenzugang: System → Update führt zurück in den Kundenbereich');
+    $r = $aufruf($port, $kdDose, 'GET', '/system/update/stand', [], ['Accept: application/json']);
+    pruefe($r['status'] === 403 && !str_contains($r['text'], 'zustand'), 'Kundenzugang: Status des Updates 403 ohne Inhalt');
+
+    $wartungAn();
+    $logDatei = $wurzel . '/storage/logs/app.log';
+    clearstatcache(true, $logDatei);
+    $logVorher = is_file($logDatei) ? (int) filesize($logDatei) : 0;
+    foreach (['/kundenbereich', '/kundenbereich/pruefnachweise', '/kundenbereich/konto'] as $pfad) {
+        gleich($aufruf($port, $kdDose, 'GET', $pfad)['status'], 200, 'Kundenbereich + Schreibsperre: ' . $pfad . ' lesen geht');
+    }
+    $r = $aufruf($port, $kdDose, 'GET', '/kundenbereich/pruefnachweise/' . (int) $nw['id'] . '/pdf');
+    clearstatcache(true, $logDatei);
+    $log = (string) @file_get_contents($logDatei, false, null, $logVorher);
+    pruefe($r['status'] === 200 && str_starts_with($r['text'], '%PDF-'), 'Kundenbereich + Schreibsperre: Prüfnachweis laden geht');
+    pruefe((int) Database::scalar("SELECT COUNT(*) FROM kunden_abrufe WHERE kunde_id = ? AND art = 'nachweis'", [$kdId]) === 1
+        && preg_match('/kundenbereich\.abruf während eines Updates.*"kunde_id":' . $kdId . ',"user_id":' . $kdKonto . ',"art":"nachweis","ziel_id":' . (int) $nw['id'] . '/', $log) === 1
+        && !str_contains($log, $kennung . ' Kunde'), 'Abruf während der Schreibsperre: in der Datenbank und im Protokoll des Servers (nur Kennungen) – ein Zurückrollen nähme ihn sonst mit');
+    $kennwortFelder = ['_token' => $kdToken, 'current_password' => $kennwort, 'new_password' => 'Neues-Kennwort-2026!x', 'new_password_repeat' => 'Neues-Kennwort-2026!x'];
+    $r = $aufruf($port, $kdDose, 'POST', '/kundenbereich/konto/kennwort', $kennwortFelder);
+    pruefe($r['status'] === 302 && $r['ziel'] === '/kundenbereich/konto', 'Kundenbereich + Schreibsperre: Kennwort (ohne Referer – der Kundenbereich schickt keinen) → zurück zum Konto (' . (string) $r['ziel'] . ')');
+    $r = $aufruf($port, $kdDose, 'GET', '/kundenbereich/konto');
+    pruefe(str_contains($r['text'], '<div class="flash warning">' . UpdateService::GESPERRT_KUNDE . '</div>') && str_contains($r['text'], 'class="kb-nav"')
+        && !str_contains($r['text'], 'class="sidebar"') && !str_contains($r['text'], 'update-zeichen'), 'Kundenbereich + Schreibsperre: die Meldung im Kundenbereich, in dessen Layout');
+    gleich($kdHash($kdKonto), $kdHashVorher, 'Kundenbereich + Schreibsperre: Kennwort nicht geändert');
+    $r = $aufruf($port, $kdDose, 'POST', '/kundenbereich/konto/kennwort', $kennwortFelder, ['Accept: application/json']);
+    $j = json_decode($r['text'], true);
+    pruefe($r['status'] === 503 && ($j['wartung'] ?? false) === true && ($j['message'] ?? '') === UpdateService::GESPERRT_KUNDE && preg_match('/^Retry-After: 30\r?$/mi', $r['kopf']) === 1,
+        'Kundenbereich + Schreibsperre: JSON → 503 mit wartung und Retry-After (' . $r['status'] . ')');
+    // Das Tor geht vor: zu Adressen des Personals weder die Meldung noch ein Auftrag.
+    $r = $aufruf($port, $kdDose, 'POST', '/system/update/starten', ['_token' => $kdToken]);
+    pruefe($r['status'] === 302 && $r['ziel'] === '/kundenbereich' && !is_file($upd . '/soll/auftrag'), 'Kundenzugang + Schreibsperre: Adresse des Personals → das Tor (zum Kundenbereich), kein Auftrag');
+    $r = $aufruf($port, $kdDose, 'POST', '/system/update/starten', ['_token' => $kdToken], ['Accept: application/json']);
+    pruefe($r['status'] === 403 && (json_decode($r['text'], true)['wartung'] ?? null) === null, 'Kundenzugang + Schreibsperre: … mit JSON 403 vom Tor, nicht 503');
+    $r = $aufruf($port, $kdDose, 'GET', '/kundenbereich');
+    pruefe($r['status'] === 200 && !str_contains($r['text'], UpdateService::GESPERRT_KUNDE) && !str_contains($r['text'], UpdateService::GESPERRT),
+        'Kundenzugang: danach keine Meldung über ein Update (das Tor meldet nichts)');
+    // Einrichtungslink (ohne Anmeldung): zurück auf denselben Link, er bleibt gültig.
+    $kdNeu = KundenService::kontoErzeugen($kdId, $kennung . '-einrichtung', '', '', password_hash(bin2hex(random_bytes(16)), PASSWORD_DEFAULT), true);
+    $link = Einrichtung::erzeugen($kdNeu);
+    $eDose = $ordner . '/dose-einrichtung';
+    $seite = $aufruf($port, $eDose, 'GET', Einrichtung::pfad($link['token']));
+    $r = $aufruf($port, $eDose, 'POST', Einrichtung::pfad($link['token']), ['_token' => $token($seite['text']), 'kennwort' => 'Einrichtung-2026!xy', 'wiederholung' => 'Einrichtung-2026!xy']);
+    pruefe($r['status'] === 302 && $r['ziel'] === Einrichtung::pfad($link['token']), 'Einrichtungslink + Schreibsperre: zurück auf denselben Link');
+    $r = $aufruf($port, $eDose, 'GET', Einrichtung::pfad($link['token']));
+    pruefe($r['status'] === 200 && str_contains($r['text'], UpdateService::GESPERRT_KUNDE) && str_contains($r['text'], 'name="kennwort"') && Einrichtung::finden($link['token']) !== null,
+        'Einrichtungslink + Schreibsperre: Meldung auf der Seite, das Formular steht, der Link gilt weiter');
+    // Kundenverwaltung (Personal): zurück auf die Seite, von der es kam – die
+    // Antwort auf ein Formular (Treffer, Dateien am Vorgang) gibt es nicht als Seite.
+    $hier = 'http://127.0.0.1:' . $port;
+    foreach ([
+        ['/kunden/' . $kdId . '/eventworx/verknuepfen', '/kunden/' . $kdId . '/eventworx/suche', '/kunden/' . $kdId],
+        ['/kunden/' . $kdId . '/nachweise/eventworx/uebernehmen', '/kunden/' . $kdId . '/nachweise/eventworx', '/kunden/' . $kdId],
+        ['/kunden/' . $kdId . '/freigabe', '/kunden/' . $kdId . '?tab=freigaben', '/kunden/' . $kdId . '?tab=freigaben'],
+        ['/kunden/' . $kdId . '/nachweise/hochladen', null, '/kunden/' . $kdId],
+        ['/berichte/1/kundenbereich', null, '/berichte/1'],
+    ] as [$pfad, $von, $soll]) {
+        $r = $aufruf($port, $a['dose'], 'POST', $pfad, ['_token' => $a['token']], $von === null ? [] : ['Referer: ' . $hier . $von]);
+        pruefe($r['status'] === 302 && $r['ziel'] === $soll, 'Kundenverwaltung + Schreibsperre: ' . $pfad . ($von === null ? ' ohne Referer' : ' von ' . $von) . ' → ' . (string) $r['ziel']);
+    }
+    pruefe(str_contains($aufruf($port, $a['dose'], 'GET', '/kunden/' . $kdId)['text'], UpdateService::GESPERRT), 'Kundenverwaltung + Schreibsperre: die Meldung des Personals');
+    $schreiben('wartung', null);
+
+    // Eventworx: Verknüpfen wartet kurz (unter 30 s) – angemeldet, das Update wartet auf
+    // es und sichert danach; Übernehmen wartet oft länger und fragt vor dem Schreiben noch
+    // einmal: Kam das Update dazwischen, steht die Liste mit Auswahl und Angaben wieder da.
+    $r = $aufruf($port, $a['dose'], 'POST', '/system/einstellungen/eventworx', ['_token' => $a['token'], 'eventworx_adresse' => $ewxBasis, 'eventworx_token' => $ewxToken]);
+    gleich($r['status'], 302, 'Eventworx der Instanz auf die Attrappe eingestellt');
+    $r = $aufruf($port, $a['dose'], 'POST', '/kunden/' . $kdId . '/eventworx/suche', ['_token' => $a['token'], 'q' => (string) $ewxJob['jobNumber']]);
+    pruefe($r['status'] === 200 && str_contains($r['text'], (string) $ewxJob['jobNumber']), 'Eventworx-Suche der Kundenverwaltung (Treffer gemerkt)');
+    $vorgaenge = static fn (): int => (int) Database::scalar('SELECT COUNT(*) FROM kunden_vorgaenge WHERE kunde_id = ?', [$kdId]);
+    file_put_contents($ewxVerzoegerung, '2');
+    $r = $waehrendWartungAn('/kunden/' . $kdId . '/eventworx/verknuepfen', ['job_id' => (string) $ewxJob['id'], 'bestaetigt' => '1'], 0.7, 150);
+    file_put_contents($ewxVerzoegerung, '0');
+    pruefe($r['belegt'] === true && $r['status'] === 302 && $r['rc'] === 0, 'Verknüpfen wartet auf Eventworx: angemeldet, darauf wartet das Update');
+    pruefe($r['skript'] !== null && $r['post'] !== null && $r['skript'] >= $r['post'] && str_contains($r['ausgabe'], 'Laufende Änderungen sind fertig'),
+        sprintf('wartung_an wartet, bis das Verknüpfen fertig ist (Sperre %.1f–%.1f s, Verknüpfen bis %.1f s)', $r['skript_start'] ?? -1, $r['skript'] ?? -1, $r['post'] ?? -1));
+    gleich($vorgaenge(), 1, 'Verknüpfen von vor der Schreibsperre: verknüpft, bevor das Update sichert');
+    $schreiben('wartung', null);
+    $vid = (int) Database::scalar('SELECT id FROM kunden_vorgaenge WHERE kunde_id = ?', [$kdId]);
+    $r = $aufruf($port, $a['dose'], 'POST', '/kunden/' . $kdId . '/nachweise/eventworx', ['_token' => $a['token'], 'vorgang' => (string) $vid]);
+    pruefe($r['status'] === 200 && str_contains($r['text'], 'Pruefprotokoll Update.pdf'), 'Dateien am Vorgang (Liste gemerkt)');
+    $norm = 'Norm ' . $kennung;
+    $wahl = ['vorgang' => (string) $vid, 'datei' => [$ewxDatei], 'geprueft_am' => date('Y-m-d', time() - 2 * 86400), 'norm' => $norm, 'freigeben' => '1'];
+    $uebernommen = static fn (): int => (int) Database::scalar("SELECT COUNT(*) FROM pruefnachweise WHERE kunde_id = ? AND quelle = 'ewx_vorgang'", [$kdId]);
+    file_put_contents($ewxVerzoegerung, '2');
+    $r = $waehrendWartungAn('/kunden/' . $kdId . '/nachweise/eventworx/uebernehmen', $wahl, 0.7, 150);
+    file_put_contents($ewxVerzoegerung, '0');
+    pruefe($r['belegt'] === true && $r['rc'] === 0 && $r['skript'] !== null && $r['post'] !== null && $r['skript'] >= $r['post'],
+        sprintf('Übernehmen wartet auf Eventworx: angemeldet, wartung_an wartet bis zum Ende (Sperre %.1f–%.1f s, Übernehmen bis %.1f s)',
+            $r['skript_start'] ?? -1, $r['skript'] ?? -1, $r['post'] ?? -1));
+    gleich($uebernommen(), 0, 'Übernehmen, während das Update begann: nichts übernommen (es fragte vor dem Schreiben noch einmal)');
+    pruefe($r['status'] === 200 && str_contains($r['text'], 'action="/kunden/' . $kdId . '/nachweise/eventworx/uebernehmen"')
+        && preg_match('/value="' . $ewxDatei . '" checked/', $r['text']) === 1 && str_contains($r['text'], 'value="' . $norm . '"')
+        && str_contains($r['text'], UpdateService::NICHTS_UEBERNOMMEN), 'Übernehmen, während das Update begann: die Liste mit Auswahl, Angaben und Meldung wieder da');
+    $schreiben('wartung', null);
+    $r = $aufruf($port, $a['dose'], 'POST', '/kunden/' . $kdId . '/nachweise/eventworx/uebernehmen', ['_token' => $a['token']] + $wahl);
+    pruefe($r['status'] === 302 && $uebernommen() === 1, 'nach dem Update: dieselbe Wahl übernommen (Gegenprobe)');
 
     // Demo-Modus: Seite mit Hinweis, kein Abzeichen
     $d = $anmelden($demoPort, $kennung . '-admin');

@@ -748,8 +748,13 @@ wartung_aus() {
 # eine untergeschobene FIFO hielte cp auf, und der Schnappschuss bleibt für
 # einen weiteren Versuch), sonst kopieren mit Zeitlimit. Erst wenn die Kopie
 # bereitliegt, -wal/-shm weg und umbenennen – keine alte WAL in der neuen Datei.
+# Ist die Datenbank schon derselbe Verweis wie der Schnappschuss, liegt sie
+# schon zurück (ein Absturz, bevor „migriert nein“ in der Marke stand): dann
+# nichts anfassen. mv bräche dort mit „the same file“ ab – nachdem -wal/-shm
+# schon weg wären, mit dem, was seitdem gespeichert wurde.
 db_zuruecklegen() {
     as_app /bin/sh -c '[ -f "$1" ] && [ ! -L "$1" ] || exit 1
+        [ "$1" -ef "$2" ] && exit 0
         rm -f -- "$2.zurueck" || exit 1
         ln -- "$1" "$2.zurueck" 2>/dev/null || timeout -s KILL 600 cp -- "$1" "$2.zurueck" || exit 1
         rm -f -- "$2-wal" "$2-shm" && mv -f -- "$2.zurueck" "$2"' sh "$SCHNAPPSCHUSS" "$DB"

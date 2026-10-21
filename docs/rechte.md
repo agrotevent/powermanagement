@@ -230,6 +230,13 @@ bekommen es nicht nachträglich, und vergeben kann es nur, wer es selbst hat.
 Ein Update startet die Dienste neu – Messung und Schalten sind für alle
 Standorte 1–3 Minuten unterbrochen.
 
+Kundenzugänge (Kundenbereich) bekommen das Recht nie – sie haben keine
+Rechte, und das Tor lässt sie nicht nach *System → Update*. Abzeichen und
+Hinweise zum Update sieht nur, wer das Recht hat; im Kundenbereich gibt
+es keine. Läuft ein Update, lesen Kunden weiter; ein Kennwort, das sie
+in dieser Zeit ändern wollen, wird nicht gespeichert, und der Kundenbereich
+sagt ihnen das.
+
 Das Recht ist bewusst eng: Es erlaubt, nach neuen Ständen zu suchen, einen
 Stand **vorwärts** auf dem ausgecheckten Zweig einzuspielen – genau den
 angezeigten – und die automatischen Updates einzustellen. Einen anderen

@@ -923,7 +923,9 @@ Die Schritte (die Oberfläche zählt sie mit):
    `config/config.php` und die Datenbank nach
    `storage/backups/vor-update-<zeit>.tar.gz` (die letzten fünf bleiben;
    die Datenbank als stimmige Kopie per `VACUUM INTO`, auch im laufenden
-   Betrieb). Die eigene Fassung legt es nach
+   Betrieb). Gebraucht wird freier Platz für zweimal die Datenbank – sie
+   enthält auch die Prüfnachweise des Kundenbereichs (PDF, bis 10 MB je
+   Datei) und wächst mit ihnen. Die eigene Fassung legt es nach
    `/var/lib/powermanagement/update/alt/` – damit rollt der Update-Dienst
    ein unterbrochenes Update zurück.
 4. **Quellcode** auf den neuen Stand; ab hier übernimmt die neue Fassung
@@ -1110,7 +1112,13 @@ schreiben: Das Update wartet darauf („Warte auf laufende Änderungen“,
 höchstens 150 s; jede schreibende Anfrage hält dafür
 `storage/update/.anfragen` geteilt gesperrt). Eine Übernahme, die dann noch
 auf die andere Instanz wartet, übernimmt nichts und meldet „Gerade läuft
-ein Update – nichts übernommen“. Die Sperre endet mit dem
+ein Update – nichts übernommen“; ebenso Prüfnachweise aus Eventworx, die
+noch auf Eventworx warten (die Liste mit Auswahl und Angaben steht dann
+wieder da). Kunden im Kundenbereich lesen und laden weiter; ändern können
+sie nur ihr Kennwort, und das meldet „Gerade wird das System aktualisiert –
+nichts gespeichert …“ im Kundenbereich. Abrufe von Dokumenten in dieser
+Zeit stehen zusätzlich in `storage/logs/app.log` – rollt das Update zurück,
+fehlten sie sonst in der Datenbank. Die Sperre endet mit dem
 Update; bleibt sie nach einem Absturz stehen, gilt sie höchstens 60 Minuten
 (länger nur, solange sich der Lauf meldet), und der Update-Dienst räumt
 eine verwaiste Sperre bei seinem nächsten Lauf weg.
@@ -1192,7 +1200,11 @@ Update-Dienst prüft wie jeden anderen; root liest nie die Datenbank.
   Änderungen am Code, nicht linearem Verlauf, `AUTOMATIK=nein` und einem
   noch nicht zurückgerollten Update. Ins Audit-Log kommt das höchstens
   einmal je Tag und Grund; nach 14 Tagen Verschieben zeigen Abzeichen und
-  Seite es an (oft ein vergessener, nie beendeter Aufbau).
+  Seite es an (oft ein vergessener, nie beendeter Aufbau). Der
+  Kundenbereich verschiebt nichts: Kunden lesen nur, und angemeldet sind
+  sie oft tagelang – ein Update fände sonst nie ein Fenster; was sie in den
+  1–3 Minuten nicht speichern können (ihr Kennwort), sagt ihnen eine
+  Meldung.
 - **Gescheiterte Stände** versucht die Automatik nie wieder – erst einen
   neueren Stand oder *Jetzt aktualisieren* von Hand. Der Update-Dienst
   prüft das nach und lässt automatisch höchstens alle 20 Stunden ein Update

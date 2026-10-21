@@ -3,12 +3,15 @@ declare(strict_types=1);
 
 namespace App\Services;
 
+use App\Auth\Auth;
 use App\Berichte\Kundenmodus;
+use App\Kunden\Kundenbereich;
 use App\Support\Config;
 use App\Support\Database;
 use App\Support\Flash;
 use App\Support\Request;
 use App\Support\Response;
+use App\Support\Router;
 use App\Support\Settings;
 
 /**
@@ -57,6 +60,10 @@ final class UpdateService
     public const ANFRAGEN = '.anfragen';
     /** Wer erst beim Schreiben merkt, dass ein Update begonnen hat (LocationUebertrag::anwenden()). */
     public const NICHTS_UEBERNOMMEN = 'Gerade läuft ein Update – nichts übernommen, bitte in etwa einer Minute noch einmal.';
+    /** Abgewiesene Änderung (wartungsSperre()) – für das Personal … */
+    public const GESPERRT = 'Gerade läuft ein Update – Änderungen sind in etwa einer Minute wieder möglich.';
+    /** … und im Kundenbereich (Kundenzugänge, Einrichtungslink): im Ton des Kundenbereichs, ohne Technik. */
+    public const GESPERRT_KUNDE = 'Gerade wird das System aktualisiert – nichts gespeichert. Bitte versuchen Sie es in etwa einer Minute noch einmal.';
 
     /** Zuletzt ins Audit übernommene Verlaufszeilen (JSON-Liste, keine Migration). */
     public const VERMERKT = 'update.vermerkt';
@@ -888,12 +895,24 @@ final class UpdateService
      * zum Wiederholen; Formulare eine Meldung und zurück. Kosten: eine
      * geteilte Dateisperre (anfrageAnmelden()) und ein is_file je POST.
      *
-     * Was der Kundenmodus ohnehin sperrt, beantwortet weiter der Router: Er
-     * prüft das vor allem anderen (423 bzw. zur Kundenseite). Sonst bekäme
-     * ein anderer Reiter während des Updates 503 statt 423 und zeigte
-     * weiter, was er geladen hat. Geschrieben wird so oder so nichts.
+     * Was der Router ohnehin abweist, beantwortet weiter er – geschrieben
+     * wird so oder so nichts: Was der Kundenmodus sperrt (423 bzw. zur
+     * Kundenseite; sonst bekäme ein anderer Reiter während des Updates 503
+     * statt 423 und zeigte weiter, was er geladen hat), und für
+     * Kundenzugänge alles außerhalb des Kundenbereichs (das Tor: 403 bzw.
+     * zum Kundenbereich – ein Kunde bekäme sonst zu einer Adresse des
+     * Personals eine Meldung über ein Update).
+     *
+     * Im Kundenbereich (Kundenzugänge, Einrichtungslink) steht die Meldung
+     * im Ton des Kundenbereichs (GESPERRT_KUNDE) in dessen Layout – die
+     * Seiten dort zeigen Meldungen wie jede andere. Ein Kennwort, das so
+     * nicht gespeichert wurde, gibt man noch einmal ein; aufgehoben wird es
+     * nirgends.
+     *
+     * $router: wohin „zurück“ führt (zurueckNachSperre()). Ohne ihn wie
+     * früher dorthin, wo die Anfrage herkam.
      */
-    public static function wartungsSperre(): void
+    public static function wartungsSperre(?Router $router = null): void
     {
         if (strtoupper((string) ($_SERVER['REQUEST_METHOD'] ?? 'GET')) !== 'POST') {
             return;
@@ -911,10 +930,11 @@ final class UpdateService
         if (in_array($pfad, ['/login', '/logout'], true)) {
             return;
         }
-        if (Kundenmodus::sperrt('POST', $pfad) !== null) {
+        $kundenzugang = Auth::check() && Kundenbereich::istKundenzugang();
+        if ($kundenzugang ? !Kundenbereich::erlaubt($pfad) : Kundenmodus::sperrt('POST', $pfad) !== null) {
             return;
         }
-        $text = 'Gerade läuft ein Update – Änderungen sind in etwa einer Minute wieder möglich.';
+        $text = $kundenzugang || str_starts_with($pfad, Kundenbereich::PFAD . '/') ? self::GESPERRT_KUNDE : self::GESPERRT;
         header('Cache-Control: no-store');
         // Nur der Accept-Kopf, wie im Router: Formulare mit data-laeuft
         // (fetch ohne Accept) sollen Meldung und Weiterleitung bekommen.
@@ -924,8 +944,44 @@ final class UpdateService
             exit;
         }
         Flash::warning($text);
-        Response::redirect(Response::zurueckZiel('/'));
+        Response::redirect($router === null ? Response::zurueckZiel($kundenzugang ? Kundenbereich::PFAD : '/')
+            : self::zurueckNachSperre($router, $pfad, $kundenzugang));
         exit;
+    }
+
+    /**
+     * Wohin nach einer abgewiesenen Änderung: auf die Seite, von der sie
+     * kam (Referer) – wenn es sie als Seite gibt. Eine Antwort auf ein
+     * Formular ist oft keine (Treffer der Eventworx-Suche, Dateien am
+     * Vorgang, eine Rückfrage, eine Kennwort-Anzeige); deren GET führte auf
+     * 404. Dann die nächste Seite darüber: /kunden/7/eventworx/suche →
+     * /kunden/7. Ohne Referer – der Kundenbereich schickt keinen
+     * (Referrer-Policy: no-referrer) – vom Ziel des Formulars aus: das
+     * Kennwort im Konto → /kundenbereich/konto, ein Einrichtungslink → derselbe
+     * Link (er bleibt gültig, eingelöst ist nichts). Ein Kundenzugang nur in
+     * den Kundenbereich, sonst dorthin bzw. zur Übersicht.
+     */
+    private static function zurueckNachSperre(Router $router, string $pfad, bool $kundenzugang): string
+    {
+        $kandidaten = array_values(array_filter([Response::zurueckZiel(''), $pfad], static fn (string $z): bool => $z !== ''));
+        foreach ($kandidaten as $ziel) {
+            [$weg, $abfrage] = array_pad(explode('?', $ziel, 2), 2, null);
+            $abfrage = $abfrage !== null ? '?' . $abfrage : '';
+            while (true) {
+                $weg = $weg === '' ? '/' : $weg;
+                $sicher = Response::sichererPfad($weg . $abfrage);
+                if ($sicher !== null && $router->hatSeite($weg) && (!$kundenzugang || Kundenbereich::erlaubt($weg))) {
+                    return $sicher;
+                }
+                if ($weg === '/') {
+                    break;
+                }
+                // Eine Seite darüber – ohne die Abfrage der unteren.
+                $weg = substr($weg, 0, (int) strrpos($weg, '/'));
+                $abfrage = '';
+            }
+        }
+        return $kundenzugang ? Kundenbereich::PFAD : '/';
     }
 
     /**

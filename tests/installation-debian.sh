@@ -51,7 +51,7 @@
 # ohne Update-Funktion (Job „Umstieg“): U1 Erstinstallation dieses Stands,
 # U2 genau der Befehl aus der Anleitung (zwei Läufe in einer Einheit) –
 # danach ist die Update-Funktion eingerichtet, die Flows sind neu und alle
-# Migrationen (auch 018, Tanks) eingespielt; U3 ein Update über die
+# Migrationen (auch 016 Kundenbereich und 018 Tanks) eingespielt; U3 ein Update über die
 # Oberfläche.
 #
 # Aufruf:  tests/installation-debian.sh
@@ -676,8 +676,9 @@ if [[ -n "$UMSTIEG" ]]; then
     # mit dem alten Skript – niemand hat sie im Editor geändert.
     pruefe "Node-RED-Flows auf dem neuen Stand" cmp -s "$ZIEL/deploy/node-red/flows.json" "$NR_FLOWS"
     pruefe "keine behaltenen Flows" bash -c '[[ ! -e "$1" ]] && ! grep -qF "im Editor verändert" "$2"' _ "$NR_NEU" "$LAUF"
-    pruefe "alle Migrationen eingespielt (auch 018, Tanks)" app_php '$da = array_column(\App\Support\Database::select("SELECT name FROM migrations"), "name");
-        $fehlt = array_diff(array_map("basename", glob("database/migrations/*.sql")), $da); exit($fehlt === [] && in_array("018_tanks.sql", $da, true) ? 0 : 1);'
+    pruefe "alle Migrationen eingespielt (auch 016 Kundenbereich und 018 Tanks)" app_php '$da = array_column(\App\Support\Database::select("SELECT name FROM migrations"), "name");
+        $fehlt = array_diff(array_map("basename", glob("database/migrations/*.sql")), $da);
+        exit($fehlt === [] && in_array("016_kundenbereich.sql", $da, true) && in_array("018_tanks.sql", $da, true) ? 0 : 1);'
     pruefe_installation
     abschluss "Umstieg U2"
 

@@ -1124,7 +1124,12 @@ Eingaben bleiben solange auf dem Gerät. Eine Peilung oder Betankung, die
 beim Start des Updates schon auf den Rohwert des Sensors wartete, trägt
 das Update noch ein, bevor es sichert; im Kartenpanel bleibt eine
 abgewiesene Eingabe stehen und lässt sich nach einer Minute noch einmal
-abschicken. Andere Instanzen bekommen über die
+abschicken. „Prüfnachweise aus Eventworx übernehmen“, das beim Start noch
+auf Eventworx wartete, übernimmt nichts mehr und zeigt die Liste mit
+Auswahl und Angaben wieder – nach dem Update genügt ein Klick. Kunden im
+Kundenbereich lesen weiter; ein neues Kennwort speichern sie erst danach
+(sie sehen dazu einen eigenen Hinweis, nie etwas vom Update selbst).
+Andere Instanzen bekommen über die
 Schnittstelle dieselbe Antwort (HTTP 503) – wer dort sendet, schickt es nach
 einer Minute noch einmal. Geht etwas schief, kommt der alte Stand von selbst zurück –
 Code, Datenbank und Einrichtung. Läuft gerade ein Aufbau oder wurde in den
