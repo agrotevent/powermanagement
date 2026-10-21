@@ -17,6 +17,7 @@
  */
 use App\Kunden\Kundenbereich;
 use App\Kunden\Pruefnachweise;
+use App\Services\SiteService;
 use App\Support\Csrf;
 use App\Support\View;
 use App\Support\Zeit;
@@ -99,7 +100,8 @@ $felder = ['standorte' => $standorte, 'vorgaenge' => $vorgaenge, 'inventar' => $
     <div class="card-head"><h2>Prüfnachweis hinterlegen</h2><span class="hint">PDF aus der Prüfung, höchstens 10 MB</span></div>
     <div class="card-body">
         <div class="field"><label for="nn-datei">Prüfprotokoll (PDF)</label>
-            <input id="nn-datei" type="file" name="datei" accept="application/pdf,.pdf" required></div>
+            <input id="nn-datei" type="file" name="datei" accept="application/pdf,.pdf" required
+                   data-max-bytes="<?= (int) Pruefnachweise::MAX_BYTES ?>" data-max-text="<?= View::e(SiteService::mb(Pruefnachweise::MAX_BYTES)) ?>"></div>
         <?= View::partial('kunden/_nachweis_felder', ['p' => 'nn', 'w' => $neu] + $felder) ?>
         <label class="check"><input type="checkbox" name="freigeben" value="1"<?= !empty($neu['freigeben']) ? ' checked' : '' ?>> <span>gleich für den Kunden freigeben</span></label>
         <p class="help">Das PDF wird nicht ausgewertet – Prüfdatum, nächste Prüfung und Ergebnis trägst du aus dem Protokoll ein; ein

@@ -836,6 +836,8 @@ tr.abweichung-zeile td { background: var(--warning-light); }
 .unterschrift-felder { margin-top: .4rem; }
 .unterschrift-meldung { min-height: 1.3em; margin: .3rem 0 0; font-weight: 600; }
 .unterschrift-meldung.fehler { color: var(--danger); }
+/* Zu große Datei, noch vor dem Hochladen gemeldet (app.js, data-max-bytes) */
+.datei-meldung { color: var(--danger); margin-top: .25rem; }
 .quer-hinweis { display: none; margin: 0 0 .5rem; padding: .4rem .6rem; border-radius: 8px; background: var(--info-light); color: #0c4a6e; font-size: .84rem; }
 @media (orientation: portrait) and (max-width: 700px) { .quer-hinweis { display: block; } }
 

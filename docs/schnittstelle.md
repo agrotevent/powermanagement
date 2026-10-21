@@ -337,6 +337,27 @@ Entscheiden zwei gleichzeitig, gewinnt der erste; der zweite hört
 Ein Zugang hat höchstens zehn offene Vorschläge und höchstens 60
 Sendungen in der Stunde (Vorschläge und direktes Schreiben zusammen); eine
 Plandatei darin ist höchstens 30 MiB groß, ein Vorschlag höchstens 48 MiB.
+
+**Größere Pläne.** Hochladen lassen sich Grundrisse bis 100 MB; die
+Schnittstelle bleibt trotzdem bei 30 MiB je Datei und 48 MiB je Sendung.
+Das ist das Protokoll von MasterAdmin (dort gelten dieselben Zahlen), und
+eine Datei steckt als base64 im JSON: 100 MB wären 134 MB Körper, die PHP
+gemessen mit 270 MB Speicher auspackt (und nginx nimmt so einen Körper an,
+bevor feststeht, ob das Token gilt). Deshalb:
+
+- **Übernehmen** (B holt von A) geht bis 100 MB: B lädt jede Plandatei
+  einzeln über `GET …/datei` herunter (gemessen 192 MB Speicher bei 100 MB).
+  MasterAdmin holt Pläne über 40 MB unter Umständen nicht – seine
+  Zeitgrenze für eine Antwort ist 60 Sekunden, sein Speicher 256 MB.
+- **Zurückschicken** (B an A): Ein Grundriss über 30 MiB – oder einer, der
+  nicht mehr in die Sendung passt (zusammen rund 33 MiB) – geht nicht mit.
+  Seine Etage geht ohne Plan hinüber – und ohne `referenz` und
+  Georeferenz, die am neuen Plan gemessen sind –, und das heißt bei A wie
+  bei MasterAdmin „unverändert“; alles andere wird geschickt. Die Meldung
+  nennt jeden ausgelassenen Plan. B merkt sich danach nicht den neuen
+  Fingerabdruck (`partner_hash`), auch wenn A direkt übernimmt: Der Standort
+  bleibt „hier geändert“, und Übernehmen fragt, bevor es den alten Plan
+  zurückholt. Früher scheiterte an einem solchen Plan die ganze Sendung.
 Beim Eingang wird nichts gerendert oder gekachelt, die Dateien liegen mit
 Zufallsnamen unter `storage/vorschlaege/`. Ein ersetzter Vorschlag und
 direkt Geschriebenes behalten nur ihre Eckdaten (Location, Etagen, Zahlen)
@@ -380,7 +401,7 @@ keine Weiterleitung. Antworten sind JSON, außer bei Plandateien.
 | GET | `/api/v1/info` | – | Name der Instanz, `produkt: "powermanagement"`, `api: 1`, Formate, Befugnisse und Ablauf des Tokens |
 | GET | `/api/v1/locations` | `plaene.lesen` | freigegebene Locations mit `stand` und Etagen (`plan`, `bearbeiten`, Zahl der Anlagen und Kabel mit `feststrom`, sonst `null`; `dosen`/`racks` immer `null`) |
 | GET | `/api/v1/locations/{schluessel}` | `plaene.lesen` | `stand`, `location` (MasterAdmin-Format 1) und `strom` (Format 2: `georeferenz`, mit `feststrom` auch `steckertypen`, `anlagen`, `leitungen`) |
-| GET | `/api/v1/locations/{schluessel}/datei?pfad=plaene/…` | `plaene.lesen` | eine Plandatei, nur unter einem Pfad aus `plan.datei` |
+| GET | `/api/v1/locations/{schluessel}/datei?pfad=plaene/…` | `plaene.lesen` | eine Plandatei (bis 100 MB, Größe vorab in `plan.bytes`), nur unter einem Pfad aus `plan.datei` |
 | POST | `/api/v1/locations/{schluessel}/vorschlaege` | `plaene.vorschlagen` (für Feststrom dazu `feststrom`) | Vorschlag einreichen – oder mit `plaene.schreiben` und `basis` direkt schreiben |
 
 ```bash

@@ -933,7 +933,29 @@ er nutzt. Was dazu am Broker passiert, steht in
 ## Standorte und Location-Abgleich
 
 **Standorte** verwaltet Standorte, Etagen und Grundrisse. Pläne kommen als
-PDF (wird serverseitig gerastert und gekachelt), PNG/JPG oder SVG.
+PDF (wird serverseitig gerastert und gekachelt), PNG/JPG oder SVG – **bis
+100 MB** je Datei. Das Formular nennt die Grenze, und der Browser meldet
+eine zu große Datei schon beim Auswählen, bevor sie über die Leitung geht.
+Größere PDFs werden meist deutlich kleiner, wenn eingebettete Bilder mit
+geringerer Auflösung exportiert werden.
+
+- **Aufbereiten:** Der Server rechnet jeden Plan einmal in Kacheln (höchstens
+  50 Megapixel, also etwa 7 000 × 7 000 Pixel). Ein gewöhnlicher Plan ist
+  beim Hochladen gleich fertig. Bei großen Plänen antwortet der Upload nach
+  rund einer halben Minute und rechnet im Hintergrund weiter – gemessen
+  ein bis vier Minuten für eine Seite mit 100 MB, länger für viele Seiten.
+  Bis dahin zeichnet der Browser den Plan selbst (langsamer, weniger
+  scharf); danach die Karte neu laden. Pläne aus dem Location-Abgleich oder
+  von einer anderen Instanz rechnet immer der Hintergrund; mehrere große
+  Pläne kommen nacheinander dran.
+- **Ersetzen:** Ein neuer Plan auf einer Etage ersetzt den alten; wird der
+  alte von keiner Etage mehr genutzt, löscht der Server ihn samt Kacheln.
+- **Große Bilder:** PNG und JPEG über 50 Megapixel rechnet der Server mit
+  poppler herunter, ohne sie ganz in den Speicher zu laden. Dafür muss ein
+  JPEG *nicht progressiv* und in RGB oder Graustufen gespeichert sein, ein
+  PNG ohne Transparenz und ohne Zeilensprung (interlaced); über 400
+  Megapixel nimmt der Upload kein Bild an. Was nicht passt, lehnt der Upload
+  mit dem Grund ab – anders speichern, verkleinern oder als PDF hochladen.
 
 **Location-Abgleich** arbeitet mit demselben Git-Repository wie MasterAdmin
 (`locations/<schlüssel>/location.json` und `plaene/`):
@@ -962,6 +984,12 @@ PDF (wird serverseitig gerastert und gekachelt), PNG/JPG oder SVG.
 
 Adresse und Token des Repositorys stehen unter **System → Einstellungen →
 Location- und Verteiler-Abgleich**.
+
+Grundrisse wandern beim Hochladen mit ins Repository. Über **50 MB** gibt es
+dazu einen Hinweis: GitHub warnt ab dieser Größe, und jede Fassung bleibt
+für immer in der Geschichte des Repositorys, die jede Installation beim
+Holen mitnimmt. Über **100 MB** nimmt GitHub keine Datei an – dann lädt
+PowerManagement gar nicht erst hoch und sagt, welcher Plan zu groß ist.
 
 ## Andere Instanzen (Schnittstelle)
 
@@ -993,6 +1021,14 @@ geändert*:
 - Zurück geht es je nach Befugnis bei A: **Hochladen** (A übernimmt gleich,
   aber nur, wenn sich dort seit dem letzten Übernehmen nichts geändert hat)
   oder **Als Vorschlag schicken** (bei A bestätigt es jemand).
+- Die Schnittstelle nimmt wie MasterAdmin **höchstens 30 MB je Plan** an
+  (zusammen rund 33 MB je Sendung). Ein größerer Grundriss geht beim
+  Zurückschicken nicht mit: Der Rest wird geschickt, dort bleibt der
+  bisherige Plan samt seinem Maßstab und seiner Georeferenz (die hier sind
+  am neuen Plan gemessen), und die Meldung nennt ihn. Hier gilt der
+  Standort danach weiter als *hier geändert* – **Übernehmen** fragt also
+  nach, bevor es den alten Plan von dort zurückholt. Übernehmen geht dagegen bis
+  100 MB – Pläne holt B als Datei, nicht im Körper einer Sendung.
 
 Vorschläge prüft A unter **Standorte → Änderungsvorschläge**: je Etage, was
 sich ändern würde, dann **Annehmen** (gewählte Etagen und Teile) oder

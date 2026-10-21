@@ -16,6 +16,11 @@
 #   3. Update auf einen neuen Stand, der einen Ordner in storage/ mitbringt,
 #      danach ein Update ohne Neues
 #
+# Bei jedem Schritt dazu die Grenzen für Grundrisse bis 100 MB, wie nginx
+# und PHP-FPM sie wirklich anwenden – mit angekündigter Länge und in Stücken
+# (chunked); vor dem Update stehen Pool und Site auf den alten Werten (64M),
+# danach wird über beide hochgeladen.
+#
 # Aufruf:  tests/installation-debian.sh
 #          PM_BEHALTEN=1 tests/installation-debian.sh   Container bleibt stehen
 #          PM_BASIS=<bild> tests/installation-debian.sh anderes Debian-13-Bild
@@ -199,6 +204,78 @@ pruefe_installation() {
         fehler "bin/power pruefen meldet Fehler:"
         printf '%s\n' "$ausgabe" | sed 's/^/            /'
     fi
+
+    pruefe_grenzen
+}
+
+# Grundrisse bis 100 MB (SiteService::MAX_UPLOAD_BYTES): was PHP-FPM aus dem
+# Pool liest und was nginx je Adresse annimmt. Mit „hochladen“ zusätzlich
+# über beide hinweg, angemeldet: knapp 100 MiB angenommen, ein Byte mehr mit
+# der Grenze abgelehnt.
+pruefe_grenzen() {
+    local php_v fpm_tt code seite jar token benutzer kennwort site antwort
+    php_v="$(php -r 'echo PHP_MAJOR_VERSION, ".", PHP_MINOR_VERSION;')"
+    fpm_tt="$("php-fpm$php_v" -tt 2>&1 || true)"
+    pruefe "PHP-FPM liest upload_max_filesize = 100M" grep -q 'php_admin_value\[upload_max_filesize\] = 100M' <<<"$fpm_tt"
+    pruefe "PHP-FPM liest post_max_size = 105M" grep -q 'php_admin_value\[post_max_size\] = 105M' <<<"$fpm_tt"
+
+    # Angekündigte Größe über der Grenze: nginx antwortet, bevor ein Byte kommt.
+    code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 -H 'Host: powermanagement.lan' -H 'Expect:' \
+        -H "Content-Length: $((17 * 1024 * 1024))" -X POST http://127.0.0.1/login 2>/dev/null)" || true
+    pruefe "nginx: 17 MiB an /login → 413 (kam: ${code:-000})" test "${code:-000}" = 413
+    seite="$(curl -s --max-time 10 -H 'Host: powermanagement.lan' -H 'Expect:' \
+        -H "Content-Length: $((106 * 1024 * 1024))" -X POST http://127.0.0.1/standorte/grundriss 2>/dev/null)" || true
+    pruefe "nginx: 106 MiB an /standorte/grundriss → eigene Seite „bis 100 MB“" grep -q 'Grundrisse lassen sich bis 100 MB hochladen' <<<"$seite"
+    code="$(head -c $((100 * 1024 * 1024)) /dev/zero | curl -s -o /dev/null -w '%{http_code}' --max-time 60 -H 'Host: powermanagement.lan' \
+        -H 'Expect:' -H 'Content-Type: application/octet-stream' --data-binary @- http://127.0.0.1/standorte/grundriss 2>/dev/null)" || true
+    pruefe "nginx und PHP: 100 MiB an /standorte/grundriss angenommen (ohne Anmeldung → 302, kam: ${code:-000})" test "${code:-000}" = 302
+    # In Stücken (Transfer-Encoding: chunked) zählt nur die location, in der
+    # nginx den Körper liest – jede Adresse muss ihre eigene Grenze haben.
+    code="$(head -c $((17 * 1024 * 1024)) /dev/zero | curl -s -o /dev/null -w '%{http_code}' --max-time 60 -H 'Host: powermanagement.lan' \
+        -H 'Expect:' -H 'Transfer-Encoding: chunked' -H 'Content-Type: application/octet-stream' --data-binary @- http://127.0.0.1/login 2>/dev/null)" || true
+    pruefe "nginx: 17 MiB in Stücken an /login → 413 (kam: ${code:-000})" test "${code:-000}" = 413
+    seite="$(head -c $((51 * 1024 * 1024)) /dev/zero | curl -s --max-time 60 -H 'Host: powermanagement.lan' -H 'Expect:' \
+        -H 'Transfer-Encoding: chunked' -H 'Content-Type: application/json' --data-binary @- http://127.0.0.1/api/v1/locations/x/vorschlaege 2>/dev/null)" || true
+    pruefe "nginx: 51 MiB in Stücken an /api/ → 413 als JSON" grep -q 'Der Körper ist zu groß' <<<"$seite"
+    code="$(head -c $((100 * 1024 * 1024)) /dev/zero | curl -s -o /dev/null -w '%{http_code}' --max-time 60 -H 'Host: powermanagement.lan' \
+        -H 'Expect:' -H 'Transfer-Encoding: chunked' -H 'Content-Type: application/octet-stream' --data-binary @- http://127.0.0.1/standorte/grundriss 2>/dev/null)" || true
+    pruefe "nginx und PHP: 100 MiB in Stücken an /standorte/grundriss angenommen (→ 302, kam: ${code:-000})" test "${code:-000}" = 302
+
+    [[ "${1:-}" == "hochladen" ]] || return 0
+    benutzer="pruefung-upload-$$"
+    kennwort="Pruefung-$(openssl rand -hex 8)"
+    site="$(cd "$ZIEL" && runuser -u www-data -- php -r '
+        require "src/bootstrap.php";
+        App\Services\BenutzerService::anlegen($argv[1], $argv[2], "admin", false);
+        echo App\Services\SiteService::saveSite(null, ["name" => $argv[1]]);' -- "$benutzer" "$kennwort")"
+    php -r 'require "/src/tests/hilfen/grundriss-dateien.php";
+        pruefPdf("/root/plan-knapp.pdf", 1, 100 * 1024 * 1024 - 2048);
+        pruefPdf("/root/plan-ueber.pdf", 1, 100 * 1024 * 1024 + 1);'
+    jar="$(mktemp)"
+    seite="$(curl -s --max-time 10 -c "$jar" -b "$jar" -H 'Host: powermanagement.lan' http://127.0.0.1/login)" || true
+    token="$(printf '%s' "$seite" | sed -n 's/.*name="_token" value="\([0-9a-f]*\)".*/\1/p' | head -1)"
+    curl -s -o /dev/null --max-time 10 -c "$jar" -b "$jar" -H 'Host: powermanagement.lan' --data-urlencode "_token=$token" \
+        --data-urlencode "username=$benutzer" --data-urlencode "password=$kennwort" http://127.0.0.1/login || true
+    seite="$(curl -s --max-time 10 -c "$jar" -b "$jar" -H 'Host: powermanagement.lan' http://127.0.0.1/standorte)" || true
+    pruefe "Formular nennt 100 MB (data-max-bytes)" grep -q 'data-max-bytes="104857600"' <<<"$seite"
+    token="$(printf '%s' "$seite" | sed -n 's/.*name="_token" value="\([0-9a-f]*\)".*/\1/p' | head -1)"
+    for datei in knapp ueber; do
+        curl -s -o /dev/null --max-time 300 -c "$jar" -b "$jar" -H 'Host: powermanagement.lan' -H 'Expect:' \
+            -F "_token=$token" -F "site_id=$site" -F neue_etagen=1 -F "plan=@/root/plan-$datei.pdf;type=application/pdf" \
+            http://127.0.0.1/standorte/grundriss || true
+        antwort="$(curl -s --max-time 10 -c "$jar" -b "$jar" -H 'Host: powermanagement.lan' http://127.0.0.1/standorte)" || true
+        if [[ "$datei" == knapp ]]; then
+            pruefe "knapp 100 MiB über nginx und PHP-FPM hochgeladen" grep -q 'Grundriss hinterlegt' <<<"$antwort"
+        else
+            pruefe "100 MiB + 1 Byte: abgelehnt mit der Grenze von PHP" grep -q 'größer, als der Server annimmt (höchstens 100 MB)' <<<"$antwort"
+        fi
+    done
+    rm -f "$jar" /root/plan-knapp.pdf /root/plan-ueber.pdf
+    (cd "$ZIEL" && runuser -u www-data -- php -r '
+        require "src/bootstrap.php";
+        App\Services\SiteService::deleteSite((int) $argv[2]);
+        App\Services\BenutzerService::loeschen((int) App\Support\Database::scalar("SELECT id FROM users WHERE username = ?", [$argv[1]]));' \
+        -- "$benutzer" "$site") || true
 }
 
 # ------------------------------------------------------------ Grundsystem
@@ -257,6 +334,17 @@ abschluss "zweiter Lauf"
 
 # ------------------------------------------------------------ 3
 schritt "3 · Update auf einen neuen Stand mit neuem Ordner in storage/"
+# Wie eine Installation von vor den 100 MB: Pool und Site mit den alten
+# Grenzen, die Site so gemerkt, als hätte das Skript sie damals geliefert –
+# das Update muss beides auf die neuen Werte bringen.
+POOL_DATEI="$(find /etc/php -path '*/fpm/pool.d/powermanagement.conf' | head -1)"
+SITE_DATEI=/etc/nginx/sites-available/powermanagement
+sed -i -e 's/upload_max_filesize\] = 100M/upload_max_filesize] = 64M/' -e 's/post_max_size\] = 105M/post_max_size] = 66M/' "$POOL_DATEI"
+sed -i 's/client_max_body_size 105m;/client_max_body_size 64m;/' "$SITE_DATEI"
+cp "$SITE_DATEI" "/var/lib/powermanagement/vorlagen/$(printf '%s' "$SITE_DATEI" | tr '/' '_')"
+systemctl restart "$(systemctl list-unit-files 'php*-fpm.service' --no-legend | awk '{print $1}' | sort -V | tail -1)"
+systemctl reload nginx
+pruefe "vorher: Pool mit den alten Grenzen" grep -q 'upload_max_filesize\] = 64M' "$POOL_DATEI"
 mkdir -p "$QUELLE/storage/pruefung-update"
 : > "$QUELLE/storage/pruefung-update/.gitkeep"
 printf '\n' >> "$QUELLE/README.md"
@@ -274,7 +362,9 @@ ok "deploy/update-debian.sh läuft durch"
 pruefe "auf dem neuen Stand" test "$(git -C "$ZIEL" rev-parse HEAD)" = "$NEU"
 pruefe "neuer Ordner in storage/ gehört www-data" \
     test "$(stat -c %U:%G "$ZIEL/storage/pruefung-update" 2>/dev/null)" = "www-data:www-data"
+pruefe "Update: nginx-Site wieder mit 105m für Grundrisse" grep -q 'client_max_body_size 105m;' "$SITE_DATEI"
 pruefe_installation
+pruefe_grenzen hochladen
 
 if ! "$ZIEL/deploy/update-debian.sh" > "$LAUF" 2>&1; then
     cat "$LAUF"

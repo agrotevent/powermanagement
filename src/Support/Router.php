@@ -152,6 +152,25 @@ final class Router
                 return;
             }
 
+            /*
+             * Größer als post_max_size: PHP verwirft dann den ganzen Körper,
+             * das Token mit. Ohne diese Prüfung hieße es unten „Sicherheits-
+             * token abgelaufen“, obwohl nur die Datei zu groß war. Geändert
+             * wird hier nichts – es gibt ja nichts, was geändert würde.
+             */
+            $verworfen = $request->koerperVerworfen();
+            if ($verworfen !== null) {
+                $satz = sprintf('Die Anfrage war mit %s größer, als der Server annimmt (post_max_size %s) – nichts übernommen.',
+                    \App\Services\SiteService::mb($verworfen, true), (string) ini_get('post_max_size'));
+                if (self::willJson()) {
+                    Response::json(['ok' => false, 'message' => $satz], 413);
+                    return;
+                }
+                Flash::error($satz);
+                Response::redirect(Response::zurueckZiel('/'));
+                return;
+            }
+
             // Das Token nur aus dem Formular – nie aus der Adresse, wo es in
             // Protokollen, im Verlauf und im Referer landen würde.
             $token = $_POST['_token'] ?? null;

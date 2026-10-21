@@ -21,6 +21,7 @@ use App\Services\MesspunktService;
 use App\Services\PlanGeoService;
 use App\Services\SchutzService;
 use App\Services\SiteService;
+use App\Support\Anfragezeit;
 use App\Support\Config;
 use App\Support\Database;
 use App\Support\Programm;
@@ -124,7 +125,7 @@ try {
         'anzahl' => 2, 'modell' => 'HK-A3', 'punkte' => '[[70,10],[72,12]]', 'farbe' => '', 'notizen' => '', 'created_at' => gmdate('c'), 'updated_at' => gmdate('c')]);
 
     $hoch = LocationSync::locationHochladen($siteId, 'pruefung');
-    pruefe($hoch['ok'], 'hochgeladen: ' . $hoch['message']);
+    pruefe($hoch['ok'] && !str_contains($hoch['message'], 'Hinweis: Der Grundriss'), 'hochgeladen (kleiner Plan, ohne Hinweis zur Größe): ' . $hoch['message']);
     $strom = json_decode($sh('git --git-dir=' . escapeshellarg($fern) . ' show main:locations/lager/strom.json'), true);
     gleich($strom['format'] ?? null, 2, 'strom.json im Format 2');
     $namen = array_column($strom['anlagen'] ?? [], 'name');
@@ -417,6 +418,71 @@ try {
     pruefe(!in_array($frei, ['lager', (string) $kopieSite['sync_key']], true) && str_starts_with($frei, 'lager-'), 'freier Schlüssel neben vergebenen: ' . $frei);
     pruefe(strlen(LocationBundle::freierSchluessel('sites', str_repeat('Lager ', 20))) <= 64, 'freier Schlüssel höchstens 64 Zeichen');
     gleich(LocationBundle::freierSchluessel('floors', $marke . ' x', [$marke . '-x']), $marke . '-x-2', 'gerade vergebene Schlüssel zählen mit');
+
+    // Größen der Plandateien, die mit hochgehen (dünn belegte Dateien)
+    $fuenfzig = $tmp . '/fuenfzig.pdf';
+    $hundert = $tmp . '/hundert.pdf';
+    $klein = $tmp . '/klein.pdf';
+    foreach ([[$fuenfzig, LocationSync::GIT_DATEI_WARNUNG + 1], [$hundert, LocationSync::GIT_DATEI_HOECHSTENS + 1], [$klein, 1024]] as [$p, $n]) {
+        $f = fopen($p, 'wb');
+        ftruncate($f, $n);
+        fclose($f);
+    }
+    $daten = ['etagen' => [['schluessel' => 'halle', 'name' => 'Halle', 'plan' => ['datei' => 'plaene/halle.pdf']],
+        ['schluessel' => 'aussen', 'name' => 'Außen', 'plan' => ['datei' => 'plaene/aussen.pdf']]]];
+    $g = LocationSync::planGroessen(['plaene/halle.pdf' => $klein, 'plaene/aussen.pdf' => $klein], $daten);
+    gleich($g, ['fehler' => '', 'hinweis' => ''], 'Git: kleine Pläne ohne Hinweis');
+    $g = LocationSync::planGroessen(['plaene/halle.pdf' => $fuenfzig, 'plaene/aussen.pdf' => $klein], $daten);
+    pruefe($g['fehler'] === '' && str_contains($g['hinweis'], '„Halle“ (50,1 MB)') && str_contains($g['hinweis'], 'GitHub warnt'), 'Git: über 50 MB ein Hinweis – ' . $g['hinweis']);
+    $g = LocationSync::planGroessen(['plaene/halle.pdf' => $fuenfzig, 'plaene/aussen.pdf' => $hundert], $daten);
+    pruefe(str_contains($g['fehler'], '„Außen“ ist 100,1 MB groß – GitHub nimmt keine Datei über 100 MB an') && str_contains($g['fehler'], 'Nichts hochgeladen'),
+        'Git: über 100 MB ein Fehler vor dem Hochladen – ' . $g['fehler']);
+
+    // Größe der Pläne fürs Repository: über 100 MB nimmt GitHub keine Datei an –
+    // das wird vorher gesagt, und nichts geht hinaus; über 50 MB ein Hinweis.
+    // Die Datei ist dünn belegt (ein Loch statt Nullen auf der Platte).
+    $aussen = (int) Database::scalar('SELECT id FROM floors WHERE site_id = ? AND name = ?', [$siteId, 'Außenfläche']);
+    $grossName = 'pruefung-' . bin2hex(random_bytes(4)) . '.pdf';
+    $grossPfad = SiteService::planDir() . '/' . $grossName;
+    $griff = fopen($grossPfad, 'wb');
+    fwrite($griff, "%PDF-1.4\n");
+    ftruncate($griff, LocationSync::GIT_DATEI_HOECHSTENS + 1);
+    fclose($griff);
+    Database::update('floors', $aussen, ['plan_file' => $grossName, 'plan_type' => 'pdf', 'plan_page' => 1, 'plan_original_name' => 'aussen.pdf', 'plan_uploaded_at' => gmdate('c')]);
+    $dortVorher = LocationSync::fernerStand();
+    $hoch = LocationSync::locationHochladen($siteId, 'pruefung');
+    pruefe(!$hoch['ok'] && str_contains($hoch['message'], '„Außenfläche“ ist 100,1 MB groß – GitHub nimmt keine Datei über 100 MB an')
+        && LocationSync::fernerStand() === $dortVorher, 'Plan über 100 MB: vorher abgelehnt, nichts hochgeladen – ' . $hoch['message']);
+    $griff = fopen($grossPfad, 'r+');
+    ftruncate($griff, LocationSync::GIT_DATEI_WARNUNG + 1);
+    fclose($griff);
+    $hoch = LocationSync::locationHochladen($siteId, 'pruefung');
+    $loc = json_decode($sh('git --git-dir=' . escapeshellarg($fern) . ' show main:locations/lager/location.json'), true);
+    $planDort = (string) (array_column((array) ($loc['etagen'] ?? []), 'plan', 'name')['Außenfläche']['datei'] ?? '');
+    $groesseDort = $planDort !== '' ? (int) $sh('git --git-dir=' . escapeshellarg($fern) . ' cat-file -s ' . escapeshellarg('main:locations/lager/' . $planDort)) : 0;
+    pruefe($hoch['ok'] && str_contains($hoch['message'], 'Hinweis: Der Grundriss von „Außenfläche“ (50,1 MB) ist größer als 50 MB.')
+        && $groesseDort === LocationSync::GIT_DATEI_WARNUNG + 1, 'Plan über 50 MB: hochgeladen, mit Hinweis – ' . $hoch['message']);
+
+    // Die Frist der ganzen Anfrage (Anfragezeit): Jeder Git-Aufruf darf bis zu
+    // 280 s, Hochladen holt aber erst und schiebt dann – zusammen über dem,
+    // was nginx wartet (300 s). In der Oberfläche zählt deshalb die Zeit seit
+    // Beginn der Anfrage; ist sie um, scheitert es mit Meldung statt mit 504.
+    Anfragezeit::$beginn = microtime(true) - (Anfragezeit::SEKUNDEN - 20);
+    $knapp = Anfragezeit::hoechstens(280.0);
+    Anfragezeit::$beginn = null;
+    pruefe($knapp > 18 && $knapp <= 20 && Anfragezeit::hoechstens(280.0) === 280.0, sprintf('Frist: 20 s vor Schluss bekommt git noch %.1f s statt 280, auf der Kommandozeile 280', $knapp));
+    $dortVorher = LocationSync::fernerStand();
+    Database::update('floors', $aussen, ['notes' => 'nach der Frist']);
+    Anfragezeit::$beginn = microtime(true) - Anfragezeit::SEKUNDEN;
+    try {
+        $hoch = LocationSync::locationHochladen($siteId, 'pruefung');
+        $holen = LocationSync::uebernehmen('lager');
+    } finally {
+        Anfragezeit::$beginn = null;
+    }
+    pruefe(!$hoch['ok'] && str_contains($hoch['message'], 'länger, als eine Anfrage hier dauern darf (zusammen höchstens 285 Sekunden')
+        && LocationSync::fernerStand() === $dortVorher, 'Frist der Anfrage um: Hochladen meldet es, nichts hochgeladen – ' . $hoch['message']);
+    pruefe(!$holen['ok'] && str_contains($holen['message'], 'bin/power location:uebernehmen'), 'Frist der Anfrage um: Übernehmen meldet es, mit dem Weg über die Kommandozeile');
 
     // ------------------------------------------------ Tanks und Kraftstoffschläuche über die Schnittstelle
     // Ein fester Tank (Bodentank) ist feste Infrastruktur wie über Git: Er geht

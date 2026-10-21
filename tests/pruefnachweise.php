@@ -460,7 +460,7 @@ try {
     $port = freierPort();
     $serverFehler = (string) tempnam(sys_get_temp_dir(), 'pm-pn-fehler-');
     $dosen[] = $serverFehler;
-    // Größere Uploads als die Vorgabe des eingebauten Servers (2 MB) – wie unter FPM (64 MB).
+    // Größere Uploads als die Vorgabe des eingebauten Servers (2 MB) – wie unter FPM (100 MB).
     hintergrund([PHP_BINARY, '-d', 'upload_max_filesize=16M', '-d', 'post_max_size=20M', '-S', '127.0.0.1:' . $port, '-t', dirname(__DIR__) . '/public'],
         ['PHP_CLI_SERVER_WORKERS' => '4'], $serverFehler);
     for ($i = 0; $i < 50 && !erreichbar('127.0.0.1', $port); $i++) {
@@ -479,6 +479,10 @@ try {
         && str_contains($seite['text'], 'id="nachweis-' . $n1 . '"') && str_contains($seite['text'], 'sieht der Kunde') && !str_contains($seite['text'], 'onclick='),
         'Reiter Prüfnachweise: Liste, Formular zum Hinterlegen');
     pruefe(str_contains($seite['text'], 'Prüfnachweise (2)'), 'Reiter mit der Zahl, die der Kunde sieht');
+    // Die Grenze prüft schon der Browser (app.js, data-max-bytes): Über 16 MB
+    // käme sonst nicht die Meldung der App, sondern die 413-Seite von nginx.
+    pruefe(preg_match('#<input id="nn-datei" type="file" name="datei"[^>]*\sdata-max-bytes="' . Pruefnachweise::MAX_BYTES . '" data-max-text="10 MB">#', $seite['text']) === 1,
+        'Dateifeld mit der Grenze für den Browser (10 MB)');
     $token = csrfAus($seite['text']);
     $zahl = static fn (): int => (int) Database::scalar('SELECT COUNT(*) FROM pruefnachweise WHERE kunde_id = ?', [$k1]);
     $vorher = $zahl();

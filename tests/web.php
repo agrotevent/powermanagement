@@ -12,6 +12,7 @@ declare(strict_types=1);
  */
 
 require __DIR__ . '/hilfen/pruefung.php';
+require __DIR__ . '/hilfen/grundriss-dateien.php';
 
 use App\Berichte\BerichtService;
 use App\Berichte\Einstellungen;
@@ -29,7 +30,10 @@ $port = freierPort();
 // Ohne app.debug zeigt der Server PHP-Meldungen nicht in der Seite, er schreibt
 // sie auf die Standardfehlerausgabe – die landet hier und wird mitgeprüft.
 $serverFehler = (string) tempnam(sys_get_temp_dir(), 'pm-web-fehler-');
-hintergrund(['php', '-S', '127.0.0.1:' . $port, '-t', dirname(__DIR__) . '/public'], ['PHP_CLI_SERVER_WORKERS' => '4'], $serverFehler);
+// Grenzen wie im PHP-FPM-Pool (deploy/php-fpm-pool.conf) – sonst nähme der
+// eingebaute Server nur 2 MB an, und der Grundriss-Upload wäre nicht prüfbar.
+hintergrund(['php', '-d', 'upload_max_filesize=100M', '-d', 'post_max_size=105M', '-d', 'memory_limit=512M',
+    '-S', '127.0.0.1:' . $port, '-t', dirname(__DIR__) . '/public'], ['PHP_CLI_SERVER_WORKERS' => '4'], $serverFehler);
 for ($i = 0; $i < 50 && !erreichbar('127.0.0.1', $port); $i++) {
     usleep(100_000);
 }
@@ -893,6 +897,59 @@ try {
     gleich($r['status'], 401, 'Livewerte ohne Anmeldung → 401');
     $r = aufruf($basis, $leer, 'POST', '/stecker/speichern', ['name' => $kennung], ['X-Requested-With: XMLHttpRequest']);
     pruefe($r['status'] === 302 && str_starts_with((string) $r['ziel'], '/login'), 'nur X-Requested-With → wie bisher Weiterleitung');
+
+    // ---------------------------------------------------- Grundriss bis 100 MB
+    serverMeldungen($serverFehler);
+    $seite = aufruf($basis, $admin['dose'], 'GET', '/standorte');
+    pruefe(str_contains($seite['text'], 'bis 100 MB)') && str_contains($seite['text'], 'data-max-bytes="104857600" data-max-text="100 MB"')
+        && str_contains($seite['text'], 'data-laeuft="wird hochgeladen …"'),
+        'Standorte: das Formular nennt 100 MB, gibt dem Browser die Grenze (data-max-bytes) und zeigt, dass es läuft');
+    $node = trim((string) shell_exec('command -v node 2>/dev/null'));
+    if ($node !== '') {
+        $js = json_decode((string) shell_exec(escapeshellarg($node) . ' ' . escapeshellarg(__DIR__ . '/hilfen/datei-grenze.cjs') . ' '
+            . escapeshellarg(dirname(__DIR__) . '/public/assets/js/app.js') . ' 104857600 ' . escapeshellarg('100 MB')), true) ?: [];
+        pruefe(($js['anfang']['versteckt'] ?? null) === true && ($js['anfang']['rolle'] ?? null) === 'alert' && ($js['genau']['gueltigkeit'] ?? null) === ''
+            && ($js['genau']['versteckt'] ?? null) === true,
+            'Browser (app.js): genau 100 MiB geht durch, ohne Meldung');
+        pruefe(($js['ueber']['gueltigkeit'] ?? '') === ($js['ueber']['meldung'] ?? null) && ($js['ueber']['versteckt'] ?? null) === false
+            && str_contains((string) ($js['ueber']['meldung'] ?? ''), '„Hallenplan.pdf“ ist 100,1 MB groß – hochladen lassen sich höchstens 100 MB.')
+            && str_contains((string) ($js['viel']['meldung'] ?? ''), 'ist 250 MB groß'),
+            'Browser (app.js): ein Byte zu viel hält das Formular an, bevor hochgeladen wird – ' . (string) ($js['ueber']['meldung'] ?? '?'));
+    }
+    aufruf($basis, $admin['dose'], 'POST', '/standorte/speichern', ['_token' => $admin['token'], 'name' => $kennung . ' Grundriss']);
+    $gSite = (int) Database::scalar('SELECT id FROM sites WHERE name = ?', [$kennung . ' Grundriss']);
+    $gDatei = sys_get_temp_dir() . '/' . $kennung . '-plan.pdf';
+    $gFelder = ['_token' => $admin['token'], 'site_id' => (string) $gSite, 'neue_etagen' => '1'];
+    $gMeldung = static function () use ($basis, $admin): string {
+        preg_match_all('/class="flash[^"]*"[^>]*>(.*?)<\/div>/s', aufruf($basis, $admin['dose'], 'GET', '/standorte')['text'], $m);
+        return trim(html_entity_decode(strip_tags(implode(' | ', $m[1]))));
+    };
+    try {
+        pruefPdf($gDatei, 1, 100 * 1024 * 1024 - 2048);
+        $r = pruefHochladen($basis, $admin['dose'], '/standorte/grundriss', $gFelder, $gDatei, 'hallenplan.pdf', 'application/pdf');
+        $meldung = $gMeldung();
+        $gEtagen = Database::select('SELECT * FROM floors WHERE site_id = ?', [$gSite]);
+        $gPfad = $gEtagen !== [] ? \App\Services\SiteService::planPath($gEtagen[0]) : null;
+        pruefe($r['status'] === 302 && $r['ziel'] === '/standorte' && str_contains($meldung, 'Grundriss hinterlegt') && $gPfad !== null
+            && filesize($gPfad) === filesize($gDatei), 'knapp 100 MiB über den Server: angenommen und abgelegt – ' . $meldung);
+        pruefPdf($gDatei, 1, 100 * 1024 * 1024 + 1);
+        $r = pruefHochladen($basis, $admin['dose'], '/standorte/grundriss', $gFelder, $gDatei, 'hallenplan.pdf', 'application/pdf');
+        $meldung = $gMeldung();
+        pruefe($r['status'] === 302 && str_contains($meldung, 'größer, als der Server annimmt (höchstens 100 MB)')
+            && (int) Database::scalar('SELECT COUNT(*) FROM floors WHERE site_id = ?', [$gSite]) === 1,
+            'ein Byte über 100 MiB: abgelehnt, mit der Grenze, nichts angelegt – ' . $meldung);
+        // Über post_max_size verwirft PHP den ganzen Körper, das Token mit –
+        // gemeldet wird die Größe, nicht ein abgelaufenes Token.
+        pruefPdf($gDatei, 1, 106 * 1024 * 1024);
+        $r = pruefHochladen($basis, $admin['dose'], '/standorte/grundriss', $gFelder, $gDatei, 'hallenplan.pdf', 'application/pdf');
+        $meldung = $gMeldung();
+        pruefe($r['status'] === 302 && preg_match('/Die Anfrage war mit 106,\d MB größer, als der Server annimmt \(post_max_size 105M\)/u', $meldung) === 1
+            && !str_contains($meldung, 'Sicherheitstoken'), 'über post_max_size: die Größe gemeldet, nicht das Token – ' . $meldung);
+        $meldungen = serverMeldungen($serverFehler);
+        pruefe(count($meldungen) === 1 && str_contains($meldungen[0], 'POST Content-Length of'), 'dabei nur die Warnung von PHP selbst: ' . implode(' | ', $meldungen));
+    } finally {
+        @unlink($gDatei);
+    }
 
     // ---------------------------------------------------- Schnittstelle (API)
     alsBenutzer($benutzer['admin']);
