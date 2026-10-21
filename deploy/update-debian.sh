@@ -77,6 +77,8 @@ GESAMT=12
 # Ergebnis der eigenen MQTT-Zugänge; update/: Aufträge an den Update-Dienst
 # (soll) und dessen Rückmeldungen (ist).
 APP_ORDNER=(logs plans demo cache inventar sessions backups mqtt mqtt/soll mqtt/ist update update/soll update/ist)
+# So lange wartet wartung_an höchstens auf Änderungen, die vor der Schreibsperre begannen.
+ANFRAGEN_WARTEN=150
 # Gründe, die einen Stand als gescheitert vermerken (ein Signal ist kein Urteil über den Commit)
 GESCHEITERT_GRUENDE=" checkout neue_fassung migration pakete einrichtung nginx dienste pruefung zeitueberschreitung "
 
@@ -698,7 +700,18 @@ marke_uebernehmen() {
 # Solange storage/update/ist/wartung steht, nimmt die Oberfläche keine
 # Änderungen an – was zwischen Sicherung und Zurückrollen geschrieben würde,
 # ginge sonst verloren (N10).
+#
+# Was vor der Sperre hereinkam, darf vor der Sicherung zu Ende schreiben:
+# Jede schreibende Anfrage hält storage/update/.anfragen geteilt gesperrt,
+# solange sie läuft – angemeldet, bevor sie nach der Sperre fragt
+# (UpdateService::anfrageAnmelden()). Exklusiv bekommt die Datei hier also
+# erst, wer keine solche Anfrage mehr neben sich hat. Ein fester Abstand
+# reichte nicht: eine Übernahme von einer anderen Instanz oder aus git, ein
+# PDF-Grundriss oder ein MQTT-Zugang warten bis zu zwei Minuten, bevor sie
+# schreiben. Länger wird nicht gewartet – wer erst danach schreibt, fragt die
+# Sperre vorher noch einmal (LocationUebertrag::anwenden()).
 wartung_an() {
+    local rc=0 anfragen="$ZIEL/storage/update/.anfragen"
     if ! as_app test -d "$ZIEL/storage/update/ist"; then
         hinweis "storage/update/ist fehlt – die Oberfläche bleibt während dieses Updates beschreibbar (wird jetzt eingerichtet)."
         return 0
@@ -706,7 +719,22 @@ wartung_an() {
     printf '# powermanagement update-wartung 1\nseit %s\nkennung %s\n' "$(date +%s)" "$KENNUNG" \
         | als_app_schreiben "$ZIEL/storage/update/ist/wartung"
     echo "    Schreibsperre der Oberfläche an"
-    sleep 2   # laufende Anfragen enden lassen
+    # 75: belegt bzw. Zeit um; jeder andere Fehler: die Datei geht nicht auf.
+    as_app flock -E 75 -n -x "$anfragen" true 2>/dev/null || rc=$?
+    if [[ "$rc" == 75 ]]; then
+        echo "    Warte auf laufende Änderungen (höchstens ${ANFRAGEN_WARTEN} s) …"
+        rc=0
+        as_app flock -E 75 -w "$ANFRAGEN_WARTEN" -x "$anfragen" true 2>/dev/null || rc=$?
+        case "$rc" in
+            0) echo "    Laufende Änderungen sind fertig" ;;
+            75) hinweis "Nach ${ANFRAGEN_WARTEN} s laufen noch Anfragen – was sie jetzt noch schreiben, kann ein Zurückrollen verwerfen." ;;
+        esac
+    fi
+    case "$rc" in
+        0|75) ;;
+        *) sleep 2 ;;   # ohne Anmeldedatei: laufende Anfragen enden lassen wie früher
+    esac
+    return 0
 }
 wartung_aus() {
     if as_app test -e "$ZIEL/storage/update/ist/wartung" 2>/dev/null; then

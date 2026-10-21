@@ -31,6 +31,9 @@ require __DIR__ . '/hilfen/pruefung.php';
 use App\Auth\ApiZugang;
 use App\Auth\Auth;
 use App\Services\BenutzerService;
+use App\Services\LocationBundle;
+use App\Services\LocationUebertrag;
+use App\Services\PartnerService;
 use App\Services\UpdateAutomatik;
 use App\Services\UpdateService;
 use App\Support\Config;
@@ -1389,6 +1392,198 @@ stream_wrapper_register("langsam", LangsamAttrappe::class);
     pruefe($r['status'] !== 503 && $r['status'] >= 400 && $r['status'] < 500, 'Schnittstelle ohne Schreibsperre: wieder die gewöhnliche Antwort (' . $r['status'] . ')');
     Database::execute('DELETE FROM api_tokens WHERE id = ?', [$apiId]);
     $automatikZurueck();
+
+    // ------------------------------------------------------------ was vor der Schreibsperre hereinkam
+    // Schreibende Anfragen melden sich an, bevor sie nach der Sperre fragen
+    // (UpdateService::anfrageAnmelden(): storage/update/.anfragen geteilt),
+    // und update-debian.sh wartet nach dem Setzen der Sperre, bis keine mehr
+    // läuft – höchstens ANFRAGEN_WARTEN Sekunden (wartung_an: die Funktion
+    // aus dem Skript, nur as_app und Co. als Attrappe). Eine Übernahme von
+    // einer anderen Instanz wartet dort oft länger (je Plandatei bis 180 s):
+    // Sie fragt die Sperre unmittelbar vor dem Schreiben noch einmal
+    // (LocationUebertrag::anwenden()) und übernimmt nichts – sonst schriebe
+    // sie nach der Sicherung, meldete „übernommen“, und ein Zurückrollen
+    // verwürfe es still (die Grundrisse blieben verwaist in storage/plans).
+    $anfragen = $upd . '/' . UpdateService::ANFRAGEN;
+    $belegt = static function () use ($anfragen): bool {
+        exec('flock -E 75 -n -x ' . escapeshellarg($anfragen) . ' true 2>/dev/null', $aus, $rc);
+        return $rc === 75;
+    };
+    UpdateService::anfrageAnmelden();
+    pruefe($belegt(), 'Anmeldung: eine schreibende Anfrage hält storage/update/.anfragen geteilt');
+    UpdateService::anfrageAbmelden();
+    pruefe(!$belegt(), 'Anmeldung: abgemeldet ist die Datei frei');
+    // Ein Kindprozess der Anfrage (git, pdftoppm) erbt die Anmeldung nicht: Endet die Anfrage, ist die Datei frei.
+    inB($ordner . '/config.php', '\\App\\Services\\UpdateService::anfrageAnmelden(); exec("sleep 3 > /dev/null 2>&1 &"); return true;');
+    pruefe(!$belegt(), 'Anmeldung: endet die Anfrage, ist die Datei frei – auch wenn ein Kindprozess weiterläuft');
+
+    // anwenden() selbst: während der Sperre nichts, ohne sie die Gegenprobe
+    $unmittelbar = ['format' => LocationBundle::FORMAT_LOCATION, 'art' => 'location', 'schluessel' => $kennung . '-unmittelbar',
+        'name' => $kennung . ' unmittelbar', 'etagen' => [['schluessel' => 'eg', 'name' => 'Erdgeschoss', 'plan' => null]]];
+    $unmittelbarAnwenden = static fn (): array => LocationUebertrag::anwenden(null, $unmittelbar, null, ['eg' => 0], static fn (string $p): ?string => null,
+        ['teile' => ['grundriss'], 'neue_etagen' => true]);
+    $standorte = static fn (string $name): int => (int) Database::scalar('SELECT COUNT(*) FROM sites WHERE name = ?', [$name]);
+    $schreiben('wartung', UpdateService::KOPF_WARTUNG . "\nseit " . time() . "\nkennung -\n");
+    $r = $unmittelbarAnwenden();
+    pruefe($r['ok'] === false && ($r['wartung'] ?? false) === true && $r['message'] === UpdateService::NICHTS_UEBERNOMMEN
+        && $standorte($unmittelbar['name']) === 0, 'anwenden() während der Schreibsperre: nichts übernommen, mit „wartung“ (' . $r['message'] . ')');
+    $schreiben('wartung', null);
+    $r = $unmittelbarAnwenden();
+    pruefe($r['ok'] === true && $standorte($unmittelbar['name']) === 1, 'anwenden() ohne Schreibsperre: übernommen (Gegenprobe) – ' . $r['message']);
+
+    // wartung_an aus deploy/update-debian.sh
+    $skriptZiel = $ordner . '/ziel';
+    mkdir($skriptZiel . '/storage', 0750, true);
+    symlink($upd, $skriptZiel . '/storage/update');
+    file_put_contents($ordner . '/wartung-an.sh', <<<'SH'
+        set -Eeuo pipefail
+        ZIEL="$1"; ANFRAGEN_WARTEN="$2"; KENNUNG=-
+        hinweis() { printf 'HINWEIS %s\n' "$1"; }
+        as_app() { (cd "$ZIEL" && "$@"); }
+        als_app_schreiben() { cat > "$1"; }
+        eval "$(sed -n '/^wartung_an() {$/,/^}$/p' "$3")"
+        declare -F wartung_an > /dev/null || { echo 'wartung_an fehlt in update-debian.sh'; exit 9; }
+        wartung_an
+        SH);
+    $wartungAnStarten = static function (int $warten) use ($ordner, $skriptZiel, $wurzel): array {
+        $aus = $ordner . '/wartung-an.aus';
+        @unlink($aus);
+        $p = proc_open(['bash', $ordner . '/wartung-an.sh', $skriptZiel, (string) $warten, $wurzel . '/deploy/update-debian.sh'],
+            [0 => ['file', '/dev/null', 'r'], 1 => ['file', $aus, 'w'], 2 => ['file', $aus, 'a']], $rohre);
+        return ['p' => $p, 'aus' => $aus];
+    };
+    $wartungAnEnde = static function (array $w): ?int {
+        $s = proc_get_status($w['p']);
+        if ($s['running']) {
+            return null;
+        }
+        proc_close($w['p']);
+        return (int) $s['exitcode'];
+    };
+    $start = microtime(true);
+    $w = $wartungAnStarten(150);
+    while (($rc = $wartungAnEnde($w)) === null && microtime(true) - $start < 20) {
+        usleep(20_000);
+    }
+    $dauer = microtime(true) - $start;
+    $aus = (string) @file_get_contents($w['aus']);
+    UpdateService::vergessen();
+    pruefe($rc === 0 && str_contains($aus, 'Schreibsperre der Oberfläche an') && UpdateService::wartungAktiv(), 'wartung_an: Schreibsperre an – ' . trim($aus));
+    pruefe($dauer < 1.5 && !str_contains($aus, 'Warte'), sprintf('wartung_an: ohne laufende Änderung kein Warten (%.1f s)', $dauer));
+    $schreiben('wartung', null);
+
+    // Eine andere Instanz hinter einer langsamen Leitung (wie in tests/sitzung.php)
+    $partnerVerzoegerung = $ordner . '/partner-verzoegerung';
+    file_put_contents($partnerVerzoegerung, '0');
+    $partnerToken = 'mtma_' . bin2hex(random_bytes(20));
+    $partnerLocation = 'Träge Halle ' . $kennung;
+    $partnerPlan = $wurzel . '/tests/hilfen/location-lager/plaene/grundriss.svg';
+    file_put_contents($ordner . '/partner.php', '<?php
+usleep((int) ((float) @file_get_contents(' . var_export($partnerVerzoegerung, true) . ') * 1000000));
+header("Content-Type: application/json");
+if (($_SERVER["HTTP_AUTHORIZATION"] ?? "") !== ' . var_export('Bearer ' . $partnerToken, true) . ') {
+    http_response_code(401);
+    echo json_encode(["ok" => false, "message" => "Token falsch"]);
+    return;
+}
+$pfad = parse_url((string) $_SERVER["REQUEST_URI"], PHP_URL_PATH);
+if ($pfad === "/api/v1/locations/traege-halle/datei" && ($_GET["pfad"] ?? "") === "plaene/eg.svg") {
+    header("Content-Type: image/svg+xml");
+    readfile(' . var_export($partnerPlan, true) . ');
+    return;
+}
+$antwort = match ($pfad) {
+    "/api/v1/info"      => ["ok" => true, "instanz" => "Träge Gegenseite", "produkt" => "powermanagement", "token" => ["befugnisse" => ["plaene.lesen"]]],
+    "/api/v1/locations" => ["ok" => true, "locations" => [["schluessel" => "traege-halle", "name" => ' . var_export($partnerLocation, true) . ', "stand" => "1a2b",
+        "etagen" => [["schluessel" => "eg", "name" => "Erdgeschoss", "plan" => true]]]]],
+    "/api/v1/locations/traege-halle" => ["ok" => true, "stand" => "1a2b", "location" => ["format" => 1, "art" => "location",
+        "schluessel" => "traege-halle", "name" => ' . var_export($partnerLocation, true) . ', "adresse" => "", "notizen" => "",
+        "etagen" => [["schluessel" => "eg", "name" => "Erdgeschoss", "ebene" => 0, "reihenfolge" => 0, "massstab" => "", "notizen" => "",
+            "plan" => ["datei" => "plaene/eg.svg", "typ" => "image", "seite" => 1, "originalname" => "eg.svg", "sha256" => ' . var_export(hash_file('sha256', $partnerPlan), true) . ']]]]],
+    default             => null,
+};
+if ($antwort === null) {
+    http_response_code(404);
+    $antwort = ["ok" => false, "message" => "Gibt es hier nicht."];
+}
+echo json_encode($antwort, JSON_UNESCAPED_UNICODE);
+');
+    $partnerPort = freierPort();
+    hintergrund(['php', '-S', '127.0.0.1:' . $partnerPort, $ordner . '/partner.php'], ['PHP_CLI_SERVER_WORKERS' => '4']);
+    for ($i = 0; $i < 50 && !erreichbar('127.0.0.1', $partnerPort); $i++) {
+        usleep(100_000);
+    }
+    $angelegt = PartnerService::anlegen('Träge Gegenseite ' . $kennung, 'http://127.0.0.1:' . $partnerPort, $partnerToken);
+    pruefe(($angelegt['ok'] ?? false) === true, 'andere Instanz eingetragen – ' . (string) ($angelegt['message'] ?? ''));
+    $partnerId = (int) ($angelegt['id'] ?? 0);
+
+    /** POST $pfad; nach $nach Sekunden wartung_an mit $warten – Zeiten ab dem Start des POST. */
+    $waehrendWartungAn = static function (string $pfad, array $felder, float $nach, int $warten) use ($port, $a, $belegt, $wartungAnStarten, $wartungAnEnde): array {
+        $mehr = curl_multi_init();
+        $h = curl_init('http://127.0.0.1:' . $port . $pfad);
+        curl_setopt_array($h, [CURLOPT_RETURNTRANSFER => true, CURLOPT_COOKIEFILE => $a['dose'], CURLOPT_TIMEOUT => 60, CURLOPT_POST => true,
+            CURLOPT_POSTFIELDS => http_build_query(['_token' => $a['token']] + $felder)]);
+        curl_multi_add_handle($mehr, $h);
+        $start = microtime(true);
+        $w = null;
+        $erg = ['post' => null, 'skript_start' => null, 'skript' => null, 'rc' => null, 'belegt' => null];
+        do {
+            curl_multi_exec($mehr, $laufend);
+            $jetzt = microtime(true) - $start;
+            if ($erg['post'] === null && $laufend === 0) {
+                $erg['post'] = $jetzt;
+            }
+            if ($w === null && $jetzt >= $nach) {
+                $erg['belegt'] = $belegt();
+                $erg['skript_start'] = microtime(true) - $start;
+                $w = $wartungAnStarten($warten);
+            }
+            if ($w !== null && $erg['skript'] === null && ($rc = $wartungAnEnde($w)) !== null) {
+                $erg['skript'] = microtime(true) - $start;
+                $erg['rc'] = $rc;
+            }
+            $laufend > 0 ? curl_multi_select($mehr, 0.02) : usleep(20_000);
+        } while (($erg['post'] === null || $erg['skript'] === null) && microtime(true) - $start < 60);
+        $erg['status'] = (int) curl_getinfo($h, CURLINFO_RESPONSE_CODE);
+        $erg['ausgabe'] = $w !== null ? (string) @file_get_contents($w['aus']) : '';
+        curl_multi_remove_handle($mehr, $h);
+        curl_close($h);
+        curl_multi_close($mehr);
+        return $erg;
+    };
+
+    // „Übernehmen“ wartet auf dort (Location 2 s, Grundriss 2 s); nach 0,7 s beginnt das Update.
+    $plaene = static fn (): array => glob($wurzel . '/storage/plans/*') ?: [];
+    $plaeneVorher = $plaene();
+    file_put_contents($partnerVerzoegerung, '2');
+    $r = $waehrendWartungAn('/instanzen/' . $partnerId . '/uebernehmen', ['schluessel' => 'traege-halle', 'aktion' => 'uebernehmen'], 0.7, 150);
+    file_put_contents($partnerVerzoegerung, '0');
+    $neuePlaene = array_values(array_diff($plaene(), $plaeneVorher));
+    foreach ($neuePlaene as $f) {
+        @unlink($f);   // nur, falls doch übernommen wurde – sonst bliebe es im Arbeitsordner
+    }
+    pruefe($r['belegt'] === true, 'Übernahme wartet auf dort: angemeldet – darauf wartet das Update');
+    pruefe($r['status'] === 302 && $r['rc'] === 0, 'Übernahme und wartung_an enden (' . $r['status'] . ', rc ' . var_export($r['rc'], true) . ')');
+    pruefe($r['skript'] !== null && $r['post'] !== null && $r['skript'] >= $r['post'] && $r['skript'] - $r['skript_start'] >= 2.0,
+        sprintf('wartung_an wartet, bis die Übernahme fertig ist (Sperre %.1f–%.1f s, Übernahme bis %.1f s)', $r['skript_start'], $r['skript'] ?? -1, $r['post'] ?? -1));
+    pruefe(str_contains($r['ausgabe'], 'Warte auf laufende Änderungen (höchstens 150 s)') && str_contains($r['ausgabe'], 'Laufende Änderungen sind fertig')
+        && !str_contains($r['ausgabe'], 'HINWEIS'), 'wartung_an: meldet das Warten und sein Ende – ' . trim($r['ausgabe']));
+    gleich($standorte($partnerLocation), 0, 'Übernahme während der Schreibsperre: kein Standort angelegt');
+    gleich($neuePlaene, [], 'Übernahme während der Schreibsperre: kein Grundriss in storage/plans');
+    $schreiben('wartung', null);
+    pruefe(str_contains($aufruf($port, $a['dose'], 'GET', '/profil')['text'], UpdateService::NICHTS_UEBERNOMMEN),
+        'Übernahme während der Schreibsperre: meldet „nichts übernommen“ statt „übernommen“');
+
+    // Höchstens ANFRAGEN_WARTEN Sekunden: „Prüfen“ wartet 3 s auf dort, wartung_an nur 1 s.
+    file_put_contents($partnerVerzoegerung, '3');
+    $r = $waehrendWartungAn('/instanzen/' . $partnerId . '/pruefen', [], 0.5, 1);
+    file_put_contents($partnerVerzoegerung, '0');
+    pruefe($r['rc'] === 0 && $r['skript'] !== null && $r['skript'] - $r['skript_start'] < 2.5 && $r['post'] !== null && $r['post'] > $r['skript'],
+        sprintf('wartung_an wartet höchstens ANFRAGEN_WARTEN (Sperre %.1f–%.1f s, „Prüfen“ bis %.1f s)', $r['skript_start'] ?? -1, $r['skript'] ?? -1, $r['post'] ?? -1));
+    pruefe(str_contains($r['ausgabe'], 'HINWEIS Nach 1 s laufen noch Anfragen'), 'wartung_an: nennt die Anfragen, die noch laufen – ' . trim($r['ausgabe']));
+    $schreiben('wartung', null);
+    $aufruf($port, $a['dose'], 'GET', '/profil');   // Meldung von „Prüfen“ abholen
+    Database::execute('DELETE FROM api_partner WHERE id = ?', [$partnerId]);
 
     // Demo-Modus: Seite mit Hinweis, kein Abzeichen
     $d = $anmelden($demoPort, $kennung . '-admin');

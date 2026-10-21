@@ -875,7 +875,8 @@ Die Schritte (die Oberfläche zählt sie mit):
    Stand, der **vorwärts** vom installierten liegt – kein Rückschritt, kein
    umgeschriebener Verlauf (sonst nur mit `--erzwingen`).
 3. **Sicherung:** Es prüft den freien Platz, sperrt die Oberfläche für
-   Änderungen (*Schreibsperre*, unten), hält den Sammler an und sichert
+   Änderungen (*Schreibsperre*, unten), wartet, bis Änderungen fertig sind,
+   die schon vorher liefen (höchstens 150 s), hält den Sammler an und sichert
    `config/config.php` und die Datenbank nach
    `storage/backups/vor-update-<zeit>.tar.gz` (die letzten fünf bleiben;
    die Datenbank als stimmige Kopie per `VACUUM INTO`, auch im laufenden
@@ -1051,7 +1052,14 @@ keine Änderungen an – ein Zurückrollen legte die Datenbank von vorher
 zurück, und was jemand eben gespeichert hat, wäre verloren. Formulare melden
 „Gerade läuft ein Update – Änderungen sind in etwa einer Minute wieder
 möglich“, Anfragen mit `Accept: application/json` bekommen 503 mit
-`Retry-After: 30`. An- und Abmelden gehen weiter. Die Sperre endet mit dem
+`Retry-After: 30`. An- und Abmelden gehen weiter. Was schon vor der Sperre
+lief – etwa „Übernehmen“ von einer anderen Instanz, ein Abgleich mit dem
+Repository oder ein PDF-Grundriss –, darf vor der Sicherung zu Ende
+schreiben: Das Update wartet darauf („Warte auf laufende Änderungen“,
+höchstens 150 s; jede schreibende Anfrage hält dafür
+`storage/update/.anfragen` geteilt gesperrt). Eine Übernahme, die dann noch
+auf die andere Instanz wartet, übernimmt nichts und meldet „Gerade läuft
+ein Update – nichts übernommen“. Die Sperre endet mit dem
 Update; bleibt sie nach einem Absturz stehen, gilt sie höchstens 60 Minuten
 (länger nur, solange sich der Lauf meldet), und der Update-Dienst räumt
 eine verwaiste Sperre bei seinem nächsten Lauf weg.
@@ -1088,6 +1096,7 @@ geht immer.
 | `/opt/powermanagement/storage/update/soll/auftrag` | der Auftrag der Oberfläche (www-data) |
 | `/opt/powermanagement/storage/update/ist/` | `helfer` (Lebenszeichen), `stand`, `lauf`, `protokoll`, `verlauf`, `wartung` (Schreibsperre) – schreibt der Update-Dienst als www-data |
 | `/opt/powermanagement/storage/update/zeitplan` | Lebenszeichen des Zeitplans (Änderungszeit) |
+| `/opt/powermanagement/storage/update/.anfragen` | leer; schreibende Anfragen halten sie geteilt gesperrt, das Update wartet nach dem Setzen der Schreibsperre darauf |
 | `/opt/powermanagement/deploy/update-helfer.sh` | der Update-Dienst (root): prüft den Auftrag und ruft `update-debian.sh` |
 | `/etc/systemd/system/powermanagement-update.{path,service,timer}` | Auftrag beobachten und ausführen; der Zeitgeber weckt den Dienst zwei Minuten nach dem Start und 15 Minuten nach jedem Lauf (Lebenszeichen, Stand, Wiederanlauf, liegengebliebene Aufträge) |
 | `/etc/systemd/system/powermanagement-update-zeitplan.{service,timer}` | Automatik: alle fünf Minuten `bin/power update:zeitplan` als www-data |

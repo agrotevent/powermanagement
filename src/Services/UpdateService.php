@@ -49,6 +49,14 @@ final class UpdateService
     public const WARTUNG_MAX = 3600, WARTUNG_PULS = 180;
     /** Suchen höchstens so oft (der Helfer drosselt zusätzlich auf 60 s). */
     public const SUCHEN_ABSTAND = 30;
+    /**
+     * In storage/update: Schreibende Anfragen halten diese Datei geteilt
+     * gesperrt, solange sie laufen (anfrageAnmelden()) – update-debian.sh
+     * wartet nach dem Setzen der Schreibsperre exklusiv darauf (wartung_an).
+     */
+    public const ANFRAGEN = '.anfragen';
+    /** Wer erst beim Schreiben merkt, dass ein Update begonnen hat (LocationUebertrag::anwenden()). */
+    public const NICHTS_UEBERNOMMEN = 'Gerade läuft ein Update – nichts übernommen, bitte in etwa einer Minute noch einmal.';
 
     /** Zuletzt ins Audit übernommene Verlaufszeilen (JSON-Liste, keine Migration). */
     public const VERMERKT = 'update.vermerkt';
@@ -60,6 +68,9 @@ final class UpdateService
 
     /** @var array<string,mixed> Je Anfrage gelesen (Seite, Navigation, Kopfleiste) */
     private static array $merker = [];
+
+    /** @var resource|null Die Anmeldung dieser Anfrage (anfrageAnmelden()) */
+    private static $anfrage = null;
 
     // ================================================================ Orte
 
@@ -874,8 +885,8 @@ final class UpdateService
     /**
      * In public/index.php vor dispatch(): während der Schreibsperre keine
      * POSTs (außer An- und Abmelden). Wer JSON will (Accept), bekommt 503
-     * zum Wiederholen; Formulare eine Meldung und zurück. Kosten: ein
-     * is_file je POST.
+     * zum Wiederholen; Formulare eine Meldung und zurück. Kosten: eine
+     * geteilte Dateisperre (anfrageAnmelden()) und ein is_file je POST.
      *
      * Was der Kundenmodus ohnehin sperrt, beantwortet weiter der Router: Er
      * prüft das vor allem anderen (423 bzw. zur Kundenseite). Sonst bekäme
@@ -887,8 +898,17 @@ final class UpdateService
         if (strtoupper((string) ($_SERVER['REQUEST_METHOD'] ?? 'GET')) !== 'POST') {
             return;
         }
+        // Erst anmelden, dann fragen: Wer vor der Sperre hereinkam, auf den
+        // wartet das Update, bevor es sichert – auch wenn er lange auf eine
+        // andere Instanz, git oder ein Gerät wartet und erst danach schreibt.
+        self::anfrageAnmelden();
+        if (!self::wartungAktiv()) {
+            return;   // angemeldet bis zum Ende der Anfrage
+        }
+        // Abgewiesen (oder An- und Abmelden während der Sperre): darauf wartet das Update nicht.
+        self::anfrageAbmelden();
         $pfad = (new Request())->path();
-        if (in_array($pfad, ['/login', '/logout'], true) || !self::wartungAktiv()) {
+        if (in_array($pfad, ['/login', '/logout'], true)) {
             return;
         }
         if (Kundenmodus::sperrt('POST', $pfad) !== null) {
@@ -906,6 +926,50 @@ final class UpdateService
         Flash::warning($text);
         Response::redirect(Response::zurueckZiel('/'));
         exit;
+    }
+
+    /**
+     * Eine Anfrage, die schreiben kann (POST der Oberfläche, schreibende
+     * Methoden der Schnittstelle), meldet sich an, BEVOR sie nach der
+     * Schreibsperre fragt: storage/update/.anfragen geteilt gesperrt, bis die
+     * Anfrage endet – PHP gibt die Sperre am Ende der Anfrage frei, ein
+     * abgestürzter Prozess mit ihm. update-debian.sh setzt erst die
+     * Schreibsperre und wartet dann exklusiv auf dieselbe Datei
+     * (wartung_an, höchstens ANFRAGEN_WARTEN Sekunden): Was vorher
+     * hereinkam, schreibt vor der Sicherung zu Ende, und was danach kommt,
+     * sieht die Sperre. Ein fester Abstand reichte nicht – eine Übernahme
+     * von einer anderen Instanz wartet Minuten, bevor sie schreibt.
+     *
+     * Nie wartend (LOCK_NB): Hält das Update die Datei gerade exklusiv,
+     * steht die Schreibsperre schon. Geht die Datei nicht auf (storage/update
+     * fehlt, Demo), bleibt es bei der Prüfung an der Tür. Mit close-on-exec
+     * („e“): git oder pdftoppm, die die Anfrage startet, erben die Sperre
+     * nicht – liefe einer weiter, hielte er sie fest.
+     */
+    public static function anfrageAnmelden(): void
+    {
+        if (self::$anfrage !== null || Config::isDemo()) {
+            return;
+        }
+        $h = @fopen(self::verzeichnis() . '/' . self::ANFRAGEN, 'ce');
+        if ($h === false) {
+            return;
+        }
+        if (!@flock($h, LOCK_SH | LOCK_NB)) {
+            fclose($h);
+            return;
+        }
+        self::$anfrage = $h;
+    }
+
+    /** Die Anmeldung vor dem Ende der Anfrage zurückgeben – wer abgewiesen wird, schreibt nichts mehr. */
+    public static function anfrageAbmelden(): void
+    {
+        if (self::$anfrage !== null) {
+            @flock(self::$anfrage, LOCK_UN);
+            @fclose(self::$anfrage);
+            self::$anfrage = null;
+        }
     }
 
     // ================================================================ Anzeige

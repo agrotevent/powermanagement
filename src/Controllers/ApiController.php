@@ -45,6 +45,9 @@ final class ApiController
 
     public const PRAEFIX = '/api/';
 
+    /** Antwort schreibender Methoden während der Schreibsperre eines Updates (503, Retry-After: 30). */
+    public const WARTUNG = 'Auf der angefragten Instanz läuft gerade ein Update – bitte in etwa einer Minute noch einmal senden.';
+
     /** Größter Körper (JSON, Plandateien als base64). nginx lässt 50 MB durch. */
     public const MAX_KOERPER = 48 * 1024 * 1024;
 
@@ -103,12 +106,16 @@ final class ApiController
 
         // Schreibsperre eines Updates: Was jetzt ankäme, verlöre ein
         // Zurückrollen (die Datenbank von vorher kommt zurück). Erst nach dem
-        // Token – ein ungültiges bekommt weiter genau dieselbe 401.
-        if (in_array($methode, ['POST', 'PUT', 'PATCH', 'DELETE'], true) && UpdateService::wartungAktiv()) {
-            header('Retry-After: 30');
-            $this->antwort(['ok' => false, 'wartung' => true,
-                'message' => 'Auf der angefragten Instanz läuft gerade ein Update – bitte in etwa einer Minute noch einmal senden.'], 503);
-            return;
+        // Token – ein ungültiges bekommt weiter genau dieselbe 401. Erst
+        // anmelden, dann fragen: auf eine Anfrage, die vor der Sperre kam,
+        // wartet das Update, bevor es sichert (UpdateService::anfrageAnmelden()).
+        if (in_array($methode, ['POST', 'PUT', 'PATCH', 'DELETE'], true)) {
+            UpdateService::anfrageAnmelden();
+            if (UpdateService::wartungAktiv()) {
+                UpdateService::anfrageAbmelden();
+                $this->wartung();
+                return;
+            }
         }
 
         $pfad = $request->path();
@@ -233,9 +240,21 @@ final class ApiController
         }
         unset($roh);
         $ergebnis = VorschlagService::einreichen($token, $schluessel, $koerper);
+        if (!empty($ergebnis['wartung'])) {
+            // Das Update begann, während der Körper ankam: beim Schreiben bemerkt, nichts geändert.
+            $this->wartung();
+            return;
+        }
         $status = (int) ($ergebnis['status'] ?? (!empty($ergebnis['ok']) ? 201 : 422));
         unset($ergebnis['status']);
         $this->antwort($ergebnis, $status);
+    }
+
+    /** 503 mit Retry-After: auf dieser Instanz läuft gerade ein Update. */
+    private function wartung(): void
+    {
+        header('Retry-After: 30');
+        $this->antwort(['ok' => false, 'wartung' => true, 'message' => self::WARTUNG], 503);
     }
 
     /** Nur GET (und HEAD) – sonst 405 mit Allow. */
