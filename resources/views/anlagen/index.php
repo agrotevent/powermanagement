@@ -46,8 +46,18 @@ $neuText = $fest === true && ($filter['art'] === '' || $filter['art'] === 'ansch
     <div class="table-wrap">
         <table class="tabelle-karten">
             <thead>
-            <?php $nurTanks = $filter['art'] === 'tank'; ?>
-            <tr><th>Anlage</th><th>Standort</th><th><?= $nurTanks ? 'Inhalt' : 'Anschlüsse' ?></th><th>Status</th><th class="num"><?= $nurTanks ? 'Inhalt jetzt' : 'Leistung' ?></th><th class="num"><?= $nurTanks ? 'Füllstand' : 'Auslastung' ?></th></tr>
+            <?php
+            // Spaltenköpfe nach dem, was in der Liste steht: nur Tanks, nur
+            // elektrische Anlagen oder beides (dann für beide lesbar).
+            $mitTanks = $filter['art'] === 'tank' || array_filter($objekte, static fn (array $o): bool => !AnlagenService::elektrisch((string) $o['art'])) !== [];
+            $mitStrom = $filter['art'] !== 'tank' && ($objekte === [] || array_filter($objekte, static fn (array $o): bool => AnlagenService::elektrisch((string) $o['art'])) !== []);
+            [$kopfArt, $kopfJetzt, $kopfStand] = match (true) {
+                $mitTanks && $mitStrom => ['Anschlüsse / Inhalt', 'Leistung / Inhalt', 'Auslastung / Füllstand'],
+                $mitTanks              => ['Inhalt', 'Inhalt jetzt', 'Füllstand'],
+                default                => ['Anschlüsse', 'Leistung', 'Auslastung'],
+            };
+            ?>
+            <tr><th>Anlage</th><th>Standort</th><th><?= View::e($kopfArt) ?></th><th>Status</th><th class="num"><?= View::e($kopfJetzt) ?></th><th class="num"><?= View::e($kopfStand) ?></th></tr>
             </thead>
             <tbody>
             <?php if ($objekte === []): ?>

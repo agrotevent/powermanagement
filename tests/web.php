@@ -354,21 +354,27 @@ try {
         pruefe(!str_contains($verteilerSeite, $kennung . '-TS'), 'Verteilung bietet keinen Tanksensor zum Einsetzen an');
         $seite = aufruf($basis, $admin['dose'], 'GET', '/anlagen/' . $tankId)['text'];
         pruefe(str_contains($seite, 'Tanksensor einbauen') && str_contains($seite, $kennung . '-TS') && str_contains($seite, 'name="einbau[offset_mm]"'), 'Tankseite: Tanksensor einbauen');
+        $peilungenVorher = (int) Database::scalar("SELECT COUNT(*) FROM tank_ereignisse WHERE objekt_id = ? AND art = 'peilung'", [$tankId]);
         $r = aufruf($basis, $admin['dose'], 'POST', '/anlagen/' . $tankId . '/einsetzen', ['inventar_id' => $ts, 'einbau' => ['offset_mm' => '25'], 'peilung_prozent' => '55',
             '_token' => $admin['token']]);
         $mpTs = Database::first("SELECT * FROM messpunkte WHERE objekt_id = ? AND rolle = 'fuellstand' AND gueltig_bis IS NULL", [$tankId]);
         $fTs = $mpTs !== null ? json_decode((string) Database::scalar('SELECT rechnung FROM tank_kennlinien WHERE messpunkt_id = ? ORDER BY id DESC LIMIT 1', [(int) $mpTs['id']]), true) : null;
         pruefe($r['status'] === 302 && ($mpTs['geraet'] ?? '') === $kennung . '-uni' && ($fTs['herkunft']['einbau']['offset_mm'] ?? null) == 25,
             'Tanksensor über das Formular eingebaut, Einbaumaß in der Kennlinie');
-        $erstePeilung = Database::first("SELECT * FROM tank_ereignisse WHERE objekt_id = ? AND art = 'peilung' ORDER BY id DESC LIMIT 1", [$tankId]);
-        gleich([(float) ($erstePeilung['prozent'] ?? 0), (int) ($erstePeilung['messpunkt_id'] ?? 0), array_key_exists('roh', $erstePeilung ?? []) ? $erstePeilung['roh'] : 'x'],
-            [55.0, (int) ($mpTs['id'] ?? -1), null],
-            'Einsetzen mit Anzeige am Tank: erste Peilung im Protokoll – ohne Rohwert seit dem Einbau nicht kalibriert');
+        // Eine Peilung beim Einsetzen gibt es nicht: Rohwerte zählen erst ab dem Einbau – erst einbauen, dann die Sonde einhängen, dann peilen.
+        gleich((int) Database::scalar("SELECT COUNT(*) FROM tank_ereignisse WHERE objekt_id = ? AND art = 'peilung'", [$tankId]), $peilungenVorher,
+            'Einsetzen trägt keine Peilung ein (auch nicht mit einem alten Feld „peilung_prozent“)');
         $seite = aufruf($basis, $admin['dose'], 'GET', '/anlagen/' . $tankId);
         pruefe($seite['status'] === 200 && phpMeldung($seite['text']) === null && str_contains($seite['text'], 'seit Einbau nicht gepeilt') && str_contains($seite['text'], 'Ausbauen'),
             'Tankseite: eingebauter Sensor, ungeprüft, mit „Ausbauen“');
-        pruefe(str_contains($seite['text'], 'Peilung 55 % eingetragen') && str_contains($seite['text'], 'sobald er meldet'),
-            'Meldung nach dem Einsetzen kommt an, obwohl die Sitzung beim Lesen des Rohwerts frei war');
+        pruefe(str_contains($seite['text'], 'Jetzt die Sonde einhängen und peilen, sobald der Sensor meldet') && !str_contains($seite['text'], 'name="peilung_prozent"'),
+            'Meldung nach dem Einsetzen nennt die Reihenfolge; das Einbauformular fragt keine Anzeige mehr ab');
+        // Gleich nach dem Einbau peilen: Der Sensor meldet noch nicht – die Peilung steht nur im Protokoll.
+        $r = aufruf($basis, $admin['dose'], 'POST', '/anlagen/' . $tankId . '/tank/peilung', ['art' => 'prozent', 'wert' => '55', '_token' => $admin['token']], $json);
+        $erste = json_decode($r['text'], true);
+        pruefe($r['status'] === 200 && ($erste['ok'] ?? false) === true && empty($erste['kalibriert']) && str_contains((string) ($erste['message'] ?? ''), 'sobald er meldet'),
+            'Peilung gleich nach dem Einbau: im Protokoll, kalibriert wird erst mit einem Wert seit dem Einbau – ' . (string) ($erste['message'] ?? ''));
+        $seite = aufruf($basis, $admin['dose'], 'GET', '/anlagen/' . $tankId);
         pruefe(str_contains($seite['text'], 'action="/anlagen/' . $tankId . '/tank/peilung"') && str_contains($seite['text'], 'action="/anlagen/' . $tankId . '/tank/betankung"')
             && str_contains($seite['text'], 'name="sensor[mm_je_roh]"') && str_contains($seite['text'], 'name="rueckwirkend"') && str_contains($seite['text'], 'id="protokoll"')
             && str_contains($seite['text'], 'action="/anlagen/' . $tankId . '/tank/ereignis/loeschen"') && str_contains($seite['text'], '/assets/js/tank.js'),
@@ -398,6 +404,22 @@ try {
         $karteTank = json_decode(aufruf($basis, $admin['dose'], 'GET', '/karte/objekt/' . $tankId)['text'], true);
         pruefe(($karteTank['tank']['sensor']['kennung'] ?? '') === $kennung . '-TS' && ($karteTank['tank']['darf']['einsetzen'] ?? false) === true
             && is_int($karteTank['tank']['sensor']['einsatz_id'] ?? null) && array_key_exists('tank', $karteTank['live'] ?? []), 'Karte: Tank-Panel mit Sensor, Ausbau und Livewerten');
+        // Den Messpunkt eines Tanksensors löscht niemand – er geht nur über „Ausbauen“, sonst nähme er alle Fassungen mit.
+        $nFassungen = (int) Database::scalar('SELECT COUNT(*) FROM tank_kennlinien WHERE messpunkt_id = ?', [(int) ($mpTs['id'] ?? 0)]);
+        $r = aufruf($basis, $admin['dose'], 'POST', '/anlagen/' . $tankId . '/messpunkt/loeschen', ['messpunkt_id' => (int) ($mpTs['id'] ?? 0), '_token' => $admin['token']], $json);
+        pruefe($r['status'] === 422 && Database::scalar('SELECT id FROM messpunkte WHERE id = ?', [(int) ($mpTs['id'] ?? 0)]) !== false && $nFassungen > 0
+            && (int) Database::scalar('SELECT COUNT(*) FROM tank_kennlinien WHERE messpunkt_id = ?', [(int) ($mpTs['id'] ?? 0)]) === $nFassungen,
+            'Messpunkt eines Tanksensors löschen abgelehnt (' . $r['status'] . '): Messpunkt und Fassungen bleiben');
+        // Ein Kunde im Kartenpanel: den Sensor sieht er, Knöpfe bekommt er keine.
+        BenutzerService::freigabeSpeichern(['subject_type' => 'user', 'subject_id' => $benutzer['zwei'], 'ziel_art' => 'objekt', 'ziel_id' => $tankId]);
+        $kundePanel = anmelden($basis, $kennung . '-zwei', $kennwort);
+        $dosen[] = $kundePanel['dose'];
+        $p = json_decode(aufruf($basis, $kundePanel['dose'], 'GET', '/karte/objekt/' . $tankId)['text'], true);
+        gleich([$p['tank']['darf'] ?? null, $p['tank']['sensor']['kennung'] ?? null,
+            array_key_exists('einsatz_id', (array) ($p['tank']['sensor'] ?? [])) ? $p['tank']['sensor']['einsatz_id'] : 'fehlt', $p['darf'] ?? null],
+            [['peilen' => false, 'betanken' => false, 'einsetzen' => false], $kennung . '-TS', null, false],
+            'Kunde im Kartenpanel: Sensor sichtbar – ohne Peilen, Betanken, Einsetzen und Ausbauen');
+        Database::execute("DELETE FROM freigaben WHERE subject_type = 'user' AND subject_id = ?", [$benutzer['zwei']]);
         $r = aufruf($basis, $admin['dose'], 'POST', '/anlagen/' . $tankId . '/messpunkt', ['geraet' => $kennung . '-hand', 'kanal' => 'voltmeter:100', '_token' => $admin['token']], $json);
         pruefe(Database::scalar('SELECT id FROM messpunkte WHERE geraet = ?', [$kennung . '-hand']) === false, 'kein Messpunkt von Hand am Tank (' . $r['status'] . ')');
         $r = aufruf($basis, $admin['dose'], 'POST', '/einsatz/' . (int) ($mpTs['einsatz_id'] ?? 0) . '/beenden', ['_token' => $admin['token']]);
@@ -454,10 +476,33 @@ try {
         $n = $ereignisse();
         $r = aufruf($basis, $kundeTank['dose'], 'POST', '/anlagen/' . $tankId . '/tank/peilung', ['art' => 'prozent', 'wert' => '60', '_token' => $kundeTank['token']], $json);
         pruefe($r['status'] === 403 && $ereignisse() === $n, 'Kunde: Peilung → 403');
-        $r = aufruf($basis, $kundeTank['dose'], 'POST', '/anlagen/' . $tankId . '/tank/ereignis/loeschen', ['ereignis_id' => (int) ($erstePeilung['id'] ?? 0), '_token' => $kundeTank['token']]);
-        pruefe($r['status'] === 403 && $ereignisse() === $n, 'Kunde: Löschen → 403');
+        $eineEreignis = (int) Database::scalar('SELECT id FROM tank_ereignisse WHERE objekt_id = ? ORDER BY id LIMIT 1', [$tankId]);
+        $r = aufruf($basis, $kundeTank['dose'], 'POST', '/anlagen/' . $tankId . '/tank/ereignis/loeschen', ['ereignis_id' => $eineEreignis, '_token' => $kundeTank['token']]);
+        pruefe($eineEreignis > 0 && $r['status'] === 403 && $ereignisse() === $n, 'Kunde: Löschen → 403');
         Database::execute("DELETE FROM freigaben WHERE subject_type = 'user' AND subject_id = ?", [$benutzer['zwei']]);
         unset($kundeFreigabe);
+
+        // Technik mit „bearbeiten“, dessen Datenfenster vor einer Stunde endete: sieht den Tank, trägt aber nichts mehr ein –
+        // was ab jetzt gälte, könnte er selbst nicht sehen.
+        Database::insert('freigaben', ['subject_type' => 'user', 'subject_id' => $benutzer['technik'], 'ziel_art' => 'objekt', 'ziel_id' => $tankId,
+            'darf_bearbeiten' => 1, 'darf_steuern' => 0, 'gueltig_ab' => null, 'gueltig_bis' => null,
+            'daten_ab' => gmdate('c', time() - 86400), 'daten_bis' => gmdate('c', time() - 3600), 'notiz' => '', 'created_by' => 'test', 'created_at' => gmdate('c')]);
+        $technikTank = anmelden($basis, $kennung . '-technik', $kennwort);
+        $dosen[] = $technikTank['dose'];
+        $r = aufruf($basis, $technikTank['dose'], 'GET', '/anlagen/' . $tankId);
+        pruefe($r['status'] === 200 && phpMeldung($r['text']) === null && !str_contains($r['text'], '/tank/peilung') && !str_contains($r['text'], '/tank/betankung'),
+            'Technik nach dem Ende des Datenfensters: Tankseite ohne Peilung und Betankung');
+        $n = $ereignisse();
+        foreach (['/tank/peilung' => ['art' => 'liter', 'wert' => '1000'], '/tank/betankung' => ['liter' => '100'], '/tank/kennlinie' => ['messpunkt' => 0],
+            '/tank/ereignis/loeschen' => ['ereignis_id' => $eineEreignis]] as $pfad => $felder) {
+            $r = aufruf($basis, $technikTank['dose'], 'POST', '/anlagen/' . $tankId . $pfad, $felder + ['_token' => $technikTank['token']], $json);
+            pruefe($r['status'] === 403 && str_contains((string) (json_decode($r['text'], true)['message'] ?? ''), 'Freigabe für die Messdaten'),
+                'Technik nach dem Ende des Datenfensters: ' . $pfad . ' → ' . $r['status']);
+        }
+        $r = aufruf($basis, $technikTank['dose'], 'POST', '/anlagen/' . $tankId . '/einsetzen', ['inventar_id' => $ts, '_token' => $technikTank['token']], $json);
+        gleich([$r['status'], $ereignisse(), Database::scalar("SELECT id FROM messpunkte WHERE objekt_id = ? AND rolle = 'fuellstand' AND gueltig_bis IS NULL", [$tankId])],
+            [403, $n, false], '… auch keinen Tanksensor einsetzen, nichts eingetragen');
+        Database::execute("DELETE FROM freigaben WHERE subject_type = 'user' AND subject_id = ?", [$benutzer['technik']]);
 
         // Füllstand: Live, Verlauf, CSV, Statistik, Karte, Übersicht, Einstellungen
         $mpAlt = (int) ($mpTs['id'] ?? 0);
@@ -911,6 +956,29 @@ try {
             pruefe($r['status'] === 403 && (json_decode($r['text'], true)['ok'] ?? true) === false, 'Planer ohne „bearbeiten“: ' . $pfad . ' → 403 (JSON)');
         }
         gleich((int) Database::scalar('SELECT COUNT(*) FROM tank_ereignisse WHERE objekt_id = ?', [$fremderTank]), 0, '… nichts eingetragen');
+        // Leitungen nur zwischen Anlagen auf der Etage – nicht über den eigenen Plan zwischen zwei fremden Anlagen
+        $fremdGen = (int) \App\Services\AnlagenService::speichern(null, ['art' => 'generator', 'name' => $kennung . ' fremder Generator', 'floor_id' => (int) $fremd['floor_id'],
+            'plan_x' => 14, 'plan_y' => 14, 'ohne_anschluesse' => true])['id'];
+        $fremdeV = (int) \App\Services\AnlagenService::speichern(null, ['art' => 'verteilung', 'name' => $kennung . ' fremde Verteilung', 'floor_id' => (int) $fremd['floor_id'],
+            'plan_x' => 16, 'plan_y' => 16, 'ohne_anschluesse' => true])['id'];
+        $leitungen = static fn (): int => (int) Database::scalar('SELECT COUNT(*) FROM leitungen');
+        $nL = $leitungen();
+        foreach ([['art' => 'kraftstoff', 'von_objekt_id' => $fremderTank, 'zu_objekt_id' => $fremdGen], ['art' => 'kabel', 'von_objekt_id' => $fremdeV, 'zu_objekt_id' => $fremdGen]] as $felder) {
+            $r = aufruf($basis, $planer['dose'], 'POST', '/karte/leitung/speichern', $felder + ['floor_id' => $werkEtage, 'punkte' => '[[10,10],[12,12]]', 'name' => $kennung . ' quer',
+                '_token' => $planer['token']], $json);
+            gleich($r['status'], 403, 'Planer: ' . $felder['art'] . ' auf der eigenen Etage zwischen zwei Anlagen eines fremden Standorts → 403');
+        }
+        gleich($leitungen(), $nL, '… nichts eingezeichnet');
+        // Ein Schlauch braucht „bearbeiten“ an beiden Enden – er ändert Vorrat und Restlaufzeit aller Tanks am Generator.
+        $schlauchPlaner = static fn () => aufruf($basis, $planer['dose'], 'POST', '/karte/leitung/speichern', ['art' => 'kraftstoff', 'von_objekt_id' => $fremderTank,
+            'zu_objekt_id' => $fremdGen, 'floor_id' => (int) $fremd['floor_id'], 'punkte' => '[[12,12],[14,14]]', 'name' => $kennung . ' schlauch', '_token' => $planer['token']], $json);
+        BenutzerService::freigabeSpeichern(['subject_type' => 'user', 'subject_id' => $benutzer['planer'], 'ziel_art' => 'objekt', 'ziel_id' => $fremderTank, 'darf_bearbeiten' => 1]);
+        $r = $schlauchPlaner();
+        pruefe($r['status'] === 403 && $leitungen() === $nL && \App\Tanks\TankService::versorgung($fremderTank)['generatoren'] === [],
+            'Planer: Schlauch vom eigenen Tank zum nur sichtbaren Generator → 403, die Versorgung bleibt');
+        BenutzerService::freigabeSpeichern(['subject_type' => 'user', 'subject_id' => $benutzer['planer'], 'ziel_art' => 'objekt', 'ziel_id' => $fremdGen, 'darf_bearbeiten' => 1]);
+        $r = $schlauchPlaner();
+        pruefe($r['status'] === 200 && \App\Tanks\TankService::versorgung($fremderTank)['generatoren'] === [$fremdGen], 'mit „bearbeiten“ an Tank und Generator: Schlauch gezogen');
         \App\Services\AnlagenService::loeschen($fremderTank);
         aufruf($basis, $planer['dose'], 'POST', '/standorte/etage', ['site_id' => $werk, 'id' => (int) $fremd['floor_id'], 'name' => $kennung . ' gekapert', '_token' => $planer['token']]);
         gleich(Database::first('SELECT name, site_id FROM floors WHERE id = ?', [(int) $fremd['floor_id']]), ['name' => $fremd['etage'], 'site_id' => $fremd['site_id']],

@@ -23,7 +23,8 @@ use App\Tanks\TankService;
  *
  * Das Recht prüft die Route (statistik.view bzw. statistik.export zum
  * Lesen, anlagen.manage zum Eintragen); hier wird jede ID einzeln geprüft:
- * der Tank (sichtbar, kein Katalog-Typ; zum Eintragen mit „bearbeiten“),
+ * der Tank (sichtbar, kein Katalog-Typ; zum Eintragen mit „bearbeiten“ und
+ * nur, solange das Datenfenster jetzt gilt),
  * ein gewählter Messpunkt (Füllstand dieses Tanks), ein Ereignis (gehört
  * zum Tank, im Datenfenster – das prüft TankService). Gelesen wird über
  * TankService, und der liest nur über Messdaten – im Datenfenster. Den
@@ -33,8 +34,9 @@ final class TankController extends Controller
 {
     /**
      * Den Tank aus der Adresse – oder 404 (auch, wenn er nicht sichtbar ist).
-     * Beim Ändern braucht es „bearbeiten“ am Tank, sonst 403. Abgelehnt wird
-     * als JSON, wenn der Aufrufer JSON erwartet ($json oder Accept).
+     * Beim Ändern braucht es „bearbeiten“ am Tank und jetzt das Datenfenster
+     * (TankService::darfEintragen), sonst 403. Abgelehnt wird als JSON, wenn
+     * der Aufrufer JSON erwartet ($json oder Accept).
      */
     private function tank(Request $request, array $params, bool $aendern = false, bool $json = false): ?array
     {
@@ -43,8 +45,8 @@ final class TankController extends Controller
             $this->ablehnen($request, $json, 404, 'Diesen Tank gibt es nicht.');
             return null;
         }
-        if ($aendern && !Zugriff::darfBearbeiten($tank)) {
-            $this->ablehnen($request, $json, 403, 'An diesem Tank darfst du nichts eintragen.');
+        if ($aendern && ($nein = TankService::eintragenVerweigert($tank)) !== null) {
+            $this->ablehnen($request, $json, 403, $nein['message']);
             return null;
         }
         return $tank;

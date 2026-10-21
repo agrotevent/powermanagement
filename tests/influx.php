@@ -212,8 +212,9 @@ try {
     $gestern = (new DateTimeImmutable('@' . $jetzt))->setTimezone(Zeit::zone())->modify('-1 day');
     $zehn = $gestern->setTime(10, 0)->getTimestamp();
     $meldungen = [];
+    // Ab 7,5 V: nach dem Sprung höchstens ≈ 9,1 V (≈ 102 % des Nennvolumens) – über 105 % wäre der Wert unplausibel, eine Lücke.
     for ($k = 0, $t = $jetzt - 3 * 86400 + 600; $t < $jetzt - 2 * 3600; $k++, $t += 9000) {
-        $meldungen[] = $tz($t, 'u=' . number_format(8.0 - 0.1 * $k + ($t >= $zehn ? 3.0 : 0.0), 2, '.', '') . ',sensorfehler=0', 'voltmeter:103');
+        $meldungen[] = $tz($t, 'u=' . number_format(7.5 - 0.1 * $k + ($t >= $zehn ? 3.0 : 0.0), 2, '.', '') . ',sensorfehler=0', 'voltmeter:103');
     }
     Influx::schreiben($meldungen, $fehler);
     $lieferschein = Database::insert('tank_ereignisse', ['objekt_id' => $tank, 'messpunkt_id' => $mpTage, 'art' => 'betankung', 'zeit' => Zeit::iso($zehn), 'liter' => 1273.0,

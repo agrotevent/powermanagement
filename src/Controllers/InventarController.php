@@ -12,7 +12,6 @@ use App\Support\Database;
 use App\Support\Flash;
 use App\Support\Request;
 use App\Support\Response;
-use App\Support\Session;
 use App\Tanks\TankRechnung;
 use App\Tanks\TankService;
 
@@ -153,6 +152,12 @@ final class InventarController extends Controller
             $this->verweigern($request, 'Diese Anlage darfst du nicht bearbeiten.');
             return;
         }
+        // Ein Tanksensor rechnet ab jetzt mit einer neuen Kennlinie – das nur
+        // im eigenen Datenfenster (wie Peilung und Betankung).
+        if (!AnlagenService::elektrisch((string) $objekt['art']) && !TankService::darfEintragen($objekt)) {
+            $this->verweigern($request, TankService::AUSSERHALB_FENSTER);
+            return;
+        }
         // Steckt das Stück gerade woanders, wird es dort abgezogen – das darf
         // nur, wer auch dort bearbeiten darf.
         $bisher = ($item = InventarService::find($request->int('inventar_id'))) !== null && $item['einsatz'] !== null
@@ -166,25 +171,10 @@ final class InventarController extends Controller
         $einbau = is_array($_POST['einbau'] ?? null) ? $_POST['einbau'] : [];
         $ergebnis = InventarService::einsetzen($request->int('inventar_id'), (int) $objekt['id'], $anschluss > 0 ? $anschluss : null,
             $request->input('typ_uebernehmen') === null || $request->bool('typ_uebernehmen'), $einbau);
-        $ziel = '/anlagen/' . (int) $objekt['id'] . '?reiter=messung';
-        // Tanksensor: gleich die erste Peilung („Anzeige am Tank“). Kalibriert
-        // wird erst mit einem Rohwert seit dem Einbau – den liest der Server,
-        // und solange hält die Anfrage die Sitzung nicht.
-        $peilung = $request->str('peilung_prozent');
-        if (!empty($ergebnis['ok']) && $peilung !== '' && !AnlagenService::elektrisch((string) $objekt['art'])) {
-            Session::freigeben();
-            $p = TankService::peilen(AnlagenService::find((int) $objekt['id']) ?? $objekt, ['prozent' => $peilung]);
-            $ergebnis['message'] = trim($ergebnis['message'] . ' ' . ($p['ok'] ? '' : 'Peilung nicht eingetragen: ') . $p['message']);
-            if ($request->wantsJson()) {
-                $this->json($ergebnis);
-                return;
-            }
-            $text = (string) $ergebnis['message'];
-            Session::nachtragen(static fn () => $p['ok'] && empty($p['warnung']) ? Flash::success($text) : Flash::warning($text));
-            $this->redirect($ziel);
-            return;
-        }
-        $this->antwort($request, $ergebnis, $ziel);
+        // Eine Peilung gleich beim Einsetzen gibt es nicht: Rohwerte zählen erst
+        // ab dem Einbau, und ein Shelly meldet erst nach einer Änderung – also
+        // erst einbauen, dann die Sonde einhängen, dann auf der Tankseite peilen.
+        $this->antwort($request, $ergebnis, '/anlagen/' . (int) $objekt['id'] . '?reiter=messung');
     }
 
     /** Einen Einsatz beenden (Abbau). */

@@ -560,6 +560,18 @@ $fallend = array_map(static fn (array $p): array => [$p[0], 1300.0 - ($p[1] - 2.
 $a = TankRechnung::anstieg($fallend, $us);
 pruefe($a !== null && abs($a['roh_vor'] - 1300) < 1 && abs($a['roh_nach'] - 600) < 1, 'Ultraschall: fallender Abstand ist ein Anstieg');
 gleich(TankRechnung::anstieg($fallend, $r), null, 'gleiche Punkte an einer Sonde: das ist kein Anstieg');
+// Langes Tanken (IBC- oder Umfüllpumpe): 2.000 l in 100 min bei 2,78 l/mm, leicht verrauscht – es zählt der ganze Anstieg, nicht nur 60 min davon.
+$hub = 2000 / 2.78 / (float) $r['sensor']['mm_je_roh'];
+$lang = [];
+for ($m = -180; $m <= 60; $m++) {
+    $wert = $m <= -100 ? 2.6 : ($m >= 0 ? 2.6 + $hub : 2.6 + $hub * ($m + 100) / 100);
+    $lang[] = [$t10 + $m * 60_000, $wert + (($m + 300) % 3 - 1) * 0.02];
+}
+$a = TankRechnung::anstieg($lang, $r);
+$b = $a !== null ? TankRechnung::betanken($r, $a['roh_vor'], $a['roh_nach'], 2000.0) : [];
+nahe($b['liter_je_mm'] ?? null, 2.78, 0.02, 'Tanken über 100 min: der ganze Anstieg zählt – 2,78 l/mm (' . var_export($b['liter_je_mm'] ?? $b['fehler'] ?? null, true) . ')');
+pruefe($a !== null && $a['t_vor'] <= $t10 - 99 * 60_000 && abs($a['roh_vor'] - 2.6) < 0.03 && abs($a['roh_nach'] - 2.6 - $hub) < 0.03,
+    '… vom Anfang des Tankens (2,6 V) bis danach (' . round(2.6 + $hub, 2) . ' V)');
 
 // Peilung.
 $ru = $fassung($sonde, $einbau, $ohneLiter);
@@ -642,6 +654,11 @@ $s = $st(['sensor' => false, 'peilung' => ['zeit' => gmdate('c', $jetzt - 3 * 36
 pruefe($s['stufe'] === 'keine' && str_contains($s['hinweis'], 'Peilung') && str_contains($s['hinweis'], '60 % (≈ 1.800 l)') && str_contains($s['hinweis'], 'vor 3 h'),
     'ohne Sensor: die letzte Peilung mit Alter – ' . $s['hinweis']);
 gleich($st(['zeit' => null, 'alter_s' => null, 'prozent' => null, 'liter' => null])['stufe'], 'stumm', 'kein Wert seit dem Einbau: stumm');
+gleich($st(['zeit' => null, 'alter_s' => null, 'prozent' => null, 'liter' => null, 'ohne_wert' => 'kein Wert in den letzten 7 Tagen']),
+    ['stufe' => 'stumm', 'hinweis' => 'kein Wert in den letzten 7 Tagen'], '… seit mehr als 7 Tagen eingebaut: „kein Wert in den letzten 7 Tagen“');
+$s = $st(['restlaufzeit_h' => 192.0]);
+pruefe($s['stufe'] === 'ok' && str_contains($s['hinweis'], 'noch 8 Tage') && isset($s['kurz']) && !str_contains($s['kurz'], 'noch 8 Tage') && str_contains($s['kurz'], 'Stand '),
+    'Hinweis mit Restlaufzeit, „kurz“ (Kachel, Panel) ohne – ' . $s['hinweis']);
 $s = $st(['liter' => null, 'prozent' => null, 'nutzbar_l' => null, 'hoehe_mm' => 860.0]);
 pruefe($s['stufe'] === 'ok' && str_contains($s['hinweis'], 'Füllhöhe 860 mm – Inhalt unbekannt: peilen'), 'ohne Kalibrierung: Füllhöhe und „peilen“');
 gleich(TankRechnung::grenzen(['tank_warnung' => '30', 'tank_alarm' => 'x'], ['warnung_prozent' => 40.0])['tank_warnung'], 40.0, 'Grenzen: Tank vor Einstellung');
@@ -783,6 +800,23 @@ try {
         'messgeraete' => [['geraet' => $kennungC . '-uni-TS1b', 'kanal' => 'voltmeter:100']]]);
     gleich([$e['ok'], count($fassungenVon($tankA)), count($laufend($tankA)), (int) $laufend($tankA)[0]['id']], [true, $n, 1, (int) $mp2['id']],
         'nur Name und Hinweis geändert: keine neue Fassung, kein neuer Messpunkt');
+    // Nach einer Peilung (Peilstab 700 mm bei 7,4 V): nur der Hinweis – keine Fassung, der Anker bleibt;
+    // nur der Meldeschritt – die Fassung der Peilung mit ihm, Anker, Steigung und „geprüft“ bleiben.
+    $peil = TankRechnung::peilen($f3['rechnung'], 7.4, ['hoehe_mm' => 700.0])['rechnung'];
+    $idPeil = TankService::fassungAnlegen($mp2, $peil, 'peilung', gmdate('c'), true);
+    $daten470 = ['buerde_ohm' => '470', 'hinweis' => 'PUR-Kabel'] + $tsDaten;
+    $speichernTs1 = static fn (array $daten): array => InventarService::speichern($ts1, ['art' => 'tanksensor', 'kennung' => $kennungC . '-TS1', 'name' => 'neu',
+        'eigenschaften' => $daten, 'messgeraete' => [['geraet' => $kennungC . '-uni-TS1b', 'kanal' => 'voltmeter:100']]]);
+    $e = $speichernTs1(['hinweis' => 'Kabel neu verlegt'] + $daten470);
+    gleich([$e['ok'], (int) (TankService::fassungJetzt((int) $mp2['id'])['id'] ?? 0)], [true, $idPeil], 'nach einer Peilung nur den Hinweis geändert: keine Fassung, der Anker bleibt');
+    $e = $speichernTs1(['hinweis' => 'Kabel neu verlegt', 'schritt_roh' => '0,05'] + $daten470);
+    $fs = TankService::fassungJetzt((int) $mp2['id']);
+    gleich([$fs['anlass'] ?? null, $fs['geprueft'] ?? null, $fs['rechnung']['sensor'] ?? null, $fs['rechnung']['tank'] ?? null],
+        ['sensor', true, ['schritt_roh' => 0.05] + $peil['sensor'], $peil['tank']], 'nur den Meldeschritt geändert: Anker und Steigung der Peilung bleiben, geprüft – ' . $e['message']);
+    nahe(TankRechnung::hoehe($fs['rechnung'], 7.4), 700.0, 0.001, '… bei 7,4 V weiter 700 mm');
+    // zurück auf den Stand vor der Peilung (für die Prüfungen unten)
+    $speichernTs1($daten470);
+    TankService::fassungAnlegen($mp2, $f3['rechnung'], 'hand', gmdate('c'), false);
 
     // Tankdaten geändert
     $speichernA = static fn (array $eig, string $name = '') => AnlagenService::speichern($tankA, ['art' => 'tank', 'name' => $name !== '' ? $name : $kennungC . ' Tank A',
@@ -972,6 +1006,15 @@ try {
     pruefe($l['stufe'] === 'stumm' && array_key_exists('roh', $l['tank']) && $l['tank']['roh'] === null && $l['tank']['liter'] === null && str_contains($l['hinweis'], 'seit dem Einbau'),
         'eben eingebaut: kein Wert von vor dem Einbau – „' . $l['hinweis'] . '“');
     gleich(TankService::rohJetzt(AnlagenService::find($tankNeu), $mNeu), null, 'rohJetzt: kein Rohwert von vor dem Einbau');
+    // Eingebaut vor 10 Tagen, seit mehr als 7 Tagen keine Meldung: nicht „seit dem Einbau“
+    $tankStill = (int) AnlagenService::speichern(null, ['art' => 'tank', 'name' => $kennungD . ' Tank still', 'floor_id' => $floorD, 'eigenschaften' => $eigD])['id'];
+    Database::insert('messpunkte', ['objekt_id' => $tankStill, 'geraet' => $kennungD . '-still', 'kanal' => 'voltmeter:100', 'rolle' => 'fuellstand',
+        'bezeichnung' => $kennungD . '-TS3', 'gueltig_ab' => Zeit::iso($jetzt - 10 * 86400), 'created_at' => gmdate('c')]);
+    $mStill = Database::first("SELECT * FROM messpunkte WHERE objekt_id = ? AND rolle = 'fuellstand'", [$tankStill]);
+    TankService::fassungAnlegen($mStill, $k2, 'einsatz', (string) $mStill['gueltig_ab'], false);
+    $l = LiveService::fuerObjekte([AnlagenService::find($tankStill)])[$tankStill];
+    pruefe($l['stufe'] === 'stumm' && str_contains($l['hinweis'], 'kein Wert in den letzten 7 Tagen') && !str_contains($l['hinweis'], 'Einbau'),
+        'eingebaut vor 10 Tagen, still: „' . $l['hinweis'] . '“');
     $roh = TankService::rohJetzt($tankObj(), $mD);
     gleich([$roh['roh'] ?? null, $roh['zeit'] ?? null, $roh['feld'] ?? null], [$w['roh'], $w['zeit'], 'u'], 'rohJetzt: der letzte Rohwert vom Server');
 
@@ -1148,14 +1191,17 @@ try {
         'Inhalt je mm im Tank samt Herkunft: ' . ($eigNach['liter_je_mm'] ?? '–') . ' · ' . ($eigNach['liter_je_mm_herkunft'] ?? ''));
     $fB = TankService::fassungJetzt((int) $mE['id']);
     gleich([$fB['anlass'] ?? null, $fB['geprueft'] ?? null, $fB['ereignis_id'] ?? null, $fB['rechnung']['tank']['liter_je_mm'] ?? null, $fB['rechnung']['tank']['form'] ?? null,
-        $fB['rechnung']['sensor'] ?? null], ['betankung', true, $bSechs, $eigNach['liter_je_mm'] ?? -1, 'quader', $k1E['sensor']],
-        'Fassung „betankung“: Inhalt je mm wie im Tank, Sensorteil bleibt, geprüft');
+        $fB['rechnung']['sensor'] ?? null], ['betankung', false, $bSechs, $eigNach['liter_je_mm'] ?? -1, 'quader', $k1E['sensor']],
+        'Fassung „betankung“: Inhalt je mm wie im Tank, Sensorteil bleibt – ungeprüft wie davor (die Einbautiefe prüft nur eine Peilung)');
     gleich([(float) ($ereignis($bSechs)['roh_vor'] ?? 0), (float) ($ereignis($bSechs)['roh_nach'] ?? 0)], [6.7, 7.8], 'Rohwerte vor und nach dem Tanken (vom Server) im Ereignis');
     $a = TankService::betankungAuswerten($t($tankE), $bSechs, false);
     pruefe(!$a['ok'] && str_contains($a['message'], 'schon ausgewertet'), 'zweimal auswerten geht nicht');
     $l = LiveService::fuerObjekte([$t($tankE)])[$tankE];
-    pruefe(($l['tank']['liter'] ?? 0) > 0 && ($l['tank']['geprueft'] ?? false) === true && str_contains((string) ($l['tank']['kennlinie'] ?? ''), 'Betankung'),
-        'Live rechnet jetzt mit Litern aus der Betankung – ' . ($l['tank']['kennlinie'] ?? ''));
+    pruefe(($l['tank']['liter'] ?? 0) > 0 && ($l['tank']['geprueft'] ?? true) === false && str_contains((string) ($l['tank']['kennlinie'] ?? ''), 'Betankung')
+        && str_contains((string) ($l['tank']['kennlinie'] ?? ''), 'seit Einbau nicht gepeilt'),
+        'Live rechnet jetzt mit Litern aus der Betankung, „seit Einbau nicht gepeilt“ – ' . ($l['tank']['kennlinie'] ?? ''));
+    pruefe(str_contains((string) ($l['tank']['kennlinie'] ?? ''), 'Betankung ' . $sechs->format('d.m.Y H:i')),
+        'Kennlinie nennt die Zeit der Betankung (' . $sechs->format('H:i') . '), nicht die der Auswertung – ' . ($l['tank']['kennlinie'] ?? ''));
 
     // ------------------------------------------------ Peilung 60 % am Demo-Tank
     $e = TankService::peilen($t($tankE), ['prozent' => '60', 'notizen' => 'Anzeige am Domdeckel']);
@@ -1275,6 +1321,29 @@ try {
     pruefe(TankService::seitenDaten($t($tankE))['rueckwirkend'] === false, '… und der Haken steht nicht auf der Seite');
     $e = TankService::peilen($t($tankE), ['hoehe_mm' => '700']);
     pruefe($e['ok'] && !empty($e['kalibriert']), 'Technik peilt im freigegebenen Zeitraum: ' . $e['message']);
+    $peilTechnik = (int) $e['id'];
+    $nEreignisse = (int) Database::scalar('SELECT COUNT(*) FROM tank_ereignisse WHERE objekt_id = ?', [$tankE]);
+    $b = TankService::betankungSpeichern($t($tankE), ['liter' => '500', 'zeit' => Zeit::fuerEingabe(Zeit::iso($jetzt - 3 * 86400)), 'kalibrieren' => false]);
+    pruefe(!$b['ok'] && str_contains($b['message'], 'außerhalb deines freigegebenen Zeitraums')
+        && (int) Database::scalar('SELECT COUNT(*) FROM tank_ereignisse WHERE objekt_id = ?', [$tankE]) === $nEreignisse,
+        'Technik: Betankung vor dem eigenen Datenfenster abgelehnt, nichts eingetragen – ' . $b['message']);
+    // Das Datenfenster endete vor einer Stunde: sehen ja, eintragen nicht mehr – was ab jetzt gälte, sähe er nicht.
+    Database::execute("UPDATE freigaben SET daten_bis = ? WHERE subject_type = 'user' AND subject_id = ?", [Zeit::iso($jetzt - 3600), $technikE]);
+    Zugriff::vergessen();
+    $nFassungen = count($alleFassungen([$tankE]));
+    foreach (['peilen' => [['hoehe_mm' => '650']], 'betankungSpeichern' => [['liter' => '100', 'zeit' => Zeit::fuerEingabe(Zeit::iso($jetzt - 7200))]],
+        'ereignisLoeschen' => [$peilTechnik], 'sensorVonHand' => [$hand, false], 'betankungAuswerten' => [$bSechs, false], 'steigungSetzen' => [$peilTechnik]] as $methode => $argumente) {
+        $nein = TankService::$methode($t($tankE), ...$argumente);
+        pruefe(!$nein['ok'] && $nein['message'] === TankService::AUSSERHALB_FENSTER, 'Technik nach dem Ende des Datenfensters: ' . $methode . ' abgelehnt');
+    }
+    gleich([(int) Database::scalar('SELECT COUNT(*) FROM tank_ereignisse WHERE objekt_id = ?', [$tankE]), count($alleFassungen([$tankE]))], [$nEreignisse, $nFassungen],
+        '… nichts eingetragen, keine Fassung');
+    $seiteT = TankService::seitenDaten($t($tankE));
+    $panelT = TankService::panelDaten($t($tankE));
+    gleich([$seiteT['darfAendern'], $seiteT['darfEintragen'], $seiteT['steigung'], $panelT['darf'], TankService::tage($t($tankE), $jetzt - 86400, $jetzt)['darf_eintragen']],
+        [true, false, null, ['peilen' => false, 'betanken' => false, 'einsetzen' => false], false], '… Tankseite, Kartenpanel und Tage ohne Eintragen');
+    Database::execute("UPDATE freigaben SET daten_bis = NULL WHERE subject_type = 'user' AND subject_id = ?", [$technikE]);
+    Zugriff::vergessen();
     alsBenutzer($kundeE);
     foreach (['peilen' => [['prozent' => '50']], 'betankungSpeichern' => [['liter' => '100']], 'ereignisLoeschen' => [(int) $e['id']],
         'sensorVonHand' => [$hand, false], 'betankungAuswerten' => [(int) $e['id'], false], 'steigungSetzen' => [(int) $e['id']]] as $methode => $argumente) {
@@ -1668,6 +1737,17 @@ nahe(($b['tage']['2026-10-20']['betankt_l'] ?? 0) + ($b['tage']['2026-10-21']['b
 pruefe(($b['tage']['2026-10-20']['betankt_l'] ?? 0) > 500 && ($b['tage']['2026-10-21']['betankt_l'] ?? 0) > 500, '… auf beide Tage verteilt');
 nahe($b['tage']['2026-10-21']['verbrauch_l'] ?? null, 480.0, 42.4, '… Verbrauch am zweiten Tag');
 
+// Betankung nach langer Ruhe: letzte Meldung gestern 20:00 bei 1.000 l, getankt heute 10:00–10:20 auf 3.000 l – alles zählt zu heute
+$ruhe = [[$um('2026-10-19 20:00') * 1000, 1000.0], [$um('2026-10-20 10:10') * 1000, 2000.0], [$um('2026-10-20 10:20') * 1000, 3000.0],
+    [$um('2026-10-20 18:00') * 1000, 2840.0], [$um('2026-10-21 02:00') * 1000, 2680.0]];
+$b = $bilanz($ruhe);
+gleich([$b['tage']['2026-10-19']['betankt_l'] ?? null, $b['tage']['2026-10-19']['verbrauch_l'] ?? null], [0.0, 0.0], 'Betankung nach langer Ruhe: am Vortag nichts getankt, nichts verbraucht');
+nahe($b['tage']['2026-10-20']['betankt_l'] ?? null, 2000.0, 0.1, '… getankt 2.000 l am Tag der Betankung');
+pruefe(count($b['betankungen']) === 1 && $b['betankungen'][0]['von'] >= $um('2026-10-20 09:30'), '… sie beginnt erst 30 min vor der ersten Meldung');
+$b = $bilanz($ruhe, [['zeit' => $um('2026-10-20 08:00'), 'liter' => 2000.0, 'id' => 5]]);
+gleich([array_column($b['betankungen'], 'quelle'), $b['tage']['2026-10-20']['betankt_l'] ?? null], [['lieferschein'], 2000.0],
+    '… ein Lieferschein mitten in der Ruhe (08:00) gehört trotzdem zu diesem Sprung');
+
 // Wärme: Inhalt steigt um 100 l über den Tag, ohne Sprung – Verbrauch 0 mit Hinweis
 $b = $bilanz($reiheG('2026-10-19 22:00', '2026-10-21 02:00', static fn (int $t): float => 1000 + 100 * ($t - $t0G) / (28 * 3600)));
 gleich([$b['tage']['2026-10-20']['verbrauch_l'], $b['betankungen']], [0.0, []], 'Wärme ohne Sprung: Verbrauch 0, keine Betankung');
@@ -1741,6 +1821,24 @@ try {
     $ls = array_values(array_filter($d['betankungen'], static fn (array $x): bool => $x['quelle'] === 'lieferschein'));
     gleich([$g['betankt_l'] ?? null, count($ls), $ls[0]['ereignisse'] ?? null, $ls[0]['lieferschein'] ?? null, $ls[0]['eintragen'] ?? null],
         [528.0, 1, [(int) ($e['id'] ?? 0)], $kennungG, false], 'mit Eintrag: getankt laut Lieferschein, nicht mehr eintragbar');
+
+    // Neu kalibriert mitten im Zeitraum (Anker −50 mm ≈ −139 l): der Sprung ist weder Verbrauch noch Betankung
+    $vorKal = TankService::tage($oG($tankG), $jetzt - 2 * 86400, $jetzt);
+    $mG = TankService::sensor($tankG);
+    $rG = TankService::fassungJetzt((int) $mG['id'])['rechnung'];
+    $rG['sensor']['mm_anker'] -= 50;
+    $abKal = $jetzt - 6 * 3600;
+    $stunde = (int) $lokal($abKal)->format('G') * 60 + (int) $lokal($abKal)->format('i');
+    if ($stunde >= 5 * 60 + 20 && $stunde <= 6 * 60 + 50) {
+        $abKal -= 3 * 3600;    // nicht mitten in die Betankung der Demo-Sonde um 06:00
+    }
+    $idKal = TankService::fassungAnlegen($mG, $rG, 'hand', Zeit::iso($abKal), false);
+    $nachKal = TankService::tage($oG($tankG), $jetzt - 2 * 86400, $jetzt);
+    nahe($nachKal['summe']['verbrauch_l'], $vorKal['summe']['verbrauch_l'], 2.0, 'neue Kennlinie (−139 l) mitten im Zeitraum: derselbe Verbrauch ('
+        . $vorKal['summe']['verbrauch_l'] . ' → ' . $nachKal['summe']['verbrauch_l'] . ' l)');
+    gleich([array_column($nachKal['betankungen'], 'quelle'), $nachKal['summe']['betankt_l']], [array_column($vorKal['betankungen'], 'quelle'), $vorKal['summe']['betankt_l']],
+        '… und keine Betankung daraus');
+    Database::execute('DELETE FROM tank_kennlinien WHERE id = ?', [$idKal]);
 
     // Ohne Kalibrierung keine Liter; ohne Sensor nur das Protokoll
     $ohneLjm = array_diff_key($eigG, ['liter_je_mm' => 1]);
@@ -1909,7 +2007,10 @@ try {
     pruefe($rc === 0 && str_contains($out, 'Leitungsbruch') && !str_contains($out, ' l →') && !str_contains($out, 'nutzbar'), 'tank:rechnen 1,7 V: Sensorfehler, keine Liter');
     [$rc, , $err] = $power(['tank:rechnen', (string) $mpH1, 'NAN']);
     pruefe($rc === 1 && str_contains($err, 'keine Zahl'), 'tank:rechnen mit NAN: abgelehnt');
-    $mpFremd = (int) Database::scalar("SELECT id FROM messpunkte WHERE rolle <> 'fuellstand' ORDER BY id DESC LIMIT 1");
+    $vtH = (int) AnlagenService::speichern(null, ['art' => 'verteilung', 'name' => $kennungH . ' Verteilung', 'floor_id' => $floorH])['id'];
+    $mpFremd = (int) Database::insert('messpunkte', ['objekt_id' => $vtH, 'geraet' => $kennungH . '-em', 'kanal' => 'em:0', 'rolle' => 'einspeisung',
+        'bezeichnung' => $kennungH . '-em', 'created_at' => gmdate('c')]);
+    pruefe($mpFremd > 0, 'Prüfbestand: ein Messpunkt „Einspeisung“ an einer eigenen Verteilung');
     [$rc, , $err] = $power(['tank:rechnen', (string) $mpFremd, '7']);
     pruefe($rc === 1 && str_contains($err, 'kein Messpunkt eines Tanksensors'), 'tank:rechnen an einem anderen Messpunkt: abgelehnt');
 
@@ -1944,8 +2045,8 @@ return $c;
     gleich([count($mpDemo), $mpDemo[0]['kennung'] ?? null, $mpDemo[0]['geraet'] ?? null, $mpDemo[0]['kanal'] ?? null], [1, 'TS-01', 'shellyplusuni-tank1', 'voltmeter:100'],
         'Demo: TS-01 misst im Tank des Aggregats');
     $fassDemo = $dort('SELECT anlass, geprueft, ab, ereignis_id FROM tank_kennlinien WHERE messpunkt_id = ? ORDER BY id', [(int) ($mpDemo[0]['id'] ?? 0)]);
-    gleich([array_column($fassDemo, 'anlass'), array_map('intval', array_column($fassDemo, 'geprueft'))], [['einsatz', 'betankung'], [0, 1]],
-        'Demo: zwei Fassungen – Einbau (ungeprüft) und Betankung (geprüft)');
+    gleich([array_column($fassDemo, 'anlass'), array_map('intval', array_column($fassDemo, 'geprueft'))], [['einsatz', 'betankung'], [0, 0]],
+        'Demo: zwei Fassungen – Einbau und Betankung, beide ungeprüft (TS-01 wurde nie gepeilt)');
     pruefe(($fassDemo[0]['ab'] ?? '') === ($mpDemo[0]['gueltig_ab'] ?? '-') && Zeit::ts((string) ($mpDemo[0]['gueltig_ab'] ?? '')) < time() - 2 * 86400
         && Zeit::ts((string) ($fassDemo[1]['ab'] ?? '')) < time() - 86400 + 3600, 'Demo: Einbau vor drei Tagen, Kalibrierung seit gestern bzw. vorgestern');
     $ereignisDemo = $dort("SELECT * FROM tank_ereignisse WHERE objekt_id = ? AND art = 'betankung'", [(int) ($tankDemo['id'] ?? 0)]);

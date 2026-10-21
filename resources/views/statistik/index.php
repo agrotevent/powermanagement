@@ -78,13 +78,14 @@ ksort($jeObjekt);
                     antippen und „zur Auswertung“ wählen. Es erscheint dann hier.</p>
             </div></div>
         <?php else: ?>
+            <?php $strom = array_values(array_filter($auswahl, static fn ($a) => $a['rolle'] !== 'fuellstand')); ?>
             <div class="toolbar-zeile">
-                <?php if (View::can('statistik.export')): ?>
+                <?php // /statistik/csv kennt nur Strom – ein Tanksensor hat seine CSV an der eigenen Karte. ?>
+                <?php if (View::can('statistik.export') && $strom !== []): ?>
                     <a class="btn btn-sm" href="/statistik/csv<?= View::e($query([])) ?>">CSV herunterladen</a>
                 <?php endif; ?>
                 <span class="small muted">Alle Werte nur im freigegebenen Datenzeitraum; Lücken in den Kurven sind Zeiten ohne Freigabe oder ohne Messwerte.</span>
             </div>
-            <?php $strom = array_values(array_filter($auswahl, static fn ($a) => $a['rolle'] !== 'fuellstand')); ?>
             <?php if (count($strom) > 1): ?>
                 <div class="card diagramm-karte">
                     <div class="card-head"><h2>Vergleich: Wirkleistung</h2></div>

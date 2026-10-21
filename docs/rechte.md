@@ -102,7 +102,7 @@ eine Freigabe mit *bearbeiten* – nicht nur eine, die ihn sichtbar macht:
 | Was | braucht |
 |-----|---------|
 | Anlage anlegen, verlegen (auch über die Etage), ins Inventar einsetzen | „Anlagen ändern“ + *bearbeiten* für den Standort (bzw. für die Anlage) |
-| Kabel, Kabelweg, Kabelbrücke zeichnen, ändern, löschen | „Kabel zeichnen“ + *bearbeiten* für den Standort **oder** für eine Anlage an einem Kabelende |
+| Kabel, Kabelweg, Kabelbrücke zeichnen, ändern, löschen | „Kabel zeichnen“ + *bearbeiten* für den Standort **oder** für eine Anlage an einem Kabelende; ein neues Kabelende steht auf der Etage des Kabels |
 | Etagen, Grundriss, Maßstab, Georeferenz | „Grundrisse pflegen“ + *bearbeiten* für den Standort |
 | ein Messgerät einer Anlage zuordnen | es darf gerade an keiner Anlage messen, die man nicht bearbeiten darf; ohne „alle Standorte“ bzw. „Datenquellen verwalten“ zählen seine Messwerte erst ab der Zuordnung |
 | ein Inventarstück einsetzen, das gerade woanders steckt | *bearbeiten* auch dort, wo es herauskommt |
@@ -214,12 +214,20 @@ Freigabe sieht, ändern, wer „Anlagen ändern“ und eine Freigabe mit
   „Anlagen ändern“ und *bearbeiten* am Tank. Wer das nicht hat (etwa ein
   Kunde), sieht die Knöpfe nicht. Ein eigenes Recht „nur betanken“ gibt es
   nicht.
+- **Eintragen nur im eigenen Datenfenster**: Peilen, betanken, kalibrieren,
+  löschen und einen Tanksensor einbauen geht nur, solange das Datenfenster
+  der Freigabe jetzt gilt; eine Betankung nur mit einem Ende darin. Sonst
+  änderte man Werte, die man selbst nicht sehen darf.
+- **Den Messpunkt eines Tanksensors** löscht niemand – er endet mit dem
+  Ausbau, Verlauf und Kennlinie bleiben.
 - **Rückwirkend** kalibrieren (*Erweitert*) nur mit unbegrenztem
   Datenfenster – sonst änderte man Werte, die man selbst nicht sehen darf.
   Es steht im Audit.
 - **Tanksensor anlegen**: „Inventar pflegen“; den Shelly-Kanal nur, wer das
   Gerät zuordnen darf.
-- **Kraftstoffschlauch**: „Kabel zeichnen“ und *bearbeiten* an beiden Enden.
+- **Kraftstoffschlauch**: „Kabel zeichnen“ und *bearbeiten* an beiden Enden
+  (oder für den Standort) – er ändert Vorrat und Restlaufzeit aller Tanks am
+  Generator. Beide Enden stehen auf der Etage des Schlauchs.
 - **Restlaufzeit**: Es zählen nur Generatoren, die der Betrachter sieht und
   live sehen darf. Ein fremder Generator verrät weder Namen noch Leistung –
   dann kommt der Verbrauch aus dem Pegel.

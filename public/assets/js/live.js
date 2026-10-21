@@ -188,7 +188,8 @@
             });
         }
         var h = kachel.querySelector('[data-feld="hinweis"]');
-        if (h) { h.textContent = l.hinweis || ''; }
+        // Ein Tank zeigt Restlaufzeit und Verbrauch in eigener Zeile – der Hinweis ohne sie.
+        if (h) { h.textContent = (l.tank && typeof l.tank.hinweis_kurz === 'string' ? l.tank.hinweis_kurz : l.hinweis) || ''; }
         // Messpunkte in Listen (Anlagenseite): Leistung und Schaltzustand
         Object.keys(l.messpunkte || {}).forEach(function (id) {
             var m = l.messpunkte[id];

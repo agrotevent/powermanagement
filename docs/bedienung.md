@@ -466,12 +466,16 @@ in [datenquellen.md](datenquellen.md#tanksensoren-rohwerte-statt-liter).
 **Einbauen** auf der Tankseite (*Sensor & Kennlinie*) oder im Tankfenster
 der Karte (*Tanksensor einsetzen …*), im Aufbau-Modus ebenso: Sensor wählen,
 **Sondenspitze über dem Boden** (Vorgabe 20 mm) bzw. bei Ultraschall die
-**Höhe der Sensorfläche** eintragen, optional gleich die **Anzeige am Tank
-(%)** als erste Peilung. In einen Tank kommt nur ein Tanksensor und ein
-Tanksensor nur in einen Tank; ein neuer ersetzt den alten. Aus Sensordaten,
-Einbaumaß und Tank entsteht die **Kennlinie** Rohwert → Füllhöhe → Liter.
-Nach jedem Einbau steht „seit Einbau nicht gepeilt“ da, bis gepeilt ist – die
-Einbautiefe ist jedes Mal etwas anders.
+**Höhe der Sensorfläche** eintragen. In einen Tank kommt nur ein Tanksensor
+und ein Tanksensor nur in einen Tank; ein neuer ersetzt den alten. Aus
+Sensordaten, Einbaumaß und Tank entsteht die **Kennlinie** Rohwert →
+Füllhöhe → Liter. Nach jedem Einbau steht „seit Einbau nicht gepeilt“ da, bis
+gepeilt ist – die Einbautiefe ist jedes Mal etwas anders.
+
+Die Reihenfolge vor Ort: **erst einbauen, dann die Sonde einhängen, dann
+peilen**, sobald der Sensor meldet. Rohwerte zählen erst ab dem Einbau, und
+ein Shelly meldet erst nach einer Änderung – eine Peilung davor steht nur im
+Protokoll.
 
 Nutzt die Sonde weniger als 40 % ihres Messbereichs (eine 0–5-mWS-Sonde im
 1,55 m hohen Tank nutzt etwa 26 %), sagt das die Meldung beim Einbau, sofern
@@ -518,7 +522,8 @@ Rohwert des Sensors nimmt der Server.
 **Betankung**: geliefert in Litern laut Lieferschein, Ende des Tankens (leer
 = jetzt, höchstens 7 Tage zurück), Nummer des Lieferscheins. Mit *Gleich
 kalibrieren* (ab 30 min nach dem Tanken) sucht die App den Sprung in den
-Rohwerten und lernt daraus den **Inhalt je mm des Tanks**. Was der Generator
+Rohwerten – auch ein langsames Tanken über mehr als eine Stunde zählt ganz –
+und lernt daraus den **Inhalt je mm des Tanks**. Was der Generator
 am Schlauch währenddessen verbraucht hat, wird abgezogen. Ein Sprung unter
 zehn Meldeschritten taugt nicht; weicht das Ergebnis um mehr als 25 % vom
 bisherigen ab, nur mit *trotzdem*. Später kalibrieren geht im Protokoll.
@@ -526,8 +531,13 @@ bisherigen ab, nur mit *trotzdem*. Später kalibrieren geht im Protokoll.
 **Fassungen.** Jede Kalibrierung, jeder Einbau, ein Shelly-Tausch und jede
 Änderung an Sensordaten oder Tank ergibt eine neue Fassung der Kennlinie ab
 jetzt. Ältere bleiben, wie sie sind: Jeder Messwert wird mit der Fassung
-gerechnet, die damals galt. *Geprüft* heißt: mit Peilung oder Lieferschein
-bestätigt.
+gerechnet, die damals galt. Ändert man am Tanksensor nur den Hinweis, bleibt
+alles, wie es ist; nur den Meldeschritt – dann rechnet die Kennlinie mit ihm
+weiter, Nullpunkt und Steigung bleiben. *Geprüft* heißt: mit einer Peilung
+bestätigt. Eine Betankung lernt den Inhalt je mm, nicht die Einbautiefe – bis
+zur ersten Peilung bleibt es bei „seit Einbau nicht gepeilt“. Im Verbrauch je
+Tag zählt der Sprung einer neuen Fassung weder als Verbrauch noch als
+Betankung.
 
 **Löschen** im Protokoll: Eine Peilung oder Betankung, die kalibriert hat,
 lässt sich nur zurücknehmen, solange danach nichts neu kalibriert wurde – die
@@ -682,8 +692,9 @@ ab 20.10. 07:00)`. Beide ändern nichts.
 - **Vergleich**: die Wirkleistung aller ausgewählten Geräte in einem
   Diagramm.
 - **CSV-Export** (Semikolon, UTF-8 mit BOM, öffnet sich direkt in Excel).
-- Ein **Tanksensor** erscheint als Verlauf seines Tanks (Liter, %, Füllhöhe,
-  Rohwert) mit dem Verbrauch je Tag und einem Link zur Tankseite.
+- Ein **Tanksensor** erscheint mit dem Inhalt in Litern, dem Verbrauch je Tag,
+  einer eigenen CSV und einem Link zur Tankseite (dort auch %, Füllhöhe und
+  Rohwert). *CSV herunterladen* oben gilt nur für die Strom-Messgeräte.
 
 ![Statistik: Kennzahlen, Wirkleistung, Strom und Spannung je Phase, Energie je Tag](bilder/statistik.png)
 

@@ -328,7 +328,7 @@ final class InventarService
             Zugriff::vergessen();
         }
         if ($einsatz !== null && $art === 'tanksensor' && $sensordaten != $vorherSensor) {
-            $hinweise[] = TankService::sensorGeaendert($id);
+            $hinweise[] = TankService::sensorGeaendert($id, (array) $vorherSensor);
         }
         $hinweis = implode(' ', array_filter($hinweise, static fn (string $h): bool => $h !== ''));
         return ['ok' => true, 'message' => trim(self::ARTEN[$art] . ' ' . $kennung . ' gespeichert (' . (count($geraete) === 1 ? '1 Messkanal' : count($geraete) . ' Messkanäle') . '). ' . $hinweis), 'id' => $id];

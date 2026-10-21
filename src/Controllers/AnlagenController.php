@@ -14,6 +14,7 @@ use App\Services\LiveService;
 use App\Services\MesspunktService;
 use App\Services\SchutzService;
 use App\Services\SiteService;
+use App\Support\Database;
 use App\Support\Flash;
 use App\Support\Request;
 use App\Support\Response;
@@ -379,6 +380,15 @@ final class AnlagenController extends Controller
     {
         $objekt = $this->anlage($params, true);
         if ($objekt === null) {
+            return;
+        }
+        // Den Füllstand eines Tanks misst ein Tanksensor aus dem Inventar – er
+        // geht nur über „Ausbauen“ (gueltig_bis). Löschen nähme seine Fassungen
+        // mit, auch die außerhalb des eigenen Datenfensters.
+        $rolle = Database::scalar('SELECT rolle FROM messpunkte WHERE id = ? AND objekt_id = ?', [$request->int('messpunkt_id'), (int) $objekt['id']]);
+        if (!AnlagenService::elektrisch((string) $objekt['art']) || in_array((string) $rolle, MesspunktService::NUR_INVENTAR, true)) {
+            $this->antwort($request, ['ok' => false, 'message' => 'Einen Tanksensor nimmt man über „Ausbauen“ heraus – Verlauf und Kennlinie bleiben dann erhalten.'],
+                '/anlagen/' . (int) $objekt['id']);
             return;
         }
         $ergebnis = MesspunktService::loeschen((int) $objekt['id'], $request->int('messpunkt_id'));

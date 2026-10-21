@@ -53,5 +53,6 @@ $roh = is_numeric($t['roh'] ?? null)
             <dt>Leer um</dt><dd data-tank="leer"><?= View::e((string) ($t['leer_um_text'] ?? '–')) ?></dd>
         </dl>
     <?php endif; ?>
-    <div class="live-hinweis small muted" data-feld="hinweis"><?= View::e((string) ($l['hinweis'] ?? '')) ?></div>
+    <?php // Restlaufzeit und Verbrauch stehen schon unter dem Balken – der Hinweis ohne sie. ?>
+    <div class="live-hinweis small muted" data-feld="hinweis"><?= View::e((string) (is_string($t['hinweis_kurz'] ?? null) ? $t['hinweis_kurz'] : ($l['hinweis'] ?? ''))) ?></div>
 </div>

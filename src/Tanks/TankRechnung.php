@@ -1036,7 +1036,8 @@ final class TankRechnung
     /**
      * Der Sprung einer Betankung in Rohpunkten [ms, roh]: der größte Anstieg
      * der Füllhöhe innerhalb von $fensterS (bei Ultraschall fällt dabei der
-     * Rohwert), davor und danach je der Median über 20 Minuten. Null, wenn
+     * Rohwert), ausgedehnt auf den ganzen Anstieg, wenn das Tanken länger
+     * dauerte; davor und danach je der Median über 20 Minuten. Null, wenn
      * der Sprung keine 10 Meldeschritte hat.
      *
      * @param list<array{0:int,1:?float}> $punkte
@@ -1062,6 +1063,32 @@ final class TankRechnung
             return null;
         }
         [, $i, $j] = $best;
+        // Dauerte das Tanken länger als das Fenster (eine IBC- oder
+        // Umfüllpumpe), ist das nur ein Stück des Anstiegs: so lange weiter
+        // nach vorn bzw. hinten, wie es dort um mehr als zwei Meldeschritte
+        // höher bzw. tiefer geht – Rauschen trägt nicht so weit.
+        $schwelle = 2 * (float) $r['sensor']['schritt_roh'];
+        do {
+            $weiter = false;
+            $k = null;
+            for ($x = $j + 1; $x < $n && $p[$x][0] - $p[$j][0] <= $fensterS * 1000; $x++) {
+                if ($k === null || $richtung * ((float) $p[$x][1] - (float) $p[$k][1]) > 0) {
+                    $k = $x;    // der höchste Punkt danach
+                }
+            }
+            if ($k !== null && $richtung * ((float) $p[$k][1] - (float) $p[$j][1]) > $schwelle) {
+                [$j, $weiter] = [$k, true];
+            }
+            $k = null;
+            for ($x = $i - 1; $x >= 0 && $p[$i][0] - $p[$x][0] <= $fensterS * 1000; $x--) {
+                if ($k === null || $richtung * ((float) $p[$k][1] - (float) $p[$x][1]) > 0) {
+                    $k = $x;    // der tiefste Punkt davor
+                }
+            }
+            if ($k !== null && $richtung * ((float) $p[$i][1] - (float) $p[$k][1]) > $schwelle) {
+                [$i, $weiter] = [$k, true];
+            }
+        } while ($weiter);
         $tVor = (int) $p[$i][0];
         $tNach = (int) $p[$j][0];
         $median = static function (int $von, int $bis) use ($p): float {
@@ -1271,7 +1298,8 @@ final class TankRechnung
      * Teile eines Tags werden addiert. Bis zur Lücke gilt der letzte Wert.
      * Zwischen zwei Meldungen wird gerade verbunden, auch über Stunden: Ein
      * Shelly meldet nur bei Änderung, Stille ist also keine Lücke. Der Wert
-     * um Mitternacht liegt auf dieser Verbindung.
+     * um Mitternacht liegt auf dieser Verbindung. Nur ein Anstieg nach mehr
+     * als 30 Minuten Stille beginnt erst 30 Minuten vor seiner Meldung.
      *
      * **Betankung erkannt:** ein Anstieg um mindestens $schwelleL innerhalb
      * von 30 Minuten oder von einer Meldung zur nächsten. Die Menge ist der
@@ -1323,6 +1351,15 @@ final class TankRechnung
                 $teil[count($teil) - 1][1] = (float) $w;
                 continue;
             }
+            // Ein Anstieg nach langer Ruhe (Betankung am Morgen nach der
+            // letzten Meldung am Abend) begann erst kurz vor der Meldung: bis
+            // dahin gilt der vorige Wert – sonst fiele ein Teil auf den Vortag.
+            // Der Hilfspunkt ist markiert: Ein Lieferschein darf trotzdem zur
+            // Zeit davor passen (wann genau getankt wurde, weiß man nicht).
+            $letzter = $teil !== [] ? $teil[count($teil) - 1] : null;
+            if ($letzter !== null && (float) $w > $letzter[1] && $t - $letzter[0] > self::BETANKUNG_DAUER_S) {
+                $teil[] = [$t - self::BETANKUNG_DAUER_S, $letzter[1], true];
+            }
             $teil[] = [$t, (float) $w];
         }
         if ($teil !== []) {
@@ -1373,7 +1410,8 @@ final class TankRechnung
             }
             foreach ($gruppen as [$a, $b]) {
                 if ($p[$b][1] - $p[$a][1] > 0) {
-                    $laeufe[] = ['teil' => $n, 'von' => $p[$a][0], 'zeit' => $p[$b][0], 'erkannt' => $p[$b][1] - $p[$a][1], 'erfasst' => []];
+                    $laeufe[] = ['teil' => $n, 'von' => $p[$a][0], 'von_frueh' => !empty($p[$a][2]) && $a > 0 ? $p[$a - 1][0] : $p[$a][0],
+                        'zeit' => $p[$b][0], 'erkannt' => $p[$b][1] - $p[$a][1], 'erfasst' => []];
                 }
             }
         }
@@ -1385,7 +1423,7 @@ final class TankRechnung
             $best = null;
             $abstand = null;
             foreach ($laeufe as $j => $l) {
-                $d = $z < $l['von'] ? $l['von'] - $z : max(0, $z - $l['zeit']);
+                $d = $z < $l['von_frueh'] ? $l['von_frueh'] - $z : max(0, $z - $l['zeit']);
                 if ($d <= self::LIEFERSCHEIN_S && ($abstand === null || $d < $abstand)) {
                     [$best, $abstand] = [$j, $d];
                 }
@@ -1549,7 +1587,8 @@ final class TankRechnung
      * schon kritischer Wert bleibt rot.
      *
      * $t: die Werte aus TankService::live (sensor, alter_s, zeit (ms),
-     * online, fehler, prozent, nutzbar_l, liter, hoehe_mm, ueber_grenze,
+     * ohne_wert (Text, wenn kein Wert kam), online, fehler, prozent,
+     * nutzbar_l, liter, hoehe_mm, ueber_grenze,
      * grenze_prozent, restlaufzeit_h, nachbestellen_bis, verbrauch_l_h,
      * schritt_l, generatoren [{name, laeuft}], peilung, gesperrt, jetzt).
      * Stehen alle Generatoren der Versorgung (Verbrauch 0), heißt es
@@ -1557,7 +1596,7 @@ final class TankRechnung
      * $grenzen: Einstellungen (GRENZEN), $tank: Eigenschaften des Tanks
      * (warnung_prozent, alarm_prozent gehen vor).
      *
-     * @return array{stufe:string,hinweis:string}
+     * @return array{stufe:string,hinweis:string,kurz?:string} kurz (nur bei „ok“): der Hinweis ohne Restlaufzeit
      */
     public static function stufe(array $t, array $grenzen, array $tank = []): array
     {
@@ -1591,7 +1630,8 @@ final class TankRechnung
         }
 
         if ($alter === null || ($t['zeit'] ?? null) === null) {
-            return ['stufe' => 'stumm', 'hinweis' => 'noch kein Wert seit dem Einbau' . ($online === false ? ', Gerät offline' : '')];
+            $ohne = is_string($t['ohne_wert'] ?? null) && $t['ohne_wert'] !== '' ? $t['ohne_wert'] : 'noch kein Wert seit dem Einbau';
+            return ['stufe' => 'stumm', 'hinweis' => $ohne . ($online === false ? ', Gerät offline' : '')];
         }
         if ($online === false || ($alter > $g['tank_stumm_h'] * 3600 && $online !== true)) {
             return ['stufe' => 'stumm', 'hinweis' => 'letzter Wert ' . self::alterText($alter) . ($online === false ? ', Gerät offline' : '')];
@@ -1625,6 +1665,7 @@ final class TankRechnung
         }
 
         $text = self::standText($t, $jetzt, '');
+        $zusatz = '';
         if (($t['liter'] ?? null) === null && $prozent === null) {
             if (isset($t['hoehe_mm'])) {
                 $text = 'Füllhöhe ' . self::zahl(round((float) $t['hoehe_mm'])) . ' mm – Inhalt unbekannt: peilen · ' . $text;
@@ -1633,11 +1674,13 @@ final class TankRechnung
                     . ' – ' . self::HINWEIS_NUR_ROH . ' ' . $text;
             }
         } elseif ($rest !== null) {
-            $text .= ' · ' . self::restText($rest);
+            $zusatz = ' · ' . self::restText($rest);
         } elseif ($literJeStunde !== null && $literJeStunde <= 0.0 && ($alle = array_filter((array) ($t['generatoren'] ?? []), 'is_array')) !== []) {
-            $text .= ' · ' . (count($alle) === 1 ? 'Generator steht' : 'Generatoren stehen');
+            $zusatz = ' · ' . (count($alle) === 1 ? 'Generator steht' : 'Generatoren stehen');
         }
-        return ['stufe' => 'ok', 'hinweis' => $text];
+        // „kurz“: ohne Restlaufzeit bzw. „Generator steht“ – für Kachel und
+        // Panel, die beides in einer eigenen Zeile zeigen.
+        return ['stufe' => 'ok', 'hinweis' => $text . $zusatz, 'kurz' => $text];
     }
 
     /** Grenzen: Einstellungen, darüber Warnung/Alarm des Tanks. @return array<string,float> */

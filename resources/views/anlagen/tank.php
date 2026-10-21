@@ -30,6 +30,7 @@
  * @var array<string,list<array{beschriftung:string,wert:string,einheit:string}>> $gruppen
  * @var ?array{lat:float,lon:float} $lage
  * @var bool $darfAendern
+ * @var bool $darfEintragen peilen, betanken, kalibrieren, einbauen – „bearbeiten“ und jetzt im Datenfenster
  * @var ?array<string,mixed> $sensor laufender Tanksensor
  * @var ?array<string,mixed> $fassung die jetzt geltende Kennlinie (im Datenfenster)
  * @var string $kennlinie die jetzige Kennlinie im Klartext
@@ -75,7 +76,6 @@ $query = static function (array $zusatz) use ($vorgabe, $von, $bis, $groesse): s
 $kennung = static fn (array $m): string => (string) ($m['kennung'] ?? '') !== '' ? (string) $m['kennung'] : (string) $m['bezeichnung'];
 $sensorArt = (string) ($fassung['rechnung']['sensor']['art'] ?? '');
 $rohEinheit = (string) (\App\Tanks\TankRechnung::ROHFELDER[(string) ($fassung['rechnung']['feld'] ?? '')][1] ?? '');
-$jetztMax = Zeit::fuerEingabe(Zeit::iso(time()));
 ob_start();
 ?>
         <div class="card">
@@ -127,7 +127,7 @@ $datenKarte = (string) ob_get_clean();
                 <p class="small muted">Sichtbarer Datenzeitraum: <?= View::e(Zugriff::beschreiben($fenster)) ?>.</p>
             <?php endif; ?>
         <?php endif; ?>
-        <?php if (!$vorlage && $darfAendern): ?>
+        <?php if ($darfEintragen): ?>
             <div class="card">
                 <div class="card-head"><h2>Vor Ort</h2><span class="hint">peilen und betanken</span></div>
                 <div class="card-body grid grid-2 tank-vorort">
@@ -156,7 +156,7 @@ $datenKarte = (string) ob_get_clean();
                             <div class="field"><label for="tank_liter">Geliefert (l)</label>
                                 <input id="tank_liter" name="liter" inputmode="decimal" autocomplete="off" required></div>
                             <div class="field"><label for="tank_ende">Ende des Tankens</label>
-                                <input id="tank_ende" name="zeit" type="datetime-local" max="<?= View::e($jetztMax) ?>"></div>
+                                <input id="tank_ende" name="zeit" type="datetime-local"></div>
                         </div>
                         <div class="field-row">
                             <div class="field"><label for="tank_ls">Lieferschein</label><input id="tank_ls" name="lieferschein" maxlength="64" autocomplete="off"></div>
@@ -204,7 +204,7 @@ $datenKarte = (string) ob_get_clean();
             <div class="card" id="tage">
                 <div class="card-head"><h2>Verbrauch je Tag</h2><span class="hint">ganze Tage im gewählten Zeitraum</span></div>
                 <div class="card-body">
-                    <?= View::partial('partials/tank-tage', ['tankId' => $id, 'quelle' => '/anlagen/' . $id . '/tank/tage' . $query([]), 'eintragen' => $darfAendern,
+                    <?= View::partial('partials/tank-tage', ['tankId' => $id, 'quelle' => '/anlagen/' . $id . '/tank/tage' . $query([]), 'eintragen' => $darfEintragen,
                         'csv' => View::can('statistik.export') ? '/anlagen/' . $id . '/tank/csv' . $query(['inhalt' => 'tage']) : null]) ?>
                 </div>
             </div>
@@ -232,7 +232,7 @@ $datenKarte = (string) ob_get_clean();
                 <?php if ($ereignisse !== []): ?>
                     <div class="table-wrap">
                         <table class="tabelle-karten tank-protokoll">
-                            <thead><tr><th>Zeit</th><th>Eintrag</th><th>Rohwert</th><th>Von</th><?= $darfAendern ? '<th></th>' : '' ?></tr></thead>
+                            <thead><tr><th>Zeit</th><th>Eintrag</th><th>Rohwert</th><th>Von</th><?= $darfEintragen ? '<th></th>' : '' ?></tr></thead>
                             <tbody>
                             <?php foreach ($ereignisse as $e): ?>
                                 <?php $einheit = $e['roh_einheit'] !== '' ? ' ' . $e['roh_einheit'] : '';
@@ -245,7 +245,7 @@ $datenKarte = (string) ob_get_clean();
                                         <?php if ($e['notizen'] !== ''): ?><div class="small muted"><?= View::e($e['notizen']) ?></div><?php endif; ?></td>
                                     <td data-label="Rohwert" class="small"><?= View::e($rohText) ?></td>
                                     <td data-label="Von" class="small"><?= View::e($e['von']) ?></td>
-                                    <?php if ($darfAendern): ?>
+                                    <?php if ($darfEintragen): ?>
                                         <td><div class="btn-row">
                                             <?php if ($e['auswerten_ab'] !== null): ?>
                                                 <form method="post" action="/anlagen/<?= $id ?>/tank/betankung/auswerten" class="btn-row">
@@ -306,7 +306,7 @@ $datenKarte = (string) ob_get_clean();
                             <form method="post" action="/einsatz/<?= (int) $sensor['einsatz_id'] ?>/beenden" class="mt" data-confirm="<?= View::e($kennung($sensor)) ?> ausbauen? Der Sensor misst dann nicht mehr hier.">
                                 <?= Csrf::field() ?><button class="btn btn-sm" type="submit">Ausbauen</button></form>
                         <?php endif; ?>
-                        <?php if ($darfAendern && $fassung !== null && in_array($sensorArt, ['linear', 'roh'], true)): ?>
+                        <?php if ($darfEintragen && $fassung !== null && in_array($sensorArt, ['linear', 'roh'], true)): ?>
                             <?php $s = $fassung['rechnung']['sensor']; $zahlFeld = static fn (mixed $w): string => is_numeric($w) ? View::zahlFeld((float) $w) : ''; ?>
                             <details class="mt tank-erweitert">
                                 <summary class="small">Erweitert: Anker und Steigung von Hand</summary>
@@ -348,14 +348,11 @@ $datenKarte = (string) ob_get_clean();
                                 <div class="field" data-nur-prinzip="ultraschall"><label for="ts_dleer">Ultraschall: Sensorfläche über dem Boden (mm)</label>
                                     <input id="ts_dleer" name="einbau[d_leer_mm]" inputmode="decimal" placeholder="nur Ultraschall"></div>
                             </div>
-                            <?php if ($nenn_l !== null): ?>
-                                <div class="field"><label for="ts_peilung">Anzeige am Tank (%) – erste Peilung, optional</label>
-                                    <input id="ts_peilung" name="peilung_prozent" inputmode="decimal" autocomplete="off" placeholder="z. B. 60"></div>
-                            <?php endif; ?>
                             <button class="btn btn-primary btn-sm" type="submit">Einbauen</button>
-                            <p class="help">Ab jetzt misst der Sensor hier; ein Sensor, der schon im Tank steckt, wird ersetzt. Danach peilen – die Einbautiefe ändert sich mit jedem Einbau.</p>
+                            <p class="help">Ab jetzt misst der Sensor hier; ein Sensor, der schon im Tank steckt, wird ersetzt. Erst einbauen, dann die Sonde einhängen,
+                                dann peilen, sobald der Sensor meldet – die Einbautiefe ändert sich mit jedem Einbau.</p>
                         </form>
-                    <?php elseif ($sensor === null && $darfAendern): ?>
+                    <?php elseif ($sensor === null && $darfEintragen): ?>
                         <p class="small muted">Kein freier Tanksensor im Inventar<?= View::can('inventar.manage') ? ' – <a href="/inventar/neu?art=tanksensor">Tanksensor anlegen</a>' : '' ?>.</p>
                     <?php endif; ?>
 

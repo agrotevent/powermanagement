@@ -9,9 +9,8 @@
  *   tankPanelLive(seite, l)             die Werte darin neu setzen (alle 5 s).
  *   einsetzenFormular(ziel, frei, id, aktionen)
  *                                       Tanksensor mit Einbaumaß einsetzen –
- *                                       im Panel und im Aufbau-Modus, dazu
- *                                       optional die Anzeige am Tank als erste
- *                                       Peilung.
+ *                                       im Panel und im Aufbau-Modus. Gepeilt
+ *                                       wird danach, sobald der Sensor meldet.
  *   peilungFormular(ziel, o, aktionen)  Peilung: Anzeige %, Inhalt l oder
  *                                       Peilstab mm – Zeit jetzt, den Rohwert
  *                                       nimmt der Server.
@@ -115,7 +114,9 @@ export function tankPanelLive(seite, l) {
     } else {
         kinder.push(el('div', { klasse: 'seite-werte tank-werte stufe-' + (l.stufe || 'keine') }, zelle('Füllstand', '')));
     }
-    if (l.hinweis) { kinder.push(el('div', { klasse: 'small muted' }, l.hinweis)); }
+    // Die Restlaufzeit steht oben schon in einer eigenen Zelle – der Hinweis ohne sie.
+    const hinweis = typeof t.hinweis_kurz === 'string' ? t.hinweis_kurz : l.hinweis;
+    if (hinweis) { kinder.push(el('div', { klasse: 'small muted' }, hinweis)); }
     ziel.replaceChildren(...kinder);
 }
 
@@ -133,13 +134,12 @@ export function einsetzenFormular(ziel, frei, objektId, aktionen) {
     const dLeer = el('input', { id: 'tank-dleer', inputmode: 'decimal', placeholder: 'z. B. 1300' });
     const offsetFeld = el('div', { klasse: 'field' }, el('label', { for: 'tank-offset' }, 'Sondenspitze über dem Boden (mm)'), offset);
     const dLeerFeld = el('div', { klasse: 'field', hidden: true }, el('label', { for: 'tank-dleer' }, 'Sensorfläche über dem Boden (mm)'), dLeer);
-    const peilung = el('input', { id: 'tank-erste-peilung', inputmode: 'decimal', autocomplete: 'off', placeholder: 'z. B. 60' });
-    const peilungFeld = el('div', { klasse: 'field' }, el('label', { for: 'tank-erste-peilung' }, 'Anzeige am Tank (%) – optional'), peilung);
     const knopf = el('button', { type: 'submit', klasse: 'btn btn-sm btn-primary' }, 'Einsetzen');
     const form = el('form', { klasse: 'tank-einsetzen' },
         el('div', { klasse: 'field' }, el('label', { for: 'tank-stueck' }, 'Welcher Tanksensor?'), auswahl),
-        offsetFeld, dLeerFeld, peilungFeld, knopf,
-        el('p', { klasse: 'help' }, 'Ein Sensor, der schon im Tank steckt, wird ersetzt. Danach peilen – die Einbautiefe ändert sich mit jedem Einbau.'));
+        offsetFeld, dLeerFeld, knopf,
+        el('p', { klasse: 'help' }, 'Ein Sensor, der schon im Tank steckt, wird ersetzt. Erst einsetzen, dann die Sonde einhängen, dann peilen,'
+            + ' sobald der Sensor meldet – die Einbautiefe ändert sich mit jedem Einbau.'));
     auswahl.addEventListener('change', () => {
         const opt = auswahl.selectedOptions[0];
         const ultraschall = !!opt && opt.dataset.prinzip === 'ultraschall';
@@ -156,7 +156,6 @@ export function einsetzenFormular(ziel, frei, objektId, aktionen) {
                 inventar_id: auswahl.value,
                 'einbau[offset_mm]': offsetFeld.hidden ? '' : offset.value,
                 'einbau[d_leer_mm]': dLeerFeld.hidden ? '' : dLeer.value,
-                peilung_prozent: peilung.value,
             });
             PM.melden(erg.message || (erg.ok ? 'Eingesetzt.' : 'Nicht möglich.'), !!erg.ok);
             if (erg.ok) { await aktionen.nachher(); }
@@ -341,7 +340,8 @@ export function tankPanel(seite, o, aktionen) {
         teile.push(vorOrt, formZiel);
     }
 
-    teile.push(el('h3', { klasse: 'mt' }, 'Inhalt'), el('p', { klasse: 'small' }, o.kurz));
+    // Nennvolumen, Kraftstoff, Bauform – „Inhalt“ heißt oben schon, was jetzt drin ist.
+    teile.push(el('h3', { klasse: 'mt' }, 'Tank'), el('p', { klasse: 'small' }, o.kurz));
 
     teile.push(el('h3', { klasse: 'mt' }, 'Tanksensor'));
     teile.push(el('p', { klasse: 'small' }, tank.sensor
