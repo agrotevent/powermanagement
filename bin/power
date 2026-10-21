@@ -59,17 +59,24 @@ declare(strict_types=1);
  *   bin/power berichte:aufbewahrung [--ausfuehren]
  *                                   Berichte über der Aufbewahrungsfrist zeigen, mit --ausfuehren löschen
  *   bin/power eventworx:pruefen     Verbindung zu Eventworx prüfen (nur lesend)
+ *   bin/power kunden:liste          Kunden des Kundenbereichs: ID, Name, aktiv, Zugänge, Locations, Nachweise
+ *   bin/power kunden:zugang <kunde-id> <benutzer> [--kennwort] [--name=…] [--email=…]
+ *                                   Kundenzugang ohne Oberfläche: Einrichtungslink (braucht app.url)
+ *                                   oder mit --kennwort ein vorläufiges Kennwort – genau einmal ausgegeben
  *   bin/power demo:seed [--reset]   Demo-Gelände mit Anlagen, Kabeln, Benutzern und Übergabeberichten anlegen
  *   bin/power wartung               Protokolle aufräumen, abgebrochene MQTT-Prüfungen
  *                                   zurücksetzen, alte Import-Vorschauen löschen, fällige
  *                                   Übergabeberichte melden, entschiedene Änderungsvorschläge
  *                                   (älter als 400 Tage) und verwaiste Vorschlags- und
- *                                   Temp-Ordner entfernen (täglich per Timer)
+ *                                   Temp-Ordner entfernen, abgelaufene Einrichtungslinks des
+ *                                   Kundenbereichs unbrauchbar machen (täglich per Timer)
  */
 
 require dirname(__DIR__) . '/src/bootstrap.php';
 
 use App\Berichte\BerichtService;
+use App\Kunden\Einrichtung;
+use App\Kunden\KundenService;
 use App\Messung\Influx;
 use App\Messung\Messdaten;
 use App\Messung\Mqtt;
@@ -98,7 +105,7 @@ $befehl = array_shift($argumente) ?? 'hilfe';
 $optionen = [];
 $werte = [];
 // Optionen mit Wert gehen als --name=wert oder --name wert.
-$mitWert = ['fassung'];
+$mitWert = ['fassung', 'name', 'email'];
 for ($i = 0; $i < count($argumente); $i++) {
     $a = $argumente[$i];
     if (str_starts_with($a, '--')) {
@@ -622,6 +629,45 @@ switch ($befehl) {
         $erg['ok'] ? $aus($erg['message']) : $fehler($erg['message']);
         break;
 
+    case 'kunden:liste':
+        $kunden = KundenService::alle();
+        if ($kunden === []) {
+            $aus('Keine Kunden.');
+            break;
+        }
+        // Nur, was zur Übersicht gehört – keine Personendaten der Zugänge.
+        $aus(sprintf('  %5s  %-40s %-9s %7s %10s %10s', 'ID', 'Name', 'Zustand', 'Zugänge', 'Locations', 'Nachweise'));
+        foreach ($kunden as $k) {
+            $aus(sprintf('  %5d  %-40s %-9s %7d %10d %10d', (int) $k['id'], mb_strimwidth((string) $k['name'], 0, 40, '…'),
+                $k['sperre'] === null ? 'aktiv' : ((int) $k['aktiv'] === 1 ? 'abgelaufen' : 'beendet'),
+                (int) $k['zugaenge'], (int) $k['locations_aktiv'], (int) $k['nachweise']));
+        }
+        break;
+
+    case 'kunden:zugang':
+        [$kundeId, $name] = array_pad($werte, 2, null);
+        if ($kundeId === null || $name === null || !ctype_digit((string) $kundeId)) {
+            $fehler('Aufruf: bin/power kunden:zugang <kunde-id> <benutzer> [--kennwort] [--name=…] [--email=…]');
+        }
+        Audit::akteur('cli');
+        $erg = KundenService::zugangAnlegen((int) $kundeId, [
+            'username'  => $name,
+            'full_name' => is_string($optionen['name'] ?? null) ? $optionen['name'] : '',
+            'email'     => is_string($optionen['email'] ?? null) ? $optionen['email'] : '',
+        ], isset($optionen['kennwort']) ? 'kennwort' : 'link');
+        if (!$erg['ok']) {
+            $fehler($erg['message']);
+        }
+        $aus($erg['message'] . ' Nur jetzt sichtbar – nicht per unverschlüsselter Mail weitergeben.');
+        if (isset($erg['kennwort'])) {
+            $aus('Vorläufiges Kennwort: ' . $erg['kennwort'] . ' (bei der ersten Anmeldung ändern)');
+        } elseif (($erg['link'] ?? null) !== null) {
+            $aus('Einrichtungslink (gilt einmal, bis ' . \App\Support\Zeit::anzeige((string) $erg['bis']) . '): ' . $erg['link']);
+        } else {
+            $aus('app.url fehlt oder ist ungültig – Pfad des Einrichtungslinks (vor ihn gehört die Adresse der Oberfläche): ' . $erg['pfad']);
+        }
+        break;
+
     case 'demo:seed':
         // Die Demo legt Konten mit bekannten Kennwörtern an (technik darf
         // schalten) und löscht mit --reset gleichnamige – nie im Betrieb.
@@ -651,6 +697,10 @@ switch ($befehl) {
         // Übergabeberichte nur melden – gelöscht wird mit berichte:aufbewahrung.
         foreach (BerichtService::wartungHinweise() as $meldung) {
             $aus($meldung);
+        }
+        $links = Einrichtung::aufraeumen();
+        if ($links > 0) {
+            $aus("Aufgeräumt: {$links} abgelaufene(r) Einrichtungslink(s) des Kundenbereichs.");
         }
         break;
 

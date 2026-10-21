@@ -4,6 +4,7 @@ declare(strict_types=1);
 namespace App\Controllers;
 
 use App\Berichte\Einstellungen;
+use App\Kunden\KundenEinstellungen;
 use App\Messung\Influx;
 use App\Messung\Messdaten;
 use App\Messung\Mqtt;
@@ -28,6 +29,11 @@ final class EinstellungenController extends Controller
             ],
             'eventworx' => Eventworx::zustand(),
             'berichte'  => Einstellungen::alle(),
+            'kundenbereich' => KundenEinstellungen::alle() + [
+                'adresse'          => KundenEinstellungen::adresse(),
+                'adresse_roh'      => trim((string) Config::get('app.url', '')),
+                'unverschluesselt' => KundenEinstellungen::unverschluesselt(),
+            ],
         ]);
     }
 
@@ -109,6 +115,25 @@ final class EinstellungenController extends Controller
         $ergebnis = Einstellungen::speichern($daten);
         $ergebnis['ok'] ? Flash::success($ergebnis['message']) : Flash::error($ergebnis['message']);
         $this->redirect('/system/einstellungen#firma');
+    }
+
+    /**
+     * Kundenbereich: Datenschutzhinweis, Ansprechpartner, Gültigkeit der
+     * Einrichtungslinks, Aufbewahrung der Prüfnachweise. Ein ungültiger Wert
+     * verwirft die ganze Eingabe.
+     */
+    public function kundenbereich(Request $request): void
+    {
+        $daten = [];
+        foreach (array_keys(KundenEinstellungen::VORGABEN) as $schluessel) {
+            $feld = str_replace('.', '__', $schluessel);
+            if (array_key_exists($feld, $_POST)) {
+                $daten[$schluessel] = $_POST[$feld];
+            }
+        }
+        $ergebnis = KundenEinstellungen::speichern($daten);
+        $ergebnis['ok'] ? Flash::success($ergebnis['message']) : Flash::error($ergebnis['message']);
+        $this->redirect('/system/einstellungen#kundenbereich');
     }
 
     /** Eventworx: Mandant und API-Token – das Token gilt nur für den Host, für den es eingetragen wird. */

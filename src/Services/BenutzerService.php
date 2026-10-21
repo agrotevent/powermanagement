@@ -494,13 +494,53 @@ final class BenutzerService
         if (Database::first('SELECT id FROM kunden WHERE id = ?', [$kundeId]) === null) {
             return ['ok' => false, 'message' => 'Diesen Kunden gibt es nicht.'];
         }
+        $f = self::kundenFreigabeLesen($daten);
+        if (!$f['ok']) {
+            return ['ok' => false, 'message' => $f['message']];
+        }
+        $id = Database::insert('freigaben', [
+            'subject_type'    => 'kunde',
+            'subject_id'      => $kundeId,
+            'ziel_art'        => 'site',
+            'ziel_id'         => $f['site_id'],
+            'ziel_kanal'      => '',
+            'darf_bearbeiten' => 0,
+            'darf_steuern'    => 0,
+            'gueltig_ab'      => $f['gueltig_ab'],
+            'gueltig_bis'     => $f['gueltig_bis'],
+            'daten_ab'        => $f['daten_ab'],
+            'daten_bis'       => $f['daten_bis'],
+            'notiz'           => $f['notiz'],
+            'created_by'      => mb_substr(Auth::name(), 0, 64),
+            'created_at'      => gmdate('c'),
+        ]);
+        Zugriff::vergessen();
+        Kundenbereich::vergessen();
+        Audit::log('kunden.freigabe_anlegen', 'kunde', (string) $kundeId, [
+            'kunde_id' => $kundeId, 'freigabe_id' => $id, 'site_id' => $f['site_id'], 'gueltig_bis' => $f['gueltig_bis'], 'ueberschneidung' => $ueberschneidung,
+        ]);
+        return ['ok' => true, 'message' => 'Freigabe angelegt.', 'id' => $id];
+    }
+
+    /**
+     * Die Eingaben einer Freigabe für einen Kunden lesen und prüfen, ohne zu
+     * speichern: Standort, Ende, Datenzeitraum (beide Enden), Veranstaltung.
+     * Die Kundenverwaltung prüft damit vor dem Speichern, ob sich der
+     * Datenzeitraum mit dem eines anderen Kunden am selben Standort
+     * überschneidet (KundenService::freigabeSpeichern).
+     *
+     * @param array<string,mixed> $daten wie freigabeFuerKunde()
+     * @return array{ok:bool,message:string,site_id?:int,gueltig_ab?:?string,gueltig_bis?:string,daten_ab?:string,daten_bis?:string,notiz?:string}
+     */
+    public static function kundenFreigabeLesen(array $daten): array
+    {
         $siteId = (int) (($daten['site_id'] ?? '') !== '' ? $daten['site_id'] : ($daten['ziel_id'] ?? 0));
         if ($siteId <= 0 || Database::first('SELECT id FROM sites WHERE id = ?', [$siteId]) === null) {
             return ['ok' => false, 'message' => 'Diesen Standort gibt es nicht.'];
         }
         $zeiten = [];
         foreach (['gueltig_ab' => false, 'gueltig_bis' => true, 'daten_ab' => false, 'daten_bis' => true] as $feld => $ende) {
-            $eingabe = trim((string) ($daten[$feld] ?? ''));
+            $eingabe = is_scalar($daten[$feld] ?? null) ? trim((string) $daten[$feld]) : '';
             $zeiten[$feld] = Zeit::ausEingabe($eingabe, $ende);
             if ($eingabe !== '' && $zeiten[$feld] === null) {
                 return ['ok' => false, 'message' => 'Kein gültiger Zeitpunkt: „' . mb_substr($eingabe, 0, 40) . '“.'];
@@ -522,27 +562,17 @@ final class BenutzerService
         if ($fehler !== null) {
             return ['ok' => false, 'message' => $fehler];
         }
-        $id = Database::insert('freigaben', [
-            'subject_type'    => 'kunde',
-            'subject_id'      => $kundeId,
-            'ziel_art'        => 'site',
-            'ziel_id'         => $siteId,
-            'ziel_kanal'      => '',
-            'darf_bearbeiten' => 0,
-            'darf_steuern'    => 0,
-            'gueltig_ab'      => $ab,
-            'gueltig_bis'     => $bis,
-            'daten_ab'        => $datenAb,
-            'daten_bis'       => $datenBis,
-            'notiz'           => mb_substr(trim((string) preg_replace('/[\x00-\x1F\x7F]+/u', ' ', (string) ($daten['notiz'] ?? ''))), 0, 255),
-            'created_by'      => mb_substr(Auth::name(), 0, 64),
-            'created_at'      => gmdate('c'),
-        ]);
-        Zugriff::vergessen();
-        Audit::log('kunden.freigabe_anlegen', 'kunde', (string) $kundeId, [
-            'kunde_id' => $kundeId, 'freigabe_id' => $id, 'site_id' => $siteId, 'gueltig_bis' => $bis, 'ueberschneidung' => $ueberschneidung,
-        ]);
-        return ['ok' => true, 'message' => 'Freigabe angelegt.', 'id' => $id];
+        $notiz = is_scalar($daten['notiz'] ?? null) ? (string) $daten['notiz'] : '';
+        return [
+            'ok'          => true,
+            'message'     => '',
+            'site_id'     => $siteId,
+            'gueltig_ab'  => $ab,
+            'gueltig_bis' => $bis,
+            'daten_ab'    => $datenAb,
+            'daten_bis'   => $datenBis,
+            'notiz'       => mb_substr(trim((string) preg_replace('/[\x00-\x1F\x7F]+/u', ' ', $notiz)), 0, 255),
+        ];
     }
 
     /** Endet ein Zeitraum vor seinem Beginn? Die Meldung dazu, sonst null. */

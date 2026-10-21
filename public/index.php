@@ -19,6 +19,7 @@ use App\Controllers\EinstellungenController;
 use App\Controllers\KarteController;
 use App\Controllers\KatalogImportController;
 use App\Controllers\KundenbereichController;
+use App\Controllers\KundenController;
 use App\Controllers\LocationController;
 use App\Controllers\ManifestController;
 use App\Controllers\PruefgeraeteController;
@@ -70,6 +71,28 @@ $router->post('/profil/passwort', [AuthController::class, 'changePassword']);
 $router->get('/kundenbereich', [KundenbereichController::class, 'index']);
 $router->get('/kundenbereich/konto', [KundenbereichController::class, 'konto']);
 $router->post('/kundenbereich/konto/kennwort', [KundenbereichController::class, 'kennwort']);
+// Einmal-Link zum Festlegen des Kennworts: ohne Anmeldung – das Token ist die
+// Berechtigung (einmal, mit Ablauf). Das Speichern ist ein POST mit CSRF-Token.
+$router->get('/kundenbereich/einrichten/{token}', [KundenbereichController::class, 'einrichten']);
+$router->post('/kundenbereich/einrichten/{token}', [KundenbereichController::class, 'einrichtenSpeichern']);
+
+// ---------------------------------------------------------------- Kunden (Personal)
+/*
+ * Die Kundenverwaltung: ansehen mit „kunden.view“, pflegen mit
+ * „kunden.manage“. Zugänge und Freigaben sieht nur, wer pflegen darf;
+ * Standorte freigeben zusätzlich nur, wer alles sieht (prüft
+ * KundenService). Jede {uid} und {fid} wird gegen den Kunden {id} geprüft.
+ * Ein Link oder vorläufiges Kennwort steht nur in der Antwort auf das
+ * Anlegen (no-store).
+ */
+$router->get('/kunden', [KundenController::class, 'index'], 'kunden.view');
+$router->post('/kunden/speichern', [KundenController::class, 'speichern'], 'kunden.manage');
+$router->get('/kunden/{id}', [KundenController::class, 'show'], 'kunden.view');
+$router->post('/kunden/{id}/loeschen', [KundenController::class, 'loeschen'], 'kunden.manage');
+$router->post('/kunden/{id}/zugang', [KundenController::class, 'zugangAnlegen'], 'kunden.manage');
+$router->post('/kunden/{id}/zugang/{uid}', [KundenController::class, 'zugang'], 'kunden.manage');
+$router->post('/kunden/{id}/freigabe', [KundenController::class, 'freigabeSpeichern'], 'kunden.manage');
+$router->post('/kunden/{id}/freigabe/{fid}/loeschen', [KundenController::class, 'freigabeLoeschen'], 'kunden.manage');
 
 // ---------------------------------------------------------------- Übersicht
 $router->get('/', [DashboardController::class, 'start']);
@@ -261,6 +284,8 @@ $router->post('/system/einstellungen/firma', [EinstellungenController::class, 'f
 // Eventworx (Kundendaten für Übergabeberichte, nur lesend): Mandant, Token, Verbindungstest.
 $router->post('/system/einstellungen/eventworx', [EinstellungenController::class, 'eventworx'], 'settings.manage');
 $router->post('/system/einstellungen/eventworx/pruefen', [EinstellungenController::class, 'eventworxPruefen'], 'settings.manage');
+// Kundenbereich: Datenschutzhinweis, Ansprechpartner, Gültigkeit der Einrichtungslinks, Aufbewahrung der Prüfnachweise.
+$router->post('/system/einstellungen/kundenbereich', [EinstellungenController::class, 'kundenbereich'], 'settings.manage');
 
 // Schnittstelle (API): Zugänge für andere Instanzen. Anlegen, Ändern,
 // Anzeigen und Löschen zusätzlich nur mit „Alle Standorte …“ (prüft der

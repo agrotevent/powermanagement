@@ -2,17 +2,32 @@
 declare(strict_types=1);
 
 /**
- * Kundenbereich: Kundenzugänge, Tor und Rechte.
+ * Kundenbereich: Kundenzugänge, Tor und Rechte; Kundenverwaltung, Zugänge
+ * und Einrichtungslink.
  *
  * Ein Kundenzugang (users.kunde_id) hat keine Rechte – auch nicht über eine
  * Rolle, die ihm jemand per SQL gibt –, sieht Standorte nur über Freigaben
  * an seinem Kunden (nur Standort, nur sehen, nie ohne Datengrenze; Konto-
  * und Rollen-Freigaben zählen nicht) und endet mit seinem Kunden. Die
- * Benutzerverwaltung lässt Kundenzugänge in Ruhe. Über HTTP (eigener
- * PHP-Server): das Tor über alle Routen aus public/index.php – GET und POST
- * mit gültigem Token führen zurück in den Kundenbereich, mit JSON 403, und
- * nichts ändert sich –, Fehlerseiten im Kundenlayout, Personal bekommt 403,
- * vorläufiges Kennwort führt ins Konto, Kunde beendet beendet die Sitzung.
+ * Benutzerverwaltung lässt Kundenzugänge in Ruhe.
+ *
+ * Kundenverwaltung (KundenService, Einrichtung): Kunden anlegen und ändern,
+ * Zugänge über vorläufiges Kennwort oder Einrichtungslink (nur der HMAC
+ * gespeichert, einmal, mit Ablauf, nur aus app.url), Benutzernamen ohne
+ * Rücksicht auf Groß-/Kleinschreibung frei, jede Zugangs- und Freigabe-ID nur
+ * am eigenen Kunden, Überschneidung der Datenzeiträume mehrerer Kunden am
+ * selben Gelände (Berühren zählt nicht), Löschen nur beendeter Kunden mit
+ * Namen, Standort löschen nimmt die Kunden-Freigaben mit.
+ *
+ * Über HTTP (eigener PHP-Server): das Tor über alle Routen aus
+ * public/index.php – GET und POST mit gültigem Token führen zurück in den
+ * Kundenbereich, mit JSON 403, und nichts ändert sich –, Fehlerseiten im
+ * Kundenlayout, Personal bekommt 403, vorläufiges Kennwort führt ins Konto,
+ * Kunde beendet beendet die Sitzung; Kundenverwaltung mit allen Reitern,
+ * Geheimnis nur einmal in der Antwort (no-store, Einmal-Marke), Einrichtungs-
+ * link einlösen (CSRF, gleiche 404 für falsch/abgelaufen/verbraucht, nicht
+ * in eine offene Sitzung), Überschneidung mit Rückfrage, CSRF und Rechte an
+ * jeder neuen Route.
  *
  * Die Prüfung legt eigene Kunden, Zugänge, Standorte und Rollen mit
  * eindeutiger Kennung an und löscht sie am Ende.
@@ -22,11 +37,18 @@ require __DIR__ . '/hilfen/pruefung.php';
 
 use App\Auth\Auth;
 use App\Auth\Zugriff;
+use App\Controllers\KundenController;
+use App\Kunden\Einrichtung;
+use App\Kunden\KundenEinstellungen;
 use App\Kunden\Kundenbereich;
+use App\Kunden\KundenService;
 use App\Services\BenutzerService;
 use App\Services\SiteService;
+use App\Support\Config;
+use App\Support\Crypto;
 use App\Support\Database;
 use App\Support\Response;
+use App\Support\Settings;
 use App\Support\Zeit;
 
 if (!function_exists('curl_init')) {
@@ -44,6 +66,8 @@ $rollen = [];
 $sites = [];
 $dosen = [];
 $auditVorher = (int) Database::scalar('SELECT COALESCE(MAX(id), 0) FROM audit_log');
+$appUrlVorher = (string) Config::get('app.url', '');
+$dateien = [];
 
 /** Ein Kunde – direkt in der Tabelle (die Kundenverwaltung kommt später). */
 $kundeAnlegen = static function (string $name, int $aktiv = 1) use ($kennung): int {
@@ -179,6 +203,7 @@ try {
 
     $personal['admin'] = BenutzerService::anlegen($kennung . '-admin', $kennwort, 'admin', false);
     $personal['planung'] = BenutzerService::anlegen($kennung . '-planung', $kennwort, 'planung', false);
+    $personal['technik'] = BenutzerService::anlegen($kennung . '-technik', $kennwort, 'technik', false);
     $personal['alt'] = BenutzerService::anlegen($kennung . '-alt', $kennwort, 'kunde', false);   // Rolle „kunde“ (bisheriger Weg)
     $rollen['ohnealles'] = (int) BenutzerService::rolleSpeichern(null, $kennung . ' ohne alles', '',
         ['kunden.view', 'kunden.manage', 'system.users.manage', 'dashboard.view'])['id'];
@@ -370,6 +395,271 @@ try {
     pruefe(!BenutzerService::freigabeLoeschen((int) $k1a['id'])['ok'] && Database::first('SELECT id FROM freigaben WHERE id = ?', [(int) $k1a['id']]) !== null,
         'freigabeLoeschen() entfernt keine Kunden-Freigabe');
 
+    // ------------------------------------------------ Kundenverwaltung: Kunden
+    alsBenutzer($personal['planung']);
+    $neu = KundenService::speichern(null, ['name' => '  ' . $kennung . "  Einrichtung\x01 GmbH ", 'kundennummer' => 'kb-' . $kennung,
+        'aktiv' => 1, 'notizen' => "Nur für uns\nzweite Zeile\x07"]);
+    pruefe($neu['ok'], 'Kunde angelegt: ' . $neu['message']);
+    $kunden['k5'] = (int) ($neu['id'] ?? 0);
+    $k5 = KundenService::find($kunden['k5']) ?? [];
+    gleich([$k5['name'] ?? '', $k5['notizen'] ?? '', (int) ($k5['created_by'] ?? 0)], [$kennung . ' Einrichtung GmbH', "Nur für uns\nzweite Zeile",
+        $personal['planung']], 'Name ohne Steuerzeichen und doppelte Leerzeichen, Notizen mehrzeilig, angelegt von');
+    foreach ([
+        'Name zu kurz'                         => ['name' => 'x'],
+        'Kundennummer doppelt (Schreibweise)'  => ['name' => $kennung . ' Doppel', 'kundennummer' => strtoupper('kb-' . $kennung)],
+        'kein Datum'                           => ['name' => $kennung . ' Datum', 'gueltig_bis' => 'bald'],
+        'Notizen zu lang'                      => ['name' => $kennung . ' Lang', 'notizen' => str_repeat('x', 5001)],
+    ] as $fall => $daten) {
+        pruefe(!KundenService::speichern(null, $daten)['ok'], 'Kunde abgelehnt: ' . $fall);
+    }
+    gleich((int) Database::scalar('SELECT COUNT(*) FROM kunden WHERE name LIKE ?', [$kennung . ' %']), count($kunden), 'nichts Abgelehntes gespeichert');
+    pruefe(KundenService::speichern($kunden['k5'], ['name' => $kennung . ' Einrichtung GmbH', 'kundennummer' => 'kb-' . $kennung, 'aktiv' => 1])['ok'],
+        'Kunde ändern: die eigene Kundennummer ist kein Doppel');
+    pruefe(!KundenService::speichern(999999999, ['name' => $kennung . ' Fremd'])['ok'], 'Kunde ändern: unbekannte ID abgelehnt');
+    $treffer = array_column(KundenService::alle(['suche' => 'EINRICHTUNG gmbh']), 'id');
+    pruefe(in_array($kunden['k5'], array_map('intval', $treffer), true), 'Suche ohne Rücksicht auf Groß-/Kleinschreibung');
+    $beendet = array_map('intval', array_column(KundenService::alle(['aktiv' => '0']), 'id'));
+    pruefe(in_array($kunden['k3'], $beendet, true) && !in_array($kunden['k5'], $beendet, true), 'Filter „beendet“');
+    $zeile = array_values(array_filter(KundenService::alle(['suche' => $kennung]), static fn (array $k): bool => (int) $k['id'] === $kunden['k1']))[0] ?? [];
+    gleich([(int) ($zeile['zugaenge'] ?? -1), (int) ($zeile['locations_aktiv'] ?? -1)], [2, 1], 'Liste: K1 mit zwei Zugängen und einer Location');
+
+    // ------------------------------------------------ Zugänge anlegen
+    gleich(KundenService::zugang($kunden['k1'], $zugaenge['z2']), null, 'zugang(K1, Zugang von K2) === null');
+    pruefe(KundenService::zugang($kunden['k1'], $zugaenge['z1']) !== null, 'zugang(K1, z1) gefunden');
+    pruefe(!array_key_exists('password_hash', KundenService::zugang($kunden['k1'], $zugaenge['z1']) ?? ['password_hash' => 1])
+        && !array_key_exists('einrichtung_hash', KundenService::zugaenge($kunden['k1'])[0] ?? ['einrichtung_hash' => 1]), 'Zugänge ohne Kennwort-Hash und Link-HMAC');
+    $vorher = (int) Database::scalar('SELECT COUNT(*) FROM users');
+    foreach ([
+        'Name in anderer Schreibweise vorhanden' => [$kunden['k5'], ['username' => strtoupper($kennung) . '-Z1'], 'kennwort'],
+        'Name eines Personal-Kontos'             => [$kunden['k5'], ['username' => $kennung . '-ADMIN'], 'link'],
+        'Leerzeichen im Namen'                   => [$kunden['k5'], ['username' => 'a b'], 'kennwort'],
+        'falsche E-Mail'                         => [$kunden['k5'], ['username' => $kennung . '-mail', 'email' => 'kein-at'], 'kennwort'],
+        'unbekannter Weg'                        => [$kunden['k5'], ['username' => $kennung . '-weg'], 'sms'],
+        'Kunde beendet'                          => [$kunden['k3'], ['username' => $kennung . '-k3neu'], 'kennwort'],
+        'Kunde gibt es nicht'                    => [999999999, ['username' => $kennung . '-niemand'], 'kennwort'],
+    ] as $fall => [$kid, $daten, $weg]) {
+        pruefe(!KundenService::zugangAnlegen($kid, $daten, $weg)['ok'], 'Zugang abgelehnt: ' . $fall);
+    }
+    gleich((int) Database::scalar('SELECT COUNT(*) FROM users'), $vorher, 'kein abgelehnter Zugang angelegt');
+
+    $mail = $kennung . '-kontakt@example.org';
+    $zk = KundenService::zugangAnlegen($kunden['k5'], ['username' => $kennung . '-kw', 'full_name' => 'Erika Muster', 'email' => $mail], 'kennwort');
+    pruefe($zk['ok'] && isset($zk['kennwort']) && !isset($zk['link']), 'Zugang mit vorläufigem Kennwort');
+    $zugaenge['kw'] = (int) ($zk['user_id'] ?? 0);
+    $konto = Database::first('SELECT * FROM users WHERE id = ?', [$zugaenge['kw']]) ?? [];
+    gleich([(int) ($konto['kunde_id'] ?? 0), (int) ($konto['must_change_password'] ?? 0), (int) Database::scalar('SELECT COUNT(*) FROM user_roles WHERE user_id = ?', [$zugaenge['kw']])],
+        [$kunden['k5'], 1, 0], 'neues Konto: kunde_id, vorläufiges Kennwort, keine Rolle');
+    pruefe(password_verify((string) ($zk['kennwort'] ?? ''), (string) ($konto['password_hash'] ?? '')) && strlen((string) ($zk['kennwort'] ?? '')) === 16,
+        'das vorläufige Kennwort (16 Zeichen) gilt');
+    gleich((KundenService::zugang($kunden['k5'], $zugaenge['kw']) ?? [])['zustand'] ?? '', 'erstanmeldung', 'Zustand: vorläufiges Kennwort');
+
+    Config::set('app.url', '');
+    $zl = KundenService::zugangAnlegen($kunden['k5'], ['username' => $kennung . '-link', 'email' => 'Link-' . $mail], 'link');
+    pruefe($zl['ok'] && array_key_exists('link', $zl) && $zl['link'] === null && preg_match('#^/kundenbereich/einrichten/[A-Za-z0-9_-]{43}$#', (string) ($zl['pfad'] ?? '')) === 1
+        && !isset($zl['kennwort']), 'ohne app.url: der Link-Weg liefert nur den Pfad');
+    $zugaenge['link'] = (int) ($zl['user_id'] ?? 0);
+    $token = substr((string) ($zl['pfad'] ?? ''), strlen(Einrichtung::PFAD));
+    $konto = Database::first('SELECT * FROM users WHERE id = ?', [$zugaenge['link']]) ?? [];
+    gleich((int) ($konto['must_change_password'] ?? 1), 0, 'Link-Weg: kein vorläufiges Kennwort');
+    gleich((string) ($konto['einrichtung_hash'] ?? ''), hash_hmac('sha256', $token, Crypto::ableiten('kunden-einrichtung')), 'gespeichert ist nur der HMAC des Tokens');
+    pruefe($konto['einrichtung_hash'] !== hash('sha256', $token) && $konto['einrichtung_hash'] !== $token, '… weder das Token noch sein SHA-256');
+    $spalten = implode("\n", array_map(static fn ($w): string => (string) $w, $konto));
+    pruefe(!str_contains($spalten, $token), 'das Token steht in keiner Spalte des Kontos');
+    $stunden = (Zeit::ts((string) $konto['einrichtung_bis']) - time()) / 3600;
+    pruefe($stunden > 71.9 && $stunden <= 72, 'Link gilt 72 Stunden (Vorgabe)');
+    gleich((KundenService::zugang($kunden['k5'], $zugaenge['link']) ?? [])['zustand'] ?? '', 'link_offen', 'Zustand: Einrichtungslink offen');
+    Config::set('app.url', 'https://kunden.example.test/pm/');
+    gleich(Einrichtung::link($token), 'https://kunden.example.test/pm/kundenbereich/einrichten/' . $token, 'mit app.url: der ganze Link');
+    foreach (['javascript:alert(1)', 'https://nutzer:geheim@kunden.example.test', 'https://kunden.example.test/?x=1', 'ftp://kunden.example.test', 'kunden.example.test'] as $url) {
+        Config::set('app.url', $url);
+        gleich(Einrichtung::link($token), null, 'app.url „' . $url . '“ taugt nicht für Links');
+    }
+    Config::set('app.url', 'http://kunden.example.test');
+    pruefe(KundenEinstellungen::unverschluesselt(), 'http:// außerhalb von localhost: unverschlüsselt');
+    Config::set('app.url', 'http://localhost:8080');
+    pruefe(!KundenEinstellungen::unverschluesselt(), 'http://localhost: nicht als unverschlüsselt gemeldet');
+    Config::set('app.url', $appUrlVorher);
+
+    // ------------------------------------------------ Einrichtungslink
+    gleich((int) (Einrichtung::finden($token)['id'] ?? 0), $zugaenge['link'], 'finden(): gültiger Link');
+    foreach (['44 Zeichen' => $token . 'A', 'mit +' => '+' . substr($token, 1), 'leer' => '', 'fremd' => str_repeat('A', 43)] as $fall => $falsch) {
+        gleich(Einrichtung::finden($falsch), null, 'finden(): ' . $fall . ' → null');
+    }
+    $bisVorher = (string) Database::scalar('SELECT einrichtung_bis FROM users WHERE id = ?', [$zugaenge['link']]);
+    Database::update('users', $zugaenge['link'], ['einrichtung_bis' => gmdate('c', time() - 60)]);
+    gleich(Einrichtung::finden($token), null, 'finden(): abgelaufen → null');
+    Database::update('users', $zugaenge['link'], ['einrichtung_bis' => $bisVorher]);
+    Database::update('kunden', $kunden['k5'], ['aktiv' => 0]);
+    KundenService::vergessen();
+    gleich(Einrichtung::finden($token), null, 'finden(): Kunde beendet → null');
+    pruefe(!KundenService::zugangLink($kunden['k5'], $zugaenge['link'])['ok'] && !KundenService::zugangKennwort($kunden['k5'], $zugaenge['link'])['ok'],
+        'Kunde beendet: kein neuer Link, kein neues Kennwort');
+    Database::update('kunden', $kunden['k5'], ['aktiv' => 1]);
+    KundenService::vergessen();
+    Database::update('users', $zugaenge['link'], ['is_active' => 0]);
+    gleich(Einrichtung::finden($token), null, 'finden(): Zugang deaktiviert → null');
+    Database::update('users', $zugaenge['link'], ['is_active' => 1]);
+
+    $neuesKennwort = 'Eingerichtet-' . bin2hex(random_bytes(4)) . '7';
+    $r = Einrichtung::einloesen($token, 'kurz1', 'kurz1');
+    pruefe(!$r['ok'] && Einrichtung::finden($token) !== null, 'einlösen mit zu kurzem Kennwort: abgelehnt, Link gilt weiter');
+    pruefe(!Einrichtung::einloesen($token, $neuesKennwort, $neuesKennwort . 'x')['ok'] && Einrichtung::finden($token) !== null,
+        'einlösen mit abweichender Wiederholung: abgelehnt, Link gilt weiter');
+    Database::update('users', $zugaenge['link'], ['failed_logins' => 3, 'locked_until' => gmdate('c', time() + 600)]);
+    alsBenutzer(null);
+    $r = Einrichtung::einloesen($token, $neuesKennwort, $neuesKennwort);
+    pruefe($r['ok'], 'einlösen: ' . $r['message']);
+    $konto = Database::first('SELECT * FROM users WHERE id = ?', [$zugaenge['link']]) ?? [];
+    gleich([$konto['einrichtung_hash'], $konto['einrichtung_bis'], (int) $konto['must_change_password'], (int) $konto['failed_logins'],
+        $konto['locked_until']], [null, null, 0, 0, null], 'eingelöst: Link weg, kein vorläufiges Kennwort, Sperre aufgehoben');
+    pruefe(!Einrichtung::einloesen($token, $neuesKennwort, $neuesKennwort)['ok'], 'ein zweites Mal einlösen: abgelehnt');
+    $audit = Database::first("SELECT * FROM audit_log WHERE action = 'kunden.zugang_eingerichtet' AND target_id = ? ORDER BY id DESC LIMIT 1",
+        [(string) $zugaenge['link']]) ?? [];
+    gleich([$audit['username'] ?? '', json_decode((string) ($audit['details'] ?? '{}'), true)], ['einrichtung:' . $kennung . '-link', ['user_id' => $zugaenge['link']]],
+        'Audit kunden.zugang_eingerichtet: Akteur „einrichtung:<benutzer>“, nur die ID');
+    pruefe(password_verify($neuesKennwort, (string) $konto['password_hash']), 'danach gilt das neue Kennwort (Anmeldung: HTTP-Teil)');
+    alsBenutzer($personal['planung']);
+    gleich((KundenService::zugang($kunden['k5'], $zugaenge['link']) ?? [])['zustand'] ?? '', 'aktiv', 'Zustand: aktiv');
+
+    // Ein neuer Link macht den alten ungültig; einer für ein vorläufiges Kennwort ersetzt das Kennwort.
+    $l1 = KundenService::zugangLink($kunden['k5'], $zugaenge['kw']);
+    $l2 = KundenService::zugangLink($kunden['k5'], $zugaenge['kw']);
+    $t1 = substr((string) ($l1['pfad'] ?? ''), strlen(Einrichtung::PFAD));
+    $t2 = substr((string) ($l2['pfad'] ?? ''), strlen(Einrichtung::PFAD));
+    pruefe($l1['ok'] && $l2['ok'] && $t1 !== $t2 && Einrichtung::finden($t1) === null && Einrichtung::finden($t2) !== null, 'neuer Link: der vorige gilt nicht mehr');
+    pruefe(!password_verify((string) $zk['kennwort'], (string) Database::scalar('SELECT password_hash FROM users WHERE id = ?', [$zugaenge['kw']]))
+        && (int) Database::scalar('SELECT must_change_password FROM users WHERE id = ?', [$zugaenge['kw']]) === 0,
+        'Link für einen Zugang mit vorläufigem Kennwort: das vorläufige Kennwort gilt nicht mehr');
+    pruefe(!KundenService::zugangLink($kunden['k1'], $zugaenge['kw'])['ok'], 'Link für einen Zugang eines anderen Kunden: abgelehnt');
+    $kw = KundenService::zugangKennwort($kunden['k5'], $zugaenge['kw']);
+    $konto = Database::first('SELECT * FROM users WHERE id = ?', [$zugaenge['kw']]) ?? [];
+    pruefe($kw['ok'] && password_verify((string) ($kw['kennwort'] ?? ''), (string) $konto['password_hash']) && (int) $konto['must_change_password'] === 1
+        && $konto['einrichtung_hash'] === null && Einrichtung::finden($t2) === null, 'neues vorläufiges Kennwort: gilt, muss geändert werden, Link weg');
+
+    // Abgelaufener Link: die Wartung macht ihn unbrauchbar, der Zustand bleibt sichtbar.
+    $zl3 = KundenService::zugangAnlegen($kunden['k5'], ['username' => $kennung . '-alt-link'], 'link');
+    $zugaenge['altlink'] = (int) ($zl3['user_id'] ?? 0);
+    Database::update('users', $zugaenge['altlink'], ['einrichtung_bis' => gmdate('c', time() - 3600)]);
+    gleich((KundenService::zugang($kunden['k5'], $zugaenge['altlink']) ?? [])['zustand'] ?? '', 'link_abgelaufen', 'Zustand: Link abgelaufen');
+    pruefe(Einrichtung::aufraeumen() >= 1 && Database::scalar('SELECT einrichtung_hash FROM users WHERE id = ?', [$zugaenge['altlink']]) === null
+        && Database::scalar('SELECT einrichtung_bis FROM users WHERE id = ?', [$zugaenge['altlink']]) !== null, 'Wartung: abgelaufener HMAC weg, Ablauf bleibt');
+    gleich((KundenService::zugang($kunden['k5'], $zugaenge['altlink']) ?? [])['zustand'] ?? '', 'link_abgelaufen', '… Zustand weiter: Link abgelaufen');
+    gleich(Database::scalar('SELECT einrichtung_hash FROM users WHERE id = ?', [$zugaenge['kw']]), null, 'Wartung: nur abgelaufene Links');
+
+    // Ändern, sperren, entsperren, löschen – nur Zugänge dieses Kunden.
+    pruefe(KundenService::zugangSpeichern($kunden['k5'], $zugaenge['link'], ['full_name' => 'Max Muster', 'email' => $mail, 'is_active' => 0])['ok']
+        && (KundenService::zugang($kunden['k5'], $zugaenge['link']) ?? [])['zustand'] === 'deaktiviert', 'Zugang deaktiviert');
+    pruefe(!Auth::attempt($kennung . '-link', $neuesKennwort, '198.51.100.8')['ok'], 'deaktivierter Zugang meldet sich nicht an');
+    KundenService::zugangSpeichern($kunden['k5'], $zugaenge['link'], ['full_name' => 'Max Muster', 'email' => $mail, 'is_active' => 1]);
+    pruefe(!KundenService::zugangSpeichern($kunden['k5'], $zugaenge['link'], ['email' => 'kaputt'])['ok'], 'Zugang ändern: falsche E-Mail abgelehnt');
+    pruefe(!KundenService::zugangSpeichern($kunden['k1'], $zugaenge['link'], ['full_name' => 'Fremd'])['ok']
+        && Database::scalar('SELECT full_name FROM users WHERE id = ?', [$zugaenge['link']]) === 'Max Muster', 'Zugang eines anderen Kunden ändern: abgelehnt');
+    Database::update('users', $zugaenge['link'], ['failed_logins' => 5, 'locked_until' => gmdate('c', time() + 600)]);
+    gleich((KundenService::zugang($kunden['k5'], $zugaenge['link']) ?? [])['zustand'] ?? '', 'gesperrt', 'Zustand: gesperrt');
+    pruefe(!KundenService::zugangEntsperren($kunden['k1'], $zugaenge['link'])['ok'], 'Zugang eines anderen Kunden entsperren: abgelehnt');
+    pruefe(KundenService::zugangEntsperren($kunden['k5'], $zugaenge['link'])['ok']
+        && Database::scalar('SELECT locked_until FROM users WHERE id = ?', [$zugaenge['link']]) === null, 'entsperrt');
+    pruefe(!KundenService::zugangLoeschen($kunden['k1'], $zugaenge['altlink'])['ok'] && BenutzerService::find($zugaenge['altlink']) !== null,
+        'Zugang eines anderen Kunden löschen: abgelehnt');
+    pruefe(KundenService::zugangLoeschen($kunden['k5'], $zugaenge['altlink'])['ok'] && BenutzerService::find($zugaenge['altlink']) === null, 'Zugang gelöscht');
+
+    // ------------------------------------------------ Überschneidung am geteilten Gelände
+    $k1Bis = $eingabe($jetzt + 7 * $tag);     // Datenende der Freigabe K1 → A
+    $ueber = KundenService::freigabeSpeichern($kunden['k2'], ['site_id' => $sites['a'], 'gueltig_ab' => $eingabe($jetzt - $tag),
+        'gueltig_bis' => $eingabe($jetzt + $tag), 'daten_wie_gueltig' => 1, 'notiz' => 'Herbstmarkt']);
+    pruefe(!$ueber['ok'] && in_array($kunden['k1'], array_column($ueber['ueberschneidungen'] ?? [], 'kunde_id'), true),
+        'K2 auf A im Zeitraum von K1: abgelehnt, Überschneidung nennt K1');
+    pruefe(!in_array($kunden['k4'], array_column($ueber['ueberschneidungen'] ?? [], 'kunde_id'), true), 'Freigabe ohne Datenenden (per SQL) überschneidet nichts');
+    $treffer = array_values(array_filter($ueber['ueberschneidungen'] ?? [], static fn (array $u): bool => $u['kunde_id'] === $kunden['k1']))[0] ?? [];
+    gleich([$treffer['kunde'] ?? '', $treffer['veranstaltung'] ?? ''], [$kennung . ' Muster Events', 'Sommerfestival'], 'Überschneidung mit Kunde und Veranstaltung');
+    $ok = KundenService::freigabeSpeichern($kunden['k2'], ['site_id' => $sites['a'], 'gueltig_ab' => $eingabe($jetzt - $tag),
+        'gueltig_bis' => $eingabe($jetzt + $tag), 'daten_wie_gueltig' => 1, 'ueberschneidung_ok' => 1]);
+    pruefe($ok['ok'], 'mit „Überschneidung bewusst“ gespeichert');
+    $details = json_decode((string) Database::scalar("SELECT details FROM audit_log WHERE action = 'kunden.freigabe_anlegen' AND target_id = ? ORDER BY id DESC LIMIT 1",
+        [(string) $kunden['k2']]), true);
+    gleich($details['ueberschneidung'] ?? null, true, 'Audit: ueberschneidung true');
+    pruefe(KundenService::freigabeLoeschen($kunden['k2'], (int) $ok['id'])['ok'], 'Freigabe entfernt');
+    $grenze = KundenService::freigabeSpeichern($kunden['k2'], ['site_id' => $sites['a'], 'gueltig_ab' => $k1Bis,
+        'gueltig_bis' => $eingabe($jetzt + 9 * $tag), 'daten_wie_gueltig' => 1]);
+    pruefe($grenze['ok'] && !isset($grenze['ueberschneidungen']), 'Grenze berührt (K1 endet, wenn K2 beginnt): keine Überschneidung');
+    KundenService::freigabeLoeschen($kunden['k2'], (int) ($grenze['id'] ?? 0));
+    $woanders = KundenService::freigabeSpeichern($kunden['k1'], ['site_id' => $sites['c'], 'gueltig_ab' => $eingabe($jetzt - $tag),
+        'gueltig_bis' => $eingabe($jetzt + $tag), 'daten_wie_gueltig' => 1]);
+    pruefe($woanders['ok'], 'anderer Standort: keine Überschneidung');
+    KundenService::freigabeLoeschen($kunden['k1'], (int) ($woanders['id'] ?? 0));
+    gleich(array_column(KundenService::ueberschneidungen($sites['a'], $jetzt - 15 * $tag, $jetzt - 14 * $tag, $kunden['k1']), 'kunde_id'), [$kunden['k2']],
+        'auch eine abgelaufene Freigabe zählt (ihre Messdaten gehören dem anderen Kunden)');
+    gleich(KundenService::ueberschneidungen($sites['a'], $jetzt - 15 * $tag, $jetzt - 14 * $tag, $kunden['k2']), [], 'die eigenen Freigaben zählen nicht');
+    pruefe(!KundenService::freigabeSpeichern($kunden['k5'], ['site_id' => $sites['b'], 'gueltig_ab' => $eingabe($jetzt)])['ok'], 'über die Kundenverwaltung: ohne Ende abgelehnt');
+    gleich(KundenService::freigabeLoeschen($kunden['k1'], (int) $k2b['id'])['ok'], false, 'Freigabe eines anderen Kunden entfernen: abgelehnt');
+    pruefe(Database::first('SELECT id FROM freigaben WHERE id = ?', [(int) $k2b['id']]) !== null, '… sie steht noch');
+    alsBenutzer($personal['ohnealles']);
+    pruefe(!KundenService::freigabeSpeichern($kunden['k5'], ['site_id' => $sites['b'], 'gueltig_ab' => $eingabe($jetzt),
+        'gueltig_bis' => $eingabe($jetzt + $tag), 'daten_wie_gueltig' => 1])['ok'], 'ohne „Alle Standorte …“: keine Freigabe');
+    pruefe(!KundenService::freigabeLoeschen($kunden['k2'], (int) $k2b['id'])['ok'], 'ohne „Alle Standorte …“: keine Freigabe entfernen');
+    alsBenutzer($personal['planung']);
+    $zustaende = array_column(KundenService::freigaben($kunden['k2']), 'zustand', 'id');
+    gleich([$zustaende[(int) $k2a['id']] ?? '', $zustaende[(int) $k2b['id']] ?? '', $zustaende[(int) $k2c['id']] ?? ''], ['abgelaufen', 'wirksam', 'kommend'],
+        'Freigaben des Kunden mit Zustand');
+
+    // ------------------------------------------------ Kunde löschen
+    $kunden['k6'] = (int) KundenService::speichern(null, ['name' => $kennung . ' Zum Löschen', 'aktiv' => 1])['id'];
+    $z6 = KundenService::zugangAnlegen($kunden['k6'], ['username' => $kennung . '-k6', 'email' => $mail], 'kennwort');
+    $f6 = KundenService::freigabeSpeichern($kunden['k6'], ['site_id' => $sites['b'], 'gueltig_ab' => $eingabe($jetzt + 30 * $tag),
+        'gueltig_bis' => $eingabe($jetzt + 31 * $tag), 'daten_wie_gueltig' => 1]);
+    pruefe($z6['ok'] && $f6['ok'], 'Kunde zum Löschen mit Zugang und Freigabe');
+    $dateiAllein = Database::insert('pruefnachweis_dateien', ['sha256' => hash('sha256', $kennung . 'allein'), 'groesse' => 5, 'daten' => base64_encode('%PDF-'), 'created_at' => gmdate('c')]);
+    $dateiGeteilt = Database::insert('pruefnachweis_dateien', ['sha256' => hash('sha256', $kennung . 'geteilt'), 'groesse' => 5, 'daten' => base64_encode('%PDF-'), 'created_at' => gmdate('c')]);
+    $dateien = [$dateiAllein, $dateiGeteilt];
+    $nachweis = static fn (int $kid, int $datei, ?int $site = null): int => Database::insert('pruefnachweise', ['kunde_id' => $kid, 'status' => 'freigegeben',
+        'quelle' => 'hand', 'bezeichnung' => $kennung . ' Verteiler', 'datei_id' => $datei, 'site_id' => $site, 'created_at' => gmdate('c')]);
+    $nachweis($kunden['k6'], $dateiAllein);
+    $nachweis($kunden['k6'], $dateiGeteilt);
+    $nachweisK2 = $nachweis($kunden['k2'], $dateiGeteilt);
+    Database::insert('kunden_vorgaenge', ['kunde_id' => $kunden['k6'], 'ewx_host' => $kennung . '.example', 'ewx_id' => bin2hex(random_bytes(12)), 'verknuepft_am' => gmdate('c')]);
+    Database::insert('kunden_abrufe', ['kunde_id' => $kunden['k6'], 'user_id' => (int) $z6['user_id'], 'art' => 'nachweis', 'ziel_id' => 1, 'am' => gmdate('c')]);
+    $bericht = Database::insert('berichte', ['status' => 'abgeschlossen', 'pruefdatum' => gmdate('Y-m-d'), 'inhalt' => '{}', 'titel' => $kennung,
+        'erstellt_von' => $personal['admin'], 'created_at' => gmdate('c'), 'kunde_id' => $kunden['k6']]);
+    pruefe(!KundenService::loeschen($kunden['k6'], $kennung . ' Zum Löschen')['ok'], 'Löschen: aktiver Kunde abgelehnt');
+    KundenService::speichern($kunden['k6'], ['name' => $kennung . ' Zum Löschen', 'aktiv' => 0]);
+    pruefe(!KundenService::loeschen($kunden['k6'], $kennung . ' Zum Loeschen')['ok'] && KundenService::find($kunden['k6']) !== null,
+        'Löschen: falscher Name abgelehnt');
+    $r = KundenService::loeschen($kunden['k6'], ' ' . strtoupper($kennung) . '  zum löschen ');
+    pruefe($r['ok'], 'Löschen mit dem Namen (Schreibweise egal): ' . $r['message']);
+    gleich([
+        KundenService::find($kunden['k6']),
+        (int) Database::scalar('SELECT COUNT(*) FROM users WHERE kunde_id = ?', [$kunden['k6']]),
+        (int) Database::scalar("SELECT COUNT(*) FROM freigaben WHERE subject_type = 'kunde' AND subject_id = ?", [$kunden['k6']]),
+        (int) Database::scalar('SELECT COUNT(*) FROM kunden_vorgaenge WHERE kunde_id = ?', [$kunden['k6']]),
+        (int) Database::scalar('SELECT COUNT(*) FROM pruefnachweise WHERE kunde_id = ?', [$kunden['k6']]),
+        (int) Database::scalar('SELECT COUNT(*) FROM kunden_abrufe WHERE kunde_id = ?', [$kunden['k6']]),
+        (int) Database::scalar('SELECT COUNT(*) FROM pruefnachweis_dateien WHERE id = ?', [$dateiAllein]),
+    ], [null, 0, 0, 0, 0, 0, 0], 'gelöscht: Kunde, Zugänge, Freigaben, Vorgänge, Nachweise, Abrufe, unbenutzte Datei');
+    gleich((int) Database::scalar('SELECT COUNT(*) FROM pruefnachweis_dateien WHERE id = ?', [$dateiGeteilt]), 1, 'eine Datei, die ein anderer Nachweis nutzt, bleibt');
+    $b = Database::first('SELECT id, kunde_id FROM berichte WHERE id = ?', [$bericht]);
+    pruefe($b !== null && $b['kunde_id'] === null, 'der Übergabebericht bleibt, nur ohne Kunde');
+    $details = json_decode((string) Database::scalar("SELECT details FROM audit_log WHERE action = 'kunden.loeschen' AND target_id = ?", [(string) $kunden['k6']]), true);
+    gleich([$details['zugaenge'] ?? null, $details['nachweise'] ?? null, $details['berichte'] ?? null], [1, 2, 1], 'Audit kunden.loeschen mit Zahlen');
+
+    // ------------------------------------------------ Standort löschen
+    $sites['d'] = SiteService::saveSite(null, ['name' => $kennung . ' Gelände D']);
+    $fd = KundenService::freigabeSpeichern($kunden['k2'], ['site_id' => $sites['d'], 'gueltig_ab' => $eingabe($jetzt - $tag),
+        'gueltig_bis' => $eingabe($jetzt + $tag), 'daten_wie_gueltig' => 1]);
+    $nachweisD = $nachweis($kunden['k2'], $dateiGeteilt, $sites['d']);
+    $vorgangD = Database::insert('kunden_vorgaenge', ['kunde_id' => $kunden['k2'], 'ewx_host' => $kennung . '.example', 'ewx_id' => bin2hex(random_bytes(12)),
+        'site_id' => $sites['d'], 'verknuepft_am' => gmdate('c')]);
+    pruefe($fd['ok'], 'Freigabe auf Gelände D');
+    SiteService::deleteSite($sites['d']);
+    gleich([
+        (int) Database::scalar("SELECT COUNT(*) FROM freigaben WHERE subject_type = 'kunde' AND ziel_art = 'site' AND ziel_id = ?", [$sites['d']]),
+        Database::scalar('SELECT site_id FROM pruefnachweise WHERE id = ?', [$nachweisD]),
+        Database::scalar('SELECT site_id FROM kunden_vorgaenge WHERE id = ?', [$vorgangD]),
+        (int) Database::scalar('SELECT COUNT(*) FROM pruefnachweise WHERE id = ?', [$nachweisD]),
+    ], [0, null, null, 1], 'Standort gelöscht: Kunden-Freigaben weg, Nachweis und Vorgang bleiben ohne Standort');
+    Database::execute("DELETE FROM audit_log WHERE target_type = 'site' AND target_id = ?", [(string) $sites['d']]);
+    unset($sites['d']);
+    Database::execute('DELETE FROM pruefnachweise WHERE id IN (?, ?)', [$nachweisD, $nachweisK2]);
+
     // ------------------------------------------------ HTTP
     $port = freierPort();
     $serverFehler = (string) tempnam(sys_get_temp_dir(), 'pm-kb-fehler-');
@@ -520,6 +810,162 @@ try {
     $r = anfrage($basis, $z1b['dose'], 'GET', '/kundenbereich');
     gleich([$r['status'], $r['ziel']], [302, '/login?next=%2Fkundenbereich'], 'abgemeldet: Kundenbereich → Anmeldung');
 
+    // ------------------------------------------------ Kundenverwaltung über HTTP
+    $planung = anmeldenAls($basis, $kennung . '-planung', $kennwort, $dosen);
+    $liste = anfrage($basis, $planung['dose'], 'GET', '/kunden');
+    pruefe($liste['status'] === 200 && str_contains($liste['text'], $kennung . ' Muster Events') && str_contains($liste['text'], 'href="/kunden"'),
+        'Stromplanung: Kundenliste, Eintrag in der Navigation');
+    pruefe(str_contains(anfrage($basis, $planung['dose'], 'GET', '/kunden?suche=' . rawurlencode('STADTMARKETING'))['text'], $kennung . ' Stadtmarketing')
+        && !str_contains(anfrage($basis, $planung['dose'], 'GET', '/kunden?suche=' . rawurlencode('STADTMARKETING'))['text'], $kennung . ' Muster Events'), 'Kundenliste: Suche');
+    foreach (array_keys(KundenController::REITER) as $tab) {
+        foreach ([$kunden['k1'], $kunden['k3'], $kunden['k5']] as $kid) {
+            $r = anfrage($basis, $planung['dose'], 'GET', '/kunden/' . $kid . '?tab=' . $tab);
+            pruefe($r['status'] === 200 && !str_contains($r['text'], 'onclick=') && !str_contains($r['text'], 'javascript:'),
+                'Kunde ' . $kid . ' Reiter ' . $tab . ': 200, ohne Inline-JavaScript (' . $r['status'] . ')');
+        }
+    }
+    $uebersicht = anfrage($basis, $planung['dose'], 'GET', '/kunden/' . $kunden['k1']);
+    pruefe(str_contains($uebersicht['text'], 'Der Kunde sieht derzeit') && str_contains($uebersicht['text'], $kennung . ' Gelände A (geteilt)')
+        && !str_contains($uebersicht['text'], $kennung . ' Gelände B'), 'Übersicht: K1 sieht derzeit A, nicht B (Konto-/Rollen-Freigaben zählen nicht)');
+    pruefe(str_contains(anfrage($basis, $planung['dose'], 'GET', '/kunden/' . $kunden['k3'])['text'], 'Nichts – der Kunde ist beendet'),
+        'Übersicht: ein beendeter Kunde sieht nichts');
+    foreach (['/kunden/999999999', '/kunden/abc', '/kunden/' . $kunden['k1'] . '?tab=gibt-es-nicht'] as $pfad) {
+        $r = anfrage($basis, $planung['dose'], 'GET', $pfad);
+        pruefe($pfad === '/kunden/' . $kunden['k1'] . '?tab=gibt-es-nicht' ? $r['status'] === 200 : $r['status'] === 404, 'Kundenseite ' . $pfad . ' → ' . $r['status']);
+    }
+    gleich(meldungenDesServers($serverFehler), [], 'Kundenverwaltung ohne PHP-Meldung');
+
+    // Ein neuer Zugang: das Kennwort genau einmal, in der Antwort, nicht zwischengespeichert.
+    $tabZ = anfrage($basis, $planung['dose'], 'GET', '/kunden/' . $kunden['k1'] . '?tab=zugaenge');
+    preg_match('/name="einmal" value="([0-9a-f]{32})"/', $tabZ['text'], $m);
+    $einmal = $m[1] ?? '';
+    $pToken = csrfAus($tabZ['text']);
+    pruefe($einmal !== '' && $pToken !== '', 'Formular „Neuer Zugang“ mit Einmal-Marke');
+    $konten = static fn (): int => (int) Database::scalar('SELECT COUNT(*) FROM users');
+    $vorher = $konten();
+    $neuerZugang = ['_token' => $pToken, 'einmal' => $einmal, 'username' => $kennung . '-http', 'full_name' => 'Per HTTP', 'email' => '', 'weg' => 'kennwort'];
+    $r = anfrage($basis, $planung['dose'], 'POST', '/kunden/' . $kunden['k1'] . '/zugang', $neuerZugang);
+    preg_match('/id="e-geheim" value="([^"]+)"/', $r['text'], $m);
+    $geheim = html_entity_decode($m[1] ?? '', ENT_QUOTES, 'UTF-8');
+    $zugaenge['http'] = (int) Database::scalar('SELECT id FROM users WHERE username = ?', [$kennung . '-http']);
+    pruefe($r['status'] === 200 && $geheim !== '' && password_verify($geheim, (string) Database::scalar('SELECT password_hash FROM users WHERE id = ?', [$zugaenge['http']])),
+        'Zugang angelegt: vorläufiges Kennwort direkt in der Antwort');
+    gleich(kopfzeile($r, 'Cache-Control'), 'no-store', 'Einmal-Seite: Cache-Control no-store');
+    gleich(anfrage($basis, $planung['dose'], 'POST', '/kunden/' . $kunden['k1'] . '/zugang', $neuerZugang)['status'], 302, 'dieselbe Einmal-Marke ein zweites Mal: zurück');
+    gleich($konten(), $vorher + 1, '… kein zweites Konto');
+    $tabZ = anfrage($basis, $planung['dose'], 'GET', '/kunden/' . $kunden['k1'] . '?tab=zugaenge');
+    pruefe(!str_contains($tabZ['text'], $geheim) && !str_contains($tabZ['text'], htmlspecialchars($geheim, ENT_QUOTES)) && str_contains($tabZ['text'], $kennung . '-http'),
+        'Reiter Zugänge: der neue Zugang, ohne sein Kennwort');
+    preg_match('/name="einmal" value="([0-9a-f]{32})"/', $tabZ['text'], $m);
+    $r = anfrage($basis, $planung['dose'], 'POST', '/kunden/' . $kunden['k1'] . '/zugang', ['_token' => $pToken, 'einmal' => $m[1] ?? '',
+        'username' => $kennung . '-httplink', 'weg' => 'link']);
+    preg_match('#id="e-geheim" value="(/kundenbereich/einrichten/[A-Za-z0-9_-]{43})"#', $r['text'], $m);
+    $pfad = $m[1] ?? '';
+    pruefe($r['status'] === 200 && $pfad !== '' && str_contains($r['text'], 'fehlt eine gültige'), 'Link-Weg ohne app.url: nur der Pfad, mit Hinweis');
+    $zugaenge['httplink'] = (int) Database::scalar('SELECT id FROM users WHERE username = ?', [$kennung . '-httplink']);
+    gleich(meldungenDesServers($serverFehler), [], 'Zugänge anlegen ohne PHP-Meldung');
+
+    // Den Link einlösen – ohne Anmeldung, POST nur mit CSRF-Token, danach zur Anmeldung.
+    $gast = (string) tempnam(sys_get_temp_dir(), 'pm-kb-');
+    $dosen[] = $gast;
+    $formular = anfrage($basis, $gast, 'GET', $pfad);
+    pruefe($formular['status'] === 200 && str_contains($formular['text'], 'value="' . $kennung . '-httplink"') && str_contains($formular['text'], 'name="kennwort"')
+        && str_contains($formular['text'], 'Datenschutzhinweis'), 'Einrichtungslink: Formular mit Benutzername und Datenschutzhinweis');
+    gleich([kopfzeile($formular, 'Cache-Control'), kopfzeile($formular, 'Referrer-Policy')], ['private, no-store', 'no-referrer'], 'Einrichtungslink: no-store, no-referrer');
+    pruefe(!str_contains($formular['text'], 'onclick=') && preg_match('/<script\b/i', $formular['text']) !== 1, 'Einrichtungslink: ohne Skript');
+    $linkHash = static fn (): ?string => Database::scalar('SELECT einrichtung_hash FROM users WHERE id = ?', [$zugaenge['httplink']]);
+    $hashVorher = $linkHash();
+    $neu = 'Kunde-' . bin2hex(random_bytes(5)) . '1';
+    anfrage($basis, $gast, 'POST', $pfad, ['kennwort' => $neu, 'wiederholung' => $neu]);
+    pruefe($linkHash() === $hashVorher && $hashVorher !== null, 'Einrichtungslink ohne CSRF-Token: nichts geändert');
+    $r = anfrage($basis, $gast, 'POST', $pfad, ['_token' => csrfAus($formular['text']), 'kennwort' => $neu, 'wiederholung' => $neu]);
+    gleich([$r['status'], $r['ziel'], $linkHash()], [302, '/login', null], 'Kennwort festgelegt → Anmeldung, Link verbraucht');
+    pruefe(str_contains(anmeldeMeldung($basis, $gast), 'Kennwort festgelegt'), 'Meldung „Kennwort festgelegt – bitte jetzt anmelden.“');
+    $verbraucht = anfrage($basis, $gast, 'GET', $pfad);
+    gleich($verbraucht['status'], 404, 'derselbe Link noch einmal: 404');
+    $fremd = anfrage($basis, $gast, 'GET', Einrichtung::PFAD . rtrim(strtr(base64_encode(random_bytes(32)), '+/', '-_'), '='));
+    $ohneMarken = static fn (string $html): string => (string) preg_replace('/nonce="[^"]*"|value="[^"]*"/', '', $html);
+    $abgelaufen = KundenService::zugangLink($kunden['k1'], $zugaenge['http']);
+    Database::update('users', $zugaenge['http'], ['einrichtung_bis' => gmdate('c', time() - 60)]);
+    $abgelaufenSeite = anfrage($basis, $gast, 'GET', (string) $abgelaufen['pfad']);
+    gleich([$fremd['status'], $abgelaufenSeite['status'], $ohneMarken($fremd['text']), $ohneMarken($verbraucht['text'])],
+        [404, 404, $ohneMarken($abgelaufenSeite['text']), $ohneMarken($abgelaufenSeite['text'])], 'falscher, abgelaufener und verbrauchter Link: dieselbe 404');
+    pruefe(!str_contains($abgelaufenSeite['text'], 'name="kennwort"') && str_contains($abgelaufenSeite['text'], htmlspecialchars(Einrichtung::UNGUELTIG)),
+        '404 ohne Formular, ein Text für alle Fälle');
+    $z = anmeldenAls($basis, $kennung . '-httplink', $neu, $dosen);
+    gleich($z['ziel'], '/kundenbereich', 'mit dem festgelegten Kennwort angemeldet → Kundenbereich');
+    $neuerLink = KundenService::zugangLink($kunden['k1'], $zugaenge['http']);
+    $r = anfrage($basis, $planung['dose'], 'GET', (string) $neuerLink['pfad']);
+    pruefe($r['status'] === 200 && str_contains($r['text'], 'bitte zuerst abmelden') && !str_contains($r['text'], 'name="kennwort"'), 'als Personal angemeldet: Hinweis, kein Formular');
+    $r = anfrage($basis, $z['dose'], 'POST', (string) $neuerLink['pfad'], ['_token' => csrfAus(anfrage($basis, $z['dose'], 'GET', '/kundenbereich')['text']),
+        'kennwort' => $neu . 'x', 'wiederholung' => $neu . 'x']);
+    pruefe($r['status'] === 200 && Einrichtung::finden(substr((string) $neuerLink['pfad'], strlen(Einrichtung::PFAD))) !== null,
+        'als Kundenzugang angemeldet: der Link setzt nichts');
+    gleich(meldungenDesServers($serverFehler), [], 'Einrichtungslink ohne PHP-Meldung');
+
+    // Freigabe mit Überschneidung: erst die Rückfrage, dann bewusst.
+    $tabF = anfrage($basis, $planung['dose'], 'GET', '/kunden/' . $kunden['k2'] . '?tab=freigaben');
+    $freigaben = static fn (): int => (int) Database::scalar("SELECT COUNT(*) FROM freigaben WHERE subject_type = 'kunde'");
+    $vorher = $freigaben();
+    $felder = ['_token' => csrfAus($tabF['text']), 'site_id' => $sites['a'], 'gueltig_ab' => $eingabe($jetzt - $tag), 'gueltig_bis' => $eingabe($jetzt + $tag),
+        'daten_wie_gueltig' => 1, 'notiz' => 'Herbstmarkt'];
+    $r = anfrage($basis, $planung['dose'], 'POST', '/kunden/' . $kunden['k2'] . '/freigabe', $felder);
+    $tabF = anfrage($basis, $planung['dose'], 'GET', '/kunden/' . $kunden['k2'] . '?tab=freigaben');
+    pruefe($r['status'] === 302 && $freigaben() === $vorher && str_contains($tabF['text'], 'Überschneidung') && str_contains($tabF['text'], $kennung . ' Muster Events')
+        && str_contains($tabF['text'], 'name="ueberschneidung_ok"') && str_contains($tabF['text'], 'value="Herbstmarkt"'), 'Überschneidung: nichts gespeichert, Liste und Häkchen, Eingaben bleiben');
+    $r = anfrage($basis, $planung['dose'], 'POST', '/kunden/' . $kunden['k2'] . '/freigabe', $felder + ['ueberschneidung_ok' => 1]);
+    $fid = (int) Database::scalar("SELECT id FROM freigaben WHERE subject_type = 'kunde' AND subject_id = ? AND notiz = 'Herbstmarkt'", [$kunden['k2']]);
+    pruefe($r['status'] === 302 && $freigaben() === $vorher + 1, 'mit Häkchen gespeichert');
+    gleich(anfrage($basis, $planung['dose'], 'POST', '/kunden/' . $kunden['k1'] . '/freigabe/' . $fid . '/loeschen', ['_token' => $felder['_token']])['status'], 404,
+        'Freigabe über einen anderen Kunden entfernen: 404');
+    anfrage($basis, $planung['dose'], 'POST', '/kunden/' . $kunden['k2'] . '/freigabe/' . $fid . '/loeschen', ['_token' => $felder['_token']]);
+    gleich($freigaben(), $vorher, 'Freigabe entfernt');
+    $r = anfrage($basis, $planung['dose'], 'POST', '/kunden/' . $kunden['k1'] . '/zugang/' . $zugaenge['z2'], ['_token' => $felder['_token'], 'aktion' => 'loeschen']);
+    pruefe($r['status'] === 404 && BenutzerService::find($zugaenge['z2']) !== null, 'Zugang über einen anderen Kunden löschen: 404');
+    $r = anfrage($basis, $planung['dose'], 'POST', '/kunden/' . $kunden['k1'] . '/zugang/' . $zugaenge['http'], ['_token' => $felder['_token'], 'aktion' => 'kennwort']);
+    preg_match('/id="e-geheim" value="([^"]+)"/', $r['text'], $m);
+    pruefe($r['status'] === 200 && kopfzeile($r, 'Cache-Control') === 'no-store'
+        && password_verify(html_entity_decode($m[1] ?? '', ENT_QUOTES, 'UTF-8'), (string) Database::scalar('SELECT password_hash FROM users WHERE id = ?', [$zugaenge['http']])),
+        'neues vorläufiges Kennwort: direkt in der Antwort, no-store');
+    gleich(meldungenDesServers($serverFehler), [], 'Freigaben und Zugangsaktionen ohne PHP-Meldung');
+
+    // Ohne CSRF-Token ändert keine der neuen Routen etwas.
+    $stand = static fn (): array => [(int) Database::scalar('SELECT COUNT(*) FROM kunden'), $konten(), (int) Database::scalar('SELECT COUNT(*) FROM freigaben'),
+        Settings::get('kundenbereich.kontakt'), (string) Database::scalar('SELECT name FROM kunden WHERE id = ?', [$kunden['k5']])];
+    $vorher = $stand();
+    preg_match('/name="einmal" value="([0-9a-f]{32})"/', anfrage($basis, $planung['dose'], 'GET', '/kunden/' . $kunden['k5'] . '?tab=zugaenge')['text'], $m);
+    $adminDose = anmeldenAls($basis, $kennung . '-admin', $kennwort, $dosen)['dose'];
+    foreach ([
+        [$planung['dose'], '/kunden/speichern', ['name' => $kennung . ' Ohne Token']],
+        [$planung['dose'], '/kunden/speichern', ['id' => $kunden['k5'], 'name' => $kennung . ' Umbenannt', 'aktiv' => 1]],
+        [$planung['dose'], '/kunden/' . $kunden['k3'] . '/loeschen', ['bestaetigung' => $kennung . ' Beendet']],
+        [$planung['dose'], '/kunden/' . $kunden['k5'] . '/zugang', ['einmal' => $m[1] ?? '', 'username' => $kennung . '-ohnetoken', 'weg' => 'kennwort']],
+        [$planung['dose'], '/kunden/' . $kunden['k5'] . '/zugang/' . $zugaenge['kw'], ['aktion' => 'loeschen']],
+        [$planung['dose'], '/kunden/' . $kunden['k5'] . '/freigabe', ['site_id' => $sites['b'], 'gueltig_ab' => $eingabe($jetzt + 40 * $tag),
+            'gueltig_bis' => $eingabe($jetzt + 41 * $tag), 'daten_wie_gueltig' => 1]],
+        [$planung['dose'], '/kunden/' . $kunden['k2'] . '/freigabe/' . (int) $k2b['id'] . '/loeschen', []],
+        [$adminDose, '/system/einstellungen/kundenbereich', ['kundenbereich__kontakt' => $kennung . ' Ohne Token']],
+    ] as [$dose, $ziel, $felder]) {
+        gleich(anfrage($basis, $dose, 'POST', $ziel, $felder)['status'], 302, 'ohne CSRF-Token: ' . $ziel . ' → zurück');
+    }
+    Settings::vergessen();
+    gleich($stand(), $vorher, 'ohne CSRF-Token: nichts geändert (Kunden, Konten, Freigaben, Einstellung)');
+
+    // Rechte: ansehen ohne pflegen, ohne Kunden-Rechte gar nicht.
+    $technik = anmeldenAls($basis, $kennung . '-technik', $kennwort, $dosen);
+    gleich(anfrage($basis, $technik['dose'], 'GET', '/kunden')['status'], 200, 'Elektrotechnik: Kundenliste');
+    $r = anfrage($basis, $technik['dose'], 'GET', '/kunden/' . $kunden['k1']);
+    pruefe($r['status'] === 200 && !str_contains($r['text'], '?tab=zugaenge') && !str_contains($r['text'], 'action="/kunden/speichern"'), 'Elektrotechnik: Kunde ohne Reiter Zugänge, ohne Formular');
+    gleich([anfrage($basis, $technik['dose'], 'GET', '/kunden/' . $kunden['k1'] . '?tab=zugaenge')['status'],
+        anfrage($basis, $technik['dose'], 'GET', '/kunden/' . $kunden['k1'] . '?tab=freigaben')['status']], [403, 403], 'Elektrotechnik: Zugänge und Freigaben 403');
+    gleich(anfrage($basis, $technik['dose'], 'POST', '/kunden/speichern', ['_token' => csrfAus($r['text']), 'name' => $kennung . ' Technik'])['status'], 403,
+        'Elektrotechnik: Kunde anlegen 403');
+    gleich(anfrage($basis, $alt['dose'], 'GET', '/kunden')['status'], 403, 'Konto mit Rolle „kunde“: /kunden 403');
+    $r = anfrage($basis, anmeldenAls($basis, $kennung . '-ohnealles', $kennwort, $dosen)['dose'], 'GET', '/kunden/' . $kunden['k2'] . '?tab=freigaben');
+    pruefe($r['status'] === 200 && str_contains($r['text'], 'darf nur, wer selbst alle Standorte sieht') && !str_contains($r['text'], 'id="neue-freigabe"'),
+        'pflegen ohne „Alle Standorte …“: Freigaben nur ansehen');
+    gleich(meldungenDesServers($serverFehler), [], 'Rechte der Kundenverwaltung ohne PHP-Meldung');
+
     // Kunde beendet: die offene Sitzung endet bei der nächsten Anfrage.
     Database::update('kunden', $kunden['k1'], ['aktiv' => 0]);
     $r = anfrage($basis, $z1['dose'], 'GET', '/kundenbereich');
@@ -534,7 +980,8 @@ try {
     gleich(meldungenDesServers($serverFehler), [], 'Kunde beendet ohne PHP-Meldung');
 
     // Datenschutz: Kundennamen nie im Audit.
-    $namen = array_map(static fn (int $id): string => (string) Database::scalar('SELECT name FROM kunden WHERE id = ?', [$id]), $kunden);
+    $namen = array_filter(array_map(static fn (int $id): string => (string) Database::scalar('SELECT name FROM kunden WHERE id = ?', [$id]), $kunden));
+    $namen[] = $kennung . ' Zum Löschen';   // schon gelöscht
     $treffer = 0;
     foreach (Database::select('SELECT details FROM audit_log WHERE id > ?', [$auditVorher]) as $a) {
         foreach ($namen as $n) {
@@ -542,18 +989,40 @@ try {
         }
     }
     gleich($treffer, 0, 'kein Kundenname in audit_log.details');
+    $mailMuster = '%' . $kennung . '-kontakt%';
+    gleich([(int) Database::scalar('SELECT COUNT(*) FROM audit_log WHERE id > ? AND details LIKE ?', [$auditVorher, $mailMuster]),
+        (int) Database::scalar('SELECT COUNT(*) FROM bericht_ereignisse WHERE details LIKE ?', [$mailMuster]),
+        str_contains((string) @file_get_contents(dirname(__DIR__) . '/storage/logs/app.log'), $kennung . '-kontakt')], [0, 0, false],
+        'keine E-Mail-Adresse eines Zugangs in Audit, Bericht-Ereignissen und Log');
+    pruefe((int) Database::scalar('SELECT COUNT(*) FROM audit_log WHERE id > ? AND (details LIKE ? OR details LIKE ?)', [$auditVorher, '%einrichten/%', '%password%']) === 0,
+        'kein Link und kein Kennwort im Audit');
 } finally {
     alsBenutzer(null);
-    $kundenIds = array_map('intval', array_column(Database::select('SELECT id FROM kunden WHERE name LIKE ?', [$kennung . '%']), 'id'));
+    Config::set('app.url', $appUrlVorher);
+    // Auch die Kunden, die die Prüfung selbst gelöscht hat (ihr Audit bleibt sonst stehen).
+    $kundenIds = array_values(array_unique(array_merge(array_map('intval', $kunden),
+        array_map('intval', array_column(Database::select('SELECT id FROM kunden WHERE name LIKE ?', [$kennung . '%']), 'id')))));
     foreach ($kundenIds as $id) {
         Database::execute("DELETE FROM freigaben WHERE subject_type = 'kunde' AND subject_id = ?", [$id]);
         foreach (Database::select('SELECT id FROM users WHERE kunde_id = ?', [$id]) as $u) {
             BenutzerService::kontoEntfernen((int) $u['id']);
             Database::execute("DELETE FROM audit_log WHERE target_type = 'user' AND target_id = ?", [(string) $u['id']]);
         }
+        foreach (['pruefnachweise', 'kunden_vorgaenge', 'kunden_abrufe'] as $tabelle) {
+            Database::execute('DELETE FROM ' . $tabelle . ' WHERE kunde_id = ?', [$id]);
+        }
+        Database::execute('UPDATE berichte SET kunde_id = NULL WHERE kunde_id = ?', [$id]);
         Database::delete('kunden', $id);
         Database::execute("DELETE FROM audit_log WHERE target_type = 'kunde' AND target_id = ?", [(string) $id]);
     }
+    foreach ($zugaenge as $id) {
+        Database::execute("DELETE FROM audit_log WHERE target_type = 'user' AND target_id = ?", [(string) $id]);
+    }
+    foreach ($dateien as $id) {
+        Database::execute('DELETE FROM pruefnachweise WHERE datei_id = ?', [$id]);
+        Database::delete('pruefnachweis_dateien', $id);
+    }
+    Database::execute('DELETE FROM berichte WHERE titel = ?', [$kennung]);
     if (isset($rolleKunde)) {
         Database::execute("DELETE FROM freigaben WHERE subject_type = 'role' AND subject_id = ? AND notiz = ?", [$rolleKunde, $kennung]);
     }
@@ -570,7 +1039,8 @@ try {
         BenutzerService::rolleLoeschen($id);
         Database::execute("DELETE FROM audit_log WHERE target_type = 'role' AND target_id = ?", [(string) $id]);
     }
-    Database::execute('DELETE FROM audit_log WHERE id > ? AND (username LIKE ? OR details LIKE ?)', [$auditVorher, $kennung . '%', '%' . $kennung . '%']);
+    Database::execute('DELETE FROM audit_log WHERE id > ? AND (username LIKE ? OR username LIKE ? OR details LIKE ?)',
+        [$auditVorher, $kennung . '%', 'einrichtung:' . $kennung . '%', '%' . $kennung . '%']);
     foreach ($dosen as $d) {
         @unlink($d);
     }

@@ -32,6 +32,8 @@ use App\Auth\Auth;
 use App\Auth\Permissions;
 use App\Auth\Zugriff;
 use App\Controllers\StatistikController;
+use App\Kunden\Einrichtung;
+use App\Kunden\KundenEinstellungen;
 use App\Messung\Datenquellen;
 use App\Messung\Http;
 use App\Messung\Influx;
@@ -46,6 +48,7 @@ use App\Support\Config;
 use App\Support\Crypto;
 use App\Support\Database;
 use App\Support\Response;
+use App\Support\Settings;
 use App\Support\View;
 
 $k = 'pm-sich-' . bin2hex(random_bytes(3));
@@ -88,6 +91,48 @@ try {
     gleich(Response::sichererDateiname("Muster Events GmbH & Co. KG \"ü\"\r\nX.pdf"), 'Muster-Events-GmbH-Co.-KG-X.pdf',
         'Dateiname in Content-Disposition nur ASCII ohne Anführungszeichen und Zeilenumbruch');
     gleich(Response::sichererDateiname('../..'), 'dokument.pdf', 'leerer Dateiname: Ersatz');
+    // Einrichtungslinks: gespeichert nur ein HMAC – mit eigenem, aus app.key abgeleitetem Schlüssel.
+    gleich(Einrichtung::hash('x'), hash_hmac('sha256', 'x', Crypto::ableiten('kunden-einrichtung')), 'Einrichtungslink: HMAC mit abgeleitetem Schlüssel');
+    pruefe(Einrichtung::hash('x') !== hash('sha256', 'x') && Einrichtung::hash('x') !== hash_hmac('sha256', 'x', (string) Config::get('app.key')),
+        'Einrichtungslink: weder SHA-256 noch app.key selbst');
+    pruefe(Einrichtung::finden(str_repeat('A', 42) . '=') === null && Einrichtung::finden("' OR 1=1 --") === null, 'Einrichtungslink: nur das Format eines Tokens');
+    // Die Adresse eines Links kommt nur aus app.url, nie aus dem Host-Kopf der Anfrage.
+    $urlVorher = (string) Config::get('app.url', '');
+    $hostVorher = $_SERVER['HTTP_HOST'] ?? null;
+    $_SERVER['HTTP_HOST'] = 'evil.example';
+    Config::set('app.url', '');
+    gleich(Einrichtung::link('t'), null, 'ohne app.url kein Link – auch nicht aus dem Host-Kopf');
+    foreach (['javascript:alert(1)//', 'https://a@evil.example', 'https://strom.example.de/?u=1', 'https://strom.example.de/#x', "https://strom.example.de\n.evil",
+        'https://strom example.de', '//evil.example', 'file:///etc/passwd'] as $url) {
+        Config::set('app.url', $url);
+        gleich(KundenEinstellungen::adresse(), null, 'app.url „' . $url . '“ abgelehnt');
+    }
+    Config::set('app.url', 'https://strom.example.de:8443/pm/');
+    gleich(Einrichtung::link('t'), 'https://strom.example.de:8443/pm/kundenbereich/einrichten/t', 'Link aus app.url (mit Port und Pfad)');
+    Config::set('app.url', $urlVorher);
+    if ($hostVorher === null) {
+        unset($_SERVER['HTTP_HOST']);
+    } else {
+        $_SERVER['HTTP_HOST'] = $hostVorher;
+    }
+    // Der Datenschutzhinweis ist Text: ein <script> darin erscheint auf der Einrichtungsseite maskiert.
+    alsBenutzer($benutzer['admin']);
+    $datenschutzVorher = Settings::get('kundenbereich.datenschutz');
+    pruefe(KundenEinstellungen::speichern(['kundenbereich.datenschutz' => '<script>alert(1)</script> Verantwortlich: {firma.name}'])['ok'], 'Datenschutzhinweis gespeichert');
+    $html = View::render('kundenbereich/einrichten', ['zustand' => 'formular', 'konto' => ['username' => '<b>' . $k . '</b>'], 'aktion' => Einrichtung::PFAD . 'x',
+        'datenschutz' => KundenEinstellungen::datenschutz(), 'absender' => '<i>Firma</i>', 'flashes' => []], 'layout/blank');
+    pruefe(str_contains($html, '&lt;script&gt;alert(1)&lt;/script&gt;') && !str_contains($html, '<script>alert') && !str_contains($html, '<b>' . $k)
+        && !str_contains($html, '<i>Firma'), 'Einrichtungsseite: Datenschutzhinweis, Benutzername und Firma maskiert');
+    foreach (['kundenbereich.einrichtung_stunden' => ['0', '169', 'x', '-1'], 'kundenbereich.nachweise_jahre' => ['0', '31', '3.5']] as $schluessel => $falsche) {
+        foreach ($falsche as $falsch) {
+            pruefe(!KundenEinstellungen::speichern([$schluessel => $falsch])['ok'], $schluessel . ' „' . $falsch . '“ abgelehnt');
+        }
+    }
+    Settings::put('kundenbereich.einrichtung_stunden', '9999');   // von Hand in die Datenbank geschrieben
+    gleich(KundenEinstellungen::einrichtungStunden(), 72, 'Unsinn in der Datenbank: Vorgabe 72 Stunden');
+    Settings::forget('kundenbereich.einrichtung_stunden');
+    $datenschutzVorher === null ? Settings::forget('kundenbereich.datenschutz') : Settings::put('kundenbereich.datenschutz', $datenschutzVorher);
+    alsBenutzer($benutzer['verwalter']);
     // Texte aus Antworten (Eventworx, Bewertung, Prüfen) nur per textContent – nie als HTML.
     $js = dirname(__DIR__) . '/public/assets/js/';
     foreach (array_merge(glob($js . 'bericht*.js') ?: [], [$js . 'unterschrift.js']) as $datei) {
@@ -184,8 +229,9 @@ try {
         && ApiZugang::pruefen('Bearer ' . strtoupper($schreibt['token']), '127.0.0.1') === null, 'nur genau das Token im Kopf „Bearer“');
     // Die Ansichten der Schnittstelle: kein Skript ohne Nonce, keine on…=, kein javascript:
     $ansichten = array_merge(glob(dirname(__DIR__) . '/resources/views/schnittstelle/*.php') ?: [], glob(dirname(__DIR__) . '/resources/views/instanzen/*.php') ?: [],
-        glob(dirname(__DIR__) . '/resources/views/vorschlaege/*.php') ?: [], [dirname(__DIR__) . '/resources/views/partials/token-standorte.php']);
-    pruefe(count($ansichten) >= 10, 'Ansichten der Schnittstelle, der anderen Instanzen und der Vorschläge gefunden');
+        glob(dirname(__DIR__) . '/resources/views/vorschlaege/*.php') ?: [], [dirname(__DIR__) . '/resources/views/partials/token-standorte.php'],
+        glob(dirname(__DIR__) . '/resources/views/kunden/*.php') ?: []);
+    pruefe(count($ansichten) >= 16, 'Ansichten der Schnittstelle, der anderen Instanzen, der Vorschläge und der Kundenverwaltung gefunden');
     // … und die des Kundenbereichs (dort gar kein Inline-Skript).
     $kundenAnsichten = array_merge(glob(dirname(__DIR__) . '/resources/views/kundenbereich/*.php') ?: [],
         [dirname(__DIR__) . '/resources/views/layout/kundenbereich.php']);

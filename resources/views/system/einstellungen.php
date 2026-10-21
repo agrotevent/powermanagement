@@ -5,7 +5,7 @@ use App\Support\Settings;
 use App\Support\View;
 
 $title = 'Einstellungen';
-$subtitle = 'InfluxDB, MQTT, Grenzwerte, Location-Abgleich, Firma & Übergabeberichte, Eventworx';
+$subtitle = 'InfluxDB, MQTT, Grenzwerte, Location-Abgleich, Firma & Übergabeberichte, Eventworx, Kundenbereich';
 $feld = static function (string $schluessel, string $typ = 'text', string $platzhalter = '') use ($werte): string {
     $name = str_replace('.', '__', $schluessel);
     $wert = $werte[$schluessel] ?? '';
@@ -201,4 +201,49 @@ $ewxFremd = $ewx['token'] && $ewx['token_host'] !== $ewx['host'];
     </form>
     <form method="post" action="/system/einstellungen/eventworx/pruefen" id="eventworx-pruefen"><?= Csrf::field() ?></form>
 </div>
+<?php
+$kb = $kundenbereich;
+$kbname = static fn (string $schluessel): string => str_replace('.', '__', $schluessel);
+?>
+<form method="post" action="/system/einstellungen/kundenbereich" class="card mt" id="kundenbereich">
+    <?= Csrf::field() ?>
+    <div class="card-head"><h2>Kundenbereich</h2><span class="hint">Zugänge für Kunden: Einrichtungslinks, Datenschutz, Aufbewahrung</span></div>
+    <div class="card-body grid grid-2">
+        <div>
+            <h3>Adresse der Oberfläche</h3>
+            <p class="btn-row">
+                <?php if ($kb['adresse'] !== null): ?>
+                    <span class="badge ok">app.url gesetzt</span> <code><?= View::e($kb['adresse']) ?></code>
+                    <?php if ($kb['unverschluesselt']): ?><span class="badge bad">unverschlüsselt</span><?php endif; ?>
+                <?php elseif ($kb['adresse_roh'] !== ''): ?>
+                    <span class="badge bad">app.url ungültig</span> <code><?= View::e($kb['adresse_roh']) ?></code>
+                <?php else: ?>
+                    <span class="badge warn">app.url fehlt</span>
+                <?php endif; ?>
+            </p>
+            <p class="help">Ohne gültige <code>app.url</code> (in <code>config/config.php</code>, z. B. <code>https://strom.example.de</code>) gibt es keine
+                Einrichtungslinks – nur vorläufige Kennwörter. Die Adresse kommt nie aus der Anfrage.
+                <?php if ($kb['unverschluesselt']): ?>Über http:// gingen Kennwörter und Links im Klartext durchs Netz – bitte HTTPS.<?php endif; ?></p>
+            <div class="field-row">
+                <div class="field"><label for="kb-stunden">Einrichtungslink gilt (Stunden)</label>
+                    <input id="kb-stunden" name="<?= $kbname('kundenbereich.einrichtung_stunden') ?>" type="number" min="1" max="168" value="<?= View::e($kb['kundenbereich.einrichtung_stunden']) ?>">
+                    <div class="help">1–168, Vorgabe 72</div></div>
+                <div class="field"><label for="kb-jahre">Prüfnachweise aufbewahren (Jahre)</label>
+                    <input id="kb-jahre" name="<?= $kbname('kundenbereich.nachweise_jahre') ?>" type="number" min="1" max="30" value="<?= View::e($kb['kundenbereich.nachweise_jahre']) ?>">
+                    <div class="help">bis 31.12. des Jahres der Prüfung + Jahre</div></div>
+            </div>
+            <div class="field"><label for="kb-kontakt">Ansprechpartner für Kunden</label>
+                <input id="kb-kontakt" name="<?= $kbname('kundenbereich.kontakt') ?>" maxlength="300" value="<?= View::e($kb['kundenbereich.kontakt']) ?>"
+                       placeholder="leer: die Bereitschaft der Übergabeberichte">
+                <div class="help">Name, Telefon oder E-Mail – steht im Kundenbereich.</div></div>
+        </div>
+        <div>
+            <div class="field"><label for="kb-datenschutz">Datenschutzhinweis (Art. 13 DSGVO)</label>
+                <textarea id="kb-datenschutz" name="<?= $kbname('kundenbereich.datenschutz') ?>" rows="9" maxlength="3000"><?= View::e($kb['kundenbereich.datenschutz']) ?></textarea>
+                <div class="help">Auf der Einrichtungsseite und im Konto des Kunden. {firma.name} und {firma.anschrift} kommen aus den Firmendaten.
+                    Mustertext, keine Rechtsberatung – leer setzt ihn zurück.</div></div>
+        </div>
+    </div>
+    <div class="card-footer"><button class="btn btn-primary" type="submit">Speichern</button></div>
+</form>
 <?php endif; ?>

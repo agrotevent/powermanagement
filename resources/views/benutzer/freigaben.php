@@ -17,7 +17,8 @@ $zeit = static function (?string $ab, ?string $bis): string {
 ?>
 <?php if ($kundenzugang): ?>
 <div class="notice">Das ist ein Kundenzugang. Er sieht nur, was seinem Kunden freigegeben ist (nur Standorte, mit Ende und
-    Datenzeitraum) – Freigaben am Konto oder an Rollen zählen für ihn nicht. Freigaben für Kunden pflegt die Kundenverwaltung.</div>
+    Datenzeitraum) – Freigaben am Konto oder an Rollen zählen für ihn nicht. Freigaben für Kunden pflegt die Kundenverwaltung.
+    <?php if (View::can('kunden.manage')): ?><a href="/kunden/<?= (int) $subjekt['kunde_id'] ?>?tab=freigaben">Zu den Freigaben des Kunden</a><?php endif; ?></div>
 <?php endif; ?>
 <div class="grid grid-sidebar">
     <div class="card">

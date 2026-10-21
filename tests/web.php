@@ -130,7 +130,7 @@ $eventworxVorher = [];
 foreach ([Eventworx::EINSTELLUNG_HOST, Eventworx::EINSTELLUNG_TOKEN_HOST, Settings::GEHEIM_EVENTWORX_TOKEN] as $s) {
     $eventworxVorher[$s] = Settings::get($s);
 }
-foreach (array_keys(Einstellungen::VORGABEN) as $s) {
+foreach (array_merge(array_keys(Einstellungen::VORGABEN), array_keys(\App\Kunden\KundenEinstellungen::VORGABEN)) as $s) {
     $eventworxVorher[$s] = Settings::get($s);
 }
 $bSite = 0;
@@ -279,6 +279,37 @@ try {
     Settings::vergessen();
     pruefe($r['status'] === 302 && !Settings::geheimnisHinterlegt(Settings::GEHEIM_EVENTWORX_TOKEN), 'Eventworx ohne CSRF-Token → abgelehnt');
     gleich((int) Database::scalar('SELECT COUNT(*) FROM audit_log WHERE details LIKE ?', ['%' . $ewxToken . '%']), 0, 'Eventworx-Token nicht im Audit');
+
+    // Kunden & Kundenbereich: Liste, jeder Reiter, Karte in den Einstellungen; ohne „kunden.view“ 403.
+    $kundeId = (int) (\App\Kunden\KundenService::speichern(null, ['name' => $kennung . ' Kunde', 'aktiv' => 1])['id'] ?? 0);
+    $auditZiele[] = ['kunde', $kundeId];
+    $kundenSeiten = ['/kunden', '/kunden?suche=' . $kennung, '/kunden?aktiv=0', '/kunden/' . $kundeId];
+    foreach (array_keys(\App\Controllers\KundenController::REITER) as $tab) {
+        $kundenSeiten[] = '/kunden/' . $kundeId . '?tab=' . $tab;
+    }
+    foreach ($kundenSeiten as $pfad) {
+        $r = aufruf($basis, $admin['dose'], 'GET', $pfad);
+        pruefe($r['status'] === 200 && phpMeldung($r['text']) === null && !str_contains($r['text'], 'onclick=') && !str_contains($r['text'], 'javascript:'),
+            'Admin ' . $pfad . ' → ' . $r['status'] . ', ohne PHP-Meldung und Inline-JavaScript');
+    }
+    pruefe(str_contains(aufruf($basis, $admin['dose'], 'GET', '/kunden')['text'], $kennung . ' Kunde'), 'Kundenliste zeigt den Kunden');
+    $r = aufruf($basis, $admin['dose'], 'GET', '/system/einstellungen');
+    pruefe(str_contains($r['text'], 'id="kundenbereich"') && str_contains($r['text'], 'app.url'), 'Einstellungen: Karte „Kundenbereich“ mit dem Stand von app.url');
+    $r = aufruf($basis, $admin['dose'], 'POST', '/system/einstellungen/kundenbereich', ['_token' => $admin['token'], 'kundenbereich__kontakt' => $kennung . ' Tel. 0',
+        'kundenbereich__einrichtung_stunden' => '48', 'kundenbereich__nachweise_jahre' => '5']);
+    Settings::vergessen();
+    gleich([$r['status'], Settings::get('kundenbereich.kontakt'), Settings::get('kundenbereich.einrichtung_stunden'), Settings::get('kundenbereich.nachweise_jahre')],
+        [302, $kennung . ' Tel. 0', '48', '5'], 'Einstellungen des Kundenbereichs gespeichert');
+    aufruf($basis, $admin['dose'], 'POST', '/system/einstellungen/kundenbereich', ['_token' => $admin['token'], 'kundenbereich__kontakt' => 'anders',
+        'kundenbereich__einrichtung_stunden' => '500']);
+    Settings::vergessen();
+    gleich([Settings::get('kundenbereich.kontakt'), Settings::get('kundenbereich.einrichtung_stunden')], [$kennung . ' Tel. 0', '48'],
+        'ungültige Gültigkeit (500 Stunden): nichts gespeichert');
+    $klein = anmelden($basis, $kennung . '-klein', $kennwort);
+    $dosen[] = $klein['dose'];
+    gleich([aufruf($basis, $klein['dose'], 'GET', '/kunden')['status'], aufruf($basis, $klein['dose'], 'GET', '/kunden/' . $kundeId)['status']], [403, 403],
+        'ohne „kunden.view“: Kundenverwaltung 403');
+    gleich(serverMeldungen($serverFehler), [], 'Kundenverwaltung ohne PHP-Meldung im Fehlerprotokoll des Servers');
 
     // Livewerte der Karte: je Phase Spannung, Strom, Leistung (Detail beim Antippen des Werts)
     if ($etage > 0) {
@@ -1419,6 +1450,7 @@ try {
         $wert === null ? Settings::forget($s) : Settings::put($s, $wert);
     }
     Database::execute('DELETE FROM steckertypen WHERE name LIKE ?', [$kennung . '%']);
+    Database::execute('DELETE FROM kunden WHERE name LIKE ?', [$kennung . '%']);
     foreach (Database::select('SELECT id FROM roles WHERE name LIKE ?', [$kennung . '%']) as $rolle) {
         $auditZiele[] = ['role', (int) $rolle['id']];
         BenutzerService::rolleLoeschen((int) $rolle['id']);

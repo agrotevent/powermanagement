@@ -44,6 +44,9 @@ $groups = [
         ['/instanzen',            'Andere Instanzen',    null, 'api.partner'],
         ['/vorschlaege',          'Änderungsvorschläge', null, 'api.vorschlaege'],
     ],
+    'Kunden' => [
+        ['/kunden',               'Kunden & Kundenbereich', null, 'kunden.view'],
+    ],
     'System' => [
         ['/system/benutzer',      'Benutzer & Freigaben', null, 'system.users.manage'],
         ['/system/rollen',        'Rollen & Rechte',      null, 'system.users.manage'],

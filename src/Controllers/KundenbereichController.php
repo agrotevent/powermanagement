@@ -4,7 +4,11 @@ declare(strict_types=1);
 namespace App\Controllers;
 
 use App\Auth\Auth;
+use App\Berichte\Einstellungen;
+use App\Kunden\Einrichtung;
+use App\Kunden\KundenEinstellungen;
 use App\Kunden\Kundenbereich;
+use App\Support\Config;
 use App\Support\Flash;
 use App\Support\Request;
 use App\Support\Response;
@@ -59,6 +63,70 @@ final class KundenbereichController extends Controller
         }
         Flash::success('Ihr Kennwort ist geändert.');
         $this->redirect(Kundenbereich::PFAD);
+    }
+
+    // ------------------------------------------------------------ Einrichtungslink
+
+    /**
+     * Einrichtungslink öffnen – ohne Anmeldung, das Token ist die
+     * Berechtigung (einmal, mit Ablauf). Für jeden ungültigen Link dieselbe
+     * 404-Seite. Wer angemeldet ist, bekommt nur einen Hinweis: ein Link soll
+     * nie in eine offene Sitzung hinein ein Kennwort setzen.
+     */
+    public function einrichten(Request $request, array $params): void
+    {
+        $token = (string) ($params['token'] ?? '');
+        if (Auth::check()) {
+            $this->einrichtenSeite('angemeldet', null, $token, 200);
+            return;
+        }
+        $konto = Einrichtung::finden($token);
+        $konto === null
+            ? $this->einrichtenSeite('ungueltig', null, $token, 404)
+            : $this->einrichtenSeite('formular', $konto, $token, 200);
+    }
+
+    /** Kennwort festlegen (POST mit CSRF-Token) – danach zur Anmeldung, kein Auto-Login. */
+    public function einrichtenSpeichern(Request $request, array $params): void
+    {
+        $token = (string) ($params['token'] ?? '');
+        if (Auth::check()) {
+            $this->einrichtenSeite('angemeldet', null, $token, 200);
+            return;
+        }
+        if (Einrichtung::finden($token) === null) {
+            $this->einrichtenSeite('ungueltig', null, $token, 404);
+            return;
+        }
+        // Kennwörter roh: Leerzeichen am Rand gehören dazu.
+        $r = Einrichtung::einloesen(
+            $token,
+            is_string($_POST['kennwort'] ?? null) ? $_POST['kennwort'] : '',
+            is_string($_POST['wiederholung'] ?? null) ? $_POST['wiederholung'] : ''
+        );
+        if (!$r['ok']) {
+            Flash::error($r['message']);
+            // finden() hat das Format geprüft – es ist dieselbe Adresse.
+            $this->redirect(Einrichtung::pfad($token));
+            return;
+        }
+        Flash::success($r['message']);
+        $this->redirect('/login');
+    }
+
+    /** Die Seite zum Einrichtungslink im Layout „blank“ – nie zwischengespeichert, kein Referer hinaus. */
+    private function einrichtenSeite(string $zustand, ?array $konto, string $token, int $status): void
+    {
+        $firma = Einstellungen::wert('firma.name');
+        $html = View::render('kundenbereich/einrichten', [
+            'zustand'     => $zustand,
+            'konto'       => $konto,
+            'aktion'      => $zustand === 'formular' ? Einrichtung::pfad($token) : '',
+            'datenschutz' => KundenEinstellungen::datenschutz(),
+            'absender'    => $firma !== '' ? $firma : (string) Config::get('app.name', 'PowerManagement'),
+            'flashes'     => Flash::pull(),
+        ], 'layout/blank');
+        Response::html($html, $status, Response::KUNDENBEREICH);
     }
 
     // ------------------------------------------------------------ intern
