@@ -192,6 +192,18 @@ wird nie gelöscht (fehlt er in der Sendung, bleibt der hiesige); gelöscht
 wird nichts, Steckertypen legt es nie an. Im Audit-Log steht das als
 `api.schreiben` mit dem Akteur `api:<Name des Zugangs>`.
 
+## Katalog importieren
+
+Einen Katalog importieren (*Standard-Verteiler → Importieren …*) darf, wer
+„Anlagen ändern“ **und** „Alle Standorte, Anlagen und Messdaten“ hat – der
+Katalog gilt für alle Standorte. Benutzt ein ausgewählter Typ einen
+Steckertyp, den es hier noch nicht gibt, braucht es dazu
+„Steckverbinder-Katalog pflegen“ – sonst wird nichts übernommen, und die
+Meldung nennt die Steckertypen und die Typen, die sie brauchen. Ohne dieses
+Recht stehen solche Typen in der Vorschau ohne Haken da; Typen ohne neue
+Stecker lassen sich trotzdem übernehmen. Danach gelten für die Typen
+dieselben Rechte wie für jeden Standard-Verteiler.
+
 ## MQTT-Zugänge
 
 Die Liste *Messtechnik → MQTT-Zugänge* sieht, wer „Datenquellen ansehen“

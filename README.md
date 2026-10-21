@@ -29,6 +29,9 @@ Mehr Bilder in der [Bedienungsanleitung](docs/bedienung.md).
   Schaltbild.
 - **Standard-Verteiler**: Katalog fertig bestückter Verteiler, die sich auf
   der Karte platzieren lassen.
+- **Katalog-Import**: Stromverteiler und Generatoren aus einem Katalog-Paket
+  (etwa der BSS-Strombibel) mit Vorschau – neue werden angelegt, hier
+  korrigierte nur auf ausdrücklichen Wunsch überschrieben.
 - **Karte**: Grundrisse (PDF/Bild/SVG) mit Feststromanschlüssen, mobilen
   Verteilern, **Kabeln, Kabelwegen und Kabelbrücken**. Anlagen per Kabel verbinden, mit Prüfung von
   Belastbarkeit, Steckern und **Spannungsfall**, dazu Maßstab und Livewerte.

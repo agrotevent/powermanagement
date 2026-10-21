@@ -144,6 +144,39 @@ document.addEventListener('DOMContentLoaded', function () {
         });
     });
 
+    /*
+     * Auswahl per Knopf: `data-auswahl-an="<Selektor>"` hakt die passenden
+     * Felder an (etwa „alle neuen“ im Katalog-Import), `data-auswahl-aus`
+     * nimmt die Haken weg. `data-auswahl-zahl="<Selektor>"` zeigt, wie viele
+     * davon angehakt sind.
+     */
+    var zaehler = document.querySelectorAll('[data-auswahl-zahl]');
+    var zaehlen = function () {
+        zaehler.forEach(function (feld) {
+            var boxen = document.querySelectorAll(feld.dataset.auswahlZahl);
+            var an = 0;
+            boxen.forEach(function (box) { if (box.checked) { an++; } });
+            feld.textContent = an + ' von ' + boxen.length + ' ausgewählt';
+        });
+    };
+    document.querySelectorAll('[data-auswahl-an], [data-auswahl-aus]').forEach(function (knopf) {
+        knopf.addEventListener('click', function () {
+            var an = knopf.hasAttribute('data-auswahl-an');
+            document.querySelectorAll(an ? knopf.dataset.auswahlAn : knopf.dataset.auswahlAus).forEach(function (box) {
+                if (box.disabled || box.checked === an) { return; }
+                box.checked = an;
+                box.dispatchEvent(new Event('change', { bubbles: true }));
+            });
+            zaehlen();
+        });
+    });
+    if (zaehler.length) {
+        document.addEventListener('change', function (ereignis) {
+            if (ereignis.target && ereignis.target.type === 'checkbox') { zaehlen(); }
+        });
+        zaehlen();
+    }
+
     // Sicherheitsabfragen.
     document.querySelectorAll('[data-confirm]').forEach(function (el) {
         el.addEventListener('submit', function (event) {

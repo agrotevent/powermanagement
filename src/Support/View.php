@@ -144,6 +144,24 @@ final class View
         return htmlspecialchars((string) $value, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
     }
 
+    /**
+     * Eine Zahl für ein Eingabefeld: mit Komma, so wenige Nachkommastellen
+     * wie möglich und doch genau – „38,5“, „1234,567“. Wer das Formular
+     * unverändert speichert, ändert den Wert nicht (fest auf zwei Stellen
+     * gerundet würde aus 1234,567 still 1234,57).
+     */
+    public static function zahlFeld(mixed $wert): string
+    {
+        if ($wert === null || $wert === '' || !is_numeric($wert)) {
+            return is_string($wert) ? $wert : '';
+        }
+        $zahl = (float) $wert;
+        for ($stellen = 0; $stellen < 10 && (float) number_format($zahl, $stellen, '.', '') !== $zahl; $stellen++);
+        $text = number_format($zahl, $stellen, ',', '');
+        $text = $stellen > 0 ? rtrim(rtrim($text, '0'), ',') : $text;
+        return $text === '-0' ? '0' : $text;
+    }
+
     /** Darf der angemeldete Benutzer das? Für Navigations-/Button-Sichtbarkeit. */
     public static function can(string $permission): bool
     {

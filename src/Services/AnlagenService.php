@@ -49,6 +49,11 @@ final class AnlagenService
     /**
      * Zusätzliche Angaben je Art (Spalte `eigenschaften`, JSON).
      * Schlüssel => [Beschriftung, Typ (text|zahl|auswahl), Einheit/Auswahl]
+     *
+     * Nur was hier steht, wird gespeichert (eigenschaftenFiltern) – ein
+     * Schlüssel, der hier fehlt, ginge beim ersten Bearbeiten verloren. Was
+     * ein Katalog-Import mitbringt (Artikelnummer, Gewicht …), steht deshalb
+     * auch hier.
      */
     public const FELDER = [
         'anschluss' => [
@@ -59,11 +64,14 @@ final class AnlagenService
             'netzbetreiber' => ['Netzbetreiber / Ansprechpartner', 'text', ''],
         ],
         'generator' => [
+            'artikelnummer' => ['Artikelnummer', 'text', ''],
             'steuerung'     => ['Steuerung', 'text', ''],
             'kraftstoff'    => ['Kraftstoff', 'auswahl', ['Diesel', 'HVO', 'Gas', 'Benzin']],
             'tank_l'        => ['Tankinhalt', 'zahl', 'l'],
             'verbrauch_l_h' => ['Verbrauch bei Volllast', 'zahl', 'l/h'],
             'schallpegel'   => ['Schallleistungspegel', 'zahl', 'dB(A)'],
+            'gewicht_kg'    => ['Gewicht leer', 'zahl', 'kg'],
+            'abmessungen'   => ['Abmessungen L × B × H', 'text', 'mm'],
         ],
         'wechselrichter' => [
             'system'         => ['System', 'text', ''],
@@ -73,7 +81,11 @@ final class AnlagenService
             'portal_id'      => ['VRM-Portal-ID', 'text', ''],
         ],
         'verteilung' => [
+            'artikelnummer'  => ['Artikelnummer', 'text', ''],
+            'gehaeuse'       => ['Gehäuse', 'text', ''],
             'schutzart'      => ['Schutzart', 'text', ''],
+            'zuleitung'      => ['Zuleitung', 'text', ''],
+            'gewicht_kg'     => ['Gewicht', 'zahl', 'kg'],
             'fi_typ'         => ['FI-Schutz (gesamt)', 'text', ''],
             'pruefung_bis'   => ['Nächste Prüfung (DGUV V3)', 'text', ''],
         ],
@@ -264,6 +276,27 @@ final class AnlagenService
     }
 
     /**
+     * Die Eigenschaften, die zu dieser Art gehören – so, wie sie gespeichert
+     * werden: Zahlen als Zahl (auch mit Komma), Text gekürzt, Leeres weg.
+     *
+     * @param array<string,mixed> $roh
+     * @return array<string,float|string>
+     */
+    public static function eigenschaftenFiltern(string $art, array $roh): array
+    {
+        $eigenschaften = [];
+        foreach (self::FELDER[$art] ?? [] as $schluessel => [$_beschriftung, $typ]) {
+            $wert = $roh[$schluessel] ?? '';
+            $wert = is_scalar($wert) ? trim((string) $wert) : '';
+            if ($wert === '') {
+                continue;
+            }
+            $eigenschaften[$schluessel] = $typ === 'zahl' ? (float) str_replace(',', '.', $wert) : mb_substr($wert, 0, 190);
+        }
+        return $eigenschaften;
+    }
+
+    /**
      * Anlage speichern.
      *
      * @return array{ok:bool,message:string,id?:int}
@@ -279,14 +312,7 @@ final class AnlagenService
             return ['ok' => false, 'message' => 'Die Anlage braucht einen Namen.'];
         }
 
-        $eigenschaften = [];
-        foreach (self::FELDER[$art] as $schluessel => [$_beschriftung, $typ]) {
-            $wert = trim((string) ($daten['eigenschaften'][$schluessel] ?? ''));
-            if ($wert === '') {
-                continue;
-            }
-            $eigenschaften[$schluessel] = $typ === 'zahl' ? (float) str_replace(',', '.', $wert) : mb_substr($wert, 0, 190);
-        }
+        $eigenschaften = self::eigenschaftenFiltern($art, (array) ($daten['eigenschaften'] ?? []));
 
         $siteId  = (int) ($daten['site_id'] ?? 0) ?: null;
         $floorId = (int) ($daten['floor_id'] ?? 0) ?: null;
@@ -331,11 +357,17 @@ final class AnlagenService
         }
         // Eine neue Anlage aus einem Katalog-Typ trägt dessen Typ, wenn nichts
         // anderes gesagt ist – daran erkennt der Aufbau, ob ein Verteiler passt.
-        if (!$id && (int) ($daten['vorlage_id'] ?? 0) > 0 && $felder['modell'] === '') {
-            $typ = Database::first('SELECT hersteller, modell FROM objekte WHERE id = ? AND ist_vorlage = 1', [(int) $daten['vorlage_id']]);
-            if ($typ !== null) {
+        if (!$id && (int) ($daten['vorlage_id'] ?? 0) > 0) {
+            $typ = Database::first('SELECT hersteller, modell, eigenschaften FROM objekte WHERE id = ? AND ist_vorlage = 1', [(int) $daten['vorlage_id']]);
+            if ($typ !== null && $felder['modell'] === '') {
                 $felder['modell'] = (string) $typ['modell'];
                 $felder['hersteller'] = $felder['hersteller'] !== '' ? $felder['hersteller'] : (string) $typ['hersteller'];
+            }
+            // Ebenso die Eigenschaften des Typs (Artikelnummer, Gewicht,
+            // Gehäuse …), soweit das Formular nichts anderes sagt.
+            if ($typ !== null) {
+                $eigenschaften += self::eigenschaftenFiltern($art, (array) (json_decode((string) ($typ['eigenschaften'] ?? ''), true) ?: []));
+                $felder['eigenschaften'] = json_encode($eigenschaften, JSON_UNESCAPED_UNICODE);
             }
         }
         // Fest oder mobil: was gesagt wird, gilt. Sonst bleibt es beim
@@ -695,9 +727,10 @@ final class AnlagenService
 
     /**
      * Eine Anlage auf einen anderen Katalog-Typ umstellen – etwa wenn beim
-     * Aufbau statt des geplanten PD 32 ein PD 63 steht. Anschlüsse und
-     * Schutzorgane kommen aus dem Katalog; Kabel und Messgeräte bleiben an
-     * „ihrem“ Anschluss (gleiche Richtung und Nummer), sonst an der Anlage.
+     * Aufbau statt des geplanten PD 32 ein PD 63 steht. Anschlüsse,
+     * Schutzorgane und die Eigenschaften des Typs kommen aus dem Katalog;
+     * Kabel und Messgeräte bleiben an „ihrem“ Anschluss (gleiche Richtung
+     * und Nummer), sonst an der Anlage.
      */
     public static function typUebernehmen(int $objektId, int $vorlageId): array
     {
@@ -734,9 +767,26 @@ final class AnlagenService
         foreach ($messgeraete as $id => $alt) {
             Database::update('messpunkte', $id, ['anschluss_id' => $alt !== null ? ($neu[$alt] ?? null) : null]);
         }
+        // Die Eigenschaften des Typs (Artikelnummer, Gewicht, Zuleitung …)
+        // wechseln mit: was vom bisherigen Typ stammt, geht, die des neuen
+        // gelten; was nur dieses Stück hat (etwa „Nächste Prüfung“), bleibt.
+        $eigenschaften = self::eigenschaftenFiltern((string) $objekt['art'], (array) $objekt['eigenschaften']);
+        $bisher = trim((string) $objekt['modell']) !== '' ? Database::select(
+            'SELECT eigenschaften FROM objekte WHERE ist_vorlage = 1 AND art = ? AND modell = ? AND id <> ?',
+            [(string) $objekt['art'], (string) $objekt['modell'], $vorlageId]) : [];
+        if (count($bisher) === 1) {
+            $vomTyp = self::eigenschaftenFiltern((string) $objekt['art'], (array) (json_decode((string) $bisher[0]['eigenschaften'], true) ?: []));
+            foreach ($vomTyp as $k => $w) {
+                if (array_key_exists($k, $eigenschaften) && $eigenschaften[$k] === $w) {
+                    unset($eigenschaften[$k]);
+                }
+            }
+        }
+        $eigenschaften = self::eigenschaftenFiltern((string) $objekt['art'], (array) $vorlage['eigenschaften']) + $eigenschaften;
         Database::update('objekte', $objektId, [
             'modell' => $vorlage['modell'], 'hersteller' => $vorlage['hersteller'],
-            'nennstrom_a' => $vorlage['nennstrom_a'], 'nennleistung_kva' => $vorlage['nennleistung_kva'], 'updated_at' => gmdate('c'),
+            'nennstrom_a' => $vorlage['nennstrom_a'], 'nennleistung_kva' => $vorlage['nennleistung_kva'],
+            'eigenschaften' => json_encode($eigenschaften, JSON_UNESCAPED_UNICODE), 'updated_at' => gmdate('c'),
         ]);
         Audit::log('anlage.typ', 'objekt', (string) $objektId, ['von' => $objekt['modell'], 'nach' => $vorlage['modell']]);
         return ['ok' => true, 'message' => '„' . $objekt['name'] . '“ ist jetzt ' . ($vorlage['modell'] ?: $vorlage['name']) . '.'];

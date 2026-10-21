@@ -8,7 +8,7 @@ use App\Auth\Auth;
 /** Revisionssicheres Protokoll aller administrativen Aktionen. */
 final class Audit
 {
-    /** Wer handelt, wenn niemand angemeldet ist – etwa „api:<Token>“. */
+    /** Wer handelt, wenn niemand angemeldet ist – etwa „api:<Token>“ oder „cli“. */
     private static ?string $akteur = null;
 
     /**
@@ -16,6 +16,7 @@ final class Audit
      *
      * Die Schnittstelle meldet niemanden an; ihre Einträge sollen trotzdem
      * zeigen, welches Token es war – nie das Token selbst, nur seinen Namen.
+     * Die Kommandozeile setzt „cli“ (etwa beim Katalog-Import).
      */
     public static function akteur(?string $name): void
     {

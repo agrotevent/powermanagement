@@ -31,7 +31,7 @@ $p = 'sf' . (int) $s['id'] . '_';
     <div class="field-row">
         <div class="field">
             <label for="<?= $p ?>strom">Nennstrom (A)</label>
-            <input id="<?= $p ?>strom" name="nennstrom_a" inputmode="decimal" value="<?= $s['nennstrom_a'] !== null ? View::e(rtrim(rtrim(number_format((float) $s['nennstrom_a'], 1, ',', ''), '0'), ',')) : '' ?>">
+            <input id="<?= $p ?>strom" name="nennstrom_a" inputmode="decimal" value="<?= View::e(View::zahlFeld($s['nennstrom_a'])) ?>">
         </div>
         <div class="field">
             <label for="<?= $p ?>char">Charakteristik</label>
