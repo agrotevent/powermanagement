@@ -62,7 +62,7 @@ Empfehlung: **2 Kerne, 2–4 GB RAM, 20 GB Platte.**
 |-----------|-------|
 | 2 Kerne | InfluxDB, Node-RED und PHP arbeiten gleichzeitig; mit einem Kern stockt die Oberfläche, wenn die Datenbank verdichtet. |
 | 2–4 GB RAM | InfluxDB hält Index und Cache im Speicher (etwa 0,5–1 GB), Node-RED rund 150 MB, der Rest ist Luft für Abfragen über lange Zeiträume. Ab einigen Dutzend Messstellen mit hoher Auflösung 4 GB. |
-| 20 GB Platte | Fast alles davon ist InfluxDB. Wie viel, hängt an der Meldefrequenz: Ein Pro 3EM schickt seinen Status etwa sekündlich (rund 20 Werte je Meldung) – das sind grob 1–2 GB im Jahr. Relais und Zwischenstecker, die nur bei Änderungen melden, fallen kaum ins Gewicht. Bei vielen sekündlich meldenden Geräten die Platte größer wählen oder mit `--aufbewahrung` begrenzen (Abschnitt 3). Nachmessen: `du -sh /var/lib/influxdb2/engine`. |
+| 20 GB Platte | Fast alles davon ist InfluxDB. Wie viel, hängt an der Meldefrequenz: Ein Pro 3EM schickt seinen Status etwa sekündlich (rund 20 Werte je Meldung) – das sind grob 1–2 GB im Jahr. Relais und Zwischenstecker, die nur bei Änderungen melden, fallen kaum ins Gewicht. Bei vielen sekündlich meldenden Geräten die Platte größer wählen oder mit `--aufbewahrung` begrenzen (Abschnitt 3). Nachmessen: `du -sh /var/lib/influxdb/engine` (das Debian-Paket speichert unter `/var/lib/influxdb`, nicht wie das Docker-Bild unter `/var/lib/influxdb2`). |
 
 Zu den Optionen:
 

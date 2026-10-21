@@ -703,6 +703,9 @@ sed 's/^/  | /' "$LAUF"
 ok "deploy/install-debian.sh läuft durch"
 pruefe "Administrator angelegt" grep -q 'Erstkennwort – bitte bei der ersten Anmeldung ändern' "$LAUF"
 pruefe "Abschlussprüfung des Skripts ohne Fehler" grep -q 'Prüfung:      in Ordnung' "$LAUF"
+# Den Platzbedarf misst die Anleitung (Abschnitt 1) mit genau diesem Befehl
+# nach – das Debian-Paket speichert unter /var/lib/influxdb (Befund 15).
+pruefe "du -sh /var/lib/influxdb/engine wie in der Anleitung" bash -c 'du -sh /var/lib/influxdb/engine >/dev/null'
 pruefe "Installation: erstes Lebenszeichen des Update-Dienstes" warte_auf 30 test -s "$IST/helfer"
 # Die gerenderten Einheiten des Update-Dienstes: systemd liest sie ohne Einwand.
 # (Nur Zeilen zu diesen Einheiten – Abhängigkeiten wie nginx.service melden
