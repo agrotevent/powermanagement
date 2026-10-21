@@ -893,6 +893,9 @@ pruefe "veränderte Flows: Update endet mit 0 (kam: $RC)" test "$RC" = 0
 pruefe "veränderte Flows: bleiben, wie sie sind" test "$(sha256sum < "$NR_FLOWS")" = "$EIGENE"
 pruefe "veränderte Flows: die neue Fassung liegt daneben" cmp -s "$ZIEL/deploy/node-red/flows.json" "$NR_NEU"
 pruefe "veränderte Flows: Hinweis nennt die Tanksensoren" enthaelt "$LAUF" "Tanksensoren brauchen die neuen Flows"
+# Die alten Flows übersetzen den Analog-Eingang (input:N, percent) schon – nur ohne x und sensorfehler.
+pruefe "veränderte Flows: Hinweis sagt, was als Analog-Eingang noch ankommt" \
+    enthaelt "$LAUF" "als Analog-Eingang nur eingang, ohne x und ohne Erkennung von Sensorfehlern"
 pruefe "veränderte Flows: Ergebnis mit Hinweis flows_behalten" \
     bash -c 'grep -qF "==> Ergebnis: eingespielt_mit_warnung" "$1" && grep -qF "Hinweise:  flows_behalten" "$1"' _ "$LAUF"
 pruefe "veränderte Flows: die Zusammenfassung sagt es noch einmal" enthaelt "$LAUF" "Node-RED:  Flows im Editor verändert und behalten"

@@ -1158,9 +1158,10 @@ if [[ "$MIT_NODERED" == "ja" ]]; then
         behalten) hinweis "Die Flows in Node-RED wurden verändert und bleiben, wie sie sind."
                   hinweis "Die mitgelieferte Fassung liegt unter $NODERED_DIR/flows.powermanagement-neu.json"
                   hinweis "(im Editor: Menü → Importieren) – oder erneut mit --flows-ersetzen aufrufen."
-                  hinweis "Tanksensoren brauchen die neuen Flows (Analogeingänge: Voltmeter, Analog-Input, Uni-ADC) – sonst"
-                  hinweis "kommen von ihnen keine Rohwerte an. Eigene MQTT-Zugänge der Shellys ebenso (Schutzliste"
-                  hinweis "pm/status/mqtt-zugaenge, Antworten unter <präfix>/pm-nodered/rpc)." ;;
+                  hinweis "Tanksensoren brauchen die neuen Flows – als Voltmeter (Plus Uni, Add-on) und am Gen1 Uni (adc) kommen sonst"
+                  hinweis "keine Rohwerte an, als Analog-Eingang nur eingang, ohne x und ohne Erkennung von Sensorfehlern."
+                  hinweis "Eigene MQTT-Zugänge der Shellys ebenso (Schutzliste pm/status/mqtt-zugaenge, Antworten unter"
+                  hinweis "<präfix>/pm-nodered/rpc)." ;;
     esac
 
     # Zugang zum Broker in flows_cred.json unter der festen ID des Broker-

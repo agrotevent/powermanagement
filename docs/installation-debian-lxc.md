@@ -952,8 +952,11 @@ sind; die neue Fassung liegt dann unter
 im Editor über *Menü → Importieren* übernommen werden – oder mit
 `--flows-ersetzen` (die alten werden als `flows.json.vor-<zeit>` gesichert).
 Was neu in den Flows ist, kommt dann nicht an – etwa die Analogeingänge der
-Tanksensoren (ohne sie keine Rohwerte, die Tankseite bleibt leer) oder die
-Schutzliste der eigenen MQTT-Zugänge. Das Update sagt es deshalb am Ende
+Tanksensoren oder die Schutzliste der eigenen MQTT-Zugänge. Ein Sensor als
+*Voltmeter* (Plus Uni, Add-on) oder am Gen1 Uni (`adc`) liefert dann keine
+Rohwerte, die Tankseite bleibt leer; als *Analog-Eingang* kommt nur
+`eingang` an, ohne `x` und ohne `sensorfehler` – ein Sensorfehler fällt
+nicht auf, der letzte Wert bleibt stehen. Das Update sagt es deshalb am Ende
 noch einmal (`Node-RED:  Flows im Editor verändert und behalten …`, Hinweis
 `flows_behalten`, in der Oberfläche unter dem Ergebnis).
 Dasselbe gilt für `settings.js`, die nginx-Site und die Mosquitto-Dateien.
@@ -1326,8 +1329,10 @@ Wenn etwas nicht klappt:
 - *„Die Node-RED-Flows wurden im Editor verändert und bleiben, wie sie
   sind.“* (am Ende von Lauf 2 noch einmal als `Node-RED:  Flows im Editor
   verändert und behalten …`): Was neu in den Flows ist, kommt dann nicht
-  an – Tanksensoren liefern keine Rohwerte, eigenen MQTT-Zugängen fehlt die
-  Schutzliste. Die neue Fassung liegt unter
+  an – Tanksensoren als *Voltmeter* und am Gen1 Uni liefern keine Rohwerte,
+  als *Analog-Eingang* nur `eingang` (ohne `x` und ohne Erkennung von
+  Sensorfehlern), eigenen MQTT-Zugängen fehlt die Schutzliste. Die neue
+  Fassung liegt unter
   `/var/lib/powermanagement/node-red/flows.powermanagement-neu.json`: im
   Node-RED-Editor über *Menü → Importieren* übernehmen – oder, wenn die
   eigenen Änderungen entbehrlich sind (sie bleiben als `flows.json.vor-<zeit>`

@@ -1247,9 +1247,10 @@ abgleichen() {
                 hinweis "Die Node-RED-Flows wurden im Editor verändert und bleiben, wie sie sind."
                 hinweis "Die neue Fassung liegt unter $NODERED_DIR/flows.powermanagement-neu.json –"
                 hinweis "im Editor über Menü → Importieren übernehmen, oder: $0 --flows-ersetzen"
-                hinweis "Tanksensoren brauchen die neuen Flows (Analogeingänge: Voltmeter, Analog-Input, Uni-ADC) – sonst"
-                hinweis "kommen von ihnen keine Rohwerte an. Eigene MQTT-Zugänge der Shellys ebenso (Schutzliste pm/status/mqtt-zugaenge,"
-                hinweis "Antworten unter <präfix>/pm-nodered/rpc) – sonst meldet die Seite „MQTT-Zugänge“, dass Node-RED sie nicht bestätigt."
+                hinweis "Tanksensoren brauchen die neuen Flows – als Voltmeter (Plus Uni, Add-on) und am Gen1 Uni (adc) kommen sonst"
+                hinweis "keine Rohwerte an, als Analog-Eingang nur eingang, ohne x und ohne Erkennung von Sensorfehlern."
+                hinweis "Eigene MQTT-Zugänge der Shellys ebenso (Schutzliste pm/status/mqtt-zugaenge, Antworten unter"
+                hinweis "<präfix>/pm-nodered/rpc) – sonst meldet die Seite „MQTT-Zugänge“, dass Node-RED sie nicht bestätigt."
                 WARNUNGEN+=(flows_behalten) ;;
         esac
     fi
