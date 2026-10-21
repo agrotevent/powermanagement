@@ -10,6 +10,7 @@ require __DIR__ . '/hilfen/pruefung.php';
 
 use App\Auth\Auth;
 use App\Auth\Zugriff;
+use App\Kunden\Kundenbereich;
 use App\Messung\Datenquellen;
 use App\Messung\Messdaten;
 use App\Services\AnlagenService;
@@ -135,6 +136,38 @@ try {
     $versuch = Auth::attempt($name, 'Pruefung2026!!', '127.0.0.1');
     pruefe(!$versuch['ok'] && str_contains($versuch['message'], 'abgelaufen'), 'Anmeldung nach Ablauf abgelehnt');
 
+    // Kundenzugang (Kundenbereich): Freigabe am Kunden mit Gültigkeit und Datenzeitraum
+    $kundeId = Database::insert('kunden', ['name' => 'Prüfung Zeitfenster ' . $name, 'aktiv' => 1, 'created_at' => gmdate('c')]);
+    $kundenzugang = Database::insert('users', ['username' => $name . '-kz', 'full_name' => '', 'email' => '',
+        'password_hash' => password_hash('Pruefung2026!!', PASSWORD_DEFAULT), 'is_active' => 1, 'kunde_id' => $kundeId, 'created_at' => gmdate('c')]);
+    $kf = Database::insert('freigaben', ['subject_type' => 'kunde', 'subject_id' => $kundeId, 'ziel_art' => 'site', 'ziel_id' => $siteId,
+        'ziel_kanal' => '', 'darf_bearbeiten' => 0, 'darf_steuern' => 0, 'notiz' => '', 'created_by' => 'test', 'created_at' => gmdate('c'),
+        'gueltig_ab' => Zeit::iso($jetzt + 86400), 'gueltig_bis' => Zeit::iso($jetzt + 3 * 86400),
+        'daten_ab' => Zeit::iso($jetzt + 86400), 'daten_bis' => Zeit::iso($jetzt + 2 * 86400)]);
+    alsBenutzer($kundenzugang);
+    pruefe(!Zugriff::siehtStandort($siteId), 'Kunden-Freigabe wirkt nicht vor gueltig_ab');
+    gleich(count(Kundenbereich::freigaben($kundeId, $jetzt + 2 * 86400)), 1, 'Vorschau „übermorgen“: wirksam');
+    gleich(count(Kundenbereich::freigaben($kundeId, $jetzt + 4 * 86400)), 0, 'Vorschau nach gueltig_bis: nicht mehr');
+    pruefe(!Zugriff::siehtStandort($siteId) && Kundenbereich::freigaben($kundeId) === [], 'die Vorschau ändert den Zwischenspeicher nicht');
+    gleich(count(Zugriff::freigaben($kundenzugang, $jetzt + 2 * 86400)), 1, 'Zugriff::freigaben() mit eigener Uhrzeit für den Kundenzugang');
+    Database::update('freigaben', $kf, ['gueltig_ab' => Zeit::iso($jetzt - 86400), 'daten_ab' => Zeit::iso($jetzt - 86400)]);
+    Zugriff::vergessen();
+    pruefe(Zugriff::siehtStandort($siteId) && Zugriff::siehtObjekt($o) && !Zugriff::siehtObjekt($of), 'ab gueltig_ab sichtbar: Standort und seine Anlage');
+    gleich(Zugriff::datenFensterStandort($siteId), [[$jetzt - 86400, $jetzt + 2 * 86400]], 'datenFensterStandort = Fenster der Kunden-Freigabe');
+    gleich(Zugriff::datenFenster($o), [[$jetzt - 86400, $jetzt + 2 * 86400]], 'datenFenster der Anlage ebenso');
+    pruefe(!Zugriff::darfBearbeiten($o) && !Zugriff::darfSteuern($q, 'switch:0', $o), 'Kundenzugang: weder bearbeiten noch schalten');
+    Database::update('freigaben', $kf, ['gueltig_bis' => Zeit::iso($jetzt - 60)]);
+    Zugriff::vergessen();
+    pruefe(!Zugriff::siehtStandort($siteId), 'nach gueltig_bis unsichtbar');
+    Database::update('freigaben', $kf, ['subject_type' => 'user', 'subject_id' => $userId, 'gueltig_bis' => Zeit::iso($jetzt + 86400)]);
+    alsBenutzer($userId);
+    pruefe(Zugriff::siehtStandort($siteId) && Zugriff::datenFensterStandort($siteId) === [[$jetzt - 86400, $jetzt + 2 * 86400]],
+        'Konto ohne kunde_id: Freigaben am Konto wie bisher');
+    Database::delete('freigaben', $kf);
+    Database::execute('DELETE FROM users WHERE id = ?', [$kundenzugang]);
+    Database::delete('kunden', $kundeId);
+    alsBenutzer($userId);
+
     // Formular-Umrechnung: „bis 24.09.“ heißt bis Tagesende Ortszeit
     $bis = Zeit::ausEingabe('2026-09-24', true);
     gleich(Zeit::anzeige($bis, 'd.m.Y H:i:s'), '24.09.2026 23:59:59', 'Enddatum schließt den Tag ein');
@@ -144,6 +177,11 @@ try {
     Database::execute('DELETE FROM user_roles WHERE user_id = ?', [$userId]);
     Database::execute('DELETE FROM users WHERE id = ?', [$userId]);
     Database::execute("DELETE FROM audit_log WHERE username = ?", [$name]);
+    foreach (Database::select('SELECT id FROM kunden WHERE name = ?', ['Prüfung Zeitfenster ' . $name]) as $k) {
+        Database::execute("DELETE FROM freigaben WHERE subject_type = 'kunde' AND subject_id = ?", [(int) $k['id']]);
+        Database::execute('DELETE FROM users WHERE kunde_id = ?', [(int) $k['id']]);
+        Database::delete('kunden', (int) $k['id']);
+    }
     AnlagenService::loeschen($objekt);
     AnlagenService::loeschen($fremd);
     Datenquellen::loeschen($quelle);

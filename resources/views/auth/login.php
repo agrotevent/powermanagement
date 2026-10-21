@@ -30,6 +30,8 @@
                 <strong>Demo-Modus.</strong> Zugang <code>admin</code> / <code>PowerAdmin2026!</code> – außerdem
                 <code>veranstalter</code> / <code>Veranstalter2026!</code> (sieht nur die Festivalwoche) und
                 <code>technik</code> / <code>Technik2026!!</code> (darf nur das Licht schalten).
+                Kundenbereich: <code>muster-events</code> / <code>Kundenbereich2026!</code> (Sommerfestival)
+                und <code>stadtmarketing</code> / <code>Stadtmarketing2026!</code> (dasselbe Gelände erst in einem Monat).
                 Alle Messwerte sind erzeugt.
             </div>
         <?php endif; ?>

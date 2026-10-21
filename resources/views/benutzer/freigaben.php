@@ -6,6 +6,7 @@ use App\Support\View;
 use App\Support\Zeit;
 
 $title = 'Freigaben: ' . $subjekt['titel'];
+$kundenzugang = !empty($kundenzugang);
 $subtitle = $art === 'role' ? 'für alle Benutzer mit dieser Rolle' : 'für diesen Benutzer';
 $zeit = static function (?string $ab, ?string $bis): string {
     if (!$ab && !$bis) {
@@ -14,6 +15,11 @@ $zeit = static function (?string $ab, ?string $bis): string {
     return trim(($ab ? 'ab ' . Zeit::anzeige($ab) : '') . ' ' . ($bis ? 'bis ' . Zeit::anzeige($bis) : ''));
 };
 ?>
+<?php if ($kundenzugang): ?>
+<div class="notice">Das ist ein Kundenzugang. Er sieht nur, was seinem Kunden freigegeben ist (nur Standorte, mit Ende und
+    Datenzeitraum) – Freigaben am Konto oder an Rollen zählen für ihn nicht. Freigaben für Kunden pflegt die Kundenverwaltung.
+    <?php if (View::can('kunden.manage')): ?><a href="/kunden/<?= (int) $subjekt['kunde_id'] ?>?tab=freigaben">Zu den Freigaben des Kunden</a><?php endif; ?></div>
+<?php endif; ?>
 <div class="grid grid-sidebar">
     <div class="card">
         <div class="card-head"><h2>Freigaben</h2><span class="hint">mehrere Freigaben ergänzen sich</span></div>
@@ -30,7 +36,9 @@ $zeit = static function (?string $ab, ?string $bis): string {
                             <div><?= View::e($zeit($f['gueltig_ab'], $f['gueltig_bis'])) ?></div></td>
                         <td data-label="Datenzeitraum" class="small"><?= View::e($zeit($f['daten_ab'], $f['daten_bis'])) ?></td>
                         <td class="right">
+                            <?php if (!$kundenzugang): ?>
                             <form method="post" action="/system/freigaben/loeschen" data-confirm="Freigabe entfernen?"><?= Csrf::field() ?><input type="hidden" name="id" value="<?= (int) $f['id'] ?>"><button class="btn btn-sm btn-ghost" type="submit">Entfernen</button></form>
+                            <?php endif; ?>
                         </td>
                     </tr>
                 <?php endforeach; ?>
@@ -39,6 +47,7 @@ $zeit = static function (?string $ab, ?string $bis): string {
         </div>
     </div>
 
+    <?php if (!$kundenzugang): ?>
     <form method="post" action="/system/freigaben/speichern" class="card" id="freigabe-form">
         <?= Csrf::field() ?>
         <input type="hidden" name="subject_type" value="<?= View::e($art) ?>">
@@ -79,7 +88,9 @@ $zeit = static function (?string $ab, ?string $bis): string {
             <button class="btn btn-primary" type="submit">Freigabe anlegen</button>
         </div>
     </form>
+    <?php endif; ?>
 </div>
+<?php if (!$kundenzugang): ?>
 <script nonce="<?= \App\Support\View::e(\App\Support\View::nonce()) ?>">
 (function () {
     var form = document.getElementById('freigabe-form');
@@ -97,3 +108,4 @@ $zeit = static function (?string $ab, ?string $bis): string {
     });
 })();
 </script>
+<?php endif; ?>

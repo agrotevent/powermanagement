@@ -18,6 +18,9 @@ use App\Controllers\InventarController;
 use App\Controllers\EinstellungenController;
 use App\Controllers\KarteController;
 use App\Controllers\KatalogImportController;
+use App\Controllers\KundenbereichController;
+use App\Controllers\KundenController;
+use App\Controllers\PruefnachweiseController;
 use App\Controllers\LocationController;
 use App\Controllers\ManifestController;
 use App\Controllers\PruefgeraeteController;
@@ -57,6 +60,69 @@ $router->post('/login', [AuthController::class, 'login']);
 $router->post('/logout', [AuthController::class, 'logout']);
 $router->get('/profil', [AuthController::class, 'profile']);
 $router->post('/profil/passwort', [AuthController::class, 'changePassword']);
+
+// ---------------------------------------------------------------- Kundenbereich
+/*
+ * Nur für Kundenzugänge (users.kunde_id); Personal bekommt 403. Kein Recht an
+ * der Route – Kundenzugänge haben keine Rechte; KundenbereichController::kunde()
+ * prüft das Konto, KundenSicht jede ID gegen den Kunden (fremd = nicht
+ * vorhanden = 404). Kundenzugänge erreichen nichts anderes (Tor im Router,
+ * Kundenbereich::erlaubt). Was Kunden sehen, kommt aus Freigaben am Kunden
+ * (nur Standorte) und aus ausdrücklicher Zuordnung – nie aus dem Standort
+ * allein. Eventworx wird von hier aus nie gefragt.
+ */
+$router->get('/kundenbereich', [KundenbereichController::class, 'index']);
+$router->get('/kundenbereich/locations', [KundenbereichController::class, 'locations']);
+$router->get('/kundenbereich/locations/{id}', [KundenbereichController::class, 'location']);
+$router->get('/kundenbereich/locations/{id}/plan/{etage}', [KundenbereichController::class, 'plan']);
+$router->get('/kundenbereich/locations/{id}/plan/{etage}/vorschau', [KundenbereichController::class, 'planVorschau']);
+$router->get('/kundenbereich/protokolle', [KundenbereichController::class, 'protokolle']);
+$router->get('/kundenbereich/protokolle/{id}', [KundenbereichController::class, 'protokoll']);
+$router->get('/kundenbereich/protokolle/{id}/pdf', [KundenbereichController::class, 'protokollPdf']);
+// Prüfnachweise (DGUV V3): nur freigegebene des Kunden; das PDF als Datei (fremdes Dokument).
+$router->get('/kundenbereich/pruefnachweise', [KundenbereichController::class, 'nachweise']);
+$router->get('/kundenbereich/pruefnachweise/{id}/pdf', [KundenbereichController::class, 'nachweisPdf']);
+$router->get('/kundenbereich/konto', [KundenbereichController::class, 'konto']);
+$router->post('/kundenbereich/konto/kennwort', [KundenbereichController::class, 'kennwort']);
+$router->get('/kundenbereich/hilfe', [KundenbereichController::class, 'hilfe']);
+// Einmal-Link zum Festlegen des Kennworts: ohne Anmeldung – das Token ist die
+// Berechtigung (einmal, mit Ablauf). Das Speichern ist ein POST mit CSRF-Token.
+$router->get('/kundenbereich/einrichten/{token}', [KundenbereichController::class, 'einrichten']);
+$router->post('/kundenbereich/einrichten/{token}', [KundenbereichController::class, 'einrichtenSpeichern']);
+
+// ---------------------------------------------------------------- Kunden (Personal)
+/*
+ * Die Kundenverwaltung: ansehen mit „kunden.view“, pflegen mit
+ * „kunden.manage“. Zugänge und Freigaben sieht nur, wer pflegen darf;
+ * Standorte freigeben zusätzlich nur, wer alles sieht (prüft
+ * KundenService). Jede {uid}, {fid}, {vid} und {nid} wird gegen den Kunden {id} geprüft.
+ * Ein Link oder vorläufiges Kennwort steht nur in der Antwort auf das
+ * Anlegen (no-store). Eventworx suchen und verknüpfen zusätzlich nur mit
+ * „berichte.eventworx“ (prüft KundenService); beides wartet auf Eventworx,
+ * ohne die Sitzung zu halten.
+ */
+$router->get('/kunden', [KundenController::class, 'index'], 'kunden.view');
+$router->post('/kunden/speichern', [KundenController::class, 'speichern'], 'kunden.manage');
+$router->get('/kunden/{id}', [KundenController::class, 'show'], 'kunden.view');
+$router->post('/kunden/{id}/loeschen', [KundenController::class, 'loeschen'], 'kunden.manage');
+$router->post('/kunden/{id}/zugang', [KundenController::class, 'zugangAnlegen'], 'kunden.manage');
+$router->post('/kunden/{id}/zugang/{uid}', [KundenController::class, 'zugang'], 'kunden.manage');
+$router->post('/kunden/{id}/freigabe', [KundenController::class, 'freigabeSpeichern'], 'kunden.manage');
+$router->post('/kunden/{id}/freigabe/{fid}/loeschen', [KundenController::class, 'freigabeLoeschen'], 'kunden.manage');
+$router->post('/kunden/{id}/eventworx/suche', [KundenController::class, 'eventworxSuche'], 'kunden.manage');
+$router->post('/kunden/{id}/eventworx/verknuepfen', [KundenController::class, 'eventworxVerknuepfen'], 'kunden.manage');
+$router->post('/kunden/{id}/vorgang/{vid}/loesen', [KundenController::class, 'vorgangLoesen'], 'kunden.manage');
+// Prüfnachweise (DGUV V3) des Kunden: hinterlegen, korrigieren, freigeben,
+// zurückziehen, löschen mit „kunden.nachweise“; die Datei ansehen mit
+// „kunden.view“. Jede {nid} wird gegen den Kunden {id} geprüft. Aus
+// Eventworx nur an einem Vorgang dieses Kunden, ausgewählt von einer Person.
+$router->post('/kunden/{id}/nachweise/hochladen', [PruefnachweiseController::class, 'hochladen'], 'kunden.nachweise');
+$router->post('/kunden/{id}/nachweise/eventworx', [PruefnachweiseController::class, 'eventworx'], 'kunden.nachweise');
+$router->post('/kunden/{id}/nachweise/eventworx/uebernehmen', [PruefnachweiseController::class, 'eventworxUebernehmen'], 'kunden.nachweise');
+$router->post('/kunden/{id}/nachweise/{nid}/speichern', [PruefnachweiseController::class, 'speichern'], 'kunden.nachweise');
+$router->post('/kunden/{id}/nachweise/{nid}/status', [PruefnachweiseController::class, 'status'], 'kunden.nachweise');
+$router->post('/kunden/{id}/nachweise/{nid}/loeschen', [PruefnachweiseController::class, 'loeschen'], 'kunden.nachweise');
+$router->get('/kunden/{id}/nachweise/{nid}/datei', [PruefnachweiseController::class, 'datei'], 'kunden.view');
 
 // ---------------------------------------------------------------- Übersicht
 $router->get('/', [DashboardController::class, 'start']);
@@ -162,6 +228,9 @@ $router->post('/berichte/{id}/ohne-kunde', [BerichtController::class, 'ohneKunde
 $router->post('/berichte/{id}/korrektur', [BerichtController::class, 'korrektur'], 'berichte.pruefen');
 $router->post('/berichte/{id}/verwerfen', [BerichtController::class, 'verwerfen'], 'berichte.pruefen');
 $router->post('/berichte/{id}/loeschen', [BerichtController::class, 'loeschen'], 'berichte.manage');
+// Bericht ↔ Kunde des Kundenbereichs (auch nach dem Einfrieren; dazu BerichtService::sichtbar).
+// Bewusst nicht /berichte/{id}/kunde…: dort liegt der Kundenmodus, und seine offenen Wege dürfen nie eine Zuordnung durchlassen.
+$router->post('/berichte/{id}/kundenbereich', [KundenController::class, 'berichtZuordnen'], 'kunden.manage');
 
 // Inventar: Verteiler und Zwischenstecker mit Shellys, Einsatz beim Aufbau.
 $router->get('/inventar', [InventarController::class, 'index'], 'datenquellen.view');
@@ -269,6 +338,8 @@ $router->post('/system/einstellungen/firma', [EinstellungenController::class, 'f
 // Eventworx (Kundendaten für Übergabeberichte, nur lesend): Mandant, Token, Verbindungstest.
 $router->post('/system/einstellungen/eventworx', [EinstellungenController::class, 'eventworx'], 'settings.manage');
 $router->post('/system/einstellungen/eventworx/pruefen', [EinstellungenController::class, 'eventworxPruefen'], 'settings.manage');
+// Kundenbereich: Datenschutzhinweis, Ansprechpartner, Gültigkeit der Einrichtungslinks, Aufbewahrung der Prüfnachweise.
+$router->post('/system/einstellungen/kundenbereich', [EinstellungenController::class, 'kundenbereich'], 'settings.manage');
 
 // Schnittstelle (API): Zugänge für andere Instanzen. Anlegen, Ändern,
 // Anzeigen und Löschen zusätzlich nur mit „Alle Standorte …“ (prüft der

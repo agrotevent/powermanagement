@@ -14,14 +14,21 @@ use App\Support\Zeit;
 /**
  * Eventworx – Kundendaten für Übergabeberichte, **nur lesend**.
  *
- * Gelesen werden Aufträge und Angebote (`GET job`, Suche) und ein einzelner
- * Vorgang (`GET job/<id>`); daraus kommen Veranstaltung, Kunde,
- * Ansprechpartner, Ort und Zeitraum. Sonst nichts:
+ * Gelesen werden Aufträge, Angebote und Lieferscheine (`GET job`, Suche) und
+ * ein einzelner Vorgang (`GET job/<id>`); daraus kommen Veranstaltung, Kunde,
+ * Ansprechpartner, Ort und Zeitraum. Für die Prüfnachweise des
+ * Kundenbereichs dazu die Liste der Dateien an einem Vorgang (`GET
+ * file/list`) und einzelne Dateien daraus (`GET file/<ObjectId>`). Sonst
+ * nichts:
  *
  * - **nur GET und nur die Pfade aus PFADE.** Das API-Token hat in Eventworx
  *   weitreichende Rechte, und Eventworx löscht Dateien per GET
  *   (`file/delete/…`) – ein Pfad außerhalb der Liste wird abgelehnt, bevor
- *   irgendetwas ins Netz geht.
+ *   irgendetwas ins Netz geht. Dateien nur mit einer ObjectId, die
+ *   `dokumente()` in diesem Prozess aus der Liste eben dieses Vorgangs
+ *   gelesen hat; eine Liste, in der auch nur eine Datei eines anderen
+ *   Vorgangs steht, wird ganz verworfen (Eventworx übergeht unbekannte
+ *   Filter still).
  * - **Das Token gilt für seinen Host.** Es wird verschlüsselt abgelegt und
  *   zusammen mit dem Host gemerkt, für den es eingetragen wurde
  *   (`eventworx.token_host`). Zieht die Adresse um, ohne dass ein neues Token
@@ -44,11 +51,32 @@ final class Eventworx
 {
     /** Ein Mandant: genau ein Name unter eventworx.biz, nur https, Port 443. */
     public const HOST = '/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.eventworx\.biz$/';
-    /** Die einzigen Pfade unter /backend/ – und nur mit GET. */
-    private const PFADE = '#^(check/ping|job|job/[A-Za-z0-9]{8,40})$#';
+    /**
+     * Die einzigen Pfade unter /backend/ – und nur mit GET. Dateien nur mit
+     * ObjectId: `file/delete/<id>` (löscht per GET), `file/download` und
+     * Ähnliches passen nie.
+     */
+    private const PFADE = '#^(check/ping|job|job/[A-Za-z0-9]{8,40}|file/list|file/[0-9a-f]{24})$#';
     private const ID = '/^[A-Za-z0-9]{8,40}$/';
+    /** Eine ObjectId (24 Hexzeichen, klein) – so nennt Eventworx Kunden (customerRefId) und Dateien. */
+    public const OID = '/^[0-9a-f]{24}$/';
     private const ARTEN_SUCHE = ['order', 'offer'];
     private const ARTEN_VORGANG = ['order', 'offer', 'deliverynote'];
+    /** Größte Datei, die übernommen wird (wie ein Prüfnachweis von Hand; MariaDB: max_allowed_packet 16 MiB). */
+    public const MAX_DATEI = 10 * 1024 * 1024;
+    /** Ordner der Dokumente am Vorgang; Uploads von Benutzern liegen darunter (/job/documents/<Projekt>). */
+    private const DATEI_PFAD = '/job/documents';
+    /**
+     * Filterform für file/list – nach der Lese-Probe (P5a/P5b, docs/eventworx.md)
+     * festlegen. true: {path, ownerDocumentId} wie die SetnetzBuchhaltung;
+     * false: nur ownerDocumentId. Beide sind sicher, weil jede Liste hier
+     * gegen den Vorgang geprüft wird – offen ist nur, ob der Filter mit
+     * path die Uploads in Unterordnern liefert. VERIFY (Probe V3)
+     */
+    private const DATEI_FILTER_MIT_PFAD = true;
+    private const DATEIEN_JE_LAUF = 200;
+    /** Sekunden für einen Download (bis 10 MB). */
+    private const ZEIT_DATEI = 30;
     public const ART_NAMEN = ['order' => 'Auftrag', 'offer' => 'Angebot', 'deliverynote' => 'Lieferschein'];
     /** Nur vollständige Entitäten – „&amp“ ohne Semikolon bleibt, wie es ist. */
     private const ENTITAET = '/&(?:#[0-9]{1,7}|#[xX][0-9a-fA-F]{1,6}|[A-Za-z][A-Za-z0-9]{1,31});/';
@@ -68,10 +96,20 @@ final class Eventworx
     private const ADRESSE_HINWEIS = 'Erlaubt ist nur die Adresse des eigenen Eventworx-Mandanten: „firma“, „firma.eventworx.biz“ oder https://firma.eventworx.biz.';
     private const UNERWARTET = 'Eventworx: unerwartete Antwort.';
     private const NICHT_VORHANDEN = 'Vorgang in Eventworx nicht (mehr) vorhanden.';
+    private const DATEI_ABGELEHNT = 'Eventworx lehnt den Dateizugriff ab – die Dateischnittstelle muss evtl. für das Token freigeschaltet werden.';
 
     /** Für Prüfskripte: Uhr (Sekunden als float) und Schlafen ersetzen. */
     public static ?\Closure $uhr = null;
     public static ?\Closure $schlafen = null;
+
+    /**
+     * Was dokumente() in DIESEM Prozess gelesen hat: Datei-ID → Vorgang und
+     * Name. Nur diese Dateien lädt datei() – eine ID aus einer Anfrage, einer
+     * Sitzung oder einer anderen Liste nie.
+     *
+     * @var array<string,array{job:string,name:string,roh:string}>
+     */
+    private static array $gelesen = [];
 
     // ------------------------------------------------------------ Adresse und Token
 
@@ -256,14 +294,21 @@ final class Eventworx
     }
 
     /**
-     * Aufträge und Angebote nach Nummer oder Text. Ob Eventworx mit `query`
-     * auch in Titel und Kunde sucht, ist am echten Mandanten nicht belegt –
-     * die Nummer ist der sichere Weg; genaue Treffer stehen oben.
+     * Vorgänge nach Nummer oder Text – Aufträge und Angebote (Bericht) oder
+     * die Arten aus $arten (Kundenverwaltung: Aufträge und Lieferscheine).
+     * Ob Eventworx mit `query` auch in Titel und Kunde sucht, ist am echten
+     * Mandanten nicht belegt – die Nummer ist der sichere Weg; genaue Treffer
+     * stehen oben.
      *
+     * @param list<string> $arten Teilmenge von order, offer, deliverynote
      * @return list<array{id:string,art:string,art_name:string,nummer:string,projekt:string,titel:string,von:?string,bis:?string,genau:bool}>
      */
-    public static function suchen(string $text): array
+    public static function suchen(string $text, array $arten = self::ARTEN_SUCHE): array
     {
+        $arten = array_values(array_intersect(self::ARTEN_VORGANG, $arten));
+        if ($arten === []) {
+            throw new \LogicException('Eventworx: keine Vorgangsart für die Suche.');
+        }
         $text = self::suchtext($text);
         $antwort = self::holen('job', [
             'start'  => 0,
@@ -272,7 +317,7 @@ final class Eventworx
             'query'  => $text,
             'sort'   => self::json([['property' => 'lastModification', 'direction' => 'DESC']]),
             'filter' => self::json([
-                ['property' => 'subType', 'operator' => 'in', 'value' => self::ARTEN_SUCHE],
+                ['property' => 'subType', 'operator' => 'in', 'value' => $arten],
                 ['property' => 'deleted', 'operator' => '=', 'value' => 'false'],
                 ['property' => 'archived', 'operator' => '=', 'value' => 'false'],
             ]),
@@ -285,8 +330,8 @@ final class Eventworx
             }
             $art = self::art($job);
             $nummer = self::nummer($job);
-            if (!in_array($art, self::ARTEN_SUCHE, true) || $nummer === '') {
-                continue; // anderes als Auftrag/Angebot, oder noch nie gespeichert (TMP_…)
+            if (!in_array($art, $arten, true) || $nummer === '') {
+                continue; // eine andere Art (Rechnung, Wareneingang …), oder noch nie gespeichert (TMP_…)
             }
             [$von, $bis] = self::hauptzeit($job);
             $treffer[$job['id']] = [
@@ -357,6 +402,8 @@ final class Eventworx
                 'nummer'   => $nummer,
                 'host'     => (string) Settings::get(self::EINSTELLUNG_HOST, ''),
                 'link'     => self::link($art, $id),
+                // Kennung des Kunden in Eventworx – nur zum Vergleich (Kundenbereich), nie ins PDF.
+                'kunde_ref' => self::kundeRef($job),
             ],
             'gruppen' => [
                 'veranstaltung' => [
@@ -390,6 +437,140 @@ final class Eventworx
                 ],
             ],
         ];
+    }
+
+    /**
+     * Die Kennung des Kunden eines Vorgangs (customerRefId) – nur als
+     * ObjectId; alles andere (eine Kundennummer wie „K-10023“, Großbuchstaben,
+     * ein Objekt) ergibt ''. Sie dient nur dem Vergleich: Gehört ein Vorgang
+     * zum selben Kunden wie ein anderer? Angezeigt wird sie nirgends.
+     */
+    public static function kundeRef(array $job): string
+    {
+        $ref = $job['customerRefId'] ?? null;
+        return is_string($ref) && preg_match(self::OID, $ref) === 1 ? $ref : '';
+    }
+
+    // ------------------------------------------------------------ Dateien am Vorgang
+
+    /**
+     * Die PDF-Dateien, die Benutzer in Eventworx an einem Vorgang hochgeladen
+     * haben (Prüfprotokolle etwa) – nur Metadaten, nie Inhalte. Erzeugte
+     * Belege (Auftrag, Rechnung, Lieferschein: mit metaDocType) gehören nicht
+     * dazu, ebenso wenig Dateien außerhalb von DATEI_PFAD, Nicht-PDF (XML der
+     * E-Rechnung) und Einträge ohne ObjectId.
+     *
+     * Eventworx übergeht unbekannte Filter still und liefert dann Dateien
+     * ganz anderer Vorgänge – womöglich anderer Kunden. Gehört deshalb auch
+     * nur EINE Datei der Antwort nicht zu diesem Vorgang (ownerDocumentId ≠
+     * $jobId, auch: fehlt), wird die ganze Liste verworfen (FILTER).
+     *
+     * Was hier geliefert wird, merkt sich dieser Prozess für datei().
+     *
+     * @return array{dateien:list<array{id:string,name:string,zeit:?string,beschreibung:string}>, mehr:bool}
+     */
+    public static function dokumente(string $jobId): array
+    {
+        if (preg_match(self::OID, $jobId) !== 1) {
+            throw new EventworxFehler('Unbekannte Vorgangskennung – Dateien gibt es nur für Vorgänge mit Eventworx-Kennung (ObjectId).', 0, 'ID');
+        }
+        $filter = self::DATEI_FILTER_MIT_PFAD ? ['path' => self::DATEI_PFAD, 'ownerDocumentId' => $jobId] : ['ownerDocumentId' => $jobId];
+        $antwort = self::holen('file/list', [
+            'page'   => 1,
+            'start'  => 0,
+            'limit'  => self::DATEIEN_JE_LAUF,
+            'filter' => self::json([['property' => 'meta', 'operator' => '=', 'value' => $filter]]),
+        ]);
+        $liste = $antwort['data'];
+        foreach ($liste as $f) {
+            if (!is_array($f)) {
+                self::vergessenFuer($jobId);
+                throw new EventworxFehler(self::UNERWARTET, 200, 'UNERWARTET');
+            }
+            if (($f['ownerDocumentId'] ?? null) !== $jobId) {
+                self::vergessenFuer($jobId);
+                throw new EventworxFehler('Eventworx hat die Dateiliste nicht auf den Vorgang beschränkt – nichts übernommen.', 200, 'FILTER');
+            }
+        }
+        $total = $antwort['total'] ?? null;
+        $total = is_int($total) || (is_string($total) && ctype_digit($total)) ? (int) $total : null;
+        $mehr = count($liste) > self::DATEIEN_JE_LAUF || ($total !== null && $total > min(count($liste), self::DATEIEN_JE_LAUF));
+        $dateien = [];
+        foreach (array_slice($liste, 0, self::DATEIEN_JE_LAUF) as $f) {
+            $id = is_string($f['id'] ?? null) ? $f['id'] : '';
+            $art = $f['metaDocType'] ?? null;
+            $pfad = $f['path'] ?? null;
+            if (preg_match(self::OID, $id) !== 1 || isset($dateien[$id])) {
+                continue;
+            }
+            if ($art !== null && $art !== '') {
+                continue; // ein erzeugter Beleg (Auftrag, Rechnung, Mahnung …)
+            }
+            if (!is_string($pfad) || ($pfad !== self::DATEI_PFAD && !str_starts_with($pfad, self::DATEI_PFAD . '/'))) {
+                continue;
+            }
+            $roh = is_string($f['documentName'] ?? null) ? $f['documentName'] : (is_string($f['name'] ?? null) ? $f['name'] : '');
+            $name = self::text($roh, 190);
+            $typ = is_string($f['contentType'] ?? null) ? strtolower(trim($f['contentType'])) : '';
+            // Mit Inhaltstyp zählt der, sonst die Endung; der Download prüft %PDF- ohnehin.
+            if ($typ !== '' ? !str_contains($typ, 'pdf') : !str_ends_with(strtolower($name), '.pdf')) {
+                continue;
+            }
+            $dateien[$id] = [
+                'id'           => $id,
+                'name'         => $name !== '' ? $name : 'Dokument.pdf',
+                'zeit'         => self::zeit($f['timeStamp'] ?? null) ?? self::zeit($f['creationDate'] ?? null) ?? self::zeit($f['documentDate'] ?? null),
+                'beschreibung' => self::text($f['description'] ?? '', 255),
+            ];
+            self::$gelesen[$id] = ['job' => $jobId, 'name' => $dateien[$id]['name'],
+                'roh' => mb_substr(trim((string) preg_replace(self::STEUERZEICHEN, '', mb_scrub($roh, 'UTF-8'))), 0, 255)];
+        }
+        $dateien = array_values($dateien);
+        usort($dateien, static fn (array $a, array $b): int => [(string) $b['zeit'], $a['name']] <=> [(string) $a['zeit'], $b['name']]);
+        return ['dateien' => $dateien, 'mehr' => $mehr];
+    }
+
+    /**
+     * Die Bytes einer Datei, die dokumente() in diesem Prozess geliefert hat
+     * – eine andere ID ist ein Programmfehler (\LogicException, bevor
+     * irgendetwas ins Netz geht). Nur ein PDF (beginnt mit %PDF-), höchstens
+     * MAX_DATEI; eine HTML-Anmeldeseite statt der Datei wird abgelehnt.
+     */
+    public static function datei(string $dateiId): string
+    {
+        $gelesen = self::$gelesen[$dateiId] ?? null;
+        if ($gelesen === null || preg_match(self::OID, $dateiId) !== 1) {
+            throw new \LogicException('Eventworx: Datei nicht aus einer Liste dieses Laufs.');
+        }
+        return self::holenDatei('file/' . $dateiId, ['filename' => $gelesen['roh'] !== '' ? $gelesen['roh'] : $gelesen['name']]);
+    }
+
+    /** Für Prüfskripte (und einen neuen Lauf): was dokumente() gelesen hat, vergessen. */
+    public static function vergessen(): void
+    {
+        self::$gelesen = [];
+    }
+
+    /**
+     * @internal Nur für EventworxProbe: eine GET-Anfrage auf einen Pfad aus
+     * EventworxProbe::PFADE (jeder andere: \LogicException vor dem Netz),
+     * ausgewertet ohne Ausnahme für HTTP-Fehler – die Probe entscheidet
+     * selbst, was ein Fehler heißt. Inhalte gehen nicht ins Log.
+     *
+     * @return array{ok:bool,status:int,json:bool,code:string,daten:?array}
+     */
+    public static function probeLesen(string $pfad, array $parameter = []): array
+    {
+        $muster = self::pfadPruefen($pfad, EventworxProbe::PFADE);
+        if (Config::isDemo()) {
+            throw new EventworxFehler('Demo-Modus: die Lese-Probe fragt kein Eventworx.', 0, 'DEMO');
+        }
+        ['antwort' => $antwort, 'ms' => $ms] = self::anfrage($pfad, $parameter, ['zeit' => self::ZEIT], EventworxProbe::PFADE);
+        $status = (int) ($antwort['status'] ?? 0);
+        $daten = json_decode((string) ($antwort['rumpf'] ?? ''), true, 512);
+        $code = is_array($daten) && is_string($daten['errorCode'] ?? null) && preg_match(self::FEHLERCODE, $daten['errorCode']) === 1 ? $daten['errorCode'] : '';
+        Logger::info('eventworx', ['pfad' => $muster, 'status' => $status, 'code' => $code, 'ms' => $ms]);
+        return ['ok' => !empty($antwort['ok']), 'status' => $status, 'json' => is_array($daten), 'code' => $code, 'daten' => is_array($daten) ? $daten : null];
     }
 
     /** Link in die Web-App (nur zum Anzeigen, nie ins PDF); '' ohne gültige Adresse. */
@@ -448,7 +629,7 @@ final class Eventworx
             [
                 'id' => '64f0c0de00000000000a1042', 'docType' => 'order', 'docSubType' => 'order', 'status' => 'confirmed',
                 'jobNumber' => 'AU-1042', 'projectNumber' => 'P-2026-017', 'title' => 'Sommerfestival 2026',
-                'customerId' => 'K-10023',
+                'customerId' => 'K-10023', 'customerRefId' => '65c3716b43f4c400000a0001',
                 'customer' => ['isCompany' => true, 'companyName' => 'Muster Events GmbH &amp; Co. KG', 'customerId' => 'K-10023'],
                 'postalAddress' => ['type' => 'postal', 'street' => 'Musterstraße 1', 'addressextension' => '', 'zipcode' => '12345', 'city' => 'Musterstadt', 'country' => 'de'],
                 'contact' => ['personSalutation' => 'Frau', 'personFirstName' => 'Erika', 'personLastName' => 'Musterfrau', 'personDepartment' => 'Produktion',
@@ -463,7 +644,7 @@ final class Eventworx
             [
                 'id' => '64f0c0de00000000000a1050', 'docType' => 'offer', 'docSubType' => 'offer', 'status' => 'open',
                 'jobNumber' => 'AN-1050', 'variantNumber' => 'AN-1050-01', 'projectNumber' => 'P-2026-021', 'title' => 'Herbstmarkt Musterstadt',
-                'customerId' => 'K-10031',
+                'customerId' => 'K-10031', 'customerRefId' => '65c3716b43f4c400000a0002',
                 'customer' => ['isCompany' => true, 'companyName' => 'Stadtmarketing Musterstadt e.&#8239;V.', 'customerId' => 'K-10031'],
                 'postalAddress' => ['type' => 'postal', 'street' => 'Rathausplatz 2', 'zipcode' => '12345', 'city' => 'Musterstadt', 'country' => 'de'],
                 'contact' => ['personSalutation' => 'Herr', 'personFirstName' => 'Max', 'personLastName' => 'Mustermann',
@@ -475,6 +656,61 @@ final class Eventworx
         ];
     }
 
+    /**
+     * Dateien der Demo am Auftrag AU-1042 (Form wie `file/list`): zwei
+     * hochgeladene Prüfprotokolle (ohne metaDocType) – das Sammelprotokoll
+     * von vor sechs Tagen übernimmt die Demo (DemoSeed), das von gestern
+     * bleibt zum Ausprobieren – und der erzeugte Beleg des Auftrags
+     * (metaDocType order), den dokumente() nie zeigt.
+     *
+     * @return list<array<string,mixed>>
+     */
+    public static function demoDateien(): array
+    {
+        $job = self::demo()[0];
+        $ms = static fn (int $tage): int => (new \DateTimeImmutable('today', Zeit::zone()))->modify($tage . ' days')->getTimestamp() * 1000;
+        return [
+            ['id' => '6650a1f2c9e77a1b00000001', 'documentName' => 'DGUV V3 Prüfprotokolle Verteiler und Kabel 2026.pdf', 'contentType' => 'application/pdf',
+                'timeStamp' => $ms(-6), 'creationDate' => $ms(-6), 'description' => '', 'owner' => 'demo', 'path' => '/job/documents/' . $job['projectNumber'],
+                'ownerDocumentId' => $job['id'], 'projectNumber' => $job['projectNumber']],
+            ['id' => '6650a1f2c9e77a1b00000002', 'documentName' => 'Auftrag ' . $job['jobNumber'] . '.pdf', 'contentType' => 'application/pdf',
+                'timeStamp' => $ms(-6), 'creationDate' => $ms(-6), 'description' => '', 'owner' => 'demo', 'path' => self::DATEI_PFAD,
+                'ownerDocumentId' => $job['id'], 'metaDocType' => 'order', 'projectNumber' => $job['projectNumber']],
+            ['id' => '6650a1f2c9e77a1b00000003', 'documentName' => 'Prüfprotokoll Kabeltrommeln Nachlieferung.pdf', 'contentType' => 'application/pdf',
+                'timeStamp' => $ms(-1), 'creationDate' => $ms(-1), 'description' => '', 'owner' => 'demo', 'path' => '/job/documents/' . $job['projectNumber'],
+                'ownerDocumentId' => $job['id'], 'projectNumber' => $job['projectNumber']],
+        ];
+    }
+
+    /** Die Datei der Demo: ein einseitiges PDF mit erfundenen Werten – zweimal erzeugt, dieselben Bytes. */
+    private static function demoDatei(string $id): string
+    {
+        $datei = null;
+        foreach (self::demoDateien() as $f) {
+            $datei = $f['id'] === $id ? $f : $datei;
+        }
+        if ($datei === null) {
+            throw new EventworxFehler('Die Datei gibt es in Eventworx nicht (mehr).', 404, 'NOT_FOUND');
+        }
+        $pdf = new \App\Pdf\Schreiber(['Title' => 'DEMO – Prüfprotokoll', 'Author' => 'PowerManagement (Demo)', 'Subject' => 'Erfundene Werte']);
+        $pdf->seite();
+        $pdf->text(20, 30, 'DEMO – Prüfprotokoll, erfundene Werte', 16, true);
+        $pdf->text(20, 42, 'Wiederholungsprüfung ortsveränderlicher Betriebsmittel (DGUV Vorschrift 3, DIN EN 50699)', 10);
+        // Andere Geräte als die Prüfnachweise von Hand im Demo-Kundenbereich (DemoSeed).
+        $zeilen = match ($id) {
+            '6650a1f2c9e77a1b00000001' => [['Unterverteiler PD32-15', 'bestanden'], ['Verlängerung CEE 63 A, 25 m (V63-25-01)', 'bestanden'],
+                ['Verlängerung CEE 16 A, 10 m (V16-10-07)', 'bestanden']],
+            '6650a1f2c9e77a1b00000003' => [['Kabeltrommel CEE 32 A, 50 m (KT-31)', 'bestanden'], ['Kabeltrommel Schuko, 25 m (KT-44)', 'bestanden']],
+            default                    => [],
+        };
+        foreach ($zeilen as $i => [$geraet, $ergebnis]) {
+            $pdf->text(20, 58 + $i * 8, $geraet, 10);
+            $pdf->text(120, 58 + $i * 8, $ergebnis, 10);
+        }
+        $pdf->text(20, 100, 'Dieses Dokument ist ein Beispiel der Demo und belegt keine Prüfung.', 9, false, 0.4);
+        return $pdf->ausgabe('2026-01-01T00:00:00+00:00', md5('demo-' . $id));
+    }
+
     // ------------------------------------------------------------ Netz
 
     /**
@@ -484,32 +720,13 @@ final class Eventworx
      */
     private static function holen(string $pfad, array $parameter = [], int $zeit = self::ZEIT): array
     {
-        if (preg_match(self::PFADE, $pfad) !== 1) {
-            throw new \LogicException('Eventworx: Pfad nicht in der Liste.');
-        }
-        $muster = str_starts_with($pfad, 'job/') ? 'job/<id>' : $pfad;
+        $muster = self::pfadPruefen($pfad, self::PFADE);
         if (Config::isDemo()) {
             return self::demoAntwort($pfad, $parameter);
         }
-        $basis = self::basis();
-        $token = self::token();
-        if (!self::eingerichtet() || $basis === '' || $token === '') {
-            throw new EventworxFehler(self::NICHT_EINGERICHTET);
-        }
-        $url = $basis . '/backend/' . $pfad . ($parameter === [] ? '' : '?' . http_build_query($parameter, '', '&', PHP_QUERY_RFC3986));
-        // Das Token geht nur an den Host, für den es eingetragen wurde.
-        if (self::autoritaet($url) !== (string) Settings::get(self::EINSTELLUNG_TOKEN_HOST, '')) {
-            throw new EventworxFehler(self::NICHT_EINGERICHTET);
-        }
-
         for ($versuch = 1; ; $versuch++) {
-            self::takt();
-            $beginn = self::jetzt();
-            $antwort = Http::anfrage('GET', $url, [
-                'kopf' => ['S-API-TOKEN' => $token, 'Accept' => 'application/json', 'User-Agent' => 'PowerManagement'],
-                'zeit' => $zeit,
-            ]);
-            $protokoll = ['pfad' => $muster, 'status' => (int) ($antwort['status'] ?? 0), 'code' => '', 'ms' => (int) round((self::jetzt() - $beginn) * 1000)];
+            ['antwort' => $antwort, 'ms' => $ms] = self::anfrage($pfad, $parameter, ['zeit' => $zeit], self::PFADE);
+            $protokoll = ['pfad' => $muster, 'status' => (int) ($antwort['status'] ?? 0), 'code' => '', 'ms' => $ms];
             try {
                 $daten = self::einordnen($antwort, $muster);
             } catch (EventworxFehler $e) {
@@ -530,11 +747,134 @@ final class Eventworx
         }
     }
 
+    /**
+     * Eine Datei (`file/<ObjectId>`) als Bytes – nur ein PDF, höchstens
+     * MAX_DATEI (Http bricht darüber ab, statt alles zu laden), kein
+     * Neuversuch. Ins Log nur `file/<id>`, Status, Code, Dauer.
+     */
+    private static function holenDatei(string $pfad, array $parameter): string
+    {
+        $muster = self::pfadPruefen($pfad, self::PFADE);
+        if ($muster !== 'file/<id>') {
+            throw new \LogicException('Eventworx: nur Dateien als Bytes.');
+        }
+        if (Config::isDemo()) {
+            return self::demoDatei(substr($pfad, 5));
+        }
+        ['antwort' => $antwort, 'ms' => $ms] = self::anfrage($pfad, $parameter, ['zeit' => self::ZEIT_DATEI, 'accept' => '*/*', 'max' => self::MAX_DATEI], self::PFADE);
+        $protokoll = ['pfad' => $muster, 'status' => (int) ($antwort['status'] ?? 0), 'code' => '', 'ms' => $ms];
+        try {
+            $bytes = self::dateiEinordnen($antwort);
+        } catch (EventworxFehler $e) {
+            Logger::info('eventworx', array_replace($protokoll, ['code' => $e->fehlercode]));
+            throw $e;
+        }
+        Logger::info('eventworx', $protokoll);
+        return $bytes;
+    }
+
+    /**
+     * Der gemeinsame Teil jeder Anfrage: der Pfad gegen die Liste (noch
+     * einmal, vor jedem Netzzugriff), das Token nur an den Host, für den es
+     * eingetragen wurde, der Takt, nur GET. $liste ist nur PFADE oder
+     * EventworxProbe::PFADE.
+     *
+     * @param array{zeit?:int,accept?:string,max?:int} $optionen
+     * @return array{antwort:array{ok:bool,status:int,rumpf:string,fehler:string,nummer:int},ms:int}
+     */
+    private static function anfrage(string $pfad, array $parameter, array $optionen, string $liste): array
+    {
+        self::pfadPruefen($pfad, $liste);
+        $basis = self::basis();
+        $token = self::token();
+        if (!self::eingerichtet() || $basis === '' || $token === '') {
+            throw new EventworxFehler(self::NICHT_EINGERICHTET);
+        }
+        $url = $basis . '/backend/' . $pfad . ($parameter === [] ? '' : '?' . http_build_query($parameter, '', '&', PHP_QUERY_RFC3986));
+        // Das Token geht nur an den Host, für den es eingetragen wurde.
+        if (self::autoritaet($url) !== (string) Settings::get(self::EINSTELLUNG_TOKEN_HOST, '')) {
+            throw new EventworxFehler(self::NICHT_EINGERICHTET);
+        }
+        self::takt();
+        $beginn = self::jetzt();
+        $http = [
+            'kopf' => ['S-API-TOKEN' => $token, 'Accept' => $optionen['accept'] ?? 'application/json', 'User-Agent' => 'PowerManagement'],
+            'zeit' => (int) ($optionen['zeit'] ?? self::ZEIT),
+        ];
+        if (isset($optionen['max'])) {
+            $http['max'] = (int) $optionen['max'];
+        }
+        $antwort = Http::anfrage('GET', $url, $http);
+        return ['antwort' => $antwort, 'ms' => (int) round((self::jetzt() - $beginn) * 1000)];
+    }
+
+    /**
+     * Steht der Pfad in der Liste? Sonst \LogicException – bevor etwas ins
+     * Netz geht. Rückgabe: das Pfadmuster fürs Log (`job/<id>`, `file/<id>`,
+     * `stock/<id>` – nie die Kennung).
+     */
+    private static function pfadPruefen(string $pfad, string $liste): string
+    {
+        if (!in_array($liste, [self::PFADE, EventworxProbe::PFADE], true) || preg_match($liste, $pfad) !== 1) {
+            throw new \LogicException('Eventworx: Pfad nicht in der Liste.');
+        }
+        return (string) preg_replace('#^([a-z]+)/[A-Za-z0-9]{8,40}$#', '$1/<id>', $pfad);
+    }
+
+    /** Was dokumente() zu diesem Vorgang gelesen hat, vergessen (die Liste ist verworfen). */
+    private static function vergessenFuer(string $jobId): void
+    {
+        self::$gelesen = array_filter(self::$gelesen, static fn (array $g): bool => $g['job'] !== $jobId);
+    }
+
+    /** Die Antwort auf einen Download einordnen: zurück kommen nur die Bytes eines PDF. */
+    private static function dateiEinordnen(array $antwort): string
+    {
+        $status = (int) ($antwort['status'] ?? 0);
+        if ((int) ($antwort['nummer'] ?? 0) === Http::ZU_GROSS) {
+            throw new EventworxFehler('Die Datei ist größer als 10 MB – bitte von Hand hochladen.', $status, 'ZU_GROSS');
+        }
+        if (empty($antwort['ok'])) {
+            throw new EventworxFehler('Eventworx nicht erreichbar – bitte später noch einmal oder den Nachweis von Hand hochladen.', 0, 'NETZ');
+        }
+        if ($status >= 300 && $status < 400) {
+            throw new EventworxFehler('Eventworx leitet um – stimmt die Adresse?', $status, 'UMLEITUNG');
+        }
+        $rumpf = (string) ($antwort['rumpf'] ?? '');
+        if ($status === 200 && str_starts_with($rumpf, '%PDF-')) {
+            if (strlen($rumpf) > self::MAX_DATEI) {
+                throw new EventworxFehler('Die Datei ist größer als 10 MB – bitte von Hand hochladen.', $status, 'ZU_GROSS');
+            }
+            return $rumpf;
+        }
+        $daten = strlen($rumpf) <= 65536 ? json_decode($rumpf, true, 64) : null;
+        $code = is_array($daten) && is_string($daten['errorCode'] ?? null) && preg_match(self::FEHLERCODE, $daten['errorCode']) === 1 ? $daten['errorCode'] : '';
+        if ($status === 401 || $status === 403 || $code === 'ACCESS_DENIED') {
+            throw new EventworxFehler(self::DATEI_ABGELEHNT, $status, 'ACCESS_DENIED');
+        }
+        if ($status === 429) {
+            throw new EventworxFehler('Eventworx: zu viele Anfragen – bitte kurz warten.', $status, 'ZU_VIELE');
+        }
+        if ($status >= 500) {
+            throw new EventworxFehler('Eventworx meldet einen Serverfehler (HTTP ' . $status . ').', $status, $code !== '' ? $code : 'SERVER');
+        }
+        if ($status === 404 || $code === 'NOT_FOUND') {
+            throw new EventworxFehler('Die Datei gibt es in Eventworx nicht (mehr).', $status, 'NOT_FOUND');
+        }
+        if ($code !== '') {
+            throw new EventworxFehler('Eventworx: ' . $code, $status, $code);
+        }
+        // Eine HTML-Anmeldeseite, ein Bild, Text …
+        throw new EventworxFehler('Eventworx lieferte keine PDF-Datei.', $status, 'KEIN_PDF');
+    }
+
     /** Eine Antwort einordnen: zurück kommt nur, was nach Erfolg aussieht. */
     private static function einordnen(array $antwort, string $muster): array
     {
+        $dateien = $muster === 'file/list';
         if (empty($antwort['ok'])) {
-            throw new EventworxFehler('Eventworx nicht erreichbar – Kundendaten bitte als Freitext eintragen.', 0, 'NETZ');
+            throw new EventworxFehler($dateien ? 'Eventworx nicht erreichbar – bitte später noch einmal oder den Nachweis von Hand hochladen.'
+                : 'Eventworx nicht erreichbar – Kundendaten bitte als Freitext eintragen.', 0, 'NETZ');
         }
         $status = (int) ($antwort['status'] ?? 0);
         if ($status >= 300 && $status < 400) {
@@ -545,7 +885,7 @@ final class Eventworx
         $code = $json && is_string($daten['errorCode'] ?? null) && preg_match(self::FEHLERCODE, $daten['errorCode']) === 1 ? $daten['errorCode'] : '';
 
         if ($status === 401 || $status === 403 || $code === 'ACCESS_DENIED') {
-            throw new EventworxFehler('Eventworx lehnt den Zugriff ab – API-Token oder REST-Modul prüfen.', $status, 'ACCESS_DENIED');
+            throw new EventworxFehler($dateien ? self::DATEI_ABGELEHNT : 'Eventworx lehnt den Zugriff ab – API-Token oder REST-Modul prüfen.', $status, 'ACCESS_DENIED');
         }
         if ($status === 429) {
             throw new EventworxFehler('Eventworx: zu viele Anfragen – bitte kurz warten.', $status, 'ZU_VIELE');
@@ -567,7 +907,7 @@ final class Eventworx
         }
         $inhalt = $daten['data'] ?? null;
         $passt = match ($muster) {
-            'job'      => is_array($inhalt) && array_is_list($inhalt),
+            'job', 'file/list' => is_array($inhalt) && array_is_list($inhalt),
             'job/<id>' => $inhalt === null || (is_array($inhalt) && $inhalt !== [] && !array_is_list($inhalt)),
             default    => true,
         };
@@ -622,6 +962,12 @@ final class Eventworx
     {
         if ($pfad === 'check/ping') {
             return ['success' => true, 'message' => 'Service is running.'];
+        }
+        if ($pfad === 'file/list') {
+            $filter = json_decode((string) ($parameter['filter'] ?? ''), true);
+            $owner = is_array($filter) ? ($filter[0]['value']['ownerDocumentId'] ?? null) : null;
+            $dateien = array_values(array_filter(self::demoDateien(), static fn (array $f): bool => $f['ownerDocumentId'] === $owner));
+            return ['success' => true, 'total' => count($dateien), 'data' => $dateien];
         }
         if ($pfad === 'job') {
             $suche = mb_strtolower((string) ($parameter['query'] ?? ''));
@@ -687,7 +1033,8 @@ final class Eventworx
         return strtolower($teile['host']) . (isset($teile['port']) ? ':' . $teile['port'] : '');
     }
 
-    private static function jetzt(): float
+    /** @internal Die Uhr (Sekunden als float) – auch für das Zeitbudget der Lese-Probe. */
+    public static function jetzt(): float
     {
         return self::$uhr !== null ? (float) (self::$uhr)() : microtime(true);
     }

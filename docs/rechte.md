@@ -18,9 +18,9 @@ und Stromplanung haben es.
 | Rolle | gedacht für | Rechte (Auszug) |
 |-------|-------------|-----------------|
 | **Administration** | Betreiber | alles (`*`), auch die Schnittstelle zu anderen Instanzen |
-| **Stromplanung** | Planer im Büro | Anlagen, Stecker, Karte, Grundrisse, Kabel, Statistik und Export, Datenquellen ansehen, Inventar pflegen, Locations holen, Übergabeberichte anlegen und ausfüllen (mit Eventworx). Sieht alle Standorte, **schaltet nicht**, **unterschreibt nicht als Prüfer**. |
-| **Elektrotechnik vor Ort** | Elektriker auf dem Gelände | Anlagen und Kabel dokumentieren, Statistik, Datenquellen ansehen, **schalten** und Schaltprotokoll, Übergabeberichte ausfüllen und **als Prüfer unterschreiben** – nur auf freigegebenen Standorten |
-| **Kunde / Veranstalter** | Auftraggeber | Übersicht, Anlagen, Karte, Statistik und CSV-Export – nur Freigegebenes im freigegebenen Zeitraum. Keine Übergabeberichte (siehe unten). |
+| **Stromplanung** | Planer im Büro | Anlagen, Stecker, Karte, Grundrisse, Kabel, Statistik und Export, Datenquellen ansehen, Inventar pflegen, Locations holen, Übergabeberichte anlegen und ausfüllen (mit Eventworx), Kunden und ihren Kundenbereich pflegen, Prüfnachweise hinterlegen. Sieht alle Standorte, **schaltet nicht**, **unterschreibt nicht als Prüfer**. |
+| **Elektrotechnik vor Ort** | Elektriker auf dem Gelände | Anlagen und Kabel dokumentieren, Statistik, Datenquellen ansehen, **schalten** und Schaltprotokoll, Übergabeberichte ausfüllen und **als Prüfer unterschreiben** – nur auf freigegebenen Standorten. Kunden ansehen und Prüfnachweise hinterlegen. |
+| **Kunde / Veranstalter** | Auftraggeber | Übersicht, Anlagen, Karte, Statistik und CSV-Export – nur Freigegebenes im freigegebenen Zeitraum. Keine Übergabeberichte (siehe unten). Der neuere Weg für Kunden ist der [Kundenbereich](#kunden--kundenbereich) – ohne Rolle. |
 
 Rollen und ihre Rechte lassen sich unter **System → Rollen & Rechte** anpassen oder
 neu anlegen. Die Rolle *Administration* behält immer alle Rechte.
@@ -48,6 +48,11 @@ Das Rechte-Verzeichnis steht in `src/Auth/Permissions.php`.
 | **Rollenzuweisung** *ab/bis* | Die Rolle – und damit ihre Rechte und die Freigaben der Rolle – gilt nur in diesem Zeitraum. |
 | **Freigabe** *gültig ab/bis* | Die Freigabe wirkt nur in diesem Zeitraum. |
 | **Freigabe** *Daten ab/bis* | Welche **Messdaten** sichtbar sind. Unabhängig davon, wann man hinschaut. |
+
+Für **Kundenzugänge** (Kundenbereich) sind es ebenfalls drei Stellen: der
+Zugang (*aktiv*, *gültig bis*), der **Kunde** (*aktiv*, „Zugänge enden
+am“ – gilt für alle seine Zugänge) und die **Freigabe am Kunden** (*gültig
+ab/bis* und *Daten ab/bis*, beide Pflicht). Rollen haben Kundenzugänge nicht.
 
 Die Zeitpunkte gelten in der Zeitzone der Installation (Vorgabe
 Europe/Berlin). Gespeichert wird UTC.
@@ -266,8 +271,8 @@ Freigabe sieht, ändern, wer „Anlagen ändern“ und eine Freigabe mit
   des Datenfensters sieht niemand. Verlauf und Tage brauchen „Statistik
   ansehen“, die CSV „Statistik exportieren“ (im Audit).
 - **Peilen, betanken, kalibrieren, löschen, Tanksensor ein- und ausbauen**:
-  „Anlagen ändern“ und *bearbeiten* am Tank. Wer das nicht hat (etwa ein
-  Kunde), sieht die Knöpfe nicht. Ein eigenes Recht „nur betanken“ gibt es
+  „Anlagen ändern“ und *bearbeiten* am Tank. Wer das nicht hat (etwa die
+  Rolle *Kunde / Veranstalter*), sieht die Knöpfe nicht. Ein eigenes Recht „nur betanken“ gibt es
   nicht.
 - **Eintragen nur im eigenen Datenfenster**: Peilen, betanken, kalibrieren,
   löschen und einen Tanksensor einbauen geht nur, solange das Datenfenster
@@ -294,6 +299,11 @@ Freigabe sieht, ändern, wer „Anlagen ändern“ und eine Freigabe mit
 - **Kommandozeile**: `bin/power tank:liste` braucht `--als=<benutzer>` und
   zeigt genau, was dieses Konto sähe; ein gesperrtes oder abgelaufenes Konto
   wird abgelehnt. `tank:rechnen` zeigt nur die Kennlinie, keine Messwerte.
+- **Kundenzugänge** (Kundenbereich) sehen keinen Tank – auch keinen festen
+  auf ihrer Location, keinen Schlauch, keinen Sensor und keinen Wert daraus.
+  Für sie deckt keine Freigabe am Kunden einen Tank (`Zugriff`), dazu Tor
+  und fehlende Rechte; Begründung in
+  [kundenbereich.md](kundenbereich.md#tanks).
 
 ## Übergabeberichte
 
@@ -315,21 +325,76 @@ und ändert Berichte überall – Freigaben braucht er dafür nicht.
 
 **Kunden zeigen.** Die Rolle *Kunde / Veranstalter* hat das Recht nicht:
 Auf einem Gelände arbeiten viele Veranstalter, und Berichte enthalten
-Kundendaten. Wer seine Berichte sehen soll, bekommt „Übergabeberichte
-ansehen“ einzeln (eigene Rolle) und eine Freigabe für den Standort **mit
+Kundendaten. Der Weg für Kunden ist der **Kundenbereich**
+([kundenbereich.md](kundenbereich.md)): Dort sieht ein Kunde nur Berichte,
+die ihm **ausdrücklich zugeordnet** sind – nie über Standort und
+Prüfdatum. Der ältere Weg geht weiterhin: „Übergabeberichte ansehen“
+einzeln (eigene Rolle) und eine Freigabe für den Standort **mit
 Datenzeitraum** – etwa genau die Festivalwoche. Dann sieht er nur Berichte,
 deren Prüfdatum darin liegt. Eine Freigabe ohne Datenzeitraum zeigt alle
-abgeschlossenen Berichte des Standorts, auch die anderer Veranstalter.
+abgeschlossenen Berichte des Standorts, auch die anderer Veranstalter – und
+auch mit Datenzeitraum die eines anderen Veranstalters, der im selben
+Zeitraum geprüft hat.
 
 Die Qualifikation („Elektrofachkraft für Veranstaltungstechnik“) trägt die
 Benutzerverwaltung ein; im Profil ist sie nur zu lesen. Ändert jemand sie,
 steht das im Audit-Log. Rechte vergibt auch hier nur, wer sie selbst hat.
 
+## Kunden & Kundenbereich
+
+Kunden mit eigenem Zugang ([kundenbereich.md](kundenbereich.md)) sind
+**keine Benutzer mit einer Rolle**. Ein Kundenzugang ist ein Konto, das zu
+einem Kunden gehört (`users.kunde_id`). Er hat **keine Rechte** – auch
+nicht, wenn ihm jemand per SQL eine Rolle gibt – und erreicht nur
+`/kundenbereich`: Ein Tor im Router schickt ihn von jeder anderen Adresse
+dorthin zurück (JSON-Anfragen bekommen 403), noch bevor eine Route oder ein
+Recht geprüft wird. Kundenzugänge stehen nicht in *Benutzer & Freigaben*,
+bekommen dort keine Freigaben und lassen sich dort nicht ändern; sie werden
+in der Kundenverwaltung gepflegt. An Tokens der Schnittstelle lassen sie
+sich nicht binden. Tanks sehen sie nie ([Tanks](#tanks)).
+
+Drei Rechte für das Personal:
+
+| Recht | erlaubt | ab Werk |
+|---|---|---|
+| „Kunden mit ihren Protokollen, Prüfnachweisen und Eventworx-Vorgängen ansehen“ (`kunden.view`) | Kundenliste, Kunde mit Übersicht („Der Kunde sieht derzeit …“), Stammdaten, Vorgänge, Protokolle, Prüfnachweise; die Karte „Kundenbereich“ am Übergabebericht | Stromplanung, Elektrotechnik |
+| „Kunden und Kundenzugänge pflegen …“ (`kunden.manage`) | Kunden anlegen, ändern, beenden, löschen; Zugänge, Einrichtungslinks, vorläufige Kennwörter und Freigaben am Kunden (beides nur mit „Alle Standorte …“, siehe unten); Abrufe sehen; Übergabeberichte zuordnen; Eventworx-Vorgänge verknüpfen und lösen | Stromplanung |
+| „Prüfnachweise (DGUV V3) …“ (`kunden.nachweise`) | Prüfnachweise hochladen, aus Eventworx übernehmen, freigeben, zurückziehen, löschen | Stromplanung, Elektrotechnik |
+
+Dazu gilt jeweils:
+
+- **Freigaben am Kunden** (Subjekt `kunde`) vergibt und entfernt nur, wer
+  „Kunden pflegen“ hat **und** selbst alle Standorte sieht („Alle
+  Standorte, Anlagen und Messdaten“). Sie gelten nur für Standorte, immer
+  nur zum **Sehen** – „bearbeiten“, „schalten“, „alles“, eine einzelne Anlage
+  oder ein Gerät gibt es für Kunden nicht, auch nicht per SQL. *gültig bis*
+  und beide Datenenden sind Pflicht; fehlt ein Datenende doch, ist der
+  Datenzeitraum leer, nie „ohne Grenze“.
+- **Zugänge, Einrichtungslinks und vorläufige Kennwörter** gibt nur aus,
+  wer selbst alles sieht, was der Kunde sieht: „Kunden pflegen“ **und**
+  „Alle Standorte, Anlagen und Messdaten“, „Kunden ansehen“ und jedes
+  Protokoll des Kunden. Ein Zugang erbt alles, was dem Kunden freigegeben
+  und zugeordnet ist – mit weniger Rechten legte sich sonst jemand ein
+  Kundenkonto an (oder übernähme eines) und läse dort, was er selbst nicht
+  sieht. Dasselbe gilt, wenn ein Kunde oder Zugang wieder aktiv wird oder
+  sein Ende später rückt.
+- **Freigaben an der Rolle `kunde` oder am Konto** gelten für
+  Kundenzugänge **nicht** – eine Freigabe an der Rolle gälte sonst für alle
+  Kunden.
+- Einen **Bericht zuordnen** darf, wer ihn selbst sieht und „Kunden pflegen“
+  hat. **Vorgänge verknüpfen** braucht zusätzlich „Kundendaten aus
+  Eventworx …“, denn die Suche zeigt alle Vorgänge des Mandanten.
+- Ein **Inventarstück** am Prüfnachweis wählt nur, wer „Datenquellen
+  ansehen“ hat.
+- Rechte vergibt auch hier nur, wer sie selbst hat.
+
 ## Demo-Zugänge
 
-Im Demo-Modus legt `bin/power demo:seed` zwei Beispielkonten an:
+Im Demo-Modus legt `bin/power demo:seed` diese Beispielkonten an:
 
 | Benutzer | Kennwort | zeigt |
 |----------|----------|-------|
 | `veranstalter` | `Veranstalter2026!` | Rolle Kunde. Freigabe nur für das Festivalgelände und nur für die Festivalwoche. Konto läuft nach 10 Tagen ab. |
 | `technik` | `Technik2026!!` | Rolle Elektrotechnik. Bearbeiten auf dem Festivalgelände (auch peilen und betanken), schalten nur beim Shelly der Geländebeleuchtung. Mit Prüfer-Qualifikation: unterschreibt Übergabeberichte. |
+| `muster-events` | `Kundenbereich2026!` | Kundenzugang von „Muster Events GmbH & Co. KG“: im Kundenbereich das Festivalgelände während des Sommerfestivals, ein Protokoll, Prüfnachweise. |
+| `stadtmarketing` | `Stadtmarketing2026!` | Kundenzugang von „Stadtmarketing Musterstadt e. V.“: dasselbe Gelände erst in einem Monat, nichts von Muster Events. |

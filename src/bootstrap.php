@@ -4,6 +4,7 @@ declare(strict_types=1);
 use App\Support\Config;
 use App\Support\Database;
 use App\Support\Logger;
+use App\Support\Response;
 use App\Support\Settings;
 use App\Support\View;
 
@@ -65,7 +66,23 @@ $schnittstelleAntwortet = static function (): bool {
     return true;
 };
 
-set_exception_handler(static function (\Throwable $e) use ($schnittstelleAntwortet): void {
+/*
+ * Die Seite zu einem unerwarteten Fehler – über dieselbe Weiche wie 403/404:
+ * ein Kundenzugang sieht sie im Layout des Kundenbereichs, nie im Personal-
+ * Layout (Response::fehlerSeite fällt bei einem Fehler darin auf die
+ * schlichte Seite zurück).
+ */
+$fehlerSeite = static function (): void {
+    [$seite, $kunde] = Response::fehlerSeite(500, 'Unerwarteter Fehler. Details stehen im Log.');
+    if ($kunde && !headers_sent()) {
+        foreach (Response::KUNDENBEREICH as $kopf) {
+            header($kopf);
+        }
+    }
+    echo $seite;
+};
+
+set_exception_handler(static function (\Throwable $e) use ($schnittstelleAntwortet, $fehlerSeite): void {
     Logger::error($e->getMessage(), ['file' => $e->getFile(), 'line' => $e->getLine()]);
     if (php_sapi_name() === 'cli') {
         fwrite(STDERR, 'Fehler: ' . $e->getMessage() . PHP_EOL);
@@ -79,12 +96,12 @@ set_exception_handler(static function (\Throwable $e) use ($schnittstelleAntwort
         echo '<pre>' . htmlspecialchars((string) $e, ENT_QUOTES) . '</pre>';
         return;
     }
-    echo View::render('errors/error', ['code' => 500, 'message' => 'Unerwarteter Fehler. Details stehen im Log.'], '');
+    $fehlerSeite();
 });
 
 // Fatale Fehler (Zeitlimit, Speichergrenze) erreichen den Handler oben
 // nicht und enden sonst als weiße Seite ohne Eintrag im Log.
-register_shutdown_function(static function () use ($schnittstelleAntwortet): void {
+register_shutdown_function(static function () use ($schnittstelleAntwortet, $fehlerSeite): void {
     $error = error_get_last();
     if ($error === null || !in_array($error['type'], [E_ERROR, E_PARSE, E_CORE_ERROR, E_COMPILE_ERROR], true)) {
         return;
@@ -98,10 +115,10 @@ register_shutdown_function(static function () use ($schnittstelleAntwortet): voi
         if ($schnittstelleAntwortet()) {
             return;
         }
-        echo View::render('errors/error', ['code' => 500, 'message' => 'Unerwarteter Fehler. Details stehen im Log.'], '');
+        $fehlerSeite();
     }
 });
-unset($schnittstelleAntwortet);
+unset($schnittstelleAntwortet, $fehlerSeite);
 
 // Datenbankverbindung früh herstellen, damit Konfigurationsfehler sofort auffallen.
 Database::pdo();

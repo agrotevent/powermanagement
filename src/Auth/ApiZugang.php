@@ -16,7 +16,8 @@ use App\Support\Zeit;
  * Was ein Token sieht, bestimmen **nur** seine Befugnisse und seine
  * Standorte (api_token_standorte) – nie die Freigaben eines Benutzers in
  * Zugriff. Ist es an einen Benutzer gebunden, schaltet das es nur ab, sobald
- * dieser inaktiv, gelöscht oder außerhalb seines Gültigkeitszeitraums ist.
+ * dieser inaktiv, gelöscht oder außerhalb seines Gültigkeitszeitraums ist
+ * (bei einem Kundenzugang auch: sein Kunde beendet).
  * Die Schnittstelle meldet niemanden an.
  *
  * Gespeichert wird das Token als sha256 (darüber wird angemeldet) und mit
@@ -120,12 +121,14 @@ final class ApiZugang
 
     /**
      * Gilt der Benutzer, an den ein Token gebunden ist, gerade? Gelöscht,
-     * inaktiv oder außerhalb seines Zeitraums: nein.
+     * inaktiv, außerhalb seines Zeitraums oder ein Kundenzugang, dessen
+     * Kunde beendet ist: nein – dieselbe Prüfung wie bei jeder Anfrage
+     * (Auth::zugangSperre). An Kundenzugänge bindet ApiZugaenge gar nicht.
      */
     public static function benutzerGueltig(int $userId): bool
     {
         $u = Database::first('SELECT * FROM users WHERE id = ?', [$userId]);
-        return $u !== null && (int) $u['is_active'] === 1 && Auth::kontoZeitraum($u) === null;
+        return $u !== null && (int) $u['is_active'] === 1 && Auth::zugangSperre($u) === null;
     }
 
     /**

@@ -5,8 +5,10 @@ namespace App\Services;
 
 use App\Auth\Auth;
 use App\Berichte\BerichtService;
+use App\Kunden\KundenService;
 use App\Support\Audit;
 use App\Support\Database;
+use App\Support\Response;
 
 /**
  * Standorte und Etagen inklusive der hochgeladenen Grundrisse.
@@ -90,6 +92,8 @@ final class SiteService
         Database::execute("DELETE FROM api_zuordnungen WHERE tabelle = 'objekte' AND ziel_id IN (SELECT id FROM objekte WHERE site_id = ?)", [$id]);
         // Übergabeberichte bleiben (mit dem Namen des Standorts), nur Entwürfe ohne Nummer gehen mit.
         BerichtService::standortEntfernt($id);
+        // Freigaben von Kunden gehen mit; ihre Vorgänge und Prüfnachweise bleiben, nur ohne Standort.
+        KundenService::standortEntfernt($id);
         Database::execute('UPDATE objekte SET site_id = NULL, floor_id = NULL, plan_x = NULL, plan_y = NULL WHERE site_id = ?', [$id]);
         foreach (Database::select('SELECT id FROM floors WHERE site_id = ?', [$id]) as $etage) {
             Database::execute('DELETE FROM leitungen WHERE floor_id = ?', [(int) $etage['id']]);
@@ -404,6 +408,48 @@ final class SiteService
     {
         clearstatcache(true, $pfad);
         return substr(basename($planFile) . '|' . (int) @filesize($pfad) . '|' . (int) @filemtime($pfad), 0, 255);
+    }
+
+    /**
+     * Die Plandatei einer Etage senden – nach der Prüfung, ob der Anfragende
+     * sie sehen darf (das ist Sache des Aufrufers). false: kein Plan da,
+     * nichts gesendet; die passende 404 schickt der Aufrufer.
+     *
+     * Ein Grundriss ist ein Bild und sonst nichts – ein SVG mit Skript soll
+     * beim direkten Aufruf nichts ausführen dürfen (sandbox). Für das
+     * Personal unverändert wie bisher (KarteController::planDatei). Für
+     * Kunden ($fuerKunden):
+     *  - nie zwischengespeichert (ein Firmenrechner wird geteilt),
+     *  - ein PDF als Anhang – die sandbox-Richtlinie sperrt Chromes
+     *    PDF-Ansicht, inline bliebe die Seite leer,
+     *  - ein neutraler Dateiname nur aus [A-Za-z0-9._-] statt des Namens,
+     *    unter dem der Plan einmal hochgeladen wurde.
+     */
+    public static function planAusliefern(array $etage, bool $fuerKunden = false): bool
+    {
+        $pfad = self::planPath($etage);
+        if ($pfad === null) {
+            return false;
+        }
+        $mime = self::planMime($etage);
+        header('Content-Type: ' . $mime);
+        header('Content-Length: ' . (string) filesize($pfad));
+        if ($fuerKunden) {
+            $endung = self::ALLOWED[$mime] ?? 'bin';
+            $name = strtr('plan-' . (string) $etage['name'], ['ä' => 'ae', 'ö' => 'oe', 'ü' => 'ue', 'Ä' => 'Ae', 'Ö' => 'Oe', 'Ü' => 'Ue', 'ß' => 'ss']);
+            header('Content-Disposition: ' . ($mime === 'application/pdf' ? 'attachment' : 'inline') . '; filename="'
+                . Response::sichererDateiname($name . '.' . $endung, 'plan.' . $endung) . '"');
+            header('X-Content-Type-Options: nosniff');
+            header('Cache-Control: private, no-store');
+        } else {
+            header('Content-Disposition: inline; filename="' . basename((string) $etage['plan_original_name'] ?: 'grundriss') . '"');
+            header('X-Content-Type-Options: nosniff');
+            header('Cache-Control: private, max-age=600');
+        }
+        header("Content-Security-Policy: default-src 'none'; style-src 'unsafe-inline'; sandbox");
+        header('Referrer-Policy: no-referrer');
+        readfile($pfad);
+        return true;
     }
 
     public static function planMime(array $floor): string

@@ -900,6 +900,38 @@ final class PlanTileService
         return $bild;
     }
 
+    /** Bis zu dieser Größe taugt ein ungekachelter Plan als Vorschau am Stück. */
+    public const VORSCHAU_BYTES = 2097152;
+
+    /**
+     * Ein kleines Bild des ganzen Plans für eine Vorschau (Kundenbereich):
+     * die Kachel der Stufe 0 (256 Pixel), wenn der Plan gekachelt ist; sonst
+     * der Plan selbst – nur ein Bild (kein PDF) und nur bis VORSCHAU_BYTES.
+     * Ein großer Rasterplan ohne Kacheln hat keine Vorschau: am Telefon jedes
+     * Mal 40 MB für ein Vorschaubild wären zu viel.
+     *
+     * @return array{pfad:string,mime:string,kachel:bool}|null
+     */
+    public static function vorschau(array $floor): ?array
+    {
+        $pfad = SiteService::planPath($floor);
+        if ($pfad === null) {
+            return null;
+        }
+        $meta = self::meta($floor);
+        if ($meta !== null && (string) ($meta['quelle'] ?? '') === basename($pfad)) {
+            $kachel = self::kachel($floor, 0, 0, 0);
+            if ($kachel !== null) {
+                return $kachel + ['kachel' => true];
+            }
+        }
+        $mime = SiteService::planMime($floor);
+        if (!in_array($mime, ['image/png', 'image/jpeg', 'image/svg+xml'], true) || (int) filesize($pfad) > self::VORSCHAU_BYTES) {
+            return null;
+        }
+        return ['pfad' => $pfad, 'mime' => $mime, 'kachel' => false];
+    }
+
     /** Eine einzelne Kachel ausliefern – oder null, wenn sie nicht existiert. */
     public static function kachel(array $floor, int $z, int $x, int $y): ?array
     {
