@@ -550,7 +550,7 @@ pruefe_installation() {
         pruefe "Update-Zeitplan läuft ohne Fehler durch" systemctl start powermanagement-update-zeitplan.service
         pruefe "Update-Zeitplan meldet sich (storage/update/zeitplan)" test -e "$ZIEL/storage/update/zeitplan"
         pruefe "bin/power update:stand: eingerichtet" bash -c \
-            'cd "$1" && runuser -u www-data -- php bin/power update:stand | grep -q "^Update-Funktion: eingerichtet"' _ "$ZIEL"
+            'cd "$1" && runuser -u www-data -- php bin/power update:stand | grep "^Update-Funktion: eingerichtet" > /dev/null' _ "$ZIEL"
         # bin/power als root: bricht vor dem require ab (Befund 10) – mit Hinweis,
         # und in storage/ entsteht nichts, das root gehört.
         pruefe "bin/power als root abgelehnt (runuser-Hinweis)" bash -c \
@@ -738,8 +738,11 @@ if [[ -n "$UMSTIEG" ]]; then
     # Der Befehl aus docs/installation-debian-lxc.md (Umstieg), Schritt 3 – wörtlich.
     systemd-run --unit=pm-umstieg --collect --setenv=HOME=/root \
       /bin/bash -c '/opt/powermanagement/deploy/update-debian.sh && /opt/powermanagement/deploy/update-debian.sh'
+    # systemd-run legt einen einfachen Dienst an: solange er läuft, ist er
+    # „active“ (nicht „activating“ wie die oneshot-Dienste oben). Mit --collect
+    # ist er danach weg – „inactive“, auch wenn er gescheitert ist.
     for _ in $(seq 1 900); do
-        [[ "$(systemctl is-active pm-umstieg 2>/dev/null || true)" == "activating" ]] || break
+        [[ "$(systemctl is-active pm-umstieg 2>/dev/null || true)" =~ ^(active|activating|deactivating|reloading)$ ]] || break
         sleep 1
     done
     journalctl --sync 2>/dev/null || true
@@ -1279,7 +1282,7 @@ systemctl stop powermanagement-update-zeitplan.timer
 BEGINN="$(app_php 'echo (new DateTimeImmutable("now", \App\Support\Zeit::zone()))->format("H:i");')"
 pruefe "update:automatik einspielen ab $BEGINN" \
     power_app update:automatik einspielen --tage=1,2,3,4,5,6,7 "--beginn=$BEGINN" --dauer=60 --karenz=0 --versatz=0
-pruefe "update:stand: Automatik automatisch einspielen" bash -c 'cd "$1" && runuser -u www-data -- php bin/power update:stand | grep -q "^Automatik:       automatisch einspielen"' _ "$ZIEL"
+pruefe "update:stand: Automatik automatisch einspielen" bash -c 'cd "$1" && runuser -u www-data -- php bin/power update:stand | grep "^Automatik:       automatisch einspielen" > /dev/null' _ "$ZIEL"
 NEU="$(neuer_stand "Stand für die Automatik" "printf '\n' >> README.md")"
 abstand_abwarten konsole
 pruefe "update:suchen --warten" power_app update:suchen --warten

@@ -1469,7 +1469,7 @@ Wochentagen, Uhrzeit und Karenzzeit, nie während eines Aufbaus).
 Wenn etwas nicht klappt:
 
 - *Verbindung abgerissen:* wieder anmelden. Läuft es noch?
-  `systemctl is-active pm-umstieg` (`activating` = läuft). Protokoll:
+  `systemctl is-active pm-umstieg` (`active` = läuft). Protokoll:
   `journalctl -a -u pm-umstieg -n 200 --no-pager`. Die Einheit **nicht**
   stoppen – das alte Skript rollt bei einem Abbruch nicht zurück.
 - *„In /opt/powermanagement gibt es lokale Änderungen“* (Lauf 1 bricht ab,
