@@ -60,12 +60,13 @@ jobs:
 
   # Das Installationsskript einmal wirklich laufen lassen: frisches Debian 13
   # mit systemd (Docker, wie ein Proxmox-LXC), dann ein zweiter Lauf und
-  # Updates – auch solche, die zurückrollen, abgebrochen werden oder abstürzen.
-  # Holt Pakete aus Debian, InfluxData und npm.
+  # Updates – auch solche, die zurückrollen, abgebrochen werden oder abstürzen,
+  # und automatische im Zeitfenster. Holt Pakete aus Debian, InfluxData und npm.
+  # Rund 15 Updates, dazwischen die Abstände, die der Update-Dienst verlangt (120 s).
   installation:
     name: Installation (Debian 13)
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    timeout-minutes: 75
     steps:
       - uses: actions/checkout@v4
 

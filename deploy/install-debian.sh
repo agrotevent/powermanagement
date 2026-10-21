@@ -275,14 +275,15 @@ if [[ -e /var/lib/powermanagement/update/offen ]]; then
     exit 1
 fi
 
-# Sammler, Wartung, Node-RED und der MQTT-Helfer laufen gehärtet (PrivateTmp,
-# ProtectSystem) und brauchen dafür eigene Mount-Namensräume. Ein LXC ohne
-# „nesting“ kann sie nicht einrichten – die Dienste scheitern dann mit
-# 226/NAMESPACE, ohne dass ein Schritt hier fehlschlägt (Befund 11). Nur ein
-# Hinweis, kein Abbruch: der Rest der Installation gelingt trotzdem, und ein
-# zweiter Lauf soll nicht an einer Probe scheitern, die nichts kaputt macht.
+# Sammler, Wartung, Node-RED, der MQTT-Helfer und der Update-Zeitplan laufen
+# gehärtet (PrivateTmp, ProtectSystem) und brauchen dafür eigene
+# Mount-Namensräume. Ein LXC ohne „nesting“ kann sie nicht einrichten – die
+# Dienste scheitern dann mit 226/NAMESPACE, ohne dass ein Schritt hier
+# fehlschlägt (Befund 11). Nur ein Hinweis, kein Abbruch: der Rest der
+# Installation gelingt trotzdem, und ein zweiter Lauf soll nicht an einer
+# Probe scheitern, die nichts kaputt macht.
 NAMENSRAEUME="ja"
-NAMENSRAEUME_TEXT="Der Container kann keine Namensräume einrichten (Proxmox: pct set <CTID> --features nesting=1, Container neu starten) – Sammler, Wartung, Node-RED und MQTT-Helfer brauchen sie."
+NAMENSRAEUME_TEXT="Der Container kann keine Namensräume einrichten (Proxmox: pct set <CTID> --features nesting=1, Container neu starten) – Sammler, Wartung, Node-RED, MQTT-Helfer und Update-Zeitplan brauchen sie."
 if ! timeout 60 systemd-run --quiet --wait --collect -p PrivateTmp=yes -p ProtectSystem=strict /bin/true >/dev/null 2>&1; then
     NAMENSRAEUME="nein"
     hinweis "$NAMENSRAEUME_TEXT"
@@ -1305,7 +1306,8 @@ einstellung mqtt.port "$MQTT_PORT"
 # ================================================================ Dienste
 schritt "Sammler, Wartung und Protokolle einrichten"
 DIENSTE=(powermanagement-sammler.service powermanagement-wartung.service powermanagement-wartung.timer
-    powermanagement-update.service powermanagement-update.path powermanagement-update.timer)
+    powermanagement-update.service powermanagement-update.path powermanagement-update.timer
+    powermanagement-update-zeitplan.service powermanagement-update-zeitplan.timer)
 # Eigene MQTT-Zugänge: der Helfer läuft bei jeder Änderung des Solls (.path)
 # und alle zwei Minuten (.timer) – nur mit dem Broker hier im Container.
 [[ "$MIT_MOSQUITTO" == "ja" ]] && DIENSTE+=(powermanagement-mqtt-zugaenge.service
@@ -1346,8 +1348,9 @@ chmod 644 "$INSTALLATION_CONF"
 # nicht, aber update-debian.sh, das er startet. Die Pfad-Einheit nimmt
 # Aufträge der Oberfläche an, der Zeitgeber weckt den Dienst regelmäßig
 # (Lebenszeichen, Stand, Wiederanlauf). Einmal gleich starten – erstes
-# Lebenszeichen für die Oberfläche.
-systemctl enable --quiet --now powermanagement-update.path powermanagement-update.timer
+# Lebenszeichen für die Oberfläche. Der Zeitplan (automatische Updates, als
+# Anwendungsbenutzer) läuft alle fünf Minuten von selbst.
+systemctl enable --quiet --now powermanagement-update.path powermanagement-update.timer powermanagement-update-zeitplan.timer
 systemctl start --no-block powermanagement-update.service || true
 
 # ================================================================ Prüfen

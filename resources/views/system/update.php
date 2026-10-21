@@ -1,4 +1,5 @@
 <?php
+use App\Services\UpdateAutomatik;
 use App\Services\UpdateService;
 use App\Support\Csrf;
 use App\Support\View;
@@ -151,6 +152,10 @@ $stufe = $aktiv ? '' : ($lauf !== null ? UpdateService::ergebnisStufe($lauf['erg
         <pre class="update-befehl mono">systemctl status powermanagement-update.path powermanagement-update.timer</pre></div>
 <?php elseif ($zustand['abgeschaltet']): ?>
     <div class="notice">Updates aus der Oberfläche sind auf diesem System abgeschaltet (<span class="mono">/etc/powermanagement/update.conf</span>) – nur über die Konsole.</div>
+<?php elseif ($automatik['lange_verschoben']): ?>
+    <div class="notice warn">Automatische Updates werden seit <?= View::e(UpdateService::dauerText(time() - (int) $automatik['verschoben_seit'])) ?> verschoben<?php
+        if (($automatik['letzter']['ergebnis'] ?? '') === 'verschoben'): ?>: <?= View::e(UpdateAutomatik::grundText($automatik['letzter']['grund'], $automatik['letzter']['text'])) ?><?php
+        else: ?>.<?php endif; ?> Läuft etwa ein Aufbau, der längst beendet ist? Einstellungen unten unter „Automatische Updates“.</div>
 <?php endif; ?>
 
 <?php if ($fortschrittOben): ?><?= $fortschrittKarte ?><?php endif; ?>
@@ -264,6 +269,101 @@ $stufe = $aktiv ? '' : ($lauf !== null ? UpdateService::ergebnisStufe($lauf['erg
 </div>
 
 <?php if (!$fortschrittOben): ?><?= $fortschrittKarte ?><?php endif; ?>
+
+<?php // ------------------------------------------------------------ Automatische Updates ?>
+<?php
+$ae = $automatik['einstellungen'];
+$gesperrt = $z === 'demo';
+$jetztTs = time();
+$pauseWert = $automatik['pausiert'] ? Zeit::anzeige(Zeit::iso((int) $ae['pause_bis']), 'Y-m-d') : '';
+$heute = (new DateTimeImmutable('now', Zeit::zone()));
+// Steht AUTOMATIK=nein in update.conf, ist „einspielen“ gesperrt – außer es ist schon gewählt (sonst fehlte der Modus beim Speichern).
+$einspielenAus = $zustand['automatik_root'] && $ae['modus'] !== 'einspielen';
+$modi = [
+    'aus'        => ['Aus', 'Nichts automatisch. Gesucht wird nur, wenn Sie auf „Jetzt suchen“ tippen.'],
+    'suchen'     => ['Nur suchen und anzeigen', 'Etwa alle sechs Stunden nachsehen; ein Abzeichen im Menü zeigt neue Stände. Eingespielt wird nur von Hand.'],
+    'einspielen' => ['Automatisch einspielen', 'Im Zeitfenster unten von selbst aktualisieren – mit Sicherung und Zurückrollen wie von Hand.'],
+];
+$naechstes = $automatik['naechstes'];
+$letzterAuto = $automatik['letzter'];
+?>
+<div class="card update-automatik" id="automatik">
+    <div class="card-head"><h2>Automatische Updates</h2><span class="spacer"></span><span class="badge <?= $ae['modus'] === 'aus' ? 'info' : 'primary' ?>"><?= View::e($automatik['modus_text']) ?></span></div>
+    <form method="post" action="/system/update/automatik" class="card-body">
+        <?= Csrf::field() ?>
+        <fieldset<?= $gesperrt ? ' disabled' : '' ?>>
+            <legend>Modus</legend>
+            <?php foreach ($modi as $wert => [$name, $hilfe]): ?>
+                <label class="check"><input type="radio" name="modus" value="<?= View::e($wert) ?>"<?= $ae['modus'] === $wert ? ' checked' : '' ?><?= $wert === 'einspielen' && $einspielenAus ? ' disabled' : '' ?>>
+                    <span><strong><?= View::e($name) ?></strong><span class="help"><?= View::e($hilfe) ?></span></span></label>
+            <?php endforeach; ?>
+            <?php if ($zustand['automatik_root']): ?>
+                <div class="notice">Automatisches Einspielen ist auf diesem System von der Konsole abgeschaltet (<span class="mono">AUTOMATIK=nein</span> in
+                    <span class="mono">/etc/powermanagement/update.conf</span>) – der Update-Dienst nimmt solche Aufträge nicht an. Gesucht wird weiter.</div>
+            <?php endif; ?>
+        </fieldset>
+        <fieldset<?= $gesperrt ? ' disabled' : '' ?>>
+            <legend>Zeitfenster zum Einspielen</legend>
+            <div class="update-tage" role="group" aria-label="Wochentage">
+            <?php foreach (UpdateAutomatik::tagNamen() as $nr => $name): ?>
+                <label class="check"><input type="checkbox" name="tage[]" value="<?= (int) $nr ?>"<?= in_array($nr, $ae['tage'], true) ? ' checked' : '' ?>> <?= View::e($name) ?></label>
+            <?php endforeach; ?>
+            </div>
+            <div class="field-row">
+                <div class="field"><label for="u_beginn">Beginn</label>
+                    <input id="u_beginn" type="time" name="beginn" value="<?= View::e($ae['beginn']) ?>" required></div>
+                <div class="field"><label for="u_dauer">Dauer</label>
+                    <select id="u_dauer" name="dauer">
+                        <?php foreach ([60 => '1 Stunde', 120 => '2 Stunden', 240 => '4 Stunden'] as $wert => $name): ?>
+                            <option value="<?= $wert ?>"<?= $ae['dauer'] === $wert ? ' selected' : '' ?>><?= View::e($name) ?></option>
+                        <?php endforeach; ?>
+                    </select></div>
+            </div>
+            <div class="field-row">
+                <div class="field"><label for="u_karenz">Karenzzeit</label>
+                    <select id="u_karenz" name="karenz">
+                        <?php foreach ([0 => 'sofort', 6 => '6 Stunden', 24 => '24 Stunden', 72 => '3 Tage'] as $wert => $name): ?>
+                            <option value="<?= $wert ?>"<?= $ae['karenz'] === $wert ? ' selected' : '' ?>><?= View::e($name) ?></option>
+                        <?php endforeach; ?>
+                    </select>
+                    <div class="help">Nur Stände, die mindestens so alt sind – ein fehlerhafter Stand kann so noch ersetzt werden.</div></div>
+                <div class="field"><label for="u_pause">Pausieren bis</label>
+                    <input id="u_pause" type="date" name="pause_bis" value="<?= View::e($pauseWert) ?>"
+                           min="<?= View::e($heute->format('Y-m-d')) ?>" max="<?= View::e($heute->modify('+' . UpdateAutomatik::PAUSE_MAX_TAGE . ' days')->format('Y-m-d')) ?>">
+                    <div class="help">Leer: nicht pausiert. Etwa über ein Veranstaltungswochenende (einschließlich dieses Tages).</div></div>
+            </div>
+            <?php if (str_starts_with($ae['beginn'], '02:')): ?>
+                <div class="notice warn">Beginn zwischen 02:00 und 02:59: Bei der Zeitumstellung gibt es diese Stunde einmal im Jahr nicht und einmal doppelt – das Fenster beginnt dann später. Besser 04:00.</div>
+            <?php endif; ?>
+        </fieldset>
+        <p class="small">Nie während eines Aufbaus oder Betriebs (an irgendeinem Standort) und nicht, wenn in den letzten 30 Minuten geschaltet wurde – dann wird
+            verschoben und im Fenster erneut geprüft. Höchstens ein Update je Tag. Ein Stand, der zurückgerollt wurde, wird nicht automatisch wiederholt –
+            erst ein neuerer Stand oder „Jetzt aktualisieren“.</p>
+        <dl class="kv">
+            <?php if ($ae['modus'] === 'einspielen'): ?>
+                <dt>Nächstes Fenster</dt>
+                <dd><?php if ($naechstes === null): ?><span class="muted">keines (kein Wochentag gewählt)</span><?php
+                    else: ?><?= View::e(UpdateAutomatik::terminText($naechstes)) ?><?php
+                        if ($jetztTs >= $naechstes['ab'] && $jetztTs < $naechstes['bis'] && !$automatik['pausiert']): ?> <span class="badge ok">offen</span><?php endif; ?><?php
+                        if ($automatik['pausiert']): ?><div class="small muted">pausiert bis <?= View::e($zeit((int) $ae['pause_bis'], 'd.m.Y')) ?> (Ende des Tages)</div><?php endif; ?><?php
+                    endif; ?></dd>
+            <?php endif; ?>
+            <dt>Zuletzt</dt>
+            <dd><?php if ($letzterAuto === null): ?><span class="muted">noch nichts automatisch eingespielt oder verschoben</span><?php
+                else: ?><?= View::e($zeit($letzterAuto['zeit'])) ?> – <?= View::e(UpdateAutomatik::letzterText($letzterAuto)) ?><?php endif; ?></dd>
+            <dt>Zeitplan</dt>
+            <dd><?= $automatik['zeitplan_alter'] === null ? '<span class="muted">noch nie gelaufen</span>' : 'zuletzt aktiv ' . View::e($vor($jetztTs - (int) $automatik['zeitplan_alter'])) ?></dd>
+        </dl>
+        <?php if ($automatik['zeitplan_still']): ?>
+            <div class="notice warn mt">Der Zeitplan läuft nicht – ohne ihn wird weder automatisch gesucht noch eingespielt. Als root auf der Konsole:
+                <pre class="update-befehl mono">systemctl status powermanagement-update-zeitplan.timer powermanagement-update-zeitplan.service</pre>
+                <span class="small">Steht dort <span class="mono">226/NAMESPACE</span>, fehlt dem Container „nesting“ (Proxmox: <span class="mono">pct set &lt;CTID&gt; --features nesting=1</span>, dann neu starten).</span></div>
+        <?php endif; ?>
+        <div class="btn-row mt">
+            <button class="btn btn-primary" type="submit"<?= $gesperrt ? ' disabled' : '' ?>>Speichern</button>
+        </div>
+    </form>
+</div>
 
 <?php // ------------------------------------------------------------ Verlauf ?>
 <div class="card" id="verlauf">

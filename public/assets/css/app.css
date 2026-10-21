@@ -1792,3 +1792,12 @@ html.menue-schmal .nav-hinweis {
 details.update-konsole > summary { cursor: pointer; list-style: none; }
 details.update-konsole > summary::-webkit-details-marker { display: none; }
 details.update-konsole:not([open]) > summary { border-bottom: 0; }
+
+/* Automatische Updates: Wochentage nebeneinander, Erklärung unter dem Modus. */
+.update-automatik .check .help { display: block; margin-top: .1rem; }
+.update-tage { display: flex; flex-wrap: wrap; gap: .2rem 1.1rem; margin-bottom: .6rem; }
+.update-tage .check { margin-bottom: .2rem; }
+.update-automatik input[type=time] {
+    width: 100%; padding: .45rem .6rem; border: 1px solid var(--border); border-radius: 8px;
+    font-family: inherit; font-size: .84rem; background: #fff; color: var(--text);
+}

@@ -16,9 +16,14 @@ declare(strict_types=1);
  * „-“ in abgelehnten Läufen); jeder Zustand über die Zeit; installierter
  * Stand ohne git-Prozess; Schreibsperre (503/Flash, An- und Abmelden, Puls);
  * Rechte; Status-JSON ohne Sitzungssperre; Abzeichen; Audit idempotent;
- * Kommandozeile (stand, suchen, starten --warten mit Fortschritt, Exit-Codes,
- * Wiederanlauf nach einem Absturz, als root abgelehnt); update.js ohne HTML
- * aus Daten. Am Ende wird alles weggeräumt.
+ * Automatik (Einstellungen, Fenster an normalen Tagen, über Mitternacht und
+ * an den Tagen der Zeitumstellung, Versatz, Karenz, gescheiterte Ziele,
+ * Aufbau und Schaltvorgänge, Pause, einmal je Tag, Zeitplan mit Auftrag,
+ * Einstellungen und Audit, stiller Zeitplan, lange verschoben, Formular und
+ * Schreibsperre); Kommandozeile (stand, suchen, starten --warten mit
+ * Fortschritt, Exit-Codes, Wiederanlauf nach einem Absturz, automatik,
+ * zeitplan, als root abgelehnt); update.js ohne HTML aus Daten. Am Ende wird
+ * alles weggeräumt.
  */
 
 require __DIR__ . '/hilfen/pruefung.php';
@@ -173,7 +178,7 @@ $auftragWeg = static function () use ($upd): void {
     @unlink($upd . '/.letzter');
     UpdateService::vergessen();
 };
-$eingerichtet = static function () use ($schreiben, $helferText, $standText, $gitHead, $auftragWeg, $I): void {
+$eingerichtet = static function () use ($schreiben, $helferText, $standText, $gitHead, $auftragWeg, $I, $upd): void {
     $auftragWeg();
     foreach (['lauf', 'wartung', 'verlauf', 'protokoll'] as $n) {
         $schreiben($n, null);
@@ -181,6 +186,16 @@ $eingerichtet = static function () use ($schreiben, $helferText, $standText, $gi
     $schreiben('helfer', $helferText(time()));
     $schreiben('stand', $standText(time()));
     $gitHead('ref: refs/heads/main', ['refs/heads/main' => $I]);
+    // Lebenszeichen des Zeitplans – wie auf einem gesunden System.
+    touch($upd . '/zeitplan');
+};
+/** Automatische Updates auf die Vorgaben zurück. */
+$automatikZurueck = static function (): void {
+    foreach ([UpdateAutomatik::MODUS, UpdateAutomatik::TAGE, UpdateAutomatik::BEGINN, UpdateAutomatik::DAUER, UpdateAutomatik::KARENZ,
+              UpdateAutomatik::PAUSE, UpdateAutomatik::VERSATZ, UpdateAutomatik::LETZTER, UpdateAutomatik::VERSCHOBEN] as $k) {
+        Settings::forget($k);
+    }
+    Settings::vergessen();
 };
 
 try {
@@ -426,6 +441,12 @@ try {
         pruefe(!is_file($upd . '/soll/auftrag'), 'fremder Besitzer: kein Auftrag');
         [$rc, $aus] = $power(['update:suchen']);
         pruefe($rc === 1 && str_contains($aus, 'runuser -u'), 'als root: update:suchen abgelehnt (' . trim($aus) . ')');
+        foreach ([['update:automatik', 'aus'], ['update:zeitplan']] as $befehl) {
+            [$rc, $aus] = $power($befehl);
+            pruefe($rc === 1 && str_contains($aus, 'runuser -u'), 'als root: ' . $befehl[0] . ' abgelehnt');
+        }
+        Settings::vergessen();
+        gleich(Settings::get(UpdateAutomatik::MODUS), null, 'als root: Modus nicht gespeichert');
         [$rc, $aus] = $power(['update:stand']);
         pruefe($rc === 0 && str_contains($aus, 'Update-Funktion: eingerichtet'), 'als root: update:stand liest');
         chown($upd, 0);
@@ -498,6 +519,276 @@ try {
     $schreiben('wartung', null);
     gleich(UpdateService::vermerken(), 1, 'vermerken: danach die neue Zeile');
 
+    // ------------------------------------------------------------ Automatik: Einstellungen
+    $eingerichtet();
+    $automatikZurueck();
+    Config::set('app.timezone', 'Europe/Berlin');
+    $tz = new \DateTimeZone('Europe/Berlin');
+    $ts = static fn (string $s): int => (new \DateTimeImmutable($s, $tz))->getTimestamp();
+    $tagIn = static fn (int $tage): string => (new \DateTimeImmutable('now', $tz))->modify(($tage >= 0 ? '+' : '') . $tage . ' days')->format('Y-m-d');
+    $e = UpdateAutomatik::einstellungen();
+    gleich([$e['modus'], $e['tage'], $e['beginn'], $e['dauer'], $e['karenz'], $e['pause_bis']], ['suchen', [1, 2, 3, 4, 5, 6, 7], '04:00', 120, 24, null],
+        'Automatik: Vorgaben (nur suchen, täglich 04:00, 2 Std., Karenz 24 Std.)');
+    foreach ([
+        'unbekannter Modus'      => ['bald', [1], '04:00', 120, 24, null],
+        'Wochentag 8'            => ['einspielen', [8], '04:00', 120, 24, null],
+        'Wochentag als Text'     => ['einspielen', ['1; DROP'], '04:00', 120, 24, null],
+        'einspielen ohne Tag'    => ['einspielen', [], '04:00', 120, 24, null],
+        'Beginn 24:00'           => ['suchen', [1], '24:00', 120, 24, null],
+        'Beginn 4:00'            => ['suchen', [1], '4:00', 120, 24, null],
+        'Dauer 90'               => ['suchen', [1], '04:00', 90, 24, null],
+        'Karenz 12'              => ['suchen', [1], '04:00', 120, 12, null],
+        'Pause in der Vergangenheit' => ['suchen', [1], '04:00', 120, 24, $tagIn(-1)],
+        'Pause über 90 Tage'     => ['suchen', [1], '04:00', 120, 24, $tagIn(91)],
+        'Pause kein Datum'       => ['suchen', [1], '04:00', 120, 24, '1.1.2027'],
+    ] as $fall => $args) {
+        $r = UpdateAutomatik::speichern(...$args);
+        pruefe(!$r['ok'] && $r['message'] !== '', 'speichern lehnt ab: ' . $fall);
+    }
+    Settings::vergessen();
+    gleich(Settings::get(UpdateAutomatik::MODUS), null, 'abgelehnt: nichts gespeichert');
+    $r = UpdateAutomatik::speichern('einspielen', ['5', '1', '3', '3'], '05:30', 60, 0, $tagIn(2));
+    $e = UpdateAutomatik::einstellungen();
+    pruefe($r['ok'] && $e['modus'] === 'einspielen' && $e['tage'] === [1, 3, 5] && $e['beginn'] === '05:30' && $e['dauer'] === 60 && $e['karenz'] === 0,
+        'speichern: Modus, Wochentage (sortiert, einmal), Beginn, Dauer, Karenz');
+    gleich($e['pause_bis'], $ts($tagIn(2) . ' 23:59:59'), 'speichern: „Pausieren bis“ = Ende des Tages in der Zeitzone der Installation');
+    pruefe(str_ends_with((string) Settings::get(UpdateAutomatik::PAUSE), '+00:00'), 'speichern: Pause als ISO 8601 in UTC');
+    gleich(UpdateAutomatik::speichern('einspielen', [1], '05:30', 60, 0, $tagIn(90))['ok'], true, 'speichern: Pause genau 90 Tage voraus geht');
+    Settings::put(UpdateAutomatik::VERSCHOBEN, gmdate('c', time() - 3600));
+    $r = UpdateAutomatik::speichern('suchen', [], '04:00', 120, 24, '');
+    $e = UpdateAutomatik::einstellungen();
+    pruefe($r['ok'] && $e['tage'] === [] && $e['pause_bis'] === null && UpdateAutomatik::verschobenSeit() === null,
+        'speichern: suchen ohne Tage geht, leere Pause entfernt sie, „verschoben seit“ fällt weg');
+    gleich(UpdateAutomatik::tageText([1, 2, 3, 4, 5]), 'Mo–Fr', 'Wochentage als Text: Mo–Fr');
+    gleich(UpdateAutomatik::tageText([1, 3, 6]), 'Mo, Mi, Sa', 'Wochentage als Text: einzeln');
+
+    // ------------------------------------------------------------ Automatik: Fenster (Europe/Berlin)
+    $e = ['modus' => 'einspielen', 'tage' => [1, 2, 3, 4, 5, 6, 7], 'beginn' => '04:00', 'dauer' => 120, 'karenz' => 24, 'pause_bis' => null, 'versatz' => 0];
+    $f = UpdateAutomatik::fenster($ts('2026-10-21 04:10'), $e);
+    pruefe($f !== null && $f['tag'] === '2026-10-21' && $f['beginn'] === $ts('2026-10-21 04:00') && $f['ende'] === $ts('2026-10-21 06:00')
+        && $f['ab'] === $ts('2026-10-21 04:00') && $f['bis'] === $ts('2026-10-21 05:45'), 'Fenster: normaler Tag 04:00–06:00, einspielen bis 05:45');
+    gleich(UpdateAutomatik::fenster($ts('2026-10-21 03:59'), $e), null, 'Fenster: vor dem Beginn zu');
+    gleich(UpdateAutomatik::fenster($ts('2026-10-21 05:45'), $e), null, 'Fenster: 15 min vor dem Ende zu');
+    pruefe(UpdateAutomatik::fenster($ts('2026-10-21 05:44'), $e) !== null, 'Fenster: bis kurz davor offen');
+    gleich(UpdateAutomatik::fenster($ts('2026-10-21 04:10'), ['versatz' => 20] + $e), null, 'Fenster: Versatz 20 min – um 04:10 noch zu');
+    gleich(UpdateAutomatik::fenster($ts('2026-10-21 04:20'), ['versatz' => 20] + $e)['ab'] ?? null, $ts('2026-10-21 04:20'), 'Fenster: Versatz 20 min – ab 04:20');
+    gleich(UpdateAutomatik::fenster($ts('2026-10-21 04:20'), ['dauer' => 60, 'versatz' => 200] + $e)['ab'] ?? null, $ts('2026-10-21 04:14'),
+        'Fenster: Versatz größer als das verkürzte Fenster – läuft herum (200 mod 31)');
+    gleich(UpdateAutomatik::fenster($ts('2026-10-21 04:10'), ['tage' => [1]] + $e), null, 'Fenster: Mittwoch, nur montags – zu');
+    gleich(UpdateAutomatik::fenster($ts('2026-10-19 04:10'), ['tage' => [1]] + $e)['tag'] ?? null, '2026-10-19', 'Fenster: Montag, nur montags – offen');
+    $nacht = ['beginn' => '23:30'] + $e;
+    gleich(UpdateAutomatik::fenster($ts('2026-10-22 00:30'), ['tage' => [3]] + $nacht)['tag'] ?? null, '2026-10-21', 'Fenster über Mitternacht gehört zum Starttag');
+    gleich(UpdateAutomatik::fenster($ts('2026-10-22 00:30'), ['tage' => [4]] + $nacht), null, 'Fenster über Mitternacht: Starttag nicht gewählt – zu');
+    // Sommerzeit: 29.03.2026 02:00 → 03:00
+    $f = UpdateAutomatik::fenster($ts('2026-03-29 04:30'), $e);
+    pruefe($f !== null && $f['beginn'] === strtotime('2026-03-29T02:00:00Z') && $f['bis'] - $f['beginn'] === 105 * 60, 'Fenster am 29.03.2026: 04:00 Sommerzeit');
+    $f = UpdateAutomatik::fenster($ts('2026-03-29 03:40'), ['beginn' => '02:30'] + $e);
+    pruefe($f !== null && $f['tag'] === '2026-03-29' && $f['beginn'] === strtotime('2026-03-29T01:30:00Z') && $f['bis'] - $f['beginn'] === 105 * 60,
+        'Fenster am 29.03.2026, Beginn 02:30 (gibt es nicht): PHP schiebt auf 03:30, Dauer bleibt');
+    // Winterzeit: 25.10.2026 03:00 → 02:00
+    $f = UpdateAutomatik::fenster(strtotime('2026-10-25T03:30:00Z'), $e);
+    pruefe($f !== null && $f['beginn'] === strtotime('2026-10-25T03:00:00Z') && $f['ende'] === strtotime('2026-10-25T05:00:00Z'), 'Fenster am 25.10.2026: 04:00 Winterzeit');
+    $f = UpdateAutomatik::fenster(strtotime('2026-10-25T01:45:00Z'), ['beginn' => '02:30'] + $e);
+    pruefe($f !== null && $f['tag'] === '2026-10-25' && $f['bis'] - $f['beginn'] === 105 * 60, 'Fenster am 25.10.2026, Beginn 02:30 (doppelt): ein Fenster, echte Dauer');
+    $f = UpdateAutomatik::fenster(strtotime('2026-10-25T00:30:00Z'), ['beginn' => '01:30'] + $e);
+    pruefe($f !== null && $f['ende'] - $f['beginn'] === 7200, 'Fenster am 25.10.2026 über die Umstellung: zwei echte Stunden');
+    // Nächstes Fenster
+    gleich(UpdateAutomatik::naechstesFenster($ts('2026-10-21 04:30'), $e)['tag'] ?? null, '2026-10-21', 'nächstes Fenster: das offene');
+    gleich(UpdateAutomatik::naechstesFenster($ts('2026-10-21 06:00'), $e)['tag'] ?? null, '2026-10-22', 'nächstes Fenster: morgen');
+    gleich(UpdateAutomatik::naechstesFenster($ts('2026-10-21 06:00'), ['tage' => [1]] + $e)['tag'] ?? null, '2026-10-26', 'nächstes Fenster: nächster Montag');
+    gleich(UpdateAutomatik::naechstesFenster($ts('2026-10-21 06:00'), ['pause_bis' => $ts('2026-10-23 23:59:59')] + $e)['tag'] ?? null, '2026-10-24',
+        'nächstes Fenster: nach der Pause');
+    gleich(UpdateAutomatik::naechstesFenster($ts('2026-10-21 06:00'), ['tage' => []] + $e), null, 'nächstes Fenster: ohne Wochentag keines');
+    gleich(UpdateAutomatik::terminText(UpdateAutomatik::naechstesFenster($ts('2026-10-21 06:00'), $e)), 'Do 22.10. 04:00–06:00', 'Termin als Text');
+
+    // ------------------------------------------------------------ Automatik: entscheiden (rein)
+    $J = $ts('2026-10-21 04:10');
+    $basis = UpdateService::stand();
+    $standAm = static fn (int $jetzt, array $mehr = []): array => array_replace($basis, [
+        'abruf_zeit' => $jetzt - 600, 'neu' => 2, 'linear' => true, 'lokal_geaendert' => false, 'zweig' => 'main', 'migrationen' => false,
+        'verfuegbar' => ['commit' => $V, 'zeit' => $jetzt - 3600],
+        'kandidaten' => [['commit' => $V, 'zeit' => $jetzt - 3600], ['commit' => $K1, 'zeit' => $jetzt - 30 * 3600]], 'gescheitert' => [],
+    ], $mehr);
+    $lage = static fn (int $jetzt, array $mehr = [], array $einst = []): array => array_replace([
+        'einstellungen' => array_replace($e, $einst), 'zustand' => 'bereit', 'aktiv' => false, 'wartung' => false, 'abgeschaltet' => false,
+        'automatik_root' => false, 'offen' => 'nein', 'stand' => $standAm($jetzt), 'letzte_suche' => null, 'letzter' => null,
+        'hindernisse' => [], 'treiber' => 'sqlite',
+    ], $mehr);
+    $ent = static fn (array $mehr = [], array $einst = [], ?int $jetzt = null): array =>
+        UpdateAutomatik::entscheiden($jetzt ?? $J, $lage($jetzt ?? $J, $mehr, $einst));
+    $kurzE = static fn (array $r): string => ($r['aktion'] ?? '-') . ' ' . $r['grund'] . ($r['ziel'] !== null ? ' ' . substr($r['ziel'], 0, 7) : '');
+    $v7 = substr($V, 0, 7);
+    $k7 = substr($K1, 0, 7);
+    gleich($kurzE($ent([], ['karenz' => 0])), "aktualisieren einspielen {$v7}", 'entscheiden: im Fenster, ohne Karenz → der neueste Stand');
+    gleich($ent([], ['karenz' => 0])['tag'], '2026-10-21', 'entscheiden: Tag des Fensters');
+    gleich($kurzE($ent()), "aktualisieren einspielen {$k7}", 'entscheiden: Karenz 24 Std. → der neueste Kandidat, der älter ist');
+    gleich($kurzE($ent([], ['karenz' => 72])), '- verschoben:karenz', 'entscheiden: alle Kandidaten jünger als die Karenz → verschoben');
+    gleich($kurzE($ent(['stand' => $standAm($J, ['gescheitert' => [$V]])], ['karenz' => 0])), "aktualisieren einspielen {$k7}", 'entscheiden: gescheitertes Ziel übersprungen');
+    gleich($kurzE($ent(['stand' => $standAm($J, ['gescheitert' => [$V, $K1]])], ['karenz' => 0])), '- verschoben:gescheitert', 'entscheiden: nur gescheiterte Ziele → verschoben');
+    gleich($kurzE($ent(['stand' => $standAm($J, ['kandidaten' => []])], ['karenz' => 0])), "aktualisieren einspielen {$v7}", 'entscheiden: ohne Kandidatenliste der verfügbare Stand');
+    foreach ([
+        'demo'               => [['zustand' => 'demo'], [], '- demo'],
+        'nicht eingerichtet' => [['zustand' => 'nicht_eingerichtet'], [], '- nicht_eingerichtet'],
+        'Schreibsperre'      => [['wartung' => true], [], '- wartung'],
+        'Lauf aktiv'         => [['aktiv' => true], [], '- laeuft'],
+        'Modus aus'          => [[], ['modus' => 'aus'], '- aus'],
+        'OBERFLAECHE=nein'   => [['abgeschaltet' => true], [], '- abgeschaltet'],
+        'nur suchen'         => [[], ['modus' => 'suchen'], '- nur_suchen'],
+        'kein Stand'         => [['stand' => null], [], 'pruefen suchen'],
+        'Stand 7 Std. alt'   => [['stand' => $standAm($J, ['abruf_zeit' => $J - 7 * 3600])], ['modus' => 'suchen'], 'pruefen suchen'],
+        'nie gesucht'        => [['stand' => $standAm($J, ['abruf_zeit' => null])], ['modus' => 'suchen'], 'pruefen suchen'],
+        'eben vergeblich gesucht' => [['stand' => $standAm($J, ['abruf_zeit' => $J - 7 * 3600]), 'letzte_suche' => $J - 600], ['modus' => 'suchen'], '- suche_wartet'],
+        'vor 40 min vergeblich gesucht' => [['stand' => $standAm($J, ['abruf_zeit' => $J - 7 * 3600]), 'letzte_suche' => $J - 2400], ['modus' => 'suchen'], 'pruefen suchen'],
+        'Versatz verlängert die 6 Std.' => [['stand' => $standAm($J, ['abruf_zeit' => $J - 6 * 3600 - 600])], ['modus' => 'suchen', 'versatz' => 30], '- nur_suchen'],
+        'pausiert'           => [[], ['pause_bis' => $J + 3600], '- verschoben:pausiert'],
+        'Pause vorbei'       => [[], ['pause_bis' => $J - 1, 'karenz' => 0], "aktualisieren einspielen {$v7}"],
+        'heute angefordert'  => [['letzter' => ['tag' => '2026-10-21', 'ergebnis' => 'angefordert']], [], '- erledigt'],
+        'heute nichts Neues' => [['letzter' => ['tag' => '2026-10-21', 'ergebnis' => 'nichts_neu']], [], '- erledigt'],
+        'heute verschoben'   => [['letzter' => ['tag' => '2026-10-21', 'ergebnis' => 'verschoben']], ['karenz' => 0], "aktualisieren einspielen {$v7}"],
+        'gestern angefordert' => [['letzter' => ['tag' => '2026-10-20', 'ergebnis' => 'angefordert']], ['karenz' => 0], "aktualisieren einspielen {$v7}"],
+        'Stand im Fenster 40 min alt' => [['stand' => $standAm($J, ['abruf_zeit' => $J - 2400])], [], 'pruefen suchen_vorher'],
+        'Stand im Fenster alt, eben gesucht' => [['stand' => $standAm($J, ['abruf_zeit' => $J - 2400]), 'letzte_suche' => $J - 300], [], '- suche_wartet'],
+        'nichts neu'         => [['stand' => $standAm($J, ['neu' => 0])], [], '- nichts_neu'],
+        'nicht linear'       => [['stand' => $standAm($J, ['linear' => false])], [], '- verschoben:nicht_linear'],
+        'lokal geändert'     => [['stand' => $standAm($J, ['lokal_geaendert' => true])], [], '- verschoben:lokal_geaendert'],
+        'kein Zweig'         => [['stand' => $standAm($J, ['zweig' => null])], [], '- verschoben:kein_zweig'],
+        'AUTOMATIK=nein'     => [['automatik_root' => true], [], '- verschoben:abgeschaltet'],
+        'unterbrochenes Update offen' => [['offen' => 'ja'], [], '- verschoben:offen'],
+        'Aufbau'             => [['hindernisse' => [['art' => 'aufbau', 'text' => 'Aufbau „Messe“ läuft.']]], ['karenz' => 0], "- verschoben:aufbau {$v7}"],
+        'geschaltet'         => [['hindernisse' => [['art' => 'geschaltet', 'text' => 'geschaltet']]], ['karenz' => 0], "- verschoben:geschaltet {$v7}"],
+        'MySQL mit Migration' => [['treiber' => 'mysql', 'stand' => $standAm($J, ['migrationen' => true])], ['karenz' => 0], "- verschoben:treiber {$v7}"],
+        'MySQL ohne Migration' => [['treiber' => 'mysql'], ['karenz' => 0], "aktualisieren einspielen {$v7}"],
+        'außerhalb'          => [[], [], '- ausserhalb', $ts('2026-10-21 07:00')],
+    ] as $fall => $daten) {
+        [$mehr, $einst, $erwartet] = $daten;
+        $jetzt = $daten[3] ?? null;
+        if (isset($mehr['letzter'])) {
+            $mehr['letzter'] += ['zeit' => $J, 'grund' => '', 'ziel' => null, 'text' => '', 'gemeldet' => []];
+        }
+        gleich($kurzE($ent($mehr, $einst, $jetzt)), $erwartet, 'entscheiden: ' . $fall);
+    }
+    gleich($ent(['hindernisse' => [['art' => 'aufbau', 'text' => 'Aufbau „Messe“ läuft.']]])['text'], 'Aufbau „Messe“ läuft.', 'entscheiden: Aufbau mit Namen');
+    foreach ([
+        'Sommerzeit 29.03.2026'   => $ts('2026-03-29 04:30'),
+        'Winterzeit 25.10.2026'   => strtotime('2026-10-25T03:30:00Z'),
+    ] as $fall => $jetzt) {
+        gleich($kurzE(UpdateAutomatik::entscheiden($jetzt, $lage($jetzt, [], ['karenz' => 0]))), "aktualisieren einspielen {$v7}", 'entscheiden: ' . $fall);
+    }
+    $jetzt = $ts('2026-10-22 00:30');
+    $r = UpdateAutomatik::entscheiden($jetzt, $lage($jetzt, [], ['karenz' => 0, 'beginn' => '23:30', 'tage' => [3]]));
+    pruefe($r['aktion'] === 'aktualisieren' && $r['tag'] === '2026-10-21', 'entscheiden: über Mitternacht, Tag = Starttag');
+    $r = UpdateAutomatik::entscheiden($jetzt, $lage($jetzt, ['letzter' => ['tag' => '2026-10-21', 'ergebnis' => 'angefordert', 'zeit' => $J, 'grund' => '', 'ziel' => $V, 'text' => '', 'gemeldet' => []]],
+        ['karenz' => 0, 'beginn' => '23:30', 'tage' => [3]]));
+    gleich($r['grund'], 'erledigt', 'entscheiden: über Mitternacht, schon am Starttag angefordert → erledigt');
+
+    // ------------------------------------------------------------ Automatik: Zeitplan (Dateien, Einstellungen, Audit)
+    $eingerichtet();
+    $automatikZurueck();
+    $jetztLokal = (new \DateTimeImmutable('now', $tz))->format('H:i');
+    $zaehle = static fn (string $aktion): int => (int) Database::scalar('SELECT COUNT(*) FROM audit_log WHERE action = ?', [$aktion]);
+    gleich(UpdateAutomatik::speichern('einspielen', [1, 2, 3, 4, 5, 6, 7], $jetztLokal, 60, 0, '', 0)['ok'], true, 'Zeitplan: Fenster ab jetzt eingestellt');
+    $automatisch = $zaehle('system.update.automatisch');
+    touch($upd . '/zeitplan', time() - 600);
+    $r = UpdateAutomatik::zeitplan();
+    $text = (string) @file_get_contents($upd . '/soll/auftrag');
+    pruefe($r['aktion'] === 'aktualisieren' && $r['ziel'] === $V && str_contains($text, "aktion aktualisieren\nausloeser automatik\nvon zeitplan\n")
+        && str_ends_with($text, "ziel {$V}\n"), 'Zeitplan: im Fenster ein Auftrag aktualisieren (automatik, zeitplan) auf den verfügbaren Stand');
+    pruefe(str_contains($r['meldung'], 'Update auf ' . $v7 . ' angefordert'), 'Zeitplan: meldet, was er tat');
+    $l = UpdateAutomatik::letzter();
+    pruefe(($l['ergebnis'] ?? '') === 'angefordert' && ($l['ziel'] ?? '') === $V && ($l['tag'] ?? '') === (new \DateTimeImmutable('now', $tz))->format('Y-m-d'),
+        'Zeitplan: auto_letzter angefordert, Tag des Fensters');
+    gleich($zaehle('system.update.automatisch') - $automatisch, 1, 'Zeitplan: Audit system.update.automatisch');
+    pruefe((UpdateAutomatik::zeitplanAlter() ?? 999) <= 5, 'Zeitplan: Lebenszeichen storage/update/zeitplan');
+    pruefe(UpdateAutomatik::einstellungen()['versatz'] === 0, 'Zeitplan: Versatz wie eingestellt');
+    $r = UpdateAutomatik::zeitplan();
+    pruefe($r['aktion'] === null && $r['grund'] === 'laeuft' && (string) @file_get_contents($upd . '/soll/auftrag') === $text, 'Zeitplan: Auftrag offen → nichts');
+    $auftragWeg();
+    $schreiben('lauf', $laufText(['zustand' => 'fertig', 'ergebnis' => 'eingespielt', 'ende' => (string) time(), 'ausloeser' => 'automatik', 'von' => 'zeitplan']));
+    $r = UpdateAutomatik::zeitplan();
+    pruefe($r['aktion'] === null && $r['grund'] === 'erledigt' && !is_file($upd . '/soll/auftrag') && $r['meldung'] === '', 'Zeitplan: höchstens ein Lauf je Tag');
+    // Ein Tag später, Aufbau läuft: verschoben, ins Audit einmal je Tag und Grund
+    $l = UpdateAutomatik::letzter();
+    Settings::put(UpdateAutomatik::LETZTER, (string) json_encode(['tag' => '2000-01-01'] + (array) $l));
+    Database::execute("UPDATE aufbauten SET status = 'aufbau' WHERE id = ?", [$aufbau]);
+    $verschoben = $zaehle('system.update.verschoben');
+    $r = UpdateAutomatik::zeitplan();
+    $l = UpdateAutomatik::letzter();
+    pruefe($r['aktion'] === null && $r['grund'] === 'verschoben:aufbau' && !is_file($upd . '/soll/auftrag'), 'Zeitplan: Aufbau läuft → kein Auftrag, verschoben');
+    pruefe(($l['ergebnis'] ?? '') === 'verschoben' && ($l['grund'] ?? '') === 'aufbau' && str_contains($l['text'] ?? '', $kennung . ' Messe'), 'Zeitplan: auto_letzter verschoben aufbau mit Namen');
+    pruefe(UpdateAutomatik::verschobenSeit() !== null && str_contains($r['meldung'], $kennung . ' Messe'), 'Zeitplan: „verschoben seit“ gesetzt, Meldung nennt den Aufbau');
+    gleich($zaehle('system.update.verschoben') - $verschoben, 1, 'Zeitplan: Audit system.update.verschoben');
+    $seit = Settings::get(UpdateAutomatik::VERSCHOBEN);
+    $r = UpdateAutomatik::zeitplan();
+    pruefe($r['grund'] === 'verschoben:aufbau' && $r['meldung'] === '' && Settings::get(UpdateAutomatik::VERSCHOBEN) === $seit, 'Zeitplan: zweimal verschoben – nichts Neues zu melden, „seit“ bleibt');
+    gleich($zaehle('system.update.verschoben') - $verschoben, 1, 'Zeitplan: Audit höchstens einmal je Tag und Grund');
+    Database::execute("UPDATE aufbauten SET status = 'beendet' WHERE id = ?", [$aufbau]);
+    $schreiben('lauf', null);
+    $r = UpdateAutomatik::zeitplan();
+    pruefe($r['aktion'] === 'aktualisieren' && is_file($upd . '/soll/auftrag') && UpdateAutomatik::verschobenSeit() === null, 'Zeitplan: Aufbau beendet → eingespielt, „seit“ gelöscht');
+    $auftragWeg();
+    // Schreibsperre, Demo, nicht eingerichtet: nichts schreiben, nicht einmal das Lebenszeichen
+    Settings::put(UpdateAutomatik::LETZTER, (string) json_encode(['tag' => '2000-01-01', 'ergebnis' => 'angefordert']));
+    touch($upd . '/zeitplan', time() - 600);
+    $schreiben('wartung', UpdateService::KOPF_WARTUNG . "\nseit " . time() . "\nkennung -\n");
+    $r = UpdateAutomatik::zeitplan();
+    clearstatcache();
+    pruefe($r['grund'] === 'wartung' && !is_file($upd . '/soll/auftrag') && filemtime($upd . '/zeitplan') <= time() - 590, 'Zeitplan: während der Schreibsperre nichts, kein Lebenszeichen');
+    $schreiben('wartung', null);
+    Config::set('app.demo', true);
+    gleich(UpdateAutomatik::zeitplan()['grund'], 'demo', 'Zeitplan: Demo-Modus – nichts');
+    Config::set('app.demo', false);
+    Config::set('update.verzeichnis', $ordner . '/gibt-es-nicht');
+    gleich(UpdateAutomatik::zeitplan()['grund'], 'nicht_eingerichtet', 'Zeitplan: nicht eingerichtet – nichts');
+    Config::set('update.verzeichnis', $upd);
+    pruefe(!is_file($upd . '/soll/auftrag'), 'Zeitplan: bis hier kein Auftrag');
+    // Nur suchen: alter Stand → suchen, ohne Netz nicht alle fünf Minuten
+    UpdateAutomatik::speichern('suchen', [1, 2, 3, 4, 5, 6, 7], '04:00', 120, 24, '');
+    $schreiben('stand', $standText(time(), ['abruf_zeit' => (string) (time() - 8 * 3600)]));
+    $r = UpdateAutomatik::zeitplan();
+    $text = (string) @file_get_contents($upd . '/soll/auftrag');
+    pruefe($r['aktion'] === 'pruefen' && str_contains($text, "aktion pruefen\nausloeser automatik\nvon zeitplan\n") && !str_contains($text, 'ziel '),
+        'Zeitplan, nur suchen: Stand älter als 6 Std. → Auftrag pruefen');
+    @unlink($upd . '/soll/auftrag');
+    UpdateService::vergessen();
+    $r = UpdateAutomatik::zeitplan();
+    pruefe($r['aktion'] === null && $r['grund'] === 'suche_wartet' && !is_file($upd . '/soll/auftrag'), 'Zeitplan: Suche schlug fehl – nicht gleich wieder');
+    $schreiben('stand', $standText(time()));
+    gleich(UpdateAutomatik::zeitplan()['grund'], 'nur_suchen', 'Zeitplan, nur suchen: frischer Stand – nichts');
+    UpdateAutomatik::speichern('aus', [1], '04:00', 120, 24, '');
+    $schreiben('stand', $standText(time(), ['abruf_zeit' => (string) (time() - 8 * 3600)]));
+    $auftragWeg();
+    gleich(UpdateAutomatik::zeitplan()['grund'], 'aus', 'Zeitplan, aus: auch ein alter Stand wird nicht gesucht');
+    pruefe(!is_file($upd . '/soll/auftrag'), 'Zeitplan, aus: kein Auftrag');
+
+    // ------------------------------------------------------------ Automatik: Abzeichen
+    $eingerichtet();
+    $automatikZurueck();
+    pruefe((UpdateService::navHinweis()['stufe'] ?? '') === 'primary', 'Abzeichen: Zeitplan lebt – Zahl');
+    touch($upd . '/zeitplan', time() - 1000);
+    UpdateService::vergessen();
+    gleich(UpdateService::navHinweis(), ['stufe' => 'warn', 'text' => 'Der Update-Zeitplan läuft nicht'], 'Abzeichen: Zeitplan still seit 15 min → gelb');
+    UpdateAutomatik::speichern('aus', [], '04:00', 120, 24, '');
+    UpdateService::vergessen();
+    pruefe((UpdateService::navHinweis()['stufe'] ?? '') === 'primary', 'Abzeichen: Modus aus – ein stiller Zeitplan zählt nicht');
+    $automatikZurueck();
+    unlink($upd . '/zeitplan');
+    touch($upd . '/soll', time() - 1000);
+    UpdateService::vergessen();
+    gleich(UpdateService::navHinweis()['stufe'] ?? '', 'warn', 'Abzeichen: Zeitplan nie gelaufen, seit der Einrichtung 15 min → gelb');
+    touch($upd . '/soll');
+    UpdateService::vergessen();
+    pruefe((UpdateService::navHinweis()['stufe'] ?? '') === 'primary', 'Abzeichen: Zeitplan nie gelaufen, eben eingerichtet → noch nicht');
+    touch($upd . '/zeitplan');
+    UpdateAutomatik::speichern('einspielen', [1, 2, 3, 4, 5, 6, 7], '04:00', 120, 24, '');
+    Settings::put(UpdateAutomatik::VERSCHOBEN, gmdate('c', time() - 15 * 86400));
+    UpdateService::vergessen();
+    gleich(UpdateService::navHinweis(), ['stufe' => 'warn', 'text' => 'Automatische Updates werden seit über 14 Tagen verschoben'], 'Abzeichen: seit 15 Tagen verschoben → gelb');
+    Settings::put(UpdateAutomatik::VERSCHOBEN, gmdate('c', time() - 13 * 86400));
+    UpdateService::vergessen();
+    pruefe((UpdateService::navHinweis()['stufe'] ?? '') === 'primary', 'Abzeichen: seit 13 Tagen verschoben – noch nicht');
+    $automatikZurueck();
+    UpdateService::vergessen();
+
     // ------------------------------------------------------------ Kommandozeile
     $eingerichtet();
     [$rc, $aus] = $power(['update:stand']);
@@ -511,6 +802,55 @@ try {
     pruefe($rc === 0 && is_file($upd . '/soll/auftrag') && str_contains((string) file_get_contents($upd . '/soll/auftrag'), "ausloeser konsole\n"),
         'update:suchen: Auftrag mit Auslöser konsole');
     $auftragWeg();
+
+    // update:automatik / update:zeitplan
+    $automatikZurueck();
+    $automatikAudit = (int) Database::scalar("SELECT COUNT(*) FROM audit_log WHERE action = 'system.update.automatik'");
+    foreach ([
+        'Wochentag 8'         => ['update:automatik', 'einspielen', '--tage=8'],
+        'Dauer keine Zahl'    => ['update:automatik', 'suchen', '--dauer=zwei'],
+        'unbekannte Option'   => ['update:automatik', 'suchen', '--ziel=x'],
+        'zwei Modi'           => ['update:automatik', 'suchen', 'aus'],
+        'Option ohne Wert'    => ['update:automatik', 'suchen', '--beginn'],
+        'Optionen ohne Modus' => ['update:automatik', '--tage=1'],
+    ] as $fall => $argumente) {
+        [$rc, $aus] = $power($argumente);
+        pruefe($rc === 1 && str_contains($aus, 'Fehler:'), 'update:automatik lehnt ab: ' . $fall);
+    }
+    Settings::vergessen();
+    gleich(Settings::get(UpdateAutomatik::MODUS), null, 'update:automatik: abgelehnt – nichts gespeichert');
+    [$rc, $aus] = $power(['update:automatik', 'einspielen', '--tage=1, 2,3', '--beginn=05:00', '--dauer=60', '--karenz=0', '--versatz=0', '--pause-bis=' . $tagIn(3)]);
+    Settings::vergessen();
+    $e = UpdateAutomatik::einstellungen();
+    pruefe($rc === 0 && str_contains($aus, 'automatisch einspielen') && $e['modus'] === 'einspielen' && $e['tage'] === [1, 2, 3] && $e['beginn'] === '05:00'
+        && $e['dauer'] === 60 && $e['karenz'] === 0 && $e['versatz'] === 0 && $e['pause_bis'] === $ts($tagIn(3) . ' 23:59:59'),
+        'update:automatik einspielen mit allen Optionen');
+    [$rc, $aus] = $power(['update:automatik', 'einspielen', '--karenz=6']);
+    Settings::vergessen();
+    $e = UpdateAutomatik::einstellungen();
+    pruefe($rc === 0 && $e['karenz'] === 6 && $e['tage'] === [1, 2, 3] && $e['beginn'] === '05:00' && $e['pause_bis'] !== null, 'update:automatik: nicht genannte Werte bleiben');
+    [$rc, $aus] = $power(['update:automatik', 'einspielen', '--pause-bis=']);
+    Settings::vergessen();
+    pruefe($rc === 0 && UpdateAutomatik::einstellungen()['pause_bis'] === null, 'update:automatik --pause-bis= hebt die Pause auf');
+    gleich((int) Database::scalar("SELECT COUNT(*) FROM audit_log WHERE action = 'system.update.automatik'") - $automatikAudit, 3, 'update:automatik: Audit je Speichern');
+    [$rc, $aus] = $power(['update:automatik']);
+    pruefe($rc === 0 && str_contains($aus, 'Modus:           automatisch einspielen') && str_contains($aus, 'Fenster:         Mo–Mi ab 05:00 für 1 Std., Karenz 6 Std.'),
+        'update:automatik ohne Modus zeigt die Einstellungen');
+    [$rc, $aus] = $power(['update:stand']);
+    pruefe($rc === 0 && preg_match('/^Automatik:       automatisch einspielen \(Mo–Mi ab 05:00 für 1 Std\., Karenz 6 Std\.\), nächstes Fenster /m', $aus) === 1,
+        'update:stand: Zeile „Automatik:“');
+    $power(['update:automatik', 'suchen']);
+    [$rc, $aus] = $power(['update:stand']);
+    pruefe(str_contains($aus, "Automatik:       nur suchen und anzeigen\n"), 'update:stand: Automatik nur suchen');
+    [$rc, $aus] = $power(['update:zeitplan', '--gespraechig']);
+    pruefe($rc === 0 && str_contains($aus, 'Nichts zu tun (nur_suchen)') && !is_file($upd . '/soll/auftrag'), 'update:zeitplan: frischer Stand, nur suchen – nichts zu tun');
+    [$rc, $aus] = $power(['update:zeitplan']);
+    gleich([$rc, trim($aus)], [0, ''], 'update:zeitplan ohne --gespraechig: still, wenn nichts geschah');
+    [$rc, $aus] = $power(['update:zeitplan'], 'demo.php');
+    gleich($rc, 0, 'update:zeitplan im Demo-Modus: Exit 0');
+    [$rc, $aus] = $power(['update:automatik', 'einspielen'], 'demo.php');
+    pruefe($rc === 1 && str_contains($aus, 'Demo-Modus'), 'update:automatik im Demo-Modus abgelehnt');
+    $automatikZurueck();
 
     /**
      * Den Helfer spielen: auf den Auftrag warten, dann ist/lauf schreiben wie
@@ -771,11 +1111,14 @@ stream_wrapper_register("langsam", LangsamAttrappe::class);
         foreach (['/system/update', '/system/update/stand'] as $pfad) {
             gleich($aufruf($port, $s['dose'], 'GET', $pfad)['status'], 403, $wer . ': GET ' . $pfad . ' → 403');
         }
-        foreach (['/system/update/suchen', '/system/update/starten'] as $pfad) {
-            gleich($aufruf($port, $s['dose'], 'POST', $pfad, ['_token' => $s['token'], 'ziel' => $V])['status'], 403, $wer . ': POST ' . $pfad . ' → 403');
+        foreach (['/system/update/suchen', '/system/update/starten', '/system/update/automatik'] as $pfad) {
+            gleich($aufruf($port, $s['dose'], 'POST', $pfad, ['_token' => $s['token'], 'ziel' => $V, 'modus' => 'einspielen', 'tage' => ['1'],
+                'beginn' => '04:00', 'dauer' => '120', 'karenz' => '0'])['status'], 403, $wer . ': POST ' . $pfad . ' → 403');
         }
     }
     pruefe(!is_file($upd . '/soll/auftrag'), 'ohne Recht kein Auftrag');
+    Settings::vergessen();
+    gleich(Settings::get(UpdateAutomatik::MODUS), null, 'ohne Recht keine Einstellung');
     $r = $aufruf($port, $a['dose'], 'POST', '/system/update/suchen', []);
     pruefe($r['status'] === 302 && !is_file($upd . '/soll/auftrag'), 'ohne Token kein Auftrag');
 
@@ -800,40 +1143,85 @@ stream_wrapper_register("langsam", LangsamAttrappe::class);
     $r = $aufruf($port, $a['dose'], 'POST', '/system/update/starten', ['_token' => $a['token'], 'ziel' => 'kaputt']);
     pruefe($r['status'] === 302 && !is_file($upd . '/soll/auftrag'), 'Starten mit ungültigem Ziel: kein Auftrag');
 
-    // Schreibsperre
-    $untertitel = Settings::get('app.subtitle');
-    $schreiben('wartung', UpdateService::KOPF_WARTUNG . "\nseit " . time() . "\nkennung -\n");
-    $r = $aufruf($port, $a['dose'], 'POST', '/system/einstellungen/speichern', ['_token' => $a['token'], 'app__subtitle' => 'Gesperrt ' . $kennung], ['Accept: application/json']);
-    $j = json_decode(substr($r['text'], 0), true);
-    pruefe($r['status'] === 503 && ($j['wartung'] ?? false) === true && preg_match('/^Retry-After: 30\r?$/mi', $r['kopf']) === 1, 'Schreibsperre: JSON → 503 mit Retry-After 30');
+    // Automatische Updates über das Formular
+    $automatikZurueck();
+    $r = $aufruf($port, $a['dose'], 'GET', '/system/update');
+    pruefe(str_contains($r['text'], 'id="automatik"') && str_contains($r['text'], 'name="modus" value="einspielen"') && str_contains($r['text'], 'name="tage[]" value="7"')
+        && str_contains($r['text'], 'type="time" name="beginn" value="04:00"') && str_contains($r['text'], 'name="pause_bis"') && $phpMeldung($r['text']) === null,
+        'Seite: Karte „Automatische Updates“ mit Modus, Wochentagen, Beginn und Pause');
+    pruefe(preg_match('/name="modus" value="suchen" checked/', $r['text']) === 1, 'Seite: Vorgabe „nur suchen und anzeigen“');
+    $felder = ['_token' => $a['token'], 'modus' => 'einspielen', 'tage' => ['1', '2', '3', '4', '5'], 'beginn' => '04:30', 'dauer' => '120', 'karenz' => '24', 'pause_bis' => ''];
+    $r = $aufruf($port, $a['dose'], 'POST', '/system/update/automatik', $felder);
     Settings::vergessen();
-    gleich(Settings::get('app.subtitle'), $untertitel, 'Schreibsperre: Einstellung unverändert');
-    $r = $aufruf($port, $a['dose'], 'POST', '/system/einstellungen/speichern', ['_token' => $a['token'], 'app__subtitle' => 'Gesperrt ' . $kennung], ['X-Requested-With: XMLHttpRequest']);
+    $e = UpdateAutomatik::einstellungen();
+    pruefe($r['status'] === 302 && $r['ziel'] === '/system/update#automatik' && $e['modus'] === 'einspielen' && $e['tage'] === [1, 2, 3, 4, 5] && $e['beginn'] === '04:30',
+        'Automatik über das Formular gespeichert, zurück zur Karte');
+    $det = json_decode((string) Database::scalar("SELECT details FROM audit_log WHERE action = 'system.update.automatik' AND username = ? ORDER BY id DESC LIMIT 1",
+        [$kennung . '-admin']), true);
+    pruefe(($det['modus'] ?? '') === 'einspielen' && ($det['tage'] ?? '') === '1,2,3,4,5' && ($det['beginn'] ?? '') === '04:30' && ($det['dauer'] ?? 0) === 120
+        && ($det['karenz'] ?? -1) === 24 && array_key_exists('pause_bis', (array) $det), 'Automatik: Audit system.update.automatik mit allen Werten');
+    $r = $aufruf($port, $a['dose'], 'POST', '/system/update/automatik', ['tage' => []] + $felder);
+    Settings::vergessen();
+    pruefe($r['status'] === 302 && UpdateAutomatik::einstellungen()['tage'] === [1, 2, 3, 4, 5], 'Automatik: ohne Wochentag abgelehnt, nichts geändert');
+    $r = $aufruf($port, $a['dose'], 'GET', '/system/update');
+    pruefe(str_contains($r['text'], 'mindestens einen Wochentag'), 'Automatik: Meldung zur Ablehnung');
+    pruefe(str_contains($r['text'], 'Nächstes Fenster') && preg_match('/name="modus" value="einspielen" checked/', $r['text']) === 1, 'Seite: nächstes Fenster, einspielen gewählt');
+    Settings::put(UpdateAutomatik::VERSCHOBEN, gmdate('c', time() - 15 * 86400));
+    Settings::put(UpdateAutomatik::LETZTER, (string) json_encode(['tag' => date('Y-m-d'), 'zeit' => time(), 'ergebnis' => 'verschoben', 'grund' => 'aufbau',
+        'ziel' => $V, 'text' => 'Aufbau „' . $kennung . ' Messe“ läuft.', 'gemeldet' => ['aufbau']]));
+    $r = $aufruf($port, $a['dose'], 'GET', '/system/update');
+    pruefe(str_contains($r['text'], 'Automatische Updates werden seit 15 Tagen verschoben: Aufbau „' . $kennung . ' Messe“ läuft.')
+        && str_contains($r['text'], 'class="nav-hinweis warn"'), 'Seite: Banner und Abzeichen nach 14 Tagen Verschieben');
+    $automatikZurueck();
+    $schreiben('helfer', $helferText(time(), 'ja', 'nein'));
+    $r = $aufruf($port, $a['dose'], 'GET', '/system/update');
+    pruefe(preg_match('/name="modus" value="einspielen" disabled/', $r['text']) === 1 && str_contains($r['text'], 'AUTOMATIK=nein'), 'Seite: AUTOMATIK=nein – einspielen gesperrt, mit Hinweis');
+    $schreiben('helfer', $helferText(time()));
+    touch($upd . '/zeitplan', time() - 1000);
+    $r = $aufruf($port, $a['dose'], 'GET', '/system/update');
+    pruefe(str_contains($r['text'], 'Der Zeitplan läuft nicht') && str_contains($r['text'], 'systemctl status powermanagement-update-zeitplan.timer'), 'Seite: stiller Zeitplan mit Befehl');
+    touch($upd . '/zeitplan');
+
+    // Schreibsperre – an POST /system/update/automatik: die Einstellung bleibt, wie sie war
+    $automatikZurueck();
+    $sperrFelder = ['_token' => $a['token'], 'modus' => 'aus', 'tage' => ['1'], 'beginn' => '04:00', 'dauer' => '120', 'karenz' => '24', 'pause_bis' => ''];
+    $modus = static function (): ?string {
+        Settings::vergessen();
+        return Settings::get(UpdateAutomatik::MODUS);
+    };
+    $schreiben('wartung', UpdateService::KOPF_WARTUNG . "\nseit " . time() . "\nkennung -\n");
+    $r = $aufruf($port, $a['dose'], 'POST', '/system/update/automatik', $sperrFelder, ['Accept: application/json']);
+    $j = json_decode($r['text'], true);
+    pruefe($r['status'] === 503 && ($j['wartung'] ?? false) === true && preg_match('/^Retry-After: 30\r?$/mi', $r['kopf']) === 1, 'Schreibsperre: JSON → 503 mit Retry-After 30');
+    gleich($modus(), null, 'Schreibsperre: Einstellung unverändert');
+    $r = $aufruf($port, $a['dose'], 'POST', '/system/update/automatik', $sperrFelder, ['X-Requested-With: XMLHttpRequest']);
     pruefe($r['status'] === 302, 'Schreibsperre: Formular (X-Requested-With, ohne Accept) → Weiterleitung');
     pruefe(str_contains($aufruf($port, $a['dose'], 'GET', '/dashboard')['text'], 'Gerade läuft ein Update'), 'Schreibsperre: Meldung nach der Weiterleitung');
-    Settings::vergessen();
-    gleich(Settings::get('app.subtitle'), $untertitel, 'Schreibsperre: auch über das Formular unverändert');
-    gleich($aufruf($port, $a['dose'], 'GET', '/system/einstellungen')['status'], 200, 'Schreibsperre: Lesen geht');
+    gleich($modus(), null, 'Schreibsperre: auch über das Formular unverändert');
+    gleich($aufruf($port, $a['dose'], 'GET', '/system/update')['status'], 200, 'Schreibsperre: Lesen geht');
     $leer = $ordner . '/dose-leer';
     $seite = $aufruf($port, $leer, 'GET', '/login');
     $r = $aufruf($port, $leer, 'POST', '/login', ['username' => $kennung . '-kunde', 'password' => $kennwort, '_token' => $token($seite['text'])]);
     pruefe($r['status'] === 302 && $r['ziel'] !== '/login', 'Schreibsperre: Anmelden geht');
     $schreiben('wartung', UpdateService::KOPF_WARTUNG . "\nseit " . (time() - 4000) . "\nkennung -\n");
-    $r = $aufruf($port, $a['dose'], 'POST', '/system/einstellungen/speichern', ['_token' => $a['token'], 'app__subtitle' => 'Frei ' . $kennung], ['Accept: application/json']);
-    Settings::vergessen();
-    pruefe($r['status'] === 302 && Settings::get('app.subtitle') === 'Frei ' . $kennung, 'Schreibsperre älter als 60 min ohne Puls: wirkungslos');
+    $r = $aufruf($port, $a['dose'], 'POST', '/system/update/automatik', $sperrFelder, ['Accept: application/json']);
+    pruefe($r['status'] === 200 && (json_decode($r['text'], true)['ok'] ?? false) === true && $modus() === 'aus', 'Schreibsperre älter als 60 min ohne Puls: wirkungslos');
     $schreiben('lauf', $laufText(['puls' => (string) time()]));
-    $r = $aufruf($port, $a['dose'], 'POST', '/system/einstellungen/speichern', ['_token' => $a['token'], 'app__subtitle' => 'Wieder ' . $kennung], ['Accept: application/json']);
-    pruefe($r['status'] === 503, 'Schreibsperre älter als 60 min, Lauf pulst: wirksam');
+    $r = $aufruf($port, $a['dose'], 'POST', '/system/update/automatik', ['modus' => 'suchen'] + $sperrFelder, ['Accept: application/json']);
+    pruefe($r['status'] === 503 && $modus() === 'aus', 'Schreibsperre älter als 60 min, Lauf pulst: wirksam');
     $schreiben('wartung', null);
     $schreiben('lauf', null);
-    $untertitel === null ? Settings::forget('app.subtitle') : Settings::put('app.subtitle', (string) $untertitel);
+    $automatikZurueck();
 
     // Demo-Modus: Seite mit Hinweis, kein Abzeichen
     $d = $anmelden($demoPort, $kennung . '-admin');
     $r = $aufruf($demoPort, $d['dose'], 'GET', '/system/update');
     pruefe($r['status'] === 200 && str_contains($r['text'], 'Demo-Modus') && $phpMeldung($r['text']) === null, 'Demo: Seite mit „Demo-Modus“');
     pruefe(!str_contains($r['text'], 'nav-hinweis') && !str_contains($r['text'], 'update-zeichen'), 'Demo: kein Abzeichen');
+    pruefe(preg_match('/<fieldset disabled>\s*<legend>Modus<\/legend>/', $r['text']) === 1, 'Demo: Automatik nur zum Ansehen');
+    $r = $aufruf($demoPort, $d['dose'], 'POST', '/system/update/automatik', ['_token' => $d['token'], 'modus' => 'aus', 'tage' => ['1'], 'beginn' => '04:00',
+        'dauer' => '120', 'karenz' => '24']);
+    pruefe($r['status'] === 302 && $modus() === null, 'Demo: Automatik lässt sich nicht speichern');
 
     // Status-Abfrage hält die Sitzung nicht: ein POST desselben Benutzers wartet nicht
     if (erreichbar('127.0.0.1', $langsamPort)) {

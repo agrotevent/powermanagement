@@ -936,6 +936,8 @@ einheiten() {
         powermanagement-update.service
         powermanagement-update.path
         powermanagement-update.timer
+        powermanagement-update-zeitplan.service
+        powermanagement-update-zeitplan.timer
     )
     [[ "$MIT_NODERED" == "ja" ]] && e+=(powermanagement-nodered.service)
     [[ "$MIT_MOSQUITTO" == "ja" ]] && e+=(
@@ -1011,6 +1013,12 @@ abgleichen() {
     # nie – es läuft womöglich gerade in ihm.
     if [[ -f /etc/systemd/system/powermanagement-update.path && -f /etc/systemd/system/powermanagement-update.timer ]]; then
         systemctl enable --quiet ${jetzt[@]+"${jetzt[@]}"} powermanagement-update.path powermanagement-update.timer \
+            || [[ "$OHNE_DIENSTE" == "ja" ]]
+    fi
+    # Update-Zeitplan (automatische Updates, als Anwendungsbenutzer): nur der
+    # Zeitgeber – den Lauf startet er selbst alle fünf Minuten.
+    if [[ -f /etc/systemd/system/powermanagement-update-zeitplan.timer ]]; then
+        systemctl enable --quiet ${jetzt[@]+"${jetzt[@]}"} powermanagement-update-zeitplan.timer \
             || [[ "$OHNE_DIENSTE" == "ja" ]]
     fi
     # Geänderte Pfad- und Zeitgeber-Einheiten greifen erst nach einem Neustart –

@@ -4,6 +4,7 @@ declare(strict_types=1);
 namespace App\Services;
 
 use App\Support\Audit;
+use App\Support\Config;
 use App\Support\Database;
 use App\Support\Zeit;
 
@@ -19,9 +20,15 @@ use App\Support\Zeit;
  *                                       erst suchen (Stand älter als 60 s), dann
  *                                       „aktualisieren“ auf den verfügbaren Stand;
  *                                       Exit wie update-debian.sh (0/1/2/3)
+ *   update:automatik [aus|suchen|einspielen] [--tage=1,2,…] [--beginn=HH:MM]
+ *                    [--dauer=MIN] [--karenz=STD] [--pause-bis=JJJJ-MM-TT|--pause-bis=]
+ *                    [--versatz=MIN]    automatische Updates einstellen (ohne Modus:
+ *                                       anzeigen); nicht genannte Werte bleiben
+ *   update:zeitplan                     nur für powermanagement-update-zeitplan.timer
  *
  * Als root nur update:stand (lesen) – ein Auftrag von root gehörte root, und
- * der Helfer liest ihn als App-Benutzer.
+ * der Helfer liest ihn als App-Benutzer; root-eigene -wal/-shm neben der
+ * SQLite ebenso.
  */
 final class UpdateKonsole
 {
@@ -46,10 +53,12 @@ final class UpdateKonsole
                 . ' (als root gehörte der Auftrag root, und der Update-Dienst liest ihn als Anwendungsbenutzer).');
         }
         return match ($befehl) {
-            'update:stand'   => self::stand($aus, !$root),
-            'update:suchen'  => self::suchen($optionen, $aus, $fehler),
-            'update:starten' => self::starten($optionen, $aus, $fehler),
-            default          => 1,
+            'update:stand'     => self::stand($aus, !$root),
+            'update:suchen'    => self::suchen($optionen, $aus, $fehler),
+            'update:starten'   => self::starten($optionen, $aus, $fehler),
+            'update:automatik' => self::automatik($werte, $optionen, $aus, $fehler),
+            'update:zeitplan'  => self::zeitplan($optionen, $aus),
+            default            => 1,
         };
     }
 
@@ -119,6 +128,7 @@ final class UpdateKonsole
                 default                        => 'aktuell',
             } . $gesucht);
         }
+        $aus('Automatik:       ' . self::automatikZeile($z));
         $lauf = $z['lauf'];
         if (UpdateService::aktiv($z)) {
             $aus('Läuft gerade:    ' . ($z['zustand'] === 'angefordert' ? 'Auftrag wartet auf den Update-Dienst' . ($z['haengt'] ? ' (hängt)' : '')
@@ -143,6 +153,148 @@ final class UpdateKonsole
         }
         if ($z['abgeschaltet']) {
             $aus('Oberfläche:      Updates aus der Oberfläche abgeschaltet (/etc/powermanagement/update.conf)');
+        }
+        return 0;
+    }
+
+    /**
+     * „nur suchen und anzeigen“, „automatisch einspielen (täglich ab 04:00 …), nächstes Fenster …“
+     *
+     * @param array<string,mixed> $z wie UpdateService::zustand()
+     */
+    private static function automatikZeile(array $z): string
+    {
+        $a = UpdateAutomatik::anzeige(null, $z);
+        $e = $a['einstellungen'];
+        $zeile = $a['modus_text'];
+        if ($e['modus'] === 'einspielen') {
+            $zeile .= ' (' . UpdateAutomatik::fensterText($e) . ')';
+            if ($a['pausiert']) {
+                $zeile .= ', pausiert bis ' . self::zeit($e['pause_bis'], 'd.m.Y');
+            } elseif ($a['naechstes'] !== null) {
+                $zeile .= ', nächstes Fenster ' . UpdateAutomatik::terminText($a['naechstes']);
+            }
+            if ($a['letzter'] !== null) {
+                $zeile .= '; zuletzt ' . self::zeit($a['letzter']['zeit'], 'd.m. H:i') . ' ' . UpdateAutomatik::letzterText($a['letzter']);
+            }
+            if ($z['automatik_root']) {
+                $zeile .= ' – auf diesem System abgeschaltet (update.conf: AUTOMATIK=nein)';
+            }
+        }
+        if ($a['zeitplan_still']) {
+            $zeile .= ' – der Zeitplan läuft nicht: systemctl status powermanagement-update-zeitplan.timer powermanagement-update-zeitplan.service';
+        }
+        return $zeile;
+    }
+
+    // ================================================================ update:automatik
+
+    /**
+     * Ohne Modus: anzeigen. Mit Modus: speichern – nicht genannte Werte
+     * bleiben, wie sie sind (eine abgelaufene Pause fällt weg).
+     *
+     * @param list<string> $werte
+     * @param array<string,string|true> $optionen
+     * @param callable(string):void $aus
+     * @param callable(string):never $fehler
+     */
+    private static function automatik(array $werte, array $optionen, callable $aus, callable $fehler): int
+    {
+        if (Config::isDemo()) {
+            $fehler('Im Demo-Modus werden keine Updates eingestellt.');
+        }
+        $erlaubt = ['tage', 'beginn', 'dauer', 'karenz', 'pause-bis', 'versatz'];
+        foreach (array_keys($optionen) as $k) {
+            if (!in_array((string) $k, $erlaubt, true)) {
+                $fehler('Unbekannte Option --' . $k . ' (erlaubt: --' . implode(', --', $erlaubt) . ').');
+            }
+        }
+        $e = UpdateAutomatik::einstellungen();
+        if ($werte === []) {
+            if ($optionen !== []) {
+                $fehler('Erst den Modus nennen: php bin/power update:automatik aus|suchen|einspielen [--tage=…] …');
+            }
+            self::automatikZeigen($aus);
+            return 0;
+        }
+        if (count($werte) > 1) {
+            $fehler('Nur ein Modus: aus, suchen oder einspielen.');
+        }
+        $wert = static function (string $k) use ($optionen, $fehler): ?string {
+            if (!array_key_exists($k, $optionen)) {
+                return null;
+            }
+            if ($optionen[$k] === true) {
+                $fehler('--' . $k . ' braucht einen Wert (--' . $k . '=…).');
+            }
+            return trim((string) $optionen[$k]);
+        };
+        $zahl = static function (string $k, int $vorher) use ($wert, $fehler): int {
+            $v = $wert($k);
+            if ($v === null) {
+                return $vorher;
+            }
+            if (preg_match('/^[0-9]{1,4}$/', $v) !== 1) {
+                $fehler('--' . $k . ' erwartet eine ganze Zahl.');
+            }
+            return (int) $v;
+        };
+        $tage = $wert('tage');
+        $tage = $tage === null ? $e['tage'] : ($tage === '' ? [] : array_map('trim', explode(',', $tage)));
+        $pause = $wert('pause-bis');
+        if ($pause === null) {
+            $pause = $e['pause_bis'] !== null && $e['pause_bis'] > time() ? Zeit::anzeige(Zeit::iso($e['pause_bis']), 'Y-m-d') : '';
+        }
+        $erg = UpdateAutomatik::speichern(
+            $werte[0],
+            $tage,
+            $wert('beginn') ?? $e['beginn'],
+            $zahl('dauer', $e['dauer']),
+            $zahl('karenz', $e['karenz']),
+            $pause,
+            array_key_exists('versatz', $optionen) ? $zahl('versatz', 0) : null
+        );
+        if (!$erg['ok']) {
+            $fehler($erg['message']);
+        }
+        Audit::log('system.update.automatik', 'update', '', $erg['werte'] ?? []);
+        $aus($erg['message']);
+        self::automatikZeigen($aus);
+        return 0;
+    }
+
+    /** @param callable(string):void $aus */
+    private static function automatikZeigen(callable $aus): void
+    {
+        $a = UpdateAutomatik::anzeige();
+        $e = $a['einstellungen'];
+        $aus('Modus:           ' . $a['modus_text']);
+        $aus('Fenster:         ' . UpdateAutomatik::fensterText($e));
+        $aus('Pausiert bis:    ' . ($a['pausiert'] ? self::zeit($e['pause_bis'], 'd.m.Y') . ' (Ende des Tages)' : '–'));
+        if ($e['modus'] === 'einspielen') {
+            $aus('Nächstes:        ' . ($a['naechstes'] !== null ? UpdateAutomatik::terminText($a['naechstes']) : 'kein Fenster (kein Wochentag)'));
+        }
+        $aus('Zuletzt:         ' . ($a['letzter'] !== null ? self::zeit($a['letzter']['zeit']) . ' – ' . UpdateAutomatik::letzterText($a['letzter']) : '–'));
+        $aus('Zeitplan:        ' . ($a['zeitplan_alter'] === null ? 'noch nie gelaufen' : 'zuletzt ' . Zeit::abstand(Zeit::iso(time() - (int) $a['zeitplan_alter'])))
+            . ($a['zeitplan_still'] ? ' – läuft nicht: systemctl status powermanagement-update-zeitplan.timer' : ''));
+    }
+
+    // ================================================================ update:zeitplan
+
+    /**
+     * Für powermanagement-update-zeitplan.timer: gibt nur aus, was geschah
+     * (mit --gespraechig auch, warum nichts).
+     *
+     * @param array<string,string|true> $optionen
+     * @param callable(string):void $aus
+     */
+    private static function zeitplan(array $optionen, callable $aus): int
+    {
+        $r = UpdateAutomatik::zeitplan();
+        if ($r['meldung'] !== '') {
+            $aus($r['meldung']);
+        } elseif (isset($optionen['gespraechig'])) {
+            $aus('Nichts zu tun (' . $r['grund'] . ').');
         }
         return 0;
     }

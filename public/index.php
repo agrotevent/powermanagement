@@ -184,7 +184,7 @@ $router->post('/system/rollen/loeschen', [BenutzerController::class, 'rolleLoesc
 // Update aus der Oberfläche: nur ein Auftrag an den root-Helfer (storage/update/soll), nie ein Prozess.
 $router->get('/system/update', [\App\Controllers\UpdateController::class, 'index'], 'system.update');
 $router->get('/system/update/stand', [\App\Controllers\UpdateController::class, 'stand'], 'system.update');
-foreach (['suchen', 'starten'] as $aktion) {
+foreach (['suchen', 'starten', 'automatik'] as $aktion) {
     $router->post('/system/update/' . $aktion, [\App\Controllers\UpdateController::class, $aktion], 'system.update');
 }
 // Während eines Updates (Sicherung bis Prüfung) keine Änderungen: ein Zurückrollen spielte

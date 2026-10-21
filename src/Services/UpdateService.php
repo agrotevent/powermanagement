@@ -961,6 +961,12 @@ final class UpdateService
         if ($z['haengt']) {
             return ['stufe' => 'warn', 'text' => 'Der Update-Auftrag wird nicht übernommen'];
         }
+        if (UpdateAutomatik::zeitplanStill($jetzt, $z)) {
+            return ['stufe' => 'warn', 'text' => 'Der Update-Zeitplan läuft nicht'];
+        }
+        if (UpdateAutomatik::langeVerschoben($jetzt)) {
+            return ['stufe' => 'warn', 'text' => 'Automatische Updates werden seit über 14 Tagen verschoben'];
+        }
         $stand = $z['stand'];
         if (self::einspielbar($stand, $z['abgeschaltet'])) {
             $n = (int) $stand['neu'];

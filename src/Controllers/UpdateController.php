@@ -12,7 +12,8 @@ use App\Support\Request;
 use App\Support\Session;
 
 /**
- * System → Update: Stand, Änderungen, Aktualisieren mit Fortschritt.
+ * System → Update: Stand, Änderungen, Aktualisieren mit Fortschritt,
+ * automatische Updates.
  *
  * Nur mit „system.update“ (prüft die Route). Die Seite holt nichts und
  * startet nichts: Suchen und Aktualisieren legen einen Auftrag für den
@@ -27,7 +28,8 @@ final class UpdateController extends Controller
     {
         UpdateService::vermerken();
         UpdateService::vergessen();
-        $zustand = UpdateService::zustand();
+        $jetzt = time();
+        $zustand = UpdateService::zustand($jetzt);
         $stand = $zustand['stand'];
         $ziel = $stand['verfuegbar']['commit'] ?? null;
         $this->view('system/update', [
@@ -36,13 +38,37 @@ final class UpdateController extends Controller
             'installiert'  => UpdateService::installiert(),
             'verlauf'      => UpdateService::verlauf(30),
             'protokoll'    => UpdateService::protokollDatei(),
-            'hindernisse'  => in_array($zustand['zustand'], ['demo', 'nicht_eingerichtet'], true) ? [] : UpdateAutomatik::hindernisse(time()),
+            'hindernisse'  => in_array($zustand['zustand'], ['demo', 'nicht_eingerichtet'], true) ? [] : UpdateAutomatik::hindernisse($jetzt),
             'ziel'         => $ziel,
             'sperreSuchen' => UpdateService::sperrgrund('pruefen'),
             'sperreStarten' => UpdateService::sperrgrund('aktualisieren', $ziel),
             'dauerZuletzt' => UpdateService::dauerZuletzt(),
+            'automatik'    => UpdateAutomatik::anzeige($jetzt, $zustand),
             'scripts'      => ['/assets/js/update.js'],
         ]);
+    }
+
+    /** Automatische Updates einstellen: Modus, Fenster, Karenz, Pause. */
+    public function automatik(Request $request): void
+    {
+        $ziel = self::ZIEL . '#automatik';
+        if (UpdateService::zustand()['zustand'] === 'demo') {
+            Flash::error('Im Demo-Modus werden keine Updates eingestellt.');
+            $this->redirect($ziel);
+            return;
+        }
+        $erg = UpdateAutomatik::speichern(
+            $request->str('modus'),
+            $request->arr('tage'),
+            $request->str('beginn'),
+            $request->int('dauer', -1),
+            $request->int('karenz', -1),
+            $request->str('pause_bis')
+        );
+        if ($erg['ok']) {
+            Audit::log('system.update.automatik', 'update', '', $erg['werte'] ?? []);
+        }
+        $this->antwort($request, $erg, $ziel);
     }
 
     /** Für update.js: nur lesen, ohne die Sitzung zu halten (alle 2 s abgefragt). */

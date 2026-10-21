@@ -32,6 +32,9 @@
 #   6. Abbruch (systemctl stop) und Absturz (SIGKILL) mitten in einem Update
 #      aus der Oberfläche: Zurückrollen bzw. Nachlauf und Wiederanlauf über
 #      den Update-Dienst; ein zweiter Lauf wartet nicht, sondern meldet „besetzt“
+#   7. Automatik (Zeitplan als App-Benutzer): im Zeitfenster von selbst
+#      eingespielt, höchstens einmal je Tag; während eines Aufbaus verschoben
+#      (einmal ins Audit), danach eingespielt
 #   8. Update-Dienst: Aufträge als App-Benutzer nach storage/update/soll
 #      (Suchen, Aktualisieren mit Stufe 2 und Protokoll ins Journal), dann
 #      untergeschobene Aufträge (Müll, Verweis auf /etc/shadow, FIFO, Ordner,
@@ -155,8 +158,9 @@ MARKE_OFFEN=/var/lib/powermanagement/update/offen
 GESCHEITERT=/var/lib/powermanagement/update/gescheitert
 SOLL="$ZIEL/storage/update/soll"
 IST="$ZIEL/storage/update/ist"
-# Die Einheiten des Update-Dienstes (eingeschaltet: Pfad und Zeitgeber)
-UPDATE_EINHEITEN=(powermanagement-update.service powermanagement-update.path powermanagement-update.timer)
+# Die Einheiten des Update-Dienstes (eingeschaltet: Pfad und Zeitgeber) und des Zeitplans
+UPDATE_EINHEITEN=(powermanagement-update.service powermanagement-update.path powermanagement-update.timer
+                  powermanagement-update-zeitplan.service powermanagement-update-zeitplan.timer)
 WARTUNG="$ZIEL/storage/update/ist/wartung"
 FEHLER=0
 
@@ -408,6 +412,56 @@ abstand_abwarten() {
     return 0
 }
 
+# ------------------------------------------------------------ Automatik
+# power_app <befehl …>: bin/power als Anwendungsbenutzer
+power_app() { (cd "$ZIEL" && runuser -u www-data -- php bin/power "$@"); }
+# app_php <code>: PHP mit der Anwendung als Anwendungsbenutzer (Werte über die Umgebung)
+app_php() { (cd "$ZIEL" && runuser -u www-data -- php -r 'require "src/bootstrap.php"; '"$1"); }
+# ruhe_abwarten [sek]: kein Auftrag liegt, der Update-Dienst läuft nicht – dreimal hintereinander
+ruhe_abwarten() {
+    local ruhig=0
+    for _ in $(seq 1 "${1:-900}"); do
+        if [[ ! -e "$SOLL/auftrag" && ! -L "$SOLL/auftrag" ]] \
+            && [[ "$(systemctl is-active powermanagement-update.service 2>/dev/null || true)" != "activating" ]]; then
+            ruhig=$((ruhig + 1))
+            (( ruhig >= 3 )) && return 0
+        else
+            ruhig=0
+        fi
+        sleep 1
+    done
+    return 1
+}
+# zeitplan_bis <commit>: den Zeitplan starten wie sein Zeitgeber (bis zu 3× – erst
+# suchen, dann einspielen), dazwischen auf einen ruhenden Update-Dienst warten
+zeitplan_bis() {
+    local i
+    for i in 1 2 3; do
+        systemctl start powermanagement-update-zeitplan.service || return 1
+        ruhe_abwarten 900 || return 1
+        if [[ "$(kopf)" == "$1" ]]; then
+            echo "            (Zeitplan-Lauf $i)"
+            return 0
+        fi
+    done
+    return 1
+}
+# auto_letzter: „<ergebnis> <grund>“ aus update.auto_letzter
+auto_letzter() {
+    app_php '$l = \App\Services\UpdateAutomatik::letzter(); echo $l["ergebnis"] ?? "-", " ", ($l["grund"] ?? "") !== "" ? $l["grund"] : "-";'
+}
+# aufbau_pruefung <status>: ein Standort mit Aufbau „Prüfung Automatik“ (anlegen bzw. Status setzen)
+aufbau_pruefung() {
+    PM_STATUS="$1" app_php '$db = "\App\Support\Database"; $n = "Prüfung Automatik";
+        $id = (int) $db::scalar("SELECT id FROM aufbauten WHERE name = ?", [$n]);
+        if ($id === 0) {
+            $site = $db::insert("sites", ["name" => $n, "created_at" => gmdate("c")]);
+            $db::insert("aufbauten", ["site_id" => $site, "name" => $n, "status" => getenv("PM_STATUS"), "gestartet_am" => gmdate("c"), "created_at" => gmdate("c")]);
+        } else {
+            $db::execute("UPDATE aufbauten SET status = ? WHERE id = ?", [getenv("PM_STATUS"), $id]);
+        }'
+}
+
 # Erst den Stand der Anwendung abwarten, dann prüfen, was ein Betreiber
 # nach der Installation vorfinden muss. „ohne_update“: eine Fassung ohne
 # Update-Funktion (Umstieg, U1).
@@ -455,7 +509,7 @@ pruefe_installation() {
     # wecken wie der Zeitgeber – sonst stünde womöglich noch ein Lebenszeichen
     # von mitten aus dem letzten Update da.
     if [[ "$mit_update" == "ja" ]]; then
-        for einheit in powermanagement-update.path powermanagement-update.timer; do
+        for einheit in powermanagement-update.path powermanagement-update.timer powermanagement-update-zeitplan.timer; do
             pruefe "$einheit läuft" systemctl is-active --quiet "$einheit"
         done
         pruefe "powermanagement-update.service nicht gescheitert" \
@@ -468,6 +522,11 @@ pruefe_installation() {
             'grep -qE "^installiert [0-9a-f]{40} [0-9]+$" "$1/stand" && grep -qx "zweig main" "$1/stand"' _ "$IST"
         pruefe "ist/ gehört www-data, Dateien 640" \
             leer "$(find "$IST" -mindepth 1 \( ! -user www-data -o -type f ! -perm 640 \) -print)"
+        # Der Zeitplan (automatische Updates) läuft als Anwendungsbenutzer in der
+        # Sandbox – einmal wie sein Zeitgeber starten: er endet ohne Fehler und
+        # hinterlässt sein Lebenszeichen.
+        pruefe "Update-Zeitplan läuft ohne Fehler durch" systemctl start powermanagement-update-zeitplan.service
+        pruefe "Update-Zeitplan meldet sich (storage/update/zeitplan)" test -e "$ZIEL/storage/update/zeitplan"
         pruefe "bin/power update:stand: eingerichtet" bash -c \
             'cd "$1" && runuser -u www-data -- php bin/power update:stand | grep -q "^Update-Funktion: eingerichtet"' _ "$ZIEL"
     fi
@@ -921,6 +980,67 @@ pruefe "danach: auf dem neuen Stand" test "$(kopf)" = "$NEU"
 pruefe_installation
 abschluss "Absturz"
 
+# ------------------------------------------------------------ 7
+schritt "7 · Automatik: im Zeitfenster von selbst einspielen, nie während eines Aufbaus"
+# Den Zeitplan treiben hier die Prüfungen selbst (wie sein Zeitgeber) – sein
+# Zeitgeber käme sonst dazwischen (etwa mit „nichts Neues“ für heute).
+systemctl stop powermanagement-update-zeitplan.timer
+# Das Fenster beginnt jetzt (Wanduhr der Installation), ohne Karenz und Versatz.
+BEGINN="$(app_php 'echo (new DateTimeImmutable("now", \App\Support\Zeit::zone()))->format("H:i");')"
+pruefe "update:automatik einspielen ab $BEGINN" \
+    power_app update:automatik einspielen --tage=1,2,3,4,5,6,7 "--beginn=$BEGINN" --dauer=60 --karenz=0 --versatz=0
+pruefe "update:stand: Automatik automatisch einspielen" bash -c 'cd "$1" && runuser -u www-data -- php bin/power update:stand | grep -q "^Automatik:       automatisch einspielen"' _ "$ZIEL"
+NEU="$(neuer_stand "Stand für die Automatik" "printf '\n' >> README.md")"
+abstand_abwarten konsole
+pruefe "update:suchen --warten" power_app update:suchen --warten
+pruefe "ist/stand nennt den neuen Stand" grep -qE "^verfuegbar $NEU [0-9]+\$" "$IST/stand"
+pruefe "Zeitplan spielt im Fenster ein" zeitplan_bis "$NEU"
+journalctl --sync 2>/dev/null || true
+pruefe "Automatik: auf dem neuen Stand" test "$(kopf)" = "$NEU"
+pruefe "Automatik: Lauf automatik/zeitplan eingespielt (kam: $(ist_wert lauf ausloeser) $(ist_wert lauf von) $(ist_wert lauf ergebnis))" \
+    test "$(ist_wert lauf ausloeser) $(ist_wert lauf von) $(ist_wert lauf ergebnis)" = "automatik zeitplan eingespielt"
+pruefe "Automatik: Audit system.update.automatisch" test "$(audit_zahl system.update.automatisch "%\"ziel7\":\"${NEU:0:7}\"%")" = 1
+pruefe "Automatik: auto_letzter angefordert" test "$(auto_letzter)" = "angefordert -"
+pruefe "Automatik: Verlauf automatik zeitplan eingespielt" \
+    bash -c "tail -n 1 /var/lib/powermanagement/update/verlauf | grep -q ' automatik zeitplan aktualisieren eingespielt '"
+LAUF_VORHER="$(ist_wert lauf kennung)"
+pruefe "ein weiterer Zeitplan-Lauf endet ohne Fehler" systemctl start powermanagement-update-zeitplan.service
+pruefe "ein weiterer Zeitplan-Lauf stellt keinen Auftrag" ruhe_abwarten 60
+pruefe "ein weiterer Zeitplan-Lauf: kein neuer Lauf" test "$(ist_wert lauf kennung)" = "$LAUF_VORHER"
+abschluss "Automatik"
+
+# Ein späterer Tag: das Update eben gilt als früher (zwei Tage – auch wenn das
+# Fenster über Mitternacht reicht), ebenso für root (dessen 20-Stunden-Abstand).
+# Und ein Aufbau läuft.
+app_php '$l = \App\Services\UpdateAutomatik::letzter(); $l["tag"] = (new DateTimeImmutable("-2 days", \App\Support\Zeit::zone()))->format("Y-m-d");
+    \App\Support\Settings::put(\App\Services\UpdateAutomatik::LETZTER, json_encode($l));'
+if [[ -f /var/lib/powermanagement/update/zeiten ]]; then
+    sed -i '/^automatik /d' /var/lib/powermanagement/update/zeiten
+fi
+pruefe "Aufbau „Prüfung Automatik“ läuft" aufbau_pruefung aufbau
+ALT="$(kopf)"
+NEU="$(neuer_stand "Stand während eines Aufbaus" "printf '\n' >> README.md")"
+abstand_abwarten konsole
+pruefe "update:suchen --warten" power_app update:suchen --warten
+for i in 1 2; do
+    pruefe "Aufbau: Zeitplan-Lauf $i endet ohne Fehler" systemctl start powermanagement-update-zeitplan.service
+    ruhe_abwarten 60 || true
+done
+pruefe "Aufbau: verschoben (kam: $(auto_letzter))" test "$(auto_letzter)" = "verschoben aufbau"
+pruefe "Aufbau: Stand unverändert" test "$(kopf)" = "$ALT"
+pruefe "Aufbau: kein Auftrag" test ! -e "$SOLL/auftrag"
+pruefe "Aufbau: Audit system.update.verschoben einmal (zwei Läufe)" test "$(audit_zahl system.update.verschoben '%"grund":"aufbau"%')" = 1
+pruefe "Aufbau beendet" aufbau_pruefung beendet
+abstand_abwarten
+pruefe "nach dem Aufbau spielt der Zeitplan ein" zeitplan_bis "$NEU"
+pruefe "nach dem Aufbau: auf dem neuen Stand" test "$(kopf)" = "$NEU"
+app_php '$db = "\App\Support\Database"; $db::execute("DELETE FROM aufbauten WHERE name = ?", ["Prüfung Automatik"]);
+    $db::execute("DELETE FROM sites WHERE name = ?", ["Prüfung Automatik"]);'
+pruefe "update:automatik suchen (Vorgabe)" power_app update:automatik suchen
+systemctl start powermanagement-update-zeitplan.timer
+pruefe_installation
+abschluss "Automatik"
+
 # ------------------------------------------------------------ 8a
 schritt "8a · Update-Dienst: Aufträge als App-Benutzer (Suchen, Aktualisieren)"
 ALT="$(kopf)"
@@ -1000,4 +1120,4 @@ abschluss "untergeschobene Aufträge"
 
 echo
 echo "Installation, zweiter Lauf, Updates (ohne HOME, über die Oberfläche mit Selbst-Update, update:starten),"
-echo "Zurückrollen, Abbruch, Absturz mit Wiederanlauf und der Update-Dienst in Ordnung."
+echo "Zurückrollen, Abbruch, Absturz mit Wiederanlauf, automatische Updates und der Update-Dienst in Ordnung."

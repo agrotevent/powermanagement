@@ -25,6 +25,10 @@ declare(strict_types=1);
  *                                   Aktualisieren wie in der Oberfläche; --warten zeigt den
  *                                   Fortschritt, Exit wie update-debian.sh (0/1/2/3). Als
  *                                   Anwendungsbenutzer: runuser -u www-data -- php bin/power …
+ *   bin/power update:automatik [aus|suchen|einspielen] [--tage=1,2,…] [--beginn=HH:MM]
+ *             [--dauer=MIN] [--karenz=STD] [--pause-bis=JJJJ-MM-TT|--pause-bis=]
+ *                                   Automatische Updates einstellen (ohne Modus: anzeigen)
+ *   bin/power update:zeitplan       Updates planen (alle 5 min per Timer, als Anwendungsbenutzer)
  *   bin/power sammler [--einmal] [--gespraechig]
  *                                   Modbus-Geräte und Clouds abfragen (Dauerdienst)
  *   bin/power user:add <name> <rolle> [passwort]
@@ -243,7 +247,7 @@ switch ($befehl) {
         }
         exit($ok ? 0 : 1);
 
-    case 'update:stand': case 'update:suchen': case 'update:starten':
+    case 'update:stand': case 'update:suchen': case 'update:starten': case 'update:automatik': case 'update:zeitplan':
         exit(\App\Services\UpdateKonsole::ausfuehren($befehl, $werte, $optionen, $aus, $fehler));
 
     case 'sammler':
