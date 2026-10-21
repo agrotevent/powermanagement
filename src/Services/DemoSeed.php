@@ -11,12 +11,20 @@ use App\Messung\Datenquellen;
 use App\Support\Config;
 use App\Support\Database;
 use App\Support\Zeit;
+use App\Tanks\TankService;
 
 /**
- * Ein Demo-Festivalgelände: Netzanschluss, Aggregat, Speicher, Verteilungen
- * mit Sicherungen und RCDs, Kabel, Kabelbrücken, Messgeräte, Benutzer mit
- * zeitlich begrenzten Freigaben, Prüfgeräte und drei Übergabeberichte
- * (abgeschlossen, vom Prüfer unterschrieben, Entwurf).
+ * Ein Demo-Festivalgelände: Netzanschluss, Aggregat mit Tank am
+ * Kraftstoffschlauch, Speicher, Verteilungen mit Sicherungen und RCDs, Kabel,
+ * Kabelbrücken, Messgeräte, Benutzer mit zeitlich begrenzten Freigaben,
+ * Prüfgeräte und drei Übergabeberichte (abgeschlossen, vom Prüfer
+ * unterschrieben, Entwurf).
+ *
+ * Der Tank des Aggregats (QUADRO-AG 3000 aus dem mitgelieferten Katalog)
+ * misst mit dem Tanksensor TS-01 seit drei Tagen; vorgestern bzw. gestern um
+ * 06:00 ist er laut Lieferschein DEMO-0815 betankt worden, daraus kennt er
+ * seinen Inhalt je mm. Der Reservetank am Catering hat keinen Sensor, nur
+ * eine Peilung von heute früh; TS-02 liegt im Lager.
  *
  * Alle Namen, Firmen und Unterschriften sind erfunden.
  *
@@ -30,6 +38,7 @@ final class DemoSeed
         if ($zuruecksetzen) {
             // Mit allen Berichten auch die Nummernzähler: die Demo beginnt wieder bei …-0001.
             foreach (['bericht_ereignisse', 'bericht_pdf', 'bericht_unterschriften', 'bericht_objekte', 'berichte', 'bericht_nummern', 'kundenmodus_geraete', 'pruefgeraete',
+                'tank_ereignisse', 'tank_kennlinien',
                 'aufbau_posten', 'aufbauten', 'einsaetze', 'inventar_messgeraete', 'inventar', 'bereich_mitglieder', 'bereiche', 'leitungen', 'messpunkte', 'anschluesse', 'schutzorgane', 'objekte', 'datenquellen', 'freigaben', 'floors', 'sites', 'schaltvorgaenge', 'mqtt_zugaenge'] as $tabelle) {
                 Database::execute('DELETE FROM ' . $tabelle);
             }
@@ -99,6 +108,18 @@ final class DemoSeed
         AnlagenService::anzahlSetzen($saeule, ['abgang' => [$typ['cee32'] => 2, $typ['cee16'] => 2, $typ['schuko'] => 2]]);
         SchutzService::vorschlagen($saeule);
 
+        // Tank-Typen aus dem mitgelieferten Katalog (Strombibel Seite 20) –
+        // genau wie ein Import sie anlegt, ein späterer Import sieht sie „schon da“.
+        $tankTyp = [];
+        $paket = json_decode((string) @file_get_contents(dirname(__DIR__, 2) . '/resources/kataloge/bss-strombibel.json'), true);
+        foreach ((array) ($paket['typen'] ?? []) as $datei) {
+            $schluessel = is_array($datei) ? (string) ($datei['schluessel'] ?? '') : '';
+            if (in_array($schluessel, ['tank-quadro-ag-1000', 'tank-quadro-ag-3000'], true)) {
+                $erg = VerteilerBundle::typAnwenden($schluessel, $datei);
+                $tankTyp[$schluessel] = $erg['ok'] ? (int) $erg['id'] : null;
+            }
+        }
+
         $setzen = static function (array $daten, float $x, float $y) use ($siteId, $floorId): int {
             return (int) AnlagenService::speichern(null, $daten + ['site_id' => $siteId, 'floor_id' => $floorId, 'plan_x' => $x, 'plan_y' => $y, 'status' => 'in_betrieb'])['id'];
         };
@@ -116,7 +137,9 @@ final class DemoSeed
         AnlagenService::anzahlSetzen($netz, ['abgang' => [$typ['powerlock'] => 1, $typ['cee125'] => 1]]);
 
         $gen = $setzen(['art' => 'generator', 'name' => 'Aggregat 1', 'kennung' => 'G-100-07', 'hersteller' => 'Musteraggregate',
-            'modell' => 'SG 100', 'nennleistung_kva' => 100, 'eigenschaften' => ['steuerung' => 'ComAp InteliGen 200', 'kraftstoff' => 'HVO', 'tank_l' => 400, 'verbrauch_l_h' => 22],
+            'modell' => 'SG 100', 'nennleistung_kva' => 100, 'eigenschaften' => ['steuerung' => 'ComAp InteliGen 200', 'kraftstoff' => 'HVO', 'tank_l' => 400, 'verbrauch_l_h' => 22,
+                // die 100-kVA-Zeile der Strombibel – Verbrauch und Restlaufzeit des Tanks am Schlauch
+                'verbrauch_kennlinie' => '100% 22L / 70% 16L / 50% 12L'],
             'ohne_anschluesse' => true], 88.0, 18.0);
         AnlagenService::anzahlSetzen($gen, ['abgang' => [$typ['powerlock'] => 1, $typ['cee63'] => 2, $typ['cee32'] => 1]]);
         SchutzService::vorschlagen($gen);
@@ -133,6 +156,15 @@ final class DemoSeed
         $licht = $setzen(['art' => 'verteilung', 'name' => 'Licht Gelände', 'kennung' => 'PD32-12', 'vorlage_id' => $pd32, 'nennstrom_a' => 32, 'modell' => 'PD 32/16'], 62.0, 50.0);
         $kasse = $setzen(['art' => 'verteilung', 'name' => 'Kasse Einlass', 'kennung' => 'SV16-03', 'vorlage_id' => $sv16, 'nennstrom_a' => 16, 'modell' => 'SV 16'], 60.0, 93.0);
         $truckV = $setzen(['art' => 'verteilung', 'name' => 'Foodtruck-Verteiler', 'kennung' => 'PD63-07', 'vorlage_id' => $pd63, 'nennstrom_a' => 63, 'modell' => 'PD 63/32/16'], 75.0, 42.0);
+        // Der Tank des Aggregats (doppelwandig, HVO wie das Aggregat) und ein
+        // Reservetank am Catering, beide aus dem Katalog. Den Inhalt je mm
+        // kennt keiner – er kommt aus der ersten Betankung bzw. Peilung.
+        $tankAgg = $setzen(['art' => 'tank', 'name' => 'Tank Aggregat 1', 'kennung' => 'T3000-02', 'modell' => 'QUADRO-AG 3000',
+            'vorlage_id' => $tankTyp['tank-quadro-ag-3000'] ?? null,
+            'eigenschaften' => ['inhalt_l' => 3000, 'kraftstoff' => 'HVO', 'bauform' => 'Quader', 'sumpf_l' => 140, 'tankanschluss' => '2 Anschlüsse']], 84.0, 26.0);
+        $tankReserve = $setzen(['art' => 'tank', 'name' => 'Reserve Catering', 'kennung' => 'T1000-05', 'modell' => 'QUADRO-AG 1000',
+            'vorlage_id' => $tankTyp['tank-quadro-ag-1000'] ?? null,
+            'eigenschaften' => ['inhalt_l' => 1000, 'kraftstoff' => 'Diesel', 'bauform' => 'Quader']], 25.0, 80.0);
 
         // ---- Kabel
         $anschluss = static function (int $objekt, string $richtung, string $stecker, int $n = 0) use ($typ): ?int {
@@ -180,6 +212,9 @@ final class DemoSeed
         $offen($truckV, $anschluss($truckV, 'abgang', 'schuko'), 2.5, [[75.0, 42.0], [66.0, 42.0], [66.0, 40.0]], 'Kaffeemobil');
         $offen($gen, $anschluss($gen, 'abgang', 'cee63', 1), 16, [[88.0, 18.0], [95.0, 18.0], [95.0, 42.0], [90.0, 44.0]], 'Grill-Truck');
         LeitungService::speichern(null, ['art' => 'kabelweg', 'floor_id' => $floorId, 'name' => 'Trasse Ost (Reserve)', 'punkte' => [[45.0, 38.0], [80.0, 38.0], [88.0, 30.0]]]);
+        // Kraftstoffschlauch vom Tank zum Aggregat: Vor- und Rücklauf mit Steckkupplungen HK-A3.
+        LeitungService::speichern(null, ['art' => 'kraftstoff', 'floor_id' => $floorId, 'name' => 'Tank → Aggregat 1', 'von_objekt_id' => $tankAgg, 'zu_objekt_id' => $gen,
+            'kabeltyp' => 'DN 10 (3/8″)', 'modell' => 'HK-A3', 'anzahl' => 2, 'punkte' => [[84.0, 26.0], [86.0, 21.0], [88.0, 18.0]]]);
         LeitungService::speichern(null, ['art' => 'kabelbruecke', 'floor_id' => $floorId, 'name' => 'Überfahrt Hauptweg', 'modell' => '5-Kanal', 'anzahl' => 4, 'punkte' => [[20.5, 50.0], [23.5, 50.0]]]);
         LeitungService::speichern(null, ['art' => 'kabelbruecke', 'floor_id' => $floorId, 'name' => 'Rettungsweg', 'modell' => 'Defender Midi', 'anzahl' => 3, 'punkte' => [[43.5, 60.0], [46.5, 60.0]]]);
 
@@ -231,11 +266,27 @@ final class DemoSeed
             'messgeraete' => [['geraet' => 'shellypro3em-zs3205', 'kanal' => 'em:0', 'stelle' => 'durchgang']]]);
         $inventar(['art' => 'zwischenstecker', 'kennung' => 'ZS-125-01', 'steckertyp_id' => $typ['cee125'], 'defekt' => 1,
             'notizen' => 'Stromwandler L2 gebrochen – zur Reparatur.']);
+        // Tanksensoren: TS-01 (Plus Uni, Sonde 0–100 mbar an 500 Ω, meldet in
+        // Schritten von 0,1 V) steckt im Tank des Aggregats, TS-02 (Sonde
+        // 0–2 mWS am Wandler 0–20 mA → 0–10 V) liegt im Lager.
+        $ts01 = $inventar(['art' => 'tanksensor', 'kennung' => 'TS-01',
+            'eigenschaften' => ['prinzip' => 'hydrostatisch', 'feld' => 'u', 'signal' => '4-20mA', 'buerde_ohm' => 500,
+                'bereich_von' => 0, 'bereich_bis' => 100, 'bereich_einheit' => 'mbar', 'schritt_roh' => 0.1],
+            'messgeraete' => [['geraet' => 'shellyplusuni-tank1', 'kanal' => 'voltmeter:100', 'stelle' => 'fuellstand']]]);
+        $inventar(['art' => 'tanksensor', 'kennung' => 'TS-02', 'name' => 'TL-136, 5 m Kabel',
+            'eigenschaften' => ['prinzip' => 'hydrostatisch', 'feld' => 'u', 'signal' => '4-20mA-wandler', 'u_bei_4ma' => 2.0, 'u_bei_20ma' => 10.0,
+                'bereich_von' => 0, 'bereich_bis' => 2, 'bereich_einheit' => 'mWS', 'schritt_roh' => 0.05],
+            'messgeraete' => [['geraet' => 'shellyplusuni-tank2', 'kanal' => 'voltmeter:100', 'stelle' => 'fuellstand']],
+            'notizen' => 'Wandler auf 0–20 mA → 0–10 V gestellt (4 mA = 2,00 V). Kabel 5 m, belüftet.']);
         InventarService::einsetzen($pd6307, $truckV);
         InventarService::einsetzen($zs6302, $gen, $anschluss($gen, 'abgang', 'cee63', 1));
+        InventarService::einsetzen($ts01, $tankAgg, null, true, ['offset_mm' => 20]);
+        // Alles seit drei Tagen im Einsatz – auch die erste Kennlinie des
+        // Tanksensors (ab dem Einbau, noch ohne Inhalt je mm).
         $seit = gmdate('c', time() - 3 * 86400);
         Database::execute('UPDATE einsaetze SET ab = ?', [$seit]);
         Database::execute('UPDATE messpunkte SET gueltig_ab = ? WHERE einsatz_id IS NOT NULL', [$seit]);
+        Database::execute('UPDATE tank_kennlinien SET ab = ?', [$seit]);
 
         // ---- Bereich: die Foodtruck-Meile. Das Aggregat versorgt auch das
         // Licht, zählt also nicht als Ganzes – nur sein Abgang zum Grill-Truck.
@@ -297,6 +348,33 @@ final class DemoSeed
         ]);
         unset($gx);
 
+        // ---- Tanks vor Ort, eingetragen von der Technik: Betankung des
+        // Aggregat-Tanks laut Lieferschein (die Demo-Sonde springt jeden Tag um
+        // 06:00 auf 2.700 l, 528 l nach 24 h mit 22 l/h) – ausgewertet wie in
+        // der App, daraus lernt der Tank seinen Inhalt je mm. Die Fassung gilt
+        // ab eine Stunde nach dem Tanken, wie wenn sie dann ausgewertet worden
+        // wäre. Am Reservetank eine Peilung von heute 08:00.
+        Auth::alsBenutzer($technik);
+        $ortszeit = static fn (int $t): \DateTimeImmutable => (new \DateTimeImmutable('@' . $t))->setTimezone(Zeit::zone());
+        $sechs = $ortszeit(time())->setTime(6, 0);
+        $sechs = ($sechs->getTimestamp() > time() ? $sechs->modify('-1 day') : $sechs)->modify('-1 day');
+        $tank = AnlagenService::find($tankAgg);
+        $betankung = $tank !== null ? TankService::betankungSpeichern($tank, ['liter' => '528', 'zeit' => $sechs->format('Y-m-d\TH:i'),
+            'lieferschein' => 'DEMO-0815', 'notizen' => 'Tankwagen Musteröl']) : ['ok' => false];
+        if (!empty($betankung['kalibriert'])) {
+            Database::execute("UPDATE tank_kennlinien SET ab = ?, created_at = ? WHERE objekt_id = ? AND anlass = 'betankung'",
+                [Zeit::iso($sechs->getTimestamp() + 3600), Zeit::iso($sechs->getTimestamp() + 3600), $tankAgg]);
+        }
+        $acht = $ortszeit(time())->setTime(8, 0);
+        $acht = $acht->getTimestamp() > time() ? $acht->modify('-1 day') : $acht;
+        $tank = AnlagenService::find($tankReserve);
+        $peilung = $tank !== null ? TankService::peilen($tank, ['prozent' => '60', 'notizen' => 'Anzeige am Tank']) : ['ok' => false];
+        if (!empty($peilung['id'])) {
+            Database::execute('UPDATE tank_ereignisse SET zeit = ?, created_at = ? WHERE id = ?',
+                [Zeit::iso($acht->getTimestamp()), Zeit::iso($acht->getTimestamp()), (int) $peilung['id']]);
+        }
+        Auth::alsBenutzer(null);
+
         // ---- Eigene MQTT-Zugänge: das Licht ist umgestellt, das Kaffeemobil
         // wartet auf seinen Neustart. Der Hash ist ein Platzhalter – im
         // Demo-Modus gibt es keinen Broker.
@@ -316,7 +394,8 @@ final class DemoSeed
         self::berichte($siteId, $aufbau, $technik, ['aggregat' => $gen, 'licht' => $licht, 'foodtruck' => $truckV, 'catering' => $catering, 'kasse' => $kasse]);
 
         return 'Demo-Gelände angelegt: ' . (int) Database::scalar('SELECT COUNT(*) FROM objekte WHERE ist_vorlage = 0') . ' Anlagen (davon '
-            . (int) Database::scalar('SELECT COUNT(*) FROM objekte WHERE ist_vorlage = 0 AND fest = 1') . ' Feststromanschlüsse), '
+            . (int) Database::scalar('SELECT COUNT(*) FROM objekte WHERE ist_vorlage = 0 AND fest = 1') . ' Feststromanschlüsse, '
+            . (int) Database::scalar("SELECT COUNT(*) FROM objekte WHERE ist_vorlage = 0 AND art = 'tank'") . ' Tanks), '
             . (int) Database::scalar('SELECT COUNT(*) FROM leitungen') . ' Leitungen, '
             . (int) Database::scalar('SELECT COUNT(*) FROM bereiche') . ' Bereich, '
             . (int) Database::scalar('SELECT COUNT(*) FROM inventar') . ' Inventarstücke, '

@@ -95,7 +95,9 @@ final class BereichController extends Controller
     private function formular(array $bereich, array $gewaehlt, array $standorte): void
     {
         $siteId = (int) $bereich['site_id'];
-        $objekte = $siteId > 0 ? Zugriff::filtern(AnlagenService::liste(['site_id' => $siteId])) : [];
+        // Nur, was Strom führt – ein Tank zählt in keiner Lastsumme.
+        $objekte = $siteId > 0 ? array_values(array_filter(Zugriff::filtern(AnlagenService::liste(['site_id' => $siteId])),
+            static fn (array $o): bool => AnlagenService::elektrisch((string) $o['art']))) : [];
         // Messgeräte an Abgängen – einzeln wählbar (der Shelly am Abgang eines
         // Foodtrucks). Je Abgang eine Zeile, auch wenn dort nacheinander
         // verschiedene Geräte steckten (Inventar-Einsätze): gezählt wird die Stelle.

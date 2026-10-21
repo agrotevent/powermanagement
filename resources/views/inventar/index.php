@@ -4,7 +4,7 @@ use App\Support\View;
 use App\Support\Zeit;
 
 $title = 'Inventar';
-$subtitle = 'Verteiler und Zwischenstecker mit ihren Shellys – beim Aufbau in geplante Anlagen eingesetzt';
+$subtitle = 'Verteiler, Zwischenstecker und Tanksensoren mit ihren Shellys – beim Aufbau in geplante Anlagen eingesetzt';
 $zustand = [
     'lager'      => ['im Lager', 'ok'],
     'im_einsatz' => ['im Einsatz', 'info'],
@@ -14,7 +14,7 @@ $zustand = [
 <div class="toolbar-zeile">
     <form method="get" action="/inventar" class="inline-form">
         <select name="art" data-absenden aria-label="Art">
-            <option value="">Verteiler und Zwischenstecker</option>
+            <option value="">Alle Arten</option>
             <?php foreach (InventarService::ARTEN as $k => $n): ?>
                 <option value="<?= $k ?>"<?= $art === $k ? ' selected' : '' ?>><?= View::e($n) ?></option>
             <?php endforeach; ?>
@@ -27,6 +27,7 @@ $zustand = [
     <?php if ($darf): ?>
         <a class="btn btn-primary btn-sm" href="/inventar/neu?art=verteilung">+ Verteiler</a>
         <a class="btn btn-sm" href="/inventar/neu?art=zwischenstecker">+ Zwischenstecker</a>
+        <a class="btn btn-sm" href="/inventar/neu?art=tanksensor">+ Tanksensor</a>
     <?php endif; ?>
 </div>
 
@@ -36,8 +37,8 @@ $zustand = [
             <thead><tr><th>Nummer</th><th>Art · Typ</th><th class="num">Messkanäle</th><th>Zustand</th><th>Wo</th></tr></thead>
             <tbody>
             <?php if ($liste === []): ?>
-                <tr><td colspan="5" class="muted">Noch nichts im Inventar. Verteiler mit eingebauten Shellys und Zwischenstecker (Messadapter bis 125 A)
-                    werden hier einmal angelegt und beim Aufbau in die geplanten Anlagen eingesetzt.</td></tr>
+                <tr><td colspan="5" class="muted">Noch nichts im Inventar. Verteiler mit eingebauten Shellys, Zwischenstecker (Messadapter bis 125 A)
+                    und Tanksensoren werden hier einmal angelegt und beim Aufbau in die geplanten Anlagen bzw. Tanks eingesetzt.</td></tr>
             <?php endif; ?>
             <?php foreach ($liste as $i): ?>
                 <?php [$text, $klasse] = $zustand[$i['zustand']]; $e = $i['einsatz']; ?>

@@ -1921,7 +1921,8 @@ final class BerichtService
 
     /**
      * Die Anlagen aus der Anfrage, jede einzeln geprüft: vorhanden, kein
-     * Standard-Verteiler, auf diesem Standort, sichtbar. Einspeisungen zuerst.
+     * Standard-Verteiler, auf diesem Standort, sichtbar, elektrisch (kein
+     * Tank). Einspeisungen zuerst.
      *
      * @param list<int|string> $ids
      * @return list<array<string,mixed>>|string  Anlagen oder die Meldung
@@ -1942,6 +1943,11 @@ final class BerichtService
             $o = AnlagenService::find($id);
             if ($o === null || (int) $o['ist_vorlage'] === 1 || $o['site_id'] === null || (int) $o['site_id'] !== $siteId || !Zugriff::siehtObjekt($o)) {
                 return 'Eine der gewählten Anlagen gehört nicht zu diesem Standort.';
+            }
+            // Geprüft wird die elektrische Anlage – ein Tank hat weder
+            // Stromkreise noch Schutzorgane.
+            if (!AnlagenService::elektrisch((string) $o['art'])) {
+                return '„' . $o['name'] . '“ ist ein Tank – ein Übergabebericht gilt der elektrischen Anlage.';
             }
             $out[] = $o;
         }

@@ -44,11 +44,19 @@ final class Messdaten
         'oeldruck_bar'    => ['Öldruck', 'bar'],
         'kuehlmittel_c'   => ['Kühlmittel', '°C'],
         'tank_prozent'    => ['Tank', '%'],
+        'tank_liter'      => ['Tankinhalt', 'l'],
         'u_batterie'      => ['Starterbatterie', 'V'],
         'betriebsstunden' => ['Betriebsstunden', 'h'],
         'starts'          => ['Starts', ''],
         'online'          => ['online', ''],
         'restlaufzeit_s'  => ['Restlaufzeit', 's'],
+        // Rohwerte der Tanksensoren (Liter rechnet App\Tanks\TankRechnung)
+        'eingang'         => ['Eingang', '%'],
+        'x'               => ['Wert laut Gerät', ''],
+        'sensorfehler'    => ['Sensorfehler', ''],
+        'i_ma'            => ['Strom', 'mA'],
+        'abstand_mm'      => ['Abstand', 'mm'],
+        'fuellhoehe_mm'   => ['Füllhöhe', 'mm'],
     ];
 
     private static function demo(): bool
@@ -195,7 +203,9 @@ final class Messdaten
     /** @return array<string,list<array{0:int,1:?float}>> */
     private static function influxReihe(string $messung, string $geraet, string $kanal, string $feld, array $phasen, int $von, int $bis, int $schritt, string $agg, ?string &$fehler): array
     {
-        $agg = in_array($agg, ['mean', 'max', 'min', 'last'], true) ? $agg : 'mean';
+        // median: für Rohwerte der Tanksensoren – ein Ausreißer (Schwappen,
+        // ein kurzer Fehlwert) zieht den Punkt nicht mit.
+        $agg = in_array($agg, ['mean', 'max', 'min', 'last', 'median'], true) ? $agg : 'mean';
         $bedingung = '"geraet" = ' . Influx::text($geraet) . ' AND "kanal" = ' . Influx::text($kanal) . ' AND ' . Influx::zeit($von, $bis);
         $gruppe = 'GROUP BY time(' . $schritt . 's)';
         if ($messung === 'strom') {
@@ -310,6 +320,137 @@ final class Messdaten
         ];
     }
 
+    // ------------------------------------------------------------ Tanks
+
+    /**
+     * Der letzte Rohwert je Tanksensor.
+     *
+     * Nicht über letzte() und sein 15-Minuten-Fenster: Ein Shelly Gen2 meldet
+     * einen Analogwert nur bei Änderung – ein Tank, aus dem nichts entnommen
+     * wird, hat seinen Wert vielleicht vor Stunden geschickt. Je Eintrag drei
+     * Abfragen, alle in einer Anfrage an die InfluxDB:
+     *
+     *   1. der letzte Wert des Rohfelds ab `ab` – frühestens ab dem Einbau,
+     *      so erscheint nie ein Wert aus dem Lager oder einem anderen Tank;
+     *   2. das letzte `sensorfehler` ab `ab` (1 = Sensorfehler, kommt mit
+     *      jeder Meldung, ein alter Fehler bleibt also nicht kleben);
+     *   3. das letzte Lebenszeichen `online` des Geräts (Kanal „geraet“) ab
+     *      `ab_online`.
+     *
+     * Ein einzelner Selektor (last) liefert die echte Zeit des Punkts. Die
+     * Untergrenzen rechnet der Aufrufer aus Einbau und Datenfenster
+     * (TankService::live) – hier wird nur gelesen.
+     *
+     * @param list<array{geraet:string,kanal:string,feld:string,ab:int,ab_online:int}> $abfragen
+     * @return array<string,array{zeit:?int,roh:?float,fehler:bool,fehler_zeit:?int,online:?bool,online_zeit:?int}> Schlüssel „geraet|kanal“
+     */
+    public static function tankLetzte(array $abfragen, ?string &$fehler = null): array
+    {
+        $abfragen = array_values(array_filter($abfragen, static fn (array $a): bool => ($a['geraet'] ?? '') !== '' && ($a['feld'] ?? '') !== ''));
+        if ($abfragen === []) {
+            return [];
+        }
+        if (self::demo()) {
+            return Demo::tankLetzte($abfragen);
+        }
+        $q = [];
+        foreach ($abfragen as $a) {
+            $wo = '"geraet" = ' . Influx::text((string) $a['geraet']) . ' AND "kanal" = ' . Influx::text((string) $a['kanal']);
+            $ab = ' AND time >= ' . ((int) $a['ab'] * 1000) . 'ms AND time <= now()';
+            $q[] = 'SELECT last(' . Influx::name((string) $a['feld']) . ') AS "wert" FROM "zustand" WHERE ' . $wo . $ab;
+            $q[] = 'SELECT last("sensorfehler") AS "fehler" FROM "zustand" WHERE ' . $wo . $ab;
+            $q[] = 'SELECT last("online") AS "online" FROM "zustand" WHERE "geraet" = ' . Influx::text((string) $a['geraet'])
+                . " AND \"kanal\" = 'geraet' AND time >= " . ((int) $a['ab_online'] * 1000) . 'ms AND time <= now()';
+        }
+        $alle = Influx::abfragenAlle(implode(';', $q), $fehler);
+        if ($alle === null) {
+            return [];
+        }
+        $erste = static function (array $serien): ?array {
+            $zeile = $serien[0]['values'][0] ?? null;
+            return is_array($zeile) && isset($zeile[0]) && array_key_exists(1, $zeile) && $zeile[1] !== null ? $zeile : null;
+        };
+        $out = [];
+        foreach ($abfragen as $n => $a) {
+            $wert = $erste($alle[3 * $n] ?? []);
+            $f = $erste($alle[3 * $n + 1] ?? []);
+            $online = $erste($alle[3 * $n + 2] ?? []);
+            $out[$a['geraet'] . '|' . $a['kanal']] = [
+                'zeit'        => $wert !== null && is_numeric($wert[1]) ? (int) $wert[0] : null,
+                'roh'         => $wert !== null && is_numeric($wert[1]) ? (float) $wert[1] : null,
+                'fehler'      => $f !== null && is_numeric($f[1]) && (float) $f[1] >= 0.5,
+                'fehler_zeit' => $f !== null ? (int) $f[0] : null,
+                'online'      => $online !== null && is_numeric($online[1]) ? (float) $online[1] >= 0.5 : null,
+                'online_zeit' => $online !== null ? (int) $online[0] : null,
+            ];
+        }
+        return $out;
+    }
+
+    /** Schritt der Punkte für das Gefälle eines Tanks: Median je 10 Minuten. */
+    public const GEFAELLE_SCHRITT = 600;
+
+    /**
+     * Rohwerte der letzten Stunden je Tanksensor – Grundlage für den
+     * Verbrauch aus dem Pegel (TankRechnung::gefaelle), wenn kein Generator
+     * am Schlauch ihn liefert. Median je 10 Minuten (ein Ausreißer zieht den
+     * Punkt nicht mit), alle Einträge in einer Anfrage an die InfluxDB.
+     *
+     * Je Eintrag gilt [ab, jetzt], zugeschnitten auf das Datenfenster
+     * (Zugriff::begrenzen) – gelesen wird nur der laufende Teil, der bis
+     * jetzt reicht. `ab` setzt der Aufrufer auf den Einbau, höchstens 6 h
+     * zurück (TankService).
+     *
+     * @param list<array{geraet:string,kanal:string,feld:string,ab:int,fenster:?array}> $abfragen
+     * @return array<string,list<array{0:int,1:float}>> „geraet|kanal“ => [[ms, roh], …], aufsteigend
+     */
+    public static function tankGefaelle(array $abfragen, ?string &$fehler = null): array
+    {
+        $jetzt = time();
+        $teile = [];
+        foreach ($abfragen as $a) {
+            if (($a['geraet'] ?? '') === '' || ($a['feld'] ?? '') === '') {
+                continue;
+            }
+            foreach (Zugriff::begrenzen($a['fenster'] ?? null, (int) $a['ab'], $jetzt) as [$von, $bis]) {
+                if ($bis >= $jetzt && $bis > $von) {
+                    $teile[] = $a + ['von' => (int) $von, 'bis' => $jetzt];
+                }
+            }
+        }
+        if ($teile === []) {
+            return [];
+        }
+        $out = [];
+        if (self::demo()) {
+            foreach ($teile as $a) {
+                $roh = Demo::reihe('zustand', (string) $a['geraet'], (string) $a['kanal'], (string) $a['feld'], [], $a['von'], $a['bis'], self::GEFAELLE_SCHRITT, 'median');
+                $out[$a['geraet'] . '|' . $a['kanal']] = array_values(array_filter($roh[$a['feld']] ?? [], static fn ($p) => is_numeric($p[1] ?? null)));
+            }
+            return $out;
+        }
+        $q = [];
+        foreach ($teile as $a) {
+            $q[] = 'SELECT median(' . Influx::name((string) $a['feld']) . ') AS "wert" FROM "zustand" WHERE "geraet" = ' . Influx::text((string) $a['geraet'])
+                . ' AND "kanal" = ' . Influx::text((string) $a['kanal']) . ' AND ' . Influx::zeit($a['von'], $a['bis'] + 1)
+                . ' GROUP BY time(' . self::GEFAELLE_SCHRITT . 's) fill(none)';
+        }
+        $alle = Influx::abfragenAlle(implode(';', $q), $fehler);
+        if ($alle === null) {
+            return [];
+        }
+        foreach ($teile as $n => $a) {
+            $punkte = [];
+            foreach ($alle[$n][0]['values'] ?? [] as $zeile) {
+                if (isset($zeile[0]) && is_numeric($zeile[1] ?? null)) {
+                    $punkte[] = [(int) $zeile[0], (float) $zeile[1]];
+                }
+            }
+            $out[$a['geraet'] . '|' . $a['kanal']] = $punkte;
+        }
+        return $out;
+    }
+
     // ------------------------------------------------------------ Geräte
 
     /**
@@ -323,9 +464,12 @@ final class Messdaten
         if (self::demo()) {
             return Demo::geraete();
         }
+        // Analogeingänge (Tanksensoren) melden nur bei Änderung – sie stehen
+        // auch dann zur Wahl, wenn ihr letzter Wert ein paar Tage alt ist.
         $q = 'SELECT last("p") FROM "strom" WHERE time > now() - 7d AND "phase" = \'sum\' GROUP BY "geraet","kanal","typ";'
            . 'SELECT count(*) FROM "zustand" WHERE time > now() - 1d GROUP BY "geraet","kanal","typ";'
-           . 'SELECT last(*) FROM "geraet" GROUP BY "geraet"';
+           . 'SELECT last(*) FROM "geraet" GROUP BY "geraet";'
+           . 'SELECT count(*) FROM "zustand" WHERE time > now() - 7d AND "kanal" =~ /^(voltmeter|input|adc):\d+$/ GROUP BY "geraet","kanal","typ"';
         $alle = Influx::abfragenAlle($q, $fehler);
         if ($alle === null) {
             return [];
@@ -345,7 +489,7 @@ final class Messdaten
             ];
         }
         $out = [];
-        foreach ([0, 1] as $i) {
+        foreach ([0, 1, 3] as $i) {
             foreach ($alle[$i] ?? [] as $serie) {
                 $g = (string) ($serie['tags']['geraet'] ?? '');
                 $k = (string) ($serie['tags']['kanal'] ?? '');

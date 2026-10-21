@@ -78,6 +78,22 @@ $pl = $gruppen['Powerlock · Powerlock-Einleiter 95 mm²'] ?? null;
 gleich($pl['stuecke'] ?? null, [25 => 5], 'Powerlock-Einleiter: je Leiter ein Stück (5 ×)');
 gleich(array_key_first($gruppen), 'Powerlock · Powerlock-Einleiter 95 mm²', 'stärkste Kabel zuerst');
 
+// Kraftstoff: Schlauchlänge mit Reserve × Stränge je Typ, zwei Kupplungen je Strang; ein fester Schlauch ist vor Ort
+$schlauch = static fn (array $d): array => $leitung($d + ['art' => 'kraftstoff', 'kabeltyp' => 'DN 10 (3/8″)', 'modell' => 'HK-A3', 'anzahl' => 2,
+    'von_name' => 'Tank', 'zu_name' => 'Aggregat']);
+$kraftstoff = MaterialService::berechnen([$objekt(['name' => 'T1', 'art' => 'tank', 'modell' => 'QUADRO-AG 3000'])], [
+    $schlauch(['name' => 's1', 'laenge' => 10 / (1 + $reserve / 100)]),
+    $schlauch(['name' => 's2', 'laenge' => 4.0, 'anzahl' => 1, 'modell' => '']),
+    $schlauch(['name' => 's3', 'kabeltyp' => 'DN 13 (1/2″)']),
+    $schlauch(['name' => 'fest', 'fest' => 1, 'laenge' => 30.0]),
+]);
+$dn10 = array_column($kraftstoff['schlaeuche'], null, 'titel')['DN 10 (3/8″)'] ?? null;
+gleich([$dn10['schlaeuche'] ?? null, $dn10['straenge'] ?? null, $dn10['meter'] ?? null], [2, 3, 2 * 10 + (int) ceil(4.0 * (1 + $reserve / 100) - 1e-9)],
+    'Schläuche DN 10: zwei Strecken, drei Stränge, Länge mit Reserve je Strang');
+gleich($kraftstoff['kupplungen'], ['HK-A3' => 10], 'Kupplungen: je Strang zwei (auch ohne Angabe HK-A3, auch ohne Länge)');
+gleich([count($kraftstoff['schlaeuche_ohne_laenge']), $kraftstoff['feste_schlaeuche'], $kraftstoff['kabel']], [1, 1, []], 'Schlauch ohne Länge gemeldet, fester vor Ort, kein Kabel');
+gleich(array_column($kraftstoff['anlagen'], 'titel'), ['Tank · QUADRO-AG 3000'], 'Tanks stehen als Anlagen in der Liste');
+
 // ------------------------------------------------ Bereiche auf eigenem Standort
 AnlagenService::grundbestand();
 $typ = [];
@@ -180,6 +196,18 @@ try {
     gleich(BereichService::mitgliedSchluessel((int) $b2['id']), ['o:' . $v1], 'gelöschtes Messgerät verschwindet aus dem Bereich');
     $mV2 = $mp($v2, 'shellypro3em-catering', 'em:0', 'einspeisung');
 
+    // Ein Tank zählt in keinem Bereich – weder gewählt noch als Mitglied aus älterer Zeit
+    $tank = $neu(['art' => 'tank', 'name' => $kennung . ' Tank', 'eigenschaften' => ['inhalt_l' => '1000']]);
+    $mTank = Database::insert('messpunkte', ['objekt_id' => $tank, 'geraet' => 'shellypro3em-buehne', 'kanal' => 'em:0', 'rolle' => 'einspeisung',
+        'bezeichnung' => '', 'gueltig_ab' => gmdate('c'), 'created_at' => gmdate('c')]);
+    $bt = $bereich(['o:' . $v1, 'o:' . $tank, 'm:' . $mTank]);
+    gleich(BereichService::mitgliedSchluessel((int) $bt['id']), ['o:' . $v1], 'Tank und sein Messgerät werden kein Mitglied');
+    Database::insert('bereich_mitglieder', ['bereich_id' => (int) $bt['id'], 'objekt_id' => $tank, 'messpunkt_id' => null, 'created_at' => gmdate('c')]);
+    gleich($zaehlt($bt), ['o:' . $v1 => true], 'ein Tank als Mitglied zählt nicht mit');
+    if (Config::isDemo()) {
+        gleich(array_keys(BereichService::live($bt)['mitglieder']), ['o:' . $v1], 'Livewert des Bereichs ohne den Tank');
+    }
+
     // Livewerte und Verläufe (Demo-Messwerte)
     if (Config::isDemo()) {
         $b = $bereich(['o:' . $v1, 'o:' . $v2, 'm:' . $mKaffee, 'm:' . $mGAb1], ['grenze_kw' => '200']);
@@ -229,7 +257,17 @@ try {
     gleich(count($mat['kabel_einzeln']), 2, 'Zuleitung vom Aggregat und Kabel V1 → V2 (nicht das Licht-Kabel)');
     pruefe(isset($einzeln['60']) && isset($einzeln['20']), 'Längen aus dem Maßstab: ' . implode(', ', array_keys($einzeln)));
     gleich($mat['bruecken'], ['Midi' => 2], 'nur die Kabelbrücke über einem Kabel des Bereichs');
+    // Ein Kraftstoffschlauch am Aggregat gehört zum Material eines Bereichs mit dem Aggregat
+    $tankM = $neu(['art' => 'tank', 'name' => $kennung . ' Tank am Aggregat', 'plan_x' => 20.0, 'plan_y' => 10.0]);
+    $sM = LeitungService::speichern(null, ['art' => 'kraftstoff', 'floor_id' => $floorId, 'name' => $kennung, 'von_objekt_id' => $tankM, 'zu_objekt_id' => $g,
+        'kabeltyp' => 'DN 10 (3/8″)', 'punkte' => [[20.0, 10.0], [10.0, 10.0]]]);    // 20 m, Vor- und Rücklauf
+    pruefe($sM['ok'], 'Schlauch Tank → Aggregat: ' . $sM['message']);
+    $mitG = MaterialService::fuerBereich($bereich(['o:' . $g]));
+    gleich(array_column($mitG['schlaeuche'], 'straenge', 'titel'), ['DN 10 (3/8″)' => 2], 'Bereich mit dem Aggregat: der Schlauch zum Tank (zwei Stränge)');
+    gleich(array_column($mitG['schlaeuche_einzeln'], 'benoetigt'), [(int) ceil(20 * (1 + $reserve / 100) - 1e-9)], 'Schlauch 20 m im Plan, mit Reserve');
+    gleich(MaterialService::fuerBereich($b)['schlaeuche'], [], 'Bereich ohne das Aggregat: kein Schlauch');
     $etage = MaterialService::fuerEtage($floorId);
+    gleich($etage['kupplungen'], ['HK-A3' => 4], 'Etage: Kupplungen des Schlauchs');
     gleich(count($etage['kabel_einzeln']), 3, 'Etage: alle drei Kabel');
     gleich($etage['bruecken'], ['Maxi' => 7, 'Midi' => 2], 'Etage: alle Kabelbrücken');
 

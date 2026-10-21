@@ -9,11 +9,12 @@ use App\Support\Audit;
 use App\Support\Database;
 
 /**
- * Katalog-Import: viele Standard-Verteiler und Aggregate aus einer Datei.
+ * Katalog-Import: viele Standard-Verteiler, Aggregate und Tanks aus einer Datei.
  *
  * Ein Paket bündelt Dateien im Format des Verteiler-Abgleichs
  * (VerteilerBundle, `verteiler-typ`) – je Typ Nennwerte, Eigenschaften,
- * Schutzorgane, Anschlüsse und die Steckertypen, die er benutzt:
+ * Schutzorgane, Anschlüsse und die Steckertypen, die er benutzt (ein Tank
+ * nur Eigenschaften):
  *
  *   { format: 1, art: "verteiler-typen", quelle: "BSS Strombibel (Stand 18.03.2025)",
  *     typen: [ {format: 1, art: "verteiler-typ", schluessel, typ: {…}, steckertypen: […]}, … ] }
@@ -354,6 +355,11 @@ final class KatalogImport
         if (!is_array($schutz) || !array_is_list($schutz)) {
             return '„schutzorgane“ muss eine Liste sein.';
         }
+        // Ein Tank hat weder Anschlüsse noch Schutzorgane – still fielen sie
+        // beim Übernehmen weg, und der Typ stünde danach „hier anders“ da.
+        if (!AnlagenService::elektrisch($art) && ($schutz !== [] || (is_array($i['anschluesse'] ?? null) && $i['anschluesse'] !== []))) {
+            return 'Ein ' . AnlagenService::ARTEN[$art]['name'] . ' hat keine Anschlüsse und keine Schutzorgane – in der Datei stehen welche.';
+        }
         if (count($schutz) > self::HOECHSTENS_JE_TYP) {
             return 'Mehr als ' . self::HOECHSTENS_JE_TYP . ' Schutzorgane.';
         }
@@ -655,18 +661,20 @@ final class KatalogImport
             ];
         }
 
+        // Ein Tank hat feste elektrische Werte (wie in AnlagenService::speichern).
+        $elektrisch = AnlagenService::elektrisch($art);
         return [
             'art'                => $art,
             'fest'               => !empty($i['fest']),
             'name'               => $text($i['name']),
             'hersteller'         => $text($i['hersteller'] ?? ''),
             'modell'             => $text($i['modell'] ?? ''),
-            'nennleistung_kva'   => $zahl($i['nennleistung_kva'] ?? ''),
-            'nennstrom_a'        => $zahl($i['nennstrom_a'] ?? ''),
-            'spannung_v'         => max(1, (int) ($i['spannung_v'] ?? 400)),
-            'phasen'             => (int) ($i['phasen'] ?? 3) === 1 ? 1 : 3,
+            'nennleistung_kva'   => $elektrisch ? $zahl($i['nennleistung_kva'] ?? '') : null,
+            'nennstrom_a'        => $elektrisch ? $zahl($i['nennstrom_a'] ?? '') : null,
+            'spannung_v'         => $elektrisch ? max(1, (int) ($i['spannung_v'] ?? 400)) : 400,
+            'phasen'             => $elektrisch && (int) ($i['phasen'] ?? 3) === 1 ? 1 : 3,
             'eigenschaften'      => AnlagenService::eigenschaftenFiltern($art, (array) ($i['eigenschaften'] ?? [])),
-            'steuerung_gesperrt' => !empty($i['steuerung_gesperrt']),
+            'steuerung_gesperrt' => $elektrisch && !empty($i['steuerung_gesperrt']),
             'notizen'            => (string) ($i['notizen'] ?? ''),
             'schutzorgane'       => $schutzorgane,
             'anschluesse'        => $anschluesse,
@@ -694,9 +702,9 @@ final class KatalogImport
         $ed = (array) ($datei['eigenschaften'] ?? []);
         foreach (array_unique(array_merge(array_keys($felder), array_keys($eh), array_keys($ed))) as $k) {
             if (!$gleich($eh[$k] ?? null, $ed[$k] ?? null)) {
-                $einheit = isset($felder[$k]) && $felder[$k][1] !== 'auswahl' ? (string) $felder[$k][2] : '';
+                $einheit = static fn (mixed $w): string => isset($felder[$k]) ? AnlagenService::einheit((string) $felder[$k][1], $felder[$k][2], $w) : '';
                 $out[] = ['feld' => $felder[$k][0] ?? (string) $k,
-                    'hier' => self::wert('', $eh[$k] ?? null, $einheit), 'datei' => self::wert('', $ed[$k] ?? null, $einheit)];
+                    'hier' => self::wert('', $eh[$k] ?? null, $einheit($eh[$k] ?? null)), 'datei' => self::wert('', $ed[$k] ?? null, $einheit($ed[$k] ?? null))];
             }
         }
 

@@ -208,6 +208,42 @@ try {
     pruefe($mobil['ok'] && $fest($ausFest) === 0 && str_contains($mobil['message'], 'jetzt mobil'), 'Anlage mit festem Kabel auf mobil gestellt: ' . $mobil['message']);
     gleich($lFest((int) $erd['id']), 0, '… das feste Kabel daran ist jetzt mobil');
 
+    // Kraftstoffschlauch: ohne Anschlüsse und Querschnitt, nicht in Belegung, Speisung, Verteilbaum und Spannungsfall
+    $tankA = (int) AnlagenService::speichern(null, ['art' => 'tank', 'name' => 'Prüf-Tank A', 'floor_id' => $floorId])['id'];
+    $tankB = (int) AnlagenService::speichern(null, ['art' => 'tank', 'name' => 'Prüf-Tank B', 'floor_id' => $floorId])['id'];
+    $genA = (int) AnlagenService::speichern(null, ['art' => 'generator', 'name' => 'Prüf-Aggregat', 'floor_id' => $floorId])['id'];
+    array_push($angelegt, $tankA, $tankB, $genA);
+    $genAb = (int) Database::scalar("SELECT id FROM anschluesse WHERE objekt_id = ? AND richtung = 'abgang' ORDER BY nr LIMIT 1", [$genA]);
+    $s = LeitungService::speichern(null, ['art' => 'kraftstoff', 'floor_id' => $floorId, 'von_objekt_id' => $tankA, 'zu_objekt_id' => $genA,
+        'von_anschluss_id' => $genAb, 'zu_anschluss_id' => $genAb, 'querschnitt_mm2' => 16, 'adern' => 5, 'laenge_m' => 500, 'anzahl' => 1, 'punkte' => [[1, 1], [5, 5]]]);
+    $schlauch = LeitungService::find((int) ($s['id'] ?? 0));
+    pruefe($s['ok'] && $schlauch['von_anschluss_id'] === null && $schlauch['zu_anschluss_id'] === null && $schlauch['querschnitt_mm2'] === null && $schlauch['adern'] === null,
+        'Schlauch ohne Anschluss-IDs, Querschnitt und Adern – auch wenn sie mitkommen');
+    pruefe(!array_filter($schlauch['hinweise'], static fn ($h) => str_contains($h, 'Spannungsfall') || str_contains($h, 'Querschnitt')), 'kein Spannungsfall am Schlauch (500 m)');
+    pruefe(in_array(true, array_map(static fn ($h) => str_contains($h, 'Rücklauf fehlt?'), $schlauch['hinweise']), true), 'nur Vorlauf: „Rücklauf fehlt?“');
+    gleich([AnlagenService::belegung($genA), AnlagenService::speisung($genA), AnlagenService::speisung($tankA)], [[], [], []], 'Schlauch nicht in Belegung und Speisung');
+    $knoten = [];
+    $sammeln = static function (array $liste) use (&$sammeln, &$knoten): void {
+        foreach ($liste as $k) {
+            $knoten[(int) $k['id']] = $k['kabel']['art'] ?? null;
+            $sammeln($k['kinder']);
+        }
+    };
+    $sammeln(AnlagenService::baum($siteId));
+    pruefe(array_key_exists($genA, $knoten) && $knoten[$genA] === null && !array_key_exists($tankA, $knoten), 'Verteilbaum: Aggregat ohne Schlauch als Zuleitung, Tank nicht darin');
+    gleich(array_column(AnlagenService::anschluesse($genA), 'leitung'), array_fill(0, count(AnlagenService::anschluesse($genA)), null), 'kein Anschluss des Aggregats belegt');
+    $s2 = LeitungService::speichern(null, ['art' => 'kraftstoff', 'floor_id' => $floorId, 'von_objekt_id' => $tankB, 'zu_objekt_id' => $genA, 'punkte' => [[2, 2], [5, 5]]]);
+    pruefe($s2['ok'] && array_filter(LeitungService::find((int) $s2['id'])['hinweise'], static fn ($h) => str_contains($h, 'Rücklauf muss in denselben Tank')) !== [],
+        'Aggregat an zwei Tanks: „Rücklauf muss in denselben Tank“');
+    pruefe(!LeitungService::speichern(null, ['art' => 'kraftstoff', 'floor_id' => $floorId, 'von_objekt_id' => $tankA, 'zu_objekt_id' => $ausMobil, 'punkte' => [[1, 1], [2, 2]]])['ok'],
+        'Schlauch Tank → Verteilung abgelehnt');
+    AnlagenService::loeschen($genA);
+    $angelegt = array_values(array_diff($angelegt, [$genA]));
+    $offen = LeitungService::find((int) $s['id']);
+    pruefe($offen !== null && $offen['zu_objekt_id'] === null && in_array('Ein Ende ist offen – den Schlauch an Tank und Generator ziehen.', $offen['hinweise'], true),
+        'Aggregat gelöscht: der Schlauch bleibt mit offenem Ende und Hinweis');
+    Database::execute("DELETE FROM leitungen WHERE art = 'kraftstoff' AND id IN (?, ?)", [(int) $s['id'], (int) $s2['id']]);
+
     // Art ändern: Anschlüsse bleiben, Angaben der alten Art fallen weg
     $vorher = AnlagenService::anzahlen($ausMobil);
     Database::update('objekte', $ausMobil, ['eigenschaften' => json_encode(['anschlussart' => 'Baustromverteiler'])]);

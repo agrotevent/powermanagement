@@ -30,6 +30,12 @@
  *
  * Einheiten, wie sie der Shelly liefert und die Oberfläche erwartet:
  * u V, i A, p W, s VA, pf ohne Einheit, f Hz, e/e_rueck Wh (Zählerstand).
+ *
+ * Analogeingänge (Tanksensoren an Plus Uni oder Plus Add-on) gehen als
+ * Rohwerte in zustand: voltmeter:N → u (V) und x (xvoltage, Einheit nur am
+ * Gerät bekannt), input:N vom Typ analog → eingang (%) und x (xpercent).
+ * Dazu bei jeder Meldung sensorfehler 0/1. Füllhöhe und Liter rechnet die
+ * App mit der Kennlinie des Einbaus, nicht dieser Flow.
  */
 
 const ABSENDER = 'pm-nodered';
@@ -242,9 +248,36 @@ if (typ === 'switch') {
 } else if (typ === 'temperature') {
     ausgabe.push(messwert(komponente, null, { temperatur: zahl(s.tC) }));
 } else if (typ === 'input') {
-    // Digitaleingang: state true/false. Analogeingang: percent.
+    // Digitaleingang (Typ switch): state true/false → eingang 1/0, wie bisher.
+    // Analogeingang (Plus Add-on, Plus Uni, Typ analog): percent, dazu
+    // xpercent, wenn am Gerät ein Ausdruck gesetzt ist. Zu jeder Meldung
+    // gehört sensorfehler 0/1 – bei errors oder ohne percent (null) nur
+    // sensorfehler = 1, nie ein Schein-0; die nächste gute Meldung setzt 0.
+    // Taster (state null) und Zähler (counts) liefern nichts.
+    const eigen = (k) => Object.prototype.hasOwnProperty.call(s, k);
+    const digital = einsNull(s.state) !== undefined;
+    const fehlerListe = Array.isArray(s.errors) && s.errors.length > 0;
+    const analog = !digital && !eigen('counts') && (eigen('percent') || (fehlerListe && !eigen('state')));
+    if (digital) {
+        ausgabe.push(messwert(komponente, null, { eingang: einsNull(s.state) }));
+    } else if (analog) {
+        const fehler = fehlerListe || zahl(s.percent) === undefined;
+        ausgabe.push(messwert(komponente, null, {
+            eingang: fehler ? undefined : zahl(s.percent),
+            x: fehler ? undefined : zahl(s.xpercent),
+            sensorfehler: fehler ? 1 : 0,
+        }));
+    }
+} else if (typ === 'voltmeter') {
+    // Plus Uni (voltmeter:100, 0–15/0–30 V), Plus Add-on (0–10 V): Spannung am
+    // Geber, an einem 4–20-mA-Wandler oder an der Bürde. Füllhöhe und Liter
+    // rechnet die App. sensorfehler wie beim Analogeingang: bei errors oder
+    // ohne voltage (null) nur sensorfehler = 1.
+    const fehler = (Array.isArray(s.errors) && s.errors.length > 0) || zahl(s.voltage) === undefined;
     ausgabe.push(messwert(komponente, null, {
-        eingang: einsNull(s.state) !== undefined ? einsNull(s.state) : zahl(s.percent),
+        u: fehler ? undefined : zahl(s.voltage),
+        x: fehler ? undefined : zahl(s.xvoltage),
+        sensorfehler: fehler ? 1 : 0,
     }));
 }
 

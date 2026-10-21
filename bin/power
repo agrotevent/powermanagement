@@ -48,6 +48,14 @@ declare(strict_types=1);
  *                                   (z. B. resources/kataloge/*.json): legt die neuen an; was
  *                                   hier anders steht (korrigiert), nur mit --ueberschreiben.
  *                                   --pruefen zeigt nur, was geschähe. Je Typ eine Zeile
+ *   bin/power tank:liste --als=<benutzer> [--standort=<id>] [--warnungen]
+ *                                   Tanks mit Füllstand, Restlaufzeit und Stufe aus Sicht dieses
+ *                                   Kontos (Freigaben, Datenfenster). --warnungen: nur gelb, rot
+ *                                   und stumm – Rückgabewert 1, wenn es welche gibt, 2 bei einem
+ *                                   Fehler (für ein Monitoring)
+ *   bin/power tank:rechnen <messpunkt-id> <rohwert>
+ *                                   Rechnung der jetzigen Kennlinie eines Tanksensors: Rohwert →
+ *                                   Füllhöhe → Liter → %. Liest nur die Datenbank
  *   bin/power mqtt:zugaenge         Shellys mit gemeinsamem oder eigenem MQTT-Zugang (ohne Geheimnisse)
  *   bin/power mqtt:vorpruefen <präfix> | --alle
  *                                   Gen2, nur lesend: antwortet das Gerät an einen Absender in
@@ -71,7 +79,7 @@ declare(strict_types=1);
  *   bin/power berichte:aufbewahrung [--ausfuehren]
  *                                   Berichte über der Aufbewahrungsfrist zeigen, mit --ausfuehren löschen
  *   bin/power eventworx:pruefen     Verbindung zu Eventworx prüfen (nur lesend)
- *   bin/power demo:seed [--reset]   Demo-Gelände mit Anlagen, Kabeln, Benutzern und Übergabeberichten anlegen
+ *   bin/power demo:seed [--reset]   Demo-Gelände mit Anlagen, Tanks, Kabeln, Benutzern und Übergabeberichten anlegen
  *   bin/power wartung               Protokolle aufräumen, abgebrochene MQTT-Prüfungen
  *                                   zurücksetzen, alte Import-Vorschauen löschen, fällige
  *                                   Übergabeberichte melden, entschiedene Änderungsvorschläge
@@ -123,6 +131,8 @@ $hilfe = static function (): string {
 
 require dirname(__DIR__) . '/src/bootstrap.php';
 
+use App\Auth\Auth;
+use App\Auth\Zugriff;
 use App\Berichte\BerichtService;
 use App\Messung\Influx;
 use App\Messung\Messdaten;
@@ -135,6 +145,7 @@ use App\Services\BenutzerService;
 use App\Services\DemoSeed;
 use App\Services\Eventworx;
 use App\Services\KatalogImport;
+use App\Services\LiveService;
 use App\Services\LocationSync;
 use App\Services\PartnerAbgleich;
 use App\Services\PlanTileService;
@@ -146,6 +157,9 @@ use App\Support\Config;
 use App\Support\Crypto;
 use App\Support\Database;
 use App\Support\Settings;
+use App\Support\Zeit;
+use App\Tanks\TankRechnung;
+use App\Tanks\TankService;
 
 $argumente = array_slice($argv, 1);
 $befehl = array_shift($argumente) ?? 'hilfe';
@@ -504,6 +518,119 @@ switch ($befehl) {
         $aus($ergebnis['message']);
         if ($z['anders'] > 0 && !isset($optionen['ueberschreiben'])) {
             $aus('Hier anders stehende Typen bleiben – mit --ueberschreiben werden sie durch die Datei ersetzt.');
+        }
+        break;
+
+    case 'tank:liste':
+        // Ohne Konto gibt es keine Rechte (Auth::permissions) – Tankwerte sieht
+        // nur, wer sie auch in der Oberfläche sähe. Fehler mit Rückgabewert 2,
+        // damit ein Monitoring sie von Warnungen (1) unterscheidet.
+        $abbruch = static function (string $text): never {
+            fwrite(STDERR, 'Fehler: ' . $text . PHP_EOL);
+            exit(2);
+        };
+        $als = is_string($optionen['als'] ?? null) ? trim($optionen['als']) : '';
+        if ($als === '') {
+            $abbruch('Bitte --als=<benutzer> angeben – Tankwerte sieht nur, wer sie sehen darf.');
+        }
+        $konto = Database::first('SELECT * FROM users WHERE username = ?', [$als]);
+        if ($konto === null) {
+            $abbruch('Den Benutzer „' . $als . '“ gibt es nicht.');
+        }
+        if ((int) $konto['is_active'] !== 1 || Auth::kontoZeitraum($konto) !== null) {
+            $abbruch('Das Konto „' . $als . '“ ist gesperrt oder gilt jetzt nicht.');
+        }
+        Auth::alsBenutzer((int) $konto['id']);
+        if (!Auth::can('anlagen.view')) {
+            $abbruch('Das Konto „' . $als . '“ darf keine Anlagen sehen.');
+        }
+        $filter = ['art' => 'tank'];
+        if (isset($optionen['standort'])) {
+            $standort = is_string($optionen['standort']) && ctype_digit($optionen['standort']) ? (int) $optionen['standort'] : 0;
+            if ($standort <= 0 || SiteService::find($standort) === null || !Zugriff::siehtStandort($standort)) {
+                $abbruch('Diesen Standort gibt es nicht oder das Konto sieht ihn nicht (--standort=<id>).');
+            }
+            $filter['site_id'] = $standort;
+        }
+        $tanks = Zugriff::filtern(AnlagenService::liste($filter));
+        $live = LiveService::fuerObjekte($tanks);
+        $nurWarnungen = isset($optionen['warnungen']);
+        $warnungen = 0;
+        foreach ($tanks as $t) {
+            $l = $live[(int) $t['id']] ?? ['stufe' => 'keine', 'hinweis' => '', 'tank' => null];
+            $warnung = in_array($l['stufe'], ['warn', 'bad', 'stumm'], true);
+            $warnungen += $warnung ? 1 : 0;
+            if ($nurWarnungen && !$warnung) {
+                continue;
+            }
+            $w = (array) ($l['tank'] ?? []);
+            $teile = [];
+            if (($w['liter'] ?? null) !== null) {
+                $teile[] = TankService::liter(round((float) $w['liter']));
+            } elseif (($w['hoehe_mm'] ?? null) !== null) {
+                $teile[] = TankService::zahl(round((float) $w['hoehe_mm'])) . ' mm';
+            }
+            if (($w['prozent'] ?? null) !== null) {
+                $teile[] = TankService::zahl(round((float) $w['prozent'])) . ' %';
+            }
+            if (is_string($w['restlaufzeit_text'] ?? null)) {
+                $teile[] = $w['restlaufzeit_text'];
+            }
+            if (is_string($w['nachbestellen_text'] ?? null)) {
+                $teile[] = 'nachbestellen bis ' . $w['nachbestellen_text'];
+            }
+            // Bei gelb, rot und stumm der Grund, sonst das Alter des Werts
+            if ($l['stufe'] !== 'ok' && (string) $l['hinweis'] !== '') {
+                $teile[] = '– ' . $l['hinweis'];
+            } elseif (is_string($w['stand'] ?? null)) {
+                $teile[] = '(Stand ' . $w['stand'] . ')';
+            }
+            $name = (string) $t['name'] . ((string) ($t['site_name'] ?? '') !== '' ? ' (' . $t['site_name'] . ')' : '');
+            $aus(str_pad((string) $l['stufe'], 9) . ' ' . mb_str_pad($name, 44) . ' ' . implode('  ', $teile));
+        }
+        if ($tanks === []) {
+            $aus('Keine Tanks, die „' . $als . '“ sieht.');
+        }
+        exit($nurWarnungen && $warnungen > 0 ? 1 : 0);
+
+    case 'tank:rechnen':
+        // Liest nur die Datenbank (Kennlinie), keine Messwerte – braucht kein Konto.
+        [$mpId, $rohText] = array_pad($werte, 2, '');
+        $messpunkt = ctype_digit((string) $mpId)
+            ? Database::first("SELECT * FROM messpunkte WHERE id = ? AND rolle = 'fuellstand'", [(int) $mpId]) : null;
+        if ($messpunkt === null) {
+            $fehler('Aufruf: bin/power tank:rechnen <messpunkt-id> <rohwert> – die Nummer ist kein Messpunkt eines Tanksensors.');
+        }
+        $roh = TankRechnung::zahlLesen((string) $rohText);
+        if ($roh === null) {
+            $fehler('Der Rohwert ist keine Zahl (etwa 7,5).');
+        }
+        $fassung = TankService::fassungJetzt((int) $messpunkt['id']);
+        if ($fassung === null) {
+            $fehler('Für diesen Messpunkt gibt es keine Kennlinie – nur den Rohwert (Sensordaten am Tanksensor nachtragen).');
+        }
+        $r = $fassung['rechnung'];
+        $erg = TankRechnung::umrechnen($r, $roh);
+        $einheit = TankRechnung::ROHFELDER[(string) $r['feld']][1] ?? '';
+        $schritte = [TankService::zahl($roh) . ($einheit !== '' ? ' ' . $einheit : '')];
+        if ($erg['hoehe_mm'] !== null) {
+            $schritte[] = TankService::zahl(round($erg['hoehe_mm'], 1)) . ' mm';
+        }
+        if ($erg['liter'] !== null) {
+            $schritte[] = TankService::liter($erg['liter']);
+        }
+        if ($erg['prozent'] !== null) {
+            $schritte[] = TankService::zahl(round($erg['prozent'], 1)) . ' %';
+        }
+        $aus(implode(' → ', $schritte) . ' (Fassung ' . (int) $fassung['id'] . ', ' . $fassung['anlass'] . ', ab '
+            . Zeit::anzeige((string) $fassung['ab'], 'd.m. H:i') . ($fassung['geprueft'] ? '' : ', ungeprüft') . ')');
+        if ($erg['fehler'] !== null) {
+            $aus($erg['fehler']);
+        } elseif ($erg['liter'] === null && $erg['hoehe_mm'] !== null) {
+            $aus(TankRechnung::HINWEIS_INHALT);
+        }
+        if ($erg['nutzbar_l'] !== null) {
+            $aus('nutzbar ' . TankService::liter($erg['nutzbar_l']) . ($erg['ueber_grenze'] ? ' – über der Füllgrenze' : ''));
         }
         break;
 
