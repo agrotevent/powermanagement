@@ -263,7 +263,11 @@ wiederholbar: Ein zweiter Lauf verwendet die Kennwörter aus dieser Datei
 weiter, ändert nichts an Datenbank und `config.php` und überschreibt keine
 eigenen Änderungen an Flows, Node-RED-Einstellungen, nginx-Site oder
 Mosquitto-ACL – neue Fassungen solcher Dateien legt es mit
-`powermanagement-neu` im Namen daneben.
+`powermanagement-neu` im Namen daneben. Einen Administrator legt es nur an,
+solange die Datenbank noch keinen Benutzer hat – etwa wenn der erste Lauf
+vorher abbrach (dann mit neuem Erstkennwort in der Zusammenfassung). Gibt es
+Benutzer, legt es niemanden an, auch keinen gelöschten oder umbenannten
+`admin`.
 
 | Datei | Inhalt |
 |-------|--------|

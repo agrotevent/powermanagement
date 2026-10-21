@@ -1264,22 +1264,43 @@ systemctl reload nginx || systemctl restart nginx
 # ================================================================ Datenbank
 schritt "Datenbank anlegen und Administrator erzeugen"
 ADMIN_KENNWORT=""
-if [[ -f "$ZIEL/storage/database.sqlite" ]]; then
-    as_app php "$ZIEL/bin/power" migrate
-    echo "    Datenbank vorhanden – nur Migrationen ausgeführt"
+# Dass die Datenbankdatei existiert, heißt nicht, dass es einen Administrator
+# gibt (Befund 2): Jeder Aufruf der Anwendung legt sie an, auch leer – etwa
+# die Anmeldeseite, sobald nginx sie ausliefert –, und ein abgebrochenes
+# „bin/power install“ hinterlässt sie halb fertig. Maßgeblich ist, ob es
+# Benutzer gibt. Gibt es welche, legt das Skript niemanden an – auch keinen
+# Administrator, den jemand bewusst entfernt oder umbenannt hat.
+DATENBANK_VORHER="nein"
+[[ -f "$ZIEL/storage/database.sqlite" ]] && DATENBANK_VORHER="ja"
+as_app php "$ZIEL/bin/power" migrate
+BENUTZER_ZAHL="$(as_app php -r 'require "src/bootstrap.php"; echo (int) App\Support\Database::scalar("SELECT COUNT(*) FROM users");')" || BENUTZER_ZAHL=""
+if [[ ! "$BENUTZER_ZAHL" =~ ^[0-9]+$ ]]; then
+    echo "Die Benutzer in der Datenbank ließen sich nicht zählen – Ausgabe oben prüfen." >&2
+    exit 1
+fi
+if (( BENUTZER_ZAHL > 0 )); then
+    echo "    Datenbank vorhanden ($BENUTZER_ZAHL Benutzer) – nur Migrationen ausgeführt"
 else
+    [[ "$DATENBANK_VORHER" == "ja" ]] && hinweis "Die Datenbank hat noch keine Benutzer – der Administrator wird jetzt angelegt."
     ADMIN_KENNWORT="$(zufall 16)"
     # Kennwort über die Standardeingabe – so steht es nicht in der Prozessliste.
     # Bei der ersten Anmeldung muss es geändert werden.
     INSTALL_ARGS=(install "$ADMIN_USER" --stdin)
     [[ -n "$TITEL" ]] && INSTALL_ARGS+=("--name=$TITEL")
-    printf '%s\n' "$ADMIN_KENNWORT" | as_app php "$ZIEL/bin/power" "${INSTALL_ARGS[@]}" | grep -v 'Passwort:' || true
-    if [[ ! -f "$ZIEL/storage/database.sqlite" ]]; then
-        echo "Die Datenbank wurde nicht angelegt – Ausgabe oben prüfen." >&2
+    # Ein Fehler darf nicht untergehen: sonst stünde ein Erstkennwort in der
+    # Zusammenfassung, zu dem es keinen Benutzer gibt.
+    if ! AUSGABE="$(printf '%s\n' "$ADMIN_KENNWORT" | as_app php "$ZIEL/bin/power" "${INSTALL_ARGS[@]}" 2>&1)"; then
+        printf '%s\n' "$AUSGABE" | grep -v 'Passwort:' >&2 || true
+        echo "bin/power install ist fehlgeschlagen – Ausgabe oben prüfen, dann das Skript noch einmal aufrufen." >&2
         exit 1
     fi
-    zugang_setzen OBERFLAECHE_BENUTZER "$ADMIN_USER"
-    zugang_setzen OBERFLAECHE_KENNWORT "$ADMIN_KENNWORT"
+    printf '%s\n' "$AUSGABE" | grep -v 'Passwort:' || true
+    if grep -qx 'Administrator angelegt:' <<< "$AUSGABE"; then
+        zugang_setzen OBERFLAECHE_BENUTZER "$ADMIN_USER"
+        zugang_setzen OBERFLAECHE_KENNWORT "$ADMIN_KENNWORT"
+    else
+        ADMIN_KENNWORT=""
+    fi
 fi
 if [[ -n "$TITEL" && -z "$ADMIN_KENNWORT" ]]; then
     as_app php "$ZIEL/bin/power" titel "$TITEL" >/dev/null

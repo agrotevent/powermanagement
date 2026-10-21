@@ -15,6 +15,8 @@
 #      Installationsskripts im Repository: das Skript holt sie und startet
 #      sie (einmal), der Zweig bleibt; app.key, Kennwörter und Administrator
 #      bleiben, alles läuft weiter
+#   2b. eine Datenbank ohne Benutzer (wie nach einem abgebrochenen ersten
+#      Lauf): derselbe Aufruf legt den Administrator an, mit neuem Erstkennwort
 #   3. Update auf einen neuen Stand, der einen Ordner in storage/ mitbringt,
 #      danach ein Update ohne Neues
 #   3b. Update ohne HOME und ohne Terminal (systemd-run, wie ein Dienst):
@@ -734,6 +736,29 @@ pruefe "Kennwörter und Tokens unverändert" test "$(grep -E '^[A-Z0-9_]+=' "$ZU
 pruefe "Administrator nicht neu angelegt" grep -q 'Administrator bestand schon' "$LAUF"
 pruefe_installation
 abschluss "zweiter Lauf"
+
+# ------------------------------------------------------------ 2b
+schritt "2b · Datenbank ohne Benutzer (wie nach einem abgebrochenen ersten Lauf): derselbe Aufruf legt den Administrator an"
+# Datei und Tabellen gibt es, nur keinen Benutzer (Befund 2). Früher hieß das
+# „Datenbank vorhanden“ – es kam nie ein Administrator dazu, und niemand
+# konnte sich anmelden.
+KENNWORT_VORHER="$(zugang OBERFLAECHE_KENNWORT)"
+pruefe "alle Benutzer entfernt" app_php '\App\Support\Database::execute("DELETE FROM user_roles"); \App\Support\Database::execute("DELETE FROM users");'
+if ! "$ZIEL/deploy/install-debian.sh" --name="Prüfung Installation" > "$LAUF" 2>&1; then
+    cat "$LAUF"
+    fehler "deploy/install-debian.sh bricht bei einer Datenbank ohne Benutzer ab"
+    abschluss "Datenbank ohne Benutzer"
+fi
+sed 's/^/  | /' "$LAUF"
+ok "deploy/install-debian.sh läuft durch"
+pruefe "meldet die Datenbank ohne Benutzer" grep -q 'Die Datenbank hat noch keine Benutzer' "$LAUF"
+pruefe "Administrator angelegt" grep -q 'Erstkennwort – bitte bei der ersten Anmeldung ändern' "$LAUF"
+pruefe "neues Erstkennwort in zugaenge.txt" test "$(zugang OBERFLAECHE_KENNWORT)" != "$KENNWORT_VORHER"
+pruefe "genau ein Benutzer: admin" \
+    test "$(app_php 'echo implode(",", array_column(\App\Support\Database::select("SELECT username FROM users"), "username"));')" = admin
+# pruefe_installation meldet sich mit dem neuen Erstkennwort an.
+pruefe_installation
+abschluss "Datenbank ohne Benutzer"
 
 # ------------------------------------------------------------ 3
 schritt "3 · Update auf einen neuen Stand mit neuem Ordner in storage/"
