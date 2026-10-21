@@ -247,6 +247,11 @@ final class BereichController extends Controller
             }
             $zeilen[] = implode(';', $zeile);
         }
+        // Die Messwerte kamen aus der InfluxDB, ohne Sitzungssperre – vielleicht
+        // liegt das Gerät inzwischen beim Kunden.
+        if ($this->kundenmodusSperrt()) {
+            return;
+        }
         Audit::log('bereich.csv', 'bereich', (string) $b['id'], ['von' => Zeit::iso($von), 'bis' => Zeit::iso($bis)]);
         $name = 'bereich-' . preg_replace('/[^a-z0-9]+/', '-', strtolower((string) $b['name'])) . '-' . date('Ymd-Hi', $von) . '.csv';
         header('Content-Type: text/csv; charset=utf-8');

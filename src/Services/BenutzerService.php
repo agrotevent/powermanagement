@@ -334,14 +334,18 @@ final class BenutzerService
     }
 
     /**
-     * Ein Konto mit seinen Rollenzuweisungen und Freigaben am Konto entfernen
-     * – ohne Prüfung und ohne Audit: das tut, wer ruft (loeschen() hier, die
-     * Kundenverwaltung für Kundenzugänge).
+     * Ein Konto mit seinen Rollenzuweisungen, Freigaben am Konto und Sperren
+     * des Kundenmodus am Gerät entfernen – ohne Prüfung und ohne Audit: das
+     * tut, wer ruft (loeschen() hier, die Kundenverwaltung für Kundenzugänge).
      */
     public static function kontoEntfernen(int $id): void
     {
         Database::execute('DELETE FROM user_roles WHERE user_id = ?', [$id]);
         Database::execute("DELETE FROM freigaben WHERE subject_type = 'user' AND subject_id = ?", [$id]);
+        // Eine Sperre des Kundenmodus am Gerät gälte für dieses Konto nie
+        // mehr – sie hielte dort nur andere Konten vom eigenen Kundenmodus ab
+        // (Kundenmodus::fremdAmGeraet()).
+        Database::execute('DELETE FROM kundenmodus_geraete WHERE user_id = ?', [$id]);
         Database::delete('users', $id);
         Zugriff::vergessen();
     }

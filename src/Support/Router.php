@@ -63,21 +63,26 @@ final class Router
         // auch eine unbekannte Adresse, eine verbotene Seite oder eine
         // falsche Methode führt zurück zur Kundenseite statt auf eine
         // Fehlerseite (die früher die ganze Navigation samt „Abmelden“ zeigte).
+        // Beginnt er erst, während eine Anfrage ohne Sitzungssperre wartet
+        // (InfluxDB, git, Geräte), prüft Controller::kundenmodusSperrt() vor
+        // der Seite oder dem Download noch einmal, und Flash::add() schreibt
+        // keine Meldung mehr, die dann auf der Kundenseite stünde.
         //
         // Kundenzugänge (Kundenbereich, eigene Anmeldung des Kunden) haben
-        // keinen Kundenmodus – starten kann ihn nur, wer Berichte ausfüllt.
-        // Eine Sperre, die aus einer abgelaufenen Sitzung des Prüfers in der
-        // Sitzungsdatei steht, gilt für sie nicht (sie schickte sie sonst im
-        // Kreis: Kundenmodus → Bericht, Tor → Kundenbereich).
+        // keinen Kundenmodus – starten kann ihn nur, wer Berichte ausfüllt,
+        // und Kundenmodus::aktiv() ist für sie immer null. Eine Sperre, die
+        // aus einer abgelaufenen Sitzung des Prüfers stammt, gilt für sie
+        // also nicht (sie schickte sie sonst im Kreis: Kundenmodus → Bericht,
+        // Tor → Kundenbereich) – ebenso wenig die Sperre am Gerät.
         $angemeldet = Auth::check();
         $kundenzugang = $angemeldet && Kundenbereich::istKundenzugang();
-        $sperre = $angemeldet && !$kundenzugang ? Kundenmodus::aktiv() : null;
-        if ($sperre !== null && !Kundenmodus::erlaubt($method, $path, $sperre['bericht'])) {
+        $gesperrt = $kundenzugang ? null : Kundenmodus::sperrt($method, $path);
+        if ($gesperrt !== null) {
             if (self::willJson()) {
                 Response::json(['ok' => false, 'kundenmodus' => true, 'message' => 'Kundenmodus aktiv – erst mit dem Kennwort des Prüfers entsperren.'], 423);
                 return;
             }
-            Response::redirect('/berichte/' . $sperre['bericht'] . '/kunde');
+            Response::redirect('/berichte/' . $gesperrt . '/kunde');
             return;
         }
 
@@ -120,7 +125,10 @@ final class Router
                     Response::redirect('/login?next=' . rawurlencode($path));
                     return;
                 }
-                if (!Auth::can($route['permission'])) {
+                // Kundenseite und Entsperren auch ohne das Recht: Endet die
+                // Rolle, während das Gerät beim Kunden liegt, bliebe es sonst
+                // gesperrt – alle anderen Wege führen ja zur Kundenseite.
+                if (!Auth::can($route['permission']) && !Kundenmodus::ausweg($method, $path)) {
                     Response::forbidden();
                     return;
                 }
@@ -128,9 +136,14 @@ final class Router
 
             // Ein Konto mit vorläufigem Kennwort kommt nur bis zum Profil –
             // ein Kundenzugang bis zu seinem Konto im Kundenbereich: erst ein
-            // eigenes Kennwort, dann der Rest.
+            // eigenes Kennwort, dann der Rest. Nicht im Kundenmodus – das
+            // Profil führte zur Kundenseite, die zum Profil, im Kreis, und
+            // entsperren ließe sich nie. Erst entsperren (mit dem vorläufigen
+            // Kennwort), danach geht es zum Profil. Kundenzugänge haben keinen
+            // Kundenmodus (Kundenmodus::aktiv() ist für sie null).
             if (Auth::check() && (int) (Auth::user()['must_change_password'] ?? 0) === 1
-                && !in_array($path, self::OHNE_NEUES_KENNWORT, true)) {
+                && !in_array($path, self::OHNE_NEUES_KENNWORT, true)
+                && ($kundenzugang || Kundenmodus::aktiv() === null)) {
                 // Das Konto im Kundenbereich sagt es selbst (ein Hinweis, nicht zwei).
                 if (!$kundenzugang) {
                     Flash::warning('Bitte zuerst ein neues Passwort vergeben.');
@@ -168,8 +181,9 @@ final class Router
 
     /**
      * Erwartet die Anfrage JSON? Nur der Accept-Kopf zählt – nicht
-     * X-Requested-With: damit schickt `data-laeuft` in app.js Formulare ab,
-     * und die sollen weiter wie bisher mit Meldung und Weiterleitung enden.
+     * X-Requested-With: Formulare mit `data-laeuft` (app.js) gehen per fetch
+     * hinaus und sollen wie ein gewöhnliches Formular mit Meldung und
+     * Weiterleitung enden. Dieselbe Regel wie Request::wantsJson().
      */
     private static function willJson(): bool
     {

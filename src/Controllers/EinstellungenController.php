@@ -14,6 +14,7 @@ use App\Support\Audit;
 use App\Support\Config;
 use App\Support\Flash;
 use App\Support\Request;
+use App\Support\Session;
 use App\Support\Settings;
 
 final class EinstellungenController extends Controller
@@ -152,7 +153,9 @@ final class EinstellungenController extends Controller
 
     public function eventworxPruefen(Request $request): void
     {
-        $ergebnis = Eventworx::verbindungTesten();
+        // Zwei Anfragen an Eventworx (Drossel, bis 12 s je Versuch) – ohne
+        // die Sitzung zu halten; die Meldung kommt danach.
+        $ergebnis = Session::ohneSperre(static fn (): array => Eventworx::verbindungTesten());
         $ergebnis['ok'] ? Flash::success($ergebnis['message']) : Flash::error($ergebnis['message']);
         $this->redirect('/system/einstellungen');
     }
@@ -164,22 +167,31 @@ final class EinstellungenController extends Controller
             $this->redirect('/system/einstellungen');
             return;
         }
-        $influx = Influx::pruefen();
-        $influx['ok'] ? Flash::success($influx['message']) : Flash::error($influx['message']);
-        try {
-            $mqtt = Mqtt::ausKonfiguration('pm-einstellungen');
-            $mqtt->abonnieren([trim((string) Config::get('mqtt.prefix', 'pm'), '/') . '/status/nodered']);
-            $herz = $mqtt->lauschen(2, static fn () => true);
-            $mqtt->trennen();
-            Flash::success('MQTT-Broker erreichbar.' . ($herz === [] ? ' Von Node-RED kam kein Herzschlag (pm/status/nodered).' : ' Node-RED meldet sich.'));
-        } catch (\Throwable $e) {
-            Flash::error('MQTT: ' . $e->getMessage());
-        }
-        if ($influx['ok']) {
-            $p = Messdaten::pipeline();
-            $p === null
-                ? Flash::warning('In der letzten Stunde hat Node-RED nichts in die InfluxDB geschrieben (Messung „pipeline“ leer).')
-                : Flash::info('Node-RED schreibt: zuletzt ' . date('d.m.Y H:i:s', intdiv($p['zeit'], 1000)) . ', ' . (int) $p['fehler'] . ' Fehler, ' . (int) $p['puffer'] . ' Zeilen im Puffer.');
+        // InfluxDB (bis influx.timeout je Abfrage) und Broker (zwei Sekunden
+        // lauschen) – ohne die Sitzung zu halten. Die Meldungen erst danach.
+        $meldungen = Session::ohneSperre(static function (): array {
+            $meldungen = [];
+            $influx = Influx::pruefen();
+            $meldungen[] = [$influx['ok'] ? 'success' : 'error', $influx['message']];
+            try {
+                $mqtt = Mqtt::ausKonfiguration('pm-einstellungen');
+                $mqtt->abonnieren([trim((string) Config::get('mqtt.prefix', 'pm'), '/') . '/status/nodered']);
+                $herz = $mqtt->lauschen(2, static fn () => true);
+                $mqtt->trennen();
+                $meldungen[] = ['success', 'MQTT-Broker erreichbar.' . ($herz === [] ? ' Von Node-RED kam kein Herzschlag (pm/status/nodered).' : ' Node-RED meldet sich.')];
+            } catch (\Throwable $e) {
+                $meldungen[] = ['error', 'MQTT: ' . $e->getMessage()];
+            }
+            if ($influx['ok']) {
+                $p = Messdaten::pipeline();
+                $meldungen[] = $p === null
+                    ? ['warning', 'In der letzten Stunde hat Node-RED nichts in die InfluxDB geschrieben (Messung „pipeline“ leer).']
+                    : ['info', 'Node-RED schreibt: zuletzt ' . date('d.m.Y H:i:s', intdiv($p['zeit'], 1000)) . ', ' . (int) $p['fehler'] . ' Fehler, ' . (int) $p['puffer'] . ' Zeilen im Puffer.'];
+            }
+            return $meldungen;
+        });
+        foreach ($meldungen as [$art, $text]) {
+            Flash::add($art, $text);
         }
         $this->redirect('/system/einstellungen');
     }

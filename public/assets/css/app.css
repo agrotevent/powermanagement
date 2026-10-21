@@ -612,6 +612,9 @@ pre.cmd .c { color: #7dd3fc; }
 
 /* Die Laufanzeige braucht die kräftige Höhe – sie ist hier die Auskunft. */
 .knopf-laeuft .progress { overflow: hidden; }
+/* Unter einem Link in einer Knopfreihe („Repository abfragen“): eigene Zeile. */
+.btn-row > .knopf-laeuft { flex-basis: 100%; }
+a.btn[aria-disabled="true"] { opacity: .5; cursor: progress; }
 
 .update-fortschritt { margin-bottom: 1rem; }
 .update-fortschritt-kopf {
