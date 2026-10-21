@@ -28,6 +28,7 @@ declare(strict_types=1);
 
 require __DIR__ . '/hilfen/pruefung.php';
 
+use App\Auth\ApiZugang;
 use App\Auth\Auth;
 use App\Services\BenutzerService;
 use App\Services\UpdateAutomatik;
@@ -513,8 +514,52 @@ try {
         unlink($upd);
         rename($upd . '.echt', $upd);
         clearstatcache();
+
+        // Der allgemeine Wächter in bin/power (Befund 10): gehört storage/ nicht
+        // root, bricht jeder Befehl als root vor dem require ab – also bevor
+        // die Datenbank oder das Log angefasst wird. Ein Baum mit eigener
+        // Kopie von bin/power (der Wächter sieht auf ../storage), src als Verweis.
+        $baum = $ordner . '/baum';
+        mkdir($baum . '/bin', 0755, true);
+        mkdir($baum . '/storage', 0750);
+        copy($wurzel . '/bin/power', $baum . '/bin/power');
+        symlink($wurzel . '/src', $baum . '/src');
+        $baumDb = $baum . '/storage/datenbank.sqlite';
+        file_put_contents($ordner . '/baum.php', '<?php $c = require ' . var_export($ordner . '/config.php', true) . '; $c["database"]["path"] = '
+            . var_export($baumDb, true) . '; return $c;');
+        $baumPower = static function (array $argumente, string $datei = 'baum.php') use ($baum, $ordner): array {
+            $p = proc_open(array_merge(['php', $baum . '/bin/power'], $argumente), [0 => ['pipe', 'r'], 1 => ['pipe', 'w'], 2 => ['pipe', 'w']],
+                $rohre, $baum, ['POWERMANAGEMENT_CONFIG' => $ordner . '/' . $datei] + getenv());
+            fclose($rohre[0]);
+            $aus = stream_get_contents($rohre[1]) . stream_get_contents($rohre[2]);
+            fclose($rohre[1]);
+            fclose($rohre[2]);
+            return [proc_close($p), $aus];
+        };
+        chown($baum . '/storage', 33);
+        clearstatcache();
+        $wwwData = function_exists('posix_getpwuid') ? (string) ((posix_getpwuid(33) ?: [])['name'] ?? '') : '';
+        foreach ([['pruefen'], ['update:stand'], ['migrate'], ['user:password', 'jemand', 'Geheim-Kennwort-2026']] as $befehl) {
+            [$rc, $aus] = $baumPower($befehl);
+            pruefe($rc === 1 && str_contains($aus, 'runuser -u ' . ($wwwData !== '' ? $wwwData : 'www-data') . ' -- php bin/power ' . $befehl[0]),
+                'Wächter: als root, storage/ gehört UID 33 → ' . $befehl[0] . ' abgelehnt (' . trim($aus) . ')');
+            pruefe(!str_contains($aus, 'Geheim-Kennwort'), 'Wächter: ' . $befehl[0] . ' – keine Argumente im Hinweis');
+        }
+        [$rc, $aus] = $baumPower(['hilfe']);
+        pruefe($rc === 0 && str_contains($aus, 'bin/power install') && str_contains($aus, 'runuser -u www-data'), 'Wächter: hilfe geht auch als root');
+        clearstatcache();
+        pruefe(!file_exists($baumDb) && array_values(array_diff(scandir($baum . '/storage'), ['.', '..'])) === [],
+            'Wächter: nichts in storage/ angelegt, auch nicht mit hilfe (keine Datenbank, kein Log)');
+        chown($baum . '/storage', 65534);
+        clearstatcache();
+        [$rc, $aus] = $baumPower(['update:stand']);
+        pruefe($rc === 1 && str_contains($aus, 'runuser -u'), 'Wächter: storage/ gehört einem anderen Benutzer → abgelehnt');
+        chown($baum . '/storage', 0);
+        clearstatcache();
+        [$rc, $aus] = $baumPower(['update:stand'], 'config.php');
+        pruefe($rc === 0 && str_contains($aus, 'Update-Funktion:'), 'Wächter: storage/ gehört root (Entwicklung) → erlaubt');
     } else {
-        fwrite(STDOUT, "  (Besitzerprüfung und „als root abgelehnt“ übersprungen – nur als root)\n");
+        fwrite(STDOUT, "  (Besitzerprüfung, „als root abgelehnt“ und der Wächter in bin/power übersprungen – nur als root)\n");
     }
 
     // auftragText: was der Helfer ablehnte, baut PHP gar nicht erst
@@ -1313,6 +1358,25 @@ stream_wrapper_register("langsam", LangsamAttrappe::class);
     Database::execute('DELETE FROM kundenmodus_geraete WHERE id = ?', [$kmGeraet]);
     Database::execute('DELETE FROM berichte WHERE id = ?', [$kmBericht]);
 
+    // Die Schnittstelle (/api/v1) läuft vor Sitzung und Router – sie fragt die
+    // Schreibsperre selbst: Schreiben 503 mit Retry-After, Lesen geht, ohne
+    // gültiges Token weiter dieselbe 401.
+    $apiToken = ApiZugang::PRAEFIX . rtrim(strtr(base64_encode(random_bytes(30)), '+/', '-_'), '=');
+    $apiId = Database::insert('api_tokens', ['name' => $kennung . ' Schnittstelle', 'token_prefix' => substr($apiToken, 0, 12),
+        'token_hash' => hash('sha256', $apiToken), 'befugnisse' => json_encode(['plaene.vorschlagen']), 'created_at' => gmdate('c')]);
+    $apiBasis = 'http://127.0.0.1:' . $port;
+    $vorschlaegeVorher = (int) Database::scalar('SELECT COUNT(*) FROM api_vorschlaege');
+    foreach (['POST', 'PUT', 'DELETE'] as $methode) {
+        $r = api($apiBasis, $methode, '/api/v1/locations/' . $kennung . '/vorschlaege', $apiToken, '{"etagen":[]}');
+        pruefe($r['status'] === 503 && ($r['json']['wartung'] ?? false) === true && ($r['json']['ok'] ?? true) === false
+            && preg_match('/^Retry-After: 30\r?$/mi', $r['kopf']) === 1, 'Schnittstelle + Schreibsperre: ' . $methode . ' → 503 mit Retry-After 30 (' . $r['status'] . ')');
+    }
+    gleich((int) Database::scalar('SELECT COUNT(*) FROM api_vorschlaege'), $vorschlaegeVorher, 'Schnittstelle + Schreibsperre: kein Vorschlag angelegt');
+    $r = api($apiBasis, 'GET', '/api/v1/info', $apiToken);
+    pruefe($r['status'] === 200 && ($r['json']['ok'] ?? false) === true, 'Schnittstelle + Schreibsperre: Lesen geht (' . $r['status'] . ')');
+    gleich(api($apiBasis, 'POST', '/api/v1/locations/' . $kennung . '/vorschlaege', 'mtma_' . str_repeat('x', 40), '{}')['status'], 401,
+        'Schnittstelle + Schreibsperre: ungültiges Token weiter 401');
+
     $schreiben('wartung', UpdateService::KOPF_WARTUNG . "\nseit " . (time() - 4000) . "\nkennung -\n");
     $r = $aufruf($port, $a['dose'], 'POST', '/system/update/automatik', $sperrFelder, ['Accept: application/json']);
     pruefe($r['status'] === 200 && (json_decode($r['text'], true)['ok'] ?? false) === true && $modus() === 'aus', 'Schreibsperre älter als 60 min ohne Puls: wirkungslos');
@@ -1321,6 +1385,9 @@ stream_wrapper_register("langsam", LangsamAttrappe::class);
     pruefe($r['status'] === 503 && $modus() === 'aus', 'Schreibsperre älter als 60 min, Lauf pulst: wirksam');
     $schreiben('wartung', null);
     $schreiben('lauf', null);
+    $r = api($apiBasis, 'POST', '/api/v1/locations/' . $kennung . '/vorschlaege', $apiToken, '{"etagen":[]}');
+    pruefe($r['status'] !== 503 && $r['status'] >= 400 && $r['status'] < 500, 'Schnittstelle ohne Schreibsperre: wieder die gewöhnliche Antwort (' . $r['status'] . ')');
+    Database::execute('DELETE FROM api_tokens WHERE id = ?', [$apiId]);
     $automatikZurueck();
 
     // Demo-Modus: Seite mit Hinweis, kein Abzeichen
@@ -1389,5 +1456,19 @@ $js = (string) file_get_contents($wurzel . '/public/assets/js/update.js');
 foreach (['innerHTML', 'insertAdjacentHTML', 'outerHTML', 'eval(', 'document.write'] as $verboten) {
     pruefe(!str_contains($js, $verboten), 'update.js ohne ' . $verboten);
 }
+pruefe(preg_match('/antwort\.status === 423\)\s*\{[^}]*location\.reload\(\)/', $js) === 1, 'update.js: 423 (Kundenmodus) lädt neu');
+
+// Berichte während der Schreibsperre (503 mit wartung): nichts abgelehnt, gleich
+// noch einmal nach Retry-After – im Browser durchgespielt: Autosave, Neuladen
+// mitten im Update (die Übernahme wartet), Unterschrift des Kunden.
+$bericht = (string) file_get_contents($wurzel . '/public/assets/js/bericht.js');
+$kundeJs = (string) file_get_contents($wurzel . '/public/assets/js/bericht-kunde.js');
+foreach (['bericht.js' => $bericht, 'bericht-kunde.js' => $kundeJs] as $datei => $quelle) {
+    pruefe(str_contains($quelle, 'var WARTUNG_PAUSE = 30000;') && preg_match('/\.status === 503 && [a-z.]*erg\.wartung\)/', $quelle) === 1,
+        $datei . ': 503 mit wartung → nach 30 s (Retry-After) noch einmal');
+}
+pruefe(preg_match('/if \(r\.status === 503 && erg\.wartung\) \{(?:(?!\n        if \(r\.status).)*?planen\(WARTUNG_PAUSE\)/s', $bericht) === 1
+    && preg_match('/if \(r\.status === 503 && erg\.wartung\) \{(?:(?!\n        if \(r\.status).)*?gestoppt = true/s', $bericht) === 0,
+    'bericht.js: Autosave hält bei 503 nicht an (kein gestoppt), plant neu');
 
 ende('update');

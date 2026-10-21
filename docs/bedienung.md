@@ -280,7 +280,8 @@ der Typ lässt sich kopieren und löschen. Fehlerhafte Einträge aus der
 Vorlage korrigiert man also einfach im Katalog. Ein gelöschter Typ ist beim
 nächsten Import wieder *neu*.
 
-Auf der Kommandozeile:
+Auf der Kommandozeile (auf einer Installation als Anwendungsbenutzer,
+`runuser -u www-data -- php bin/power …` – als root bricht `bin/power` ab):
 
 ```bash
 php bin/power katalog:import resources/kataloge/bss-strombibel.json --pruefen   # nur ansehen
@@ -767,6 +768,8 @@ rotes **!** meldet eine Störung (Update gescheitert, Update-Dienst still,
 Auftrag hängt). Auf dem Handy, wo die Seitenleiste zu ist, steht dasselbe
 Zeichen oben in der Kopfleiste.
 
+![System → Update: installierter Stand, vier neue Stände mit Betreff, Aktualisieren, Automatische Updates und Verlauf](bilder/update.png)
+
 | Karte | zeigt |
 |-------|-------|
 | **Stand** | installierter Stand (Datum, Kurz-Hash, Betreff, Zweig), verfügbar: *Aktuell*, *n Änderungen*, *Suche fehlgeschlagen*, *Lokale Änderungen*, *Verlauf nicht linear*; wann zuletzt gesucht wurde. **Jetzt suchen** fragt das Repository. |
@@ -783,7 +786,10 @@ getrennt, die Oberfläche ist einen Moment nicht erreichbar (die Seite
 meldet „Dienste starten neu …“ und macht von selbst weiter). Solange das
 Update läuft, nimmt die Oberfläche keine Änderungen an: Speichern meldet
 „Gerade läuft ein Update – Änderungen sind in etwa einer Minute wieder
-möglich“. Geht etwas schief, kommt der alte Stand von selbst zurück –
+möglich“. Übergabeberichte speichern danach von selbst noch einmal, die
+Eingaben bleiben solange auf dem Gerät. Andere Instanzen bekommen über die
+Schnittstelle dieselbe Antwort (HTTP 503) – wer dort sendet, schickt es nach
+einer Minute noch einmal. Geht etwas schief, kommt der alte Stand von selbst zurück –
 Code, Datenbank und Einrichtung. Läuft gerade ein Aufbau oder wurde in den
 letzten 30 Minuten geschaltet, nennt die Seite das und verlangt das
 Kästchen **Trotzdem jetzt aktualisieren**. Ist der Knopf gesperrt, steht

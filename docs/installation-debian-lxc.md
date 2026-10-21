@@ -1187,8 +1187,10 @@ journalctl -a -u powermanagement-update -I                  # letzter Lauf (syst
 ```
 
 `bin/power` nie als root aufrufen – es legte root-eigene Dateien in
-`storage/` an; die Befehle `update:suchen`, `update:starten` und
-`update:automatik` lehnen das ab. Immer `runuser -u www-data -- php bin/power …`.
+`storage/` an (Datenbank-Nebendateien, Log, Kacheln), und die Oberfläche
+scheiterte danach. Als root bricht es deshalb mit einem Hinweis ab, solange
+`storage/` nicht root gehört (nur `bin/power hilfe` geht). Immer
+`runuser -u www-data -- php bin/power …`.
 
 **Direkt mit dem Skript** – für Optionen, die die Oberfläche nicht kennt
 (`--erzwingen`, `--flows-ersetzen`, `--zweig=<name>`, `--bis=<commit>`).

@@ -19,6 +19,12 @@
  * (…:aktuell) und sagt nur dann „auf dem Gerät gesichert“, wenn das ging.
  * Abmelden räumt beide weg; danach schreibt die Seite nichts mehr zurück.
  *
+ * Während eines Updates (503 mit wartung, etwa eine Minute) ist nichts
+ * abgelehnt: Die Eingaben bleiben auf dem Gerät, gespeichert wird nach
+ * Retry-After (30 s) noch einmal, eine Unterschrift geht dann mit demselben
+ * Idempotenzschlüssel noch einmal hinaus. Ein Entwurf, der gerade übernommen
+ * werden sollte, wartet – die Seite nimmt solange keine Eingaben an.
+ *
  * Bewertet wird nur auf dem Server – hier wird nur angezeigt, was das
  * Autosave zurückgibt. Texte aus Antworten nur per textContent, nie als HTML.
  *
@@ -43,6 +49,7 @@
     var TAKT = 20000;
     var LOKAL_TAKT = 500;
     var KEEPALIVE_HOECHSTENS = 60000;
+    var WARTUNG_PAUSE = 30000;   // Retry-After der Schreibsperre eines Updates
     var VORLAGE = '__Z__';
     var OP_FOLGE = { '': '>', '>': '<', '<': '' };
     var OP_TEXT = { '': 'Messwert genau (=)', '>': 'über dem Messbereich (>)', '<': 'unter dem Messbereich (<)' };
@@ -66,6 +73,9 @@
     var uebernahme = false;   // ein lokaler Entwurf wird gerade übernommen
     var lokalGesperrt = false;  // ein älterer lokaler Entwurf wartet auf Übernehmen/Verwerfen
     var unsicher = null;      // { json, ewx }: gesendet, aber ohne Antwort – geht beim nächsten Mal zuerst
+    var wartungBis = 0;       // bis dahin läuft ein Update (503) – Speichern wartet so lange
+    var zuletztWartung = false;   // die letzte Antwort war 503 wegen eines Updates
+    var uebernahmeWartet = false; // ein lokaler Entwurf wird nach dem Update übernommen
     var kette = Promise.resolve();
     var speicherZeit = null;
     var lokalZeit = null;
@@ -262,7 +272,11 @@
         return einmal(o);
     }
 
+    /** Läuft gerade ein Update (zuletzt 503)? Dann erst nach WARTUNG_PAUSE wieder senden. */
+    function wartet() { return wartungBis > Date.now(); }
+
     function einmal(o) {
+        zuletztWartung = false;
         if (gestoppt || (uebernahme && !o.uebernahme)) { return Promise.resolve(false); }
         var json = o.inhalt || zustand();
         var mitEwx = o.ewx !== undefined ? o.ewx : ewx;
@@ -297,6 +311,7 @@
             wurzel.dataset.version = String(version);
             bestaetigt = json;
             abgelehnt = null;
+            wartungBis = 0;
             if (ausLokal) {
                 lokalLoeschen(typeof ausLokal === 'string' ? ausLokal : LOKAL);
                 stand('laeuft', 'übernommen – lädt neu …');
@@ -314,6 +329,30 @@
             return true;
         }
         var gesichert = lokalSchreiben(zustand());
+        if (r.status === 503 && erg.wartung) {
+            // Gerade läuft ein Update (Schreibsperre, meist etwa eine Minute):
+            // nichts abgelehnt, nichts verloren – gleich noch einmal.
+            zuletztWartung = true;
+            wartungBis = Date.now() + WARTUNG_PAUSE;
+            stand('warn', 'Update läuft');
+            if (ausLokal) {
+                // Der Entwurf bleibt auf dem Gerät, wie er ist (lokalSchreiben
+                // schreibt während der Übernahme nicht). Übernommen wird nach
+                // dem Update; bis dahin keine Eingaben – das Neuladen danach
+                // verwürfe sie.
+                uebernahmeWartet = true;
+                wurzel.inert = true;
+                meldungZeigen('Gerade läuft ein Update – die Eingaben auf diesem Gerät sind gesichert und werden danach übernommen. '
+                    + 'Bitte so lange warten.', {});
+                setTimeout(function () { uebernahmeWartet = false; lokalUebernehmen(typeof ausLokal === 'string' ? ausLokal : LOKAL); }, WARTUNG_PAUSE);
+                return false;
+            }
+            meldungZeigen('Gerade läuft ein Update – ' + (gesichert ? 'deine Eingaben sind auf diesem Gerät gesichert und werden'
+                : 'deine Eingaben sind NICHT gesichert; bitte die Seite offen lassen, sie werden') + ' in etwa einer halben Minute noch einmal gespeichert.',
+            { erneut: true });
+            planen(WARTUNG_PAUSE);
+            return false;
+        }
         if (r.status === 401) {
             gestoppt = true;
             stand('fehler', 'abgemeldet');
@@ -363,7 +402,7 @@
         lokalPlanen();
         if (gestoppt) { return; }
         if (!anzeige.classList.contains('laeuft') && meldung.hidden) { stand('warn', 'ungespeichert'); }
-        planen(VERZOEGERUNG);
+        planen(wartet() ? wartungBis - Date.now() : VERZOEGERUNG);
     }
 
     function abgeleitetEntfernen(el) {
@@ -1094,9 +1133,11 @@
 
     function unterschreiben(werte) {
         var schluessel = 'pruefer:' + berichtId;
+        var dlg = wurzel.querySelector('[data-unterschrift-dialog]');
         unterschrift.laeuft(true);
         unterschrift.meldung('speichert und unterschreibt …', false);
         speichern().then(function (ok) {
+            if (!ok && zuletztWartung) { return { status: 503, erg: { ok: false, wartung: true } }; }
             if (!ok) { return { status: 0, erg: { ok: false, message: 'Der Bericht ist nicht gespeichert – siehe Meldung oben.' } }; }
             laufendeUnterschrift = anfrage('/unterschreiben', {
                 version: String(version), striche: unterschrift.daten(), name: werte.name || '', ort: werte.ort || '',
@@ -1113,6 +1154,18 @@
                 lokalLoeschen();
                 unterschrift.meldung((r.erg.message || 'Unterschrieben.') + ' Lädt …', false);
                 window.location.href = ADRESSE;
+                return;
+            }
+            if (r.status === 503 && r.erg.wartung) {
+                // Gerade läuft ein Update: Die Unterschrift bleibt stehen und geht
+                // gleich noch einmal hinaus – mit demselben Idempotenzschlüssel,
+                // also nichts doppelt. „Abbrechen“ hält das an.
+                unterschrift.meldung('Gerade läuft ein Update – die Unterschrift bleibt stehen und wird in etwa einer halben Minute noch einmal gesendet.', false);
+                var uhr = setTimeout(function () {
+                    laufendeUnterschrift = null;
+                    if (dlg && dlg.hasAttribute('open')) { unterschreiben(werte); } else { unterschrift.laeuft(false); }
+                }, WARTUNG_PAUSE);
+                laufendeUnterschrift = { abbrechen: function () { clearTimeout(uhr); } };
                 return;
             }
             unterschrift.laeuft(false);
@@ -1384,7 +1437,7 @@
         if (!gestoppt && (zustand() !== bestaetigt || ewx !== '')) { speichern(); }
     });
     setInterval(function () {
-        if (!gestoppt && !uebernahme && (zustand() !== bestaetigt || ewx !== '')) { speichern(); }
+        if (!gestoppt && !uebernahme && !wartet() && (zustand() !== bestaetigt || ewx !== '')) { speichern(); }
     }, TAKT);
     window.addEventListener('resize', kopfHoehe);
 
@@ -1398,7 +1451,11 @@
         wurzel.querySelector('[data-lokal-leiste]').hidden = true;
         stand('laeuft', 'übernimmt Eingaben vom Gerät …');
         speichern({ inhalt: lokal.inhalt, ewx: typeof lokal.ewx === 'string' ? lokal.ewx : '', uebernahme: schluessel }).then(function (ok) {
-            if (!ok) { uebernahme = false; }
+            // Während eines Updates bleibt die Übernahme offen (sie kommt gleich noch einmal).
+            if (!ok && !uebernahmeWartet) {
+                uebernahme = false;
+                wurzel.inert = false;
+            }
         });
     }
 

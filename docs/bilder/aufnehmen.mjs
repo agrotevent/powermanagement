@@ -23,7 +23,7 @@
  * Netz, auf GitHub landet nichts. Deshalb muss der Server diese Arbeitskopie
  * ausliefern (php und git im PATH). Die Einstellungen und Abgleich-Vermerke
  * der Installation stehen danach wieder wie vorher; zwei Notizen im Inventar
- * bleiben geändert (der Teil läuft zuletzt).
+ * bleiben geändert (der Teil läuft als letzter an dieser Installation).
  *
  * Für die Schnittstelle (andere Instanzen) startet das Skript eine zweite
  * Instanz B: derselbe Code mit eigener Konfiguration und Datenbank im
@@ -35,6 +35,11 @@
  * Standorte, B samt Datenbank und die Plandateien, die B im gemeinsamen
  * storage/plans abgelegt hat; die Abgleich-Schlüssel des Geländes stehen
  * wie vorher. Gezeigt wird nie ein Token im Klartext.
+ *
+ * System → Update zeigt eine dritte Instanz U (wie B, dazu eigenes
+ * storage/update und .git im Temp-Ordner): Die Dateien des Update-Dienstes
+ * schreibt das Skript mit den letzten Commits dieser Arbeitskopie selbst –
+ * es läuft kein Update. Danach ist U samt Temp-Ordner wieder weg.
  */
 import { execFileSync, spawn } from 'child_process';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs';
@@ -609,6 +614,101 @@ return $c;
             if (is_dir($k) && trim((string) shell_exec('git -C ' . escapeshellarg($k) . ' remote get-url origin 2>/dev/null')) === $argv[2]) {
                 exec('rm -rf ' . escapeshellarg($k));
             }`, sicherung, repo);
+        rmSync(tmp, { recursive: true, force: true });
+    }
+}
+
+// ------------------------------------------------------------ Update (zuletzt)
+{
+    /*
+     * System → Update zeigt im Demo-Modus nur einen Hinweis. Für das Bild
+     * startet das Skript eine eigene Instanz U wie B: eigene Datenbank,
+     * eigenes storage/update und ein eigenes .git im Temp-Ordner. Was sonst
+     * der Update-Dienst schreibt (Lebenszeichen, Stand, Verlauf), schreibt
+     * das Skript selbst – mit den letzten Commits dieser Arbeitskopie. Es
+     * läuft kein Update, und an der Installation ändert sich nichts.
+     */
+    const tmp = mkdtempSync(join(tmpdir(), 'pm-bilder-update-'));
+    const uConfig = join(tmp, 'u.php');
+    const umgebungU = { ...process.env, POWERMANAGEMENT_CONFIG: uConfig };
+    const portU = await freierPort();
+    const u = { url: `http://127.0.0.1:${portU}`, name: 'admin', wort: 'Update-Bilder-2026!' };
+    const commits = execFileSync('git', ['-C', wurzel, 'log', '--no-merges', '-n', '6', '--format=%H %ct %s'], { encoding: 'utf8' })
+        .trim().split('\n').map((z) => {
+            const [h, t, ...s] = z.split(' ');
+            return { h, t: Number(t), s: s.join(' ') };
+        });
+    let server = null;
+    try {
+        if (commits.length < 6) {
+            throw new Error('Update: zu wenige Commits in der Arbeitskopie');
+        }
+        writeFileSync(uConfig, `<?php
+$c = require ${phpText(join(wurzel, 'config/config.php'))};
+$c['app']['demo'] = false;
+$c['app']['url'] = ${phpText(u.url)};
+$c['database'] = ['driver' => 'sqlite', 'path' => ${phpText(join(tmp, 'u.sqlite'))}] + $c['database'];
+$c['update']['verzeichnis'] = ${phpText(join(tmp, 'update'))};
+$c['update']['git_verzeichnis'] = ${phpText(join(tmp, 'git'))};
+return $c;
+`);
+        execFileSync('php', ['bin/power', 'install', u.name, u.wort, '--ohne-wechsel'], { cwd: wurzel, env: umgebungU, stdio: 'ignore' });
+        // Installiert ist der fünftletzte Commit, verfügbar der neueste; davor
+        // ein Update von Hand vor drei Tagen.
+        const [installiert, alt] = [commits[4], commits[5]];
+        const neu = commits.slice(0, 4);
+        execFileSync('php', ['-r', `require 'src/bootstrap.php'; use App\\Services\\UpdateService as U;
+            [, $tmp, $daten, $von] = $argv;
+            $d = json_decode($daten, true);
+            $jetzt = time();
+            foreach (['update/soll', 'update/ist', 'git/refs/heads'] as $o) { mkdir($tmp . '/' . $o, 0750, true); }
+            file_put_contents($tmp . '/git/HEAD', "ref: refs/heads/main\\n");
+            file_put_contents($tmp . '/git/refs/heads/main', $d['installiert']['h'] . "\\n");
+            file_put_contents($tmp . '/update/ist/helfer', U::KOPF_HELFER . "\\nzeit {$jetzt}\\nfassung {$d['installiert']['h']}\\noberflaeche ja\\nautomatik ja\\noffen nein\\npfad ok\\n");
+            $erst = $d['neu'][0];
+            $stand = U::KOPF_STAND . "\\nerzeugt {$jetzt}\\nabruf ok\\nabruf_zeit " . ($jetzt - 1500) . "\\nzweig main\\n"
+                . "quelle https://github.com/agrotevent/powermanagement\\ninstalliert {$d['installiert']['h']} {$d['installiert']['t']}\\n"
+                . 'installiert_betreff ' . $d['installiert']['s'] . "\\nverfuegbar {$erst['h']} {$erst['t']}\\nneu " . count($d['neu']) . "\\n"
+                . "linear ja\\nlokal_geaendert nein\\nmigrationen nein\\neinrichtung ja\\nflows nein\\n";
+            foreach ($d['neu'] as $c) { $stand .= "ziel_kandidat {$c['h']} {$c['t']}\\n"; }
+            foreach ($d['neu'] as $c) { $stand .= "commit {$c['h']} {$c['t']} {$c['s']}\\n"; }
+            file_put_contents($tmp . '/update/ist/stand', $stand . "weitere 0\\n");
+            // Das letzte Update: im Verlauf und als zuletzt gelaufener Lauf
+            $beginn = $jetzt - 3 * 86400;
+            $kennung = bin2hex(random_bytes(16));
+            $sicherung = 'vor-update-' . date('Ymd-His', $beginn) . '.tar.gz';
+            file_put_contents($tmp . '/update/ist/verlauf', U::KOPF_VERLAUF . "\\neintrag {$beginn} " . ($beginn + 143) . " {$kennung}"
+                . " hand {$von} aktualisieren eingespielt - {$d['alt']['h']} {$d['installiert']['h']} {$sicherung}\\n");
+            file_put_contents($tmp . '/update/ist/lauf', U::KOPF_LAUF . "\\nkennung {$kennung}\\naktion aktualisieren\\nausloeser hand\\nvon {$von}\\n"
+                . "zustand fertig\\nergebnis eingespielt\\ngrund -\\nschritt 12 12 Prüfen\\nbeginn {$beginn}\\npuls " . ($beginn + 143) . "\\nende " . ($beginn + 143)
+                . "\\nalt {$d['alt']['h']}\\nneu {$d['installiert']['h']}\\nziel {$d['installiert']['h']}\\nsicherung {$sicherung}\\npruefung ok\\ninvocation -\\nprotokoll -\\n");
+            touch($tmp . '/update/zeitplan');`, tmp, JSON.stringify({ installiert, alt, neu }), u.name], { cwd: wurzel, env: umgebungU });
+
+        server = spawn('php', ['-S', `127.0.0.1:${portU}`, '-t', 'public'], { cwd: wurzel, env: umgebungU, stdio: 'ignore' });
+        for (let i = 0; i < 100; i++) {
+            try {
+                if ((await fetch(u.url + '/login')).ok) {
+                    break;
+                }
+            } catch {
+                // noch nicht da
+            }
+            await new Promise((r) => setTimeout(r, 100));
+        }
+        const su = await sitzung(DESKTOP, {}, u);
+        await oeffnen(su.page, '/system/update', 600, u.url);
+        const text = await su.page.locator('main').innerText();
+        for (const z of ['Jetzt suchen', 'Jetzt aktualisieren', 'Automatische Updates', neu[0].s.slice(0, 30)]) {
+            if (!text.includes(z)) {
+                fehler.push('Update: „' + z + '“ fehlt auf der Seite');
+            }
+        }
+        await foto(su.page, 'update', { fullPage: true });
+        await su.ctx.close();
+    } finally {
+        if (server !== null) {
+            server.kill('SIGTERM');
+        }
         rmSync(tmp, { recursive: true, force: true });
     }
 }

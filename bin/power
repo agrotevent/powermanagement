@@ -77,7 +77,49 @@ declare(strict_types=1);
  *                                   Übergabeberichte melden, entschiedene Änderungsvorschläge
  *                                   (älter als 400 Tage) und verwaiste Vorschlags- und
  *                                   Temp-Ordner entfernen (täglich per Timer)
+ *
+ * Auf einer Installation als Anwendungsbenutzer: runuser -u www-data -- php bin/power …
+ * Als root bricht bin/power ab, solange storage/ nicht root gehört (außer hilfe).
  */
+
+/*
+ * Nicht als root, wenn storage/ jemand anderem gehört (Befund 10): Schon
+ * bootstrap.php öffnete die SQLite als root – root-eigene -wal/-shm, ein
+ * root-eigenes storage/logs/app.log –, und Befehle wie verteiler:liste oder
+ * plan:kacheln legten root-eigene Arbeitskopien und Kacheln an. Danach
+ * scheitert die Oberfläche. Deshalb vor dem require, für alle Befehle außer
+ * der Hilfe – die kommt dann ohne bootstrap.php. Ein Checkout, dessen
+ * storage/ root gehört (Entwicklung, CI als root), bleibt erlaubt. Im Hinweis
+ * nur der Befehl, nie die Argumente – dort kann ein Kennwort stehen.
+ */
+$hilfe = static function (): string {
+    // Der erste Doc-Kommentar dieser Datei (oben).
+    preg_match('#/\*\*(.*?)\*/#s', (string) file_get_contents(__FILE__), $m);
+    return trim((string) preg_replace('/^\s*\* ?/m', '', $m[1] ?? ''));
+};
+(static function (array $argv, callable $hilfe): void {
+    if (!function_exists('posix_geteuid') || posix_geteuid() !== 0) {
+        return;
+    }
+    $befehl = (string) ($argv[1] ?? 'hilfe');
+    $storage = dirname(__DIR__) . '/storage';
+    clearstatcache();
+    $besitzer = is_dir($storage) ? @fileowner($storage) : @fileowner(dirname(__DIR__));
+    if ($besitzer === 0) {
+        return;
+    }
+    if (in_array($befehl, ['hilfe', 'help', '--help', '-h'], true)) {
+        fwrite(STDOUT, $hilfe() . PHP_EOL);
+        exit(0);
+    }
+    $konto = is_int($besitzer) && function_exists('posix_getpwuid') ? (posix_getpwuid($besitzer) ?: [])['name'] ?? '' : '';
+    $name = preg_match('/^[a-z_][a-z0-9_-]{0,31}$/', (string) $konto) === 1 ? (string) $konto : '';
+    $befehl = preg_match('/^[a-z][a-z0-9:-]{0,40}$/', $befehl) === 1 ? $befehl : '…';
+    fwrite(STDERR, 'Fehler: bin/power nicht als root – storage/ gehört ' . ($name !== '' ? $name : 'einem anderen Benutzer')
+        . '. Bitte als Anwendungsbenutzer: runuser -u ' . ($name !== '' ? $name : 'www-data') . ' -- php bin/power ' . $befehl
+        . (count($argv) > 2 ? ' …' : '') . PHP_EOL);
+    exit(1);
+})($argv, $hilfe);
 
 require dirname(__DIR__) . '/src/bootstrap.php';
 
@@ -684,7 +726,5 @@ switch ($befehl) {
         break;
 
     default:
-        $kopf = file_get_contents(__FILE__);
-        preg_match('#/\*\*(.*?)\*/#s', (string) $kopf, $m);
-        $aus(trim(preg_replace('/^\s*\* ?/m', '', $m[1] ?? '')));
+        $aus($hilfe());
 }

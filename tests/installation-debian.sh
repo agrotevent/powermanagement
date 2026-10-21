@@ -532,6 +532,11 @@ pruefe_installation() {
         pruefe "Update-Zeitplan meldet sich (storage/update/zeitplan)" test -e "$ZIEL/storage/update/zeitplan"
         pruefe "bin/power update:stand: eingerichtet" bash -c \
             'cd "$1" && runuser -u www-data -- php bin/power update:stand | grep -q "^Update-Funktion: eingerichtet"' _ "$ZIEL"
+        # bin/power als root: bricht vor dem require ab (Befund 10) – mit Hinweis,
+        # und in storage/ entsteht nichts, das root gehört.
+        pruefe "bin/power als root abgelehnt (runuser-Hinweis)" bash -c \
+            'cd "$1" && ! php bin/power pruefen > /dev/null 2> /tmp/pm-waechter.txt && grep -q "runuser -u www-data -- php bin/power pruefen" /tmp/pm-waechter.txt' _ "$ZIEL"
+        pruefe "storage/ danach weiter ohne root-eigene Dateien" leer "$(find "$ZIEL/storage" -user root -print)"
     fi
 
     # Oberfläche über nginx und PHP-FPM

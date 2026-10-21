@@ -6,6 +6,7 @@ namespace App\Controllers;
 use App\Auth\ApiZugang;
 use App\Services\ApiBestand;
 use App\Services\LocationBundle;
+use App\Services\UpdateService;
 use App\Services\VorschlagService;
 use App\Support\Audit;
 use App\Support\Config;
@@ -31,6 +32,11 @@ use App\Support\Request;
  * Was ein Token sieht, kommt nur aus seinen Befugnissen und Standorten
  * (ApiZugang) – angemeldet wird dabei niemand, auch nicht der Benutzer, an
  * den ein Token gebunden ist.
+ *
+ * Während eines Updates (Schreibsperre, UpdateService::wartungAktiv())
+ * bekommt jede schreibende Methode 503 mit Retry-After – wie die Oberfläche
+ * (UpdateService::wartungsSperre() läuft erst hinter dieser Tür). Lesen geht
+ * weiter.
  */
 final class ApiController
 {
@@ -94,6 +100,16 @@ final class ApiController
             return;
         }
         Audit::akteur('api:' . mb_substr((string) $token['name'], 0, 60));
+
+        // Schreibsperre eines Updates: Was jetzt ankäme, verlöre ein
+        // Zurückrollen (die Datenbank von vorher kommt zurück). Erst nach dem
+        // Token – ein ungültiges bekommt weiter genau dieselbe 401.
+        if (in_array($methode, ['POST', 'PUT', 'PATCH', 'DELETE'], true) && UpdateService::wartungAktiv()) {
+            header('Retry-After: 30');
+            $this->antwort(['ok' => false, 'wartung' => true,
+                'message' => 'Auf der angefragten Instanz läuft gerade ein Update – bitte in etwa einer Minute noch einmal senden.'], 503);
+            return;
+        }
 
         $pfad = $request->path();
         $k = self::SCHLUESSEL;

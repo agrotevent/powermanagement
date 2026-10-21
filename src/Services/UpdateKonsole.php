@@ -28,7 +28,9 @@ use App\Support\Zeit;
  *
  * Als root nur update:stand (lesen) – ein Auftrag von root gehörte root, und
  * der Helfer liest ihn als App-Benutzer; root-eigene -wal/-shm neben der
- * SQLite ebenso.
+ * SQLite ebenso. Gehört storage/ nicht root (jede Installation), kommt root
+ * gar nicht bis hierher: bin/power lehnt vor dem require ab. Hier zählt
+ * zusätzlich storage/update (bzw. update.verzeichnis) – auch als Verweis.
  */
 final class UpdateKonsole
 {
