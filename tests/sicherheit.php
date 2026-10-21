@@ -73,6 +73,21 @@ try {
     pruefe(BenutzerService::darfVergeben(['dashboard.view', 'system.users.manage']), 'eigene Rechte darf man vergeben');
     pruefe(!BenutzerService::darfVergeben(['berichte.view']) && !BenutzerService::darfVergeben(['berichte.pruefen']),
         'Rechte der Übergabeberichte nur, wer sie selbst hat');
+    pruefe(!BenutzerService::darfVergeben(['kunden.view']) && !BenutzerService::darfVergeben(['kunden.manage'])
+        && !BenutzerService::darfVergeben(['kunden.nachweise']), 'Rechte des Kundenbereichs nur, wer sie selbst hat');
+    // Kundenbereich: Standorte für Kunden gibt nur frei, wer selbst alles sieht (was sie
+    // speichert – nur Standort, nur sehen –, prüft kundenbereich.php).
+    pruefe(!BenutzerService::freigabeFuerKunde(1, ['site_id' => 1, 'gueltig_ab' => '2026-01-01', 'gueltig_bis' => '2026-01-02',
+        'daten_wie_gueltig' => 1])['ok'], 'Kunden-Freigabe ohne „Alle Standorte …“ abgelehnt');
+    // Der Kundenbereich fragt Eventworx nie – Dateien aus Eventworx übernimmt eine Person.
+    foreach (['src/Controllers/KundenbereichController.php', 'src/Kunden/Kundenbereich.php', 'src/Kunden/KundenSicht.php'] as $datei) {
+        if (is_file(dirname(__DIR__) . '/' . $datei)) {
+            pruefe(!str_contains((string) file_get_contents(dirname(__DIR__) . '/' . $datei), 'Eventworx::'), $datei . ' fragt Eventworx nicht');
+        }
+    }
+    gleich(Response::sichererDateiname("Muster Events GmbH & Co. KG \"ü\"\r\nX.pdf"), 'Muster-Events-GmbH-Co.-KG-X.pdf',
+        'Dateiname in Content-Disposition nur ASCII ohne Anführungszeichen und Zeilenumbruch');
+    gleich(Response::sichererDateiname('../..'), 'dokument.pdf', 'leerer Dateiname: Ersatz');
     // Texte aus Antworten (Eventworx, Bewertung, Prüfen) nur per textContent – nie als HTML.
     $js = dirname(__DIR__) . '/public/assets/js/';
     foreach (array_merge(glob($js . 'bericht*.js') ?: [], [$js . 'unterschrift.js']) as $datei) {
@@ -171,6 +186,16 @@ try {
     $ansichten = array_merge(glob(dirname(__DIR__) . '/resources/views/schnittstelle/*.php') ?: [], glob(dirname(__DIR__) . '/resources/views/instanzen/*.php') ?: [],
         glob(dirname(__DIR__) . '/resources/views/vorschlaege/*.php') ?: [], [dirname(__DIR__) . '/resources/views/partials/token-standorte.php']);
     pruefe(count($ansichten) >= 10, 'Ansichten der Schnittstelle, der anderen Instanzen und der Vorschläge gefunden');
+    // … und die des Kundenbereichs (dort gar kein Inline-Skript).
+    $kundenAnsichten = array_merge(glob(dirname(__DIR__) . '/resources/views/kundenbereich/*.php') ?: [],
+        [dirname(__DIR__) . '/resources/views/layout/kundenbereich.php']);
+    pruefe(count($kundenAnsichten) >= 3, 'Ansichten des Kundenbereichs gefunden');
+    foreach ($kundenAnsichten as $datei) {
+        $text = (string) file_get_contents($datei);
+        $name = basename(dirname($datei)) . '/' . basename($datei);
+        pruefe(preg_match('/<script(?![^>]*\bsrc=)/i', $text) !== 1, $name . ': kein Inline-Skript');
+        pruefe(preg_match('/\son[a-z]+\s*=/i', $text) !== 1 && stripos($text, 'javascript:') === false, $name . ': kein on…= und kein javascript:');
+    }
     // Eine Vorschlagsdatei nur über ihren Zufallsnamen im eigenen Ordner – auch ein verfälschter Eintrag führt nicht hinaus.
     foreach (['../../config/config.php', '/etc/passwd', 'abc.svg', str_repeat('a', 24) . '.php'] as $falsch) {
         pruefe(\App\Services\VorschlagService::datei(['id' => 1, 'dateien' => ['plaene/x.svg' => ['datei' => $falsch]]], 'plaene/x.svg') === null,

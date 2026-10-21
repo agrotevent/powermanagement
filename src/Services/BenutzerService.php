@@ -6,6 +6,7 @@ namespace App\Services;
 use App\Auth\Auth;
 use App\Auth\Permissions;
 use App\Auth\Zugriff;
+use App\Kunden\Kundenbereich;
 use App\Support\Audit;
 use App\Support\Database;
 use App\Support\Zeit;
@@ -17,9 +18,18 @@ use App\Support\Zeit;
  *   1. das Konto selbst (gueltig_ab/gueltig_bis),
  *   2. jede Rollenzuweisung (Rolle „Kunde“ nur für die Veranstaltungswoche),
  *   3. jede Freigabe (was, wann gültig, welcher Datenzeitraum).
+ *
+ * Kundenzugänge (users.kunde_id) gehören nicht hierher: sie stehen nicht in
+ * der Liste, lassen sich hier weder ändern noch sperren, entsperren oder
+ * löschen, bekommen keine Freigaben am Konto – das alles macht die
+ * Kundenverwaltung. Ihre Standorte kommen aus Freigaben am Kunden
+ * (freigabeFuerKunde, subject_type 'kunde').
  */
 final class BenutzerService
 {
+    /** Die Meldung, wenn hier jemand einen Kundenzugang anfassen will. */
+    public const KUNDENZUGANG = 'Kundenzugänge pflegt die Kundenverwaltung.';
+
     public const ZIELE = [
         'alles'  => 'Alle Standorte und Anlagen',
         'site'   => 'Standort',
@@ -74,10 +84,22 @@ final class BenutzerService
         ), 'permission')));
     }
 
-    /** Darf der angemeldete Benutzer dieses Konto ändern, sperren, löschen oder ihm Freigaben geben? */
+    /**
+     * Darf der angemeldete Benutzer dieses Konto ändern, sperren, löschen oder
+     * ihm Freigaben geben? Einen Kundenzugang nie – auch nicht die
+     * Administration: ein Konto ohne Rechte wäre sonst für jeden mit „Benutzer
+     * verwalten“ zu haben (Kennwort setzen, Freigaben am Konto).
+     */
     public static function darfVerwalten(int $userId): bool
     {
-        return self::darfVergeben(self::benutzerRechte($userId));
+        return !self::istKundenzugang($userId) && self::darfVergeben(self::benutzerRechte($userId));
+    }
+
+    /** Ist dieses Konto ein Kundenzugang (users.kunde_id)? */
+    public static function istKundenzugang(int $userId): bool
+    {
+        $konto = Database::first('SELECT id, kunde_id FROM users WHERE id = ?', [$userId]);
+        return $konto !== null && Kundenbereich::istKundenzugang($konto);
     }
 
     /**
@@ -181,10 +203,10 @@ final class BenutzerService
 
     // ------------------------------------------------------------ Benutzer
 
-    /** @return list<array<string,mixed>> */
+    /** @return list<array<string,mixed>> die Konten des Personals – ohne Kundenzugänge */
     public static function alle(): array
     {
-        $benutzer = Database::select('SELECT * FROM users ORDER BY username');
+        $benutzer = Database::select('SELECT * FROM users WHERE kunde_id IS NULL ORDER BY username');
         foreach ($benutzer as &$b) {
             $b['rollen'] = Database::select(
                 'SELECT r.id, r.name, ur.gueltig_ab, ur.gueltig_bis FROM user_roles ur JOIN roles r ON r.id = ur.role_id WHERE ur.user_id = ? ORDER BY r.name',
@@ -194,6 +216,12 @@ final class BenutzerService
             $b['zeitraum_hinweis'] = Auth::kontoZeitraum($b);
         }
         return $benutzer;
+    }
+
+    /** Wie viele Kundenzugänge es gibt (die Liste oben zeigt sie nicht). */
+    public static function kundenzugaenge(): int
+    {
+        return (int) Database::scalar('SELECT COUNT(*) FROM users WHERE kunde_id IS NOT NULL');
     }
 
     public static function find(int $id): ?array
@@ -206,6 +234,9 @@ final class BenutzerService
      */
     public static function speichern(?int $id, array $daten, array $rollen): array
     {
+        if ($id && self::istKundenzugang($id)) {
+            return ['ok' => false, 'message' => self::KUNDENZUGANG];
+        }
         $username = trim((string) ($daten['username'] ?? ''));
         if ($username === '' || preg_match('/^[A-Za-z0-9._@-]{2,64}$/', $username) !== 1) {
             return ['ok' => false, 'message' => 'Benutzername: 2–64 Zeichen, Buchstaben, Ziffern und . _ @ -.'];
@@ -294,17 +325,36 @@ final class BenutzerService
         if ($id === Auth::id()) {
             return ['ok' => false, 'message' => 'Das eigene Konto lässt sich nicht löschen.'];
         }
-        Database::execute('DELETE FROM user_roles WHERE user_id = ?', [$id]);
-        Database::execute("DELETE FROM freigaben WHERE subject_type = 'user' AND subject_id = ?", [$id]);
-        Database::delete('users', $id);
+        if (self::istKundenzugang($id)) {
+            return ['ok' => false, 'message' => self::KUNDENZUGANG];
+        }
+        self::kontoEntfernen($id);
         Audit::log('benutzer.loeschen', 'user', (string) $id);
         return ['ok' => true, 'message' => 'Benutzer gelöscht.'];
     }
 
-    public static function entsperren(int $id): void
+    /**
+     * Ein Konto mit seinen Rollenzuweisungen und Freigaben am Konto entfernen
+     * – ohne Prüfung und ohne Audit: das tut, wer ruft (loeschen() hier, die
+     * Kundenverwaltung für Kundenzugänge).
+     */
+    public static function kontoEntfernen(int $id): void
     {
+        Database::execute('DELETE FROM user_roles WHERE user_id = ?', [$id]);
+        Database::execute("DELETE FROM freigaben WHERE subject_type = 'user' AND subject_id = ?", [$id]);
+        Database::delete('users', $id);
+        Zugriff::vergessen();
+    }
+
+    /** @return array{ok:bool,message:string} */
+    public static function entsperren(int $id): array
+    {
+        if (self::istKundenzugang($id)) {
+            return ['ok' => false, 'message' => self::KUNDENZUGANG];
+        }
         Database::update('users', $id, ['failed_logins' => 0, 'locked_until' => null]);
         Audit::log('benutzer.entsperren', 'user', (string) $id);
+        return ['ok' => true, 'message' => 'Konto entsperrt.'];
     }
 
     public static function anlegen(string $username, string $kennwort, string $rolleSchluessel, bool $mussAendern = true): int
@@ -355,13 +405,24 @@ final class BenutzerService
         };
     }
 
+    /**
+     * Eine Freigabe an einem Benutzer oder einer Rolle – genau diese beiden.
+     * Freigaben an Kunden legt nur freigabeFuerKunde() an; ein Kundenzugang
+     * bekommt keine Freigabe am Konto (sie zählte für ihn ohnehin nicht).
+     */
     public static function freigabeSpeichern(array $daten): array
     {
-        $subjectType = ($daten['subject_type'] ?? '') === 'role' ? 'role' : 'user';
+        $subjectType = (string) ($daten['subject_type'] ?? '');
+        if (!in_array($subjectType, ['user', 'role'], true)) {
+            return ['ok' => false, 'message' => 'Freigaben gelten für einen Benutzer oder eine Rolle.'];
+        }
         $subjectId = (int) ($daten['subject_id'] ?? 0);
         $tabelle = $subjectType === 'role' ? 'roles' : 'users';
         if (Database::first('SELECT id FROM ' . $tabelle . ' WHERE id = ?', [$subjectId]) === null) {
             return ['ok' => false, 'message' => 'Benutzer bzw. Rolle nicht gefunden.'];
+        }
+        if ($subjectType === 'user' && self::istKundenzugang($subjectId)) {
+            return ['ok' => false, 'message' => 'Kundenzugänge sehen nur, was ihrem Kunden freigegeben ist – Freigaben dafür in der Kundenverwaltung.'];
         }
         $zielArt = (string) ($daten['ziel_art'] ?? '');
         if (!isset(self::ZIELE[$zielArt])) {
@@ -384,10 +445,9 @@ final class BenutzerService
             $datenAb = $ab;
             $datenBis = $bis;
         }
-        foreach ([[$ab, $bis, 'Gültigkeit'], [$datenAb, $datenBis, 'Datenzeitraum']] as [$a, $b, $was]) {
-            if ($a !== null && $b !== null && Zeit::ts($b) < Zeit::ts($a)) {
-                return ['ok' => false, 'message' => $was . ': das Ende liegt vor dem Beginn.'];
-            }
+        $fehler = self::zeitraeumePruefen($ab, $bis, $datenAb, $datenBis);
+        if ($fehler !== null) {
+            return ['ok' => false, 'message' => $fehler];
         }
         $id = Database::insert('freigaben', [
             'subject_type'    => $subjectType,
@@ -410,9 +470,96 @@ final class BenutzerService
         return ['ok' => true, 'message' => 'Freigabe angelegt.', 'id' => $id];
     }
 
+    /**
+     * Eine Freigabe für einen Kunden: nur ein Standort, nur sehen, immer mit
+     * Ende und mit Datenzeitraum (beide Enden).
+     *
+     * Ein Gelände hat mehrere Veranstalter. Ohne Ende sähe der Kunde den
+     * Standort auch beim nächsten, ohne Datengrenze dessen Messwerte. Was das
+     * Formular sonst schickt (Ziel „alles“, „bearbeiten“, „schalten“, Kanal),
+     * gilt nicht. Vergeben darf sie nur, wer selbst alle Standorte sieht
+     * (darfFreigabeVergeben). Ob sie sich mit der eines anderen Kunden am
+     * selben Standort überschneidet, prüft vorher die Kundenverwaltung;
+     * $ueberschneidung hält fest, dass sie es bewusst trotzdem tut (Audit).
+     *
+     * @param array<string,mixed> $daten site_id (oder ziel_id), gueltig_ab, gueltig_bis,
+     *        daten_ab, daten_bis oder daten_wie_gueltig, notiz (Veranstaltung, für den Kunden sichtbar)
+     * @return array{ok:bool,message:string,id?:int}
+     */
+    public static function freigabeFuerKunde(int $kundeId, array $daten, bool $ueberschneidung = false): array
+    {
+        if (!self::darfFreigabeVergeben('site', false)) {
+            return ['ok' => false, 'message' => 'Standorte für Kunden freigeben darf nur, wer selbst alle Standorte sieht („Alle Standorte, Anlagen und Messdaten“).'];
+        }
+        if (Database::first('SELECT id FROM kunden WHERE id = ?', [$kundeId]) === null) {
+            return ['ok' => false, 'message' => 'Diesen Kunden gibt es nicht.'];
+        }
+        $siteId = (int) (($daten['site_id'] ?? '') !== '' ? $daten['site_id'] : ($daten['ziel_id'] ?? 0));
+        if ($siteId <= 0 || Database::first('SELECT id FROM sites WHERE id = ?', [$siteId]) === null) {
+            return ['ok' => false, 'message' => 'Diesen Standort gibt es nicht.'];
+        }
+        $zeiten = [];
+        foreach (['gueltig_ab' => false, 'gueltig_bis' => true, 'daten_ab' => false, 'daten_bis' => true] as $feld => $ende) {
+            $eingabe = trim((string) ($daten[$feld] ?? ''));
+            $zeiten[$feld] = Zeit::ausEingabe($eingabe, $ende);
+            if ($eingabe !== '' && $zeiten[$feld] === null) {
+                return ['ok' => false, 'message' => 'Kein gültiger Zeitpunkt: „' . mb_substr($eingabe, 0, 40) . '“.'];
+            }
+        }
+        ['gueltig_ab' => $ab, 'gueltig_bis' => $bis, 'daten_ab' => $datenAb, 'daten_bis' => $datenBis] = $zeiten;
+        if ($bis === null) {
+            return ['ok' => false, 'message' => 'Eine Freigabe für einen Kunden braucht ein Ende – sonst sähe er den Standort auch beim nächsten Veranstalter.'];
+        }
+        if (!empty($daten['daten_wie_gueltig'])) {
+            $datenAb = $ab;
+            $datenBis = $bis;
+        }
+        if ($datenAb === null || $datenBis === null) {
+            return ['ok' => false, 'message' => 'Der Datenzeitraum braucht Beginn und Ende'
+                . (!empty($daten['daten_wie_gueltig']) ? ' – für „wie die Gültigkeit“ also auch einen Beginn der Freigabe.' : '.')];
+        }
+        $fehler = self::zeitraeumePruefen($ab, $bis, $datenAb, $datenBis);
+        if ($fehler !== null) {
+            return ['ok' => false, 'message' => $fehler];
+        }
+        $id = Database::insert('freigaben', [
+            'subject_type'    => 'kunde',
+            'subject_id'      => $kundeId,
+            'ziel_art'        => 'site',
+            'ziel_id'         => $siteId,
+            'ziel_kanal'      => '',
+            'darf_bearbeiten' => 0,
+            'darf_steuern'    => 0,
+            'gueltig_ab'      => $ab,
+            'gueltig_bis'     => $bis,
+            'daten_ab'        => $datenAb,
+            'daten_bis'       => $datenBis,
+            'notiz'           => mb_substr(trim((string) preg_replace('/[\x00-\x1F\x7F]+/u', ' ', (string) ($daten['notiz'] ?? ''))), 0, 255),
+            'created_by'      => mb_substr(Auth::name(), 0, 64),
+            'created_at'      => gmdate('c'),
+        ]);
+        Zugriff::vergessen();
+        Audit::log('kunden.freigabe_anlegen', 'kunde', (string) $kundeId, [
+            'kunde_id' => $kundeId, 'freigabe_id' => $id, 'site_id' => $siteId, 'gueltig_bis' => $bis, 'ueberschneidung' => $ueberschneidung,
+        ]);
+        return ['ok' => true, 'message' => 'Freigabe angelegt.', 'id' => $id];
+    }
+
+    /** Endet ein Zeitraum vor seinem Beginn? Die Meldung dazu, sonst null. */
+    private static function zeitraeumePruefen(?string $ab, ?string $bis, ?string $datenAb, ?string $datenBis): ?string
+    {
+        foreach ([[$ab, $bis, 'Gültigkeit'], [$datenAb, $datenBis, 'Datenzeitraum']] as [$a, $b, $was]) {
+            if ($a !== null && $b !== null && Zeit::ts($b) < Zeit::ts($a)) {
+                return $was . ': das Ende liegt vor dem Beginn.';
+            }
+        }
+        return null;
+    }
+
+    /** Eine Freigabe an einem Benutzer oder einer Rolle entfernen (Kunden-Freigaben: Kundenverwaltung). */
     public static function freigabeLoeschen(int $id): array
     {
-        $f = Database::first('SELECT * FROM freigaben WHERE id = ?', [$id]);
+        $f = Database::first("SELECT * FROM freigaben WHERE id = ? AND subject_type IN ('user', 'role')", [$id]);
         if ($f === null) {
             return ['ok' => false, 'message' => 'Diese Freigabe gibt es nicht.'];
         }

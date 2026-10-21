@@ -3,6 +3,7 @@ declare(strict_types=1);
 
 namespace App\Auth;
 
+use App\Kunden\Kundenbereich;
 use App\Support\Database;
 use App\Support\Zeit;
 
@@ -28,6 +29,10 @@ use App\Support\Zeit;
  *
  * Schalten hängt zusätzlich am Recht `steuern` und lässt sich bis auf ein
  * einzelnes Gerät (Datenquelle) und dort einen einzelnen Kanal vergeben.
+ *
+ * Kundenzugänge (users.kunde_id) haben nur die Freigaben ihres Kunden
+ * (Kundenbereich::freigaben – nur Standorte, nur sehen, nie ohne
+ * Datengrenze); Freigaben am Konto oder an Rollen zählen für sie nicht.
  */
 final class Zugriff
 {
@@ -41,6 +46,7 @@ final class Zugriff
     {
         self::$cache = [];
         self::$geraeteObjekte = null;
+        Kundenbereich::vergessen();
     }
 
     /** Sieht der angemeldete Benutzer alles, ohne Zeitgrenze? */
@@ -65,6 +71,17 @@ final class Zugriff
         // wird nicht zwischengespeichert – sonst gälte die Vorschau weiter.
         $eigeneZeit = $jetzt !== null;
         $jetzt ??= time();
+        if (!$eigeneZeit && isset(self::$cache[$userId])) {
+            return self::$cache[$userId];
+        }
+        $konto = $userId === Auth::id() ? Auth::user() : Database::first('SELECT id, kunde_id FROM users WHERE id = ?', [$userId]);
+        if ($konto !== null && Kundenbereich::istKundenzugang($konto)) {
+            // Ein Kundenzugang sieht nur, was seinem Kunden freigegeben ist –
+            // nie Freigaben am Konto oder an Rollen (eine Freigabe an der
+            // Rolle „kunde“ gälte sonst für alle Kunden).
+            $wirksam = Kundenbereich::freigaben((int) $konto['kunde_id'], $eigeneZeit ? $jetzt : null);
+            return $eigeneZeit ? $wirksam : (self::$cache[$userId] = $wirksam);
+        }
         if ($eigeneZeit || !isset(self::$cache[$userId])) {
             $rollen = [];
             foreach (Database::select('SELECT role_id, gueltig_ab, gueltig_bis FROM user_roles WHERE user_id = ?', [$userId]) as $zuweisung) {

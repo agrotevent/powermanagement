@@ -10,6 +10,9 @@ $form = $benutzer ?? ($neu ? ['id' => 0, 'username' => '', 'full_name' => '', 'e
 <div class="toolbar-zeile">
     <a class="btn btn-sm btn-primary" href="/system/benutzer?neu=1">+ Neuer Benutzer</a>
     <span class="small muted">Was ein Konto sieht, regeln Rechte (über Rollen) und Freigaben. Beides lässt sich zeitlich begrenzen.</span>
+    <?php if (($kundenzugaenge ?? 0) > 0): ?>
+        <span class="small muted"><?= (int) $kundenzugaenge ?> <?= (int) $kundenzugaenge === 1 ? 'Kundenzugang' : 'Kundenzugänge' ?> – nicht in dieser Liste, Kundenzugänge pflegt die Kundenverwaltung.</span>
+    <?php endif; ?>
 </div>
 
 <?php if ($form !== null): ?>

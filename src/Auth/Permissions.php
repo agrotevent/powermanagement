@@ -30,6 +30,14 @@ final class Permissions
             'berichte.pruefen'   => 'Als Prüfer unterschreiben, ohne Kunde abschließen, zurückziehen, Korrektur anlegen (nur mit hinterlegter Qualifikation)',
             'berichte.eventworx' => 'Kundendaten aus Eventworx suchen und übernehmen (Eventworx zeigt dort alle Vorgänge)',
         ],
+        // Für Kundenzugänge selbst gibt es kein Recht: sie haben keine Rolle
+        // und keine Rechte (Auth::permissions() = []), das Tor im Router
+        // lässt sie nur in den Kundenbereich (App\Kunden\Kundenbereich).
+        'Kunden & Kundenbereich' => [
+            'kunden.view'        => 'Kunden mit ihren Protokollen, Prüfnachweisen und Eventworx-Vorgängen ansehen (Zugänge, Freigaben und Abrufe nur mit „Kunden pflegen“)',
+            'kunden.manage'      => 'Kunden und Kundenzugänge pflegen, Übergabeberichte zuordnen, Vorgänge verknüpfen; Standorte freigeben nur mit „Alle Standorte, Anlagen und Messdaten“',
+            'kunden.nachweise'   => 'Prüfnachweise (DGUV V3) hochladen, aus Eventworx übernehmen, freigeben und zurückziehen',
+        ],
         'Karte & Standorte' => [
             'karte.view'         => 'Karte mit Grundriss ansehen',
             'plans.manage'       => 'Standorte, Etagen und Grundrisse pflegen, Maßstab setzen',
@@ -117,6 +125,7 @@ final class Permissions
                     'karte.view', 'plans.manage', 'leitungen.manage', 'statistik.view', 'statistik.export',
                     'datenquellen.view', 'inventory.pull', 'inventar.manage',
                     'berichte.view', 'berichte.manage', 'berichte.eventworx',
+                    'kunden.view', 'kunden.manage', 'kunden.nachweise',
                 ],
             ],
             'technik' => [
@@ -126,11 +135,15 @@ final class Permissions
                     'dashboard.view', 'anlagen.view', 'anlagen.manage', 'karte.view', 'leitungen.manage',
                     'statistik.view', 'datenquellen.view', 'steuern', 'steuern.protokoll',
                     'berichte.view', 'berichte.manage', 'berichte.eventworx', 'berichte.pruefen',
+                    'kunden.view', 'kunden.nachweise',
                 ],
             ],
             // Keine Übergabeberichte: ein Gelände hat mehrere Veranstalter,
             // und Berichte enthalten Kundendaten. Wer sie sehen soll, bekommt
             // „berichte.view“ einzeln – mit Freigabe und Datenzeitraum.
+            // Auch nichts aus „Kunden & Kundenbereich“: Kunden mit eigenem
+            // Zugang (Kundenbereich) haben gar keine Rolle; diese Rolle ist
+            // der ältere Weg über Freigaben am Konto.
             'kunde' => [
                 'name'        => 'Kunde / Veranstalter',
                 'description' => 'Sieht Anlagen und Statistiken der freigegebenen Standorte im freigegebenen Zeitraum.',

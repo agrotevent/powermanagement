@@ -18,6 +18,7 @@ use App\Controllers\InventarController;
 use App\Controllers\EinstellungenController;
 use App\Controllers\KarteController;
 use App\Controllers\KatalogImportController;
+use App\Controllers\KundenbereichController;
 use App\Controllers\LocationController;
 use App\Controllers\ManifestController;
 use App\Controllers\PruefgeraeteController;
@@ -56,6 +57,19 @@ $router->post('/login', [AuthController::class, 'login']);
 $router->post('/logout', [AuthController::class, 'logout']);
 $router->get('/profil', [AuthController::class, 'profile']);
 $router->post('/profil/passwort', [AuthController::class, 'changePassword']);
+
+// ---------------------------------------------------------------- Kundenbereich
+/*
+ * Nur für Kundenzugänge (users.kunde_id); Personal bekommt 403. Kein Recht an
+ * der Route – Kundenzugänge haben keine Rechte; KundenbereichController::kunde()
+ * prüft das Konto. Kundenzugänge erreichen nichts anderes (Tor im Router,
+ * Kundenbereich::erlaubt). Was Kunden sehen, kommt aus Freigaben am Kunden
+ * (nur Standorte) und aus ausdrücklicher Zuordnung – nie aus dem Standort
+ * allein. Eventworx wird von hier aus nie gefragt.
+ */
+$router->get('/kundenbereich', [KundenbereichController::class, 'index']);
+$router->get('/kundenbereich/konto', [KundenbereichController::class, 'konto']);
+$router->post('/kundenbereich/konto/kennwort', [KundenbereichController::class, 'kennwort']);
 
 // ---------------------------------------------------------------- Übersicht
 $router->get('/', [DashboardController::class, 'start']);

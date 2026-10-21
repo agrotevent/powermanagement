@@ -3,6 +3,7 @@ declare(strict_types=1);
 
 namespace App\Auth;
 
+use App\Kunden\Kundenbereich;
 use App\Support\Audit;
 use App\Support\Config;
 use App\Support\Csrf;
@@ -85,6 +86,12 @@ final class Auth
             self::logFailure($username, $ip, 'außerhalb des Gültigkeitszeitraums');
             return ['ok' => false, 'message' => $zeitraum];
         }
+        // Kundenzugang eines beendeten Kunden – ebenfalls erst nach dem Kennwort.
+        $kunde = Kundenbereich::sperre($user);
+        if ($kunde !== null) {
+            self::logFailure($username, $ip, 'Kunde nicht aktiv');
+            return ['ok' => false, 'message' => $kunde];
+        }
 
         $hash = (string) $user['password_hash'];
         if (password_needs_rehash($hash, PASSWORD_DEFAULT)) {
@@ -109,6 +116,19 @@ final class Auth
         Audit::log('auth.login', 'user', (string) $user['id'], ['ip' => $ip]);
 
         return ['ok' => true, 'user' => $user, 'must_change_password' => (int) $user['must_change_password'] === 1];
+    }
+
+    /**
+     * Darf dieses Konto jetzt angemeldet sein? null = ja, sonst die Meldung.
+     *
+     * Eine Stelle für die Anmeldung, jede Anfrage (user()), die Bindung eines
+     * Tokens der Schnittstelle (ApiZugang) und künftig SSO: der Zeitraum des
+     * Kontos und – bei Kundenzugängen – ob ihr Kunde aktiv und gültig ist.
+     * Ob das Konto selbst aktiv ist (is_active), prüft, wer fragt.
+     */
+    public static function zugangSperre(array $user, ?int $jetzt = null): ?string
+    {
+        return self::kontoZeitraum($user, $jetzt) ?? Kundenbereich::sperre($user, $jetzt);
     }
 
     /**
@@ -231,8 +251,9 @@ final class Auth
             Session::forget('user_id');
             return null;
         }
-        // Abgelaufen, während die Sitzung offen war: dann ist sie zu Ende.
-        if (self::kontoZeitraum($user) !== null) {
+        // Abgelaufen, während die Sitzung offen war – oder der Kunde eines
+        // Kundenzugangs ist beendet: dann ist sie zu Ende.
+        if (self::zugangSperre($user) !== null) {
             Session::forget('user_id');
             return null;
         }
@@ -245,6 +266,7 @@ final class Auth
         self::$user = $userId === null ? null : Database::first('SELECT * FROM users WHERE id = ?', [$userId]);
         self::$permissions = null;
         Zugriff::vergessen();
+        Kundenbereich::vergessen();
     }
 
     public static function id(): ?int
@@ -271,6 +293,11 @@ final class Auth
         }
         $user = self::user();
         if (!$user) {
+            return self::$permissions = [];
+        }
+        // Kundenzugänge haben keine Rechte – auch nicht über eine Rolle, die
+        // ihnen jemand per SQL zugewiesen hat. „*“ erfüllte sonst jedes Recht.
+        if (Kundenbereich::istKundenzugang($user)) {
             return self::$permissions = [];
         }
         $rows = Database::select(
@@ -322,6 +349,9 @@ final class Auth
     /** Erste Seite, die der angemeldete Benutzer tatsächlich sehen darf. */
     public static function landingPath(): string
     {
+        if (Kundenbereich::istKundenzugang()) {
+            return Kundenbereich::PFAD;
+        }
         $candidates = [
             '/dashboard'       => 'dashboard.view',
             '/karte'           => 'karte.view',
@@ -349,10 +379,47 @@ final class Auth
         return null;
     }
 
+    /**
+     * Das eigene Kennwort ändern – aus dem Profil und aus dem Kundenbereich.
+     *
+     * Verlangt das aktuelle Kennwort und die Wiederholung. Danach enden alle
+     * anderen Sitzungen mit dem alten Kennwort (user()); diese läuft mit
+     * neuer Sitzungs-ID und neuem Token weiter.
+     *
+     * @return array{ok:bool,message:string}
+     */
+    public static function kennwortAendern(array $user, string $aktuell, string $neu, string $wiederholung): array
+    {
+        if (!password_verify($aktuell, (string) $user['password_hash'])) {
+            return ['ok' => false, 'message' => 'Das aktuelle Passwort stimmt nicht.'];
+        }
+        if ($neu !== $wiederholung) {
+            return ['ok' => false, 'message' => 'Die neuen Passwörter stimmen nicht überein.'];
+        }
+        $fehler = self::validatePassword($neu);
+        if ($fehler !== null) {
+            return ['ok' => false, 'message' => $fehler];
+        }
+        $hash = password_hash($neu, PASSWORD_DEFAULT);
+        Database::update('users', (int) $user['id'], [
+            'password_hash'        => $hash,
+            'must_change_password' => 0,
+            'updated_at'           => gmdate('c'),
+        ]);
+        Audit::log('auth.passwort', 'user', (string) $user['id']);
+        Session::regenerate();
+        self::sitzungBinden($hash);
+        Csrf::erneuern();
+        self::$user = null;
+        self::$permissions = null;
+        return ['ok' => true, 'message' => 'Passwort geändert.'];
+    }
+
     /** Für Prüfskripte. */
     public static function vergessen(): void
     {
         self::$user = null;
         self::$permissions = null;
+        Kundenbereich::vergessen();
     }
 }

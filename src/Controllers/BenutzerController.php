@@ -3,6 +3,7 @@ declare(strict_types=1);
 
 namespace App\Controllers;
 
+use App\Kunden\Kundenbereich;
 use App\Messung\Datenquellen;
 use App\Services\AnlagenService;
 use App\Services\BenutzerService;
@@ -12,12 +13,21 @@ use App\Support\Flash;
 use App\Support\Request;
 use App\Support\Response;
 
+/**
+ * Benutzer, Rollen und Freigaben des Personals. Kundenzugänge (users.kunde_id)
+ * erscheinen hier nicht und lassen sich hier nicht ändern – das macht die
+ * Kundenverwaltung.
+ */
 final class BenutzerController extends Controller
 {
     public function index(Request $request): void
     {
         $bearbeiten = $request->int('id');
         $benutzer = $bearbeiten > 0 ? BenutzerService::find($bearbeiten) : null;
+        if ($benutzer !== null && Kundenbereich::istKundenzugang($benutzer)) {
+            Flash::info(BenutzerService::KUNDENZUGANG);
+            $benutzer = null;
+        }
         $zuweisungen = [];
         if ($benutzer !== null) {
             foreach (Database::select('SELECT * FROM user_roles WHERE user_id = ?', [$bearbeiten]) as $z) {
@@ -26,6 +36,7 @@ final class BenutzerController extends Controller
         }
         $this->view('benutzer/index', [
             'alle'        => BenutzerService::alle(),
+            'kundenzugaenge' => BenutzerService::kundenzugaenge(),
             'rollen'      => BenutzerService::rollen(),
             'benutzer'    => $benutzer,
             'neu'         => $request->bool('neu'),
@@ -41,7 +52,9 @@ final class BenutzerController extends Controller
         $id = $request->int('id') ?: null;
         $rollen = (array) ($_POST['rollen'] ?? []);
         $ergebnis = null;
-        if ($id !== null && !BenutzerService::darfVerwalten($id)) {
+        if ($id !== null && BenutzerService::istKundenzugang($id)) {
+            $ergebnis = ['ok' => false, 'message' => BenutzerService::KUNDENZUGANG];
+        } elseif ($id !== null && !BenutzerService::darfVerwalten($id)) {
             $ergebnis = ['ok' => false, 'message' => self::UEBER_MIR];
         }
         foreach ($rollen as $rolleId => $zuweisung) {
@@ -62,21 +75,25 @@ final class BenutzerController extends Controller
 
     public function loeschen(Request $request): void
     {
-        $ergebnis = BenutzerService::darfVerwalten($request->int('id'))
-            ? BenutzerService::loeschen($request->int('id'))
-            : ['ok' => false, 'message' => self::UEBER_MIR];
+        $id = $request->int('id');
+        $ergebnis = match (true) {
+            BenutzerService::istKundenzugang($id) => ['ok' => false, 'message' => BenutzerService::KUNDENZUGANG],
+            !BenutzerService::darfVerwalten($id)  => ['ok' => false, 'message' => self::UEBER_MIR],
+            default                               => BenutzerService::loeschen($id),
+        };
         $ergebnis['ok'] ? Flash::success($ergebnis['message']) : Flash::error($ergebnis['message']);
         $this->redirect('/system/benutzer');
     }
 
     public function entsperren(Request $request): void
     {
-        if (!BenutzerService::darfVerwalten($request->int('id'))) {
-            Flash::error(self::UEBER_MIR);
-        } else {
-            BenutzerService::entsperren($request->int('id'));
-            Flash::success('Konto entsperrt.');
-        }
+        $id = $request->int('id');
+        $ergebnis = match (true) {
+            BenutzerService::istKundenzugang($id) => ['ok' => false, 'message' => BenutzerService::KUNDENZUGANG],
+            !BenutzerService::darfVerwalten($id)  => ['ok' => false, 'message' => self::UEBER_MIR],
+            default                               => BenutzerService::entsperren($id),
+        };
+        $ergebnis['ok'] ? Flash::success($ergebnis['message']) : Flash::error($ergebnis['message']);
         $this->redirect('/system/benutzer');
     }
 
@@ -86,7 +103,7 @@ final class BenutzerController extends Controller
         $id = $request->int('id');
         $subjekt = $art === 'role'
             ? Database::first('SELECT id, name AS titel FROM roles WHERE id = ?', [$id])
-            : Database::first("SELECT id, username AS titel, full_name, gueltig_ab, gueltig_bis FROM users WHERE id = ?", [$id]);
+            : Database::first("SELECT id, username AS titel, full_name, gueltig_ab, gueltig_bis, kunde_id FROM users WHERE id = ?", [$id]);
         if ($subjekt === null) {
             Response::notFound();
             return;
@@ -94,6 +111,8 @@ final class BenutzerController extends Controller
         $this->view('benutzer/freigaben', [
             'art'       => $art,
             'subjekt'   => $subjekt,
+            // Ein Kundenzugang sieht nur Freigaben an seinem Kunden: hier nur ein Hinweis, kein Formular.
+            'kundenzugang' => $art === 'user' && Kundenbereich::istKundenzugang($subjekt),
             'freigaben' => BenutzerService::freigaben($art, $id),
             'standorte' => SiteService::all(),
             'objekte'   => AnlagenService::liste(),
@@ -101,29 +120,46 @@ final class BenutzerController extends Controller
         ]);
     }
 
-    /** Darf der angemeldete Benutzer die Freigaben dieses Kontos bzw. dieser Rolle ändern? */
+    /**
+     * Darf der angemeldete Benutzer die Freigaben dieses Kontos bzw. dieser
+     * Rolle ändern? Nur Benutzer und Rollen – Kunden-Freigaben und
+     * Kundenzugänge pflegt die Kundenverwaltung.
+     */
     private function darfFreigabenAendern(string $art, int $id): bool
     {
-        return $art === 'role'
-            ? BenutzerService::darfVergeben(BenutzerService::rollenRechte($id))
-            : BenutzerService::darfVerwalten($id);
+        return match ($art) {
+            'role'  => BenutzerService::darfVergeben(BenutzerService::rollenRechte($id)),
+            'user'  => !BenutzerService::istKundenzugang($id) && BenutzerService::darfVerwalten($id),
+            default => false,
+        };
     }
 
     public function freigabeSpeichern(Request $request): void
     {
-        $art = $request->str('subject_type') === 'role' ? 'role' : 'user';
-        $ergebnis = !$this->darfFreigabenAendern($art, $request->int('subject_id'))
-            ? ['ok' => false, 'message' => $art === 'role' ? 'Diese Rolle hat Rechte, die du selbst nicht hast.' : self::UEBER_MIR]
-            : (!BenutzerService::darfFreigabeVergeben($request->str('ziel_art'), $request->bool('darf_steuern'))
-                ? ['ok' => false, 'message' => 'Freigaben auf alles oder mit „schalten“ vergibt nur die Administration, andere nur, wer selbst alle Standorte sieht.']
-                : BenutzerService::freigabeSpeichern($_POST));
+        $art = $request->str('subject_type');
+        $ergebnis = match (true) {
+            !in_array($art, ['user', 'role'], true)
+                => ['ok' => false, 'message' => 'Freigaben gelten für einen Benutzer oder eine Rolle.'],
+            $art === 'user' && BenutzerService::istKundenzugang($request->int('subject_id'))
+                => ['ok' => false, 'message' => BenutzerService::KUNDENZUGANG],
+            !$this->darfFreigabenAendern($art, $request->int('subject_id'))
+                => ['ok' => false, 'message' => $art === 'role' ? 'Diese Rolle hat Rechte, die du selbst nicht hast.' : self::UEBER_MIR],
+            !BenutzerService::darfFreigabeVergeben($request->str('ziel_art'), $request->bool('darf_steuern'))
+                => ['ok' => false, 'message' => 'Freigaben auf alles oder mit „schalten“ vergibt nur die Administration, andere nur, wer selbst alle Standorte sieht.'],
+            default => BenutzerService::freigabeSpeichern($_POST),
+        };
         $ergebnis['ok'] ? Flash::success($ergebnis['message']) : Flash::error($ergebnis['message']);
-        $this->redirect('/system/freigaben?art=' . ($request->str('subject_type') === 'role' ? 'role' : 'user') . '&id=' . $request->int('subject_id'));
+        $this->redirect('/system/freigaben?art=' . ($art === 'role' ? 'role' : 'user') . '&id=' . $request->int('subject_id'));
     }
 
     public function freigabeLoeschen(Request $request): void
     {
         $f = Database::first('SELECT * FROM freigaben WHERE id = ?', [$request->int('id')]);
+        // Nur Freigaben an Benutzern und Rollen – eine Kunden-Freigabe gibt es hier nicht.
+        if ($f !== null && !in_array((string) $f['subject_type'], ['user', 'role'], true)) {
+            Response::notFound();
+            return;
+        }
         $ergebnis = $f !== null && (!$this->darfFreigabenAendern((string) $f['subject_type'], (int) $f['subject_id'])
             || !BenutzerService::darfFreigabeVergeben((string) $f['ziel_art'], (int) $f['darf_steuern'] === 1))
             ? ['ok' => false, 'message' => 'Diese Freigabe darf nur entfernen, wer sie auch vergeben dürfte.']

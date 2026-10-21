@@ -293,14 +293,7 @@ final class BerichtController extends Controller
         if ($b['status'] === 'geprueft') {
             BerichtService::pdfAbgerufen((int) $b['id']);
         }
-        http_response_code(200);
-        header('Content-Type: application/pdf');
-        header('Content-Disposition: inline; filename="' . $pdf['name'] . '"');
-        header('Content-Length: ' . strlen($pdf['bytes']));
-        header('X-Content-Type-Options: nosniff');
-        header('Cache-Control: private, no-store');
-        header('Referrer-Policy: no-referrer');
-        echo $pdf['bytes'];
+        Response::pdf($pdf['name'], $pdf['bytes']);
     }
 
     /** Autosave: `version`, `inhalt` (JSON), optional `ewx` – Antwort mit Bewertung. */
