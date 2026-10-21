@@ -5,6 +5,7 @@ namespace App\Messung;
 
 use App\Support\Config;
 use App\Support\Logger;
+use App\Support\Session;
 use App\Support\Settings;
 
 /**
@@ -77,11 +78,17 @@ final class Influx
     {
         $parameter = array_merge(['db' => self::datenbank(), 'q' => $influxql, 'epoch' => 'ms'], self::zugangParameter());
         $beginn = microtime(true);
-        $antwort = Http::anfrage('POST', self::url() . '/query', [
-            'kopf'   => self::kopf() + ['Content-Type' => 'application/x-www-form-urlencoded'],
+        // Bis zu influx.timeout Sekunden – so lange stünden sonst alle
+        // anderen Anfragen desselben Browsers an der Sitzung an, auch beim
+        // Aufbau einer Seite (Dashboard, Anlage, Auswertung, Bereiche). Wie
+        // PartnerService::anfrage() ohne Sitzungssperre; die Live-Abfragen
+        // haben sie schon vorher freigegeben, dann ändert das nichts.
+        $kopf = self::kopf() + ['Content-Type' => 'application/x-www-form-urlencoded'];
+        $antwort = Session::ohneSperre(static fn (): array => Http::anfrage('POST', self::url() . '/query', [
+            'kopf'   => $kopf,
             'rumpf'  => http_build_query($parameter),
             'zeit'   => (int) Config::get('influx.timeout', 8),
-        ]);
+        ]));
         // Seiten mit Livewerten fragen alle 5 s – eine träge InfluxDB macht
         // sich zuerst dort bemerkbar. Im Log steht sie dann schwarz auf weiß.
         $dauer = microtime(true) - $beginn;

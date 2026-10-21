@@ -21,7 +21,7 @@ $statusText = ['neu' => 'noch nicht hier', 'aktuell' => 'aktuell', 'neuer' => 'd
         <p class="small muted mb0">Repository: <span class="mono"><?= View::e($repo !== '' ? $repo : 'nicht eingetragen') ?></span> · Zweig <span class="mono"><?= View::e($zweig) ?></span></p>
     </div>
     <div class="card-footer btn-row">
-        <a class="btn btn-primary btn-sm<?= $hindernis !== null ? ' disabled' : '' ?>" href="/location?holen=1">Repository abfragen</a>
+        <a class="btn btn-primary btn-sm<?= $hindernis !== null ? ' disabled' : '' ?>" href="/location?holen=1" data-laeuft="fragt ab …" data-laeuft-hinweis="Fragt das Repository ab. Über eine langsame Leitung kann das dauern. Bitte nicht noch einmal klicken.">Repository abfragen</a>
         <?php if (View::can('settings.manage') || View::can('inventory.push')): ?><a class="btn btn-sm" href="/system/einstellungen">Einstellungen</a><?php endif; ?>
         <a class="btn btn-sm btn-ghost" href="/verteiler-abgleich">Verteiler-Abgleich</a>
     </div>
@@ -45,7 +45,8 @@ $statusText = ['neu' => 'noch nicht hier', 'aktuell' => 'aktuell', 'neuer' => 'd
                     <td data-label="Hier"><span class="badge <?= $l['status'] === 'aktuell' ? 'ok' : ($l['status'] === 'neuer' ? 'warn' : '') ?>"><?= View::e($statusText[$l['status']] ?? $l['status']) ?></span>
                         <?= $l['synced_at'] !== '' ? '<div class="small muted">' . View::e(Zeit::anzeige($l['synced_at'])) . '</div>' : '' ?></td>
                     <td class="right">
-                        <form method="post" action="/location/uebernehmen"><?= Csrf::field() ?><input type="hidden" name="schluessel" value="<?= View::e($l['schluessel']) ?>">
+                        <form method="post" action="/location/uebernehmen" data-laeuft="übernimmt …"
+                              data-laeuft-hinweis="Holt die Location aus dem Repository. Mit Grundrissen kann das einige Minuten dauern. Bitte nicht noch einmal klicken."><?= Csrf::field() ?><input type="hidden" name="schluessel" value="<?= View::e($l['schluessel']) ?>">
                             <button class="btn btn-sm<?= $l['status'] !== 'aktuell' ? ' btn-primary' : '' ?>" type="submit">Übernehmen</button></form>
                     </td>
                 </tr>
@@ -73,7 +74,7 @@ $statusText = ['neu' => 'noch nicht hier', 'aktuell' => 'aktuell', 'neuer' => 'd
                             ? '<div class="muted">' . (int) ($n['mobil'] ?? 0) . ' mobile Anlagen und ' . (int) ($n['mobil_leitungen'] ?? 0) . ' mobile Leitungen bleiben hier</div>' : '' ?></td>
                     <td data-label="Zuletzt" class="small"><?= View::e(Zeit::anzeige($s['synced_at'])) ?></td>
                     <td class="right">
-                        <form method="post" action="/location/hochladen" data-confirm="Feststromanschlüsse von „<?= View::e($s['name']) ?>“ ins gemeinsame Repository hochladen?">
+                        <form method="post" action="/location/hochladen" data-laeuft="lädt hoch …" data-confirm="Feststromanschlüsse von „<?= View::e($s['name']) ?>“ ins gemeinsame Repository hochladen?">
                             <?= Csrf::field() ?><input type="hidden" name="site_id" value="<?= (int) $s['id'] ?>">
                             <button class="btn btn-sm" type="submit"<?= $hindernis !== null ? ' disabled' : '' ?>>Hochladen</button>
                         </form>

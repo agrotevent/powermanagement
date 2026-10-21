@@ -4,6 +4,7 @@ declare(strict_types=1);
 namespace App\Controllers;
 
 use App\Auth\Auth;
+use App\Berichte\Kundenmodus;
 use App\Support\Flash;
 use App\Support\Request;
 use App\Support\Response;
@@ -13,9 +14,35 @@ abstract class Controller
 {
     protected function view(string $template, array $data = [], string $layout = 'layout/app'): void
     {
+        if ($this->kundenmodusSperrt()) {
+            return;
+        }
         $data['currentUser'] = Auth::user();
         $data['flashes']     = Flash::pull();
         Response::html(View::render($template, $data, $layout));
+    }
+
+    /**
+     * Kundenmodus, der begann, während diese Anfrage wartete: Der Router
+     * prüft ihn vor dem Handler. Wer danach ohne Sitzungssperre auf
+     * InfluxDB, git, Gerät oder Cloud wartet (Session::ohneSperre()), lässt
+     * „An Kunden übergeben“ aus einem anderen Reiter mittendrin durch – und
+     * die Seite käme danach vollständig, mit Navigation, in einem Reiter an,
+     * der die Sperre (BroadcastChannel) nie gehört hat; ein CSV-Download
+     * (Strg- oder Mittelklick, Hintergrundreiter) läge im Download-Ordner
+     * des Tablets. Also vor jeder Seite und jedem Download noch einmal, mit
+     * der wieder geöffneten Sitzung: true – dann ist schon zur Kundenseite
+     * weitergeleitet, und es kommt nichts mehr.
+     */
+    protected function kundenmodusSperrt(): bool
+    {
+        $request = new Request();
+        $gesperrt = Kundenmodus::sperrt($request->method(), $request->path());
+        if ($gesperrt === null) {
+            return false;
+        }
+        $this->redirect('/berichte/' . $gesperrt . '/kunde');
+        return true;
     }
 
     protected function redirect(string $to): void

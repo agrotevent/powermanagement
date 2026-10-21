@@ -296,6 +296,10 @@ final class BenutzerService
         }
         Database::execute('DELETE FROM user_roles WHERE user_id = ?', [$id]);
         Database::execute("DELETE FROM freigaben WHERE subject_type = 'user' AND subject_id = ?", [$id]);
+        // Eine Sperre des Kundenmodus am Gerät gälte für dieses Konto nie
+        // mehr – sie hielte dort nur andere Konten vom eigenen Kundenmodus ab
+        // (Kundenmodus::fremdAmGeraet()).
+        Database::execute('DELETE FROM kundenmodus_geraete WHERE user_id = ?', [$id]);
         Database::delete('users', $id);
         Audit::log('benutzer.loeschen', 'user', (string) $id);
         return ['ok' => true, 'message' => 'Benutzer gelöscht.'];

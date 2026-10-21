@@ -1125,7 +1125,8 @@ final class BerichtService
      * Den Kundenmodus starten: das Gerät wird für alles außer der
      * Kundenseite dieses Berichts gesperrt (Router), bis der Prüfer sein
      * Kennwort eingibt. Ab jetzt lässt sich die Unterschrift nicht mehr
-     * zurückziehen – der Kunde hat den Bericht gesehen.
+     * zurückziehen – der Kunde hat den Bericht gesehen. Nicht an einem
+     * Gerät, das noch für den Kundenmodus eines anderen Kontos gesperrt ist.
      *
      * @return array{ok:bool,message:string,status:int}
      */
@@ -1140,6 +1141,13 @@ final class BerichtService
         }
         if (!self::darfKundenblock($b)) {
             return ['ok' => false, 'status' => 403, 'message' => 'Für diesen Bericht fehlt eine Freigabe mit „bearbeiten“.'];
+        }
+        if (Kundenmodus::fremdAmGeraet()) {
+            // Sonst nähme der neue Kundenmodus dem Gerät die Sperre des
+            // anderen Kontos (Kundenmodus::starten() ersetzt das Cookie), und
+            // am Bericht stünde „kundenmodus_start“ – kein Zurückziehen mehr.
+            return ['ok' => false, 'status' => 409,
+                'message' => 'Dieses Gerät ist noch für den Kundenmodus eines anderen Kontos gesperrt – erst mit jenem Konto anmelden und entsperren.'];
         }
         if (!self::beimKundenVermerken($id, 'kundenmodus_start')) {
             return ['ok' => false, 'status' => 409, 'message' => 'Der Bericht wurde inzwischen geändert – bitte neu laden.'];
