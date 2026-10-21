@@ -57,6 +57,28 @@ final class LocationSync
     /** Wie lange ein Git-Aufruf höchstens dauern darf. */
     private const ZEITGRENZE = 120;
 
+    /**
+     * Wie lange Klonen, Holen und Hochladen dauern dürfen.
+     *
+     * Ein Grundriss hat bis zu 100 MB (SiteService::MAX_UPLOAD_BYTES); über
+     * eine Leitung mit 5 Mbit/s sind das fast drei Minuten. Knapp unter
+     * fastcgi_read_timeout (300 s), damit der Browser die Meldung noch sieht.
+     */
+    private const ZEITGRENZE_UEBERTRAGUNG = 280;
+
+    /**
+     * Ab dieser Größe einer Plandatei warnt GitHub beim Hochladen – und jede
+     * Fassung bleibt für immer in der Geschichte des Repositories, die jede
+     * Instanz beim Holen mitnimmt.
+     */
+    public const GIT_DATEI_WARNUNG = 50 * 1024 * 1024;
+
+    /**
+     * Größer nimmt GitHub keine Datei an (100 MiB) – der Push scheiterte
+     * dann nach dem vollständigen Hochladen. Deshalb vorher abgelehnt.
+     */
+    public const GIT_DATEI_HOECHSTENS = 100 * 1024 * 1024;
+
     // ---------------------------------------------------------- Einrichtung
 
     public static function repoUrl(): string
@@ -295,7 +317,7 @@ final class LocationSync
              * noch nicht, und `clone --branch main` scheitert daran – das
              * ist aber kein Fehler, sondern der erste Tag.
              */
-            $ergebnis = self::git(['clone', '--depth', '50', '--', self::repoUrl(), $kopie], dirname($kopie));
+            $ergebnis = self::git(['clone', '--depth', '50', '--', self::repoUrl(), $kopie], dirname($kopie), self::ZEITGRENZE_UEBERTRAGUNG);
             if (!$ergebnis['ok']) {
                 return ['ok' => false, 'message' => 'Das Repository ließ sich nicht holen: ' . $ergebnis['message'], 'commit' => ''];
             }
@@ -359,7 +381,7 @@ final class LocationSync
             $holen = self::git([
                 'fetch', 'origin',
                 '+refs/heads/' . $zweig . ':refs/remotes/origin/' . $zweig,
-            ], $kopie);
+            ], $kopie, self::ZEITGRENZE_UEBERTRAGUNG);
             if (!$holen['ok']) {
                 return ['ok' => false, 'message' => 'Holen fehlgeschlagen: ' . $holen['message']];
             }
@@ -601,6 +623,10 @@ final class LocationSync
 
         $vorhanden = self::locationLesen($schluessel);
         $location = LocationBundle::locationFuerRepo($siteId, $vorhanden);
+        $groesse = self::planGroessen($location['dateien'], $location['daten']);
+        if ($groesse['fehler'] !== '') {
+            return ['ok' => false, 'message' => $groesse['fehler']];
+        }
         foreach ($location['dateien'] as $imRepo => $aufPlatte) {
             $dateiZiel = $ziel . '/' . $imRepo;
             if (!is_dir(dirname($dateiZiel))) {
@@ -630,7 +656,46 @@ final class LocationSync
         return ['ok' => true, 'message' => $site['name'] . ' ist hochgeladen'
             . ($location['geaendert'] ? ' (Etagen/Grundriss in location.json ergänzt)' : '') . '. ' . $ergebnis['wo']
             . ($geruest !== [] ? ' Das Repository war leer und ist jetzt angelegt.' : '')
-            . self::zweigHinweis()];
+            . self::zweigHinweis() . $groesse['hinweis']];
+    }
+
+    /**
+     * Passen die Plandateien, die mit hochgehen, ins Repository?
+     *
+     * Über GIT_DATEI_HOECHSTENS ein Fehler, bevor etwas eingecheckt wird –
+     * sonst ginge die Datei ganz über die Leitung, und GitHub lehnte den
+     * Push danach ab. Über GIT_DATEI_WARNUNG ein Hinweis zur Erfolgsmeldung.
+     *
+     * @param array<string,string> $dateien im Repository → auf der Platte
+     * @param array<string,mixed> $daten location.json (für die Etagennamen)
+     * @return array{fehler:string,hinweis:string}
+     */
+    public static function planGroessen(array $dateien, array $daten): array
+    {
+        $namen = [];
+        foreach ((array) ($daten['etagen'] ?? []) as $etage) {
+            if (is_array($etage['plan'] ?? null) && is_string($etage['plan']['datei'] ?? null)) {
+                $namen[$etage['plan']['datei']] = (string) ($etage['name'] ?? $etage['schluessel'] ?? '');
+            }
+        }
+        $hinweise = [];
+        foreach ($dateien as $imRepo => $aufPlatte) {
+            clearstatcache(true, $aufPlatte);
+            $bytes = (int) @filesize($aufPlatte);
+            $wer = '„' . (($namen[$imRepo] ?? '') !== '' ? $namen[$imRepo] : $imRepo) . '“';
+            if ($bytes > self::GIT_DATEI_HOECHSTENS) {
+                return ['fehler' => sprintf('Der Grundriss von %s ist %s groß – GitHub nimmt keine Datei über %s an, der Push scheiterte. '
+                    . 'Nichts hochgeladen. Den Plan kleiner exportieren (eingebettete Bilder mit geringerer Auflösung) und neu hinterlegen.',
+                    $wer, SiteService::mb($bytes, true), SiteService::mb(self::GIT_DATEI_HOECHSTENS)), 'hinweis' => ''];
+            }
+            if ($bytes > self::GIT_DATEI_WARNUNG) {
+                $hinweise[] = sprintf('%s (%s)', $wer, SiteService::mb($bytes, true));
+            }
+        }
+        return ['fehler' => '', 'hinweis' => $hinweise === [] ? '' : sprintf(
+            ' Hinweis: Der Grundriss von %s ist größer als %s. GitHub warnt ab dieser Größe, und jede Fassung bleibt für immer im Repository – '
+            . 'jede Instanz holt sie beim Abgleich mit. Wenn möglich kleiner exportieren.',
+            implode(', ', $hinweise), SiteService::mb(self::GIT_DATEI_WARNUNG))];
     }
 
     /** JSON so, wie es im Repository steht – lesbar und mit Zeilenende. */
@@ -699,7 +764,7 @@ final class LocationSync
         $dort = self::fernerStand();
         $hochgeladen = false;
         if ($dort !== $hier) {
-            $push = self::git(['push', 'origin', 'HEAD:' . $zweig], $kopie);
+            $push = self::git(['push', 'origin', 'HEAD:' . $zweig], $kopie, self::ZEITGRENZE_UEBERTRAGUNG);
             if (!$push['ok']) {
                 return $fehler('Das Hochladen scheiterte: ' . $push['message']);
             }
@@ -950,7 +1015,7 @@ final class LocationSync
      * @param list<string> $argumente
      * @return array{ok:bool,ausgabe:string,message:string}
      */
-    private static function git(array $argumente, string $verzeichnis): array
+    private static function git(array $argumente, string $verzeichnis, int $zeit = self::ZEITGRENZE): array
     {
         $git = self::gitPfad();
         if ($git === null) {
@@ -984,7 +1049,7 @@ final class LocationSync
         stream_set_blocking($rohre[2], false);
         $ausgabe = '';
         $fehler  = '';
-        $ende    = microtime(true) + self::ZEITGRENZE;
+        $ende    = microtime(true) + $zeit;
         $rc      = -1;
 
         while (true) {

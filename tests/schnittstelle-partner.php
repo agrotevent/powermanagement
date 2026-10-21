@@ -1075,6 +1075,34 @@ try {
     pruefe(($gesendet['dateien'] ?? null) === [] && ($gEtagen[$fixKey]['plan']['sha256'] ?? '') === hash('sha256', $svg)
         && ($gesendet['basis'] ?? null) === (string) Database::scalar('SELECT partner_stand FROM sites WHERE id = ?', [$maSite]),
         'an MasterAdmin: der unveränderte Plan nur mit Prüfsumme, ohne Datei; der Stand des letzten Abrufs');
+
+    // Ein Grundriss über 30 MiB passt nicht in die Schnittstelle (wie bei
+    // MasterAdmin): Er bleibt hier, der Rest geht trotzdem hinüber – früher
+    // scheiterte die ganze Sendung. Die Datei ist dünn belegt.
+    $planVorher = (string) Database::scalar('SELECT plan_file FROM floors WHERE id = ?', [$maHaupt]);
+    $grossName = 'pruefung-' . bin2hex(random_bytes(4)) . '.svg';
+    $griff = fopen(SiteService::planDir() . '/' . $grossName, 'wb');
+    fwrite($griff, '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><!--');
+    ftruncate($griff, \App\Services\ApiBestand::MAX_DATEI_BYTES + 1);
+    fseek($griff, 0, SEEK_END);
+    fwrite($griff, '--></svg>');
+    fclose($griff);
+    Database::update('floors', $maHaupt, ['plan_file' => $grossName, 'plan_sha256' => '', 'plan_sha_marke' => '']);
+    try {
+        $maGesendet = null;
+        $r = PartnerAbgleich::zurueckschicken($maSite, 'großer Plan');
+        $gesendet = (array) $maGesendet;
+        $gEtagen = array_column((array) ($gesendet['location']['etagen'] ?? []), null, 'schluessel');
+        pruefe($r['ok'] && str_contains($r['message'], 'Nicht mitgeschickt – größer, als die Schnittstelle annimmt (höchstens 30 MB je Plan')
+            && str_contains($r['message'], 'Grundriss von „Heißt hier anders“ (30,1 MB)'),
+            'Plan über 30 MiB: der Rest geht hinüber, die Meldung nennt den ausgelassenen Plan – ' . $r['message']);
+        pruefe(($gesendet['dateien'] ?? null) === [] && array_key_exists($fixKey, $gEtagen) && $gEtagen[$fixKey]['plan'] === null
+            && (float) ($gEtagen[$fixKey]['referenz']['meter'] ?? 0) === 44.0,
+            'an MasterAdmin: die Etage ohne Plan (dort „unverändert“), Maßstab trotzdem dabei');
+    } finally {
+        @unlink(SiteService::planDir() . '/' . $grossName);
+        Database::update('floors', $maHaupt, ['plan_file' => $planVorher, 'plan_sha256' => '', 'plan_sha_marke' => '']);
+    }
     $maLang = true;
     $etagenDort = count(PartnerAbgleich::locations($ma)['locations'][0]['etagen'] ?? []);
     $r = PartnerAbgleich::uebernehmen($ma, $maKey, $maSite, [$fixKey => (string) $maHaupt, 'aussen' => (string) $maFloors[1]['id'], $maLangKey => 'neu'], false);

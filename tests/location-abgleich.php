@@ -120,7 +120,7 @@ try {
     pruefe($erd['ok'] && (int) Database::scalar('SELECT fest FROM leitungen WHERE id = ?', [(int) $erd['id']]) === 1, 'Erdkabel zwischen Feststromanschlüssen ist fest verlegt');
 
     $hoch = LocationSync::locationHochladen($siteId, 'pruefung');
-    pruefe($hoch['ok'], 'hochgeladen: ' . $hoch['message']);
+    pruefe($hoch['ok'] && !str_contains($hoch['message'], 'Hinweis: Der Grundriss'), 'hochgeladen (kleiner Plan, ohne Hinweis zur Größe): ' . $hoch['message']);
     $strom = json_decode($sh('git --git-dir=' . escapeshellarg($fern) . ' show main:locations/lager/strom.json'), true);
     gleich($strom['format'] ?? null, 2, 'strom.json im Format 2');
     $namen = array_column($strom['anlagen'] ?? [], 'name');
@@ -412,6 +412,50 @@ try {
     pruefe(!in_array($frei, ['lager', (string) $kopieSite['sync_key']], true) && str_starts_with($frei, 'lager-'), 'freier Schlüssel neben vergebenen: ' . $frei);
     pruefe(strlen(LocationBundle::freierSchluessel('sites', str_repeat('Lager ', 20))) <= 64, 'freier Schlüssel höchstens 64 Zeichen');
     gleich(LocationBundle::freierSchluessel('floors', $marke . ' x', [$marke . '-x']), $marke . '-x-2', 'gerade vergebene Schlüssel zählen mit');
+
+    // Größen der Plandateien, die mit hochgehen (dünn belegte Dateien)
+    $fuenfzig = $tmp . '/fuenfzig.pdf';
+    $hundert = $tmp . '/hundert.pdf';
+    $klein = $tmp . '/klein.pdf';
+    foreach ([[$fuenfzig, LocationSync::GIT_DATEI_WARNUNG + 1], [$hundert, LocationSync::GIT_DATEI_HOECHSTENS + 1], [$klein, 1024]] as [$p, $n]) {
+        $f = fopen($p, 'wb');
+        ftruncate($f, $n);
+        fclose($f);
+    }
+    $daten = ['etagen' => [['schluessel' => 'halle', 'name' => 'Halle', 'plan' => ['datei' => 'plaene/halle.pdf']],
+        ['schluessel' => 'aussen', 'name' => 'Außen', 'plan' => ['datei' => 'plaene/aussen.pdf']]]];
+    $g = LocationSync::planGroessen(['plaene/halle.pdf' => $klein, 'plaene/aussen.pdf' => $klein], $daten);
+    gleich($g, ['fehler' => '', 'hinweis' => ''], 'Git: kleine Pläne ohne Hinweis');
+    $g = LocationSync::planGroessen(['plaene/halle.pdf' => $fuenfzig, 'plaene/aussen.pdf' => $klein], $daten);
+    pruefe($g['fehler'] === '' && str_contains($g['hinweis'], '„Halle“ (50,1 MB)') && str_contains($g['hinweis'], 'GitHub warnt'), 'Git: über 50 MB ein Hinweis – ' . $g['hinweis']);
+    $g = LocationSync::planGroessen(['plaene/halle.pdf' => $fuenfzig, 'plaene/aussen.pdf' => $hundert], $daten);
+    pruefe(str_contains($g['fehler'], '„Außen“ ist 100,1 MB groß – GitHub nimmt keine Datei über 100 MB an') && str_contains($g['fehler'], 'Nichts hochgeladen'),
+        'Git: über 100 MB ein Fehler vor dem Hochladen – ' . $g['fehler']);
+
+    // Größe der Pläne fürs Repository: über 100 MB nimmt GitHub keine Datei an –
+    // das wird vorher gesagt, und nichts geht hinaus; über 50 MB ein Hinweis.
+    // Die Datei ist dünn belegt (ein Loch statt Nullen auf der Platte).
+    $aussen = (int) Database::scalar('SELECT id FROM floors WHERE site_id = ? AND name = ?', [$siteId, 'Außenfläche']);
+    $grossName = 'pruefung-' . bin2hex(random_bytes(4)) . '.pdf';
+    $grossPfad = SiteService::planDir() . '/' . $grossName;
+    $griff = fopen($grossPfad, 'wb');
+    fwrite($griff, "%PDF-1.4\n");
+    ftruncate($griff, LocationSync::GIT_DATEI_HOECHSTENS + 1);
+    fclose($griff);
+    Database::update('floors', $aussen, ['plan_file' => $grossName, 'plan_type' => 'pdf', 'plan_page' => 1, 'plan_original_name' => 'aussen.pdf', 'plan_uploaded_at' => gmdate('c')]);
+    $dortVorher = LocationSync::fernerStand();
+    $hoch = LocationSync::locationHochladen($siteId, 'pruefung');
+    pruefe(!$hoch['ok'] && str_contains($hoch['message'], '„Außenfläche“ ist 100,1 MB groß – GitHub nimmt keine Datei über 100 MB an')
+        && LocationSync::fernerStand() === $dortVorher, 'Plan über 100 MB: vorher abgelehnt, nichts hochgeladen – ' . $hoch['message']);
+    $griff = fopen($grossPfad, 'r+');
+    ftruncate($griff, LocationSync::GIT_DATEI_WARNUNG + 1);
+    fclose($griff);
+    $hoch = LocationSync::locationHochladen($siteId, 'pruefung');
+    $loc = json_decode($sh('git --git-dir=' . escapeshellarg($fern) . ' show main:locations/lager/location.json'), true);
+    $planDort = (string) (array_column((array) ($loc['etagen'] ?? []), 'plan', 'name')['Außenfläche']['datei'] ?? '');
+    $groesseDort = $planDort !== '' ? (int) $sh('git --git-dir=' . escapeshellarg($fern) . ' cat-file -s ' . escapeshellarg('main:locations/lager/' . $planDort)) : 0;
+    pruefe($hoch['ok'] && str_contains($hoch['message'], 'Hinweis: Der Grundriss von „Außenfläche“ (50,1 MB) ist größer als 50 MB.')
+        && $groesseDort === LocationSync::GIT_DATEI_WARNUNG + 1, 'Plan über 50 MB: hochgeladen, mit Hinweis – ' . $hoch['message']);
 } finally {
     if ($inventarId !== null) {
         foreach (Database::select('SELECT id FROM einsaetze WHERE inventar_id = ? AND bis IS NULL', [$inventarId]) as $e) {

@@ -662,6 +662,12 @@ geringerer Auflösung exportiert werden.
 Adresse und Token des Repositorys stehen unter **System → Einstellungen →
 Location- und Verteiler-Abgleich**.
 
+Grundrisse wandern beim Hochladen mit ins Repository. Über **50 MB** gibt es
+dazu einen Hinweis: GitHub warnt ab dieser Größe, und jede Fassung bleibt
+für immer in der Geschichte des Repositorys, die jede Installation beim
+Holen mitnimmt. Über **100 MB** nimmt GitHub keine Datei an – dann lädt
+PowerManagement gar nicht erst hoch und sagt, welcher Plan zu groß ist.
+
 ## Andere Instanzen (Schnittstelle)
 
 Ohne gemeinsames Repository geht dasselbe direkt von Installation zu
@@ -690,6 +696,11 @@ geändert*:
 - Zurück geht es je nach Befugnis bei A: **Hochladen** (A übernimmt gleich,
   aber nur, wenn sich dort seit dem letzten Übernehmen nichts geändert hat)
   oder **Als Vorschlag schicken** (bei A bestätigt es jemand).
+- Die Schnittstelle nimmt wie MasterAdmin **höchstens 30 MB je Plan** an
+  (zusammen rund 33 MB je Sendung). Ein größerer Grundriss geht beim
+  Zurückschicken nicht mit: Der Rest wird geschickt, dort bleibt der
+  bisherige Plan, und die Meldung nennt ihn. Übernehmen geht dagegen bis
+  100 MB – Pläne holt B als Datei, nicht im Körper einer Sendung.
 
 Vorschläge prüft A unter **Standorte → Änderungsvorschläge**: je Etage, was
 sich ändern würde, dann **Annehmen** (gewählte Etagen und Teile) oder
