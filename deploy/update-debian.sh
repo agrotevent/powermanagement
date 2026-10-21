@@ -40,8 +40,9 @@
 # Regel für neue Dateien außerhalb von git: jede gehört in abgleichen(), und
 # eine Datei, die es vorher nicht gab, trägt neu_merken() vor dem Schreiben
 # als neu_angelegt in die Marke ein – das Zurückrollen entfernt sie wieder.
-# Dieses Skript startet oder stoppt nie powermanagement-update.service (das
-# wäre ein SIGTERM an den eigenen Dienst).
+# Dieses Skript stoppt powermanagement-update.service nie und startet ihn nie
+# neu (das wäre ein SIGTERM an den eigenen Dienst); von der Konsole aus stößt
+# es ihn nur an (start --no-block), damit Stand und Verlauf stimmen.
 
 # -E: der ERR-Trap muss auch greifen, wenn ein Kommando in einer Funktion
 # scheitert – sonst bliebe ein halb eingespieltes Update stehen.
@@ -932,6 +933,9 @@ einheiten() {
         powermanagement-sammler.service
         powermanagement-wartung.service
         powermanagement-wartung.timer
+        powermanagement-update.service
+        powermanagement-update.path
+        powermanagement-update.timer
     )
     [[ "$MIT_NODERED" == "ja" ]] && e+=(powermanagement-nodered.service)
     [[ "$MIT_MOSQUITTO" == "ja" ]] && e+=(
@@ -1000,6 +1004,13 @@ abgleichen() {
     fi
     if [[ "$MIT_MOSQUITTO" == "ja" && -f /etc/systemd/system/powermanagement-mqtt-zugaenge.path ]]; then
         systemctl enable --quiet ${jetzt[@]+"${jetzt[@]}"} powermanagement-mqtt-zugaenge.path powermanagement-mqtt-zugaenge.timer \
+            || [[ "$OHNE_DIENSTE" == "ja" ]]
+    fi
+    # Update-Dienst: Pfad-Einheit (Aufträge der Oberfläche) und Zeitgeber
+    # (Lebenszeichen, Wiederanlauf). Den Dienst selbst startet dieses Skript
+    # nie – es läuft womöglich gerade in ihm.
+    if [[ -f /etc/systemd/system/powermanagement-update.path && -f /etc/systemd/system/powermanagement-update.timer ]]; then
+        systemctl enable --quiet ${jetzt[@]+"${jetzt[@]}"} powermanagement-update.path powermanagement-update.timer \
             || [[ "$OHNE_DIENSTE" == "ja" ]]
     fi
     # Geänderte Pfad- und Zeitgeber-Einheiten greifen erst nach einem Neustart –
@@ -1683,9 +1694,14 @@ stufe1() {
             exit 1
         fi
         # Nur Nachfahren auf der Erst-Eltern-Linie: ein Commit mitten aus
-        # einem zusammengeführten Zweig ist so nicht wählbar.
-        kandidaten="$(g rev-list --first-parent --ancestry-path "$ALT..origin/$ZWEIG")"
-        if [[ "$ERZWINGEN" != "ja" && "$BIS" != "$ALT" ]] && ! grep -qx "$BIS" <<< "$kandidaten"; then
+        # einem zusammengeführten Zweig ist so nicht wählbar. Beides getrennt
+        # erfragen – „--first-parent --ancestry-path“ zusammen verliert den
+        # Merge, in dem ein installierter Stand eines Seitenzweigs aufging
+        # (dieselben Kandidaten zeigt der Update-Dienst in ist/stand).
+        kandidaten="$(g rev-list --first-parent "$ALT..origin/$ZWEIG")"
+        if [[ "$ERZWINGEN" != "ja" && "$BIS" != "$ALT" ]] \
+            && ! { grep -qx "$BIS" <<< "$kandidaten" \
+                   && grep -qx "$BIS" <<< "$(g rev-list --ancestry-path "$ALT..origin/$ZWEIG")"; }; then
             hinweis "--bis=$BIS liegt nicht auf der Erst-Eltern-Linie zwischen dem installierten Stand und origin/$ZWEIG – nichts verändert."
             ergebnis nicht_begonnen ziel_ungueltig
             exit 1

@@ -1,0 +1,46 @@
+# /etc/systemd/system/powermanagement-update.service
+#
+# Führt Aufträge aus Oberfläche, Automatik und „bin/power update:starten“ aus
+# (deploy/update-helfer.sh → deploy/update-debian.sh) und holt nach einem Absturz das
+# Zurückrollen nach. Läuft als root in einer eigenen cgroup: der Neustart von PHP-FPM
+# trifft es nicht. Liest den Auftrag und schreibt Status/Protokoll als App-Benutzer.
+# update-debian.sh stoppt diese Einheit NIE und startet sie nie neu (das wäre SIGTERM an
+# sich selbst); von der Konsole aus stößt es sie nur an (start --no-block, für den Stand).
+#
+# Bewusst ohne Sandbox (ProtectSystem, PrivateTmp, NoNewPrivileges …): das Update
+# schreibt /etc, /usr (apt) und /opt, dpkg-Skripte laufen darin, und es soll auch im
+# LXC ohne nesting laufen und Fehler melden können. Gegen Missbrauch schützen die
+# Prüfung des Auftrags, die Prüfung des Codes und env -i (deploy/update-helfer.sh).
+#
+# Platzhalter: __APP_DIR__, __APP_USER__
+
+[Unit]
+Description=PowerManagement: Update ausführen (Oberfläche, Automatik, Wiederanlauf)
+# Beim Herunterfahren zuerst diesen Dienst beenden (und zurückrollen), dann diese.
+After=nginx.service mosquitto.service powermanagement-sammler.service powermanagement-nodered.service
+# Schleifenbremse (anders als beim MQTT-Dienst): bliebe ein Auftrag liegen, startete die
+# Pfad-Einheit sofort neu. Nach 20 Starts in 5 min gibt systemd auf – der Zeitgeber
+# heilt die Pfad-Einheit (update-helfer.sh), die Seite meldet „Auftrag hängt“.
+StartLimitIntervalSec=5min
+StartLimitBurst=20
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash __APP_DIR__/deploy/update-helfer.sh --ziel=__APP_DIR__ --app-benutzer=__APP_USER__
+ExecStopPost=/bin/bash __APP_DIR__/deploy/update-helfer.sh --nachlauf --ziel=__APP_DIR__ --app-benutzer=__APP_USER__
+# Ohne User= setzt systemd kein HOME (Befund 24). Die Skripte setzen es zusätzlich selbst.
+Environment=HOME=/root LANG=C.UTF-8 NO_COLOR=1
+# Neue Code-Dateien, Einheiten und npm-Module müssen für andere lesbar sein.
+UMask=0022
+# oneshot hat sonst kein Zeitlimit (RuntimeMaxSec wirkt bei oneshot nicht). Danach
+# SIGTERM → das Update beendet den laufenden Schritt und rollt zurück.
+TimeoutStartSec=60min
+TimeoutStopSec=20min
+# SIGTERM nur an den Helfer; er reicht es weiter. SIGKILL an den Rest erst, wenn der
+# Helfer fertig ist (oder nach TimeoutStopSec).
+KillMode=mixed
+Nice=5
+IOSchedulingClass=best-effort
+IOSchedulingPriority=6
+LimitCORE=0
+SyslogIdentifier=powermanagement-update

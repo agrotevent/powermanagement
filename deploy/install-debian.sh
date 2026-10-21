@@ -1304,7 +1304,8 @@ einstellung mqtt.port "$MQTT_PORT"
 
 # ================================================================ Dienste
 schritt "Sammler, Wartung und Protokolle einrichten"
-DIENSTE=(powermanagement-sammler.service powermanagement-wartung.service powermanagement-wartung.timer)
+DIENSTE=(powermanagement-sammler.service powermanagement-wartung.service powermanagement-wartung.timer
+    powermanagement-update.service powermanagement-update.path powermanagement-update.timer)
 # Eigene MQTT-Zugänge: der Helfer läuft bei jeder Änderung des Solls (.path)
 # und alle zwei Minuten (.timer) – nur mit dem Broker hier im Container.
 [[ "$MIT_MOSQUITTO" == "ja" ]] && DIENSTE+=(powermanagement-mqtt-zugaenge.service
@@ -1340,6 +1341,14 @@ NODERED_APP=$NODERED_APP
 NODERED_DIR=$NODERED_DIR
 KONF
 chmod 644 "$INSTALLATION_CONF"
+
+# Update-Dienst erst jetzt einschalten: der Helfer liest installation.conf
+# nicht, aber update-debian.sh, das er startet. Die Pfad-Einheit nimmt
+# Aufträge der Oberfläche an, der Zeitgeber weckt den Dienst regelmäßig
+# (Lebenszeichen, Stand, Wiederanlauf). Einmal gleich starten – erstes
+# Lebenszeichen für die Oberfläche.
+systemctl enable --quiet --now powermanagement-update.path powermanagement-update.timer
+systemctl start --no-block powermanagement-update.service || true
 
 # ================================================================ Prüfen
 schritt "Prüfen"

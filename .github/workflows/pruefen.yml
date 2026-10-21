@@ -38,8 +38,8 @@ jobs:
           php -l bin/power > /dev/null
           for f in public/assets/js/*.js; do node --check "$f"; done
           for f in public/assets/js/module/*.js; do node --experimental-default-type=module --check "$f"; done
-          bash -n deploy/*.sh tests/*.sh
-          shellcheck -S warning -e SC2016,SC1111 deploy/*.sh tests/*.sh
+          bash -n deploy/*.sh tests/*.sh tests/hilfen/*.sh
+          shellcheck -S warning -e SC2016,SC1111 deploy/*.sh tests/*.sh tests/hilfen/*.sh
           node -e 'JSON.parse(require("fs").readFileSync("deploy/node-red/flows.json", "utf8"))'
 
       - name: Einrichten (Demo-Modus)
@@ -71,3 +71,18 @@ jobs:
 
       - name: Installation, zweiter Lauf und Update
         run: bash tests/installation-debian.sh
+
+  # Der einmalige Umstieg einer bestehenden Installation ohne Update-Funktion
+  # (7586d1d, der Stand vor dem Update-Dienst) – genau der Befehl aus der
+  # Anleitung. Braucht die ganze Geschichte (fetch-depth: 0).
+  umstieg:
+    name: Umstieg (Debian 13)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Umstieg von 7586d1d
+        run: bash tests/installation-debian.sh --umstieg=7586d1d
