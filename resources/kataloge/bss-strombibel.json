@@ -10039,6 +10039,7 @@
      "artikelnummer": "1004913",
      "tank_l": 240.0,
      "verbrauch_l_h": 22.0,
+     "verbrauch_kennlinie": "100% 22L / 70% 16L / 50% 12L",
      "gewicht_kg": 1689.0,
      "abmessungen": "2.750 × 1.100 × 1.760 mm (L × B × H)"
     },
@@ -10148,6 +10149,7 @@
      "artikelnummer": "1004912",
      "tank_l": 450.0,
      "verbrauch_l_h": 33.0,
+     "verbrauch_kennlinie": "100% 33L / 70% 26,5L / 50% 24L",
      "gewicht_kg": 2195.0,
      "abmessungen": "3.300 × 1.200 × 1.930 mm (L × B × H)"
     },
@@ -10178,6 +10180,7 @@
      "artikelnummer": "1003974",
      "tank_l": 450.0,
      "verbrauch_l_h": 44.0,
+     "verbrauch_kennlinie": "100% 44L / 80% 41L / 50% 29,5L / 25% 14,1L",
      "gewicht_kg": 2300.0,
      "abmessungen": "3.300 × 1.200 × 1.965 mm (L × B × H)"
     },
@@ -10322,6 +10325,7 @@
      "artikelnummer": "1004092",
      "tank_l": 450.0,
      "verbrauch_l_h": 59.0,
+     "verbrauch_kennlinie": "100% 59L / 80% 48L / 50% 36L",
      "gewicht_kg": 3550.0,
      "abmessungen": "3.800 × 1.400 × 2.253 mm (L × B × H)"
     },
@@ -10466,6 +10470,7 @@
      "artikelnummer": "1004911",
      "tank_l": 450.0,
      "verbrauch_l_h": 69.0,
+     "verbrauch_kennlinie": "100% 69L / 80% 59L / 50% 34,5L / 25% 18,2L",
      "gewicht_kg": 3570.0,
      "abmessungen": "3.300 × 1.400 × 2.250 mm (L × B × H)"
     },
@@ -10610,6 +10615,7 @@
      "artikelnummer": "1004023",
      "tank_l": 200.0,
      "verbrauch_l_h": 14.0,
+     "verbrauch_kennlinie": "100% 14L / 75% 8,2L",
      "gewicht_kg": 1150.0,
      "abmessungen": "2.294 × 1.007 × 1.465 mm (L × B × H)"
     },
@@ -10710,6 +10716,7 @@
      "artikelnummer": "1004177",
      "tank_l": 200.0,
      "verbrauch_l_h": 22.0,
+     "verbrauch_kennlinie": "100% 22L / 75% 16L",
      "gewicht_kg": 1560.0,
      "abmessungen": "2.414 × 1.090 × 1.700 mm (L × B × H)"
     },
@@ -10921,6 +10928,102 @@
      "farbe": "#475569"
     }
    ]
+  },
+  {
+   "format": 1,
+   "art": "verteiler-typ",
+   "schluessel": "tank-quadro-ag-1000",
+   "stand": "2025-03-18T00:00:00+00:00",
+   "von": "BSS Strombibel (Stand 18.03.2025)",
+   "typ": {
+    "art": "tank",
+    "fest": false,
+    "name": "QUADRO-AG 1000",
+    "hersteller": "",
+    "modell": "QUADRO-AG 1000",
+    "nennleistung_kva": null,
+    "nennstrom_a": null,
+    "spannung_v": 400,
+    "phasen": 3,
+    "eigenschaften": {
+     "artikelnummer": "1004061",
+     "inhalt_l": 1000.0,
+     "gewicht_kg": 289.0,
+     "gewicht_voll_kg": 1289.0,
+     "abmessungen": "1.200 × 1.000 × 1.229 mm (L × B × H)",
+     "zulassung": "D/BAM/15450/31A, Z-38.12-230",
+     "tankanschluss": "Steckkupplung HK-A3"
+    },
+    "steuerung_gesperrt": false,
+    "notizen": "Aus der BSS Strombibel (Stand 18.03.2025), Seite 20.\n\nTankheizungen können auf Anfrage eingebaut werden.\n\nKraftstoff, Bauform, Innenmaße, Füllgrenze und Sumpf stehen nicht in der Strombibel – den Inhalt je mm Füllhöhe lernt der Tank aus der ersten Peilung oder Betankung.\n\nBeim Einlesen gedeutet – bitte prüfen:\n- Nennvolumen 1.000 l aus dem Typnamen (die Tabelle hat keine Spalte für den Inhalt).\n- „Gewicht / Kg“ 289 / 1289 als leer / voll gelesen; voll ist mit 1 kg je Liter gerechnet (1.289 − 289 = 1.000).\n- Das Sternchen hinter dem Typ verweist auf die Fußnote „*Tankanschluss: Steckkupplung HK-A3“ – als Tankanschluss übernommen.\n\nLaut Strombibel:\nTyp | Art.Nr. | L (mm) | B (mm) | H (mm) | Gewicht / Kg | Zulassung\nQUADRO-AG 1000* | 1004061 | 1200 | 1000 | 1229 | 289 / 1289 | D/BAM/15450/31A Z-38.12-230\n*Tankanschluss: Steckkupplung HK-A3\nTankheizungen können auf Anfrage eingebaut werden.",
+    "schutzorgane": [],
+    "anschluesse": []
+   },
+   "steckertypen": []
+  },
+  {
+   "format": 1,
+   "art": "verteiler-typ",
+   "schluessel": "tank-quadro-ag-2000",
+   "stand": "2025-03-18T00:00:00+00:00",
+   "von": "BSS Strombibel (Stand 18.03.2025)",
+   "typ": {
+    "art": "tank",
+    "fest": false,
+    "name": "QUADRO-AG 2000",
+    "hersteller": "",
+    "modell": "QUADRO-AG 2000",
+    "nennleistung_kva": null,
+    "nennstrom_a": null,
+    "spannung_v": 400,
+    "phasen": 3,
+    "eigenschaften": {
+     "artikelnummer": "1004906",
+     "inhalt_l": 2000.0,
+     "gewicht_kg": 730.0,
+     "gewicht_voll_kg": 2730.0,
+     "abmessungen": "2.400 × 1.200 × 1.188 mm (L × B × H)",
+     "zulassung": "D/BAM/16125/31A, Z-38.12-223",
+     "tankanschluss": "2 Anschlüsse"
+    },
+    "steuerung_gesperrt": false,
+    "notizen": "Aus der BSS Strombibel (Stand 18.03.2025), Seite 20.\n\nTankheizungen können auf Anfrage eingebaut werden.\n\nKraftstoff, Bauform, Innenmaße, Füllgrenze und Sumpf stehen nicht in der Strombibel – den Inhalt je mm Füllhöhe lernt der Tank aus der ersten Peilung oder Betankung.\n\nBeim Einlesen gedeutet – bitte prüfen:\n- Nennvolumen 2.000 l aus dem Typnamen (die Tabelle hat keine Spalte für den Inhalt).\n- „Gewicht / Kg“ 730 / 2730 als leer / voll gelesen; voll ist mit 1 kg je Liter gerechnet (2.730 − 730 = 2.000).\n- Die zwei Sternchen hinter dem Typ verweisen auf die Fußnote „** Tank verfügt über 2 Anschlüsse“ – als Tankanschluss „2 Anschlüsse“ übernommen (vermutlich Vor- und Rücklauf). Welche Kupplung, steht nicht da.\n\nLaut Strombibel:\nTyp | Art.Nr. | L (mm) | B (mm) | H (mm) | Gewicht / Kg | Zulassung\nQUADRO-AG 2000** | 1004906 | 2400 | 1200 | 1188 | 730 / 2730 | D/BAM/16125/31A Z-38.12-223\n** Tank verfügt über 2 Anschlüsse\nTankheizungen können auf Anfrage eingebaut werden.",
+    "schutzorgane": [],
+    "anschluesse": []
+   },
+   "steckertypen": []
+  },
+  {
+   "format": 1,
+   "art": "verteiler-typ",
+   "schluessel": "tank-quadro-ag-3000",
+   "stand": "2025-03-18T00:00:00+00:00",
+   "von": "BSS Strombibel (Stand 18.03.2025)",
+   "typ": {
+    "art": "tank",
+    "fest": false,
+    "name": "QUADRO-AG 3000",
+    "hersteller": "",
+    "modell": "QUADRO-AG 3000",
+    "nennleistung_kva": null,
+    "nennstrom_a": null,
+    "spannung_v": 400,
+    "phasen": 3,
+    "eigenschaften": {
+     "artikelnummer": "1004093",
+     "inhalt_l": 3000.0,
+     "gewicht_kg": 840.0,
+     "gewicht_voll_kg": 3840.0,
+     "abmessungen": "2.400 × 1.200 × 1.548 mm (L × B × H)",
+     "zulassung": "D/BAM/16125/31A, Z-38.12-223",
+     "tankanschluss": "2 Anschlüsse"
+    },
+    "steuerung_gesperrt": false,
+    "notizen": "Aus der BSS Strombibel (Stand 18.03.2025), Seite 20.\n\nTankheizungen können auf Anfrage eingebaut werden.\n\nKraftstoff, Bauform, Innenmaße, Füllgrenze und Sumpf stehen nicht in der Strombibel – den Inhalt je mm Füllhöhe lernt der Tank aus der ersten Peilung oder Betankung.\n\nBeim Einlesen gedeutet – bitte prüfen:\n- Nennvolumen 3.000 l aus dem Typnamen (die Tabelle hat keine Spalte für den Inhalt).\n- „Gewicht / Kg“ 840 / 3840 als leer / voll gelesen; voll ist mit 1 kg je Liter gerechnet (3.840 − 840 = 3.000).\n- Die zwei Sternchen hinter dem Typ verweisen auf die Fußnote „** Tank verfügt über 2 Anschlüsse“ – als Tankanschluss „2 Anschlüsse“ übernommen (vermutlich Vor- und Rücklauf). Welche Kupplung, steht nicht da.\n\nLaut Strombibel:\nTyp | Art.Nr. | L (mm) | B (mm) | H (mm) | Gewicht / Kg | Zulassung\nQUADRO-AG 3000** | 1004093 | 2400 | 1200 | 1548 | 840 / 3840 | D/BAM/16125/31A Z-38.12-223\n** Tank verfügt über 2 Anschlüsse\nTankheizungen können auf Anfrage eingebaut werden.",
+    "schutzorgane": [],
+    "anschluesse": []
+   },
+   "steckertypen": []
   }
  ]
 }

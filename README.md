@@ -29,9 +29,13 @@ Mehr Bilder in der [Bedienungsanleitung](docs/bedienung.md).
   Schaltbild.
 - **Standard-Verteiler**: Katalog fertig bestückter Verteiler, die sich auf
   der Karte platzieren lassen.
-- **Katalog-Import**: Stromverteiler und Generatoren aus einem Katalog-Paket
-  (etwa der BSS-Strombibel) mit Vorschau – neue werden angelegt, hier
-  korrigierte nur auf ausdrücklichen Wunsch überschrieben.
+- **Katalog-Import**: Stromverteiler, Generatoren und Tanks aus einem
+  Katalog-Paket (etwa der BSS-Strombibel) mit Vorschau – neue werden
+  angelegt, hier korrigierte nur auf ausdrücklichen Wunsch überschrieben.
+- **Tanks** im Plan, **Tanksensoren** (Shelly) mit Füllstand, Verbrauch und
+  Restlaufzeit: Rohwerte in der InfluxDB, Kennlinie je Einbau, Kalibrieren
+  vor Ort mit Peilung und Betankung, Kraftstoffschlauch zum Generator,
+  Verbrauch je Tag.
 - **Karte**: Grundrisse (PDF/Bild/SVG) mit Feststromanschlüssen, mobilen
   Verteilern, **Kabeln, Kabelwegen und Kabelbrücken**. Anlagen per Kabel verbinden, mit Prüfung von
   Belastbarkeit, Steckern und **Spannungsfall**, dazu Maßstab und Livewerte.
@@ -48,7 +52,8 @@ Mehr Bilder in der [Bedienungsanleitung](docs/bedienung.md).
   **ohne Doppelzählung** – was hinter einem anderen Mitglied hängt, zählt
   nicht noch einmal. Mit Grenze, Verlauf, Energie und CSV.
 - **Inventar**: Verteiler und Zwischenstecker (bis 125 A) mit ihren
-  Shellys – an der Einspeisung, je Abgang oder im Durchgang. Beim Aufbau
+  Shellys – an der Einspeisung, je Abgang oder im Durchgang –, dazu
+  Tanksensoren. Beim Aufbau
   wird ausgewählt, welches Stück wo steht; die Werte gehören dann zur
   Anlage, genau für die Dauer des Einsatzes.
 - **Aufbau-Modus**: Plan festhalten, vor Ort jede Anlage und jedes Kabel per
@@ -127,7 +132,7 @@ Update: **[docs/installation-debian-lxc.md](docs/installation-debian-lxc.md)**.
 | Datei | Inhalt |
 |-------|--------|
 | [docs/installation-debian-lxc.md](docs/installation-debian-lxc.md) | Installation, Update, Sicherung, Fehlersuche |
-| [docs/bedienung.md](docs/bedienung.md) | Übersicht, Karte, Anlagen, Verteilerplan, Aufbau und Abgleich, Übergabeberichte, Inventar, Auswertung, Bereiche, Materialliste, Schalten, Location- und Verteiler-Abgleich, andere Instanzen |
+| [docs/bedienung.md](docs/bedienung.md) | Übersicht, Karte, Anlagen, Verteilerplan, Aufbau und Abgleich, Übergabeberichte, Inventar, Tanks und Kraftstoff, Auswertung, Bereiche, Materialliste, Schalten, Location- und Verteiler-Abgleich, andere Instanzen |
 | [docs/berichte.md](docs/berichte.md) | Übergabeberichte: Ablauf vor Ort, Felder, Vorbelegung, Grenzwerte, Unterschrift und Beweiswert, Kundenmodus, Korrektur, Integrität, Datenschutz, Aufbewahrung |
 | [docs/rechte.md](docs/rechte.md) | Rollen, Freigaben, Zeitfenster, Schaltrechte je Gerät |
 | [docs/schnittstelle.md](docs/schnittstelle.md) | Schnittstelle zu anderen Instanzen (PowerManagement, MasterAdmin): Zugänge, Übernehmen, Vorschläge, direktes Schreiben, Endpunkte |
@@ -147,6 +152,8 @@ bin/power titel "Titel" [untertitel] [kürzel]
 bin/power plan:kacheln [--neu]
 bin/power location:liste   ·   bin/power location:uebernehmen <schlüssel>
 bin/power verteiler:liste   ·   bin/power verteiler:uebernehmen|verteiler:hochladen --alle | <typ|inventar> <schlüssel>
+bin/power katalog:import <datei> [--ueberschreiben] [--pruefen]
+bin/power tank:liste --als=<benutzer> [--standort=<id>] [--warnungen]   ·   bin/power tank:rechnen <messpunkt-id> <rohwert>
 bin/power berichte:pruefen [<nummer> [--fassung=N]] [--pdf]   ·   bin/power berichte:pdf <nummer> <ziel.pdf> [--fassung=N]
 bin/power berichte:aufbewahrung [--ausfuehren]   ·   bin/power eventworx:pruefen
 bin/power demo:seed [--reset]
@@ -184,6 +191,7 @@ src/Messung/              InfluxDB, MQTT, Modbus TCP, ComAp, VRM, Sammler, Steue
 src/Pdf/                  eigener PDF-Schreiber (Schrift als Teilmenge, Tabellen)
 src/Services/             Anlagen, Schutzorgane, Leitungen, Messpunkte, Inventar, Aufbau, Live, Bereiche, Material, Standorte, Location- und Verteiler-Abgleich, Schnittstelle, Eventworx
 src/Support/              Router, Datenbank, Sitzung, CSRF, Verschlüsselung …
+src/Tanks/                Tanks: Rechnung Rohwert → Füllhöhe → Liter (TankRechnung), Fassungen, Live, Peilung, Betankung (TankService)
 storage/                  Datenbank, Grundrisse, Kacheln, Zwischenspeicher, Protokolle, eingegangene Vorschläge
 tests/                    Prüfskripte
 ```

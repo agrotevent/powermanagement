@@ -376,6 +376,26 @@ Energie von Relais meldet Gen1 in *Wattminuten*; Node-RED rechnet in Wh
 um. Die Summe über die Phasen eines EM/3EM bildet Node-RED selbst, sobald
 von allen Phasen ein frischer Wert vorliegt.
 
+### Tanksensor (Plus Uni mit 4–20-mA-Sonde)
+
+Ein Plus Uni (oder ein Plus/Gen3 mit Add-on, ein Gen1 Uni) wird wie oben
+angebunden. Am Gerät zusätzlich, von Hand – die App stellt dort nichts ein:
+
+1. **Peripherie:** den Analogeingang als *Voltmeter* einrichten
+   (`voltmeter:100`), Messbereich 0 (0–15 V) und nie umschalten.
+2. **`report_thr`** so klein wie möglich (0,02–0,05 V), **ECO-Modus aus**,
+   *Generic status update over MQTT* an.
+3. **Versorgung:** ein eigenes 24-V-SELV-Netzteil (der Plus Uni verträgt
+   9–28 V DC) – nie Starterbatterie oder Bordnetz des Generators. Minus an
+   **GND**, dort auch die Bürde (499 Ω) bzw. die Masse des Wandlers
+   („0–20 mA → 0–10 V“).
+
+Verdrahtung, Abgleich des Wandlers und Wahl der Sonde stehen in
+[datenquellen.md](datenquellen.md#420-ma-sonde-am-plus-uni), Annahme und
+Einbau am Tank in [bedienung.md](bedienung.md#sonde-annehmen-und-einbauen).
+In PowerManagement wird die Sonde unter *Inventar → + Tanksensor* angelegt
+und auf der Tankseite eingebaut. Ein eigener Zugang (unten) geht genauso.
+
 ### Eigener Zugang je Shelly
 
 Der gemeinsame Zugang hat einen Haken: Wer sein Kennwort aus *einem* Gerät

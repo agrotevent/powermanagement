@@ -34,6 +34,13 @@ final class Settings
         'grenzen.warnung'   => 'Auslastung, ab der eine Anlage gelb wird (%)',
         'grenzen.alarm'     => 'Auslastung, ab der eine Anlage rot wird (%)',
         'grenzen.spannungsfall' => 'Zulässiger Spannungsfall auf einem Kabel (%)',
+        // Tanks (TankRechnung::GRENZEN; Warnung/Alarm am Tank selbst gehen vor)
+        'grenzen.tank_warnung'        => 'Füllstand, unter dem ein Tank gelb wird (%)',
+        'grenzen.tank_alarm'          => 'Füllstand, unter dem ein Tank rot wird (%)',
+        'grenzen.tank_rest_warnung_h' => 'Restlaufzeit, unter der ein Tank gelb wird (h)',
+        'grenzen.tank_rest_alarm_h'   => 'Restlaufzeit, unter der ein Tank rot wird (h)',
+        'grenzen.tank_stumm_h'        => 'Tanksensor ohne Lebenszeichen gilt als stumm nach (h)',
+        'grenzen.tank_vorlauf_h'      => 'Lieferzeit für Kraftstoff – „nachbestellen bis“ (h)',
         'material.reserve'  => 'Kabelreserve in der Materialliste (%)',
     ];
 

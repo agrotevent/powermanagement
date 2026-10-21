@@ -8,6 +8,7 @@ $title = 'Übersicht';
 $subtitle = 'Livewerte aller freigegebenen Anlagen';
 
 $stufen = ['ok' => 0, 'warn' => 0, 'bad' => 0, 'stumm' => 0];
+$mitTanks = array_filter($objekte, static fn ($o) => !AnlagenService::elektrisch((string) $o['art'])) !== [];
 foreach ($objekte as $o) {
     $l = $live[(int) $o['id']] ?? [];
     if (isset($stufen[$l['stufe'] ?? ''])) {
@@ -31,8 +32,8 @@ foreach ($objekte as $o) {
 <div class="grid grid-4 kennzahlen">
     <div class="card stat-card"><div class="stat"><span class="label">Einspeisung gesamt</span><span class="value"><?= View::e(Messdaten::format($einspeisung, 'W')) ?></span><span class="trend">je Zweig die oberste gemessene Anlage</span></div></div>
     <div class="card stat-card ok"><div class="stat"><span class="label">Im grünen Bereich</span><span class="value"><?= $stufen['ok'] ?></span><span class="trend">Anlagen mit Messwerten</span></div></div>
-    <div class="card stat-card <?= $stufen['warn'] + $stufen['bad'] > 0 ? 'bad' : 'ok' ?>"><div class="stat"><span class="label">Hoch ausgelastet</span><span class="value"><?= $stufen['warn'] + $stufen['bad'] ?></span><span class="trend">ab <?= (int) \App\Services\LiveService::grenzeWarnung() ?> % des Nennstroms</span></div></div>
-    <div class="card stat-card <?= $stufen['stumm'] > 0 ? 'warn' : 'ok' ?>"><div class="stat"><span class="label">Ohne aktuelle Werte</span><span class="value"><?= $stufen['stumm'] ?></span><span class="trend">Messgerät seit über 2 min stumm</span></div></div>
+    <div class="card stat-card <?= $stufen['warn'] + $stufen['bad'] > 0 ? 'bad' : 'ok' ?>"><div class="stat"><span class="label">Hoch ausgelastet</span><span class="value"><?= $stufen['warn'] + $stufen['bad'] ?></span><span class="trend">ab <?= (int) \App\Services\LiveService::grenzeWarnung() ?> % des Nennstroms<?= $mitTanks ? ', Tanks knapp' : '' ?></span></div></div>
+    <div class="card stat-card <?= $stufen['stumm'] > 0 ? 'warn' : 'ok' ?>"><div class="stat"><span class="label">Ohne aktuelle Werte</span><span class="value"><?= $stufen['stumm'] ?></span><span class="trend">Messgerät seit über 2 min stumm<?= $mitTanks ? ', Tanksensor ohne Lebenszeichen' : '' ?></span></div></div>
 </div>
 
 <?php if ($warnungen !== []): ?>
@@ -59,7 +60,7 @@ foreach ($objekte as $o) {
         <h2 class="abschnitt"><?= View::e($info['mehrzahl']) ?></h2>
         <div class="live-raster">
             <?php foreach ($dieser as $o): ?>
-                <?= View::partial('partials/live-kachel', ['objekt' => $o, 'l' => $live[(int) $o['id']] ?? []]) ?>
+                <?= View::partial(AnlagenService::elektrisch($art) ? 'partials/live-kachel' : 'partials/tank-kachel', ['objekt' => $o, 'l' => $live[(int) $o['id']] ?? []]) ?>
             <?php endforeach; ?>
         </div>
     <?php endforeach; ?>

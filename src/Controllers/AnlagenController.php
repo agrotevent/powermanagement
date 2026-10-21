@@ -15,10 +15,13 @@ use App\Services\LiveService;
 use App\Services\MesspunktService;
 use App\Services\SchutzService;
 use App\Services\SiteService;
+use App\Support\Database;
 use App\Support\Flash;
 use App\Support\Request;
 use App\Support\Response;
 use App\Support\Session;
+use App\Support\Zeitraum;
+use App\Tanks\TankService;
 
 final class AnlagenController extends Controller
 {
@@ -118,7 +121,10 @@ final class AnlagenController extends Controller
                 'status' => 'geplant', 'eigenschaften' => [], 'steuerung_gesperrt' => 0, 'ist_vorlage' => $vorlage ? 1 : 0, 'notizen' => '',
             ],
             'standorte' => Zugriff::standorteFiltern(SiteService::all()),
-            'vorlagen'  => AnlagenService::liste(['vorlagen' => true]),
+            // Ein Tank entsteht nur aus einem Tank-Typ, eine elektrische Anlage
+            // nur aus einem elektrischen Katalog-Typ.
+            'vorlagen'  => array_values(array_filter(AnlagenService::liste(['vorlagen' => true]),
+                static fn (array $v): bool => AnlagenService::elektrisch((string) $v['art']) === AnlagenService::elektrisch($art))),
         ]);
     }
 
@@ -129,8 +135,10 @@ final class AnlagenController extends Controller
             return;
         }
         // Art umstellen: das Formular lädt mit ?art= neu, gespeichert wird erst mit „Speichern“.
+        // Nur zwischen elektrischen Arten – ein Tank bleibt ein Tank.
         $art = $request->str('art');
-        $artNeu = isset(AnlagenService::ARTEN[$art]) && $art !== $objekt['art'] ? $art : null;
+        $artNeu = isset(AnlagenService::ARTEN[$art]) && $art !== $objekt['art']
+            && AnlagenService::elektrisch($art) === AnlagenService::elektrisch((string) $objekt['art']) ? $art : null;
         if ($artNeu !== null) {
             $objekt['art'] = $artNeu;
         }
@@ -192,6 +200,18 @@ final class AnlagenController extends Controller
         if ($objekt === null) {
             return;
         }
+        // Ein Tank hat keine Anschlüsse, Sicherungen und Kabel – er hat seine eigene Seite.
+        if (!AnlagenService::elektrisch((string) $objekt['art'])) {
+            [$von, $bis, $vorgabe] = Zeitraum::ausAnfrage($request);
+            $groesse = $request->str('groesse', 'liter');
+            $this->view('anlagen/tank', TankService::seitenDaten($objekt) + [
+                'von' => $von, 'bis' => $bis, 'vorgabe' => $vorgabe,
+                'groesse' => isset(TankService::GROESSEN[$groesse]) ? $groesse : 'liter',
+                'stylesheets' => ['/assets/vendor/uplot/uPlot.min.css'],
+                'scripts' => ['/assets/vendor/uplot/uPlot.iife.min.js', '/assets/js/live.js', '/assets/js/statistik.js', '/assets/js/tank.js'],
+            ]);
+            return;
+        }
         $id = (int) $objekt['id'];
         $messpunkte = MesspunktService::fuerObjekt($id);
         $live = LiveService::fuerObjekte([$objekt]);
@@ -218,7 +238,9 @@ final class AnlagenController extends Controller
             'kennzahlen'   => $kennzahlen,
             'einsaetze'    => (int) $objekt['ist_vorlage'] === 1 ? [] : InventarService::einsaetzeAnObjekt($id, true),
             'inventar'     => (int) $objekt['ist_vorlage'] === 0 && Zugriff::darfBearbeiten($objekt) && Auth::can('datenquellen.view')
-                ? array_values(array_filter(InventarService::fuerBetrachter(InventarService::liste()), static fn ($i) => $i['zustand'] !== 'defekt' && (int) ($i['einsatz']['objekt_id'] ?? 0) !== $id))
+                // Ein Tanksensor gehört in einen Tank – hier stehen nur Verteiler und Zwischenstecker zur Wahl.
+                ? array_values(array_filter(InventarService::fuerBetrachter(InventarService::liste()), static fn ($i) => $i['zustand'] !== 'defekt'
+                    && $i['art'] !== 'tanksensor' && (int) ($i['einsatz']['objekt_id'] ?? 0) !== $id))
                 : [],
             'auswertung'   => MesspunktService::auswertung(),
             'reiter'       => $request->str('reiter', 'uebersicht'),
@@ -362,6 +384,15 @@ final class AnlagenController extends Controller
     {
         $objekt = $this->anlage($params, true);
         if ($objekt === null) {
+            return;
+        }
+        // Den Füllstand eines Tanks misst ein Tanksensor aus dem Inventar – er
+        // geht nur über „Ausbauen“ (gueltig_bis). Löschen nähme seine Fassungen
+        // mit, auch die außerhalb des eigenen Datenfensters.
+        $rolle = Database::scalar('SELECT rolle FROM messpunkte WHERE id = ? AND objekt_id = ?', [$request->int('messpunkt_id'), (int) $objekt['id']]);
+        if (!AnlagenService::elektrisch((string) $objekt['art']) || in_array((string) $rolle, MesspunktService::NUR_INVENTAR, true)) {
+            $this->antwort($request, ['ok' => false, 'message' => 'Einen Tanksensor nimmt man über „Ausbauen“ heraus – Verlauf und Kennlinie bleiben dann erhalten.'],
+                '/anlagen/' . (int) $objekt['id']);
             return;
         }
         $ergebnis = MesspunktService::loeschen((int) $objekt['id'], $request->int('messpunkt_id'));

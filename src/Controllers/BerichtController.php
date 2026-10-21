@@ -239,7 +239,8 @@ final class BerichtController extends Controller
         $anlagen = [];
         if ($b['site_id'] !== null) {
             foreach (AnlagenService::liste(['site_id' => (int) $b['site_id']]) as $o) {
-                if (Zugriff::siehtObjekt($o)) {
+                // Ein Tank hat keine Stromkreise – er gehört in keinen Übergabebericht.
+                if (Zugriff::siehtObjekt($o) && AnlagenService::elektrisch((string) $o['art'])) {
                     $anlagen[] = $o + ['im_bericht' => in_array((int) $o['id'], $objektIds, true)];
                 }
             }

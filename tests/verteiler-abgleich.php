@@ -7,7 +7,8 @@ declare(strict_types=1);
  * zweiten Installation erkennen und übernehmen, eigene Änderungen
  * hochladen, beide Seiten geändert, Shellys an einem eingesetzten Stück,
  * Rechte, Entfernen, Schlüssel als Pfad, Location-Abgleich lässt Typen in
- * Ruhe.
+ * Ruhe. Tanksensor mit Sensordaten und Tank-Typ ohne Anschlüsse hin und
+ * zurück; Verteiler und Zwischenstecker behalten ihren Fingerabdruck.
  */
 
 require __DIR__ . '/hilfen/pruefung.php';
@@ -25,6 +26,7 @@ use App\Support\Database;
 use App\Support\Fingerabdruck;
 use App\Support\Programm;
 use App\Support\Settings;
+use App\Tanks\TankRechnung;
 
 if (Programm::finden('git') === null) {
     uebersprungen('verteiler-abgleich', 'git fehlt');
@@ -332,6 +334,52 @@ try {
         'im neuen Repository nur das hochgeladene Stück');
     Settings::put('inventory.repo_url', 'file://' . $fern);
     Config::set('inventory.repo_url', 'file://' . $fern);
+
+    // ------------------------------------------------ Tanksensor und Tank-Typ
+    $sensorDaten = ['prinzip' => 'hydrostatisch', 'feld' => 'u', 'signal' => '4-20mA', 'buerde_ohm' => '500', 'bereich_bis' => '100',
+        'bereich_einheit' => 'mbar', 'schritt_roh' => '0,1'];
+    $tsId = (int) InventarService::speichern(null, ['art' => 'tanksensor', 'kennung' => $K . '-TS1', 'eigenschaften' => $sensorDaten,
+        'messgeraete' => [['geraet' => 'shellyplusuni-' . $k, 'kanal' => 'voltmeter:100', 'stelle' => 'fuellstand']]])['id'];
+    $tsKey = VerteilerBundle::stueckSchluessel($tsId);
+    $tankTypId = (int) AnlagenService::speichern(null, ['art' => 'tank', 'name' => $k . ' Tanktyp', 'modell' => $k . '-AG3000', 'ist_vorlage' => 1,
+        'eigenschaften' => ['inhalt_l' => '3000', 'artikelnummer' => '1004093', 'tankanschluss' => '2 Anschlüsse']])['id'];
+    $tankTypKey = VerteilerBundle::typSchluessel($tankTypId);
+    $ohneSensordaten = static fn (int $id): bool => !array_key_exists('eigenschaften', VerteilerBundle::stueckLesen($id)['stueck']);
+    pruefe($ohneSensordaten($vId) && $ohneSensordaten($zId), 'Verteiler und Zwischenstecker ohne Schlüssel „eigenschaften“ – ihr Fingerabdruck bleibt');
+    $hoch = VerteilerSync::hochladen([['inventar', $tsKey], ['typ', $tankTypKey]], 'pruefung');
+    pruefe($hoch['ok'], 'Tanksensor und Tank-Typ hochgeladen: ' . $hoch['message']);
+    $tsDatei = $dortDatei('verteiler/inventar/' . $tsKey . '.json');
+    $tankDatei = $dortDatei('verteiler/typen/' . $tankTypKey . '.json');
+    gleich([$tsDatei['stueck']['art'] ?? null, $tsDatei['stueck']['eigenschaften'] ?? null, $tsDatei['stueck']['messgeraete'][0]['stelle'] ?? null],
+        ['tanksensor', TankRechnung::sensorNormal($sensorDaten), 'fuellstand'], 'Tanksensor mit Sensordaten und Messkanal in der Datei');
+    gleich([$tankDatei['typ']['art'] ?? null, $tankDatei['typ']['anschluesse'] ?? null, $tankDatei['typ']['schutzorgane'] ?? null, $tankDatei['typ']['eigenschaften']['inhalt_l'] ?? null],
+        ['tank', [], [], 3000], 'Tank-Typ ohne Anschlüsse und Schutzorgane in der Datei');
+    gleich([$status('inventar', $tsKey), $status('typ', $tankTypKey)], ['aktuell', 'aktuell'], 'nach dem Hochladen aktuell (Fingerabdruck hier = dort)');
+    pruefe(str_contains(VerteilerBundle::kurzbeschreibung($tsDatei), 'Hydrostatisch 0–100 mbar') && str_contains(VerteilerBundle::kurzbeschreibung($tsDatei), '1 Messkanal'),
+        'Kurzbeschreibung des Tanksensors: ' . VerteilerBundle::kurzbeschreibung($tsDatei));
+    gleich(VerteilerBundle::kurzbeschreibung($tankDatei), 'Tank · ' . $k . '-AG3000 · 3.000 l', 'Kurzbeschreibung des Tank-Typs: Nennvolumen statt Anschlüssen');
+    $andereAendern('verteiler/inventar/' . $tsKey . '.json', static function (array $d): array {
+        $d['stueck']['eigenschaften']['buerde_ohm'] = 470;
+        return $d;
+    }, 'Bürde getauscht');
+    $andereAendern('verteiler/typen/' . $tankTypKey . '.json', static function (array $d): array {
+        $d['typ']['eigenschaften']['inhalt_l'] = 2850;
+        return $d;
+    }, 'Nennvolumen');
+    gleich([$status('inventar', $tsKey), $status('typ', $tankTypKey)], ['dort_neuer', 'dort_neuer'], 'Änderungen an Sensordaten und Tank-Typ dort erkannt');
+    $ueber = VerteilerSync::uebernehmen([['inventar', $tsKey], ['typ', $tankTypKey]], ['typ' => true, 'inventar' => true]);
+    pruefe($ueber['ok'], 'übernommen: ' . $ueber['message']);
+    gleich([InventarService::find($tsId)['eigenschaften']['buerde_ohm'] ?? null, (float) (AnlagenService::find($tankTypId)['eigenschaften']['inhalt_l'] ?? 0)], [470.0, 2850.0],
+        'Bürde und Nennvolumen übernommen');
+    gleich([$status('inventar', $tsKey), $status('typ', $tankTypKey)], ['aktuell', 'aktuell'], 'nach dem Übernehmen gleich');
+    $andereAendern('verteiler/typen/' . $tankTypKey . '.json', static function (array $d): array {
+        $d['typ']['anschluesse'] = [['richtung' => 'abgang', 'stecker' => 'cee16', 'nr' => 1, 'bezeichnung' => 'X1', 'schutz' => null, 'phase' => '', 'notizen' => '']];
+        $d['typ']['nennleistung_kva'] = 100;
+        return $d;
+    }, 'Anschluss am Tank');
+    VerteilerSync::uebernehmen([['typ', $tankTypKey]], ['typ' => true, 'inventar' => true]);
+    $tankTyp = AnlagenService::find($tankTypId);
+    gleich([count(AnlagenService::anschluesse($tankTypId)), $tankTyp['nennleistung_kva'], (int) $tankTyp['ist_vorlage']], [0, null, 1], 'ein Tank-Typ bleibt ohne Anschlüsse und Leistung');
 
     // ------------------------------------------------ Fingerabdruck (gemeinsam mit der Schnittstelle)
     // Derselbe Inhalt gibt denselben Wert wie vor dem Umzug nach

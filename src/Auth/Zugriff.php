@@ -3,6 +3,7 @@ declare(strict_types=1);
 
 namespace App\Auth;
 
+use App\Services\AnlagenService;
 use App\Support\Database;
 use App\Support\Zeit;
 
@@ -366,9 +367,14 @@ final class Zugriff
         }
         $objekte = self::objekteZuGeraet((string) $datenquelle['geraet']);
         foreach ($objekte as $o) {
-            if ((int) ($o['steuerung_gesperrt'] ?? 0) === 1) {
+            // Gesperrt – oder ein Tank: Ein Gerät, das in einem Tank misst,
+            // schaltet die App nie, auch wenn es ein Relais hat.
+            if ((int) ($o['steuerung_gesperrt'] ?? 0) === 1 || !AnlagenService::elektrisch((string) ($o['art'] ?? ''))) {
                 return false;
             }
+        }
+        if ($objekt !== null && !AnlagenService::elektrisch((string) ($objekt['art'] ?? ''))) {
+            return false;
         }
         if ($objekt !== null) {
             $objekte = array_values(array_filter($objekte, static fn (array $o): bool => (int) $o['id'] === (int) ($objekt['id'] ?? 0)));

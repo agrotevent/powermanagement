@@ -59,14 +59,15 @@ Zahlenwert desselben Feldes blockieren.
 
 Wer eigene Geräte anbinden will (etwa über ein Skript auf einem Router), muss
 nur dieses Format auf `pm/messwert/…` veröffentlichen. Den Rest erledigt
-Node-RED.
+Node-RED. Tankgeber liefern Rohwerte in den Feldern aus dem Abschnitt
+[Tanksensoren](#tanksensoren-rohwerte-statt-liter).
 
 ## InfluxDB-Schema
 
 | Messung | Tags | Felder |
 |---------|------|--------|
 | `strom` | `geraet`, `kanal`, `phase` (L1/L2/L3/N/sum), `typ` | `u i p q s pf f e e_rueck` |
-| `zustand` | `geraet`, `kanal`, `typ` | frei (`soc`, `temperatur`, `schalter`, `…_text`) |
+| `zustand` | `geraet`, `kanal`, `typ` | frei (`soc`, `temperatur`, `schalter`, `…_text`; Rohwerte der Tanksensoren `u`, `eingang`, `x`, `sensorfehler` …, siehe [unten](#tanksensoren-rohwerte-statt-liter)) |
 | `geraet` | `geraet`, `typ` | `modell`, `produkt`, `name`, `firmware`, `generation`, `mac`, `praefix`, `ip` |
 | `pipeline` | `quelle` | Herzschlag von Node-RED: `geschrieben`, `fehler`, `puffer`, `verworfen` |
 
@@ -82,12 +83,16 @@ ein) und 3.x. Geschrieben wird über `/write?precision=ms`.
 Shellys brauchen **keine Datenquelle**. Sie melden sich über MQTT und
 erscheinen unter **Messtechnik → Datenquellen → Geräte in der InfluxDB**.
 Dort ordnet man sie einer Anlage zu, als **Messpunkt** (Einspeisung, Abgang
-oder einzelner Anschluss).
+oder einzelner Anschluss). Ein Shelly mit einer Füllstandsonde kommt
+stattdessen als **Tanksensor** ins Inventar und wird in einen Tank
+eingebaut ([Tanksensoren](#tanksensoren-rohwerte-statt-liter)).
 
 | Generation | Themen | Node-RED macht daraus |
 |------------|--------|-----------------------|
 | Gen2+ (Plus, Pro, Gen3, Gen4) | `<präfix>/status/em:0`, `…/switch:0`, `…/emdata:0`, `…/online` | Messwerte je Kanal; Geräteinfo per RPC `Shelly.GetDeviceInfo` (alle 6 h) |
+| Gen2+ Plus Uni, Plus Add-on (Analogeingang) | `<präfix>/status/voltmeter:N`, `…/input:N` (Typ *analog*) | Rohwerte `u` (V) bzw. `eingang` (%), dazu `x` und bei jeder Meldung `sensorfehler` 0/1 ([Tanksensoren](#tanksensoren-rohwerte-statt-liter)) |
 | Gen1 | `shellies/<id>/emeter/N/…`, `…/relay/N/power`, `…/announce` | Messwerte; Wattminuten → Wh; 3EM-Summe |
+| Gen1 Uni | `shellies/<id>/adc/N` | Kanal `adc:N` mit `u` (V) |
 
 Einrichtung am Gerät (MQTT-Server, Benutzer `shelly`, *Generic status
 update over MQTT* bei Gen2+): siehe
@@ -151,6 +156,136 @@ MQTT-Präfix und die Generation übernimmt PowerManagement aus der InfluxDB.
 - Gen1 bekommt `on`/`off` auf `shellies/<id>/relay/N/command`. Eine
   Bestätigung gibt es dort nicht, der neue Zustand erscheint mit dem
   nächsten Messwert.
+
+## Tanksensoren: Rohwerte statt Liter
+
+Ein Tanksensor – etwa eine hydrostatische 4–20-mA-Sonde an einem Shelly
+Plus Uni – meldet keinen Füllstand, sondern eine Spannung oder einen
+Prozentwert. In die InfluxDB kommen nur diese **Rohwerte**; Node-RED rechnet
+nichts um. Füllhöhe, Liter und Prozent rechnet PowerManagement beim Lesen,
+mit der Kennlinie des Einbaus (Sonde, Messbereich, Einbaumaß, Tank).
+
+Die Sonde mit ihrem Shelly legt man unter **Inventar → + Tanksensor** an:
+Messkanal (Gerät und Kanal, etwa `voltmeter:100`) und Sensordaten
+(Messprinzip, Signal, Wandler bzw. Bürde, Messbereich laut Sonde). Auf der
+Seite des Tanks wird sie mit dem Einbaumaß (Sondenspitze über dem Boden)
+eingebaut; daraus entsteht die erste Fassung der Kennlinie. Sie gilt als
+ungeprüft, bis gepeilt ist – die Einbautiefe ändert sich mit jedem Einbau.
+
+Warum nicht gleich Liter:
+
+- **Kalibriert wird je Einbau.** Derselbe Sensor misst in einem anderen Tank
+  oder nach einer Peilung anders. Die Kennlinie gehört zum Einbau, nicht zum
+  Gerät.
+- **Korrigierbar.** Eine Peilung oder Betankung ergibt eine neue Fassung
+  der Kennlinie. Die gespeicherten Messwerte bleiben, wie sie gemessen
+  wurden.
+- **Rechte vor der Rechnung.** Die App liest Rohwerte nur im Datenfenster
+  der Freigaben und rechnet erst danach.
+- **Kein Gerät schreibt Messwerte.** Weder der gemeinsame Zugang `shelly`
+  (`topic deny pm/#`) noch ein eigener Zugang (`%u/#`) darf auf
+  `pm/messwert/…` schreiben. Ein Shelly kann also keine fertigen Liter
+  einspeisen; was er in seinem Baum meldet, übersetzt Node-RED.
+
+| Feld in `zustand` | Einheit | Quelle |
+|-------------------|---------|--------|
+| `u` | V | Gen2+ `voltmeter:N` (`voltage`), Gen1 Uni `adc/N` |
+| `eingang` | % (analog) bzw. 0/1 (digital) | Gen2+ `input:N` (`percent` bzw. `state`) |
+| `x` | nur am Gerät bekannt | `xvoltage` bzw. `xpercent`, wenn am Gerät ein Ausdruck gesetzt ist |
+| `sensorfehler` | 0/1 | bei **jeder** Meldung von `voltmeter:N` und analogem `input:N` |
+| `i_ma`, `abstand_mm`, `fuellhoehe_mm` | mA, mm, mm | Fremdgeräte (Modbus-Analogmodul, ESPHome) über `pm/messwert/…` |
+| `tank_prozent`, `tank_liter` | %, l | Quellen, die schon kalibriert sind (ComAp, Victron GX Tank) |
+
+Die Einheit steckt im Feldnamen. Zahlen bleiben JSON-Zahlen und gehen als
+Float in die InfluxDB.
+
+**`sensorfehler`:** Meldet der Shelly `errors` (etwa `out_of_range`) oder
+`voltage` bzw. `percent` als `null`, schreibt Node-RED nur
+`sensorfehler=1` – ohne Wert, nie eine Schein-0. Jede gute Meldung trägt
+`sensorfehler=0`; die nächste gute Meldung hebt einen Fehler also wieder
+auf. Digitaleingänge (`state`), Taster und Zähler (`counts`) bekommen kein
+`sensorfehler`, Taster und Zähler auch keinen Wert. Der ADC des Gen1 Uni
+meldet keine Fehler; dort gibt es nur `u`.
+
+Beispiele (Line Protocol):
+
+```
+zustand,geraet=shellyplusuni-a0b1c2,kanal=voltmeter:100,typ=shelly u=7.5,x=12.34,sensorfehler=0 1760612400000
+zustand,geraet=shellyplus1-a0b1c2,kanal=input:100,typ=shelly eingang=64.2,sensorfehler=0 1760612400000
+zustand,geraet=shellyplusuni-a0b1c2,kanal=voltmeter:100,typ=shelly sensorfehler=1 1760612460000
+zustand,geraet=shellyuni-a1b2c3,kanal=adc:0,typ=shelly u=6.42 1760612400000
+```
+
+### Einrichtung am Gerät
+
+Die App stellt am Shelly nichts ein. Sie kennt weder `Voltmeter.SetConfig`
+noch das Anlegen von Peripherie und startet nie ein Gerät neu. Deshalb von
+Hand in der Shelly-App oder der Weboberfläche des Geräts:
+
+- **Peripherie:** Analogeingang am Plus Uni bzw. Add-on als *Voltmeter*
+  einrichten (Kanal `voltmeter:100`). Als *Analog-Eingang* meldet er
+  Prozent (`input:100`). Beim Gen1 Uni heißt der Kanal `adc:0`.
+- **MQTT:** *Generic status update over MQTT* einschalten (Gen2+).
+- **Meldeschwelle** `report_thr` so klein, wie das Gerät erlaubt:
+  Voltmeter 0,02–0,05 V, Analog-Eingang 1 %.
+- **ECO-Modus aus**, sonst springt der Wert.
+
+**Melderhythmus:** Ein Gen2+-Shelly meldet nur, wenn sich der Wert um mehr
+als `report_thr` ändert – einen festen Takt gibt es nicht. Ein ruhender
+Tank schweigt deshalb oft Stunden. Die App zeigt den Stand mit seinem
+Alter; „stumm“ gilt erst ohne Lebenszeichen des Geräts (`online`).
+
+### 4–20-mA-Sonde am Plus Uni
+
+- **Versorgung:** ein eigenes 24-V-SELV-Netzteil, fest auf 24,0 V – nie die
+  Starterbatterie oder das Bordnetz des Generators. Der Plus Uni verträgt
+  9–28 V DC (8–24 V AC, 5 V stabilisiert; die 12–36 V gelten für den
+  alten Gen1 Uni). Bei DC: + an VAC1, − an **GND** (Masse der Sensoren),
+  VAC2 frei. Bürde bzw. Masse des Wandlers an dieselbe GND-Klemme. Die
+  Sonde liegt in Reihe in der Stromschleife.
+- **Mit Bürde (der einfachere Weg):** 499 Ω (oder 2 × 1 kΩ parallel),
+  Metallschicht ≤ 25 ppm/K, vom Analogeingang nach GND: 4 mA ≈ 2,0 V,
+  20 mA ≈ 10 V. Für einen Kurzschluss der Sondenleitung auslegen
+  (24 V / 499 Ω = 48 mA, 1,15 W – also ≥ 2 W) oder die Schleife begrenzen.
+  In der App: Signal „4–20 mA (an einer Bürde)“, Bürde 499 Ω. Am Plus
+  Add-on (0–10 V) 470 Ω.
+- **Mit Wandler „0/4–20 mA → 0–10 V“:** auf **0–20 mA → 0–10 V**
+  abgleichen – ZERO bei 4,00 mA auf 2,00 V, SPAN bei 20,00 mA auf 10,00 V.
+  Dafür braucht es eine Stromquelle, die Sonde liefert 20 mA nie.
+  Steckbrücken nach dem Aufdruck der eigenen Platine setzen, danach prüfen:
+  0 mA unter 1,8 V, 21 mA ≈ 10,5 V. Trimmer sichern und nach jedem
+  Transport den Wert bei 4 mA prüfen; das Modul braucht 7–36 V. Im Modus
+  „4–20 mA → 0–10 V“ (4 mA = 0 V) ergäbe ein Leitungsbruch ebenfalls 0 V:
+  **Leitungsbruch wird so nicht erkannt – der Tank zeigt dann leer.** In
+  der App: Signal „4–20 mA über Spannungswandler“, Vorgabe 2,0 V bei 4 mA
+  und 10,0 V bei 20 mA (bei 3,3 V bzw. 5 V Endwert 0,66 / 1,0 V).
+- **Spannung bei 4 und 20 mA** so eintragen, wie der Shelly sie meldet –
+  nicht ausrechnen. Der Eingang des Shelly ist vermutlich ungenauer als
+  die Sonde: Voltmeter im Messbereich 0 (0–15 V) lassen und nie
+  umschalten, den Uni in den Schatten (Umgebung höchstens 40 °C).
+- **Kalibrieren:** Eine Peilung mit dem Peilstab setzt nur den Anker, die
+  Steigung bleibt. Zwei Peilungen im selben Einbau mit mindestens 300 mm
+  Höhenunterschied (etwa vor und nach dem Betanken) können auch die
+  Steigung setzen; weicht sie um mehr als 15 % von den Sensordaten ab,
+  warnt die App („Messbereich, Dichte oder Wandler prüfen“).
+- **Spannung an der Sonde:** Ob 24 V minus 10 V an der Bürde reichen, ist
+  nicht belegt – die Klemmenspannung der Sonde bei hohem Strom messen.
+- **Sonde:** Messbereich passend zur Tankhöhe. Ein voller QUADRO-AG steht
+  nach den Außenmaßen nur etwa 1,1 m hoch (≈ 0,9 mWS): 0–2 mWS ist die
+  sichere Wahl, 0–1 mWS (doppelt so genau) nur, wenn die gemessene volle
+  Füllhöhe unter 1,15 m liegt. Nutzt eine Sonde weniger als 40 % ihres
+  Messbereichs, sagt die App das – eine 0–5-mWS-Sonde im 1,55 m hohen Tank
+  nutzt etwa 26 %, 0,5 % vom Messbereich sind dort ≈ 30 mm Diesel. Für
+  Diesel müssen Membran und Kabelmantel dieselbeständig sein (etwa PUR-
+  oder FEP-Kabel, FKM-Dichtung) – viele „Wasserstandssensoren“ haben
+  PVC-Kabel, Datenblatt prüfen.
+
+Die App warnt nur. Grenzwertgeber und Leckanzeiger am Tank bleiben Pflicht.
+Wie eine Sonde angenommen, in den Tank gebracht und vor dem Transport
+ausgebaut wird – Öffnung, druckoffene Dose für das belüftete Kabel, Wasser
+am Boden –, steht in
+[bedienung.md](bedienung.md#sonde-annehmen-und-einbauen); Peilung,
+Betankung und Kennlinie im Abschnitt [Tanks](bedienung.md#tanks-und-kraftstoff).
 
 ## Victron Energy
 

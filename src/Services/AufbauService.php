@@ -15,8 +15,8 @@ use App\Support\Zeit;
  * Aufbau: der Übergang von der Planung zum echten Aufbau.
  *
  * Beim Start wird der Plan des Standorts festgehalten – was mitgebracht und
- * aufgebaut wird: mobile Anlagen, mobile Kabel, Kabelbrücken und die
- * Materialliste. Vor Ort wird jede Position per Klick bestätigt („wie
+ * aufgebaut wird: mobile Anlagen, mobile Kabel, Kabelbrücken,
+ * Kraftstoffschläuche und die Materialliste. Vor Ort wird jede Position per Klick bestätigt („wie
  * geplant“), als geändert markiert (mit Notiz, beim Kabel mit der echten
  * Länge) oder als entfallen. Was beim Aufbau neu dazukommt, zählt als
  * zusätzlich. „Aufbau fertig“ hält den Ist-Stand fest; die Veranstaltung
@@ -89,9 +89,13 @@ final class AufbauService
         return $out;
     }
 
+    /** Leitungsarten, die aufgebaut werden – Kabelwege sind nur Trassen. */
+    public const LEITUNGEN = ['kabel', 'kabelbruecke', 'kraftstoff'];
+
     /**
-     * Was auf dem Standort aufgebaut wird: mobile Anlagen, mobile Kabel und
-     * Kabelbrücken, mit allem, was Materialliste und Abgleich brauchen.
+     * Was auf dem Standort aufgebaut wird: mobile Anlagen, mobile Kabel,
+     * Kabelbrücken und Kraftstoffschläuche, mit allem, was Materialliste und
+     * Abgleich brauchen.
      *
      * @return array{zeit:string,objekte:list<array<string,mixed>>,leitungen:list<array<string,mixed>>,material:array<string,mixed>}
      */
@@ -101,7 +105,7 @@ final class AufbauService
         $leitungen = [];
         foreach (SiteService::floors($siteId) as $f) {
             foreach (LeitungService::fuerEtage((int) $f['id']) as $l) {
-                if ((int) $l['fest'] === 0 && in_array($l['art'], ['kabel', 'kabelbruecke'], true)) {
+                if ((int) $l['fest'] === 0 && in_array($l['art'], self::LEITUNGEN, true)) {
                     $leitungen[] = $l;
                 }
             }
@@ -150,7 +154,7 @@ final class AufbauService
         ]);
         Audit::log('aufbau.start', 'site', (string) $siteId, ['aufbau' => $id, 'name' => $name]);
         return ['ok' => true, 'message' => '„' . $name . '“ gestartet: ' . count($plan['objekte']) . ' Anlagen und ' . count($plan['leitungen'])
-            . ' Kabel/Kabelbrücken zum Aufbauen.', 'id' => $id];
+            . ' Kabel, Kabelbrücken und Schläuche zum Aufbauen.', 'id' => $id];
     }
 
     /**
@@ -200,7 +204,7 @@ final class AufbauService
             return $o !== null ? (string) $o['name'] : null;
         }
         $l = LeitungService::find($refId);
-        return $l !== null && (int) $l['fest'] === 0 && in_array($l['art'], ['kabel', 'kabelbruecke'], true)
+        return $l !== null && (int) $l['fest'] === 0 && in_array($l['art'], self::LEITUNGEN, true)
             && (int) Database::scalar('SELECT site_id FROM floors WHERE id = ?', [(int) $l['floor_id']]) === (int) $aufbau['site_id']
             ? self::leitungName($l) : null;
     }
@@ -213,7 +217,20 @@ final class AufbauService
         if ($l['art'] === 'kabelbruecke') {
             return 'Kabelbrücke' . ($l['modell'] !== '' ? ' ' . $l['modell'] : '');
         }
+        if ($l['art'] === 'kraftstoff') {
+            return 'Schlauch ' . ($l['von_name'] ?? '?') . ' → ' . ($l['zu_name'] ?? '?');
+        }
         return ($l['von_name'] ?? '?') . ' → ' . ($l['zu_name'] ?? 'offenes Ende');
+    }
+
+    /** Was in der Liste unter einer Leitung steht: Stecker und Kabeltyp, Elemente, Schlauch mit Kupplung. */
+    private static function leitungText(array $l): string
+    {
+        return match ((string) $l['art']) {
+            'kabelbruecke' => $l['anzahl'] . ' Elemente',
+            'kraftstoff'   => trim(max(1, (int) $l['anzahl']) . ' × ' . trim((string) $l['kabeltyp'] . ' ' . (string) $l['modell'])),
+            default        => trim(($l['von_typ'] ?? $l['zu_typ'] ?? '') . ' ' . $l['kabeltyp']),
+        };
     }
 
     /** „Aufbau fertig“: Ist-Stand festhalten, ab jetzt läuft der Betrieb. */
@@ -310,7 +327,7 @@ final class AufbauService
             $imPlan['l'][(int) $l['id']] = true;
             $p = $posten['l:' . (int) $l['id']] ?? null;
             $eintraege[] = ['schluessel' => 'l:' . (int) $l['id'], 'art' => 'leitung', 'id' => (int) $l['id'], 'name' => self::leitungName($l),
-                'text' => $l['art'] === 'kabelbruecke' ? $l['anzahl'] . ' Elemente' : trim(($l['von_typ'] ?? $l['zu_typ'] ?? '') . ' ' . $l['kabeltyp']),
+                'text' => self::leitungText($l), 'leitung' => (string) $l['art'],
                 'status' => $p['status'] ?? 'offen', 'notiz' => (string) ($p['notiz'] ?? ''),
                 'laenge_plan' => $l['laenge'], 'laenge_ist' => $p['laenge_ist'] ?? null];
         }
@@ -323,7 +340,7 @@ final class AufbauService
         foreach ($jetzt['leitungen'] ?? [] as $l) {
             if (!isset($imPlan['l'][(int) $l['id']])) {
                 $eintraege[] = ['schluessel' => 'l:' . (int) $l['id'], 'art' => 'leitung', 'id' => (int) $l['id'], 'name' => self::leitungName($l),
-                    'text' => trim(($l['von_typ'] ?? $l['zu_typ'] ?? '') . ' ' . $l['kabeltyp']), 'status' => 'zusaetzlich', 'notiz' => '',
+                    'text' => self::leitungText($l), 'leitung' => (string) $l['art'], 'status' => 'zusaetzlich', 'notiz' => '',
                     'laenge_plan' => null, 'laenge_ist' => $l['laenge']];
             }
         }
@@ -510,6 +527,10 @@ final class AufbauService
         }
         $out = [];
         foreach (Zugriff::filtern(AnlagenService::liste(['site_id' => (int) $aufbau['site_id']])) as $o) {
+            // Ein Tank hat keinen Nennstrom und keine Last.
+            if (!AnlagenService::elektrisch((string) $o['art'])) {
+                continue;
+            }
             // Das Hauptmessgerät, das im Betrieb steckte (auch ein inzwischen abgebautes).
             $messpunkte = array_values(array_filter(MesspunktService::fuerObjekt((int) $o['id'], true), static function ($m) use ($von, $bis) {
                 $ab = Zeit::ts($m['gueltig_ab'] ?? null);

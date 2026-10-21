@@ -41,6 +41,7 @@ $darfSetzen = $darfAnlegen;
             <button type="button" class="btn btn-sm" data-modus="kabel" title="Kabel von Anlage zu Anlage ziehen">Kabel</button>
             <button type="button" class="btn btn-sm" data-modus="kabelweg" title="Kabeltrasse ohne feste Enden">Kabelweg</button>
             <button type="button" class="btn btn-sm" data-modus="bruecke" title="Kabelbrücke über einen Weg legen">Kabelbrücke</button>
+            <button type="button" class="btn btn-sm" data-modus="schlauch" title="Kraftstoffschlauch vom Tank zum Generator">Schlauch</button>
         <?php endif; ?>
         <?php if ($darfMassstab): ?>
             <button type="button" class="btn btn-sm" data-modus="massstab" title="Zwei Punkte mit bekanntem Abstand setzen">Maßstab</button>
@@ -86,6 +87,7 @@ $darfSetzen = $darfAnlegen;
                 <label class="check"><input type="checkbox" data-ebene="kabel" checked> Mobile Kabel</label>
                 <label class="check"><input type="checkbox" data-ebene="kabelweg" checked> Kabelwege</label>
                 <label class="check"><input type="checkbox" data-ebene="kabelbruecke" checked> Kabelbrücken</label>
+                <label class="check"><input type="checkbox" data-ebene="kraftstoff" checked> Kraftstoffschläuche</label>
                 <label class="check"><input type="checkbox" data-ebene="beschriftung" checked> Namen</label>
                 <label class="check"><input type="checkbox" data-ebene="werte" checked> Livewerte</label>
                 <label class="check"><input type="checkbox" data-ebene="fremd"> Racks &amp; Dosen (MasterAdmin)</label>
@@ -99,6 +101,8 @@ $darfSetzen = $darfAnlegen;
                 <span class="legende-form fest" aria-hidden="true"></span> fest
                 <span class="legende-form mobil" aria-hidden="true"></span> mobil
                 <span class="legende-linie fest" aria-hidden="true"></span> fest verlegt
+                <span class="legende-form tank" aria-hidden="true"></span> Tank: Pegel = Füllstand, Rand = Stufe
+                <span class="legende-linie schlauch" aria-hidden="true"></span> Kraftstoffschlauch
                 <?php if ($massstab !== null && ($massstab['quelle'] ?? '') !== 'georeferenz'): ?><span class="muted">· Maßstab gesetzt (<?= View::e(number_format((float) $massstab['meter'], 0, ',', '.')) ?> m)</span><?php endif; ?>
                 <?php if ($geo !== null): ?><span class="muted">· georeferenziert<?= ($massstab['quelle'] ?? '') === 'georeferenz' ? ' (Längen daraus)' : '' ?> ·
                     <a href="/karte/<?= (int) $etage['id'] ?>/geojson">GeoJSON</a></span><?php endif; ?>
@@ -131,6 +135,8 @@ $darfSetzen = $darfAnlegen;
     'kabeltypen' => LeitungService::KABELTYPEN,
     'querschnitte' => LeitungService::QUERSCHNITTE,
     'bruecken'   => LeitungService::BRUECKEN,
+    'schlauchtypen' => LeitungService::SCHLAUCHTYPEN,
+    'kupplung'   => LeitungService::KUPPLUNG_VORGABE,
     'darf'       => ['setzen' => $darfSetzen, 'leitung' => $darfLeitung, 'massstab' => $darfMassstab, 'statistik' => View::can('statistik.view'),
         'inventar' => View::can('datenquellen.view')],
 ], JSON_UNESCAPED_UNICODE | JSON_HEX_TAG | JSON_HEX_AMP) ?></script>

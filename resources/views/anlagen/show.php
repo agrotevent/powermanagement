@@ -155,7 +155,8 @@ $messgeraet = static function (array $m) use ($objekt, $auswertung, $live): stri
                     <?php endif; ?>
                     <?php foreach (AnlagenService::FELDER[$objekt['art']] as $k => [$beschriftung, $typ, $zusatz]): ?>
                         <?php if (isset($objekt['eigenschaften'][$k])): ?>
-                            <dt><?= View::e($beschriftung) ?></dt><dd><?= View::e(is_float($objekt['eigenschaften'][$k]) ? $zahl($objekt['eigenschaften'][$k]) : (string) $objekt['eigenschaften'][$k]) ?><?= $typ !== 'auswahl' && $zusatz !== '' ? ' ' . View::e($zusatz) : '' ?></dd>
+                            <?php $einheit = AnlagenService::einheit($typ, $zusatz, $objekt['eigenschaften'][$k]); ?>
+                            <dt><?= View::e($beschriftung) ?></dt><dd><?= View::e(is_float($objekt['eigenschaften'][$k]) ? $zahl($objekt['eigenschaften'][$k]) : (string) $objekt['eigenschaften'][$k]) ?><?= $einheit !== '' ? ' ' . View::e($einheit) : '' ?></dd>
                         <?php endif; ?>
                     <?php endforeach; ?>
                 </dl>
@@ -459,7 +460,7 @@ $messgeraet = static function (array $m) use ($objekt, $auswertung, $live): stri
             <div class="field">
                 <label for="mp_rolle">Misst</label>
                 <select id="mp_rolle" name="rolle">
-                    <?php foreach (MesspunktService::ROLLEN as $k => $r): ?><option value="<?= $k ?>"><?= View::e($r) ?></option><?php endforeach; ?>
+                    <?php foreach (array_diff_key(MesspunktService::ROLLEN, array_flip(MesspunktService::NUR_INVENTAR)) as $k => $r): ?><option value="<?= $k ?>"><?= View::e($r) ?></option><?php endforeach; ?>
                 </select>
             </div>
             <div class="field">

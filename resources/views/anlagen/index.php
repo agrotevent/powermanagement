@@ -8,10 +8,10 @@ $fest = $filter['fest'];
 $title = $fest === true ? 'Feststromanschlüsse' : ($artInfo['mehrzahl'] ?? ($fest === false ? 'Mobile Anlagen' : 'Anlagen'));
 $subtitle = $fest === true
     ? 'Fest installiert, gehören zur Location – werden beim Location-Abgleich übertragen'
-    : 'Stromanschlüsse, Generatoren, Wechselrichter und Verteilungen';
+    : ($filter['art'] === 'tank' ? 'Kraftstofftanks im Plan – mit Inhalt, Maßen und Zulassung' : 'Stromanschlüsse, Generatoren, Wechselrichter, Verteilungen und Tanks');
 $neuArt = $artInfo !== null ? $filter['art'] : ($fest === true ? 'anschluss' : 'verteilung');
 $neuLink = '/anlagen/neu?art=' . $neuArt . ($fest === true ? '&amp;fest=1' : '');
-$neuText = $fest === true && ($filter['art'] === '' || $filter['art'] === 'anschluss') ? 'Neuer Feststromanschluss' : 'Neue ' . ($artInfo['name'] ?? 'Anlage');
+$neuText = $fest === true && ($filter['art'] === '' || $filter['art'] === 'anschluss') ? 'Neuer Feststromanschluss' : ($artInfo['neu'] ?? 'Neue Anlage');
 ?>
 <div class="toolbar-zeile">
     <form method="get" action="/anlagen" class="inline-form">
@@ -46,7 +46,18 @@ $neuText = $fest === true && ($filter['art'] === '' || $filter['art'] === 'ansch
     <div class="table-wrap">
         <table class="tabelle-karten">
             <thead>
-            <tr><th>Anlage</th><th>Standort</th><th>Anschlüsse</th><th>Status</th><th class="num">Leistung</th><th class="num">Auslastung</th></tr>
+            <?php
+            // Spaltenköpfe nach dem, was in der Liste steht: nur Tanks, nur
+            // elektrische Anlagen oder beides (dann für beide lesbar).
+            $mitTanks = $filter['art'] === 'tank' || array_filter($objekte, static fn (array $o): bool => !AnlagenService::elektrisch((string) $o['art'])) !== [];
+            $mitStrom = $filter['art'] !== 'tank' && ($objekte === [] || array_filter($objekte, static fn (array $o): bool => AnlagenService::elektrisch((string) $o['art'])) !== []);
+            [$kopfArt, $kopfJetzt, $kopfStand] = match (true) {
+                $mitTanks && $mitStrom => ['Anschlüsse / Inhalt', 'Leistung / Inhalt', 'Auslastung / Füllstand'],
+                $mitTanks              => ['Inhalt', 'Inhalt jetzt', 'Füllstand'],
+                default                => ['Anschlüsse', 'Leistung', 'Auslastung'],
+            };
+            ?>
+            <tr><th>Anlage</th><th>Standort</th><th><?= View::e($kopfArt) ?></th><th>Status</th><th class="num"><?= View::e($kopfJetzt) ?></th><th class="num"><?= View::e($kopfStand) ?></th></tr>
             </thead>
             <tbody>
             <?php if ($objekte === []): ?>
@@ -63,10 +74,18 @@ $neuText = $fest === true && ($filter['art'] === '' || $filter['art'] === 'ansch
                         <div class="small muted"><?= View::e(trim($o['hersteller'] . ' ' . $o['modell'])) ?></div>
                     </td>
                     <td data-label="Standort"><?= View::e($o['site_name'] ?? '–') ?><?= $o['floor_name'] ? '<div class="small muted">' . View::e($o['floor_name']) . '</div>' : '' ?></td>
-                    <td data-label="Anschlüsse" class="small"><?= View::e($o['kurzform']) ?></td>
+                    <td data-label="<?= AnlagenService::elektrisch((string) $o['art']) ? 'Anschlüsse' : 'Inhalt' ?>" class="small"><?= View::e($o['kurzform']) ?></td>
                     <td data-label="Status"><span class="badge status-<?= View::e($o['status']) ?>"><?= View::e(AnlagenService::STATUS[$o['status']] ?? $o['status']) ?></span></td>
-                    <td data-label="Leistung" class="num" data-feld="p"><?= View::e(Messdaten::format($l['p'] ?? null, 'W')) ?></td>
-                    <td data-label="Auslastung" class="num" data-feld="auslastung"><?= ($l['auslastung'] ?? null) !== null ? (int) round((float) $l['auslastung']) . ' %' : '' ?></td>
+                    <?php if (AnlagenService::elektrisch((string) $o['art'])): ?>
+                        <td data-label="Leistung" class="num" data-feld="p"><?= View::e(Messdaten::format($l['p'] ?? null, 'W')) ?></td>
+                        <td data-label="Auslastung" class="num" data-feld="auslastung"><?= ($l['auslastung'] ?? null) !== null ? (int) round((float) $l['auslastung']) . ' %' : '' ?></td>
+                    <?php else: ?>
+                        <?php $t = is_array($l['tank'] ?? null) ? $l['tank'] : []; ?>
+                        <td data-label="Inhalt jetzt" class="num" data-tank="menge"><?= is_numeric($t['liter'] ?? null) ? View::e(\App\Tanks\TankService::zahl(round((float) $t['liter']))) . ' l'
+                            : (is_numeric($t['hoehe_mm'] ?? null) ? View::e(\App\Tanks\TankService::zahl(round((float) $t['hoehe_mm']))) . ' mm' : '–') ?></td>
+                        <td data-label="Füllstand" class="num"><span data-tank="prozent"><?= is_numeric($t['prozent'] ?? null) ? View::e(\App\Tanks\TankService::zahl(round((float) $t['prozent']))) . ' %' : '' ?></span>
+                            <div class="small tank-rest" data-tank="rest"><?= View::e(\App\Tanks\TankService::restZeile($t)) ?></div></td>
+                    <?php endif; ?>
                 </tr>
             <?php endforeach; ?>
             </tbody>
