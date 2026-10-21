@@ -173,7 +173,7 @@ git -C /opt/powermanagement remote get-url origin
 
 | Option | Wofür |
 |--------|-------|
-| `--name="Titel"` | Titel der Oberfläche (später unter System → Einstellungen änderbar) |
+| `--name="Titel"` | Titel der Oberfläche (später unter System → Einstellungen änderbar; bei einem weiteren Lauf nur, solange keiner eingetragen ist) |
 | `--repo=<url>` / `--zweig=main` | woher installiert wird |
 | `--ziel=/opt/powermanagement` | Installationsverzeichnis |
 | `--port=80` | Port der Oberfläche, falls 80 belegt ist |
@@ -260,14 +260,19 @@ Bei einer vorhandenen **InfluxDB 1.8** mit Anmeldung ist das „Token“
 Alle erzeugten Kennwörter und Tokens stehen zusätzlich in
 **`/etc/powermanagement/zugaenge.txt`** (nur root). Das Skript ist
 wiederholbar: Ein zweiter Lauf verwendet die Kennwörter aus dieser Datei
-weiter, ändert nichts an Datenbank und `config.php` und überschreibt keine
-eigenen Änderungen an Flows, Node-RED-Einstellungen, nginx-Site oder
-Mosquitto-ACL – neue Fassungen solcher Dateien legt es mit
-`powermanagement-neu` im Namen daneben. Einen Administrator legt es nur an,
-solange die Datenbank noch keinen Benutzer hat – etwa wenn der erste Lauf
-vorher abbrach (dann mit neuem Erstkennwort in der Zusammenfassung). Gibt es
-Benutzer, legt es niemanden an, auch keinen gelöschten oder umbenannten
-`admin`.
+weiter, ändert nichts an `config.php` und überschreibt keine eigenen
+Änderungen an Flows, Node-RED-Einstellungen, nginx-Site oder Mosquitto-ACL –
+neue Fassungen solcher Dateien legt es mit `powermanagement-neu` im Namen
+daneben. Auch was in der Oberfläche eingetragen ist (*System →
+Einstellungen*: Titel, InfluxDB, MQTT), bleibt: In eine vorhandene Datenbank
+trägt das Skript nur ein, was dort noch fehlt, und nennt in der
+Zusammenfassung unter „Beibehalten“, wo seine Optionen deshalb nicht
+gegriffen haben. Nur den Zugang der Anwendung zum Broker im Container
+schreibt es jedes Mal neu – er muss zur Kennwortdatei passen, die jeder Lauf
+schreibt. Einen Administrator legt es nur an, solange die Datenbank noch
+keinen Benutzer hat – etwa wenn der erste Lauf vorher abbrach (dann mit neuem
+Erstkennwort in der Zusammenfassung). Gibt es Benutzer, legt es niemanden an,
+auch keinen gelöschten oder umbenannten `admin`.
 
 | Datei | Inhalt |
 |-------|--------|

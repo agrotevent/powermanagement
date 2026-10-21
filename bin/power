@@ -14,9 +14,10 @@ declare(strict_types=1);
  *                                   config/config.php, wird sie mit eigenem Schlüssel
  *                                   angelegt (--demo: im Demo-Modus, ohne InfluxDB/MQTT).
  *   bin/power migrate               Nur Migrationen ausführen (und Grundbestand ergänzen)
- *   bin/power einstellung <schlüssel> <wert> | --stdin
+ *   bin/power einstellung <schlüssel> <wert> | --stdin [--nur-wenn-leer]
  *                                   Einstellung setzen; influx.token, influx.password,
- *                                   mqtt.password und inventory.token werden verschlüsselt abgelegt
+ *                                   mqtt.password und inventory.token werden verschlüsselt abgelegt.
+ *                                   --nur-wenn-leer: nur, wenn noch nichts eingetragen ist
  *   bin/power pruefen               Datenbank, InfluxDB, MQTT und Node-RED prüfen
  *   bin/power update:stand          Update-Funktion: installierter und verfügbarer Stand, letzter Lauf
  *   bin/power update:suchen [--warten]
@@ -176,7 +177,7 @@ switch ($befehl) {
             $wert = $eingabe();
         }
         if ($schluessel === null || $wert === null) {
-            $fehler('Aufruf: bin/power einstellung <schlüssel> <wert>   (oder --stdin)');
+            $fehler('Aufruf: bin/power einstellung <schlüssel> <wert>   (oder --stdin)   [--nur-wenn-leer]');
         }
         $geheim = [
             'influx.token'    => Settings::GEHEIM_INFLUX_TOKEN,
@@ -184,6 +185,19 @@ switch ($befehl) {
             'mqtt.password'   => Settings::GEHEIM_MQTT_KENNWORT,
             'inventory.token' => Settings::GEHEIM_REPO_TOKEN,
         ];
+        // --nur-wenn-leer (Installationsskript bei vorhandener Datenbank): Was
+        // schon eingetragen ist – etwa in der Oberfläche –, bleibt. Gemeldet
+        // wird nur, ob es derselbe Wert ist, nie der Wert.
+        if (isset($optionen['nur-wenn-leer']) && (isset($geheim[$schluessel]) || array_key_exists($schluessel, Settings::OVERRIDABLE))) {
+            $bisher = isset($geheim[$schluessel])
+                ? Crypto::decrypt(Settings::get($geheim[$schluessel], ''))
+                : (string) Settings::get($schluessel, '');
+            if ($bisher !== '') {
+                $gleich = $bisher === (isset($geheim[$schluessel]) ? trim($wert) : $wert);
+                $aus($schluessel . ($gleich ? ' unverändert.' : ' bleibt – schon anders eingetragen.'));
+                break;
+            }
+        }
         if (isset($geheim[$schluessel])) {
             Settings::geheimnisSetzen($geheim[$schluessel], $wert);
             $aus($schluessel . ' verschlüsselt abgelegt.');

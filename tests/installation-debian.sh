@@ -14,7 +14,8 @@
 #   2. derselbe Aufruf noch einmal, inzwischen mit einer neuen Fassung des
 #      Installationsskripts im Repository: das Skript holt sie und startet
 #      sie (einmal), der Zweig bleibt; app.key, Kennwörter und Administrator
-#      bleiben, alles läuft weiter
+#      bleiben, Titel und Einstellungen aus der Oberfläche auch, der Zugang
+#      der Anwendung zum Broker passt wieder zur Kennwortdatei, alles läuft weiter
 #   2b. eine Datenbank ohne Benutzer (wie nach einem abgebrochenen ersten
 #      Lauf): derselbe Aufruf legt den Administrator an, mit neuem Erstkennwort
 #   3. Update auf einen neuen Stand, der einen Ordner in storage/ mitbringt,
@@ -715,6 +716,18 @@ abschluss "Erstinstallation"
 schritt "2 · Derselbe Aufruf noch einmal (das Repository hat inzwischen ein neues Installationsskript)"
 KONFIG_VORHER="$(sha256sum "$ZIEL/config/config.php")"
 ZUGAENGE_VORHER="$(grep -E '^[A-Z0-9_]+=' "$ZUGAENGE" | sort)"
+# In der Oberfläche geändert (so speichert System → Einstellungen): Titel und
+# InfluxDB-Organisation bleiben beim zweiten Lauf (Befund 4). Den Zugang zum
+# Broker im Container schreibt jeder Lauf neu – ein falsches Kennwort in der
+# Anwendung passt danach wieder zur Kennwortdatei.
+einstellung_wert() { PM_K="$1" app_php 'echo \App\Support\Settings::get(getenv("PM_K"), "-");'; }
+mqtt_zugang_passt() {
+    PM_KW="$(zugang MQTT_POWERMANAGEMENT_KENNWORT)" app_php 'echo hash_equals(getenv("PM_KW"),
+        \App\Support\Crypto::decrypt(\App\Support\Settings::get(\App\Support\Settings::GEHEIM_MQTT_KENNWORT, ""))) ? "ja" : "nein";'
+}
+pruefe "Einstellungen wie in der Oberfläche geändert" app_php '$s = "\App\Support\Settings";
+    $s::put("app.name", "Titel aus der Oberfläche"); $s::put("influx.org", "org-aus-der-oberflaeche");
+    $s::geheimnisSetzen($s::GEHEIM_MQTT_KENNWORT, "falsch-aus-der-oberflaeche");'
 # Nur die neue Fassung gibt diese Zeile aus – die laufende alte sieht sie nie.
 MARKE="Prüfung: neue Fassung des Installationsskripts"
 NEU="$(neuer_stand "Neue Fassung des Installationsskripts" \
@@ -734,6 +747,11 @@ pruefe "Ausgabe ohne Farben (kein Terminal)" ohne_esc "$LAUF"
 pruefe "config/config.php (app.key) unverändert" test "$(sha256sum "$ZIEL/config/config.php")" = "$KONFIG_VORHER"
 pruefe "Kennwörter und Tokens unverändert" test "$(grep -E '^[A-Z0-9_]+=' "$ZUGAENGE" | sort)" = "$ZUGAENGE_VORHER"
 pruefe "Administrator nicht neu angelegt" grep -q 'Administrator bestand schon' "$LAUF"
+pruefe "Titel aus der Oberfläche bleibt (kam: $(einstellung_wert app.name))" \
+    test "$(einstellung_wert app.name)" = "Titel aus der Oberfläche"
+pruefe "influx.org aus der Oberfläche bleibt" test "$(einstellung_wert influx.org)" = "org-aus-der-oberflaeche"
+pruefe "Zusammenfassung nennt, was bleibt" grep -qx '  Beibehalten:  app.name influx.org' "$LAUF"
+pruefe "Zugang zum Broker im Container passt wieder zur Kennwortdatei" test "$(mqtt_zugang_passt)" = ja
 pruefe_installation
 abschluss "zweiter Lauf"
 
@@ -756,6 +774,9 @@ pruefe "Administrator angelegt" grep -q 'Erstkennwort – bitte bei der ersten A
 pruefe "neues Erstkennwort in zugaenge.txt" test "$(zugang OBERFLAECHE_KENNWORT)" != "$KENNWORT_VORHER"
 pruefe "genau ein Benutzer: admin" \
     test "$(app_php 'echo implode(",", array_column(\App\Support\Database::select("SELECT username FROM users"), "username"));')" = admin
+# Ohne Benutzer gilt die Datenbank als neu: Titel und Einstellungen aus diesem Aufruf.
+pruefe "Titel und influx.org aus diesem Aufruf (kam: $(einstellung_wert app.name), $(einstellung_wert influx.org))" \
+    bash -c '[[ "$1" == "Prüfung Installation" && "$2" == powermanagement ]]' _ "$(einstellung_wert app.name)" "$(einstellung_wert influx.org)"
 # pruefe_installation meldet sich mit dem neuen Erstkennwort an.
 pruefe_installation
 abschluss "Datenbank ohne Benutzer"

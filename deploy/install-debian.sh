@@ -21,7 +21,11 @@
 # Das Skript ist wiederholbar: Erledigtes wird übersprungen, erzeugte
 # Kennwörter stehen in /etc/powermanagement/zugaenge.txt und werden beim
 # nächsten Lauf wiederverwendet. Eigene Änderungen an den Node-RED-Flows,
-# an config/config.php und an der Datenbank bleiben unangetastet.
+# an config/config.php und an der Datenbank bleiben unangetastet – auch
+# Titel und Zugänge, die in der Oberfläche geändert wurden: In eine
+# vorhandene Datenbank trägt das Skript nur ein, was dort noch fehlt. Nur den
+# Zugang der Anwendung zum Broker im Container schreibt es jedes Mal neu; er
+# muss zur Kennwortdatei passen, die jeder Lauf schreibt.
 
 set -euo pipefail
 
@@ -80,7 +84,8 @@ hilfe() {
     cat <<HILFE
 Aufruf: $0 [Optionen]
 
-  --name=<titel>          Titel der Oberfläche
+  --name=<titel>          Titel der Oberfläche (bei vorhandener Datenbank nur,
+                          solange keiner eingetragen ist)
   --repo=<git-url>        Git-Repository, aus dem installiert wird. Ohne Angabe:
                           der Checkout, in dem dieses Skript liegt, oder GIT_REPO
                           aus /etc/powermanagement/git.conf
@@ -1302,27 +1307,49 @@ else
         ADMIN_KENNWORT=""
     fi
 fi
-if [[ -n "$TITEL" && -z "$ADMIN_KENNWORT" ]]; then
-    as_app php "$ZIEL/bin/power" titel "$TITEL" >/dev/null
-fi
 
 # ================================================================ Einstellungen
 schritt "Zugänge in die Anwendung eintragen"
 # Zugangsdaten landen verschlüsselt in der Datenbank (mit app.key).
 # Werte über die Standardeingabe: Tokens und Kennwörter erscheinen so nicht
 # in der Prozessliste.
+#
+# In eine vorhandene Datenbank (es gibt Benutzer) nur, was dort noch fehlt
+# (Befund 4): Titel, InfluxDB und MQTT lassen sich in der Oberfläche ändern
+# (System → Einstellungen) – ein weiterer Lauf mit denselben Optionen setzte
+# sie sonst still zurück. „immer“: nur der Zugang zum Broker im Container.
+BEHALTEN=()
 einstellung() {
-    printf '%s\n' "$2" | as_app php "$ZIEL/bin/power" einstellung "$1" --stdin >/dev/null
-    echo "    $1"
+    local ausgabe args=(einstellung "$1" --stdin)
+    if (( BENUTZER_ZAHL > 0 )) && [[ "${3:-}" != "immer" ]]; then
+        args+=(--nur-wenn-leer)
+    fi
+    ausgabe="$(printf '%s\n' "$2" | as_app php "$ZIEL/bin/power" "${args[@]}")"
+    case "$ausgabe" in
+        "$1 bleibt"*)      echo "    $1 – bleibt, in der Anwendung anders eingetragen"; BEHALTEN+=("$1") ;;
+        "$1 unverändert"*) echo "    $1 (unverändert)" ;;
+        *)                 echo "    $1" ;;
+    esac
 }
+# Bei einer neuen Datenbank hat „bin/power install --name“ den Titel gesetzt.
+if [[ -n "$TITEL" ]] && (( BENUTZER_ZAHL > 0 )); then
+    einstellung app.name "$TITEL"
+fi
 einstellung influx.url "$INFLUX_URL"
 einstellung influx.database "$INFLUX_DB"
 einstellung influx.org "$INFLUX_ORG"
 [[ -n "$INFLUX_TOKEN_PM" ]] && einstellung influx.token "$INFLUX_TOKEN_PM"
 einstellung mqtt.host "$MQTT_HOST"
 einstellung mqtt.port "$MQTT_PORT"
-[[ -n "$MQTT_PM_BENUTZER" ]] && einstellung mqtt.username "$MQTT_PM_BENUTZER"
-[[ -n "$MQTT_PM_KENNWORT" ]] && einstellung mqtt.password "$MQTT_PM_KENNWORT"
+# Das Kennwort von „powermanagement“ am Broker im Container setzt jeder Lauf
+# in dessen Kennwortdatei – die Anwendung muss dasselbe haben. Zeigt mqtt.host
+# (aus der Oberfläche) auf einen anderen Broker, bleibt dessen Zugang.
+MQTT_ZUGANG=""
+if [[ "$MIT_MOSQUITTO" == "ja" && " ${BEHALTEN[*]} " != *" mqtt.host "* ]]; then
+    MQTT_ZUGANG="immer"
+fi
+[[ -n "$MQTT_PM_BENUTZER" ]] && einstellung mqtt.username "$MQTT_PM_BENUTZER" "$MQTT_ZUGANG"
+[[ -n "$MQTT_PM_KENNWORT" ]] && einstellung mqtt.password "$MQTT_PM_KENNWORT" "$MQTT_ZUGANG"
 
 # ================================================================ Dienste
 schritt "Sammler, Wartung und Protokolle einrichten"
@@ -1493,6 +1520,12 @@ if [[ "$MIT_INFLUX" == "ja" ]]; then
 else
     echo
     echo "  InfluxDB:     $INFLUX_URL (vorhanden), Datenbank $INFLUX_DB"
+fi
+if (( ${#BEHALTEN[@]} > 0 )); then
+    echo
+    echo "  Beibehalten:  ${BEHALTEN[*]}"
+    echo "                (in der Anwendung anders eingetragen – Optionen dieses Aufrufs gelten"
+    echo "                dafür nur bei einer neuen Datenbank; ändern unter System → Einstellungen)"
 fi
 echo
 if [[ "$PRUEF_RC" -eq 0 ]]; then
