@@ -54,6 +54,14 @@ final class Permissions
             'inventory.pull'     => 'Locations und Verteiler aus dem gemeinsamen Repository übernehmen (Verteiler: nur mit dem Recht, Katalog bzw. Inventar zu pflegen)',
             'inventory.push'     => 'Locations, Feststromanschlüsse und Verteiler ins Repository hochladen und dort entfernen',
         ],
+        'Schnittstelle (API)' => [
+            // Was ein Token von außen sieht, legen seine Befugnisse und
+            // Standorte fest (ApiZugang) – nicht die Freigaben in Zugriff.
+            // Deshalb gibt Standorte nur frei, wer selbst alles sieht.
+            'api.manage'         => 'Zugänge (Tokens) für andere Instanzen anlegen, anzeigen und widerrufen – Standorte freigeben nur mit „Alle Standorte, Anlagen und Messdaten“',
+            'api.partner'        => 'Andere Instanzen eintragen, Locations von dort übernehmen und Änderungen zurückschicken (nur auf Standorten, die man ändern darf)',
+            'api.vorschlaege'    => 'Änderungsvorschläge anderer Instanzen ansehen, annehmen und ablehnen (annehmen nur mit „bearbeiten“ am Standort)',
+        ],
         'System' => [
             'system.users.manage'=> 'Benutzer, Rollen und Freigaben verwalten',
             'settings.manage'    => 'Systemeinstellungen ändern (InfluxDB, MQTT, Repository)',

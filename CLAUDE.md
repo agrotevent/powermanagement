@@ -31,10 +31,20 @@ keine Build-Schritte. JS-Bibliotheken liegen fertig unter `public/assets/vendor`
   Texte aus Antworten per `textContent`, nie per `innerHTML`.
 - **Nichts hält die Sitzung, während es wartet.** PHP sperrt die
   Sitzungsdatei für die ganze Anfrage. Endpunkte, die regelmäßig abgefragt
-  werden oder auf InfluxDB, Geräte oder Clouds warten, rufen vorher
-  `Session::freigeben()` (danach nur noch lesen; was nach dem Warten noch
-  in die Sitzung muss, über `Session::nachtragen()`). Abfragen im Browser
-  starten erst, wenn die vorige fertig ist (`live.js`, `karte.js`).
+  werden oder auf InfluxDB, Geräte, Clouds oder andere Instanzen warten,
+  rufen vorher `Session::freigeben()` (danach nur noch lesen); was nach dem
+  Warten noch kurz in die Sitzung muss, trägt `Session::nachtragen()` ein,
+  und wer danach weiter in die Sitzung schreibt und weiterleitet (Anfragen
+  an andere Instanzen), wartet in `Session::ohneSperre()` – beide öffnen nur
+  dieselbe Sitzung desselben Benutzers wieder, ohne zweites Cookie.
+  Abfragen im Browser starten erst, wenn die vorige fertig ist (`live.js`,
+  `karte.js`), oder brechen sie ab (Eventworx in `bericht.js`). Ohne
+  Sitzungssperre läuft dieselbe Aktion auch zweimal nebeneinander
+  (Doppelklick, zweiter Reiter): Wer danach anlegt oder verknüpft, braucht
+  eine eigene Sperre, und zwar **nicht blockierend**
+  (`flock(LOCK_EX | LOCK_NB)`, sonst Meldung – `PartnerAbgleich::gesperrt()`);
+  blockierend hinge die zweite Anfrage mit der Sitzung fest, und die erste
+  käme nie zurück. Formulare davor tragen `data-laeuft`.
 - **Weiterleitungen** nur auf eigene Pfade: `Response::sichererPfad()`,
   `Response::zurueckZiel()` statt `$_SERVER['HTTP_REFERER']` oder `next`.
 - **Zeiten** werden in UTC gespeichert (ISO 8601) und in der Zeitzone der
@@ -52,6 +62,30 @@ keine Build-Schritte. JS-Bibliotheken liegen fertig unter `public/assets/vendor`
   gespeichert (nur der Mosquitto-Hash): Gen2 per `MQTT.SetConfig` ans Gerät
   oder von Hand; Gen1 und jedes neue Kennwort genau einmal angezeigt, nie
   per MQTT. Die App startet nie ein Gerät neu.
+- **Schnittstelle `/api/v1`** läuft vor Sitzung und Router (`ApiController`),
+  antwortet nur JSON und nimmt das Token nur aus
+  `Authorization: Bearer mtma_…`. Was ein Token sieht, bestimmen seine
+  Befugnisse und `api_token_standorte` (`App\Auth\ApiZugang`) – nie
+  `Zugriff`. Hinaus geht nur, was auch über Git geht (Standorte, Etagen,
+  Pläne, Maßstab, Georeferenz, Feststrom) – nie Messpunkte, mobile Planung
+  oder Dosen/Racks/APs, auch nicht der Fremdbestand; `location.format`
+  bleibt 1, fehlender Schlüssel heißt „unbekannt“, leere Liste „keine“. Von
+  außen ändert ein Vorschlag, den hier jemand annimmt – oder mit
+  `plaene.schreiben` direkt, aber nur mit passendem Stand (`basis`) oder
+  ausdrücklichem `erzwingen`; dieselben Schutzregeln: dabei und beim
+  Übernehmen bleiben Namen, Schaltsperre und Messpunkte hier, ein Maßstab
+  oder eine Georeferenz hier wird nie gelöscht, gelöscht wird nichts, ein
+  Token legt keine Steckertypen an (und niemand einen, den kein Anschluss
+  der Sendung nutzt). Zugeordnet werden nur
+  feste Anlagen und Kabel, innerhalb des Standorts – über
+  `partner_schluessel` (B) bzw. `sync_key` und `api_zuordnungen` je Token
+  (A), nie über den `sync_key` anderer Standorte; mobil Gewordenes bleibt
+  mobil. Schlüssel an der Schnittstelle prüft
+  `LocationBundle::schluesselFormat()` (wie die Adresse), nicht
+  `schluesselGueltig()`. Annehmen, Ablehnen und direktes Schreiben holen
+  zuerst die Schreibsperre (Zustand bzw. Standort), dann wird geprüft.
+  Alles läuft über `LocationUebertrag`; Anfragen an andere Instanzen nur
+  über `PartnerService::anfrage()` (folgt keiner Umleitung).
 - **Ein Import überschreibt nie still eine Korrektur.** Katalog-Pakete gehen
   nur über `App\Services\KatalogImport` (lesen → Vorschau → uebernehmen,
   je Typ `VerteilerBundle::typAnwenden`, alles in einer Transaktion). Was hier
@@ -106,10 +140,10 @@ bash -n deploy/*.sh tests/*.sh && shellcheck -S warning -e SC2016,SC1111 deploy/
 
 | Prüfskript | prüft |
 |------------|-------|
-| `tests/zeitfenster.php` | Freigaben, Gültigkeit, Datenfenster, Schalt-Freigaben |
-| `tests/anschluesse.php` | Anschlüsse, Standard-Verteiler, Schutzorgane, Kabel, Spannungsfall, fest/mobil (Anlagen und Kabel) |
+| `tests/zeitfenster.php` | Freigaben, Gültigkeit, Datenfenster, Schalt-Freigaben, ganzer Standort sichtbar |
+| `tests/anschluesse.php` | Anschlüsse, Standard-Verteiler, Schutzorgane, Kabel, Spannungsfall, fest/mobil (Anlagen und Kabel), Messpunkte und Einsätze bleiben beim Ersetzen der Anschlüsse |
 | `tests/inventar.php` | Inventar, Einsatz/Abbau, Gültigkeit der Messpunkte, Bereiche über wechselnde Geräte, Schalten nach Abbau |
-| `tests/location-abgleich.php` | Git-Location-Abgleich mit MasterAdmin-Format; nur Feststromanschlüsse und feste Kabel, mobile Planung bleibt |
+| `tests/location-abgleich.php` | Git-Location-Abgleich mit MasterAdmin-Format; nur Feststromanschlüsse und feste Kabel, mobile Planung bleibt; fehlende Dosen bleiben, Messpunkte nach erneutem Holen; Übertrag der Schnittstelle (`LocationUebertrag`), freie Schlüssel |
 | `tests/katalog-import.php` | Katalog-Import: Format (kein JSON, falsche Art, Format 2, leer, doppelter Schlüssel, unbekannte Art, Stecker ohne Beschreibung, neuer Stecker ohne Werte, Auswahl, Spannung …), neu → übernommen → schon da, keine Messpunkte am Typ (auch im Verteiler-Abgleich), bearbeitbar, „hier anders“ nur mit Auswahl und nur im Stand der Vorschau überschrieben, Typwechsel mit Eigenschaften, Rechte, alles oder nichts, Vorschau ablegen, Kommandozeile und jedes Paket unter `resources/kataloge` (je eigene leere Instanz) |
 | `tests/verteiler-abgleich.php` | Verteiler-Abgleich: Standard-Verteiler und Inventar hochladen/übernehmen, hier/dort/beide geändert, Shelly-Tausch im Einsatz, Rechte, Entfernen |
 | `tests/aufbau.php` | Aufbau: Plan festhalten, bestätigen/geändert/entfallen/zusätzlich, fertig, beenden, Abgleich (Versatz, Längen, Material, Last) |
@@ -121,12 +155,15 @@ bash -n deploy/*.sh tests/*.sh && shellcheck -S warning -e SC2016,SC1111 deploy/
 | `tests/mqtt-zugaenge.php` | Eigene MQTT-Zugänge von App bis Broker: Gen2 einrichten/übertragen/prüfen/Neustart/neues Kennwort/entfernen, Gen1, Sperre des gemeinsamen Zugangs, Kontoprobe gegen falsche ACLs, keine Geheimnisse (eigener Mosquitto, Shelly-Attrappen) |
 | `tests/influx.php` | InfluxQL: Livewerte, Verläufe, Datenfenster, Energie je Tag (eigene InfluxDB 1.x) |
 | `tests/cloud.php` | ComAp WebSupervisor, Victron VRM (Http-Attrappe) |
+| `tests/schnittstelle.php` | API Seite A: Token, 401/403/404/405/413 nur JSON, keine Sitzung, Zuschnitt (nur freigegebene Standorte, nur fest, keine Messpunkte/Dosen/Racks/APs), Plandatei-Whitelist, Stand, Zugänge anlegen/anzeigen/widerrufen, keine Geheimnisse (eigener PHP-Server) |
+| `tests/schnittstelle-vorschlaege.php` | Vorschläge: Prüfungen beim Eingang (auch Anlage ohne Anschlüsse/Schutzorgane/Namen, Leitung ohne Punkte), MasterAdmin-Form, Unterschiede, annehmen nur mit Rechten, Namen/Schaltsperre/Messpunkte bleiben, Georeferenz bleibt, wenn sie fehlt, ablehnen nur mit „bearbeiten“, sehen nur mit dem ganzen Standort; direkt schreiben mit `plaene.schreiben` (passender Stand, 409, `erzwingen`, 422 Steckertypen); unbenutzte Steckertypen nie im Katalog, mobil Gewordenes bleibt mobil, Kabelenden an Anlagen, die nicht mitkommen, bleiben; ersetzte/direkte Zeilen nur mit Eckdaten, 60 Sendungen je Stunde; gleichzeitig entscheiden und schreiben (zweiter Prozess); Schlüssel älterer Fassungen (`-` am Ende, `-2` hinter 64 Zeichen) (eigener PHP-Server) |
+| `tests/schnittstelle-partner.php` | Andere Instanzen: eintragen, Zustände, übernehmen/zuordnen/verknüpfen/lösen nur am Standort (Zuordnen nur mit „bearbeiten“, mit Rückfrage), nichts wandert zwischen Standorten, zurückschicken und annehmen, hochladen (409, `erzwingen` → „dort geändert“), Befugnisse vor dem Senden frisch, eigene Einträge nie doppelt (Schlüssel aus der Antwort, `gesendet_als`, freie Schlüssel), dort Gelöschtes kommt nicht zurück, nur hier Vorhandenes hält „hier geändert“, mobil Gemachtes bleibt mobil, lange Schlüssel PM ↔ PM und von MasterAdmin, Verbindungsfehler, MasterAdmin-Format (zweite Instanz, Attrappe) |
 | `tests/berichte.php` | Übergabeberichte: Vorbelegung aus Plan/Schutzorganen/Kabeln/Inventar (Messwerte nie), Grenzwerte (Zs/Ik, R_iso inkl. 250 V, RCD, „gemessen an“ nur am selben RCD, TT/IT ohne RCD, TN-C, Erdung inkl. IT), Speichern (Version/409, verlorene Antwort → 200, 422, IDs nur vom Server, kein Gleitkomma), Abschluss-Prüfung (Prüfdatum, Kurzliste, „ja“/„mängelfrei“ trotz Mangel, Erdung), Unterschrift (nur Striche aus ganzen Zahlen, Grenzen Punkte/Bytes, Name passt zum Konto), Einfrieren/Nummer/Siegel, Schreibsperre eines zweiten Prozesses, Zurückziehen, Kunde und ohne Kunde (gesehener Stand), Kundenmodus und Kennwort, Integrität (Status per SQL, PDF-Siegel, Erzeuger), PDF beim Abschluss (gespeichert, Neuerzeugung byte-gleich, ein Byte geändert → Befund), Korrektur, Kunde aus früherem Bericht, Sichtbarkeit mit Datenfenster (auch nach Löschen des Standorts), Löschen/Verwerfen, Lösch-Abläufe, Aufbewahrung (ab Abschluss, ganze Nummern, Nummer nie zweimal), Kommandozeile (`berichte:pruefen`/`pdf`/`aufbewahrung`) und Wartungs-Hinweise, Datenschutz |
 | `tests/bericht-pdf.php` | PDF der Übergabeberichte: eigener Schreiber, Schrift als Teilmenge (Prüfsumme, Glyphen, kein .notdef), Layout mit poppler (A4, Schriften eingebettet, Texte, Tabellenkopf je Seite, keine Bilder, Fuß „Blatt x von y“), zweimal erzeugt gleiche Bytes, Vorschau, ohne Kunde, Korrektur, 300 Kreise (ohne poppler übersprungen) |
 | `tests/eventworx.php` | Eventworx nur lesend: Adresse, Token an den Host gebunden, Pfadliste, Anfragen, Aufbereitung ohne Beträge/Notizen, Fehlerantworten, Nachlesen bei `data:null`, Drossel, Demo, keine Geheimnisse in Log/Audit/Meldungen (Http-Attrappe) |
-| `tests/web.php` | alle Seiten ohne PHP-Meldung (auch im Fehlerprotokoll des Servers), 403/404 als eigene Seite ohne Navigation, CSRF (mit `Accept: application/json` 419/401 als JSON), Schalt-Ablehnung, Weiterleitungen, Sitzung nach Kennwortwechsel, Benutzerverwaltung ohne Administration, Ändern nur mit „bearbeiten“, Übergabeberichte (Seiten, PDF mit Kopfzeilen/Vorschau/gespeicherten Bytes, Autosave 200/409/422/423, Eventworx-Demo, Firma-Karte, Prüfer-Qualifikation, Rechte von Kunde und Planer, Unterschreiben, Kundenmodus-Sperre auch für unbekannte/verbotene Adressen und Abmelden, Sperre am Gerät nach neuer Anmeldung, Bremse statt Abmelden nach fünf Fehlversuchen, Entsperren, ohne Kunde, Korrektur), Katalog-Import (Seite, Vorschau nach Upload mit vorausgewählten neuen Typen, Übernehmen mit CSRF, Stand der Vorschau, nichts übernommen → Warnung und Vorschau bleibt, ohne Stecker-Recht, Zahlen ungerundet im Formular, 403, kein JSON) (eigener PHP-Server) |
-| `tests/sitzung.php` | Sitzungssperre: Live-Endpunkte (Anlage, Dashboard, Karte, Bereiche) und Eventworx-Suche/-Vorgang im Bericht geben die Sitzung frei – Speichern, Bericht-Autosave und Seiten kommen bei träger InfluxDB bzw. trägem Eventworx durch, der geladene Vorgang bleibt vorgemerkt, nach dem Abmelden 401 ohne Kundendaten (eigene Instanz, Attrappen für InfluxDB und Eventworx über `eventworx.basis`) |
-| `tests/sicherheit.php` | Rechte vergeben, Anmelde-Bremse ohne Kontoerkennung, Geräte zuordnen, Kanal-Freigaben beim Schalten, Schlüssel aus dem Repository, Line Protocol, CSV, Adressen, keine Umleitung mit Token (curl und Streams), app.key, PDF-Werkzeuge, Bericht-JS ohne HTML aus Daten, nur mit Zeitgrenze, Abmelden ohne Rückschreiben des Entwurfs, andere Tabs im Kundenmodus, Unterschrift ohne Zeit/Druck, Handballen und Bytegrenze der Fläche (Node), als SVG nur Zahlen |
+| `tests/web.php` | alle Seiten ohne PHP-Meldung (auch im Fehlerprotokoll des Servers), 403/404 als eigene Seite ohne Navigation, CSRF (mit `Accept: application/json` 419/401 als JSON), Schalt-Ablehnung, Weiterleitungen, Sitzung nach Kennwortwechsel, Benutzerverwaltung ohne Administration, Ändern nur mit „bearbeiten“, Seiten der Schnittstelle (Zugänge, andere Instanzen, Vorschläge; Standortnamen in der Liste der Zugänge nur, wo man hinsieht; CSRF bei Anlegen und Löschen) und `/api` ohne Sitzung, Übergabeberichte (Seiten, PDF mit Kopfzeilen/Vorschau/gespeicherten Bytes, Autosave 200/409/422/423, Eventworx-Demo, Firma-Karte, Prüfer-Qualifikation, Rechte von Kunde und Planer, Unterschreiben, Kundenmodus-Sperre auch für unbekannte/verbotene Adressen, die Seiten der Schnittstelle und Abmelden – `/api` bleibt davon unberührt –, Sperre am Gerät nach neuer Anmeldung, Bremse statt Abmelden nach fünf Fehlversuchen, Entsperren, ohne Kunde, Korrektur), Katalog-Import (Seite, Vorschau nach Upload mit vorausgewählten neuen Typen, Übernehmen mit CSRF, Stand der Vorschau, nichts übernommen → Warnung und Vorschau bleibt, ohne Stecker-Recht, Zahlen ungerundet im Formular, 403, kein JSON) (eigener PHP-Server) |
+| `tests/sitzung.php` | Sitzungssperre: Live-Endpunkte (Anlage, Dashboard, Karte, Bereiche) und Eventworx-Suche/-Vorgang im Bericht geben die Sitzung frei – Speichern, Bericht-Autosave und Seiten kommen bei träger InfluxDB bzw. trägem Eventworx durch, der geladene Vorgang bleibt vorgemerkt (`nachtragen()`), nach dem Abmelden 401 ohne Kundendaten; Seite einer anderen Instanz und „Prüfen“ halten sie nicht, während sie auf dort warten (`ohneSperre()`), Meldungen danach und aus einem zweiten Reiter kommen an; Doppelklick auf „Übernehmen“ legt einen Standort an (Sperre ohne Warten); Kennwortwechsel oder Abmelden im zweiten Reiter, während „Prüfen“ wartet: angemeldet bzw. abgemeldet, keine neue leere Sitzung; kein zweites Sitzungscookie beim Wiederöffnen (eigene Instanz, Attrappen für InfluxDB, Eventworx über `eventworx.basis` und eine andere Instanz) |
+| `tests/sicherheit.php` | Rechte vergeben, Anmelde-Bremse ohne Kontoerkennung, Geräte zuordnen, Kanal-Freigaben beim Schalten, Schlüssel aus dem Repository, Line Protocol, CSV, Adressen, keine Umleitung mit Token (curl und Streams), app.key, PDF-Werkzeuge, Zugänge der Schnittstelle vergeben, anzeigen nur mit den Rechten dahinter, Bindung lösen nur mit Verwaltungsrecht, verfälschtes Token, Meldungen anderer Instanzen maskiert, Instanzseite ohne Etagen eines verborgenen Standorts, Ansichten ohne Inline-JS, Bericht-JS ohne HTML aus Daten, nur mit Zeitgrenze, Abmelden ohne Rückschreiben des Entwurfs, andere Tabs im Kundenmodus, Unterschrift ohne Zeit/Druck, Handballen und Bytegrenze der Fläche (Node), als SVG nur Zahlen |
 | `tests/nodered-funktionen.mjs` | Node-RED-Funktionen, `flows.json` passt zu den Quellen |
 | `tests/installation-debian.sh` | `deploy/install-debian.sh` auf frischem Debian 13 mit systemd (Docker): Erstinstallation, zweiter Lauf (Kennwörter, app.key bleiben), Update mit neuem Ordner in `storage/`; Rechte (Code root, `storage/` www-data), Dienste, Anmeldung, Broker, `bin/power pruefen` |
 
@@ -163,7 +200,11 @@ wieder – er lässt sich danach nicht mehr zurückziehen.
 Für den Verteiler-Abgleich legt das Skript sich ein eigenes Repository im
 Temp-Ordner an (kein Token, nichts auf GitHub) und stellt Einstellungen und
 Abgleich-Vermerke danach wieder her – der Server muss dafür diese
-Arbeitskopie ausliefern (`php` und `git` im PATH). Nur Bilder mit geänderter
+Arbeitskopie ausliefern (`php` und `git` im PATH). Für die Schnittstelle
+startet es eine zweite Instanz (eigene Datenbank im Temp-Ordner, eigener
+PHP-Server auf einem freien Port) und räumt danach Zugänge, Vorschlag, die
+eigens angelegten Standorte und die Plandateien der zweiten Instanz wieder
+weg. Nur Bilder mit geänderter
 Oberfläche einchecken; die übrigen unterscheiden sich nur in Zeiten und
 Messwerten.
 

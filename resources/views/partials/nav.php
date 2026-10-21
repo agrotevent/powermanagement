@@ -41,11 +41,14 @@ $groups = [
     'Standorte' => [
         ['/standorte',            'Standorte & Etagen',  null, 'plans.manage'],
         ['/location',             'Location-Abgleich',   null, 'inventory.pull'],
+        ['/instanzen',            'Andere Instanzen',    null, 'api.partner'],
+        ['/vorschlaege',          'Änderungsvorschläge', null, 'api.vorschlaege'],
     ],
     'System' => [
         ['/system/benutzer',      'Benutzer & Freigaben', null, 'system.users.manage'],
         ['/system/rollen',        'Rollen & Rechte',      null, 'system.users.manage'],
         ['/system/einstellungen', 'Einstellungen',        null, 'settings.manage'],
+        ['/system/schnittstelle', 'Schnittstelle (API)',  null, 'api.manage'],
         ['/audit',                'Audit-Log',            null, 'audit.view'],
     ],
 ];

@@ -487,6 +487,38 @@ tr.abweichung-zeile td { background: var(--warning-light); }
 .karte-seite .pm-phasen th, .karte-seite .pm-phasen td { padding: .15rem .25rem; }
 .pm-phasen th { text-transform: none; letter-spacing: normal; }
 
+/* Schnittstelle (API): Token zum Kopieren, „Anzeigen“ mit Kennwort,
+   Standort-Freigaben eines Zugangs. */
+.api-token-zeile { display: flex; flex-wrap: wrap; gap: .5rem; align-items: center; }
+.api-token-zeile input { flex: 1 1 22rem; min-width: 0; font-size: .95rem; }
+.api-anzeigen { display: flex; flex-wrap: wrap; gap: .3rem; margin-top: .3rem; }
+.api-anzeigen input { width: 11rem; max-width: 100%; }
+.token-standorte-alle { margin-bottom: .3rem; }
+.token-standorte .check { margin-bottom: 0; }
+#api-pruefen { word-break: break-all; }
+
+/* Andere Instanzen: Etagen dort → hier, Aktionen je Location, Zurückschicken. */
+.api-adresse { word-break: break-all; }
+.api-etagen .api-etage { display: flex; flex-wrap: wrap; gap: .1rem .5rem; padding: .15rem 0; }
+.api-etagen .api-etage + .api-etage { border-top: 1px dashed var(--border); }
+.api-ziel { flex-basis: 100%; }
+.api-aktionen { justify-content: flex-end; }
+.api-aktionen form { margin: 0; }
+.api-zurueck > summary { list-style: none; cursor: pointer; }
+.api-zurueck > summary::-webkit-details-marker { display: none; }
+.api-zurueck[open] > form { display: flex; flex-direction: column; gap: .3rem; margin-top: .4rem; min-width: min(18rem, 100%); text-align: left; }
+.api-neues-token input { max-width: 100%; }
+@media (max-width: 720px) {
+    .api-aktionen { justify-content: flex-start; }
+}
+
+/* Änderungsvorschläge: Notiz mit Zeilenumbrüchen, Feststrom je Etage (+ ~ −). */
+.vorschlag-notiz { white-space: pre-wrap; overflow-wrap: anywhere; }
+.vorschlag-etagen .check { margin-bottom: 0; }
+.vorschlag-etagen .badge + .badge { margin-left: .25rem; }
+.vorschlag-art { font-weight: 600; margin-top: .15rem; }
+.vorschlag-namen { margin: .1rem 0 .3rem; padding-left: 1rem; overflow-wrap: anywhere; }
+
 /* ------------------------------------------------------------ Übergabeberichte
  *
  * Ausgefüllt wird am Tablet und am Telefon, draußen, oft mit Handschuhen:

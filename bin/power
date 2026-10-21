@@ -61,8 +61,10 @@ declare(strict_types=1);
  *   bin/power eventworx:pruefen     Verbindung zu Eventworx prüfen (nur lesend)
  *   bin/power demo:seed [--reset]   Demo-Gelände mit Anlagen, Kabeln, Benutzern und Übergabeberichten anlegen
  *   bin/power wartung               Protokolle aufräumen, abgebrochene MQTT-Prüfungen
- *                                   zurücksetzen, alte Import-Vorschauen löschen,
- *                                   fällige Übergabeberichte melden (täglich per Timer)
+ *                                   zurücksetzen, alte Import-Vorschauen löschen, fällige
+ *                                   Übergabeberichte melden, entschiedene Änderungsvorschläge
+ *                                   (älter als 400 Tage) und verwaiste Vorschlags- und
+ *                                   Temp-Ordner entfernen (täglich per Timer)
  */
 
 require dirname(__DIR__) . '/src/bootstrap.php';
@@ -80,9 +82,11 @@ use App\Services\DemoSeed;
 use App\Services\Eventworx;
 use App\Services\KatalogImport;
 use App\Services\LocationSync;
+use App\Services\PartnerAbgleich;
 use App\Services\PlanTileService;
 use App\Services\SiteService;
 use App\Services\VerteilerSync;
+use App\Services\VorschlagService;
 use App\Support\Audit;
 use App\Support\Config;
 use App\Support\Crypto;
@@ -633,6 +637,11 @@ switch ($befehl) {
         $s = Database::execute('DELETE FROM schaltvorgaenge WHERE created_at < ?', [$grenze]);
         $aus("Aufgeräumt: {$a} Audit-Einträge, {$s} Schaltvorgänge (älter als 400 Tage).");
         foreach (MqttZugaenge::wartung() as $meldung) {
+            $aus($meldung);
+        }
+        // Schnittstelle: entschiedene Vorschläge, verwaiste Vorschlagsordner,
+        // liegengebliebene Temp-Ordner von Plan-Downloads
+        foreach ([...VorschlagService::wartung(), ...PartnerAbgleich::wartung()] as $meldung) {
             $aus($meldung);
         }
         $vorschauen = KatalogImport::aufraeumen();

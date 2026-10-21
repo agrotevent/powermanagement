@@ -85,6 +85,9 @@ final class SiteService
         // ein Generator verschwindet nicht, weil sein Einsatzort gelöscht wird.
         BereichService::standortEntfernt($id);
         AufbauService::standortEntfernt($id);
+        // Was ein Token hier angelegt hat, gehört zu diesem Standort – ohne ihn
+        // findet die Schnittstelle es nicht mehr wieder.
+        Database::execute("DELETE FROM api_zuordnungen WHERE tabelle = 'objekte' AND ziel_id IN (SELECT id FROM objekte WHERE site_id = ?)", [$id]);
         // Übergabeberichte bleiben (mit dem Namen des Standorts), nur Entwürfe ohne Nummer gehen mit.
         BerichtService::standortEntfernt($id);
         Database::execute('UPDATE objekte SET site_id = NULL, floor_id = NULL, plan_x = NULL, plan_y = NULL WHERE site_id = ?', [$id]);
@@ -92,6 +95,10 @@ final class SiteService
             Database::execute('DELETE FROM leitungen WHERE floor_id = ?', [(int) $etage['id']]);
         }
         Database::execute('DELETE FROM floors WHERE site_id = ?', [$id]);
+        // Kein Token sieht einen gelöschten Standort mehr; Vorschläge dazu
+        // bleiben zur Nachvollziehbarkeit stehen, nur ohne Standort.
+        Database::execute('DELETE FROM api_token_standorte WHERE site_id = ?', [$id]);
+        Database::execute('UPDATE api_vorschlaege SET site_id = NULL WHERE site_id = ?', [$id]);
         Database::delete('sites', $id);
         Audit::log('site.delete', 'site', (string) $id);
     }
@@ -157,6 +164,7 @@ final class SiteService
         // Anlagen verlieren nur ihren Platz im Plan, Leitungen dieser Etage
         // gehen mit: ein Kabelweg ohne Plan hat keine Lage mehr.
         Database::execute('UPDATE objekte SET floor_id = NULL, plan_x = NULL, plan_y = NULL WHERE floor_id = ?', [$id]);
+        Database::execute("DELETE FROM api_zuordnungen WHERE tabelle = 'leitungen' AND ziel_id IN (SELECT id FROM leitungen WHERE floor_id = ?)", [$id]);
         Database::execute('DELETE FROM leitungen WHERE floor_id = ?', [$id]);
         Database::delete('floors', $id);
 
@@ -355,6 +363,47 @@ final class SiteService
         }
         $path = self::planDir() . '/' . basename((string) $floor['plan_file']);
         return is_file($path) ? $path : null;
+    }
+
+    /**
+     * Prüfsumme und Größe der Plandatei einer Etage – null ohne Plan.
+     *
+     * Zwischengespeichert in plan_sha256: die Schnittstelle fragt sie für
+     * jede Etage jeder Liste ab, ein großes PDF jedes Mal zu lesen wäre
+     * teuer. Die Marke (Datei|Größe|Änderungszeit) sagt, ob der Wert noch
+     * gilt; sonst wird neu gerechnet – für alle Etagen mit dieser Datei.
+     *
+     * @return array{sha256:string,bytes:int}|null
+     */
+    public static function planPruefsumme(array $floor): ?array
+    {
+        $pfad = self::planPath($floor);
+        if ($pfad === null) {
+            return null;
+        }
+        clearstatcache(true, $pfad);
+        $bytes = filesize($pfad);
+        if ($bytes === false) {
+            return null;
+        }
+        $marke = self::planMarke((string) $floor['plan_file'], $pfad);
+        $sha = (string) ($floor['plan_sha256'] ?? '');
+        if ((string) ($floor['plan_sha_marke'] ?? '') === $marke && preg_match('/^[0-9a-f]{64}$/', $sha) === 1) {
+            return ['sha256' => $sha, 'bytes' => (int) $bytes];
+        }
+        $sha = hash_file('sha256', $pfad);
+        if ($sha === false) {
+            return null;
+        }
+        Database::execute('UPDATE floors SET plan_sha256 = ?, plan_sha_marke = ? WHERE plan_file = ?', [$sha, $marke, (string) $floor['plan_file']]);
+        return ['sha256' => $sha, 'bytes' => (int) $bytes];
+    }
+
+    /** Woran planPruefsumme() erkennt, dass die Datei noch dieselbe ist. */
+    public static function planMarke(string $planFile, string $pfad): string
+    {
+        clearstatcache(true, $pfad);
+        return substr(basename($planFile) . '|' . (int) @filesize($pfad) . '|' . (int) @filemtime($pfad), 0, 255);
     }
 
     public static function planMime(array $floor): string

@@ -23,10 +23,12 @@ use App\Support\Database;
 use App\Support\Settings;
 
 $port = freierPort();
+// Mehrere Arbeiter: eine Seite, die die eigene Schnittstelle aufruft (eine
+// andere Instanz über die Loopback-Adresse), wartete sonst auf sich selbst.
 // Ohne app.debug zeigt der Server PHP-Meldungen nicht in der Seite, er schreibt
 // sie auf die Standardfehlerausgabe – die landet hier und wird mitgeprüft.
 $serverFehler = (string) tempnam(sys_get_temp_dir(), 'pm-web-fehler-');
-hintergrund(['php', '-S', '127.0.0.1:' . $port, '-t', dirname(__DIR__) . '/public'], null, $serverFehler);
+hintergrund(['php', '-S', '127.0.0.1:' . $port, '-t', dirname(__DIR__) . '/public'], ['PHP_CLI_SERVER_WORKERS' => '4'], $serverFehler);
 for ($i = 0; $i < 50 && !erreichbar('127.0.0.1', $port); $i++) {
     usleep(100_000);
 }
@@ -132,6 +134,10 @@ foreach (array_keys(Einstellungen::VORGABEN) as $s) {
     $eventworxVorher[$s] = Settings::get($s);
 }
 $bSite = 0;
+// Audit-Einträge dieses Laufs zu eigenen Rollen, Standorten, Etagen und Anlagen
+// tragen die Kennung nicht im Text – am Ende über ihr Ziel weg.
+$auditVorher = (int) Database::scalar('SELECT COALESCE(MAX(id), 0) FROM audit_log');
+$auditZiele = [];
 // Nummernzähler der Übergabeberichte: die Prüfung vergibt Nummern im laufenden Jahr – am Ende zurück.
 $nummernVorher = array_column(Database::select('SELECT jahr, laufnr FROM bericht_nummern'), 'laufnr', 'jahr');
 
@@ -542,13 +548,175 @@ try {
     $r = aufruf($basis, $leer, 'POST', '/stecker/speichern', ['name' => $kennung], ['X-Requested-With: XMLHttpRequest']);
     pruefe($r['status'] === 302 && str_starts_with((string) $r['ziel'], '/login'), 'nur X-Requested-With → wie bisher Weiterleitung');
 
+    // ---------------------------------------------------- Schnittstelle (API)
+    alsBenutzer($benutzer['admin']);
+    $zugang = \App\Services\ApiZugaenge::anlegen(['name' => $kennung . ' Zugang', 'befugnisse' => ['plaene.lesen']]);
+    alsBenutzer(null);
+    pruefe($zugang['ok'], 'Zugang für die Schnittstelle angelegt');
+    $zugangId = (int) ($zugang['id'] ?? 0);
+    foreach (['/system/schnittstelle', '/system/schnittstelle/' . $zugangId] as $pfad) {
+        $r = aufruf($basis, $admin['dose'], 'GET', $pfad);
+        pruefe($r['status'] === 200, 'Admin ' . $pfad . ' → ' . $r['status']);
+        pruefe(phpMeldung($r['text']) === null, 'Admin ' . $pfad . ' ohne PHP-Meldung ' . (string) phpMeldung($r['text']));
+    }
+    gleich(aufruf($basis, $admin['dose'], 'GET', '/system/schnittstelle/999999999')['status'], 404, 'unbekannter Zugang → 404');
+    gleich(aufruf($basis, $admin['dose'], 'GET', '/system/schnittstelle/anlegen')['status'], 404, '/system/schnittstelle/anlegen per GET → 404');
+    $tokensVorher = (int) Database::scalar('SELECT COUNT(*) FROM api_tokens');
+    foreach ([
+        '/system/schnittstelle/anlegen' => ['name' => $kennung . ' ohne csrf', 'befugnisse' => ['plaene.lesen']],
+        '/system/schnittstelle/' . $zugangId . '/speichern' => ['name' => $kennung . ' gekapert', 'befugnisse' => ['plaene.lesen']],
+        '/system/schnittstelle/' . $zugangId . '/anzeigen' => ['kennwort' => $kennwort],
+        '/system/schnittstelle/' . $zugangId . '/widerrufen' => [],
+        '/system/schnittstelle/' . $zugangId . '/loeschen' => [],
+    ] as $pfad => $felder) {
+        $r = aufruf($basis, $admin['dose'], 'POST', $pfad, $felder);
+        pruefe($r['status'] === 302 && !str_contains($r['text'], 'mtma_'), 'Schnittstelle ' . $pfad . ' ohne CSRF-Token → abgelehnt');
+    }
+    gleich([(int) Database::scalar('SELECT COUNT(*) FROM api_tokens'), Database::first('SELECT name, revoked_at FROM api_tokens WHERE id = ?', [$zugangId])],
+        [$tokensVorher, ['name' => $kennung . ' Zugang', 'revoked_at' => null]], 'ohne CSRF-Token ändert sich an den Zugängen nichts');
+    // Die Ablehnung ohne CSRF-Token verbraucht die Einmal-Marke nicht: dieselbe
+    // Marke mit Token legt den Zugang an – ohne Token entsteht keiner.
+    $seite = aufruf($basis, $admin['dose'], 'GET', '/system/schnittstelle');
+    preg_match('/name="einmal" value="([0-9a-f]+)"/', $seite['text'], $m);
+    $einmal = $m[1] ?? '';
+    $felder = ['name' => $kennung . ' mit Marke', 'befugnisse' => ['plaene.lesen'], 'einmal' => $einmal];
+    $r = aufruf($basis, $admin['dose'], 'POST', '/system/schnittstelle/anlegen', $felder);
+    pruefe($einmal !== '' && $r['status'] === 302 && !str_contains($r['text'], 'mtma_')
+        && (int) Database::scalar('SELECT COUNT(*) FROM api_tokens WHERE name = ?', [$kennung . ' mit Marke']) === 0,
+        'anlegen mit gültiger Einmal-Marke, aber ohne CSRF-Token → kein Zugang');
+    $r = aufruf($basis, $admin['dose'], 'POST', '/system/schnittstelle/anlegen', $felder + ['_token' => $admin['token']]);
+    pruefe($r['status'] === 200 && str_contains($r['text'], 'mtma_') && (int) Database::scalar('SELECT COUNT(*) FROM api_tokens WHERE name = ?', [$kennung . ' mit Marke']) === 1,
+        '… mit CSRF-Token legt dieselbe Marke ihn an');
+    alsBenutzer($benutzer['admin']);
+    $widerrufen = \App\Services\ApiZugaenge::anlegen(['name' => $kennung . ' widerrufen', 'befugnisse' => ['plaene.lesen']]);
+    \App\Services\ApiZugaenge::widerrufen((int) $widerrufen['id']);
+    alsBenutzer(null);
+    $r = aufruf($basis, $admin['dose'], 'POST', '/system/schnittstelle/' . (int) $widerrufen['id'] . '/loeschen', []);
+    pruefe($r['status'] === 302 && Database::first('SELECT id FROM api_tokens WHERE id = ?', [(int) $widerrufen['id']]) !== null,
+        'einen widerrufenen Zugang ohne CSRF-Token löschen → er bleibt');
+    $r = aufruf($basis, $admin['dose'], 'POST', '/system/schnittstelle/' . (int) $widerrufen['id'] . '/loeschen', ['_token' => $admin['token']]);
+    pruefe($r['status'] === 302 && Database::first('SELECT id FROM api_tokens WHERE id = ?', [(int) $widerrufen['id']]) === null, '… mit CSRF-Token gelöscht');
+
+    // Die Liste der Zugänge nennt nur Standorte, die man selbst sieht
+    alsBenutzer($benutzer['admin']);
+    $sichtbar = \App\Services\SiteService::saveSite(null, ['name' => $kennung . ' Sichtbar']);
+    $unsichtbarName = $kennung . ' Unsichtbar ' . bin2hex(random_bytes(3));
+    $unsichtbar = \App\Services\SiteService::saveSite(null, ['name' => $unsichtbarName]);
+    $listenRolle = (int) BenutzerService::rolleSpeichern(null, $kennung . ' apiliste', '', ['api.manage', 'karte.view', 'dashboard.view'])['id'];
+    $benutzer['apiliste'] = BenutzerService::anlegen($kennung . '-apiliste', $kennwort,
+        (string) Database::scalar('SELECT role_key FROM roles WHERE id = ?', [$listenRolle]), false);
+    BenutzerService::freigabeSpeichern(['subject_type' => 'user', 'subject_id' => $benutzer['apiliste'], 'ziel_art' => 'site', 'ziel_id' => $sichtbar]);
+    $zweiOrte = \App\Services\ApiZugaenge::anlegen(['name' => $kennung . ' zwei Orte', 'befugnisse' => ['plaene.lesen'], 'sehen' => [$sichtbar, $unsichtbar]]);
+    alsBenutzer(null);
+    pruefe($zweiOrte['ok'], 'Zugang für zwei Standorte angelegt');
+    $apiliste = anmelden($basis, $kennung . '-apiliste', $kennwort);
+    $dosen[] = $apiliste['dose'];
+    $r = aufruf($basis, $apiliste['dose'], 'GET', '/system/schnittstelle');
+    pruefe($r['status'] === 200 && str_contains($r['text'], htmlspecialchars($kennung . ' Sichtbar')) && !str_contains($r['text'], $unsichtbarName)
+        && str_contains($r['text'], '1 weiterer, den du nicht siehst'), 'api.manage mit Freigabe nur für einen Standort: der andere nur als Anzahl');
+    $r = aufruf($basis, $admin['dose'], 'GET', '/system/schnittstelle');
+    pruefe(str_contains($r['text'], $unsichtbarName), '… der Admin sieht beide Namen');
+    $r = aufruf($basis, $leer, 'GET', '/api/v1/info');
+    pruefe($r['status'] === 401 && (json_decode($r['text'], true)['ok'] ?? true) === false && $r['ziel'] === null
+        && stripos($r['kopf'], 'application/json') !== false && stripos($r['kopf'], 'Set-Cookie') === false, '/api/v1/info ohne Token → 401 JSON, keine Anmeldeseite, kein Cookie');
+    $r = aufruf($basis, $admin['dose'], 'GET', '/api/v1/info');
+    gleich($r['status'], 401, '/api/v1/info mit Sitzung, aber ohne Token → 401 (die Sitzung zählt dort nicht)');
+
+    // ---------------------------------------------------- Andere Instanzen
+    // Diese Instanz als ihre eigene Gegenseite (über die Loopback-Adresse) –
+    // mit einem eigenen Standort, damit kein Bestand einen Schlüssel bekommt.
+    alsBenutzer($benutzer['admin']);
+    $instanzSite = \App\Services\SiteService::saveSite(null, ['name' => $kennung . ' Instanz <b>']);
+    \App\Services\SiteService::saveFloor(null, ['site_id' => $instanzSite, 'name' => 'Halle']);
+    $selbstZugang = \App\Services\ApiZugaenge::anlegen(['name' => $kennung . ' selbst', 'befugnisse' => ['plaene.lesen', 'feststrom'], 'sehen' => [$instanzSite]]);
+    $selbst = \App\Services\PartnerService::anlegen($kennung . ' selbst', $basis . '/api/v1', (string) ($selbstZugang['token'] ?? ''));
+    alsBenutzer(null);
+    pruefe($selbst['ok'], 'diese Instanz als andere eingetragen: ' . $selbst['message']);
+    $selbstId = (int) ($selbst['id'] ?? 0);
+    $instanzKey = \App\Services\LocationBundle::schluesselSichern('sites', $instanzSite, $kennung . ' Instanz');
+    foreach (['/instanzen', '/instanzen/' . $selbstId, '/instanzen/' . $selbstId . '/zuordnen?schluessel=' . rawurlencode($instanzKey)] as $pfad) {
+        $r = aufruf($basis, $admin['dose'], 'GET', $pfad);
+        pruefe($r['status'] === 200, 'Admin ' . $pfad . ' → ' . $r['status']);
+        pruefe(phpMeldung($r['text']) === null, 'Admin ' . $pfad . ' ohne PHP-Meldung ' . (string) phpMeldung($r['text']));
+    }
+    $r = aufruf($basis, $admin['dose'], 'GET', '/instanzen/' . $selbstId);
+    pruefe(str_contains($r['text'], htmlspecialchars($kennung . ' Instanz <b>')) && str_contains($r['text'], 'passt zu') && !str_contains($r['text'], (string) ($selbstZugang['token'] ?? 'x')),
+        'Instanzseite: die Location dort (maskiert), „passt zu“ (gleicher Schlüssel), kein Token');
+    foreach (['/instanzen/999999999', '/instanzen/x', '/instanzen/' . $selbstId . '/zuordnen?schluessel=gibt-es-nicht'] as $pfad) {
+        $r = aufruf($basis, $admin['dose'], 'GET', $pfad);
+        pruefe(in_array($r['status'], [302, 404], true) && phpMeldung($r['text']) === null, 'Admin ' . $pfad . ' → ' . $r['status']);
+    }
+    $vorher = [(int) Database::scalar('SELECT COUNT(*) FROM api_partner'), Database::first('SELECT partner_id FROM sites WHERE id = ?', [$instanzSite])];
+    foreach (['/instanzen/anlegen' => ['adresse' => $basis, 'token' => (string) ($selbstZugang['token'] ?? '')], '/instanzen/' . $selbstId . '/pruefen' => [],
+        '/instanzen/' . $selbstId . '/loeschen' => [], '/instanzen/' . $selbstId . '/uebernehmen' => ['schluessel' => $instanzKey, 'aktion' => 'verknuepfen',
+        'ziel' => (string) $instanzSite, 'etagen' => []], '/instanzen/' . $selbstId . '/loesen' => ['site_id' => $instanzSite],
+        '/instanzen/' . $selbstId . '/zurueck' => ['site_id' => $instanzSite]] as $pfad => $felder) {
+        $r = aufruf($basis, $admin['dose'], 'POST', $pfad, $felder);
+        pruefe($r['status'] === 302 && $r['ziel'] !== '/instanzen/' . $selbstId, 'Andere Instanzen ' . $pfad . ' ohne CSRF-Token → abgelehnt');
+    }
+    gleich([(int) Database::scalar('SELECT COUNT(*) FROM api_partner'), Database::first('SELECT partner_id FROM sites WHERE id = ?', [$instanzSite])], $vorher,
+        'ohne CSRF-Token weder eingetragen noch ausgetragen noch verknüpft');
+
+    // ---------------------------------------------------- Änderungsvorschläge
+    // Ein Vorschlag, wie ihn die Schnittstelle ablegt – mit Text, der maskiert ankommen muss.
+    $instanzEtage = (int) Database::scalar('SELECT id FROM floors WHERE site_id = ? ORDER BY id LIMIT 1', [$instanzSite]);
+    $instanzEtageKey = \App\Services\LocationBundle::schluesselSichern('floors', $instanzEtage, 'Halle');
+    $vorschlagId = Database::insert('api_vorschlaege', [
+        'token_id' => $zugangId, 'token_name' => $kennung . ' Zugang', 'absender' => $kennung . ' <i>Absender</i>', 'site_id' => $instanzSite,
+        'site_key' => $instanzKey, 'daten' => json_encode(['location' => ['format' => 1, 'art' => 'location', 'schluessel' => $instanzKey, 'name' => 'dort',
+            'etagen' => [['schluessel' => $instanzEtageKey, 'name' => '<script>x</script>', 'ebene' => 0, 'reihenfolge' => 0, 'massstab' => '1:250', 'plan' => null]]]]),
+        'dateien' => '{}', 'notiz' => '<b>Notiz</b>', 'status' => 'offen', 'created_at' => gmdate('c'),
+    ]);
+    foreach (['/vorschlaege', '/vorschlaege/' . $vorschlagId] as $pfad) {
+        $r = aufruf($basis, $admin['dose'], 'GET', $pfad);
+        pruefe($r['status'] === 200, 'Admin ' . $pfad . ' → ' . $r['status']);
+        pruefe(phpMeldung($r['text']) === null, 'Admin ' . $pfad . ' ohne PHP-Meldung ' . (string) phpMeldung($r['text']));
+        pruefe(!str_contains($r['text'], '<i>Absender</i>') && !str_contains($r['text'], '<b>Notiz</b>') && !str_contains($r['text'], '<script>x'),
+            'Admin ' . $pfad . ': Text von dort maskiert');
+    }
+    gleich(aufruf($basis, $admin['dose'], 'GET', '/vorschlaege/999999999')['status'], 404, 'unbekannter Vorschlag → 404');
+    foreach (['/vorschlaege/' . $vorschlagId . '/annehmen' => ['etagen' => [$instanzEtageKey], 'teile' => ['grundriss']],
+        '/vorschlaege/' . $vorschlagId . '/ablehnen' => ['grund' => 'ohne CSRF']] as $pfad => $felder) {
+        $r = aufruf($basis, $admin['dose'], 'POST', $pfad, $felder);
+        pruefe($r['status'] === 302 && $r['ziel'] !== '/vorschlaege/' . $vorschlagId, 'Vorschläge ' . $pfad . ' ohne CSRF-Token → abgelehnt');
+    }
+    gleich([Database::scalar('SELECT status FROM api_vorschlaege WHERE id = ?', [$vorschlagId]), Database::scalar('SELECT scale_note FROM floors WHERE id = ?', [$instanzEtage])],
+        ['offen', ''], 'ohne CSRF-Token weder angenommen noch abgelehnt');
+
     // ---------------------------------------------------- Kunde ohne Freigabe
     $kunde = anmelden($basis, $kennung . '-kunde', $kennwort);
     $dosen[] = $kunde['dose'];
     foreach (['/datenquellen', '/system/benutzer', '/system/einstellungen', '/audit', '/stecker', '/standorte', '/anlagen/neu', '/steuerung/protokoll', '/bereiche/neu',
-        '/inventar', '/inventar/neu', '/verteiler-abgleich', '/location', '/anlagen/katalog/import'] as $pfad) {
+        '/inventar', '/inventar/neu', '/verteiler-abgleich', '/location', '/anlagen/katalog/import', '/system/schnittstelle', '/system/schnittstelle/' . $zugangId] as $pfad) {
         gleich(aufruf($basis, $kunde['dose'], 'GET', $pfad)['status'], 403, 'Kunde ' . $pfad);
     }
+    // Ohne „api.manage“ nichts an den Zugängen – auch nicht widerrufen
+    foreach (['anlegen' => ['name' => $kennung . ' vom Kunden', 'befugnisse' => ['plaene.lesen']], $zugangId . '/widerrufen' => [],
+        $zugangId . '/anzeigen' => ['kennwort' => $kennwort], $zugangId . '/speichern' => ['name' => $kennung . ' vom Kunden']] as $aktion => $felder) {
+        $r = aufruf($basis, $kunde['dose'], 'POST', '/system/schnittstelle/' . $aktion, $felder + ['_token' => $kunde['token']]);
+        pruefe($r['status'] === 403 && !str_contains($r['text'], 'mtma_'), 'Kunde: Schnittstelle ' . $aktion . ' → 403');
+    }
+    gleich(Database::first('SELECT name, revoked_at FROM api_tokens WHERE id = ?', [$zugangId]), ['name' => $kennung . ' Zugang', 'revoked_at' => null],
+        'der Zugang bleibt, wie er war');
+    // Ohne „api.partner“ keine anderen Instanzen
+    foreach (['/instanzen', '/instanzen/' . $selbstId, '/instanzen/' . $selbstId . '/zuordnen?schluessel=' . rawurlencode($instanzKey)] as $pfad) {
+        gleich(aufruf($basis, $kunde['dose'], 'GET', $pfad)['status'], 403, 'Kunde ' . $pfad);
+    }
+    foreach (['anlegen' => ['adresse' => $basis, 'token' => 'mtma_' . str_repeat('k', 40)], $selbstId . '/loeschen' => [], $selbstId . '/pruefen' => [],
+        $selbstId . '/uebernehmen' => ['schluessel' => $instanzKey], $selbstId . '/loesen' => ['site_id' => $instanzSite],
+        $selbstId . '/zurueck' => ['site_id' => $instanzSite, 'erzwingen' => '1']] as $aktion => $felder) {
+        gleich(aufruf($basis, $kunde['dose'], 'POST', '/instanzen/' . $aktion, $felder + ['_token' => $kunde['token']])['status'], 403, 'Kunde: Instanzen ' . $aktion . ' → 403');
+    }
+    pruefe(\App\Services\PartnerService::find($selbstId) !== null, 'die Instanz bleibt eingetragen');
+    // Ohne „api.vorschlaege“ keine Änderungsvorschläge
+    foreach (['/vorschlaege', '/vorschlaege/' . $vorschlagId, '/vorschlaege/' . $vorschlagId . '/datei?pfad=plaene%2Fx.svg'] as $pfad) {
+        gleich(aufruf($basis, $kunde['dose'], 'GET', $pfad)['status'], 403, 'Kunde ' . $pfad);
+    }
+    foreach (['annehmen' => ['etagen' => [$instanzEtageKey], 'teile' => ['grundriss']], 'ablehnen' => ['grund' => 'vom Kunden']] as $aktion => $felder) {
+        gleich(aufruf($basis, $kunde['dose'], 'POST', '/vorschlaege/' . $vorschlagId . '/' . $aktion, $felder + ['_token' => $kunde['token']])['status'], 403,
+            'Kunde: Vorschlag ' . $aktion . ' → 403');
+    }
+    gleich(Database::scalar('SELECT status FROM api_vorschlaege WHERE id = ?', [$vorschlagId]), 'offen', 'der Vorschlag bleibt offen');
     if ($etage > 0) {
         gleich(aufruf($basis, $kunde['dose'], 'GET', '/karte/' . $etage . '/geojson')['status'], 403, 'Kunde ohne Freigabe: kein GeoJSON');
         $r = aufruf($basis, $kunde['dose'], 'POST', '/karte/georeferenz', ['floor_id' => $etage, 'entfernen' => 1, '_token' => $kunde['token']], ['Accept: application/json']);
@@ -719,6 +887,7 @@ try {
         $werkEtage = \App\Services\SiteService::saveFloor(null, ['site_id' => $werk, 'name' => 'Halle']);
         $eigen = (int) \App\Services\AnlagenService::speichern(null, ['art' => 'verteilung', 'name' => $kennung . ' eigen', 'floor_id' => $werkEtage,
             'plan_x' => 10, 'plan_y' => 10, 'ohne_anschluesse' => true])['id'];
+        array_push($auditZiele, ['site', $werk], ['floor', $werkEtage], ['objekt', $eigen]);
         BenutzerService::freigabeSpeichern(['subject_type' => 'user', 'subject_id' => $benutzer['planer'], 'ziel_art' => 'site', 'ziel_id' => $werk, 'darf_bearbeiten' => 1]);
         BenutzerService::freigabeSpeichern(['subject_type' => 'user', 'subject_id' => $benutzer['planer'], 'ziel_art' => 'site', 'ziel_id' => (int) $fremd['site_id']]);
         $planer = anmelden($basis, $kennung . '-planer', $kennwort);
@@ -757,6 +926,7 @@ try {
     $bEtage = \App\Services\SiteService::saveFloor(null, ['site_id' => $bSite, 'name' => 'Wiese']);
     $bVert = (int) \App\Services\AnlagenService::speichern(null, ['art' => 'verteilung', 'name' => $kennung . ' Bühne', 'site_id' => $bSite,
         'floor_id' => $bEtage, 'ohne_anschluesse' => true])['id'];
+    array_push($auditZiele, ['site', $bSite], ['floor', $bEtage], ['objekt', $bVert]);
     \App\Services\AnlagenService::anzahlSetzen($bVert, ['eingang' => [$typen['cee63'] => 1], 'abgang' => [$typen['cee32'] => 1, $typen['schuko'] => 2]]);
     \App\Services\SchutzService::vorschlagen($bVert);
     $bAufbau = (int) \App\Services\AufbauService::starten($bSite, $kennung . ' Sommerfest')['id'];
@@ -983,19 +1153,6 @@ try {
 
     // ---------------------------------------------------- Übergabeberichte: Unterschriften, Kundenmodus, Korrektur
     Database::update('users', $benutzer['admin'], ['pruefer_qualifikation' => 'Elektrofachkraft ' . $kennung, 'full_name' => 'Pia Prüferin']);
-    /** Eine gültige Unterschrift aus ganzen Zahlen – jedes Mal andere Striche. */
-    $striche = static function (): string {
-        $versatz = random_int(0, 400);
-        $s = [];
-        for ($zug = 0; $zug < 2; $zug++) {
-            $linie = [];
-            for ($x = 1000; $x <= 8600; $x += 380) {
-                $linie[] = [$x + $versatz, 2500 + intdiv($x, 380) % 2 * 4000 + $zug * 300];
-            }
-            $s[] = $linie;
-        }
-        return json_encode(['s' => $s]);
-    };
     /** Einen Bericht so ausfüllen, dass nur noch die Warnung zur Kalibrierung offen ist; Antwort von „Prüfen“. */
     $ausfuellen = static function (int $id) use ($basis, &$admin, $json, $kennung, $geraet): array {
         $b = BerichtService::find($id);
@@ -1028,9 +1185,9 @@ try {
         aufruf($basis, $admin['dose'], 'POST', '/berichte/anlegen', ['site_id' => $bSite, 'objekte' => [$bVert], '_token' => $admin['token']]);
         return (int) Database::scalar('SELECT id FROM berichte WHERE site_id = ? ORDER BY id DESC LIMIT 1', [$bSite]);
     };
-    $unterschreiben = static function (int $id, array $felder = []) use ($basis, &$admin, $json, $striche): array {
+    $unterschreiben = static function (int $id, array $felder = []) use ($basis, &$admin, $json): array {
         $r = aufruf($basis, $admin['dose'], 'POST', '/berichte/' . $id . '/unterschreiben', $felder + ['version' => BerichtService::find($id)['version'],
-            'striche' => $striche(), 'name' => 'Pia Prüferin', 'ort' => 'Musterstadt', 'anfrage' => bin2hex(random_bytes(16)),
+            'striche' => unterschriftStriche(), 'name' => 'Pia Prüferin', 'ort' => 'Musterstadt', 'anfrage' => bin2hex(random_bytes(16)),
             'geraet_am' => gmdate('c'), '_token' => $admin['token']], $json);
         return ['status' => $r['status'], 'j' => json_decode($r['text'], true) ?? []];
     };
@@ -1103,6 +1260,28 @@ try {
         $r = aufruf($basis, $admin['dose'], $m, $pfad);
         pruefe($r['status'] === 302 && $r['ziel'] === '/berichte/' . $b3 . '/kunde' && !str_contains($r['text'], 'action="/logout"'), 'Kundenmodus: ' . $m . ' ' . $pfad . ' → Kundenseite');
     }
+    // Ebenso die Seiten der Schnittstelle (Zugänge, andere Instanzen, Vorschläge):
+    // Das Konto darf sie, das Gerät beim Kunden nicht – auch nicht absenden.
+    $tokensVorher = (int) Database::scalar('SELECT COUNT(*) FROM api_tokens');
+    $partnerVorher = Database::first('SELECT verified_at FROM api_partner WHERE id = ?', [$selbstId]);
+    foreach ([['GET', '/system/schnittstelle', []], ['GET', '/system/schnittstelle/' . $zugangId, []], ['GET', '/instanzen', []],
+        ['GET', '/instanzen/' . $selbstId, []], ['GET', '/vorschlaege', []], ['GET', '/vorschlaege/' . $vorschlagId, []],
+        ['POST', '/system/schnittstelle/anlegen', ['name' => $kennung . ' im Kundenmodus', 'befugnisse' => ['plaene.lesen'], '_token' => $admin['token']]],
+        ['POST', '/system/schnittstelle/' . $zugangId . '/anzeigen', ['kennwort' => $kennwort, '_token' => $admin['token']]],
+        ['POST', '/instanzen/' . $selbstId . '/pruefen', ['_token' => $admin['token']]],
+        ['POST', '/vorschlaege/' . $vorschlagId . '/ablehnen', ['grund' => 'im Kundenmodus', '_token' => $admin['token']]]] as [$m, $pfad, $felder]) {
+        $r = aufruf($basis, $admin['dose'], $m, $pfad, $felder);
+        pruefe($r['status'] === 302 && $r['ziel'] === '/berichte/' . $b3 . '/kunde' && !str_contains($r['text'], 'mtma_'), 'Kundenmodus: ' . $m . ' ' . $pfad . ' → Kundenseite');
+    }
+    gleich([(int) Database::scalar('SELECT COUNT(*) FROM api_tokens'), Database::scalar('SELECT status FROM api_vorschlaege WHERE id = ?', [$vorschlagId]),
+        Database::first('SELECT verified_at FROM api_partner WHERE id = ?', [$selbstId])], [$tokensVorher, 'offen', $partnerVorher],
+        'Kundenmodus: kein Zugang angelegt, kein Vorschlag abgelehnt, keine Instanz geprüft');
+    // /api/v1 hängt nicht an der Sitzung: mit Token antwortet sie wie sonst,
+    // ohne Token mit 401 – nie mit der Kundenseite.
+    $r = aufruf($basis, $admin['dose'], 'GET', '/api/v1/info', [], ['Authorization: Bearer ' . (string) ($selbstZugang['token'] ?? '')]);
+    pruefe($r['status'] === 200 && (json_decode($r['text'], true)['ok'] ?? false) === true && $r['ziel'] === null, 'Kundenmodus: /api/v1/info mit Token wie sonst');
+    $r = aufruf($basis, $admin['dose'], 'GET', '/api/v1/info');
+    pruefe($r['status'] === 401 && $r['ziel'] === null && stripos($r['kopf'], 'application/json') !== false, 'Kundenmodus: /api/v1/info ohne Token → 401 JSON, keine Kundenseite');
     pruefe(!str_contains($kundeSeite['text'], 'action="/logout"'), 'Kundenseite ohne Abmelden');
     $r = aufruf($basis, $admin['dose'], 'POST', '/logout', ['_token' => $admin['token']]);
     pruefe($r['status'] === 302 && $r['ziel'] === '/berichte/' . $b3 . '/kunde' && aufruf($basis, $admin['dose'], 'GET', '/dashboard')['ziel'] === '/berichte/' . $b3 . '/kunde',
@@ -1117,7 +1296,7 @@ try {
     aufruf($basis, $geraet, 'POST', '/login', ['username' => $kennung . '-admin', 'password' => $kennwort, '_token' => token($seite['text'])]);
     $r = aufruf($basis, $geraet, 'GET', '/dashboard');
     pruefe($r['status'] === 302 && $r['ziel'] === '/berichte/' . $b3 . '/kunde', 'Kundenmodus am Gerät: nach neuer Anmeldung in diesem Browser weiter gesperrt');
-    $kundeFelder = ['striche' => $striche(), 'name' => 'Kim Kunde', 'funktion' => 'Produktion', 'ort' => 'Musterstadt', 'vorbehalte' => '',
+    $kundeFelder = ['striche' => unterschriftStriche(), 'name' => 'Kim Kunde', 'funktion' => 'Produktion', 'ort' => 'Musterstadt', 'vorbehalte' => '',
         'anfrage' => bin2hex(random_bytes(16)), 'geraet_am' => gmdate('c'), '_token' => $admin['token'], 'inhalt_hash' => (string) BerichtService::find($b3)['inhalt_hash']];
     $r = aufruf($basis, $admin['dose'], 'POST', '/berichte/' . $b3 . '/kunde/unterschreiben', ['inhalt_hash' => str_repeat('0', 64)] + $kundeFelder + ['bestaetigungen' => ['erhalten']], $json);
     pruefe($r['status'] === 409 && BerichtService::find($b3)['status'] === 'geprueft', 'Kunde hat einen anderen Stand gesehen → 409, nichts gespeichert');
@@ -1213,12 +1392,35 @@ try {
     pruefe(str_contains($r['text'], 'Eine Korrektur ist in Arbeit') && !str_contains($r['text'], 'action="/berichte/' . $b3 . '/korrektur"'), 'Vorgänger: Hinweis auf die offene Korrektur');
     gleich(serverMeldungen($serverFehler), [], 'keine PHP-Meldung im Fehlerprotokoll des Servers');
 } finally {
+    foreach (Database::select('SELECT id FROM api_partner WHERE name LIKE ?', [$kennung . '%']) as $p) {
+        \App\Services\PartnerService::loeschen((int) $p['id']);
+        Database::execute("DELETE FROM audit_log WHERE target_type = 'api_partner' AND target_id = ?", [(string) $p['id']]);
+    }
+    foreach (Database::select('SELECT id FROM sites WHERE name LIKE ?', [$kennung . '%']) as $s) {
+        $auditZiele[] = ['site', (int) $s['id']];
+        foreach (['floor' => 'floors', 'objekt' => 'objekte'] as $typ => $tabelle) {
+            foreach (Database::select("SELECT id FROM {$tabelle} WHERE site_id = ?", [(int) $s['id']]) as $z) {
+                $auditZiele[] = [$typ, (int) $z['id']];
+            }
+        }
+        \App\Services\SiteService::deleteSite((int) $s['id']);
+    }
+    foreach (Database::select('SELECT id FROM api_tokens WHERE name LIKE ?', [$kennung . '%']) as $t) {
+        foreach (Database::select('SELECT id FROM api_vorschlaege WHERE token_id = ?', [(int) $t['id']]) as $v) {
+            Database::execute('DELETE FROM api_vorschlaege WHERE id = ?', [(int) $v['id']]);
+            Database::execute("DELETE FROM audit_log WHERE target_type = 'api_vorschlag' AND target_id = ?", [(string) $v['id']]);
+        }
+        Database::execute('DELETE FROM api_token_standorte WHERE token_id = ?', [(int) $t['id']]);
+        Database::execute('DELETE FROM api_tokens WHERE id = ?', [(int) $t['id']]);
+        Database::execute("DELETE FROM audit_log WHERE target_type = 'api_token' AND target_id = ?", [(string) $t['id']]);
+    }
     Settings::vergessen();
     foreach ($eventworxVorher as $s => $wert) {
         $wert === null ? Settings::forget($s) : Settings::put($s, $wert);
     }
     Database::execute('DELETE FROM steckertypen WHERE name LIKE ?', [$kennung . '%']);
     foreach (Database::select('SELECT id FROM roles WHERE name LIKE ?', [$kennung . '%']) as $rolle) {
+        $auditZiele[] = ['role', (int) $rolle['id']];
         BenutzerService::rolleLoeschen((int) $rolle['id']);
     }
     Database::execute('DELETE FROM leitungen WHERE name LIKE ?', [$kennung . '%']);
@@ -1232,6 +1434,7 @@ try {
         BereichService::loeschen((int) $b['id']);
     }
     foreach (Database::select('SELECT id FROM objekte WHERE name LIKE ?', [$kennung . '%']) as $o) {
+        $auditZiele[] = ['objekt', (int) $o['id']];
         \App\Services\AnlagenService::loeschen((int) $o['id']);
     }
     foreach ($benutzer as $id) {
@@ -1253,7 +1456,6 @@ try {
     Database::execute('DELETE FROM pruefgeraete WHERE fabrikat LIKE ?', [$kennung . '%']);
     if ($bSite > 0) {
         \App\Services\SiteService::deleteSite($bSite);
-        Database::execute("DELETE FROM audit_log WHERE target_type = 'site' AND target_id = ?", [(string) $bSite]);
     }
     foreach ($benutzer as $id) {
         Database::execute('DELETE FROM schaltvorgaenge WHERE user_id = ?', [$id]);
@@ -1263,10 +1465,15 @@ try {
     foreach ($benutzer as $id) {
         Database::execute("DELETE FROM audit_log WHERE target_type = 'user' AND target_id = ?", [(string) $id]);
     }
+    foreach ($auditZiele as [$typ, $id]) {
+        Database::execute('DELETE FROM audit_log WHERE id > ? AND target_type = ? AND target_id = ?', [$auditVorher, $typ, (string) $id]);
+    }
     foreach ($dosen as $d) {
         @unlink($d);
     }
 }
 @unlink($serverFehler);
+gleich(array_map(static fn (array $z): string => $z['action'] . ' ' . $z['target_type'] . ' ' . $z['target_id'],
+    Database::select('SELECT action, target_type, target_id FROM audit_log WHERE id > ? ORDER BY id', [$auditVorher])), [], 'aufgeräumt: kein Audit-Eintrag dieses Laufs übrig');
 
 ende('web');

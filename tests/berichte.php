@@ -775,19 +775,15 @@ try {
     pruefe((int) Database::scalar('SELECT COUNT(*) FROM audit_log WHERE details LIKE ?', ['%IBAN ' . $kennung . '%']) === 0, 'Bankdaten nicht im Audit');
 
     // ================================================== Unterschrift: nur Striche aus ganzen Zahlen
-    /** Eine gültige Unterschrift – jedes Mal andere Striche (Kopierschutz). */
-    $striche = static function (): string {
-        $versatz = random_int(0, 400);
-        $s = [];
-        for ($zug = 0; $zug < 3; $zug++) {
-            $linie = [];
-            for ($x = 1000; $x <= 8600; $x += 380) {
-                $linie[] = [$x + $versatz, 2500 + intdiv($x, 380) % 2 * 4000 + $zug * 300];
-            }
-            $s[] = $linie;
-        }
-        return json_encode(['s' => $s]);
-    };
+    // Dieselben Striche nimmt der Server nur einmal an (Kopierschutz). Mit
+    // nur 401 möglichen Unterschriften stieß die Testhilfe dann und wann auf
+    // eine schon gespeicherte – 402 Stück müssen verschieden sein.
+    $hashes = [];
+    for ($n = 0; $n < 402; $n++) {
+        $p = Unterschrift::pruefen(unterschriftStriche());
+        $hashes[] = $p['ok'] ? Kanon::hash(['s' => $p['striche']]) : 'ungültig';
+    }
+    pruefe(!in_array('ungültig', $hashes, true) && count(array_unique($hashes)) === 402, 'Testhilfe: 402 Unterschriften, alle gültig und verschieden');
     $abgelehnt = static fn (string $json): bool => !Unterschrift::pruefen($json)['ok'];
     pruefe($abgelehnt(''), 'Unterschrift leer → abgelehnt');
     pruefe($abgelehnt('{"s":[]}'), 'keine Striche → abgelehnt');
@@ -882,7 +878,7 @@ try {
     $zeilen = static fn (int $id): int => (int) Database::scalar('SELECT COUNT(*) FROM bericht_unterschriften WHERE bericht_id = ?', [$id]);
 
     $u1 = $bereitAnlegen();
-    $prueferDaten = ['striche' => $striche(), 'name' => 'Tom Technik', 'ort' => 'Musterstadt', 'anfrage' => $anfrage(), 'geraet_am' => '2026-10-16T09:58:12.123Z'];
+    $prueferDaten = ['striche' => unterschriftStriche(), 'name' => 'Tom Technik', 'ort' => 'Musterstadt', 'anfrage' => $anfrage(), 'geraet_am' => '2026-10-16T09:58:12.123Z'];
     $r = BerichtService::prueferUnterschreiben($u1, $version($u1), $prueferDaten);
     pruefe(!$r['ok'] && $r['status'] === 422 && ($r['fehler'] ?? null) === [] && in_array('querschnitt_leer', array_column($r['warnungen'] ?? [], 'code'), true),
         'Warnungen nicht bestätigt → 422 mit der Liste');
@@ -933,7 +929,7 @@ try {
     pruefe(!BerichtService::darfBearbeiten($b1) && BerichtService::kundeAusBericht($u1, $quelle)['status'] === 423, 'eingefroren: nicht bearbeitbar, kein Kunde aus früherem Bericht');
     $r = BerichtService::prueferUnterschreiben($u1, $version($u1), $prueferDaten);
     pruefe($r['ok'] && $r['status'] === 200 && $r['unterschrift'] === (int) $pz['id'] && $zeilen($u1) === 1, 'gleiche Anfrage noch einmal → dieselbe Zeile');
-    $r = BerichtService::prueferUnterschreiben($u1, $version($u1), ['anfrage' => $anfrage(), 'striche' => $striche()] + $prueferDaten);
+    $r = BerichtService::prueferUnterschreiben($u1, $version($u1), ['anfrage' => $anfrage(), 'striche' => unterschriftStriche()] + $prueferDaten);
     pruefe(!$r['ok'] && $r['status'] === 409 && $zeilen($u1) === 1, 'zweite Prüfer-Unterschrift → 409');
 
     $u2 = $bereitAnlegen();
@@ -941,7 +937,7 @@ try {
     pruefe(!$r['ok'] && $r['status'] === 409, 'dieselbe Anfrage an einem anderen Bericht → 409');
     $r = BerichtService::prueferUnterschreiben($u2, $version($u2), ['anfrage' => $anfrage()] + $prueferDaten);
     pruefe(!$r['ok'] && $r['status'] === 422 && str_contains($r['message'], 'neu unterschreiben'), 'gleiche Striche in einem anderen Bericht → abgelehnt');
-    $r = BerichtService::prueferUnterschreiben($u2, $version($u2), ['anfrage' => $anfrage(), 'striche' => $striche()] + $prueferDaten);
+    $r = BerichtService::prueferUnterschreiben($u2, $version($u2), ['anfrage' => $anfrage(), 'striche' => unterschriftStriche()] + $prueferDaten);
     $nummer2 = sprintf('%s-%d-0002', $praefix, $jahrU);
     pruefe($r['ok'] && BerichtService::find($u2)['nummer'] === $nummer2, 'zweiter Bericht: laufende Nummer 0002');
 
@@ -960,7 +956,7 @@ try {
     gleich([$ereignis['details']['inhalt_hash'] ?? '', $ereignis['details']['kette_hash'] ?? ''], [$b2['inhalt_hash'], $kette2], 'Ereignis hält alten Hash und alte Kette');
     pruefe(BerichtService::speichern($u2, $version($u2), json_encode($bereit))['ok'], 'zurückgezogen: wieder speicherbar');
     pruefe(!BerichtService::loeschen($u2)['ok'], 'Entwurf mit Nummer wird nicht gelöscht');
-    $r = BerichtService::prueferUnterschreiben($u2, $version($u2), ['anfrage' => $anfrage(), 'striche' => $striche()] + $prueferDaten);
+    $r = BerichtService::prueferUnterschreiben($u2, $version($u2), ['anfrage' => $anfrage(), 'striche' => unterschriftStriche()] + $prueferDaten);
     pruefe($r['ok'] && BerichtService::find($u2)['nummer'] === $nummer2, 'neu unterschrieben: dieselbe Nummer');
     $_SESSION = [];
     $vorKunde = $version($u2);
@@ -973,7 +969,7 @@ try {
     gleich((int) Database::scalar('SELECT COUNT(*) FROM kundenmodus_geraete WHERE bericht_id = ?', [$u2]), 0, 'Kundenmodus beendet: Sperre am Gerät weg');
     pruefe(!BerichtService::zurueckziehbar(BerichtService::find($u2)) && BerichtService::zurueckziehen($u2, 'zu spät')['status'] === 409, 'nach dem Kundenmodus kein Zurückziehen');
     $u3 = $bereitAnlegen();
-    $r = BerichtService::prueferUnterschreiben($u3, $version($u3), ['anfrage' => $anfrage(), 'striche' => $striche(), 'name' => ' TOM   TECHNIK '] + $prueferDaten);
+    $r = BerichtService::prueferUnterschreiben($u3, $version($u3), ['anfrage' => $anfrage(), 'striche' => unterschriftStriche(), 'name' => ' TOM   TECHNIK '] + $prueferDaten);
     pruefe($r['ok'], 'Name in Druckbuchstaben (Groß/klein, Leerzeichen egal) passt zum Konto: ' . $r['message']);
     gleich(BerichtService::find($u3)['nummer'], sprintf('%s-%d-0003', $praefix, $jahrU), 'dritter Bericht: 0003');
     BerichtService::ereignis($u3, 'pdf_abgerufen', ['stufe' => 'vorschau']);
@@ -1001,7 +997,7 @@ try {
             usleep(50_000);
         }
         $start = microtime(true);
-        $r = BerichtService::prueferUnterschreiben($uSperre, $version($uSperre), ['anfrage' => $anfrage(), 'striche' => $striche()] + $prueferDaten);
+        $r = BerichtService::prueferUnterschreiben($uSperre, $version($uSperre), ['anfrage' => $anfrage(), 'striche' => unterschriftStriche()] + $prueferDaten);
         $gewartet = microtime(true) - $start;
         proc_close($sperre);
         @unlink($signal);
@@ -1011,7 +1007,7 @@ try {
     // ================================================== Kunde
     $vorbehalte = 'Vorbehalt ' . $kennung . ': Kabelbrücke an Bühne fehlt';
     $unterzeichner = 'Kim Kunde ' . $kennung;
-    $kundeDaten = ['striche' => $striche(), 'name' => $unterzeichner, 'funktion' => 'Produktionsleitung', 'ort' => 'Musterstadt',
+    $kundeDaten = ['striche' => unterschriftStriche(), 'name' => $unterzeichner, 'funktion' => 'Produktionsleitung', 'ort' => 'Musterstadt',
         'bestaetigungen' => ['erhalten', 'eingewiesen', 'gibtsnicht'], 'vorbehalte' => $vorbehalte, 'anfrage' => $anfrage(), 'geraet_am' => 'gestern'];
     $u4 = $bereitAnlegen();
     pruefe(BerichtService::kundeUnterschreiben($u4, $mitHash($u4) + $kundeDaten)['status'] === 409 && !BerichtService::kundenmodusStarten($u4)['ok'], 'Kunde vor dem Prüfer → abgelehnt');
@@ -1051,7 +1047,7 @@ try {
         'Kundenzeile kettet an die des Prüfers; nur bekannte Bestätigungen');
     $r = BerichtService::kundeUnterschreiben($u1, $mitHash($u1) + $kundeDaten);
     pruefe($r['ok'] && $r['unterschrift'] === (int) $kz['id'] && $zeilen($u1) === 2, 'Kundenunterschrift doppelt gesendet → eine Zeile');
-    $r = BerichtService::kundeUnterschreiben($u1, $mitHash($u1) + ['anfrage' => $anfrage(), 'striche' => $striche()] + $kundeDaten);
+    $r = BerichtService::kundeUnterschreiben($u1, $mitHash($u1) + ['anfrage' => $anfrage(), 'striche' => unterschriftStriche()] + $kundeDaten);
     pruefe(!$r['ok'] && $r['status'] === 409 && $zeilen($u1) === 2, 'zweite Kundenunterschrift → abgelehnt');
     gleich(BerichtService::integritaet($u1), ['ok' => true, 'eingefroren' => true, 'befunde' => []], 'Integrität nach dem Abschluss');
     pruefe(!BerichtService::ohneKunde($u2, 'abwesend', '')['ok'] && BerichtService::ohneKunde($u2, 'egal', 'Grund genug')['status'] === 422, 'ohne Kunde: Grund und Art sind Pflicht');
@@ -1179,7 +1175,7 @@ try {
     $korr = $kb['inhalt'];
     $korr['kreise'][0]['leitung']['querschnitt'] = '4';
     pruefe($speichern($k1, $korr)['ok'], 'Korrektur gespeichert');
-    $r = BerichtService::prueferUnterschreiben($k1, $version($k1), ['anfrage' => $anfrage(), 'striche' => $striche()] + $prueferDaten);
+    $r = BerichtService::prueferUnterschreiben($k1, $version($k1), ['anfrage' => $anfrage(), 'striche' => unterschriftStriche()] + $prueferDaten);
     $kb = BerichtService::find($k1);
     pruefe($r['ok'] && $kb['nummer'] === $nummer1 . '-K1' && ($kb['inhalt']['vorgaenger']['nummer'] ?? '') === $nummer1
         && ($kb['inhalt']['vorgaenger']['inhalt_hash'] ?? '') === BerichtService::find($u1)['inhalt_hash'] && ($kb['inhalt']['vorgaenger']['grund'] ?? '') === 'Querschnitt nachgetragen',
@@ -1187,7 +1183,7 @@ try {
     gleich([BerichtService::find($u1)['status'], BerichtService::korrektur($u1, 'noch eine')['status']], ['abgeschlossen', 409], 'unterschriebene Korrektur: Vorgänger noch gültig, keine zweite');
     $pdfVorher = Database::select('SELECT * FROM bericht_pdf WHERE bericht_id = ?', [$u1]);
     $hashVorher = BerichtService::find($u1)['inhalt_hash'];
-    pruefe(BerichtService::kundeUnterschreiben($k1, $mitHash($k1) + ['anfrage' => $anfrage(), 'striche' => $striche()] + $kundeDaten)['ok'], 'Kunde unterschreibt die Korrektur');
+    pruefe(BerichtService::kundeUnterschreiben($k1, $mitHash($k1) + ['anfrage' => $anfrage(), 'striche' => unterschriftStriche()] + $kundeDaten)['ok'], 'Kunde unterschreibt die Korrektur');
     $alt = BerichtService::find($u1);
     pruefe(BerichtService::find($k1)['status'] === 'abgeschlossen' && $alt['status'] === 'ersetzt' && $alt['ersetzt_durch_id'] === $k1, 'Korrektur abgeschlossen → Vorgänger ersetzt');
     pruefe($alt['inhalt_hash'] === $hashVorher && Database::select('SELECT * FROM bericht_pdf WHERE bericht_id = ?', [$u1]) === $pdfVorher
@@ -1208,10 +1204,10 @@ try {
     $testJahre[] = $jahrA;
     $altesDatum = $bereit;
     $altesDatum['kopf']['pruefdatum'] = $jahrA . '-03-02';
-    $unterschreibenAlt = static function () use ($siteId, $vt, $altesDatum, $speichern, $version, $anfrage, $striche, $prueferDaten): int {
+    $unterschreibenAlt = static function () use ($siteId, $vt, $altesDatum, $speichern, $version, $anfrage, $prueferDaten): int {
         $id = (int) BerichtService::anlegen($siteId, null, [$vt])['id'];
         $speichern($id, $altesDatum);
-        $r = BerichtService::prueferUnterschreiben($id, $version($id), ['anfrage' => $anfrage(), 'striche' => $striche()] + $prueferDaten);
+        $r = BerichtService::prueferUnterschreiben($id, $version($id), ['anfrage' => $anfrage(), 'striche' => unterschriftStriche()] + $prueferDaten);
         pruefe($r['ok'], 'Bericht mit altem Prüfdatum unterschrieben (Warnung bestätigt): ' . $r['message']);
         return $id;
     };
@@ -1222,7 +1218,7 @@ try {
         'Prüfdatum ' . $jahrA . ': Nummer im Jahr des Prüfdatums, Frist ab dem Abschluss');
     $r = BerichtService::korrektur($pa, 'Ort nachgetragen');
     $ka = (int) ($r['id'] ?? 0);
-    pruefe(BerichtService::prueferUnterschreiben($ka, $version($ka), ['anfrage' => $anfrage(), 'striche' => $striche()] + $prueferDaten)['ok']
+    pruefe(BerichtService::prueferUnterschreiben($ka, $version($ka), ['anfrage' => $anfrage(), 'striche' => unterschriftStriche()] + $prueferDaten)['ok']
         && BerichtService::ohneKunde($ka, 'abwesend', 'Kunde nicht vor Ort')['ok'], 'Korrektur mit dem alten Prüfdatum unterschrieben und abgeschlossen');
     gleich(BerichtService::find($ka)['aufbewahren_bis'], sprintf('%04d-12-31', $jahrHeute + 10), 'Korrektur: Frist ab dem Abschluss');
     $faelligIds = static fn (): array => array_map('intval', array_column(BerichtService::faellig(), 'id'));
@@ -1233,7 +1229,7 @@ try {
     Database::update('berichte', $ka, ['aufbewahren_bis' => '2000-12-31']);
     pruefe($kb2 > 0 && !in_array($pa, $faelligIds(), true) && !in_array($ka, $faelligIds(), true), 'offene Korrektur (Entwurf): die Nummer ist nicht fällig');
     Database::update('berichte', $kb2, ['vorgaenger_id' => 999999999]);
-    gleich(BerichtService::prueferUnterschreiben($kb2, $version($kb2), ['anfrage' => $anfrage(), 'striche' => $striche()] + $prueferDaten)['status'], 409,
+    gleich(BerichtService::prueferUnterschreiben($kb2, $version($kb2), ['anfrage' => $anfrage(), 'striche' => unterschriftStriche()] + $prueferDaten)['status'], 409,
         'Vorgänger fehlt → die Korrektur wird nicht ohne Verweis eingefroren (409)');
     gleich(BerichtService::find($kb2)['status'], 'entwurf', 'nichts eingefroren');
     Database::update('berichte', $kb2, ['vorgaenger_id' => $ka]);

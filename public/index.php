@@ -4,6 +4,7 @@ declare(strict_types=1);
 require dirname(__DIR__) . '/src/bootstrap.php';
 
 use App\Controllers\AnlagenController;
+use App\Controllers\ApiController;
 use App\Controllers\AuditController;
 use App\Controllers\AufbauController;
 use App\Controllers\AuthController;
@@ -12,6 +13,7 @@ use App\Controllers\BerichtController;
 use App\Controllers\BenutzerController;
 use App\Controllers\DashboardController;
 use App\Controllers\DatenquellenController;
+use App\Controllers\InstanzenController;
 use App\Controllers\InventarController;
 use App\Controllers\EinstellungenController;
 use App\Controllers\KarteController;
@@ -20,14 +22,28 @@ use App\Controllers\LocationController;
 use App\Controllers\ManifestController;
 use App\Controllers\PruefgeraeteController;
 use App\Controllers\MqttZugaengeController;
+use App\Controllers\SchnittstelleController;
 use App\Controllers\StandortController;
 use App\Controllers\StatistikController;
 use App\Controllers\SteckerController;
 use App\Controllers\SteuerungController;
 use App\Controllers\VerteilerAbgleichController;
+use App\Controllers\VorschlaegeController;
 use App\Support\Request;
 use App\Support\Router;
 use App\Support\Session;
+
+/*
+ * Die Schnittstelle für andere Instanzen (/api/v1) läuft vor Sitzung und
+ * Router: ohne Cookie, ohne CSRF-Token, ohne Weiterleitung auf die
+ * Anmeldung – jede Anfrage meldet sich mit ihrem Token selbst an und
+ * bekommt JSON zurück.
+ */
+$anfrage = new Request();
+if (ApiController::zustaendig($anfrage->path())) {
+    (new ApiController())->bearbeiten($anfrage);
+    return;
+}
 
 Session::start();
 
@@ -232,6 +248,36 @@ $router->post('/system/einstellungen/firma', [EinstellungenController::class, 'f
 $router->post('/system/einstellungen/eventworx', [EinstellungenController::class, 'eventworx'], 'settings.manage');
 $router->post('/system/einstellungen/eventworx/pruefen', [EinstellungenController::class, 'eventworxPruefen'], 'settings.manage');
 
+// Schnittstelle (API): Zugänge für andere Instanzen. Anlegen, Ändern,
+// Anzeigen und Löschen zusätzlich nur mit „Alle Standorte …“ (prüft der
+// Controller); widerrufen darf jeder mit dem Recht – das nimmt nur weg.
+$router->get('/system/schnittstelle', [SchnittstelleController::class, 'index'], 'api.manage');
+$router->post('/system/schnittstelle/anlegen', [SchnittstelleController::class, 'anlegen'], 'api.manage');
+$router->get('/system/schnittstelle/{id}', [SchnittstelleController::class, 'zugang'], 'api.manage');
+foreach (['speichern', 'anzeigen', 'widerrufen', 'loeschen'] as $aktion) {
+    $router->post('/system/schnittstelle/{id}/' . $aktion, [SchnittstelleController::class, $aktion], 'api.manage');
+}
+
+// Andere Instanzen (Seite B): Locations von dort übernehmen, zuordnen,
+// verknüpfen, lösen und zurückschicken – woran, prüft PartnerAbgleich
+// (Standort mit „bearbeiten“, Pläne, Anlagen, Kabel, Steckertypen).
+$router->get('/instanzen', [InstanzenController::class, 'index'], 'api.partner');
+$router->post('/instanzen/anlegen', [InstanzenController::class, 'anlegen'], 'api.partner');
+$router->get('/instanzen/{id}', [InstanzenController::class, 'instanz'], 'api.partner');
+$router->get('/instanzen/{id}/zuordnen', [InstanzenController::class, 'zuordnen'], 'api.partner');
+foreach (['pruefen', 'loeschen', 'uebernehmen', 'loesen', 'zurueck'] as $aktion) {
+    $router->post('/instanzen/{id}/' . $aktion, [InstanzenController::class, $aktion], 'api.partner');
+}
+
+// Änderungsvorschläge anderer Instanzen (Seite A): sehen nur mit dem ganzen
+// Standort, annehmen nur mit „bearbeiten“ – prüft VorschlagService.
+$router->get('/vorschlaege', [VorschlaegeController::class, 'index'], 'api.vorschlaege');
+$router->get('/vorschlaege/{id}', [VorschlaegeController::class, 'vorschlag'], 'api.vorschlaege');
+$router->get('/vorschlaege/{id}/datei', [VorschlaegeController::class, 'datei'], 'api.vorschlaege');
+foreach (['annehmen', 'ablehnen'] as $aktion) {
+    $router->post('/vorschlaege/{id}/' . $aktion, [VorschlaegeController::class, $aktion], 'api.vorschlaege');
+}
+
 $router->get('/audit', [AuditController::class, 'index'], 'audit.view');
 
-$router->dispatch(new Request());
+$router->dispatch($anfrage);
