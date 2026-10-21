@@ -69,6 +69,107 @@ function pruefPdfSchreiben(string $pfad, int $seiten, int $fuellung): void
     fclose($f);
 }
 
+/**
+ * Ein PDF mit Haarlinien (0,1 pt, schwarz) auf $breite × $hoehe Punkt:
+ * senkrechte bei $xs, waagerechte bei $ys (Punkt, von links oben), je 20 pt
+ * vor dem Rand endend – wie in einem CAD-Export.
+ *
+ * @param list<float> $xs
+ * @param list<float> $ys
+ */
+function pruefPdfHaarlinien(string $pfad, float $breite, float $hoehe, array $xs, array $ys): void
+{
+    $inhalt = "0 0 0 RG 0.1 w\n";
+    foreach ($xs as $x) {
+        $inhalt .= sprintf("%.3F %.3F m %.3F %.3F l S\n", $x, 20, $x, $hoehe - 20);
+    }
+    foreach ($ys as $y) {
+        $inhalt .= sprintf("%.3F %.3F m %.3F %.3F l S\n", 20, $hoehe - $y, $breite - 20, $hoehe - $y);
+    }
+    $objekte = [
+        1 => '<< /Type /Catalog /Pages 2 0 R >>',
+        2 => '<< /Type /Pages /Kids [3 0 R] /Count 1 >>',
+        3 => sprintf('<< /Type /Page /Parent 2 0 R /MediaBox [0 0 %.2F %.2F] /Contents 4 0 R >>', $breite, $hoehe),
+        4 => '<< /Length ' . strlen($inhalt) . " >>\nstream\n" . $inhalt . "\nendstream",
+    ];
+    $pdf = "%PDF-1.4\n%\xE2\xE3\xCF\xD3\n";
+    $versatz = [];
+    foreach ($objekte as $nr => $obj) {
+        $versatz[$nr] = strlen($pdf);
+        $pdf .= $nr . " 0 obj\n" . $obj . "\nendobj\n";
+    }
+    $xref = strlen($pdf);
+    $pdf .= "xref\n0 5\n0000000000 65535 f \n";
+    foreach ($versatz as $v) {
+        $pdf .= sprintf("%010d 00000 n \n", $v);
+    }
+    file_put_contents($pfad, $pdf . "trailer\n<< /Size 5 /Root 1 0 R >>\nstartxref\n" . $xref . "\n%%EOF\n");
+}
+
+/**
+ * Eine Stufe einer Kachelpyramide als ein Bild (für kleine Stufen in
+ * Prüfungen) – Kacheln, die fehlen, bleiben durchsichtig.
+ */
+function pruefStufe(string $ordner, int $z, string $format): GdImage
+{
+    $kacheln = [];
+    $spalten = $zeilen = 1;
+    foreach (glob($ordner . '/' . $z . '/*/*.' . $format) ?: [] as $pfad) {
+        preg_match('#/(\d+)/(\d+)\.\w+$#', $pfad, $m);
+        $kacheln[] = [$pfad, (int) $m[1], (int) $m[2]];
+        $spalten = max($spalten, (int) $m[1] + 1);
+        $zeilen = max($zeilen, (int) $m[2] + 1);
+    }
+    $bild = imagecreatetruecolor($spalten * 256, $zeilen * 256);
+    imagealphablending($bild, false);
+    imagesavealpha($bild, true);
+    imagefilledrectangle($bild, 0, 0, imagesx($bild) - 1, imagesy($bild) - 1, imagecolorallocatealpha($bild, 255, 255, 255, 127));
+    foreach ($kacheln as [$pfad, $x, $y]) {
+        $kachel = match ($format) {
+            'png'   => imagecreatefrompng($pfad),
+            'webp'  => imagecreatefromwebp($pfad),
+            default => imagecreatefromjpeg($pfad),
+        };
+        imagealphablending($kachel, false);
+        imagecopy($bild, $kachel, $x * 256, $y * 256, 0, 0, 256, 256);
+    }
+    return $bild;
+}
+
+/**
+ * Wie gut ist eine Linie zu sehen? Anteil der Punkte entlang der Linie, an
+ * denen sie sich um mindestens ein Viertel vom Papier abhebt – je Punkt
+ * zählt das dunkelste Pixel bis zwei Pixel neben der erwarteten Lage.
+ * $senkrecht: Linie bei x = $lage, geprüft über y = $von … $bis.
+ */
+function pruefLinieSichtbar(GdImage $bild, float $lage, bool $senkrecht, int $von, int $bis): float
+{
+    $treffer = $punkte = 0;
+    for ($t = $von; $t <= $bis; $t += 3) {
+        $dunkel = 255;
+        for ($d = -2; $d <= 2; $d++) {
+            $s = (int) round($lage) + $d;
+            [$x, $y] = $senkrecht ? [$s, $t] : [$t, $s];
+            if ($x < 0 || $y < 0 || $x >= imagesx($bild) || $y >= imagesy($bild)) {
+                continue;
+            }
+            $c = imagecolorat($bild, $x, $y);
+            $dunkel = min($dunkel, (int) round(((($c >> 16) & 255) + (($c >> 8) & 255) + ($c & 255)) / 3));
+        }
+        $punkte++;
+        $treffer += 255 - $dunkel >= 64 ? 1 : 0;
+    }
+    return $punkte > 0 ? $treffer / $punkte : 0.0;
+}
+
+/** Erster Wert (DC) der ersten Quantisierungstabelle eines JPEG – 3 bei Qualität 92, 5 bei 85 (libjpeg). */
+function pruefJpegDc(string $pfad): ?int
+{
+    $daten = (string) file_get_contents($pfad, false, null, 0, 4096);
+    $stelle = strpos($daten, "\xFF\xDB");
+    return $stelle === false || strlen($daten) < $stelle + 6 ? null : ord($daten[$stelle + 5]);
+}
+
 /** Ein PNG-Chunk mit Prüfsumme. */
 function pruefPngChunk(string $typ, string $daten): string
 {

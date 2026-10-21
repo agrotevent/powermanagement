@@ -159,7 +159,7 @@ bin/power pruefen
 bin/power sammler [--einmal] [--gespraechig]
 bin/power user:add <name> <rolle> [passwort]   ·   bin/power user:password <name> <passwort>
 bin/power titel "Titel" [untertitel] [kürzel]
-bin/power plan:kacheln [--neu]
+bin/power plan:kacheln [--neu] [--etage=<id>,…] [--qualitaet=standard|fein]
 bin/power location:liste   ·   bin/power location:uebernehmen <schlüssel>
 bin/power verteiler:liste   ·   bin/power verteiler:uebernehmen|verteiler:hochladen --alle | <typ|inventar> <schlüssel>
 bin/power katalog:import <datei> [--ueberschreiben] [--pruefen]

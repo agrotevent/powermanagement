@@ -16,24 +16,29 @@ use App\Support\Programm;
  * wird der Plan einmal in eine Kachelpyramide zerlegt:
  *
  *   Stufe maxZoom  Plan in Originalgröße, in 256er-Kacheln geschnitten
- *   Stufe z-1      je vier Kacheln der Stufe darüber auf eine verkleinert
+ *   Stufe z-1      je vier Kacheln der Stufe darüber auf eine gemittelt
  *   …
  *   Stufe 0        der ganze Plan in einer Kachel (Übersicht)
  *
  * Gebaut wird von oben nach unten aus den bereits geschriebenen Kacheln.
- * Dadurch liegen nie mehr als fünf Kacheln gleichzeitig im Speicher, auch
- * bei einem Plan mit 50 Megapixeln.
+ * Dadurch liegen nie mehr als fünf Kacheln gleichzeitig im Speicher, wie
+ * groß der Plan auch ist. Bei einem PDF rechnet poppler die kleinen Stufen
+ * (bis STREIFEN_PIXEL) selbst – dort zeigt die Übersicht Haarlinien wie ein
+ * PDF-Betrachter, statt sie wegzumitteln (siehe schneidenPdf()).
+ *
+ * Was die Pixel ändert, zählt FASSUNG hoch: Eine ältere Pyramide bleibt
+ * nutzbar, ist aber als veraltet erkennbar (veraltet()).
  *
  * PDF wird hier ebenfalls gekachelt, seit der Weg über pdf.js im Browser
  * sich als Sackgasse erwiesen hat (die Begründung steht in
- * PdfRasterService). Gerastert wird streifenweise, damit auch ein A3-Plan
- * in 6144 px Breite nicht den Speicher sprengt. Fehlt poppler auf dem
+ * PdfRasterService). Gerastert wird streifenweise, damit auch ein A0-Plan
+ * in 16 773 px Breite nicht den Speicher sprengt. Fehlt poppler auf dem
  * Server, bleibt es beim Zeichnen im Browser – dann aber mit begrenzter
  * Zoomtiefe, siehe quelle().
  *
  * PNG und JPEG über MAX_PIXEL gehen denselben Weg: als einseitiges PDF
- * (BildPdf) zu poppler, das sie streifenweise liest und herunterrechnet –
- * gd packte sie sonst ganz aus.
+ * (BildPdf) zu poppler, das sie streifenweise liest – gd packte sie sonst
+ * ganz aus. Über MAX_BILDPIXEL rechnet poppler sie herunter.
  *
  * Mit Plänen bis 100 MB dauert das Minuten. Der Upload rechnet deshalb nur
  * eine Weile selbst (bauen() mit Frist) und gibt den Rest an einen eigenen
@@ -50,15 +55,90 @@ final class PlanTileService
     public const AB_PIXELN = 1600;
 
     /**
-     * Größe des gerechneten Plans – und bis hierher schneidet gd ein Bild.
+     * Bis hierher schneidet gd ein Bild (Pixel).
      *
      * gd packt ein Bild ganz aus, außerhalb von memory_limit (Debians
      * php-gd nutzt die libgd des Systems): gemessen 228 MB im PHP-Prozess
      * für ein JPEG mit 49 Megapixeln, 371 MB für ein PNG mit 50. Größere
-     * Bilder gehen über poppler (BildPdf) und werden auf diese Fläche
-     * heruntergerechnet.
+     * Bilder gehen über poppler (BildPdf).
+     *
+     * Zugleich die Notbremse für PDF: Kann pdfimages nicht sagen, wie groß
+     * die Bilder auf einer Seite sind, wird die Seite höchstens so groß
+     * gerechnet – so viel hat poppler auch mit einem eingebetteten Scan
+     * immer vertragen (gemessen 216 MB).
      */
     public const MAX_PIXEL = 50000000;
+
+    /**
+     * So groß rechnet poppler ein Bild höchstens (Pixel in der Ausgabe).
+     *
+     * pdftoppm rechnet ein Bild bei jedem Aufruf auf seine ganze
+     * Ausgabegröße hoch, auch wenn nur ein Streifen davon gebraucht wird –
+     * rund 3 Byte je Pixel, gleich wie groß das Bild in der Datei ist.
+     * Gemessen an einem Scan mit 151 Megapixeln: 25 MP Ausgabe 147 MB,
+     * 50 MP 216 MB, 79 MP 295 MB, 151 MP 504 MB, 200 MP 636 MB. Ein
+     * Vektorplan bleibt bei 70–80 MB, ganz gleich wie groß gerechnet.
+     *
+     * Ein eingehülltes Bild (BildPdf) wird darum höchstens so groß, und ein
+     * PDF nur so groß, dass sein größtes Bild darunter bleibt (siehe
+     * PdfRasterService::bildflaeche()) – mit 80 Megapixeln rund 300 MB bei
+     * poppler, dazu bis 200 MB im PHP-Prozess.
+     */
+    public const MAX_BILDPIXEL = 80_000_000;
+
+    /**
+     * Wie fein ein PDF gerechnet wird.
+     *
+     * Ziel sind PX_JE_PT Pixel je Punkt (rund 360 dpi), begrenzt durch die
+     * Fläche ('pixel') und die lange Kante ('kante'). „standard“ deckt A0
+     * fast ganz ab (16 773 statt 16 850 px), ein Geländeplan von 2 × 1 m
+     * kommt auf 20 000 px (rund 250 dpi); „fein“ gibt ihm die vollen
+     * 360 dpi, braucht dafür aber doppelt so lange und doppelt so viel
+     * Platte. Der Speicher hängt an keiner der beiden Grenzen: PHP hält
+     * einen Streifen (STREIFEN_PIXEL), poppler bei Vektorplänen 70–80 MB.
+     *
+     * Bilder (PNG, JPEG) rechnen beide Stufen gleich: bis MAX_PIXEL in
+     * Originalgröße mit gd, darüber über poppler bis MAX_BILDPIXEL.
+     */
+    public const QUALITAETEN = [
+        'standard' => ['pixel' => 200_000_000, 'kante' => 20_480, 'name' => 'Standard'],
+        'fein'     => ['pixel' => 400_000_000, 'kante' => 32_768, 'name' => 'Fein'],
+    ];
+
+    /** Pixel je Punkt der PDF-Seite (72 Punkt je Zoll): rund 360 dpi. */
+    public const PX_JE_PT = 5;
+
+    /**
+     * Fassung der Pyramide, steht in kacheln.json (fehlt sie: Fassung 1).
+     *
+     * Hochzählen bei jeder Änderung, die Pixel der Kacheln ändert – wie
+     * BerichtPdf::ERZEUGER. 2: Mitteln statt bikubisch (keine verlorenen
+     * Haarlinien, kein Grauschleier), kleine Stufen eines PDF direkt von
+     * poppler, PDF bis 200 Megapixel, JPEG in Qualität 92, WebP.
+     */
+    public const FASSUNG = 2;
+
+    /** JPEG-Qualität der Kacheln: gemessen wich 85 im Mittel um 3,1 vom Scan ab, 92 um 1,0 – für ein Drittel mehr Bytes. */
+    public const JPEG_QUALITAET = 92;
+
+    /**
+     * Ab dieser mittleren Größe einer Kachel als PNG ist ein Plan ein
+     * Scan oder Foto – dann JPEG statt verlustfrei (fotoartig()). Gemessen:
+     * Scan 64–80 KB, saubere CAD-Kacheln 1–5 KB. Dichte Schraffur eines
+     * Vektorplans kommt auch auf 100 KB – ein PDF wird deshalb nur dann
+     * geprüft, wenn ein Bild mindestens die halbe Seite bedeckt.
+     */
+    public const FOTO_BYTES = 30_720;
+
+    /**
+     * Länger soll ein Bau nicht rechnen (Sekunden). Sagt die Hochrechnung
+     * nach dem ersten Streifen mehr voraus, wird mit der nächstkleineren
+     * Fläche gerechnet (NOTSTUFEN, zuTeuer()).
+     */
+    public const ZEITBUDGET = 900;
+
+    /** So lange dürfen die kleinen Stufen eines PDF bei poppler mindestens dauern (Sekunden). */
+    public const KLEINE_STUFEN_ZEIT = 60;
 
     /**
      * Größtes Bild, das überhaupt noch aufbereitet wird (Pixel).
@@ -81,15 +161,6 @@ final class PlanTileService
      */
     public const PDF_ZUSATZ_BROWSER = 1;
 
-    /** Zwischenlager für Kacheln, die der Browser schickt. */
-    private const ROH = '/.roh';
-
-    /** Ein Streifen ist so breit wie der Plan – aber keine 12 MB groß. */
-    private const MAX_STREIFEN_BYTES = 12582912;
-
-    /** Mehr Kachelzeilen als das hat kein Plan, der unter MAX_PIXEL bleibt. */
-    private const MAX_ZEILEN = 512;
-
     /**
      * Fläche eines Streifens, den poppler auf einmal rendert (Pixel).
      *
@@ -100,14 +171,6 @@ final class PlanTileService
      * noch ein Viertel bis ein Siebtel so oft lesen.
      */
     public const STREIFEN_PIXEL = 16_000_000;
-
-    /**
-     * Längste Kante, auf die ein Plan gerechnet wird.
-     *
-     * Darüber wird die Datei größer als der Nutzen: 12288 px sind bei A3
-     * rund 740 dpi, und die Fläche bleibt unter MAX_PIXEL.
-     */
-    public const MAX_KANTE = 12288;
 
     public static function dir(): string
     {
@@ -235,6 +298,37 @@ final class PlanTileService
         return is_array($daten) && isset($daten['breite'], $daten['max_zoom']) ? $daten : null;
     }
 
+    /** Fassung einer Pyramide (FASSUNG); ohne Eintrag ist es Fassung 1. */
+    public static function fassung(array $meta): int
+    {
+        return max(1, (int) ($meta['fassung'] ?? 1));
+    }
+
+    /** Gerechnet, bevor FASSUNG zuletzt hochgezählt wurde – neu rechnen lohnt. */
+    public static function veraltet(array $meta): bool
+    {
+        return self::fassung($meta) < self::FASSUNG;
+    }
+
+    /** Eine der QUALITAETEN – Unbekanntes wird „standard“. */
+    public static function qualitaet(?string $wert): string
+    {
+        return isset(self::QUALITAETEN[(string) $wert]) ? (string) $wert : 'standard';
+    }
+
+    /**
+     * Würde „fein“ diesen Plan deutlich schärfer machen (mindestens ein
+     * Zehntel mehr Kante)? Nur bei einem PDF, dessen Standard an der Fläche
+     * oder Kante hing – steht im meta, ohne die Datei noch einmal zu lesen.
+     */
+    public static function feinMoeglich(array $meta): bool
+    {
+        $fein = (int) ($meta['kanten']['fein'] ?? 0);
+        // Wich der Bau schon wegen Zeit oder Platte aus, hülfe „fein“ nicht.
+        return self::qualitaet($meta['qualitaet'] ?? null) !== 'fein' && !in_array($meta['grenze'] ?? null, ['zeit', 'platte'], true)
+            && $fein >= 1.1 * max(1, (int) ($meta['kante'] ?? 0));
+    }
+
     /**
      * Rechnet gerade jemand an den Kacheln dieser Etage?
      *
@@ -354,9 +448,12 @@ final class PlanTileService
      * Streifen rechnet. Was schon geschnitten war, ist dann wieder weg; den
      * Plan rechnet imHintergrund() von vorn.
      *
+     * $qualitaet: eine der QUALITAETEN. Ohne Angabe bleibt es bei der, mit
+     * der die vorhandene Pyramide gerechnet ist, sonst „standard“.
+     *
      * @return array{ok:bool,message:string,kacheln:int,meta:?array,abgebrochen?:bool}
      */
-    public static function bauen(array $floor, bool $neu = false, bool $warten = true, ?float $bis = null): array
+    public static function bauen(array $floor, bool $neu = false, bool $warten = true, ?float $bis = null, ?string $qualitaet = null): array
     {
         $quelle = SiteService::planPath($floor);
         if ($quelle === null) {
@@ -403,7 +500,19 @@ final class PlanTileService
         }
 
         try {
-            $ergebnis = self::schneiden($floor, $quelle, $ordner, $bis);
+            /*
+             * Was die vorhandene Pyramide schon festgelegt hat, bleibt: die
+             * Qualität, wenn keine verlangt ist, und das Seitenverhältnis.
+             * Anlagen, Maßstab und Georeferenz stehen in Prozent von Breite
+             * und Höhe – mit einem anderen Verhältnis säßen sie daneben.
+             */
+            $alt = self::meta($floor);
+            if ($alt !== null && ((string) ($alt['quelle'] ?? '') !== basename($quelle)
+                || (int) ($alt['seite'] ?? 1) !== max(1, (int) ($floor['plan_page'] ?? 1)))) {
+                $alt = null;
+            }
+            $qualitaet = self::qualitaet($qualitaet ?? ($alt['qualitaet'] ?? null));
+            $ergebnis = self::schneiden($floor, $quelle, $ordner, $bis, $qualitaet, $alt);
         } finally {
             flock($sperre, LOCK_UN);
             fclose($sperre);
@@ -454,38 +563,57 @@ final class PlanTileService
         }
     }
 
-    private static function schneiden(array $floor, string $quelle, string $ordner, ?float $bis = null): array
+    /**
+     * @param ?array $alt kacheln.json der bisherigen Pyramide derselben Datei und Seite
+     */
+    private static function schneiden(array $floor, string $quelle, string $ordner, ?float $bis, string $qualitaet, ?array $alt): array
     {
         $start  = microtime(true);
         $ext    = strtolower(pathinfo($quelle, PATHINFO_EXTENSION));
         if ($ext === 'pdf') {
-            return self::schneidenPdf($floor, $quelle, $ordner, $start, 'png', null, $bis);
+            return self::schneidenPdf($floor, $quelle, $ordner, $start, $bis, $qualitaet, $alt);
         }
-        $format = $ext === 'png' ? 'png' : 'jpg';
 
         /*
          * Über MAX_PIXEL nicht mit gd: das Bild käme ganz in den Speicher
          * (4 Byte je Pixel, außerhalb von memory_limit). Stattdessen als
-         * einseitiges PDF zu poppler, das es streifenweise liest und auf
-         * MAX_PIXEL herunterrechnet – siehe BildPdf.
+         * einseitiges PDF zu poppler, das es streifenweise liest – siehe
+         * BildPdf. Ein JPEG bleibt JPEG; ob ein PNG ein Scan ist, zeigt der
+         * erste Streifen.
          */
         if (self::ueberGd($quelle)) {
+            $kopf = BildPdf::pruefen($quelle);
             $huelle = PdfRasterService::tempName('bild') . '.pdf';
             try {
                 if (!BildPdf::schreiben($quelle, $huelle)) {
-                    return ['ok' => false, 'message' => 'Das Bild ließ sich nicht für poppler aufbereiten. ' . BildPdf::pruefen($quelle)['grund'], 'kacheln' => 0, 'meta' => null];
+                    return ['ok' => false, 'message' => 'Das Bild ließ sich nicht für poppler aufbereiten. ' . $kopf['grund'], 'kacheln' => 0, 'meta' => null];
                 }
-                $masse = self::masse($quelle) ?? ['breite' => 1, 'hoehe' => 1];
-                return self::schneidenPdf(['plan_page' => 1] + $floor, $huelle, $ordner, $start, $format, basename($quelle), $bis,
-                    $masse['hoehe'] / max(1, $masse['breite']));
+                return self::schneidenPdf(['plan_page' => 1] + $floor, $huelle, $ordner, $start, $bis, $qualitaet, $alt, [
+                    'name'   => basename($quelle),
+                    'breite' => $kopf['breite'],
+                    'hoehe'  => $kopf['hoehe'],
+                    'format' => $kopf['art'] === 'jpeg' ? 'jpg' : 'auto',
+                ]);
             } finally {
                 @unlink($huelle);
             }
         }
 
-        $bild = $format === 'png' ? @imagecreatefrompng($quelle) : @imagecreatefromjpeg($quelle);
+        $bild = $ext === 'png' ? @imagecreatefrompng($quelle) : @imagecreatefromjpeg($quelle);
         if (!$bild instanceof \GdImage) {
             return ['ok' => false, 'message' => 'Bilddatei konnte nicht gelesen werden.', 'kacheln' => 0, 'meta' => null];
+        }
+
+        /*
+         * Ein JPEG bleibt JPEG – verlustfrei gespeichert würde es nur
+         * größer. Ein PNG bleibt verlustfrei, außer es ist ein Scan
+         * (fotoartig()): dann wären die Kacheln fünfmal so groß wie als JPEG
+         * und bei WebP zehnmal so langsam. Mit Transparenz bleibt es immer
+         * verlustfrei – JPEG kennt keine.
+         */
+        $format = 'jpg';
+        if ($ext === 'png') {
+            $format = BildPdf::pruefen($quelle)['durchsichtig'] || !self::fotoartig($bild) ? self::verlustfrei() : 'jpg';
         }
 
         $breite = imagesx($bild);
@@ -516,21 +644,27 @@ final class PlanTileService
         }
         imagedestroy($bild);
 
-        // ---- darunterliegende Stufen aus je vier Kacheln der Stufe darüber
-        $anzahl += self::pyramideUnten($ordner, $spalten, $zeilen, $maxZ, $format);
+        // ---- darunterliegende Stufen: je vier Kacheln der Stufe darüber gemittelt
+        $raster = [$maxZ => [$spalten, $zeilen]];
+        $anzahl += self::pyramideUnten($ordner, $raster, $maxZ, $format);
 
         $meta = [
-            'breite'   => $breite,
-            'hoehe'    => $hoehe,
-            'max_zoom' => $maxZ,
-            'kachel'   => self::KACHEL,
-            'format'   => $format,
-            'kacheln'  => $anzahl,
-            'quelle'   => basename($quelle),
-            'gebaut'   => gmdate('c'),
-            'dauer_ms' => (int) round((microtime(true) - $start) * 1000),
+            'breite'     => $breite,
+            'hoehe'      => $hoehe,
+            'max_zoom'   => $maxZ,
+            'kachel'     => self::KACHEL,
+            'format'     => $format,
+            'kacheln'    => $anzahl,
+            'quelle'     => basename($quelle),
+            'fassung'    => self::FASSUNG,
+            'qualitaet'  => $qualitaet,
+            'kante'      => max($breite, $hoehe),
+            'kante_ziel' => max($breite, $hoehe),
+            'gebaut'     => gmdate('c'),
+            'dauer_ms'   => (int) round((microtime(true) - $start) * 1000),
         ];
-        file_put_contents(self::metaPfad($floor), json_encode($meta, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));
+        self::metaSchreiben($floor, $meta);
+        self::ueberzaehligeWeg($ordner, $raster, $format);
 
         return [
             'ok'      => true,
@@ -543,131 +677,386 @@ final class PlanTileService
     /**
      * Zerlegt einen PDF-Grundriss in Kacheln.
      *
-     * Gearbeitet wird streifenweise: poppler rendert die volle Breite und
+     * Die oberste Stufe rechnet poppler streifenweise: die volle Breite und
      * einige Kachelzeilen (höchstens STREIFEN_PIXEL), daraus werden die
      * Kacheln geschnitten, dann kommt der nächste Streifen. So hängt der
-     * Speicherbedarf an der Fläche eines Streifens, nicht an der des Plans.
+     * Speicher von PHP an der Fläche eines Streifens, nicht an der des
+     * Plans.
      *
-     * $name: Name der Plandatei für meta.json, wenn $quelle nur eine Hülle
-     * ist (BildPdf); $verhaeltnis: Höhe/Breite, wenn es schon feststeht.
+     * Die Stufen darunter entstehen durch Mitteln (stufeMitteln()) – bis
+     * auf die kleinen (bis STREIFEN_PIXEL, ein Aufruf je Stufe): die rechnet
+     * poppler selbst. Ein Mittel ist physikalisch richtig, nur macht es
+     * eine Haarlinie je Stufe halb so kräftig; zwei Stufen unter der
+     * obersten war sie gemessen nicht mehr zu sehen (0 % der Linienpunkte
+     * mit einem Viertel Kontrast), ein PDF-Betrachter zeichnet sie aber
+     * mindestens ein Pixel breit (direkt gerechnet 87–95 %). Bei schweren
+     * Plänen kostet jeder Aufruf so lange wie ein Streifen oder länger – sind
+     * die kleinen Stufen absehbar teurer als kleineDirekt() erlaubt, werden
+     * auch sie gemittelt.
      *
-     * @return array{ok:bool,message:string,kacheln:int,meta:?array}
+     * $bild: ist $quelle nur die Hülle eines Bildes (BildPdf) – Name, Maße
+     * und Kachelformat ('jpg', oder 'auto': nach dem ersten Streifen). Ein
+     * Bild rechnet poppler nicht schärfer, als das Mittel es tut; seine
+     * Stufen werden alle gemittelt.
+     *
+     * @return array{ok:bool,message:string,kacheln:int,meta:?array,abgebrochen?:bool}
      */
     private static function schneidenPdf(
         array $floor,
         string $quelle,
         string $ordner,
         float $start,
-        string $format = 'png',
-        ?string $name = null,
-        ?float $bis = null,
-        ?float $verhaeltnis = null
+        ?float $bis,
+        string $qualitaet,
+        ?array $alt,
+        ?array $bild = null
     ): array {
         $seite = max(1, (int) ($floor['plan_page'] ?? 1));
+        $fehler = static fn (string $text): array => ['ok' => false, 'message' => $text, 'kacheln' => 0, 'meta' => null];
+        $abgebrochen = static function () use ($floor): array {
+            // Der Aufrufer wartet nicht länger (Upload): ein halber Plan
+            // hilft niemandem, also weg damit – imHintergrund() rechnet ihn.
+            self::teilbauWeg($floor);
+            return ['ok' => false, 'abgebrochen' => true, 'message' => 'Die Zeit im Upload ist um – der Plan wird im Hintergrund fertig gerechnet.', 'kacheln' => 0, 'meta' => null];
+        };
 
         /*
-         * Erst die Zielauflösung, dann die Maße – in dieser Reihenfolge.
-         *
-         * Ein großer Plan verträgt und braucht mehr Pixel als ein kleiner:
-         * auf einem A0-Hallenplan steht bei gleicher Kantenlänge viermal so
-         * viel auf derselben Fläche. Die Zielauflösung wächst deshalb mit
-         * der Seite, gedeckelt durch MAX_KANTE und die Flächengrenze.
+         * Das Seitenverhältnis: beim Bild aus seinem Kopf, sonst aus der
+         * bisherigen Pyramide – Anlagen, Maßstab und Georeferenz stehen in
+         * Prozent von Breite und Höhe und sitzen so nach dem Neurechnen, wo
+         * sie saßen. Erst ohne beides aus der Probe: jede weitere hieße, die
+         * ganze Seite noch einmal zu lesen (bei einem 100-MB-Plan Sekunden).
          */
-        $kante = self::zielKante($quelle, $seite);
-        // Das Seitenverhältnis einmal aus der Probe – jede weitere Probe
-        // hieße, die ganze Seite noch einmal zu lesen (bei einem
-        // 100-MB-Plan Sekunden). Bei einem eingehüllten Bild steht es fest.
-        $verhaeltnis ??= PdfRasterService::verhaeltnis($quelle, $seite);
-        $masse = $verhaeltnis !== null ? PdfRasterService::masseAus($verhaeltnis, $kante) : null;
-        if ($masse === null) {
-            return [
-                'ok'      => false,
-                'message' => 'Das PDF ließ sich nicht rastern. ' . PdfRasterService::werkzeug()['hinweis'],
-                'kacheln' => 0,
-                'meta'    => null,
+        $verhaeltnis = match (true) {
+            $bild !== null => $bild['hoehe'] / max(1, $bild['breite']),
+            (float) ($alt['verhaeltnis'] ?? 0) > 0 => (float) $alt['verhaeltnis'],
+            (int) ($alt['breite'] ?? 0) > 0 && (int) ($alt['hoehe'] ?? 0) > 0 => (int) $alt['hoehe'] / (int) $alt['breite'],
+            default => PdfRasterService::verhaeltnis($quelle, $seite),
+        };
+        if ($verhaeltnis === null || $verhaeltnis <= 0) {
+            return $fehler('Das PDF ließ sich nicht rastern. ' . PdfRasterService::werkzeug()['hinweis']);
+        }
+        $punkte = $bild === null ? PdfRasterService::punkte($quelle, $seite) : null;
+        $bildflaeche = $bild === null
+            ? PdfRasterService::bildflaeche($quelle, $seite, $punkte !== null ? $punkte['breite'] * $punkte['hoehe'] : null)
+            : null;
+
+        /*
+         * Erst die volle Größe der Qualität. Sagt der erste Streifen, dass
+         * sie länger als ZEITBUDGET dauern oder die Platte sprengen würde,
+         * geht es mit der nächstkleineren Fläche weiter (NOTSTUFEN) – bis zur
+         * letzten, die dann auf jeden Fall gerechnet wird.
+         */
+        $flaechen = [null];
+        foreach (self::NOTSTUFEN as $notstufe) {
+            if ($notstufe < self::QUALITAETEN[$qualitaet]['pixel']) {
+                $flaechen[] = $notstufe;
+            }
+        }
+        /*
+         * Kachelformat: beim Bild steht es fest (JPEG bleibt JPEG). Ein PDF
+         * ohne großes Bild ist ein Vektorplan – verlustfrei, auch wenn eine
+         * dichte Schraffur im ersten Streifen nach Foto aussähe. Bedeckt ein
+         * Bild die halbe Seite oder mehr (ein Scan, ein Luftbild), oder weiß
+         * es keiner, entscheidet der erste Streifen (fotoartig()).
+         */
+        $format = $bild['format'] ?? ($bildflaeche !== null && $punkte !== null
+            && $bildflaeche < 0.5 * $punkte['breite'] * $punkte['hoehe'] ? self::verlustfrei() : 'auto');
+
+        $ziel = null;
+        $oben = null;
+        $ausgewichen = null;
+        foreach ($flaechen as $i => $flaeche) {
+            $versuch = self::ziel($verhaeltnis, $qualitaet, $punkte, $bildflaeche, $bild, $flaeche);
+            if ($ziel !== null && $versuch['kante'] >= $ziel['kante']) {
+                continue;
+            }
+            // Hochgerechnet wird nur, wo es noch kleiner ginge.
+            $kleiner = false;
+            foreach (array_slice($flaechen, $i + 1) as $danach) {
+                $kleiner = $kleiner || self::ziel($verhaeltnis, $qualitaet, $punkte, $bildflaeche, $bild, $danach)['kante'] < $versuch['kante'];
+            }
+            $ziel = $versuch;
+            $oben = self::stufeRendern($quelle, $seite, $ziel['kante'], $ziel['breite'], $ziel['hoehe'],
+                self::maxZoom($ziel['breite'], $ziel['hoehe']), $ordner, $format, $bis, $kleiner);
+            if (!isset($oben['zu_teuer'])) {
+                break;
+            }
+            $ausgewichen = $oben['zu_teuer'];
+            Logger::info(sprintf('Kacheln: %s × %s Pixel %s – es wird kleiner gerechnet.', $ziel['breite'], $ziel['hoehe'],
+                $ausgewichen === 'zeit' ? 'dauerten länger als ' . intdiv(self::ZEITBUDGET, 60) . ' Minuten' : 'passten nicht auf die Platte'));
+        }
+        if (!empty($oben['abgebrochen'])) {
+            return $abgebrochen();
+        }
+        if (!$oben['ok']) {
+            // Was bis hierher geschnitten ist, passt zu keiner Pyramide.
+            if ($oben['anzahl'] > 0) {
+                self::teilbauWeg($floor);
+            }
+            return $fehler($oben['message']);
+        }
+        if ($oben['anzahl'] === 0) {
+            return $fehler('Das PDF ergab keine Kacheln.');
+        }
+
+        $maxZ   = self::maxZoom($ziel['breite'], $ziel['hoehe']);
+        $format = $oben['format'];
+        $anzahl = $oben['anzahl'];
+        $raster = [$maxZ => [$oben['spalten'], $oben['zeilen']]];
+        $direkt = [];
+
+        /*
+         * Die Stufen darunter. Bis eine in einen Aufruf passt, wird
+         * gemittelt; die kleinen rechnet poppler, solange kleineDirekt()
+         * die Zeit dafür gibt – sonst wird ab da weiter gemittelt.
+         */
+        $selbst  = $bild === null;
+        $je      = $oben['sekunden'] / max(1, $oben['aufrufe']);
+        $budget  = max(self::KLEINE_STUFEN_ZEIT, 0.5 * $oben['sekunden']);
+        $bisher  = 0.0;
+        for ($z = $maxZ - 1; $z >= 0; $z--) {
+            $kanteZ = max(1, (int) round($ziel['kante'] / 2 ** ($maxZ - $z)));
+            $masseZ = PdfRasterService::masseAus($verhaeltnis, $kanteZ);
+            if ($selbst && $masseZ['breite'] * $masseZ['hoehe'] <= self::STREIFEN_PIXEL) {
+                $selbst = self::kleineDirekt($bisher, $je, $z + 1, $budget);
+            }
+            if ($selbst && $masseZ['breite'] * $masseZ['hoehe'] <= self::STREIFEN_PIXEL) {
+                if ($bis !== null && microtime(true) > $bis) {
+                    return $abgebrochen();
+                }
+                $stufe = self::stufeRendern($quelle, $seite, $kanteZ, $masseZ['breite'], $masseZ['hoehe'], $z, $ordner, $format, $bis, false);
+                if (!empty($stufe['abgebrochen'])) {
+                    return $abgebrochen();
+                }
+                if ($stufe['ok'] && $stufe['anzahl'] > 0) {
+                    $raster[$z] = [$stufe['spalten'], $stufe['zeilen']];
+                    $anzahl += $stufe['anzahl'];
+                    $direkt[] = $z;
+                    $bisher += $stufe['sekunden'];
+                    $je = max($je, $stufe['sekunden']);
+                    continue;
+                }
+                // poppler mag diese Stufe nicht: gemittelt ist sie auch gut.
+                Logger::info('Kacheln: Stufe ' . $z . ' ließ sich nicht direkt rechnen (' . $stufe['message'] . ') – sie wird gemittelt.');
+                $selbst = false;
+            }
+            $anzahl += self::stufeMitteln($ordner, $z, $raster[$z + 1], $format);
+            $raster[$z] = [(int) ceil($raster[$z + 1][0] / 2), (int) ceil($raster[$z + 1][1] / 2)];
+        }
+
+        $meta = [
+            'breite'      => $ziel['breite'],
+            'hoehe'       => $ziel['hoehe'],
+            'max_zoom'    => $maxZ,
+            'kachel'      => self::KACHEL,
+            'format'      => $format,
+            'kacheln'     => $anzahl,
+            'quelle'      => $bild['name'] ?? basename($quelle),
+            'seite'       => $seite,
+            'kante'       => $ziel['kante'],
+            'fassung'     => self::FASSUNG,
+            'qualitaet'   => $qualitaet,
+            'verhaeltnis' => round($verhaeltnis, 8),
+            'kante_ziel'  => $ziel['kante_ziel'],
+            'kanten'      => $ziel['kanten'],
+            'grenze'      => $ausgewichen ?? $ziel['grenze'],
+            'direkt'      => $direkt,
+            'gebaut'      => gmdate('c'),
+            'dauer_ms'    => (int) round((microtime(true) - $start) * 1000),
+        ];
+        self::metaSchreiben($floor, $meta);
+        self::ueberzaehligeWeg($ordner, $raster, $format);
+
+        $masse = number_format($ziel['breite'], 0, ',', '.') . ' × ' . number_format($ziel['hoehe'], 0, ',', '.') . ' Pixel';
+        return [
+            'ok'      => true,
+            'message' => match (true) {
+                $bild === null => sprintf('%d Kacheln in %d Stufen aus dem PDF berechnet (%s).', $anzahl, $maxZ + 1, $masse),
+                $ziel['breite'] < $bild['breite'] => sprintf('%d Kacheln in %d Stufen berechnet (auf %s verkleinert).', $anzahl, $maxZ + 1, $masse),
+                default => sprintf('%d Kacheln in %d Stufen berechnet (%s, Originalgröße).', $anzahl, $maxZ + 1, $masse),
+            },
+            'kacheln' => $anzahl,
+            'meta'    => $meta,
+        ];
+    }
+
+    /**
+     * Notstufen der Fläche (Pixel), wenn eine Qualität zu lange dauern oder
+     * die Platte sprengen würde: erst 200, dann 50 Megapixel (so groß
+     * rechnete Fassung 1 jeden Plan).
+     */
+    private const NOTSTUFEN = [200_000_000, 50_000_000];
+
+    /**
+     * Auf welche Größe eine Seite gerechnet wird.
+     *
+     * Ziel sind PX_JE_PT Pixel je Punkt (ein eingehülltes Bild: seine
+     * Originalgröße), begrenzt durch
+     *  - 'kante' und 'flaeche' der Qualität ($flaeche ersetzt die Fläche –
+     *    für die Notstufen),
+     *  - 'bild': das größte Bild der Seite höchstens MAX_BILDPIXEL in der
+     *    Ausgabe (Speicher von poppler); weiß das keiner ($bildflaeche
+     *    null), die ganze Seite höchstens MAX_PIXEL wie in Fassung 1.
+     * 'grenze' sagt, welche Grenze gegriffen hat (null: keine), 'kanten' je
+     * Qualität die Kante, die sie ergäbe – für feinMoeglich().
+     *
+     * Nicht halbiert, sondern genau so weit verkleinert, wie die Grenze es
+     * verlangt: Früher kostete das Halbieren eine ganze Zoomstufe (aus 8407
+     * zulässigen Pixeln wurden 4203).
+     *
+     * @param float $verhaeltnis Höhe durch Breite
+     * @param ?array{breite:float,hoehe:float} $punkte Seitengröße in Punkt (pdfinfo)
+     * @param ?float $bildflaeche größtes Bild in Punkt² (PdfRasterService::bildflaeche()), 0.0: keines
+     * @param ?array{breite:int,hoehe:int} $bild Maße eines eingehüllten Bildes
+     * @return array{kante:int,breite:int,hoehe:int,kante_ziel:int,grenze:?string,kanten:array<string,int>}
+     */
+    public static function ziel(float $verhaeltnis, string $qualitaet, ?array $punkte, ?float $bildflaeche, ?array $bild = null, ?int $flaeche = null): array
+    {
+        $kurz = $verhaeltnis <= 1.0 ? $verhaeltnis : 1 / $verhaeltnis;
+        $kurz = max($kurz, 1e-6);
+        $langPt = $punkte !== null ? max($punkte['breite'], $punkte['hoehe']) : 0.0;
+        $kanteZiel = match (true) {
+            $bild !== null  => max($bild['breite'], $bild['hoehe']),
+            $langPt > 0     => max(2048, (int) round($langPt * self::PX_JE_PT)),
+            default         => PdfRasterService::KANTE,
+        };
+
+        // Speicher von poppler: das größte Bild der Seite in der Ausgabe.
+        $bildKante = match (true) {
+            $bild !== null => (int) floor(sqrt(self::MAX_BILDPIXEL / $kurz)),
+            $bildflaeche === null || $langPt <= 0 => (int) floor(sqrt(self::MAX_PIXEL / $kurz)),
+            $bildflaeche > 0 => (int) floor($langPt * sqrt(self::MAX_BILDPIXEL / $bildflaeche)),
+            default => PHP_INT_MAX,
+        };
+
+        $rechnen = static function (string $q, ?int $flaeche) use ($verhaeltnis, $kurz, $kanteZiel, $bildKante, $bild): array {
+            $pixel = $flaeche ?? self::QUALITAETEN[$q]['pixel'];
+            $grenzen = [
+                'bild'    => $bildKante,
+                'flaeche' => (int) floor(sqrt($pixel / $kurz)),
+                'kante'   => self::QUALITAETEN[$q]['kante'],
             ];
-        }
-
-        /*
-         * Die Fläche wird nicht größer, als die Obergrenze erlaubt – lieber
-         * ein etwas gröberer Plan als ein Server, der am Hochladen erstickt.
-         *
-         * Auch hier wird nicht halbiert: zielKante() rechnet die Grenze aus
-         * dem Seitenverhältnis aus, das aus einer 256 Pixel breiten Probe
-         * stammt und deshalb um ein halbes Prozent danebenliegen kann. Wer
-         * bei dieser Genauigkeit halbiert, verliert eine ganze Zoomstufe –
-         * gemessen kamen aus 8407 zulässigen Pixeln so 4203.
-         */
-        if ($masse['breite'] * $masse['hoehe'] > self::MAX_PIXEL) {
-            $faktor = sqrt(self::MAX_PIXEL / ($masse['breite'] * $masse['hoehe']));
-            $kante  = max(1024, (int) floor($kante * $faktor));
-            $masse  = PdfRasterService::masseAus($verhaeltnis, $kante);
-        }
-
-        // Sicherheitsnetz, falls die Schätzung noch immer darüber liegt.
-        while ($masse['breite'] * $masse['hoehe'] > self::MAX_PIXEL && $kante > 1024) {
-            $kante = (int) ($kante * 0.9);
+            $kante = min($kanteZiel, ...array_values($grenzen));
+            $grenze = $kante < $kanteZiel ? (string) array_search($kante, $grenzen, true) : null;
+            // Ganz genau: die Maße werden gerundet, die Fläche darf trotzdem nicht darüber.
+            $hoechstens = min($pixel, $bild !== null ? self::MAX_BILDPIXEL : PHP_INT_MAX);
             $masse = PdfRasterService::masseAus($verhaeltnis, $kante);
-        }
+            while ($kante > 1 && $masse['breite'] * $masse['hoehe'] > $hoechstens) {
+                $kante--;
+                $masse = PdfRasterService::masseAus($verhaeltnis, $kante);
+                $grenze ??= 'flaeche';
+            }
+            return ['kante' => $kante, 'breite' => $masse['breite'], 'hoehe' => $masse['hoehe'], 'grenze' => $grenze];
+        };
 
-        $breite  = $masse['breite'];
-        $hoehe   = $masse['hoehe'];
-        $maxZ    = self::maxZoom($breite, $hoehe);
+        $ergebnis = $rechnen($qualitaet, $flaeche);
+        $kanten = [];
+        foreach (array_keys(self::QUALITAETEN) as $q) {
+            $kanten[$q] = $rechnen($q, null)['kante'];
+        }
+        return $ergebnis + ['kante_ziel' => $kanteZiel, 'kanten' => $kanten];
+    }
+
+    /**
+     * Noch eine kleine Stufe direkt von poppler? Ja, solange die bisher
+     * dafür gebrauchte Zeit und die geschätzte für die übrigen $rest Stufen
+     * ($je Sekunden je Aufruf – so lange wie ein Streifen der obersten Stufe
+     * oder die teuerste kleine Stufe bis hier) in $budget passen
+     * (KLEINE_STUFEN_ZEIT, mindestens die Hälfte der obersten Stufe).
+     */
+    public static function kleineDirekt(float $bisher, float $je, int $rest, float $budget): bool
+    {
+        return $bisher + $je * $rest <= $budget;
+    }
+
+    /**
+     * Würde die oberste Stufe zu teuer? Hochgerechnet aus dem ersten
+     * Streifen: $sekunden und $bytes für $kacheln Kacheln, $streifen
+     * Streifen insgesamt, $alle Kacheln der obersten Stufe. Die Stufen
+     * darunter kommen mit einem Drittel dazu, und auf der Platte soll das
+     * Dreifache frei sein ($frei, null: unbekannt).
+     *
+     * @return 'zeit'|'platte'|null
+     */
+    public static function zuTeuer(float $sekunden, int $streifen, int $bytes, int $kacheln, int $alle, ?float $frei): ?string
+    {
+        if ($sekunden * $streifen > self::ZEITBUDGET) {
+            return 'zeit';
+        }
+        if ($frei !== null && $kacheln > 0 && 3 * ($bytes / $kacheln) * $alle * 4 / 3 > $frei) {
+            return 'platte';
+        }
+        return null;
+    }
+
+    /**
+     * Eine Stufe der Pyramide mit poppler rendern und schneiden – die
+     * oberste in Streifen, eine kleine (bis STREIFEN_PIXEL) in einem Aufruf.
+     *
+     * Ein Streifen ist so hoch, wie STREIFEN_PIXEL es erlaubt: poppler
+     * liest und deutet bei jedem Aufruf die ganze Seite, ganz gleich, wie
+     * schmal der Ausschnitt ist. Gemessen an einem Vektorplan mit 104 MB
+     * (eine A0-Seite) dauerte jeder Aufruf rund 11 Sekunden – mit einer
+     * Kachelzeile je Aufruf waren das 33 Streifen und 380 Sekunden. Ein
+     * eingebetteter Scan wird bei jedem Aufruf ganz ausgepackt (gemessen
+     * 15 Sekunden je Streifen bei 80 Megapixeln). Braucht poppler für einen
+     * Streifen länger als seine Zeitgrenze, wird er halbiert und noch einmal
+     * versucht – ein schwerer Vektorplan scheitert so nicht an der Höhe der
+     * Streifen. Passt die ganze Stufe in einen Streifen, reicht ein Aufruf
+     * ab dem oberen Rand, bewusst höher als die Seite (siehe unten).
+     *
+     * $format 'auto': nach dem ersten Streifen (fotoartig()).
+     * $waechter: nach dem ersten Streifen hochrechnen (zuTeuer()) und mit
+     * 'zu_teuer' aufhören, statt weiterzurechnen.
+     *
+     * @return array{ok:bool,message:string,anzahl:int,spalten:int,zeilen:int,format:string,aufrufe:int,sekunden:float,abgebrochen?:bool,zu_teuer?:string}
+     */
+    private static function stufeRendern(
+        string $quelle,
+        int $seite,
+        int $kante,
+        int $breite,
+        int $hoehe,
+        int $z,
+        string $ordner,
+        string $format,
+        ?float $bis,
+        bool $waechter
+    ): array {
+        $beginn  = microtime(true);
         $spalten = (int) ceil($breite / self::KACHEL);
         $zeilen  = (int) ceil($hoehe / self::KACHEL);
         $anzahl  = 0;
+        $aufrufe = 0;
+        $ergebnis = static function (bool $ok, string $text, array $mehr = []) use (&$anzahl, &$spalten, &$zeilen, &$format, &$aufrufe, $beginn): array {
+            return $mehr + [
+                'ok' => $ok, 'message' => $text, 'anzahl' => $anzahl, 'spalten' => $spalten, 'zeilen' => $zeilen,
+                'format' => $format, 'aufrufe' => $aufrufe, 'sekunden' => microtime(true) - $beginn,
+            ];
+        };
 
-        /*
-         * Mehrere Kachelzeilen je Aufruf von poppler.
-         *
-         * poppler liest und deutet bei jedem Aufruf die ganze Seite, ganz
-         * gleich, wie schmal der Ausschnitt ist. Gemessen an einem
-         * Vektorplan mit 104 MB (eine A0-Seite) dauerte jeder Aufruf rund
-         * 11 Sekunden – mit einer Kachelzeile je Aufruf waren das 33
-         * Streifen und 380 Sekunden, länger als nginx auf eine Antwort
-         * wartet. Ein eingebetteter Scan (94 MB JPEG, 139 Megapixel) wird
-         * bei jedem Aufruf ganz ausgepackt: 4,4 Sekunden je Streifen.
-         *
-         * Ein Streifen ist deshalb so hoch, wie STREIFEN_PIXEL es erlaubt.
-         * Der Speicher hängt an der Fläche des Streifens, nicht an der des
-         * Plans. Braucht poppler für einen Streifen länger als seine
-         * Zeitgrenze, wird er halbiert und noch einmal versucht – ein
-         * schwerer Vektorplan scheitert so nicht an der Höhe der Streifen.
-         */
-        $jeStreifen   = self::zeilenJeStreifen($breite, $zeilen);
+        $jeStreifen = $breite * $zeilen * self::KACHEL <= self::STREIFEN_PIXEL ? $zeilen + 2 : self::zeilenJeStreifen($breite, $zeilen);
         $streifenHoch = $jeStreifen * self::KACHEL;
 
         $y = 0;
         while ($y < $zeilen) {
             if ($bis !== null && microtime(true) > $bis) {
-                // Der Aufrufer wartet nicht länger (Upload): ein halber Plan
-                // hilft niemandem, also weg damit – imHintergrund() rechnet ihn.
-                self::teilbauWeg($floor);
-                return ['ok' => false, 'abgebrochen' => true, 'message' => 'Die Zeit im Upload ist um – der Plan wird im Hintergrund fertig gerechnet.', 'kacheln' => 0, 'meta' => null];
+                return $ergebnis(false, '', ['abgebrochen' => true]);
             }
             $nummer   = $y + 1;
             $ziel     = PdfRasterService::tempName('streifen');
-            $streifen = PdfRasterService::streifen(
-                $quelle,
-                $seite,
-                $kante,
-                $y * self::KACHEL,
-                $streifenHoch,
-                $ziel
-            );
+            $streifen = PdfRasterService::streifen($quelle, $seite, $kante, $y * self::KACHEL, $streifenHoch, $ziel);
+            $aufrufe++;
 
             if (!$streifen['ok']) {
                 PdfRasterService::aufraeumen($ziel);
                 if (!empty($streifen['zeit']) && $jeStreifen > 1) {
-                    $jeStreifen   = max(1, intdiv($jeStreifen, 2));
+                    $jeStreifen   = max(1, intdiv(min($jeStreifen, $zeilen), 2));
                     $streifenHoch = $jeStreifen * self::KACHEL;
                     continue;
                 }
-                // Was bis hierher geschnitten ist, passt zu keiner Pyramide.
-                if ($anzahl > 0) {
-                    self::teilbauWeg($floor);
-                }
-                return ['ok' => false, 'message' => 'Streifen ab Zeile ' . $nummer . ': ' . $streifen['message'], 'kacheln' => 0, 'meta' => null];
+                return $ergebnis(false, 'Streifen ab Zeile ' . $nummer . ': ' . $streifen['message']);
             }
 
             /*
@@ -685,15 +1074,17 @@ final class PlanTileService
             $bild = @imagecreatefrompng($streifen['pfad']);
             PdfRasterService::aufraeumen($ziel);
             if (!$bild instanceof \GdImage) {
-                if ($anzahl > 0) {
-                    self::teilbauWeg($floor);
-                }
-                return ['ok' => false, 'message' => 'Streifen ab Zeile ' . $nummer . ' ließ sich nicht lesen.', 'kacheln' => 0, 'meta' => null];
+                return $ergebnis(false, 'Streifen ab Zeile ' . $nummer . ' ließ sich nicht lesen.');
+            }
+            if ($format === 'auto') {
+                $format = self::fotoartig($bild) ? 'jpg' : self::verlustfrei();
             }
 
             $streifenBreite = imagesx($bild);
             $streifenHoehe  = imagesy($bild);
             $reihen         = (int) ceil($streifenHoehe / self::KACHEL);
+            $bytes          = 0;
+            $geschrieben    = 0;
             for ($r = 0; $r < $reihen && $y + $r < $zeilen; $r++) {
                 for ($x = 0; $x < $spalten; $x++) {
                     $links = $x * self::KACHEL;
@@ -711,12 +1102,22 @@ final class PlanTileService
                         min(self::KACHEL, $streifenBreite - $links),
                         min(self::KACHEL, $streifenHoehe - $r * self::KACHEL)
                     );
-                    self::schreiben($kachel, $ordner, $maxZ, $x, $y + $r, $format);
+                    $bytes += self::schreiben($kachel, $ordner, $z, $x, $y + $r, $format);
                     imagedestroy($kachel);
-                    $anzahl++;
+                    $geschrieben++;
                 }
             }
             imagedestroy($bild);
+            $anzahl += $geschrieben;
+
+            if ($waechter && $y === 0 && $streifenHoehe >= $streifenHoch) {
+                $frei = @disk_free_space($ordner);
+                $teuer = self::zuTeuer(microtime(true) - $beginn, (int) ceil($zeilen / $jeStreifen), $bytes, $geschrieben,
+                    $spalten * $zeilen, $frei === false ? null : (float) $frei);
+                if ($teuer !== null) {
+                    return $ergebnis(false, '', ['zu_teuer' => $teuer]);
+                }
+            }
 
             // Kürzer als verlangt: das war der untere Rand.
             if ($streifenHoehe < $streifenHoch) {
@@ -726,36 +1127,7 @@ final class PlanTileService
             $y += $jeStreifen;
         }
 
-        if ($anzahl === 0) {
-            return ['ok' => false, 'message' => 'Das PDF ergab keine Kacheln.', 'kacheln' => 0, 'meta' => null];
-        }
-
-        $anzahl += self::pyramideUnten($ordner, $spalten, $zeilen, $maxZ, $format);
-
-        $meta = [
-            'breite'   => $breite,
-            'hoehe'    => $hoehe,
-            'max_zoom' => $maxZ,
-            'kachel'   => self::KACHEL,
-            'format'   => $format,
-            'kacheln'  => $anzahl,
-            'quelle'   => $name ?? basename($quelle),
-            'seite'    => $seite,
-            'kante'    => $kante,
-            'gebaut'   => gmdate('c'),
-            'dauer_ms' => (int) round((microtime(true) - $start) * 1000),
-        ];
-        file_put_contents(self::metaPfad($floor), json_encode($meta, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));
-
-        return [
-            'ok'      => true,
-            'message' => $name === null
-                ? sprintf('%d Kacheln in %d Stufen aus dem PDF berechnet.', $anzahl, $maxZ + 1)
-                : sprintf('%d Kacheln in %d Stufen berechnet (auf %s × %s Pixel verkleinert).', $anzahl, $maxZ + 1,
-                    number_format($breite, 0, ',', '.'), number_format($hoehe, 0, ',', '.')),
-            'kacheln' => $anzahl,
-            'meta'    => $meta,
-        ];
+        return $ergebnis(true, '');
     }
 
     /**
@@ -849,9 +1221,10 @@ final class PlanTileService
      * $arbeit rechnen, aber nie neben einem anderen Bau im Hintergrund – für
      * bin/power plan:kacheln (so rechnet imHintergrund()) und die Wartung.
      *
-     * Jeder Bau eines großen Plans hält gemessen 150–200 MB im PHP-Prozess
+     * Jeder Bau eines großen Plans hält gemessen 175–200 MB im PHP-Prozess
      * (gd außerhalb von memory_limit, auf der Kommandozeile ohnehin ohne
-     * Grenze) und 70–210 MB bei pdftoppm. Lädt jemand Halle für Halle vier
+     * Grenze) und 70–80 MB bei pdftoppm, mit einem eingebetteten Scan bis
+     * 300 MB (MAX_BILDPIXEL). Lädt jemand Halle für Halle vier
      * große Pläne hoch, liefen sonst vier solcher Prozesse nebeneinander –
      * über 1 GB, in einem Container mit 2 GB samt InfluxDB ein Fall für den
      * OOM-Killer –, und jeder einzelne würde langsamer. pm.max_children
@@ -994,249 +1367,12 @@ final class PlanTileService
      * höher zurück als verlangt). Wäre er so hoch wie die Seite, sähe die
      * ganze Seite aus wie ein gewöhnlicher Streifen. Die geschätzte Höhe
      * liegt höchstens ein halbes Prozent daneben – zwei Zeilen Abstand
-     * reichen bis weit über MAX_KANTE.
+     * reichen bis weit über die größte Kante der QUALITAETEN.
      */
     public static function zeilenJeStreifen(int $breite, int $zeilen): int
     {
         $je = max(1, intdiv(self::STREIFEN_PIXEL, max(1, $breite) * self::KACHEL));
         return $zeilen > 2 ? max(1, min($je, $zeilen - 2)) : 1;
-    }
-
-    // ------------------------------------------- Kacheln aus dem Browser
-
-    /**
-     * Einen im Browser gezeichneten Streifen entgegennehmen und schneiden.
-     *
-     * Hintergrund: poppler ist auf einem LXC schnell nachinstalliert, aber
-     * eben nicht überall vorhanden – und solange es fehlt, blieb ein
-     * PDF-Grundriss in Safari unbrauchbar. Der Browser kann die Seite
-     * jedoch selbst zeichnen; er darf es nur nicht bei jedem Aufruf neu
-     * tun, weil ihm dabei auf tiefen Stufen die Canvasfläche ausgeht.
-     *
-     * Also einmal: der Browser rechnet die oberste Stufe Streifen für
-     * Streifen, schickt sie her, und ab da ist ein PDF-Grundriss dasselbe
-     * wie ein JPEG – ein Stapel gewöhnlicher Bildkacheln.
-     *
-     * Ein Streifen ist so breit wie der Plan und eine Kachel hoch. Das
-     * spart Anfragen gegenüber einzelnen Kacheln und ist derselbe
-     * Zuschnitt wie beim Rastern mit poppler.
-     *
-     * @return array{ok:bool,message:string,kacheln:int}
-     */
-    public static function streifenAnnehmen(array $floor, int $zeile, string $png): array
-    {
-        if ($zeile < 0 || $zeile > self::MAX_ZEILEN) {
-            return ['ok' => false, 'message' => 'Streifen liegt außerhalb des Erlaubten.', 'kacheln' => 0];
-        }
-        if ($png === '' || strlen($png) > self::MAX_STREIFEN_BYTES) {
-            return ['ok' => false, 'message' => 'Streifen ist leer oder zu groß.', 'kacheln' => 0];
-        }
-
-        /*
-         * Was hier ankommt, kommt aus einem Browser – also wird geprüft,
-         * ob es wirklich ein PNG in der erwarteten Form ist, und nicht
-         * bloß geglaubt. Sonst läge im Kachelordner, was immer jemand
-         * schickt.
-         */
-        $masse = @getimagesizefromstring($png);
-        if ($masse === false || $masse[2] !== IMAGETYPE_PNG) {
-            return ['ok' => false, 'message' => 'Nur PNG wird angenommen.', 'kacheln' => 0];
-        }
-        if ((int) $masse[1] > self::KACHEL || (int) $masse[0] > self::MAX_KANTE) {
-            return ['ok' => false, 'message' => 'Der Streifen hat nicht das erwartete Maß.', 'kacheln' => 0];
-        }
-
-        if (!extension_loaded('gd')) {
-            // Ohne gd gäbe es hier einen Fatal Error statt einer Antwort,
-            // und der Browser rechnete den ganzen Plan umsonst.
-            return ['ok' => false, 'message' => self::GD_FEHLT, 'kacheln' => 0];
-        }
-
-        $bild = @imagecreatefromstring($png);
-        if (!$bild instanceof \GdImage) {
-            return ['ok' => false, 'message' => 'Streifen ließ sich nicht lesen.', 'kacheln' => 0];
-        }
-
-        $ordner  = self::planDir($floor) . self::ROH;
-        $breite  = imagesx($bild);
-        $hoehe   = imagesy($bild);
-        $spalten = (int) ceil($breite / self::KACHEL);
-        $anzahl  = 0;
-
-        for ($x = 0; $x < $spalten; $x++) {
-            $links  = $x * self::KACHEL;
-            $kachel = self::leer('png');
-            imagecopy(
-                $kachel,
-                $bild,
-                0,
-                0,
-                $links,
-                0,
-                min(self::KACHEL, $breite - $links),
-                min(self::KACHEL, $hoehe)
-            );
-            // Die oberste Stufe steht noch nicht fest – erst beim
-            // Abschließen ist die Gesamtzahl der Zeilen bekannt. Bis
-            // dahin liegen die Kacheln unter Stufe 0 im Zwischenlager.
-            self::schreiben($kachel, $ordner, 0, $x, $zeile, 'png');
-            imagedestroy($kachel);
-            $anzahl++;
-        }
-        imagedestroy($bild);
-
-        return ['ok' => true, 'message' => $anzahl . ' Kacheln abgelegt.', 'kacheln' => $anzahl];
-    }
-
-    /**
-     * Die hochgeladenen Streifen zur fertigen Pyramide machen.
-     *
-     * Der Browser liefert nur die oberste Stufe; alles darunter rechnet
-     * der Server aus dem, was schon auf der Platte liegt – dafür braucht
-     * es kein PDF-Werkzeug, nur gd.
-     *
-     * @return array{ok:bool,message:string,kacheln:int,meta:?array}
-     */
-    public static function kachelnAbschliessen(array $floor, int $breite, int $hoehe): array
-    {
-        $start  = microtime(true);
-        $quelle = SiteService::planPath($floor);
-        if ($quelle === null) {
-            return ['ok' => false, 'message' => 'Kein Grundriss hinterlegt.', 'kacheln' => 0, 'meta' => null];
-        }
-        if (!extension_loaded('gd')) {
-            return ['ok' => false, 'message' => self::GD_FEHLT, 'kacheln' => 0, 'meta' => null];
-        }
-        if ($breite < self::KACHEL || $hoehe < self::KACHEL) {
-            return ['ok' => false, 'message' => 'Die gemeldeten Maße ergeben keinen Plan.', 'kacheln' => 0, 'meta' => null];
-        }
-        if ($breite > self::MAX_KANTE || $hoehe > self::MAX_KANTE || $breite * $hoehe > self::MAX_PIXEL) {
-            return ['ok' => false, 'message' => 'Der Plan wäre größer als erlaubt.', 'kacheln' => 0, 'meta' => null];
-        }
-
-        $roh     = self::planDir($floor) . self::ROH;
-        $ordner  = self::planDir($floor);
-        $maxZ    = self::maxZoom($breite, $hoehe);
-        $spalten = (int) ceil($breite / self::KACHEL);
-        $zeilen  = (int) ceil($hoehe / self::KACHEL);
-
-        // Ältere Kacheln müssen weg, sonst mischen sich zwei Auflösungen.
-        foreach (glob($ordner . '/[0-9]*', GLOB_ONLYDIR) ?: [] as $alt) {
-            self::verzeichnisWeg($alt);
-        }
-
-        // Das Zwischenlager an seinen Platz bringen: dort liegt alles
-        // unter Stufe 0, hier bekommt es die richtige Stufennummer.
-        $anzahl = 0;
-        for ($x = 0; $x < $spalten; $x++) {
-            for ($y = 0; $y < $zeilen; $y++) {
-                $her = self::pfad($roh, 0, $x, $y, 'png');
-                if (!is_file($her)) {
-                    continue;
-                }
-                $hin = self::pfad($ordner, $maxZ, $x, $y, 'png');
-                if (!is_dir(dirname($hin))) {
-                    mkdir(dirname($hin), 0775, true);
-                }
-                if (@rename($her, $hin)) {
-                    $anzahl++;
-                }
-            }
-        }
-
-        self::verzeichnisWeg($roh);
-
-        if ($anzahl === 0) {
-            return ['ok' => false, 'message' => 'Es kam keine einzige Kachel an.', 'kacheln' => 0, 'meta' => null];
-        }
-
-        $anzahl += self::pyramideUnten($ordner, $spalten, $zeilen, $maxZ, 'png');
-
-        $meta = [
-            'breite'   => $breite,
-            'hoehe'    => $hoehe,
-            'max_zoom' => $maxZ,
-            'kachel'   => self::KACHEL,
-            'format'   => 'png',
-            'kacheln'  => $anzahl,
-            'quelle'   => basename($quelle),
-            'seite'    => max(1, (int) ($floor['plan_page'] ?? 1)),
-            'herkunft' => 'browser',
-            'gebaut'   => gmdate('c'),
-            'dauer_ms' => (int) round((microtime(true) - $start) * 1000),
-        ];
-        file_put_contents(self::metaPfad($floor), json_encode($meta, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));
-
-        return [
-            'ok'      => true,
-            'message' => sprintf('%d Kacheln in %d Stufen aus dem Browser übernommen.', $anzahl, $maxZ + 1),
-            'kacheln' => $anzahl,
-            'meta'    => $meta,
-        ];
-    }
-
-    /**
-     * Lohnt sich ein zweiter Durchgang?
-     *
-     * Ja, wenn poppler inzwischen da ist und mehr herausholen würde als
-     * das, was vorliegt – etwa weil der Plan seinerzeit im Browser
-     * gerechnet wurde und dort an dessen Grenze hing.
-     *
-     * Bei einem Plan, der schon auf der Zielauflösung liegt, wird nichts
-     * angeboten. Ein Knopf, der dasselbe Ergebnis noch einmal rechnet,
-     * ist schlimmer als keiner.
-     */
-    private static function gehtSchaerfer(array $floor, array $meta): bool
-    {
-        $pfad = SiteService::planPath($floor);
-        if ($pfad === null || strtolower(pathinfo($pfad, PATHINFO_EXTENSION)) !== 'pdf') {
-            return false;
-        }
-        if (!PdfRasterService::verfuegbar()) {
-            return false;
-        }
-
-        $ziel = self::zielKante($pfad, max(1, (int) ($floor['plan_page'] ?? 1)));
-
-        // Ein Zehntel Unterschied merkt niemand – erst darüber lohnt es.
-        return (int) $meta['breite'] < (int) ($ziel * 0.9);
-    }
-
-    /**
-     * Auf welche Kantenlänge ein PDF gerechnet wird.
-     *
-     * Maßstab ist die Seitengröße in Punkt: etwa 5 Pixel je Punkt, also
-     * rund 360 dpi. Bei A3 kommen so knapp 6000 px heraus, bei A0 das
-     * Doppelte – begrenzt durch MAX_KANTE und die Flächengrenze.
-     */
-    public static function zielKante(string $pdf, int $seite): int
-    {
-        $punkte = PdfRasterService::punkte($pdf, $seite);
-        if ($punkte === null) {
-            return PdfRasterService::KANTE;
-        }
-
-        $langeKante = max($punkte['breite'], $punkte['hoehe']);
-        $kante      = max(2048, min(self::MAX_KANTE, (int) round($langeKante * 5)));
-
-        /*
-         * Die Fläche im Blick behalten: ein langes schmales Format darf
-         * nicht über die Grenze laufen, nur weil eine Kante kurz ist.
-         *
-         * Halbiert wurde hier früher, und das kostete eine Zoomstufe.
-         * Gemessen an einem A0-Plan: 12288 px ergäben 107 Megapixel, also
-         * zu viel – halbiert kamen 6144 px und 27 Megapixel heraus, bei
-         * einer Grenze von 50. Der Browser rechnete denselben Plan
-         * unterdessen auf 8192 px. Es wird deshalb nicht halbiert, sondern
-         * genau so weit heruntergerechnet, wie die Fläche es zulässt.
-         */
-        $verhaeltnis = min($punkte['breite'], $punkte['hoehe']) / max($langeKante, 1);
-        if ($verhaeltnis > 0) {
-            $grenze = (int) floor(sqrt(self::MAX_PIXEL / $verhaeltnis));
-            $kante  = max(2048, min($kante, $grenze));
-        }
-
-        return $kante;
     }
 
     /** Ein Verzeichnis samt Inhalt entfernen – nur innerhalb der Kachelordner. */
@@ -1256,46 +1392,168 @@ final class PlanTileService
     }
 
     /**
-     * Die Stufen unterhalb der obersten, je vier Kacheln auf eine.
+     * Die Stufen unterhalb von $vonZ bis 0, je vier Kacheln auf eine
+     * (stufeMitteln()). $raster bekommt Spalten und Zeilen jeder Stufe.
      *
      * Gelesen wird ausschließlich, was bereits auf der Platte liegt –
      * deshalb sind nie mehr als fünf Kacheln gleichzeitig im Speicher,
      * unabhängig davon, wie groß der Plan ist.
+     *
+     * @param array<int,array{int,int}> $raster
      */
-    private static function pyramideUnten(string $ordner, int $spalten, int $zeilen, int $maxZ, string $format): int
+    private static function pyramideUnten(string $ordner, array &$raster, int $vonZ, string $format): int
     {
         $anzahl = 0;
-        for ($z = $maxZ - 1; $z >= 0; $z--) {
-            $spalten = (int) ceil($spalten / 2);
-            $zeilen  = (int) ceil($zeilen / 2);
-            for ($x = 0; $x < $spalten; $x++) {
-                for ($y = 0; $y < $zeilen; $y++) {
-                    $gross = self::leer($format, self::KACHEL * 2);
-                    foreach ([[0, 0], [1, 0], [0, 1], [1, 1]] as [$dx, $dy]) {
-                        $teil = self::lesen($ordner, $z + 1, $x * 2 + $dx, $y * 2 + $dy, $format);
-                        if ($teil === null) {
-                            continue;
-                        }
-                        imagecopy($gross, $teil, $dx * self::KACHEL, $dy * self::KACHEL, 0, 0, self::KACHEL, self::KACHEL);
-                        imagedestroy($teil);
+        for ($z = $vonZ - 1; $z >= 0; $z--) {
+            $anzahl += self::stufeMitteln($ordner, $z, $raster[$z + 1], $format);
+            $raster[$z] = [(int) ceil($raster[$z + 1][0] / 2), (int) ceil($raster[$z + 1][1] / 2)];
+        }
+        return $anzahl;
+    }
+
+    /**
+     * Stufe $z aus der Stufe darüber ($oben: deren Spalten und Zeilen): je
+     * vier Kacheln auf eine, als genaues Mittel aus 2 × 2 Pixeln.
+     *
+     * Bis Fassung 1 verkleinerte das imagescale(IMG_BICUBIC_FIXED). Das
+     * tastet mit einem B-Spline an geraden Pixeln ab: eine Linie von einem
+     * Pixel blieb auf gerader Spalte mit 68 % Kontrast, auf ungerader wurde
+     * sie zu zwei Pixeln mit je 16 % – eine Stufe tiefer fiel so jede
+     * zweite Haarlinie aus, Schrägen wurden zur Perlschnur. Dazu sank Weiß
+     * je Stufe um drei Werte (Stufe 0: 237), und außerhalb der Seite blieb
+     * ein Schleier (Alpha 115 statt 127). imagecopyresampled() bei genau
+     * der halben Größe ist ein Flächenmittel (höchstens 0,5 daneben) und
+     * war gemessen sogar schneller (4,3 statt 5,1 s für 50 Megapixel).
+     * Durchsichtige Pixel zählen dabei nach ihrer Deckung.
+     *
+     * @param array{int,int} $oben
+     */
+    private static function stufeMitteln(string $ordner, int $z, array $oben, string $format): int
+    {
+        $spalten = (int) ceil($oben[0] / 2);
+        $zeilen  = (int) ceil($oben[1] / 2);
+        $anzahl  = 0;
+        for ($x = 0; $x < $spalten; $x++) {
+            for ($y = 0; $y < $zeilen; $y++) {
+                $gross = self::leer($format, self::KACHEL * 2);
+                imagealphablending($gross, false);
+                foreach ([[0, 0], [1, 0], [0, 1], [1, 1]] as [$dx, $dy]) {
+                    $teil = self::lesen($ordner, $z + 1, $x * 2 + $dx, $y * 2 + $dy, $format);
+                    if ($teil === null) {
+                        continue;
                     }
-                    $klein = imagescale($gross, self::KACHEL, self::KACHEL, IMG_BICUBIC_FIXED);
-                    imagedestroy($gross);
-                    if ($klein instanceof \GdImage) {
-                        self::schreiben($klein, $ordner, $z, $x, $y, $format);
-                        imagedestroy($klein);
-                        $anzahl++;
-                    }
+                    imagecopy($gross, $teil, $dx * self::KACHEL, $dy * self::KACHEL, 0, 0, self::KACHEL, self::KACHEL);
+                    imagedestroy($teil);
                 }
+                $klein = imagecreatetruecolor(self::KACHEL, self::KACHEL);
+                imagealphablending($klein, false);
+                imagesavealpha($klein, true);
+                imagecopyresampled($klein, $gross, 0, 0, 0, 0, self::KACHEL, self::KACHEL, self::KACHEL * 2, self::KACHEL * 2);
+                imagedestroy($gross);
+                self::schreiben($klein, $ordner, $z, $x, $y, $format);
+                imagedestroy($klein);
+                $anzahl++;
             }
         }
         return $anzahl;
     }
 
+    /**
+     * Ist das Bild ein Scan oder Foto? Dann werden die Kacheln JPEG –
+     * verlustfrei wären sie drei- bis fünfmal so groß (gemessen: Scan als
+     * PNG 74–78 MB, als JPEG 22–24 MB) und als WebP zehnmal so langsam.
+     *
+     * Die Probe: bis zu zwölf Kacheln, über das Bild verteilt, als PNG – im
+     * Mittel über FOTO_BYTES ist es einer (Papierrauschen hält jede Kachel
+     * groß, ein sauberer CAD-Plan bleibt bei wenigen KB).
+     */
+    private static function fotoartig(\GdImage $bild): bool
+    {
+        $spalten = intdiv(imagesx($bild), self::KACHEL);
+        $zeilen  = intdiv(imagesy($bild), self::KACHEL);
+        if ($spalten === 0 || $zeilen === 0) {
+            return false;
+        }
+        $bytes = $proben = 0;
+        $quer = min(4, $spalten);
+        $hoch = min(3, $zeilen);
+        for ($i = 0; $i < $quer; $i++) {
+            for ($j = 0; $j < $hoch; $j++) {
+                $x = intdiv((2 * $i + 1) * $spalten, 2 * $quer);
+                $y = intdiv((2 * $j + 1) * $zeilen, 2 * $hoch);
+                $kachel = imagecreatetruecolor(self::KACHEL, self::KACHEL);
+                imagecopy($kachel, $bild, 0, 0, $x * self::KACHEL, $y * self::KACHEL, self::KACHEL, self::KACHEL);
+                ob_start();
+                imagepng($kachel, null, 6);
+                $bytes += strlen((string) ob_get_clean());
+                imagedestroy($kachel);
+                $proben++;
+            }
+        }
+        return $bytes / $proben > self::FOTO_BYTES;
+    }
+
+    /**
+     * Das verlustfreie Kachelformat: WebP, wenn gd es verlustfrei schreibt
+     * – gemessen 45–49 % der Bytes von PNG, bei gleichen Pixeln –, sonst PNG.
+     *
+     * Ob es das tut, zeigt ein kleines Muster mit Farben und Alpha, einmal
+     * je Prozess: Eine libgd, die IMG_WEBP_LOSSLESS nicht kennt, nähme die
+     * Zahl als Qualität und schriebe verlustbehaftet.
+     */
+    public static function verlustfrei(): string
+    {
+        static $format = null;
+        if ($format !== null) {
+            return $format;
+        }
+        $format = 'png';
+        if (!defined('IMG_WEBP_LOSSLESS') || !function_exists('imagewebp') || !function_exists('imagecreatefromwebp')
+            || empty(gd_info()['WebP Support'])) {
+            return $format;
+        }
+        $muster = imagecreatetruecolor(16, 16);
+        imagealphablending($muster, false);
+        imagesavealpha($muster, true);
+        for ($y = 0; $y < 16; $y++) {
+            for ($x = 0; $x < 16; $x++) {
+                imagesetpixel($muster, $x, $y, (($x * $y * 7) % 128) << 24 | (($x * 37 + $y * 11) % 256) << 16 | (($x * 5 + $y * 71) % 256) << 8 | (($x ^ $y) * 13 % 256));
+            }
+        }
+        ob_start();
+        $ok = @imagewebp($muster, null, IMG_WEBP_LOSSLESS);
+        $daten = (string) ob_get_clean();
+        $zurueck = $ok && $daten !== '' ? @imagecreatefromstring($daten) : false;
+        if (!$zurueck instanceof \GdImage) {
+            return $format;
+        }
+        for ($y = 0; $y < 16; $y++) {
+            for ($x = 0; $x < 16; $x++) {
+                $a = imagecolorat($muster, $x, $y);
+                $b = imagecolorat($zurueck, $x, $y);
+                // Ganz durchsichtig zählt nur das Alpha – die Farbe darunter sieht keiner.
+                if ($a >> 24 !== $b >> 24 || ($a >> 24 !== 127 && ($a & 0xFFFFFF) !== ($b & 0xFFFFFF))) {
+                    return $format;
+                }
+            }
+        }
+        return $format = 'webp';
+    }
+
+    /** Mime-Typ einer Kachel im Format $format. */
+    public static function mime(string $format): string
+    {
+        return match ($format) {
+            'png'   => 'image/png',
+            'webp'  => 'image/webp',
+            default => 'image/jpeg',
+        };
+    }
+
     private static function leer(string $format, int $kante = self::KACHEL): \GdImage
     {
         $bild = imagecreatetruecolor($kante, $kante);
-        if ($format === 'png') {
+        if ($format !== 'jpg') {
             // Durchsichtige Pläne bleiben durchsichtig.
             imagealphablending($bild, false);
             imagesavealpha($bild, true);
@@ -1312,19 +1570,24 @@ final class PlanTileService
         return $ordner . '/' . $z . '/' . $x . '/' . $y . '.' . $format;
     }
 
-    private static function schreiben(\GdImage $bild, string $ordner, int $z, int $x, int $y, string $format): void
+    /** Eine Kachel schreiben; zurück kommen ihre Bytes (0: nicht geschrieben). */
+    private static function schreiben(\GdImage $bild, string $ordner, int $z, int $x, int $y, string $format): int
     {
         $ziel = self::pfad($ordner, $z, $x, $y, $format);
         $dir  = dirname($ziel);
         if (!is_dir($dir)) {
             mkdir($dir, 0775, true);
         }
-        if ($format === 'png') {
+        if ($format !== 'jpg') {
             imagesavealpha($bild, true);
-            imagepng($bild, $ziel, 6);
-        } else {
-            imagejpeg($bild, $ziel, 85);
         }
+        $ok = match ($format) {
+            'png'   => imagepng($bild, $ziel, 6),
+            'webp'  => imagewebp($bild, $ziel, IMG_WEBP_LOSSLESS),
+            default => imagejpeg($bild, $ziel, self::JPEG_QUALITAET),
+        };
+        clearstatcache(true, $ziel);
+        return $ok ? (int) @filesize($ziel) : 0;
     }
 
     private static function lesen(string $ordner, int $z, int $x, int $y, string $format): ?\GdImage
@@ -1333,15 +1596,72 @@ final class PlanTileService
         if (!is_file($pfad)) {
             return null;
         }
-        $bild = $format === 'png' ? @imagecreatefrompng($pfad) : @imagecreatefromjpeg($pfad);
+        $bild = match ($format) {
+            'png'   => @imagecreatefrompng($pfad),
+            'webp'  => @imagecreatefromwebp($pfad),
+            default => @imagecreatefromjpeg($pfad),
+        };
         if (!$bild instanceof \GdImage) {
             return null;
         }
-        if ($format === 'png') {
+        if ($format !== 'jpg') {
             imagealphablending($bild, false);
             imagesavealpha($bild, true);
         }
         return $bild;
+    }
+
+    /**
+     * kacheln.json schreiben – über eine Zwischendatei und rename(): so
+     * liest die Karte nie ein halbes (direkt geschrieben war gemessen jede
+     * fünfzigste Lesung unlesbar, während gerade geschrieben wurde).
+     */
+    private static function metaSchreiben(array $floor, array $meta): void
+    {
+        $pfad = self::metaPfad($floor);
+        $zwischen = $pfad . '.' . bin2hex(random_bytes(4)) . '.tmp';
+        if (@file_put_contents($zwischen, json_encode($meta, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES)) === false || !@rename($zwischen, $pfad)) {
+            @unlink($zwischen);
+        }
+    }
+
+    /**
+     * Was nach einem Bau nicht mehr zur Pyramide gehört: Stufen über der
+     * obersten, Kacheln außerhalb des Rasters einer Stufe ($raster: Spalten
+     * und Zeilen je Stufe) und in einem anderen Format – Reste einer
+     * früheren Pyramide derselben Datei. Angefasst werden nur Namen, die
+     * das Kacheln selbst vergibt (Stufe/Spalte/Zeile.Format).
+     *
+     * @param array<int,array{int,int}> $raster
+     */
+    private static function ueberzaehligeWeg(string $ordner, array $raster, string $format): void
+    {
+        foreach (scandir($ordner) ?: [] as $stufe) {
+            $pfadZ = $ordner . '/' . $stufe;
+            if (preg_match('/^\d{1,2}$/', $stufe) !== 1 || !is_dir($pfadZ) || is_link($pfadZ)) {
+                continue;
+            }
+            if (!isset($raster[(int) $stufe])) {
+                self::verzeichnisWeg($pfadZ);
+                continue;
+            }
+            [$spalten, $zeilen] = $raster[(int) $stufe];
+            foreach (scandir($pfadZ) ?: [] as $spalte) {
+                $pfadX = $pfadZ . '/' . $spalte;
+                if (preg_match('/^\d+$/', $spalte) !== 1 || !is_dir($pfadX) || is_link($pfadX)) {
+                    continue;
+                }
+                if ((int) $spalte >= $spalten) {
+                    self::verzeichnisWeg($pfadX);
+                    continue;
+                }
+                foreach (scandir($pfadX) ?: [] as $datei) {
+                    if (preg_match('/^(\d+)\.(png|jpg|webp)$/', $datei, $m) === 1 && ((int) $m[1] >= $zeilen || $m[2] !== $format)) {
+                        @unlink($pfadX . '/' . $datei);
+                    }
+                }
+            }
+        }
     }
 
     /** Bis zu dieser Größe taugt ein ungekachelter Plan als Vorschau am Stück. */
@@ -1388,7 +1708,7 @@ final class PlanTileService
         if (!is_file($pfad)) {
             return null;
         }
-        return ['pfad' => $pfad, 'mime' => $format === 'png' ? 'image/png' : 'image/jpeg'];
+        return ['pfad' => $pfad, 'mime' => self::mime($format)];
     }
 
     public static function aufraeumen(array $floor): void
@@ -1410,9 +1730,31 @@ final class PlanTileService
     // ------------------------------------------------------- Karte beliefern
 
     /**
+     * Wie die Pyramide gerechnet ist – aus kacheln.json, ohne die Datei zu
+     * lesen (ein Kartenaufruf fragt weder pdfinfo noch pdfimages):
+     * Fassung, Qualität, ob sie veraltet ist (veraltet()) und ob „fein“
+     * sie deutlich schärfer machte (feinMoeglich()). Ließe sich nichts
+     * gewinnen, wird nichts angeboten – ein Knopf, der dasselbe Ergebnis
+     * noch einmal rechnet, ist schlimmer als keiner.
+     *
+     * @return array{fassung:int,qualitaet:string,veraltet:bool,fein_moeglich:bool}
+     */
+    public static function gerechnet(array $meta): array
+    {
+        return [
+            'fassung'       => self::fassung($meta),
+            'qualitaet'     => self::qualitaet($meta['qualitaet'] ?? null),
+            'veraltet'      => self::veraltet($meta),
+            'fein_moeglich' => self::feinMoeglich($meta),
+        ];
+    }
+
+    /**
      * Alles, was die Karte im Browser über diesen Plan wissen muss.
      *
-     * @return array{art:string,url:string,breite:int,hoehe:int,seite:int,max_zoom:int,zusatz:int,kachel_url:?string,kachel:int}|null
+     * Bei Kacheln dazu, wie sie gerechnet sind (gerechnet()).
+     *
+     * @return array{art:string,url:string,breite:int,hoehe:int,seite:int,max_zoom:int,zusatz:int,kachel_url:?string,kachel:int,fassung?:int,qualitaet?:string,veraltet?:bool,fein_moeglich?:bool}|null
      */
     public static function quelle(array $floor): ?array
     {
@@ -1440,12 +1782,7 @@ final class PlanTileService
                     'zusatz'     => 2,
                     'kachel_url' => '/grundriss/' . $id . '/kachel/{z}/{x}/{y}',
                     'kachel'     => (int) ($meta['kachel'] ?? self::KACHEL),
-                    'herkunft'   => (string) ($meta['herkunft'] ?? 'server'),
-                    // Ließe sich der Plan noch feiner rechnen? Nur dann
-                    // wird es angeboten – ein Knopf, der dasselbe Ergebnis
-                    // noch einmal rechnet, ist schlimmer als keiner.
-                    'schaerfer'  => self::gehtSchaerfer($floor, $meta),
-                ];
+                ] + self::gerechnet($meta);
             }
 
             /*
@@ -1507,7 +1844,7 @@ final class PlanTileService
                 'zusatz'     => 2,
                 'kachel_url' => '/grundriss/' . $id . '/kachel/{z}/{x}/{y}',
                 'kachel'     => (int) ($meta['kachel'] ?? self::KACHEL),
-            ];
+            ] + self::gerechnet($meta);
         }
 
         return [

@@ -186,6 +186,55 @@ try {
     }
     gleich(PlanTileService::zeilenJeStreifen(5962, 33), 10, 'A0 hochkant (5962 px): zehn Kachelzeilen je Aufruf statt einer');
 
+    // ------------------------------------------------ Schärfe: auf welche Größe eine Seite gerechnet wird
+    // Fassung 1 deckelte jeden Plan bei 50 Megapixeln: A0 kam auf 8 386 px
+    // (179 dpi), ein Geländeplan von 2 × 1 m auf 9 960 px (126 dpi).
+    $a0 = ['breite' => 2383.94, 'hoehe' => 3370.39];
+    $a0v = $a0['hoehe'] / $a0['breite'];
+    $z = PlanTileService::ziel($a0v, 'standard', $a0, 0.0);
+    pruefe($z['kante'] >= 16_800 && $z['breite'] * $z['hoehe'] <= 200_000_000 && $z['grenze'] === 'flaeche' && $z['kante_ziel'] === 16_852,
+        sprintf('A0 (Vektor): %d × %d px, fast die vollen 5 px/pt (%d) – Fassung 1: 8 386', $z['breite'], $z['hoehe'], $z['kante_ziel']));
+    $f = PlanTileService::ziel($a0v, 'fein', $a0, 0.0);
+    gleich([$f['kante'], $f['grenze'], $z['kanten']], [16_852, null, ['standard' => $z['kante'], 'fein' => 16_852]], 'A0 fein: volle 5 px/pt');
+    pruefe(!PlanTileService::feinMoeglich(['kante' => $z['kante'], 'kanten' => $z['kanten'], 'qualitaet' => 'standard']),
+        'A0: „fein“ wird nicht angeboten – es brächte keine 0,5 % mehr');
+    $gelaende = ['breite' => 5669.29, 'hoehe' => 2834.65];
+    $g = PlanTileService::ziel(0.5, 'standard', $gelaende, 0.0);
+    $gf = PlanTileService::ziel(0.5, 'fein', $gelaende, 0.0);
+    pruefe($g['kante'] === 20_000 && $gf['kante'] >= 28_000 && $gf['breite'] * $gf['hoehe'] <= 400_000_000
+        && PlanTileService::feinMoeglich(['kante' => $g['kante'], 'kanten' => $g['kanten'], 'qualitaet' => 'standard'])
+        && !PlanTileService::feinMoeglich(['kante' => $gf['kante'], 'kanten' => $gf['kanten'], 'qualitaet' => 'fein'])
+        && !PlanTileService::feinMoeglich(['kante' => $g['kante'], 'kanten' => $g['kanten'], 'qualitaet' => 'standard', 'grenze' => 'zeit']),
+        sprintf('Gelände 2 × 1 m: standard %d px (254 dpi), fein %d px (360 dpi) – angeboten nur bei standard und nicht nach Zeitnot', $g['kante'], $gf['kante']));
+    $a3 = PlanTileService::ziel(841.89 / 1190.55, 'standard', ['breite' => 1190.55, 'hoehe' => 841.89], 0.0);
+    gleich([$a3['kante'], $a3['grenze']], [5953, null], 'A3: 5 px/pt ohne Grenze');
+    // Ein eingebetteter Scan: poppler rechnet ihn bei jedem Aufruf auf die
+    // ganze Ausgabegröße hoch (3 Byte je Pixel) – die Seite wird so groß,
+    // dass das Bild unter MAX_BILDPIXEL bleibt (gemessen 295 MB).
+    $s = PlanTileService::ziel($a0v, 'fein', $a0, $a0['breite'] * $a0['hoehe']);
+    pruefe($s['grenze'] === 'bild' && $s['breite'] * $s['hoehe'] <= PlanTileService::MAX_BILDPIXEL && $s['breite'] * $s['hoehe'] > 79_000_000
+        && $s['kanten'] === ['standard' => $s['kante'], 'fein' => $s['kante']],
+        sprintf('Scan als A0-PDF: %d × %d px, so groß, dass poppler das Bild auf höchstens 80 Megapixel rechnet – auch mit „fein“', $s['breite'], $s['hoehe']));
+    $halb = PlanTileService::ziel($a0v, 'standard', $a0, $a0['breite'] * $a0['hoehe'] / 4);
+    pruefe($halb['grenze'] === 'flaeche', 'Bild auf einem Viertel der Seite: es bleibt bei der Fläche der Qualität');
+    $ohne = PlanTileService::ziel($a0v, 'standard', $a0, null);
+    pruefe($ohne['breite'] * $ohne['hoehe'] <= PlanTileService::MAX_PIXEL && $ohne['kante'] > 8_300 && $ohne['grenze'] === 'bild',
+        sprintf('ohne pdfimages (Bilder unbekannt): wie Fassung 1 höchstens 50 Megapixel (%d px)', $ohne['kante']));
+    $h = PlanTileService::ziel(8000 / 12000, 'fein', null, null, ['breite' => 12000, 'hoehe' => 8000]);
+    $h2 = PlanTileService::ziel(7000 / 9000, 'standard', null, null, ['breite' => 9000, 'hoehe' => 7000]);
+    pruefe($h['breite'] * $h['hoehe'] <= PlanTileService::MAX_BILDPIXEL && $h['breite'] >= 10_900 && $h['grenze'] === 'bild'
+        && [$h2['breite'], $h2['hoehe'], $h2['grenze']] === [9000, 7000, null],
+        sprintf('Bild über poppler: 96 Megapixel auf %d × %d, 63 Megapixel in Originalgröße (Fassung 1: beide auf 50)', $h['breite'], $h['hoehe']));
+    // Hochrechnung nach dem ersten Streifen (Ausweichen auf eine kleinere Fläche)
+    gleich([PlanTileService::zuTeuer(10.0, 91, 1, 1, 1, null), PlanTileService::zuTeuer(10.0, 90, 30_000, 10, 100_000, 2e9),
+        PlanTileService::zuTeuer(1.0, 10, 30_000, 10, 100_000, 1e9)], ['zeit', null, 'platte'],
+        'zu teuer: über 15 Minuten hochgerechnet, oder auf der Platte nicht das Dreifache frei');
+    gleich([PlanTileService::kleineDirekt(0.0, 10.0, 6, 60.0), PlanTileService::kleineDirekt(0.0, 11.0, 6, 60.0), PlanTileService::kleineDirekt(50.0, 11.0, 1, 60.0)],
+        [true, false, false], 'kleine Stufen direkt, solange die Zeit dafür reicht (mindestens 60 s)');
+    pruefe(PlanTileService::veraltet(['breite' => 1, 'max_zoom' => 0]) && PlanTileService::fassung(['breite' => 1]) === 1
+        && !PlanTileService::veraltet(['fassung' => PlanTileService::FASSUNG]) && PlanTileService::FASSUNG >= 2,
+        'kacheln.json ohne Fassung: Fassung 1, veraltet');
+
     // ------------------------------------------------ BildPdf: Kopf, Hülle, Farben
     pruefPngKopf($tmp . '/kopf.png', 9000, 7000);
     $p = BildPdf::pruefen($tmp . '/kopf.png');
@@ -220,6 +269,90 @@ try {
             }
             pruefe($ok && $rc === 0 && $abweichung === 0, 'BildPdf: PNG (' . $art . ') unverändert eingehüllt, poppler liest dieselben Farben (Abweichung ' . $abweichung . ')');
         }
+    }
+
+    // ------------------------------------------------ Pyramide aus einem Bild (gd): Mittel, Formate, Fassung
+    /** Ein Bild als Plan einer neuen Etage dieses Standorts. */
+    $bildEtage = static function (GdImage $bild, string $endung, string $name) use ($siteId, $tmp): array {
+        $pfad = $tmp . '/' . $name . '.' . $endung;
+        $endung === 'png' ? imagepng($bild, $pfad, 6) : imagejpeg($bild, $pfad, 95);
+        $id = SiteService::saveFloor(null, ['site_id' => $siteId, 'name' => $name]);
+        $datei = 'site' . $siteId . '_' . bin2hex(random_bytes(8)) . '.' . $endung;
+        rename($pfad, SiteService::planDir() . '/' . $datei);
+        Database::update('floors', $id, ['plan_file' => $datei, 'plan_type' => 'image', 'plan_page' => 1]);
+        return SiteService::floor($id);
+    };
+    if (extension_loaded('gd')) {
+        // Linien von einem Pixel, auf gerader wie ungerader Spalte, auf
+        // weißem Papier. Fassung 1 verkleinerte bikubisch: eine Stufe tiefer
+        // blieb jede zweite Linie mit 16 % Kontrast (statt 50 %), Weiß sank
+        // je Stufe um drei Werte, außerhalb des Plans blieb ein Schleier.
+        $bild = imagecreatetruecolor(2000, 1500);
+        imagefilledrectangle($bild, 0, 0, 1999, 1499, 0xFFFFFF);
+        $spalten = range(101, 1900, 37);
+        foreach ($spalten as $x) {
+            imageline($bild, $x, 60, $x, 1440, 0x000000);
+        }
+        $linien = $bildEtage($bild, 'png', 'Linien');
+        $b = PlanTileService::bauen($linien, true);
+        $meta = (array) ($b['meta'] ?? []);
+        $fmt = (string) ($meta['format'] ?? '');
+        $ordnerL = PlanTileService::planDir($linien);
+        pruefe($b['ok'] && $fmt === PlanTileService::verlustfrei() && in_array($fmt, ['png', 'webp'], true)
+            && ($meta['fassung'] ?? null) === PlanTileService::FASSUNG && ($meta['qualitaet'] ?? '') === 'standard' && (int) ($meta['max_zoom'] ?? 0) === 3,
+            'CAD-Bild (PNG): verlustfreie Kacheln (' . $fmt . '), kacheln.json mit Fassung ' . PlanTileService::FASSUNG);
+        $oben = pruefStufe($ordnerL, 2, $fmt);
+        $sichtbar = array_map(static fn (int $x): float => pruefLinieSichtbar($oben, $x / 2, true, 40, 700), $spalten);
+        pruefe(min($sichtbar) >= 0.95, sprintf('eine Stufe tiefer: jede Linie zu sehen, auf gerader wie ungerader Spalte (die schwächste zu %d %%)', round(100 * min($sichtbar))));
+        $papier = $aussen = [];
+        for ($zz = 2; $zz >= 0; $zz--) {
+            $stufe = pruefStufe($ordnerL, $zz, $fmt);
+            $papier[$zz] = imagecolorat($stufe, intdiv(40, 2 ** (3 - $zz)), intdiv(700, 2 ** (3 - $zz)));
+            $aussen[$zz] = imagecolorat($stufe, intdiv(2020, 2 ** (3 - $zz)), intdiv(1520, 2 ** (3 - $zz))) >> 24;
+        }
+        gleich([$papier, $aussen], [[2 => 0xFFFFFF, 1 => 0xFFFFFF, 0 => 0xFFFFFF], [2 => 127, 1 => 127, 0 => 127]],
+            'Papier bleibt auf allen Stufen weiß (255), außerhalb des Plans ganz durchsichtig');
+        gleich([PlanTileService::kachel($linien, 0, 0, 0)['mime'] ?? null, PlanTileService::vorschau($linien)['mime'] ?? null],
+            [PlanTileService::mime($fmt), PlanTileService::mime($fmt)], 'Kachel und Vorschau mit dem Mime-Typ des Formats');
+        $q = PlanTileService::quelle($linien);
+        gleich([$q['fassung'] ?? null, $q['veraltet'] ?? null, $q['qualitaet'] ?? null], [PlanTileService::FASSUNG, false, 'standard'], 'Karte: Fassung, nicht veraltet');
+        // Eine Pyramide von vorher (ohne Fassung) bleibt nutzbar, ist aber veraltet.
+        $altMeta = $meta;
+        unset($altMeta['fassung'], $altMeta['qualitaet']);
+        file_put_contents(PlanTileService::metaPfad($linien), json_encode($altMeta));
+        $q = PlanTileService::quelle($linien);
+        gleich([$q['art'] ?? null, $q['fassung'] ?? null, $q['veraltet'] ?? null], ['kacheln', 1, true], 'Pyramide ohne Fassung: Kacheln wie bisher, als veraltet gemeldet');
+
+        // Ein JPEG bleibt JPEG – jetzt in Qualität 92 (Fassung 1: 85).
+        $foto = imagecreatetruecolor(1800, 1200);
+        imagefilledrectangle($foto, 0, 0, 1799, 1199, 0xF4F1EA);
+        for ($i = 0; $i < 60; $i++) {
+            imagefilledellipse($foto, 30 * $i, 20 * $i, 90, 60, 0x204080 + $i);
+        }
+        $jpeg = $bildEtage($foto, 'jpg', 'Foto');
+        $b = PlanTileService::bauen($jpeg, true);
+        $dc = pruefJpegDc(PlanTileService::planDir($jpeg) . '/' . (int) ($b['meta']['max_zoom'] ?? 0) . '/0/0.jpg');
+        gleich([$b['meta']['format'] ?? null, $dc], ['jpg', 3], 'JPEG-Quelle: Kacheln JPEG in Qualität 92 (Quantisierung DC 3, bei 85 wäre es 5)');
+
+        // Ein Scan als PNG wird JPEG – mit Transparenz bleibt er verlustfrei.
+        mt_srand(17);
+        $rauschen = imagecreatetruecolor(509, 509);
+        for ($y = 0; $y < 509; $y++) {
+            for ($x = 0; $x < 509; $x++) {
+                $grau = mt_rand(150, 255);
+                imagesetpixel($rauschen, $x, $y, ($grau << 16) | ($grau << 8) | max(0, $grau - 9));
+            }
+        }
+        $scan = imagecreatetruecolor(1700, 1200);
+        imagesettile($scan, $rauschen);
+        imagefilledrectangle($scan, 0, 0, 1699, 1199, IMG_COLOR_TILED);
+        $b = PlanTileService::bauen($bildEtage($scan, 'png', 'Scan'), true);
+        imagesavealpha($scan, true);
+        imagealphablending($scan, false);
+        imagefilledrectangle($scan, 0, 0, 300, 300, imagecolorallocatealpha($scan, 255, 255, 255, 127));
+        $b2 = PlanTileService::bauen($bildEtage($scan, 'png', 'Scan mit Alpha'), true);
+        gleich([$b['meta']['format'] ?? null, $b2['meta']['format'] ?? null], ['jpg', PlanTileService::verlustfrei()],
+            'Scan als PNG: JPEG-Kacheln; mit Transparenz verlustfrei');
     }
 
     // ------------------------------------------------ Wartung: was liegen blieb
@@ -291,14 +424,100 @@ try {
         $m = json_decode((string) shell_exec(escapeshellarg(PHP_BINARY) . ' -d memory_limit=512M ' . escapeshellarg(__DIR__ . '/hilfen/kacheln-messen.php')
             . ' ' . (int) ($etage['id'] ?? 0)), true) ?: [];
         $meta = (array) ($m['meta'] ?? []);
-        pruefe(($m['ok'] ?? false) && ($meta['format'] ?? '') === 'png' && isset($meta['kante'])
-            && (int) $meta['breite'] * (int) $meta['hoehe'] <= PlanTileService::MAX_PIXEL && (int) $meta['breite'] > 8000,
-            sprintf('über poppler auf höchstens %d Megapixel gerechnet: %s', intdiv(PlanTileService::MAX_PIXEL, 1_000_000), (string) ($m['message'] ?? '?')));
+        // Fassung 1 rechnete es auf 50 Megapixel herunter (8 660 px breit).
+        pruefe(($m['ok'] ?? false) && ($meta['format'] ?? '') === PlanTileService::verlustfrei() && isset($meta['kante'])
+            && (int) $meta['breite'] * (int) $meta['hoehe'] <= PlanTileService::MAX_BILDPIXEL && (int) $meta['breite'] >= 10_900
+            && ($meta['grenze'] ?? '') === 'bild' && ($meta['direkt'] ?? null) === [],
+            sprintf('über poppler auf höchstens %d Megapixel gerechnet, verlustfrei, alle Stufen gemittelt: %s', intdiv(PlanTileService::MAX_BILDPIXEL, 1_000_000), (string) ($m['message'] ?? '?')));
         pruefe(($m['prozess_mb'] ?? null) === null || $m['prozess_mb'] < 300,
             sprintf('Speicher des PHP-Prozesses %s MB, unter 300 (mit gd über 500: 384 MB Bild, 96 MB Lesepuffer), memory_limit-Anteil %s MB, %s s',
                 (string) ($m['prozess_mb'] ?? '?'), (string) ($m['php_mb'] ?? '?'), (string) ($m['sekunden'] ?? '?')));
+        // pdftoppm rechnet das Bild auf die ganze Ausgabe hoch (3 Byte je
+        // Pixel): bei 80 Megapixeln gemessen 295 MB. Gezählt wird der größte
+        // Kindprozess – mindestens so viel, wie PHP beim Start hielt.
+        pruefe(($m['kind_mb'] ?? null) === null || $m['kind_mb'] < 340,
+            sprintf('Speicher von pdftoppm höchstens %s MB, unter 340', (string) ($m['kind_mb'] ?? '?')));
         $karte = $etage !== null ? PlanTileService::quelle(SiteService::floor((int) $etage['id'])) : null;
         gleich($karte['art'] ?? null, 'kacheln', 'die Karte bekommt Kacheln, nicht das ganze Bild');
+
+        // ------------------------------------------------ PDF: Haarlinien in der Übersicht, Qualität, Fassung
+        // Senkrechte und waagerechte Linien mit 0,1 pt, dicht genug, dass sie
+        // auf jeder Stufe gerade wie ungerade Pixel treffen. Gemittelt wäre
+        // eine Haarlinie zwei Stufen tiefer nicht mehr zu sehen; poppler
+        // zeichnet sie auf den kleinen Stufen wie ein PDF-Betrachter.
+        $xs = $ys = [];
+        for ($x = 40.0; $x < 560; $x += 6.7) {
+            $xs[] = $x;
+        }
+        for ($y = 40.0; $y < 360; $y += 5.9) {
+            $ys[] = $y;
+        }
+        $haarId = SiteService::saveFloor(null, ['site_id' => $siteId, 'name' => 'Haarlinien']);
+        $haarName = 'site' . $siteId . '_' . bin2hex(random_bytes(8)) . '.pdf';
+        pruefPdfHaarlinien(SiteService::planDir() . '/' . $haarName, 600, 400, $xs, $ys);
+        Database::update('floors', $haarId, ['plan_file' => $haarName, 'plan_type' => 'pdf', 'plan_page' => 1]);
+        $haar = SiteService::floor($haarId);
+        $b = PlanTileService::bauen($haar, true);
+        $meta = (array) ($b['meta'] ?? []);
+        $fmt = (string) ($meta['format'] ?? '');
+        $ordnerH = PlanTileService::planDir($haar);
+        pruefe($b['ok'] && [$meta['breite'] ?? 0, $meta['max_zoom'] ?? 0, $meta['direkt'] ?? null, $meta['fassung'] ?? 0] === [3000, 4, [3, 2, 1, 0], PlanTileService::FASSUNG]
+            && $fmt === PlanTileService::verlustfrei() && array_key_exists('grenze', $meta) && $meta['grenze'] === null,
+            'PDF 600 × 400 pt: 3 000 px (5 px/pt), Stufen 3 bis 0 direkt von poppler, verlustfrei, Fassung ' . PlanTileService::FASSUNG . ' – ' . $b['message']);
+        $schwach = [];
+        foreach ([3, 2, 1] as $zz) {
+            $stufe = pruefStufe($ordnerH, $zz, $fmt);
+            $massstab = 5 / 2 ** (4 - $zz);
+            $werte = array_merge(
+                array_map(static fn (float $x): float => pruefLinieSichtbar($stufe, $x * $massstab, true, (int) (60 * $massstab), (int) (340 * $massstab)), $xs),
+                array_map(static fn (float $y): float => pruefLinieSichtbar($stufe, $y * $massstab, false, (int) (60 * $massstab), (int) (540 * $massstab)), $ys)
+            );
+            $schwach[$zz] = round(min($werte), 2);
+        }
+        gleich($schwach, [3 => 1.0, 2 => 1.0, 1 => 1.0], 'Haarlinien eine, zwei und drei Stufen unter der obersten überall zu sehen (Anteil der Punkte, schwächste Linie)');
+
+        // Neu rechnen: Qualität und Seitenverhältnis bleiben; was nicht mehr
+        // zur Pyramide gehört, geht – Fremdes bleibt; kacheln.json wird ersetzt, nicht überschrieben.
+        $b = PlanTileService::bauen($haar, true, true, null, 'fein');
+        $inode = fileinode(PlanTileService::metaPfad($haar));
+        foreach (['9/0', '0/5', '1/0'] as $teil) {
+            @mkdir($ordnerH . '/' . $teil, 0775, true);
+        }
+        $andersFormat = $fmt === 'png' ? 'jpg' : 'png';
+        foreach (['9/0/0.' . $fmt, '0/5/0.' . $fmt, '1/0/0.' . $andersFormat, '1/0/7.' . $fmt] as $rest) {
+            file_put_contents($ordnerH . '/' . $rest, 'alt');
+        }
+        file_put_contents($ordnerH . '/notiz.txt', 'fremd');
+        $b2 = PlanTileService::bauen($haar, true);
+        clearstatcache();
+        pruefe(($b['meta']['qualitaet'] ?? '') === 'fein' && ($b2['meta']['qualitaet'] ?? '') === 'fein'
+            && ($b2['meta']['verhaeltnis'] ?? 0) === ($meta['verhaeltnis'] ?? 1) && ($b2['meta']['hoehe'] ?? 0) === ($meta['hoehe'] ?? 1),
+            'neu gerechnet ohne Angabe: Qualität „fein“ bleibt, Seitenverhältnis und Höhe wie zuvor');
+        pruefe(!is_dir($ordnerH . '/9') && !is_dir($ordnerH . '/0/5') && !is_file($ordnerH . '/1/0/0.' . $andersFormat) && !is_file($ordnerH . '/1/0/7.' . $fmt)
+            && is_file($ordnerH . '/1/0/0.' . $fmt) && is_file($ordnerH . '/notiz.txt'),
+            'nach dem Bau weg: Stufe über der obersten, Spalte und Zeile außerhalb, anderes Format – eigene Kacheln und fremde Datei bleiben');
+        pruefe(fileinode(PlanTileService::metaPfad($haar)) !== $inode && glob($ordnerH . '/*.tmp') === [],
+            'kacheln.json über eine Zwischendatei ersetzt (neue Inode, keine Zwischendatei übrig)');
+        @unlink($ordnerH . '/notiz.txt');
+
+        // pdfimages: wie groß stehen Bilder auf der Seite? Ein Bild über die
+        // ganze Seite (wie ein Scan) deckelt die Seite, ein Plan ohne Bilder nicht.
+        // (BildPdf: eine Seite von 4 800 × 3 200 Punkt – 384 Megapixel bei 5 px/pt.)
+        $foto = imagecreatetruecolor(4800, 3200);
+        imagefilledrectangle($foto, 0, 0, 4799, 3199, 0xD0E0F0);
+        imagejpeg($foto, $tmp . '/seite.jpg', 90);
+        imagedestroy($foto);
+        BildPdf::schreiben($tmp . '/seite.jpg', $tmp . '/seite.pdf');
+        $flaeche = PdfRasterService::bildflaeche($tmp . '/seite.pdf', 1, 4800 * 3200);
+        if ($flaeche === null) {
+            fwrite(STDOUT, "  (ohne pdfimages: Bildfläche übersprungen)\n");
+        } else {
+            $punkte = PdfRasterService::punkte($tmp . '/seite.pdf', 1);
+            $zs = PlanTileService::ziel(3200 / 4800, 'standard', $punkte, $flaeche);
+            pruefe(abs($flaeche - 4800 * 3200) < 4800 * 3200 * 0.02 && PdfRasterService::bildflaeche((string) SiteService::planPath($haar), 1) === 0.0
+                && $zs['grenze'] === 'bild' && $zs['breite'] * $zs['hoehe'] <= PlanTileService::MAX_BILDPIXEL && $zs['breite'] * $zs['hoehe'] > 79_000_000,
+                sprintf('pdfimages: Bild über die ganze Seite %.0f pt² (Seite 15 360 000), ohne Bilder 0 – die Seite mit Bild auf %d × %d px', $flaeche, $zs['breite'], $zs['hoehe']));
+        }
 
         // ------------------------------------------------ Zeitgrenze: Abbruch, dann Hintergrund
         $pdf = $tmp . '/zwei.pdf';

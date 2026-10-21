@@ -844,16 +844,26 @@ gilt je Lesevorgang, nicht für die ganze Datei – auch eine langsame Leitung
 kommt durch, solange Daten fließen. PHP bekommt den Körper erst danach
 (`max_input_time` 120 s reicht für das Lesen über den Socket). Danach
 kachelt der Upload höchstens rund 30 Sekunden selbst und antwortet; was
-dann noch fehlt (ein Vektorplan mit 100 MB braucht gemessen gut vier
-Minuten, ein PDF mit 60 Seiten länger), rechnet ein eigener Prozess
+dann noch fehlt (ein Vektorplan mit 100 MB braucht gemessen gut drei
+Minuten, ein eingescannter mit 90 MB gut eineinhalb, ein PDF mit 60 Seiten
+länger), rechnet ein eigener Prozess
 (`bin/power plan:kacheln --etage=…`, Protokoll in
 `storage/logs/kacheln.log`). Pläne aus dem Location-Abgleich, von einer
 anderen Instanz oder aus einem angenommenen Vorschlag rechnet immer dieser
 Prozess – die Anfrage selbst wartet nicht darauf. Solche Prozesse rechnen
 **nacheinander**, nie zwei Pläne zugleich (jeder hält bei einem großen Plan
-150–200 MB, dazu pdftoppm); wer warten muss, sagt es im Protokoll. Bricht
+175–200 MB, dazu pdftoppm mit 70–80 MB, mit eingebettetem Scan bis
+300 MB); wer warten muss, sagt es im Protokoll. Würde ein Plan länger als
+15 Minuten rechnen oder die Platte nicht reichen (gebraucht wird das
+Dreifache der erwarteten Kacheln), rechnet der Server ihn kleiner. Bricht
 einer ab – etwa weil php-fpm beim Update neu startet –, holt die
 nächtliche Wartung es nach und räumt seine Zwischendateien weg.
+
+Platte: Ein PDF bekommt seit Fassung 2 der Kacheln bis 200 Megapixel
+(vorher 50) – gemessen 4,5 MB für einen leichten A0-Plan, 7 MB für einen
+Geländeplan, 24 MB für einen schweren Vektorplan, 30–35 MB für einen
+eingescannten Plan. Ältere Pläne bleiben,
+wie sie sind; schärfer rechnet sie `bin/power plan:kacheln --neu`.
 
 Holen und Hochladen über Git und das Übernehmen von einer anderen Instanz
 dürfen in der Oberfläche zusammen höchstens **285 Sekunden** dauern

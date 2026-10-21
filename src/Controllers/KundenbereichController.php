@@ -137,7 +137,9 @@ final class KundenbereichController extends Controller
         }
         header('Content-Type: ' . $vorschau['mime']);
         header('Content-Length: ' . (string) filesize($vorschau['pfad']));
-        header('Content-Disposition: inline; filename="plan-vorschau.' . ($vorschau['mime'] === 'image/png' ? 'png' : 'jpg') . '"');
+        header('Content-Disposition: inline; filename="plan-vorschau.' . match ($vorschau['mime']) {
+            'image/png' => 'png', 'image/webp' => 'webp', default => 'jpg',
+        } . '"');
         header('X-Content-Type-Options: nosniff');
         header('Cache-Control: private, no-store');
         header("Content-Security-Policy: default-src 'none'; style-src 'unsafe-inline'; sandbox");

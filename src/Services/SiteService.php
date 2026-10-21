@@ -39,9 +39,11 @@ final class SiteService
      * So viele Sekunden kachelt der Upload selbst, bevor er antwortet.
      *
      * Ein gewöhnlicher Plan ist in dieser Zeit fertig. Ein 100-MB-Plan
-     * nicht: gemessen 73 Sekunden für einen eingebetteten Scan, 270 für
-     * eine A0-Seite mit 104 MB Vektordaten, eine halbe Stunde für 60
-     * Seiten. Was dann noch fehlt, rechnet ein eigener Prozess weiter
+     * nicht: gemessen (Fassung 2 der Kacheln, bis 200 Megapixel) 96
+     * Sekunden für einen eingescannten A0-Plan mit 91 MB, 196 für eine
+     * A0-Seite mit 97 MB Vektordaten; ein leichter A0-Plan braucht schon
+     * eine Minute, 60 Seiten weit über eine halbe Stunde. Was dann noch
+     * fehlt, rechnet ein eigener Prozess weiter
      * (PlanTileService::imHintergrund) – der Browser wartet nicht, bis
      * nginx aufgibt.
      */
@@ -667,13 +669,13 @@ final class SiteService
         }
         $pruefung = BildPdf::pruefen($pfad);
         if (!$pruefung['ok']) {
-            return sprintf('Das Bild hat %s. Über %d Megapixel rechnet der Server es mit poppler herunter, und dafür muss es so gespeichert sein: '
+            return sprintf('Das Bild hat %s. Über %d Megapixel bereitet der Server es mit poppler auf, und dafür muss es so gespeichert sein: '
                 . 'JPEG nicht progressiv, in RGB oder Graustufen – PNG ohne Transparenz und ohne Zeilensprung. %s '
                 . 'Anders gespeichert oder auf höchstens %d Megapixel verkleinert klappt es.',
                 $wie, intdiv(PlanTileService::MAX_PIXEL, 1_000_000), $pruefung['grund'], intdiv(PlanTileService::MAX_PIXEL, 1_000_000));
         }
         if (!PdfRasterService::verfuegbar()) {
-            return sprintf('Das Bild hat %s. Über %d Megapixel rechnet der Server es mit poppler herunter. %s',
+            return sprintf('Das Bild hat %s. Über %d Megapixel bereitet der Server es mit poppler auf. %s',
                 $wie, intdiv(PlanTileService::MAX_PIXEL, 1_000_000), PdfRasterService::werkzeug()['hinweis']);
         }
         return null;

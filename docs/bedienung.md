@@ -939,19 +939,31 @@ eine zu große Datei schon beim Auswählen, bevor sie über die Leitung geht.
 Größere PDFs werden meist deutlich kleiner, wenn eingebettete Bilder mit
 geringerer Auflösung exportiert werden.
 
-- **Aufbereiten:** Der Server rechnet jeden Plan einmal in Kacheln (höchstens
-  50 Megapixel, also etwa 7 000 × 7 000 Pixel). Ein gewöhnlicher Plan ist
-  beim Hochladen gleich fertig. Bei großen Plänen antwortet der Upload nach
-  rund einer halben Minute und rechnet im Hintergrund weiter – gemessen
-  ein bis vier Minuten für eine Seite mit 100 MB, länger für viele Seiten.
-  Bis dahin zeichnet der Browser den Plan selbst (langsamer, weniger
-  scharf); danach die Karte neu laden. Pläne aus dem Location-Abgleich oder
-  von einer anderen Instanz rechnet immer der Hintergrund; mehrere große
-  Pläne kommen nacheinander dran.
+- **Aufbereiten:** Der Server rechnet jeden Plan einmal in Kacheln. Ein PDF
+  bekommt rund 360 dpi (5 Pixel je Punkt), höchstens 200 Megapixel: A0 fast
+  ganz (16 773 × 11 924 Pixel), ein Geländeplan von 2 × 1 m rund 250 dpi.
+  Steckt ein eingescannter Plan im PDF, wird die Seite nur so groß, dass
+  der Scan bei 80 Megapixeln bleibt (sonst bräuchte poppler über 600 MB
+  Speicher). Ein gewöhnlicher Plan ist beim Hochladen gleich fertig. Bei
+  großen Plänen antwortet der Upload nach rund einer halben Minute und
+  rechnet im Hintergrund weiter – gemessen ein bis vier Minuten für eine
+  Seite mit 100 MB, länger für viele Seiten. Bis dahin zeichnet der
+  Browser den Plan selbst (langsamer, weniger scharf); danach die Karte neu
+  laden. Pläne aus dem Location-Abgleich oder von einer anderen Instanz
+  rechnet immer der Hintergrund; mehrere große Pläne kommen nacheinander
+  dran.
+- **Übersicht:** Die kleinen Zoomstufen eines PDF rechnet poppler selbst –
+  Haarlinien bleiben dort wie in einem PDF-Betrachter zu sehen, statt
+  wegzumitteln. Pläne, die vor dieser Fassung gerechnet wurden, zeigt die
+  Karte weiter; schärfer werden sie mit `bin/power plan:kacheln --neu`.
+  `--qualitaet=fein` rechnet ein PDF bis 400 Megapixel (der Geländeplan
+  mit vollen 360 dpi) – doppelt so lange, doppelt so viel Platte.
 - **Ersetzen:** Ein neuer Plan auf einer Etage ersetzt den alten; wird der
   alte von keiner Etage mehr genutzt, löscht der Server ihn samt Kacheln.
-- **Große Bilder:** PNG und JPEG über 50 Megapixel rechnet der Server mit
-  poppler herunter, ohne sie ganz in den Speicher zu laden. Dafür muss ein
+- **Große Bilder:** PNG und JPEG über 50 Megapixel bereitet der Server mit
+  poppler auf, ohne sie ganz in den Speicher zu laden – bis 80 Megapixel in
+  Originalgröße, darüber verkleinert. Ein Scan wird JPEG-Kacheln, ein
+  sauberer CAD-Export verlustfreie (WebP oder PNG). Dafür muss ein
   JPEG *nicht progressiv* und in RGB oder Graustufen gespeichert sein, ein
   PNG ohne Transparenz und ohne Zeilensprung (interlaced); über 400
   Megapixel nimmt der Upload kein Bild an. Was nicht passt, lehnt der Upload

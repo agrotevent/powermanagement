@@ -23,10 +23,12 @@ declare(strict_types=1);
  *   bin/power user:add <name> <rolle> [passwort]
  *   bin/power user:password <name> <passwort>
  *   bin/power titel "Titel" [untertitel] [kürzel]
- *   bin/power plan:kacheln [--neu] [--etage=<id>,…]
+ *   bin/power plan:kacheln [--neu] [--etage=<id>,…] [--qualitaet=standard|fein]
  *                                   Kacheln aller (oder dieser) Grundrisse berechnen – so
  *                                   rechnet auch der Upload große Pläne im Hintergrund weiter;
- *                                   läuft schon einer, wird gewartet (nie zwei nebeneinander)
+ *                                   läuft schon einer, wird gewartet (nie zwei nebeneinander).
+ *                                   --neu rechnet vorhandene neu (ohne --qualitaet in der
+ *                                   bisherigen Qualität); fein: PDF bis 400 statt 200 Megapixel
  *   bin/power location:liste        Locations im gemeinsamen Repository anzeigen
  *   bin/power location:uebernehmen <schlüssel>
  *   bin/power verteiler:liste       Verteiler hier und im Repository mit ihrem Stand
@@ -387,15 +389,22 @@ switch ($befehl) {
         }
         $stempel = static fn (): string => $nur !== null ? gmdate('Y-m-d\TH:i:s\Z') . ' ' : '';
         $neu = isset($optionen['neu']);
+        $qualitaet = null;
+        if (isset($optionen['qualitaet'])) {
+            $qualitaet = (string) $optionen['qualitaet'];
+            if (!isset(PlanTileService::QUALITAETEN[$qualitaet])) {
+                $fehler('--qualitaet kennt ' . implode(' und ', array_keys(PlanTileService::QUALITAETEN)) . '.');
+            }
+        }
         // Nie zwei Bauten nebeneinander (Speicher) – der nächste wartet; die
         // Etagen erst danach lesen, inzwischen kann eine gelöscht sein.
-        PlanTileService::nacheinander(static function () use ($nur, $neu, $aus, $stempel): void {
+        PlanTileService::nacheinander(static function () use ($nur, $neu, $qualitaet, $aus, $stempel): void {
             foreach (SiteService::allFloors() as $etage) {
                 if ((string) $etage['plan_file'] === '' || ($nur !== null && !in_array((int) $etage['id'], $nur, true))) {
                     continue;
                 }
                 $start = microtime(true);
-                $ergebnis = PlanTileService::bauen($etage, $neu);
+                $ergebnis = PlanTileService::bauen($etage, $neu, true, null, $qualitaet);
                 $aus($stempel() . $etage['site_name'] . ' / ' . $etage['name'] . ': ' . $ergebnis['message']
                     . ($nur !== null ? sprintf(' (%.0f s)', microtime(true) - $start) : ''));
             }
