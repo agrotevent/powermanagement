@@ -1451,10 +1451,12 @@ zurueckrollen() {   # zurueckrollen <grund> [<zeile>]
             marke_loeschen
             rm -f -- "$ZUSTAND/alt/update-debian.sh"
             hinweis "Zurückgerollt auf $(g log -1 --format='%h %s')."
+            [[ "$herunter" == "nein" ]] && dienst_anstossen
             ergebnis zurueckgerollt "$grund"
             exit 2
         fi
         hinweis "Git ließ sich nicht zurücksetzen – Handarbeit nötig (docs/installation-debian-lxc.md, Zurückrollen von Hand)."
+        [[ "$herunter" == "nein" ]] && dienst_anstossen
         ergebnis unvollstaendig "$grund" "Handarbeit nötig"
         exit 3
     fi
@@ -1534,11 +1536,14 @@ zurueckrollen() {   # zurueckrollen <grund> [<zeile>]
         rm -f -- "$ZUSTAND/alt/update-debian.sh"
         hinweis "Zurückgerollt auf $(g log -1 --format='%h %s')."
         [[ "$SICHERUNG" != "-" ]] && hinweis "Sicherung: $SICHERUNG"
+        # Von der Konsole: Stand und Verlauf der Oberfläche gleich nachziehen.
+        [[ "$herunter" == "nein" ]] && dienst_anstossen
         ergebnis zurueckgerollt "$grund"
         exit 2
     fi
     hinweis "Handarbeit nötig – docs/installation-debian-lxc.md (Zurückrollen von Hand). Die Marke bleibt: $MARKE"
     [[ "$SICHERUNG" != "-" ]] && hinweis "Sicherung: $SICHERUNG"
+    [[ "$herunter" == "nein" ]] && dienst_anstossen
     ergebnis unvollstaendig "$grund" "Handarbeit nötig"
     exit 3
 }

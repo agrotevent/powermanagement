@@ -52,6 +52,7 @@ final class Permissions
             'system.users.manage'=> 'Benutzer, Rollen und Freigaben verwalten',
             'settings.manage'    => 'Systemeinstellungen ändern (InfluxDB, MQTT, Repository)',
             'audit.view'         => 'Audit-Log ansehen',
+            'system.update'      => 'PowerManagement aktualisieren (startet Dienste neu – Messung und Schalten kurz unterbrochen)',
         ],
     ];
 

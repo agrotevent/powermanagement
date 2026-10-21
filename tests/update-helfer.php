@@ -17,7 +17,8 @@ declare(strict_types=1);
  * (Kopf, Zeichen, Größe, Form, Schlüssel, Werte, Zeit, Kennung, update.conf,
  * Abstände, gescheiterte Stände, Verweis, FIFO, Ordner); Sperre; Signale als
  * TERM; Wiederanlauf; Nachlauf; Protokoll bereinigt und gekürzt; keine
- * Geheimnisse; --auftrag-pruefen. Als root zusätzlich: Prüfung des Codes
+ * Geheimnisse; --auftrag-pruefen und der Abgleich mit dem Auftrag, den die
+ * Anwendung baut (UpdateService::auftragText). Als root zusätzlich: Prüfung des Codes
  * (root-eigen, keine Schreibrechte für andere, keine Verweise) und der Weg
  * über setpriv als App-Benutzer.
  */
@@ -1017,6 +1018,46 @@ try {
         gleich($nurPruefen($text), 'abgelehnt ' . $code, "--auftrag-pruefen ({$name}): abgelehnt {$code}");
     }
     pruefe($verdorben >= 12, '--auftrag-pruefen: mindestens zwölf verdorbene Varianten');
+
+    // Die Anwendung baut den Auftrag (UpdateService::auftragText) – der Helfer
+    // nimmt jeden an, den sie baut. Was sie gar nicht erst baut, lehnt er mit
+    // demselben Code ab, den sie meldet.
+    $roherAuftrag = static fn (string $k, string $aktion, string $ausloeser, string $von, string $zeit, ?string $ziel): string
+        => KOPF . "kennung {$k}\naktion {$aktion}\nausloeser {$ausloeser}\nvon {$von}\nzeit {$zeit}\n" . ($ziel !== null ? "ziel {$ziel}\n" : '');
+    foreach (['hand', 'automatik', 'konsole'] as $ausloeser) {
+        foreach (['pruefen' => null, 'aktualisieren' => $sha['M57']] as $aktion => $ziel) {
+            $k = bin2hex(random_bytes(16));
+            $text = \App\Services\UpdateService::auftragText($k, $aktion, $ausloeser, 'pruefung', $T, $ziel);
+            gleich($text, $roherAuftrag($k, $aktion, $ausloeser, 'pruefung', (string) $T, $ziel), "PHP-Auftrag {$aktion} ({$ausloeser}): Format wie erwartet");
+            gleich($nurPruefen($text), 'ok ' . $aktion, "PHP-Auftrag {$aktion} ({$ausloeser}): der Helfer nimmt ihn an");
+        }
+    }
+    $phpK = bin2hex(random_bytes(16));
+    $phpVerdorben = [
+        'Kennung zu kurz'          => [substr($phpK, 0, 31), 'pruefen', 'hand', 'pruefung', $T, null],
+        'Kennung zu lang'          => [$phpK . 'a', 'pruefen', 'hand', 'pruefung', $T, null],
+        'Kennung mit Großbuchstaben' => [strtoupper($phpK), 'pruefen', 'hand', 'pruefung', $T, null],
+        'Aktion zuruecknehmen'     => [$phpK, 'zuruecknehmen', 'hand', 'pruefung', $T, null],
+        'Auslöser system'          => [$phpK, 'pruefen', 'system', 'pruefung', $T, null],
+        'Von mit Leerzeichen'      => [$phpK, 'pruefen', 'hand', 'a b', $T, null],
+        'Von zu lang'              => [$phpK, 'pruefen', 'hand', str_repeat('a', 65), $T, null],
+        'Zeit zu kurz'             => [$phpK, 'pruefen', 'hand', 'pruefung', 123, null],
+        'Ziel zu kurz'             => [$phpK, 'aktualisieren', 'hand', 'pruefung', $T, substr($sha['M57'], 0, 39)],
+        'Ziel mit Großbuchstaben'  => [$phpK, 'aktualisieren', 'hand', 'pruefung', $T, strtoupper($sha['M57'])],
+        'Ziel bei pruefen'         => [$phpK, 'pruefen', 'hand', 'pruefung', $T, $sha['M57']],
+        'Ziel fehlt'               => [$phpK, 'aktualisieren', 'hand', 'pruefung', $T, null],
+    ];
+    foreach ($phpVerdorben as $name => [$k, $aktion, $ausloeser, $von, $zeit, $ziel]) {
+        $phpCode = null;
+        try {
+            \App\Services\UpdateService::auftragText($k, $aktion, $ausloeser, $von, $zeit, $ziel);
+        } catch (\InvalidArgumentException $e) {
+            $phpCode = $e->getMessage();
+        }
+        pruefe($phpCode !== null, "PHP baut keinen Auftrag ({$name})");
+        gleich($nurPruefen($roherAuftrag($k, $aktion, $ausloeser, $von, (string) $zeit, $ziel)), 'abgelehnt ' . $phpCode,
+            "PHP und Helfer lehnen gleich ab ({$name}: {$phpCode})");
+    }
     gleich($nurPruefen($auftragText('pruefen', null, 'hand', null, $kennungEingespielt)[1]), 'ok pruefen',
         '--auftrag-pruefen: bekannte Kennung (Zustand) spielt keine Rolle');
     $zustandNachher = array_map('basename', glob($d['zustand'] . '/*'));

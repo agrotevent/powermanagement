@@ -1011,6 +1011,10 @@ kind_lauf() {   # kind_lauf <skript> <optionen…>
         gescheitert_merken "$L_ZIEL" "$L_GRUND" "$L_BEGINN"
     fi
     protokoll_kopieren
+    # Stand und Verlauf vor dem Ende des Laufs: sieht die Oberfläche
+    # „fertig“, kennt sie schon den neuen Stand (und lädt neu).
+    stand_schreiben
+    verlauf_spiegeln
     lauf_ende "$L_ZUSTAND" "$L_ERGEBNIS" "$L_GRUND"
 }
 
@@ -1316,6 +1320,7 @@ main() {
             if abstand_unter pruefen "$ABSTAND_PRUEFEN"; then
                 # Eben erst geholt: Stand aus den Refs, ohne Netz.
                 L_SCHRITT="0 12 -"
+                stand_schreiben
                 lauf_ende fertig geprueft -
             else
                 kind_lauf "$UPDATE_SKRIPT" --pruefen
@@ -1323,12 +1328,9 @@ main() {
         aktualisieren)
             kind_lauf "$UPDATE_SKRIPT" --bis="$A_ZIEL" ;;
     esac
-    stand_schreiben
-    verlauf_spiegeln
     # Ohne Ergebnis, aber mit Marke (das Update starb): sofort zurückrollen.
     if [[ "$L_ERGEBNIS" == "abgebrochen" && -e "$ZUSTAND/offen" && "$ABGEBROCHEN" == "nein" ]] && update_sperre_frei; then
         wiederaufnehmen
-        stand_schreiben
     fi
     protokolle_aufraeumen
     lebenszeichen

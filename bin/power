@@ -18,6 +18,13 @@ declare(strict_types=1);
  *                                   Einstellung setzen; influx.token, influx.password,
  *                                   mqtt.password und inventory.token werden verschlüsselt abgelegt
  *   bin/power pruefen               Datenbank, InfluxDB, MQTT und Node-RED prüfen
+ *   bin/power update:stand          Update-Funktion: installierter und verfügbarer Stand, letzter Lauf
+ *   bin/power update:suchen [--warten]
+ *                                   Nach neuen Ständen suchen (Auftrag an den Update-Dienst)
+ *   bin/power update:starten [--warten] [--trotz-betrieb] [--ziel=<commit>]
+ *                                   Aktualisieren wie in der Oberfläche; --warten zeigt den
+ *                                   Fortschritt, Exit wie update-debian.sh (0/1/2/3). Als
+ *                                   Anwendungsbenutzer: runuser -u www-data -- php bin/power …
  *   bin/power sammler [--einmal] [--gespraechig]
  *                                   Modbus-Geräte und Clouds abfragen (Dauerdienst)
  *   bin/power user:add <name> <rolle> [passwort]
@@ -188,6 +195,7 @@ switch ($befehl) {
         $ok = true;
         $aus('Datenbank:  ' . Database::driver() . ', ' . (int) Database::scalar('SELECT COUNT(*) FROM users') . ' Benutzer, '
             . (int) Database::scalar('SELECT COUNT(*) FROM objekte WHERE ist_vorlage = 0') . ' Anlagen');
+        $aus('Update:     ' . \App\Services\UpdateService::kurzStand());
         if (Crypto::schluesselFehler() !== null) {
             $aus('Schlüssel:  ' . Crypto::schluesselFehler());
             $ok = false;
@@ -234,6 +242,9 @@ switch ($befehl) {
                 : 'zuletzt ' . date('d.m.Y H:i:s', intdiv($pipeline['zeit'], 1000)) . ', ' . (int) $pipeline['geschrieben'] . ' Zeilen, ' . (int) $pipeline['fehler'] . ' Fehler'));
         }
         exit($ok ? 0 : 1);
+
+    case 'update:stand': case 'update:suchen': case 'update:starten':
+        exit(\App\Services\UpdateKonsole::ausfuehren($befehl, $werte, $optionen, $aus, $fehler));
 
     case 'sammler':
         if (Config::isDemo()) {

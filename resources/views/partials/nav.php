@@ -46,6 +46,7 @@ $groups = [
         ['/system/rollen',        'Rollen & Rechte',      null, 'system.users.manage'],
         ['/system/einstellungen', 'Einstellungen',        null, 'settings.manage'],
         ['/audit',                'Audit-Log',            null, 'audit.view'],
+        ['/system/update',        'Update',               null, 'system.update'],
     ],
 ];
 $query = (string) (parse_url((string) ($activePath ?? '/'), PHP_URL_QUERY) ?? '');
@@ -60,6 +61,8 @@ foreach ($groups as $items) {
         }
     }
 }
+// Hinweise an Einträgen (neue Stände, gescheitertes Update) – nur für den, der handeln darf.
+$hinweise = View::can('system.update') ? array_filter(['/system/update' => \App\Services\UpdateService::navHinweis()]) : [];
 ?>
 <nav class="sidebar">
     <div class="brand">
@@ -95,10 +98,17 @@ foreach ($groups as $items) {
             }
         }
         $schluessel = 'g' . substr(md5($groupName), 0, 8);
+        $gruppenHinweis = null;
+        foreach ($visible as $item) {
+            if (isset($hinweise[$item[0]]) && ($gruppenHinweis === null || $hinweise[$item[0]]['stufe'] === 'bad')) {
+                $gruppenHinweis = $hinweise[$item[0]];
+            }
+        }
         ?>
         <div class="nav-group<?= $offen ? ' offen' : '' ?>" data-nav-gruppe="<?= View::e($schluessel) ?>">
             <button class="nav-group-title" type="button" aria-expanded="<?= $offen ? 'true' : 'false' ?>" <?= $offen ? 'data-nav-aktiv="1"' : '' ?>>
                 <span class="nav-text"><?= View::e($groupName) ?></span>
+                <?php if ($gruppenHinweis !== null): ?><span class="nav-punkt <?= View::e($gruppenHinweis['stufe']) ?>" title="<?= View::e($gruppenHinweis['text']) ?>"></span><?php endif; ?>
                 <span class="nav-group-pfeil" aria-hidden="true"></span>
             </button>
             <div class="nav-group-items">
@@ -110,6 +120,9 @@ foreach ($groups as $items) {
                         <span class="nav-kuerzel"><?= View::e($kuerzel) ?></span>
                     </span>
                     <span class="nav-text"><?= View::e($label) ?></span>
+                    <?php if (isset($hinweise[$href])): ?>
+                        <span class="nav-hinweis <?= View::e($hinweise[$href]['stufe']) ?>" title="<?= View::e($hinweise[$href]['text']) ?>"><?= isset($hinweise[$href]['zahl']) ? (int) $hinweise[$href]['zahl'] : '!' ?><span class="sr-only"> – <?= View::e($hinweise[$href]['text']) ?></span></span>
+                    <?php endif; ?>
                 </a>
             <?php endforeach; ?>
             </div>

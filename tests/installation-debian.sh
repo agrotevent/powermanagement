@@ -19,15 +19,19 @@
 #      danach ein Update ohne Neues
 #   3b. Update ohne HOME und ohne Terminal (systemd-run, wie ein Dienst):
 #      läuft durch, Ausgabe ohne Farben, kein globales safe.directory
-#   4. Selbst-Update über die Konsole: die neue Fassung des Update-Skripts
-#      übernimmt im selben Lauf (Stufe 2); --pruefen ändert nichts
-#   5a. kaputte Migration: vollständig zurück (rc 2) – Code, Zweig, Schema,
-#      Einheiten und Vorlagen wie vorher, der Stand gilt als gescheitert
-#   5b. Prüfung scheitert erst nach Abgleich und Neustart (Anmeldeseite 500):
-#      auch neue Einheit, Logrotate, Pool, Site samt Merker kommen zurück
-#   6. Abbruch (systemctl stop) und Absturz (SIGKILL) mitten im Update:
-#      Zurückrollen bzw. Wiederanlauf über den Update-Dienst; ein zweiter
-#      Lauf wartet nicht, sondern meldet „besetzt“
+#   4. Update über die Oberfläche (System → Update: anmelden, suchen,
+#      aktualisieren, Status abfragen über Neustarts hinweg) mit Selbst-Update:
+#      die neue Fassung des Update-Skripts übernimmt im selben Lauf (Stufe 2);
+#      --pruefen ändert nichts; Audit, Protokoll ohne Farben und Zugangsdaten
+#   5a. kaputte Migration (bin/power update:starten --warten): vollständig
+#      zurück (rc 2) – Code, Zweig, Schema, Einheiten und Vorlagen wie vorher,
+#      der Stand gilt als gescheitert
+#   5b. Prüfung scheitert erst nach Abgleich und Neustart (Anmeldeseite 500,
+#      update:starten --warten): auch neue Einheit, Logrotate, Pool, Site
+#      samt Merker kommen zurück
+#   6. Abbruch (systemctl stop) und Absturz (SIGKILL) mitten in einem Update
+#      aus der Oberfläche: Zurückrollen bzw. Nachlauf und Wiederanlauf über
+#      den Update-Dienst; ein zweiter Lauf wartet nicht, sondern meldet „besetzt“
 #   8. Update-Dienst: Aufträge als App-Benutzer nach storage/update/soll
 #      (Suchen, Aktualisieren mit Stufe 2 und Protokoll ins Journal), dann
 #      untergeschobene Aufträge (Müll, Verweis auf /etc/shadow, FIFO, Ordner,
@@ -36,7 +40,8 @@
 # Mit --umstieg=<commit> stattdessen der einmalige Umstieg von einer Fassung
 # ohne Update-Funktion (Job „Umstieg“): U1 Erstinstallation dieses Stands,
 # U2 genau der Befehl aus der Anleitung (zwei Läufe in einer Einheit) –
-# danach ist die Update-Funktion eingerichtet.
+# danach ist die Update-Funktion eingerichtet; U3 ein Update über die
+# Oberfläche.
 #
 # Aufruf:  tests/installation-debian.sh
 #          tests/installation-debian.sh --umstieg=7586d1d
@@ -240,7 +245,7 @@ auftrag_legen() {
 auftrag_roh() {
     als_www bash -c 't="$(mktemp "$1/../.auftrag-XXXXXX")" && cat > "$t" && chmod 640 "$t" && mv -f "$t" "$1/auftrag"' _ "$SOLL"
 }
-ist_wert() { sed -n "s/^$2 //p" "$IST/$1" 2>/dev/null | head -n 1; }
+ist_wert() { sed -n "s/^$2 //p" "$IST/$1" 2>/dev/null | head -n 1 || true; }
 # lauf_abwarten <kennung> <sek>: bis ist/lauf diesen Auftrag fertig meldet
 lauf_abwarten() {
     for _ in $(seq 1 "$2"); do
@@ -272,6 +277,135 @@ warte_auf() {
         sleep 1
     done
     "$@"
+}
+
+# ------------------------------------------------------------ Oberfläche und update:starten
+# Ein eigenes Administrationskonto (nicht der Erst-Administrator – dessen
+# Erstkennwort prüft pruefe_installation) und eine Sitzung wie im Browser,
+# über nginx und PHP-FPM.
+ADMIN_NAME=pruefung-update
+ADMIN_KW="Pruefung-Update-$(od -An -N6 -tx1 /dev/urandom | tr -d ' \n')"
+JAR=/root/pm-pruefung.cookies
+ANTWORT=/root/pm-pruefung.antwort
+LAUF_VORHER=""
+ERGEBNIS_UI=""
+admin_anlegen() {
+    (cd "$ZIEL" && PM_KW="$ADMIN_KW" PM_NAME="$ADMIN_NAME" runuser -u www-data -- php -r '
+        require "src/bootstrap.php";
+        if ((int) \App\Support\Database::scalar("SELECT COUNT(*) FROM users WHERE username = ?", [getenv("PM_NAME")]) === 0) {
+            \App\Services\BenutzerService::anlegen(getenv("PM_NAME"), getenv("PM_KW"), "admin", false);
+        }')
+}
+# audit_zahl <aktion> <LIKE auf details>: Einträge im Audit (als App-Benutzer gelesen)
+audit_zahl() {
+    (cd "$ZIEL" && PM_A="$1" PM_L="$2" runuser -u www-data -- php -r 'require "src/bootstrap.php";
+        echo (int) \App\Support\Database::scalar("SELECT COUNT(*) FROM audit_log WHERE action = ? AND details LIKE ?", [getenv("PM_A"), getenv("PM_L")]);')
+}
+# http_get <pfad> / http_post <pfad> <k=v …>: Antwort nach $ANTWORT, Status in
+# HTTP_CODE, Weiterleitung in HTTP_ZIEL
+http_get() {
+    local w
+    w="$(curl -s --max-time 30 -o "$ANTWORT" -w '%{http_code} %{redirect_url}' -c "$JAR" -b "$JAR" \
+        -H 'Host: powermanagement.lan' "http://127.0.0.1$1" 2>/dev/null)" || w="000 "
+    HTTP_CODE="${w%% *}"
+    HTTP_ZIEL="${w#* }"
+}
+http_post() {
+    local pfad="$1" w kv args=()
+    shift
+    for kv in "$@"; do args+=(--data-urlencode "$kv"); done
+    w="$(curl -s --max-time 30 -o "$ANTWORT" -w '%{http_code} %{redirect_url}' -c "$JAR" -b "$JAR" \
+        -H 'Host: powermanagement.lan' "${args[@]}" "http://127.0.0.1$pfad" 2>/dev/null)" || w="000 "
+    HTTP_CODE="${w%% *}"
+    HTTP_ZIEL="${w#* }"
+}
+seiten_token() { sed -n 's/.*name="_token" value="\([0-9a-f]*\)".*/\1/p' "$ANTWORT" | head -n 1; }
+anmelden() {
+    rm -f "$JAR"
+    http_get /login
+    http_post /login "_token=$(seiten_token)" "username=$ADMIN_NAME" "password=$ADMIN_KW"
+    [[ "$HTTP_CODE" == 302 && "$HTTP_ZIEL" != *"/login"* ]]
+}
+# ueber_oberflaeche <commit>: wie ein Betreiber – „Jetzt suchen“, warten, bis
+# die Seite genau diesen Stand anbietet, dann „Jetzt aktualisieren“
+ueber_oberflaeche() {
+    http_get /system/update
+    [[ "$HTTP_CODE" == 200 ]] || { echo "            /system/update: HTTP $HTTP_CODE"; return 1; }
+    http_post /system/update/suchen "_token=$(seiten_token)"
+    [[ "$HTTP_CODE" == 302 ]] || { echo "            Suchen: HTTP $HTTP_CODE"; return 1; }
+    warte_auf 180 grep -qE "^verfuegbar $1 [0-9]+\$" "$IST/stand" || { echo "            ist/stand nennt $1 nicht"; return 1; }
+    helfer_abwarten || return 1
+    http_get /system/update
+    grep -qF "name=\"ziel\" value=\"$1\"" "$ANTWORT" || { echo "            die Seite bietet $1 nicht an"; return 1; }
+    http_post /system/update/starten "_token=$(seiten_token)" "ziel=$1"
+    [[ "$HTTP_CODE" == 302 && "$HTTP_ZIEL" == *"#fortschritt" ]] || { echo "            Starten: HTTP $HTTP_CODE $HTTP_ZIEL"; return 1; }
+}
+# oberflaeche_abwarten <sek>: /system/update/stand abfragen wie update.js –
+# 000/502/503/504 (Dienste starten neu) sind erlaubt, am Ende kommt 200 JSON –,
+# bis ein Lauf mit anderer Kennung als $LAUF_VORHER (keine Suche) zu Ende ist.
+# ERGEBNIS_UI = "<aktion> <ergebnis> <grund>"
+oberflaeche_abwarten() {
+    local code werte a k ak e g
+    ERGEBNIS_UI=""
+    for _ in $(seq 1 "$1"); do
+        code="$(curl -s --max-time 10 -o "$ANTWORT" -w '%{http_code}' -c "$JAR" -b "$JAR" -H 'Host: powermanagement.lan' \
+            -H 'Accept: application/json' http://127.0.0.1/system/update/stand 2>/dev/null)" || code=000
+        case "$code" in
+            200)
+                werte="$(php -r '$j = json_decode((string) file_get_contents($argv[1]), true);
+                    if (!is_array($j)) { exit(1); }
+                    $l = is_array($j["lauf"] ?? null) ? $j["lauf"] : [];
+                    echo empty($j["aktiv"]) ? "ruhe" : "aktiv", " ", $l["kennung"] ?? "-", " ", $l["aktion"] ?? "-", " ",
+                        $l["ergebnis"] ?? "-", " ", $l["grund"] ?? "-";' "$ANTWORT" 2>/dev/null)" || werte=""
+                read -r a k ak e g <<< "$werte"
+                if [[ "$a" == ruhe && -n "$k" && "$k" != "-" && "$k" != "$LAUF_VORHER" && "$ak" != pruefen ]]; then
+                    ERGEBNIS_UI="$ak $e $g"
+                    return 0
+                fi ;;
+            000|502|503|504) ;;
+            *) echo "            /system/update/stand: HTTP $code (abgemeldet?)"; return 1 ;;
+        esac
+        sleep 2
+    done
+    return 1
+}
+# ist_schritt_abwarten <n>: bis ein neuer Lauf (Kennung ≠ $LAUF_VORHER) Schritt n erreicht (≤ 300 s)
+ist_schritt_abwarten() {
+    local n
+    for _ in $(seq 1 300); do
+        n="$(ist_wert lauf schritt)"
+        n="${n%% *}"
+        if [[ "$(ist_wert lauf kennung)" != "$LAUF_VORHER" && "$(ist_wert lauf zustand)" == laeuft \
+              && "${n:-0}" =~ ^[0-9]+$ && "${n:-0}" -ge "$1" ]]; then
+            return 0
+        fi
+        sleep 1
+    done
+    return 1
+}
+# update_starten: bin/power update:starten --warten als App-Benutzer, Ausgabe nach $LAUF, rc in RC
+update_starten() {
+    RC=0
+    (cd "$ZIEL" && runuser -u www-data -- php bin/power update:starten --warten) > "$LAUF" 2>&1 < /dev/null || RC=$?
+    sed 's/^/  | /' "$LAUF"
+}
+# abstand_abwarten [konsole]: der Update-Dienst nimmt ein Aktualisieren erst
+# 120 s nach dem letzten an („zu_oft“); update:starten sucht nur, wenn der
+# letzte Abruf älter als 60 s ist – mit „konsole“ auch darauf warten.
+abstand_abwarten() {
+    local bis=0 t jetzt
+    t="$(sed -n 's/^aktualisieren \([0-9][0-9]*\).*/\1/p' /var/lib/powermanagement/update/zeiten 2>/dev/null | head -n 1)"
+    [[ -n "$t" ]] && bis=$((t + 125))
+    if [[ "${1:-}" == konsole ]]; then
+        t="$(stat -c %Y "$ZIEL/.git/FETCH_HEAD" 2>/dev/null || echo 0)"
+        (( t + 65 > bis )) && bis=$((t + 65))
+    fi
+    jetzt="$(date +%s)"
+    if (( bis > jetzt )); then
+        echo "    (warte $((bis - jetzt)) s – Abstand zwischen zwei Updates bzw. Suchen)"
+        sleep $((bis - jetzt))
+    fi
+    return 0
 }
 
 # Erst den Stand der Anwendung abwarten, dann prüfen, was ein Betreiber
@@ -334,6 +468,8 @@ pruefe_installation() {
             'grep -qE "^installiert [0-9a-f]{40} [0-9]+$" "$1/stand" && grep -qx "zweig main" "$1/stand"' _ "$IST"
         pruefe "ist/ gehört www-data, Dateien 640" \
             leer "$(find "$IST" -mindepth 1 \( ! -user www-data -o -type f ! -perm 640 \) -print)"
+        pruefe "bin/power update:stand: eingerichtet" bash -c \
+            'cd "$1" && runuser -u www-data -- php bin/power update:stand | grep -q "^Update-Funktion: eingerichtet"' _ "$ZIEL"
     fi
 
     # Oberfläche über nginx und PHP-FPM
@@ -463,6 +599,20 @@ if [[ -n "$UMSTIEG" ]]; then
     pruefe_installation
     abschluss "Umstieg U2"
 
+    schritt "U3 · Das erste Update über die Oberfläche – ab jetzt übernimmt Stufe 2"
+    NEU="$(neuer_stand "Erstes Update über die Oberfläche" "printf '\n' >> README.md")"
+    pruefe "Administrationskonto für die Prüfung angelegt" admin_anlegen
+    pruefe "Anmeldung über nginx" anmelden
+    abstand_abwarten
+    LAUF_VORHER="$(ist_wert lauf kennung)"
+    pruefe "Suchen und Aktualisieren über die Oberfläche" ueber_oberflaeche "$NEU"
+    pruefe "Status-Abfrage bis zum Ende" oberflaeche_abwarten 900
+    pruefe "Oberfläche: aktualisieren eingespielt (kam: $ERGEBNIS_UI)" test "$ERGEBNIS_UI" = "aktualisieren eingespielt -"
+    pruefe "auf dem neuen Stand" test "$(kopf)" = "$NEU"
+    pruefe "Stufe 2 der neuen Fassung" enthaelt "$IST/protokoll" "Die neue Fassung des Update-Skripts übernimmt."
+    pruefe_installation
+    abschluss "Umstieg U3"
+
     echo
     echo "Umstieg von $UMSTIEG auf den Arbeitsstand in Ordnung."
     exit 0
@@ -575,7 +725,7 @@ pruefe_installation
 abschluss "Update ohne HOME"
 
 # ------------------------------------------------------------ 4
-schritt "4 · Selbst-Update über die Konsole: die neue Fassung übernimmt im selben Lauf"
+schritt "4 · Update über die Oberfläche mit Selbst-Update: die neue Fassung übernimmt im selben Lauf"
 ALT="$(kopf)"
 # Nur die neue Fassung gibt diese Zeile aus – Stufe 1 (die laufende, alte
 # Fassung) kennt sie nicht. Erscheint sie, hat Stufe 2 der neuen übernommen.
@@ -588,26 +738,50 @@ pruefe "--pruefen endet mit 0 (kam: $RC)" test "$RC" = 0
 pruefe "--pruefen: Stand unverändert" test "$(kopf)" = "$ALT"
 pruefe "--pruefen: nur vorwärts (Linear: ja)" enthaelt "$LAUF" "Linear:      ja"
 pruefe "--pruefen: .git/index unverändert" test "$(stat -c %Y "$ZIEL/.git/index")" = "$INDEX_VORHER"
-update_lauf
-pruefe "Update endet mit 0 (kam: $RC)" test "$RC" = 0
+pruefe "Administrationskonto für die Prüfung angelegt" admin_anlegen
+pruefe "Anmeldung über nginx" anmelden
+http_get /system/update
+pruefe "System → Update: 200 mit dem installierten Stand (kam: $HTTP_CODE)" \
+    bash -c '[[ "$1" == 200 ]] && grep -qF "$2" "$3"' _ "$HTTP_CODE" "${ALT:0:7}" "$ANTWORT"
+abstand_abwarten
+LAUF_VORHER="$(ist_wert lauf kennung)"
+pruefe "Suchen und Aktualisieren über die Oberfläche" ueber_oberflaeche "$NEU"
+pruefe "Status-Abfrage bis zum Ende (Neustarts der Dienste dazwischen erlaubt)" oberflaeche_abwarten 600
+pruefe "Oberfläche: aktualisieren eingespielt (kam: $ERGEBNIS_UI)" test "$ERGEBNIS_UI" = "aktualisieren eingespielt -"
+journalctl --sync 2>/dev/null || true
 pruefe "auf dem neuen Stand" test "$(kopf)" = "$NEU"
-pruefe "die neue Fassung übernimmt" enthaelt "$LAUF" "Die neue Fassung des Update-Skripts übernimmt."
-pruefe "Prüfzeile der neuen Fassung genau einmal" test "$(grep -cF "$PRUEFZEILE" "$LAUF")" = 1
-pruefe "Ergebnis eingespielt" enthaelt "$LAUF" "==> Ergebnis: eingespielt"
-pruefe "Verlauf: eingespielt" bash -c "tail -n 1 /var/lib/powermanagement/update/verlauf | grep -q ' aktualisieren eingespielt'"
+pruefe "ist/protokoll gehört zu diesem Lauf" test "$(ist_wert protokoll kennung)" = "$(ist_wert lauf kennung)"
+pruefe "die neue Fassung übernimmt" enthaelt "$IST/protokoll" "Die neue Fassung des Update-Skripts übernimmt."
+pruefe "Prüfzeile der neuen Fassung im selben Lauf, genau einmal" test "$(grep -cF "$PRUEFZEILE" "$IST/protokoll")" = 1
+pruefe "ist/protokoll ohne ESC" ohne_esc "$IST/protokoll"
+pruefe "ist/protokoll ohne Zugangsdaten" bash -c '! grep -qE "x-access-token|gh[pousr]_[A-Za-z0-9]{10}" "$1"' _ "$IST/protokoll"
+pruefe "Journal des Update-Dienstes: Ergebnis eingespielt" \
+    bash -c 'journalctl -a -u powermanagement-update --no-pager -o cat | grep -qF "==> Ergebnis: eingespielt"'
+pruefe "Verlauf: eingespielt" bash -c "tail -n 1 /var/lib/powermanagement/update/verlauf | grep -q ' hand $ADMIN_NAME aktualisieren eingespielt '"
 pruefe "Kopie der alten Fassung aufgeräumt" test ! -e /var/lib/powermanagement/update/alt/update-debian.sh
 pruefe "kein Schnappschuss übrig" leer "$(find "$ZIEL/storage/backups" -maxdepth 1 -name '.schnappschuss-*' -print)"
+http_get /system/update
+pruefe "System → Update zeigt den neuen Stand" grep -qF "${NEU:0:7}" "$ANTWORT"
+pruefe "Audit: system.update.ergebnis (beim Seitenaufruf vermerkt)" \
+    test "$(audit_zahl system.update.ergebnis "%\"ergebnis\":\"eingespielt\"%\"neu7\":\"${NEU:0:7}\"%")" = 1
+pruefe "Audit: system.update.anfordern (Suchen und Aktualisieren)" \
+    test "$(audit_zahl system.update.anfordern "%\"ziel7\":\"${NEU:0:7}\"%")" = 1
 pruefe_installation
-abschluss "Selbst-Update"
+abschluss "Update über die Oberfläche"
 
 # ------------------------------------------------------------ 5a
-schritt "5a · Kaputte Migration: vollständig zurück"
+schritt "5a · Kaputte Migration (update:starten --warten): vollständig zurück"
 ALT="$(kopf)"
 SUMMEN="$(pruefsummen)"
 NEU="$(neuer_stand "Kaputte Migration" "printf 'SELEKT kaputt;\n' > database/migrations/099_pruefung_kaputt.sql")"
-update_lauf
-pruefe "Update endet mit 2 – zurückgerollt (kam: $RC)" test "$RC" = 2
-pruefe "Ergebnis zurueckgerollt (migration)" enthaelt "$LAUF" "==> Ergebnis: zurueckgerollt (migration)"
+abstand_abwarten konsole
+update_starten
+pruefe "update:starten --warten endet mit 2 – zurückgerollt (kam: $RC)" test "$RC" = 2
+pruefe "Ergebnis zurueckgerollt (migration) (kam: $(ist_wert lauf ergebnis) $(ist_wert lauf grund))" \
+    test "$(ist_wert lauf ergebnis) $(ist_wert lauf grund)" = "zurueckgerollt migration"
+pruefe "update:starten zeigt Schritte mit Uhrzeit und das Ergebnis" \
+    bash -c 'grep -qE "^[0-9]{2}:[0-9]{2}:[0-9]{2}  \[[0-9]+/[0-9]+\] " "$1" && grep -qF "Ergebnis: Zurückgerollt" "$1"' _ "$LAUF"
+pruefe "Protokoll: Ergebnis zurueckgerollt (migration)" enthaelt "$IST/protokoll" "==> Ergebnis: zurueckgerollt (migration)"
 pruefe "Stand wie vorher" test "$(kopf)" = "$ALT"
 pruefe "Zweig bleibt main" test "$(zweig)" = main
 pruefe "Einheiten, Vorlagen und Schema wie vorher" test "$(pruefsummen)" = "$SUMMEN"
@@ -622,7 +796,7 @@ pruefe "danach: auf dem neuen Stand" test "$(kopf)" = "$NEU"
 abschluss "kaputte Migration"
 
 # ------------------------------------------------------------ 5b
-schritt "5b · Prüfung scheitert nach Abgleich und Neustart: auch Einheiten und Vorlagen zurück"
+schritt "5b · Prüfung scheitert nach Abgleich und Neustart (update:starten --warten): auch Einheiten und Vorlagen zurück"
 ALT="$(kopf)"
 SUMMEN="$(pruefsummen)"
 # Eine Migration, die gelingt; geänderte Vorlagen (Logrotate, Pool, Site);
@@ -639,11 +813,14 @@ NEU="$(neuer_stand "Anmeldeseite kaputt" '
     grep -q "powermanagement-pruefung.timer" deploy/update-debian.sh
     sed -i "/^declare(strict_types=1);\$/a if ((\$_SERVER[\"REQUEST_URI\"] ?? \"\") === \"/login\") { http_response_code(500); exit; }" public/index.php
     grep -q "http_response_code(500)" public/index.php')"
-update_lauf
-pruefe "Update endet mit 2 – zurückgerollt (kam: $RC)" test "$RC" = 2
-pruefe "Ergebnis zurueckgerollt (pruefung)" enthaelt "$LAUF" "==> Ergebnis: zurueckgerollt (pruefung)"
-pruefe "Anmeldeseite scheiterte erst mit dem neuen Code" enthaelt "$LAUF" "antwortet mit HTTP 500 statt 200"
-pruefe "Abgleich mit der alten Fassung" enthaelt "$LAUF" "Abgleich mit der alten Fassung:"
+abstand_abwarten konsole
+update_starten
+pruefe "update:starten --warten endet mit 2 – zurückgerollt (kam: $RC)" test "$RC" = 2
+pruefe "Ergebnis zurueckgerollt (pruefung) (kam: $(ist_wert lauf ergebnis) $(ist_wert lauf grund))" \
+    test "$(ist_wert lauf ergebnis) $(ist_wert lauf grund)" = "zurueckgerollt pruefung"
+pruefe "Protokoll: Ergebnis zurueckgerollt (pruefung)" enthaelt "$IST/protokoll" "==> Ergebnis: zurueckgerollt (pruefung)"
+pruefe "Anmeldeseite scheiterte erst mit dem neuen Code" enthaelt "$IST/protokoll" "antwortet mit HTTP 500 statt 200"
+pruefe "Abgleich mit der alten Fassung" enthaelt "$IST/protokoll" "Abgleich mit der alten Fassung:"
 pruefe "Stand wie vorher" test "$(kopf)" = "$ALT"
 pruefe "Zweig bleibt main" test "$(zweig)" = main
 pruefe "Einheiten, Logrotate, Pool, Site samt Merker und Schema wie vorher" test "$(pruefsummen)" = "$SUMMEN"
@@ -666,48 +843,54 @@ pruefe_installation
 abschluss "Prüfung scheitert"
 
 # ------------------------------------------------------------ 6
-schritt "6 · Abbruch (systemctl stop) und Absturz (SIGKILL) mitten im Update"
+schritt "6 · Abbruch (systemctl stop) und Absturz (SIGKILL) mitten in einem Update aus der Oberfläche"
 ALT="$(kopf)"
 GESCHEITERT_VORHER="$(cat "$GESCHEITERT" 2>/dev/null || true)"
 # Stufe 2 wartet nach dem Abgleich 30 s – Zeit, um dazwischenzugehen.
 NEU="$(neuer_stand "Langsames Update" \
     "sed -i '/^stufe2() {\$/,/^}\$/ s/^    schritt 9 \"Dienste starten\" dienste\$/    sleep 30\n&/' deploy/update-debian.sh; grep -q '^    sleep 30\$' deploy/update-debian.sh")"
-FORTSCHRITT=/run/pm-pruefung/fortschritt
-ERGEBNIS=/run/pm-pruefung/ergebnis
-install -d -m 700 /run/pm-pruefung
-rm -f /run/pm-pruefung/fortschritt /run/pm-pruefung/ergebnis
-# Wie §19.2 der Anleitung: eigene Einheit, KillMode=mixed – systemctl stop
-# schickt TERM nur an das Skript; es beendet den laufenden Schritt und rollt zurück.
-systemd-run --quiet --collect --unit=pm-pruefung-abbruch -p KillMode=mixed -p TimeoutStopSec=20min \
-    "$ZIEL/deploy/update-debian.sh" --fortschritt-datei="$FORTSCHRITT" --ergebnis-datei="$ERGEBNIS"
-pruefe "Fortschritt erreicht den Abgleich" fortschritt_abwarten "$FORTSCHRITT" 8
+abstand_abwarten
+LAUF_VORHER="$(ist_wert lauf kennung)"
+pruefe "Update über die Oberfläche angefordert" ueber_oberflaeche "$NEU"
+pruefe "Fortschritt erreicht den Abgleich" ist_schritt_abwarten 8
 pruefe "Schreibsperre der Oberfläche steht" test -e "$WARTUNG"
+# Während der Schreibsperre: Lesen geht, ein POST wird mit Meldung abgewiesen.
+http_get /system/update
+pruefe "Schreibsperre: System → Update lässt sich lesen (kam: $HTTP_CODE)" test "$HTTP_CODE" = 200
+http_post /system/update/suchen "_token=$(seiten_token)"
+pruefe "Schreibsperre: ein POST der Oberfläche wird abgewiesen (kam: $HTTP_CODE)" \
+    bash -c '[[ "$1" == 302 ]] && test ! -e "$2/auftrag"' _ "$HTTP_CODE" "$SOLL"
+http_get /system/update
+pruefe "Schreibsperre: die Seite nennt den Grund" enthaelt "$ANTWORT" "Gerade läuft ein Update – Änderungen sind in etwa einer Minute wieder möglich."
 update_lauf
 pruefe "ein zweiter Lauf endet sofort mit 1 (kam: $RC)" test "$RC" = 1
 pruefe "ein zweiter Lauf meldet „Ein anderes Update läuft gerade.“" enthaelt "$LAUF" "Ein anderes Update läuft gerade."
-systemctl stop pm-pruefung-abbruch
-journalctl --sync 2>/dev/null || true
-journalctl -a -u pm-pruefung-abbruch --no-pager -o cat > "$LAUF" 2>&1 || true
-sed 's/^/  | /' "$LAUF"
-pruefe "Ergebnis zurueckgerollt (abgebrochen)" \
-    bash -c 'grep -qx "ergebnis zurueckgerollt" "$1" && grep -qx "grund abgebrochen" "$1"' _ "$ERGEBNIS"
+# KillMode=mixed: TERM nur an den Helfer, er reicht es weiter; das Update
+# beendet den laufenden Schritt und rollt zurück.
+systemctl stop powermanagement-update.service
+pruefe "Oberfläche: zurueckgerollt (abgebrochen)" oberflaeche_abwarten 120
+pruefe "Oberfläche: aktualisieren zurueckgerollt abgebrochen (kam: $ERGEBNIS_UI)" \
+    test "$ERGEBNIS_UI" = "aktualisieren zurueckgerollt abgebrochen"
 pruefe "Stand wie vorher" test "$(kopf)" = "$ALT"
 pruefe "Zweig bleibt main" test "$(zweig)" = main
 pruefe "ein Abbruch zählt nicht als gescheitert" test "$(cat "$GESCHEITERT" 2>/dev/null || true)" = "$GESCHEITERT_VORHER"
 pruefe_installation
 abschluss "Abbruch"
 
-rm -f /run/pm-pruefung/fortschritt /run/pm-pruefung/ergebnis
 # Der Zeitgeber des Update-Dienstes holte das Zurückrollen sonst womöglich
 # vor den Prüfungen unten nach – für diesen Teil anhalten.
 systemctl stop powermanagement-update.timer
-systemd-run --quiet --collect --unit=pm-pruefung-absturz -p KillMode=mixed -p TimeoutStopSec=20min \
-    "$ZIEL/deploy/update-debian.sh" --fortschritt-datei="$FORTSCHRITT"
-pruefe "Fortschritt erreicht den Abgleich" fortschritt_abwarten "$FORTSCHRITT" 8
-systemctl kill -s KILL pm-pruefung-absturz
-pruefe "Einheit nach SIGKILL beendet" einheit_abwarten pm-pruefung-absturz
+abstand_abwarten
+LAUF_VORHER="$(ist_wert lauf kennung)"
+pruefe "Update über die Oberfläche angefordert" ueber_oberflaeche "$NEU"
+pruefe "Fortschritt erreicht den Abgleich" ist_schritt_abwarten 8
+LAUF_VORHER="$(ist_wert lauf kennung)"
+systemctl kill -s KILL powermanagement-update.service
+pruefe "Update-Dienst nach SIGKILL beendet" einheit_abwarten powermanagement-update.service
 pruefe "Marke „offen“ bleibt" test -e "$MARKE_OFFEN"
 pruefe "Schreibsperre bleibt" test -e "$WARTUNG"
+pruefe "Nachlauf: ist/lauf fehler abgebrochen helfer (kam: $(ist_wert lauf zustand) $(ist_wert lauf ergebnis) $(ist_wert lauf grund))" \
+    test "$(ist_wert lauf kennung) $(ist_wert lauf zustand) $(ist_wert lauf ergebnis) $(ist_wert lauf grund)" = "$LAUF_VORHER fehler abgebrochen helfer"
 update_lauf
 pruefe "ein neues Update lehnt ab (kam: $RC)" test "$RC" = 1
 pruefe "ein neues Update nennt --wiederaufnehmen" enthaelt "$LAUF" "--wiederaufnehmen"
@@ -715,10 +898,10 @@ pruefe "ein neues Update nennt --wiederaufnehmen" enthaelt "$LAUF" "--wiederaufn
 # update.lock und rollt mit der gesicherten alten Fassung zurück.
 systemctl start powermanagement-update.service || true
 journalctl --sync 2>/dev/null || true
-pruefe "Update-Dienst: Wiederanlauf (aktion wiederaufnehmen, Auslöser system)" \
-    bash -c '[[ "$(sed -n "s/^aktion //p" "$1/lauf")" == wiederaufnehmen && "$(sed -n "s/^ausloeser //p" "$1/lauf")" == system ]]' _ "$IST"
-pruefe "Update-Dienst: zurueckgerollt (unterbrochen) (kam: $(ist_wert lauf ergebnis) $(ist_wert lauf grund))" \
-    test "$(ist_wert lauf ergebnis) $(ist_wert lauf grund)" = "zurueckgerollt unterbrochen"
+pruefe "Oberfläche: der Wiederanlauf ist zu sehen" oberflaeche_abwarten 60
+pruefe "Oberfläche: wiederaufnehmen zurueckgerollt unterbrochen (kam: $ERGEBNIS_UI)" \
+    test "$ERGEBNIS_UI" = "wiederaufnehmen zurueckgerollt unterbrochen"
+pruefe "Update-Dienst: Wiederanlauf mit Auslöser system" test "$(ist_wert lauf ausloeser)" = system
 pruefe "Journal des Update-Dienstes: Ergebnis zurueckgerollt (unterbrochen)" \
     bash -c 'journalctl -a -u powermanagement-update --no-pager -o cat | grep -qF "==> Ergebnis: zurueckgerollt (unterbrochen)"'
 pruefe "Stand wie vorher" test "$(kopf)" = "$ALT"
@@ -749,6 +932,7 @@ pruefe "Suchen: fertig geprueft (kam: $(ist_wert lauf zustand) $(ist_wert lauf e
 pruefe "Suchen: Stand unverändert" test "$(kopf)" = "$ALT"
 pruefe "Suchen: ist/stand nennt den neuen Stand als verfügbar und als Kandidaten" \
     bash -c 'grep -qE "^verfuegbar $2 [0-9]+$" "$1/stand" && grep -qE "^ziel_kandidat $2 [0-9]+$" "$1/stand" && grep -qx "neu 1" "$1/stand" && grep -qx "linear ja" "$1/stand"' _ "$IST" "$NEU"
+abstand_abwarten
 auftrag_legen aktualisieren "$NEU"
 pruefe "Aktualisieren: der Dienst meldet den Auftrag fertig" lauf_abwarten "$AUFTRAG_KENNUNG" 900
 journalctl --sync 2>/dev/null || true
@@ -815,5 +999,5 @@ pruefe_installation
 abschluss "untergeschobene Aufträge"
 
 echo
-echo "Installation, zweiter Lauf, Updates (ohne HOME, Selbst-Update), Zurückrollen, Abbruch,"
-echo "Absturz mit Wiederanlauf und der Update-Dienst in Ordnung."
+echo "Installation, zweiter Lauf, Updates (ohne HOME, über die Oberfläche mit Selbst-Update, update:starten),"
+echo "Zurückrollen, Abbruch, Absturz mit Wiederanlauf und der Update-Dienst in Ordnung."
