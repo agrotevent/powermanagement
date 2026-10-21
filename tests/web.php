@@ -201,7 +201,7 @@ try {
         '/stecker', '/standorte', '/location', '/verteiler-abgleich', '/statistik', '/statistik?zeitraum=7d', '/statistik?zeitraum=frei&von=2026-01-01&bis=2026-01-02',
         '/datenquellen', '/datenquellen/profile', '/datenquellen/mqtt-zugaenge', '/datenquellen/mqtt-zugaenge?filter=eigen', '/steuerung/protokoll', '/system/benutzer', '/system/freigaben?art=user&id=' . $benutzer['kunde'],
         '/system/freigaben?art=role&id=' . (int) Database::scalar("SELECT id FROM roles WHERE role_key = 'kunde'"), '/system/rollen',
-        '/system/einstellungen', '/audit', '/anlagen?fest=1', '/anlagen?fest=0', '/anlagen/neu?art=anschluss&fest=1',
+        '/system/einstellungen', '/system/sso', '/audit', '/anlagen?fest=1', '/anlagen?fest=0', '/anlagen/neu?art=anschluss&fest=1',
         '/anlagen/neu?art=anschluss&vorlage=1&fest=1'];
     // Jede Anlage und jeder Standard-Verteiler mit allen Reitern – Aggregat,
     // Speicher und Verteilung mit Messgeräten zeigen jeweils anderes.
@@ -1207,8 +1207,25 @@ try {
     curl_close($c);
     $r = aufruf($basis, $ohneSso, 'GET', '/abgemeldet');
     pruefe($r['status'] === 302 && $r['ziel'] === '/login', '/abgemeldet ohne Sitzung → /login');
+    $r = aufruf($basis, $ohneSso, 'GET', '/login/sso/verbinden');
+    pruefe($r['status'] === 302 && $r['ziel'] === '/login?next=%2Fprofil' && preg_match('/^Cache-Control:\s*no-store/mi', $r['kopf']) === 1,
+        '/login/sso/verbinden ohne Anmeldung → /login?next=/profil');
+    gleich(aufruf($basis, $ohneSso, 'GET', '/login/sso/verbinden', [], ['Sec-Fetch-Site: cross-site'])['status'], 403, '/login/sso/verbinden von fremder Seite → 403');
+    $r = aufruf($basis, $ohneSso, 'GET', '/system/sso');
+    pruefe($r['status'] === 302 && str_starts_with((string) $r['ziel'], '/login'), '/system/sso ohne Anmeldung → Anmeldeseite');
+    $loginSeite = aufruf($basis, $ohneSso, 'GET', '/login');
+    pruefe(!str_contains($loginSeite['text'], 'sso-knopf') && !str_contains($loginSeite['text'], '<details class="lokal"'), 'SSO aus: Anmeldeseite ohne Knopf, Formular offen');
     $seite = aufruf($basis, $ohneSso, 'GET', '/login');
     aufruf($basis, $ohneSso, 'POST', '/login', ['username' => $kennung . '-zwei', 'password' => $kennwort, '_token' => token($seite['text'])]);
+    // SSO aus: Verbinden führt mit Meldung zurück ins Profil, das Profil zeigt keine SSO-Karte.
+    $r = aufruf($basis, $ohneSso, 'GET', '/login/sso/verbinden');
+    pruefe($r['status'] === 302 && $r['ziel'] === '/profil' && str_contains(aufruf($basis, $ohneSso, 'GET', '/profil')['text'], 'nicht eingerichtet'),
+        'SSO aus: Verbinden → /profil mit Meldung');
+    $r = aufruf($basis, $ohneSso, 'GET', '/profil');
+    pruefe(!str_contains($r['text'], 'id="sso"') && str_contains($r['text'], 'Passwort ändern'), 'SSO aus: Profil ohne SSO-Karte, mit Kennwort-Karte');
+    $r = aufruf($basis, $ohneSso, 'POST', '/profil/sso/loesen', ['_token' => token($r['text'])]);
+    pruefe($r['status'] === 302 && $r['ziel'] === '/profil' && str_contains(aufruf($basis, $ohneSso, 'GET', '/profil')['text'], 'mit keiner Anmeldung'),
+        'Lösen ohne Verknüpfung → /profil mit Meldung');
     $r = aufruf($basis, $ohneSso, 'POST', '/logout', ['_token' => token(aufruf($basis, $ohneSso, 'GET', '/profil')['text'])]);
     pruefe($r['status'] === 302 && $r['ziel'] === '/login' && preg_match('/^Set-Cookie:\s*pm_sso_neu=/mi', $r['kopf']) !== 1,
         'Abmelden (Kennwort) → /login, ohne pm_sso_neu');
@@ -1241,6 +1258,14 @@ try {
     // ---------------------------------------------------- Benutzer verwalten ohne Administration
     $verwalter = anmelden($basis, $kennung . '-verwalter', $kennwort);
     $dosen[] = $verwalter['dose'];
+    // Anmeldung über SSO einrichten nur mit sso.manage – auch nicht mit „Benutzer verwalten“.
+    gleich(aufruf($basis, $verwalter['dose'], 'GET', '/system/sso')['status'], 403, 'Verwalter ohne sso.manage: /system/sso → 403');
+    $vorherSso = Database::select("SELECT setting_key, setting_value FROM settings WHERE setting_key LIKE 'sso.%' ORDER BY setting_key");
+    $r = aufruf($basis, $verwalter['dose'], 'POST', '/system/sso/optionen', ['anlegen' => '1', 'scopes' => 'openid', '_token' => $verwalter['token']]);
+    pruefe($r['status'] === 403 && Database::select("SELECT setting_key, setting_value FROM settings WHERE setting_key LIKE 'sso.%' ORDER BY setting_key") == $vorherSso,
+        'Verwalter ohne sso.manage: Optionen speichern → 403, nichts geändert');
+    $r = aufruf($basis, $verwalter['dose'], 'GET', '/system/benutzer');
+    pruefe($r['status'] === 200 && !str_contains($r['text'], 'href="/system/sso'), 'Verwalter ohne sso.manage: kein Verweis auf Anmeldung (SSO)');
     $adminRolle = (int) Database::scalar('SELECT id FROM roles WHERE is_system = 1 ORDER BY id LIMIT 1');
     aufruf($basis, $verwalter['dose'], 'POST', '/system/benutzer/speichern', ['id' => $benutzer['verwalter'], 'username' => $kennung . '-verwalter', 'is_active' => 1,
         'rollen' => [$adminRolle => ['aktiv' => 1], $verwalterRolle => ['aktiv' => 1]], '_token' => $verwalter['token']]);

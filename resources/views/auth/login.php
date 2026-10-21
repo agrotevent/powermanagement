@@ -1,4 +1,35 @@
 <?php use App\Support\Csrf; use App\Support\View; ?>
+<?php
+/*
+ * Anmeldung. Mit SSO steht oben der Knopf – ein Link, kein Formular: CSP
+ * form-action 'self' gälte in Chromium sonst auch für die Weiterleitung zum
+ * Anmeldedienst. Bei „nur SSO“ ist das Kennwortformular eingeklappt (für
+ * Kundenzugänge und den Notzugang), ganz ohne JavaScript (<details>).
+ *
+ * @var ?string $sso Beschriftung („Authentik“) oder null ohne SSO
+ * @var bool $nurSso
+ * @var bool $lokal Kennwortformular aufgeklappt
+ */
+$sso = $sso ?? null;
+$next = (string) ($next ?? '');
+$formular = static function (bool $hauptweg) use ($next): string {
+    ob_start(); ?>
+        <form method="post" action="/login">
+            <?= Csrf::field() ?>
+            <input type="hidden" name="next" value="<?= View::e($next) ?>">
+            <div class="field">
+                <label for="username">Benutzername</label>
+                <input type="text" id="username" name="username" autocomplete="username"<?= $hauptweg ? ' autofocus' : '' ?> required>
+            </div>
+            <div class="field">
+                <label for="password">Passwort</label>
+                <input type="password" id="password" name="password" autocomplete="current-password" required>
+            </div>
+            <button class="btn btn-block<?= $hauptweg ? ' btn-primary' : '' ?>" type="submit">Anmelden</button>
+        </form>
+    <?php return (string) ob_get_clean();
+};
+?>
 <div class="login-wrap">
     <div class="login-card">
         <div class="brand">
@@ -11,19 +42,20 @@
 
         <?= View::partial('partials/flash', ['flashes' => $flashes ?? []]) ?>
 
-        <form method="post" action="/login">
-            <?= Csrf::field() ?>
-            <input type="hidden" name="next" value="<?= View::e($next ?? '') ?>">
-            <div class="field">
-                <label for="username">Benutzername</label>
-                <input type="text" id="username" name="username" autocomplete="username" autofocus required>
-            </div>
-            <div class="field">
-                <label for="password">Passwort</label>
-                <input type="password" id="password" name="password" autocomplete="current-password" required>
-            </div>
-            <button class="btn btn-primary btn-block" type="submit">Anmelden</button>
-        </form>
+        <?php if ($sso !== null): ?>
+            <a class="btn btn-primary btn-block sso-knopf" href="/login/sso?next=<?= View::e(rawurlencode($next)) ?>">Mit <?= View::e($sso) ?> anmelden</a>
+            <div class="oder">oder</div>
+            <?php if (!empty($nurSso)): ?>
+                <details class="lokal"<?= !empty($lokal) ? ' open' : '' ?>>
+                    <summary>Mit Benutzername und Kennwort (Kunden, Notzugang)</summary>
+                    <?= $formular(false) ?>
+                </details>
+            <?php else: ?>
+                <?= $formular(false) ?>
+            <?php endif; ?>
+        <?php else: ?>
+            <?= $formular(true) ?>
+        <?php endif; ?>
 
         <?php if (!empty($demoMode)): ?>
             <div class="notice" style="margin-top:1rem">

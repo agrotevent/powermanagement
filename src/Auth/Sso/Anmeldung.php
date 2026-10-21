@@ -271,6 +271,42 @@ final class Anmeldung
         return $pfad;
     }
 
+    /**
+     * Darf das angemeldete Konto sich jetzt im Profil mit dem Anmeldedienst
+     * verbinden? null = ja, sonst die Meldung. Nur in einer Sitzung mit
+     * Kennwort (nicht über SSO, nie als Notzugang – ein Notzugang wird nie
+     * verknüpft), nie ein Kundenzugang, nur ohne Identität beim jetzigen
+     * Aussteller und nicht der letzte Notzugang bei „nur SSO“. Für den Start
+     * (SsoController::verbinden) und den Link im Profil.
+     */
+    public static function verbindenFehler(): ?string
+    {
+        $user = Auth::user();
+        if ($user === null) {
+            return 'Bitte zuerst anmelden.';
+        }
+        if (!Einstellungen::aktiv()) {
+            return self::T_NICHT_EINGERICHTET;
+        }
+        $weg = Auth::anmeldeweg();
+        if ($weg === 'notzugang') {
+            return 'Ein Notzugang wird nie mit dem Anmeldedienst verknüpft.';
+        }
+        if ($weg !== 'kennwort') {
+            return 'Verbinden geht nur in einer Sitzung, die mit Kennwort angemeldet ist.';
+        }
+        if (Kundenbereich::istKundenzugang($user)) {
+            return Konten::T_KUNDE_NIE;
+        }
+        if (Konten::identitaet((int) $user['id']) !== null) {
+            return 'Dieses Konto ist schon mit einer Anmeldung bei ' . Einstellungen::name() . ' verknüpft.';
+        }
+        if (Schutz::letzterNotzugang((int) $user['id'])) {
+            return Schutz::T_LETZTER_NOTZUGANG;
+        }
+        return null;
+    }
+
     /** Nach dem Abmelden: Die nächste SSO-Anmeldung in diesem Browser verlangt prompt=login (12 h). */
     public static function cookieNeuSetzen(): void
     {

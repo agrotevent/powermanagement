@@ -94,6 +94,15 @@ try {
             pruefe(!in_array('sso.manage', $rolle['permissions'], true), 'Standardrolle ' . $schluessel . ' ohne sso.manage');
         }
     }
+    // Gruppe → Rolle vergibt die Rolle an jedes Gruppenmitglied – also nur, wer sie von Hand vergeben dürfte.
+    $planungRolle = (int) Database::scalar("SELECT id FROM roles WHERE role_key = 'planung'");
+    pruefe(\App\Auth\Sso\Konten::zuordnungFehler('pm-' . $k, 'rolle', $planungRolle) !== null, 'Gruppe → Rolle mit Rechten, die man nicht hat → abgelehnt');
+    pruefe(\App\Auth\Sso\Konten::zuordnungFehler('pm-' . $k, 'rolle', $rollen['klein']) === null, 'Gruppe → Rolle mit eigenen Rechten → erlaubt');
+    alsBenutzer($benutzer['klein']);
+    pruefe(\App\Auth\Sso\Konten::zuordnungFehler('pm-' . $k, 'rolle', $rollen['klein']) !== null, 'Gruppe → Rolle ohne „Benutzer verwalten“ → abgelehnt');
+    pruefe(!\App\Auth\Sso\Konten::anfrageVerwerfen(0)['ok'] && !\App\Auth\Sso\Konten::anfrageFreischalten(0, $benutzer['klein'])['ok'],
+        'Anmeldeanfragen verwerfen/freischalten ohne „Benutzer verwalten“ → abgelehnt');
+    alsBenutzer($benutzer['verwalter']);
     // Wohin das SSO-Secret geht und wohin die Anmeldung zurückkehrt, ändert nie die Oberfläche.
     pruefe(preg_grep('/^sso\./', array_keys(Settings::OVERRIDABLE)) === [] && !array_key_exists('app.url', Settings::OVERRIDABLE),
         'Settings::OVERRIDABLE ohne sso.* und app.url');
@@ -316,6 +325,22 @@ try {
         pruefe(preg_match('/\son[a-z]+\s*=/i', $text) !== 1 && stripos($text, 'javascript:') === false, $name . ': kein on…= und kein javascript:');
     }
 
+    // Was der Anmeldedienst schickt (Name dort, Name, E-Mail, Gruppen einer Anfrage oder
+    // Verknüpfung) und Befunde der Prüfung kommen auf /system/sso nur maskiert an.
+    $boese = '<script>alert(1)</script>';
+    $html = View::render('sso/einstellungen', [
+        'zustand'        => ['befund' => [['ok' => false, 'text' => $boese]], 'geprueft_am' => time(), 'kids' => [$boese], 'algs' => ['RS256'],
+            'aussteller' => 'https://idp.example/' . $boese] + \App\Auth\Sso\Einstellungen::zustand(),
+        'zuordnungen'    => [['id' => 1, 'gruppe' => $boese, 'art' => 'rolle', 'ziel_id' => 1, 'ziel_name' => $boese, 'created_by' => $boese, 'created_at' => gmdate('c')]],
+        'rollen'         => [['id' => 1, 'name' => $boese, 'verwaltend' => false, 'waehlbar' => true, 'freigaben' => 0]],
+        'anfragen'       => [['id' => 1, 'name_dort' => $boese, 'voller_name' => $boese, 'email' => $boese, 'email_bestaetigt' => 1, 'gruppen' => [$boese],
+            'grund' => $boese, 'anzahl' => 2, 'letzte_am' => gmdate('c'), 'vorschlag' => null]],
+        'konten'         => [['id' => 1, 'username' => $boese, 'full_name' => $boese]],
+        'verknuepfungen' => [['user_id' => 1, 'username' => $boese, 'full_name' => $boese, 'name_dort' => $boese, 'weg' => $boese, 'zuletzt_am' => null,
+            'gruppen' => [$boese], 'nur_sso' => 0, 'kunde_id' => null, 'verwaltbar' => true, 'anderer_aussteller' => false]],
+        'darfBenutzer'   => true,
+    ], '');
+    pruefe(!str_contains($html, '<script>') && substr_count($html, '&lt;script&gt;') >= 15, 'SSO-Einstellungen: Angaben des Anmeldedienstes nur maskiert');
     // Was eine andere Instanz schickt, kommt in der Instanzseite nur maskiert an:
     // ihre Meldung, Namen von Locations und Etagen; ein Schlüssel, der keiner
     // ist, wird übergangen.

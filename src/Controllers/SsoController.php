@@ -7,6 +7,8 @@ use App\Auth\Auth;
 use App\Auth\Sso\Anbieter;
 use App\Auth\Sso\Anmeldung;
 use App\Auth\Sso\Einstellungen;
+use App\Auth\Sso\Konten;
+use App\Auth\Sso\Schutz;
 use App\Auth\Sso\SsoFehler;
 use App\Support\Flash;
 use App\Support\Logger;
@@ -16,9 +18,10 @@ use App\Support\Session;
 use App\Support\View;
 
 /**
- * Anmeldung über SSO (OpenID Connect): Start, Rückruf und die Seite nach dem
- * Abmelden. Die Arbeit macht App\Auth\Sso\Anmeldung; hier stehen nur
- * Kopfzeilen, Meldungen und Weiterleitungen.
+ * Anmeldung über SSO (OpenID Connect): Start, Rückruf, Verbinden und Lösen im
+ * Profil und die Seite nach dem Abmelden. Die Arbeit macht
+ * App\Auth\Sso\Anmeldung; hier stehen nur Kopfzeilen, Meldungen und
+ * Weiterleitungen.
  *
  * Jede Antwort: Cache-Control no-store und Referrer-Policy no-referrer – die
  * Adresse des Rückrufs trägt Code und state, die Seite nach dem Abmelden
@@ -84,6 +87,84 @@ final class SsoController extends Controller
     }
 
     /**
+     * GET /login/sso/verbinden – im Profil das angemeldete Konto (Sitzung mit
+     * Kennwort) mit einer Anmeldung beim Anmeldedienst verbinden. Ein Link
+     * (kein Formular, CSP form-action), darum nur von dieser Seite aus
+     * (Sec-Fetch-Site, wenn der Browser es schickt) – eine fremde Seite löste
+     * sonst die Verknüpfung mit ihrer eigenen Anmeldung dort aus. Verlangt
+     * beim Anmeldedienst eine neue Anmeldung (prompt=login, max_age=0).
+     */
+    public function verbinden(Request $request): void
+    {
+        $this->ohneSpeichern();
+        if (!self::vonDieserSeite()) {
+            Response::forbidden('Verbinden geht nur von dieser Seite aus – bitte im Profil auf „Mit … verbinden“ tippen.');
+            return;
+        }
+        if ($request->method() === 'HEAD') {
+            $this->redirect('/profil');   // legt keinen Vorgang an
+            return;
+        }
+        if (!Auth::check()) {
+            $this->redirect('/login?next=' . rawurlencode('/profil'));
+            return;
+        }
+        $fehler = Anmeldung::verbindenFehler() ?? Anmeldung::gebremst($request->ip());
+        if ($fehler !== null) {
+            Flash::error($fehler);
+            $this->redirect('/profil');
+            return;
+        }
+        try {
+            $adresse = Anmeldung::starten('verbinden', '/profil', true, Auth::id());
+        } catch (SsoFehler $e) {
+            Logger::info('sso', ['schritt' => 'start', 'grund' => $e->pruefung, 'zweck' => 'verbinden']);
+            Flash::error($e->getMessage());
+            $this->redirect('/profil');
+            return;
+        }
+        self::zumAnbieter($adresse);
+    }
+
+    /**
+     * POST /profil/sso/loesen – die eigene Verknüpfung lösen. Nicht, wer sich
+     * nur über SSO anmeldet (ohne Verknüpfung käme er nicht mehr hinein bzw.
+     * umginge „nur SSO“ – das löst die Benutzerverwaltung). In einer Sitzung
+     * über SSO endet die Sitzung damit: abmelden, mit Kennwort neu anmelden.
+     */
+    public function profilLoesen(Request $request): void
+    {
+        $this->ohneSpeichern();
+        $user = Auth::user();
+        if ($user === null) {
+            $this->redirect('/login?next=' . rawurlencode('/profil'));
+            return;
+        }
+        $name = Einstellungen::name();
+        if (Schutz::nurSso($user)) {
+            Flash::error('Dieses Konto meldet sich nur über ' . $name . ' an – lösen kann die Verknüpfung nur die Benutzerverwaltung.');
+            $this->redirect('/profil');
+            return;
+        }
+        $sso = Auth::anmeldeweg() === 'sso';
+        if (!Konten::loesen((int) $user['id'])) {
+            Flash::info('Dieses Konto ist mit keiner Anmeldung bei ' . $name . ' verknüpft.');
+            $this->redirect('/profil');
+            return;
+        }
+        if ($sso) {
+            Auth::logout();
+            Session::neu();
+            Anmeldung::cookieNeuSetzen();
+            Flash::info('Verknüpfung gelöst – bitte mit Kennwort anmelden.');
+            $this->redirect('/login');
+            return;
+        }
+        Flash::success('Die Verknüpfung mit ' . $name . ' ist gelöst – angemeldet wird ab jetzt mit Kennwort.');
+        $this->redirect('/profil');
+    }
+
+    /**
      * GET /abgemeldet – nach dem Abmelden einer SSO-Sitzung, einmal: der Link
      * zum Abmelden beim Anmeldedienst (ein Link, keine Weiterleitung – wer
      * dort angemeldet bleiben will, bleibt es). Neu geladen, ohne Hinweis
@@ -116,6 +197,16 @@ final class SsoController extends Controller
     }
 
     private const KOPF = ['Cache-Control: no-store', 'Referrer-Policy: no-referrer'];
+
+    /**
+     * Kam der Link von dieser Seite? Sec-Fetch-Site same-origin oder none
+     * (eingetippt, Lesezeichen); ohne die Kopfzeile (ältere Browser) ja.
+     */
+    private static function vonDieserSeite(): bool
+    {
+        $seite = $_SERVER['HTTP_SEC_FETCH_SITE'] ?? null;
+        return !is_string($seite) || in_array(strtolower(trim($seite)), ['same-origin', 'none'], true);
+    }
 
     private function ohneSpeichern(): void
     {

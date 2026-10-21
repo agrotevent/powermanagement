@@ -1068,6 +1068,27 @@ pruefe((int) Database::scalar('SELECT COUNT(*) FROM sso_anfragen') === Konten::M
     && Database::first('SELECT id FROM sso_anfragen WHERE subjekt = ?', ['viele-1-' . $kennung]) !== null, '201 Anfragen → die älteste ist weg');
 Database::execute('DELETE FROM sso_anfragen');
 
+// F.8 Verbinden im Profil – wer darf (Anmeldung::verbindenFehler, Start und Link im Profil)
+$abmelden();
+gleich(Anmeldung::verbindenFehler(), 'Bitte zuerst anmelden.', 'verbinden: ohne Anmeldung → abgelehnt');
+$verbinder = BenutzerService::anlegen($kennung . '-verbinder', $pw, 'planung', false);
+pruefe(Auth::attempt($kennung . '-verbinder', $pw, '192.0.2.11')['ok'] && Anmeldung::verbindenFehler() === null, 'verbinden: Kennwort-Sitzung, unverknüpft → erlaubt');
+Settings::put(Einstellungen::AKTIV, '0');
+gleich(Anmeldung::verbindenFehler(), Anmeldung::T_NICHT_EINGERICHTET, 'verbinden: SSO aus → abgelehnt');
+Settings::put(Einstellungen::AKTIV, '1');
+Konten::verknuepfen($verbinder, $iss, 'sub-verbinder-' . $kennung, 'cli', '', []);
+pruefe(str_contains((string) Anmeldung::verbindenFehler(), 'schon'), 'verbinden: schon verknüpft → abgelehnt');
+$abmelden();
+pruefe($ablauf($person($subPlaner, 'planer-dort'))['ok'] && str_contains((string) Anmeldung::verbindenFehler(), 'mit Kennwort'), 'verbinden: in einer SSO-Sitzung → abgelehnt');
+$abmelden();
+pruefe(Auth::attempt($kennung . '-kz', $pw, '192.0.2.11')['ok'] && Anmeldung::verbindenFehler() === Konten::T_KUNDE_NIE, 'verbinden: Kundenzugang → abgelehnt');
+$abmelden();
+Settings::put(Einstellungen::NUR_SSO, '1');
+pruefe(Auth::attempt($kennung . '-admin', $pw, '192.0.2.11')['ok'] && Auth::anmeldeweg() === 'notzugang'
+    && str_contains((string) Anmeldung::verbindenFehler(), 'Notzugang'), 'verbinden: Notzugang → abgelehnt');
+Settings::put(Einstellungen::NUR_SSO, '0');
+$abmelden();
+
 // ================================================================ G. Prüfkette
 $planerKonto = static fn (): array => (array) BenutzerService::find($planer);
 Database::update('users', $planer, ['is_active' => 0]);

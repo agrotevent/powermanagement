@@ -53,6 +53,7 @@ $groups = [
         ['/system/rollen',        'Rollen & Rechte',      null, 'system.users.manage'],
         ['/system/einstellungen', 'Einstellungen',        null, 'settings.manage'],
         ['/system/schnittstelle', 'Schnittstelle (API)',  null, 'api.manage'],
+        ['/system/sso',           'Anmeldung (SSO)',      null, 'sso.manage'],
         ['/audit',                'Audit-Log',            null, 'audit.view'],
     ],
 ];

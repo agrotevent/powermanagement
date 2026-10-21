@@ -638,6 +638,27 @@ a.btn[aria-disabled="true"] { opacity: .5; cursor: progress; }
 .login-card .brand { display: flex; align-items: center; gap: .65rem; margin-bottom: 1.25rem; }
 .login-card .logo { width: 40px; height: 40px; border-radius: 10px; background: linear-gradient(135deg, #2563eb, #0ea5e9); color: #fff; display: grid; place-items: center; font-weight: 700; }
 
+/* Anmeldung über SSO: der Knopf (ein Link) oben, „oder“ als Trennlinie,
+   bei „nur SSO“ das Kennwortformular eingeklappt – ohne JavaScript, mit
+   Tippflächen von mindestens 44 px. */
+.sso-knopf { min-height: 44px; display: flex; align-items: center; justify-content: center; text-align: center; }
+.oder { display: flex; align-items: center; gap: .6rem; margin: 1rem 0; color: var(--text-muted); font-size: .78rem; }
+.oder::before, .oder::after { content: ""; flex: 1; border-top: 1px solid var(--border); }
+details.lokal > summary {
+    min-height: 44px; display: flex; align-items: center; gap: .4rem; cursor: pointer;
+    font-size: .84rem; color: var(--text-muted); list-style: none;
+}
+details.lokal > summary::-webkit-details-marker { display: none; }
+details.lokal > summary::before { content: "▸"; }
+details.lokal[open] > summary::before { content: "▾"; }
+details.lokal[open] > summary { margin-bottom: .5rem; }
+.text-ok { color: var(--success); }
+.text-bad { color: var(--danger); }
+.sso-befund li { padding: .2rem 0; }
+details.sso-neu > summary { cursor: pointer; min-height: 32px; display: flex; align-items: center; font-size: .82rem; }
+.sso-kopieren { display: flex; gap: .4rem; align-items: center; }
+.sso-kopieren input { flex: 1; min-width: 0; font-family: "JetBrains Mono", monospace; font-size: .76rem; }
+
 .demo-flag {
     background: #fef3c7; color: #92400e; padding: .15rem .5rem; border-radius: 6px;
     font-size: .7rem; font-weight: 650; letter-spacing: .03em;

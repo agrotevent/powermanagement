@@ -27,6 +27,7 @@ use App\Controllers\PruefgeraeteController;
 use App\Controllers\MqttZugaengeController;
 use App\Controllers\SchnittstelleController;
 use App\Controllers\SsoController;
+use App\Controllers\SsoEinstellungenController;
 use App\Controllers\StandortController;
 use App\Controllers\StatistikController;
 use App\Controllers\SteckerController;
@@ -64,17 +65,21 @@ $router->post('/profil/passwort', [AuthController::class, 'changePassword']);
 
 // ---------------------------------------------------------------- Anmeldung über SSO (OpenID Connect)
 /*
- * Optional. Der Start ist ein Link (GET), kein Formular: CSP form-action
- * 'self' gälte in Chromium sonst auch für die Weiterleitung zum Anbieter.
- * Der Rückruf kommt als GET (response_mode=query, das Sitzungs-Cookie ist
- * SameSite=Lax) und ist durch state (Sitzung, einmalig), PKCE und nonce
- * geschützt – ein CSRF-Token gibt es dort nicht. Ziele außerhalb dieser
- * Seite kommen nur aus der geprüften Discovery. Ohne Recht an der Route:
- * Start und Rückruf gehen ohne Anmeldung, /abgemeldet nur abgemeldet.
+ * Optional. Start und Verbinden sind Links (GET), keine Formulare: CSP
+ * form-action 'self' gälte in Chromium sonst auch für die Weiterleitung zum
+ * Anbieter. Der Rückruf kommt als GET (response_mode=query, das
+ * Sitzungs-Cookie ist SameSite=Lax) und ist durch state (Sitzung, einmalig),
+ * PKCE und nonce geschützt – ein CSRF-Token gibt es dort nicht. Ziele
+ * außerhalb dieser Seite kommen nur aus der geprüften Discovery. Ohne Recht
+ * an der Route: Start und Rückruf gehen ohne Anmeldung, /abgemeldet nur
+ * abgemeldet; Verbinden (nur von dieser Seite, Sec-Fetch-Site) und Lösen im
+ * Profil prüfen die Anmeldung selbst.
  */
 $router->get('/login/sso', [SsoController::class, 'start']);
 $router->get('/login/sso/rueckruf', [SsoController::class, 'rueckruf']);
+$router->get('/login/sso/verbinden', [SsoController::class, 'verbinden']);
 $router->get('/abgemeldet', [SsoController::class, 'abgemeldet']);
+$router->post('/profil/sso/loesen', [SsoController::class, 'profilLoesen']);
 
 // ---------------------------------------------------------------- Kundenbereich
 /*
@@ -325,6 +330,8 @@ $router->get('/system/benutzer', [BenutzerController::class, 'index'], 'system.u
 $router->post('/system/benutzer/speichern', [BenutzerController::class, 'speichern'], 'system.users.manage');
 $router->post('/system/benutzer/loeschen', [BenutzerController::class, 'loeschen'], 'system.users.manage');
 $router->post('/system/benutzer/entsperren', [BenutzerController::class, 'entsperren'], 'system.users.manage');
+// Anmeldung über SSO am Konto: Verknüpfung lösen, SSO-Sitzungen beenden (+ darfVerwalten).
+$router->post('/system/benutzer/{id}/sso', [BenutzerController::class, 'sso'], 'system.users.manage');
 $router->get('/system/freigaben', [BenutzerController::class, 'freigaben'], 'system.users.manage');
 $router->post('/system/freigaben/speichern', [BenutzerController::class, 'freigabeSpeichern'], 'system.users.manage');
 $router->post('/system/freigaben/loeschen', [BenutzerController::class, 'freigabeLoeschen'], 'system.users.manage');
@@ -346,6 +353,20 @@ $router->post('/system/einstellungen/eventworx', [EinstellungenController::class
 $router->post('/system/einstellungen/eventworx/pruefen', [EinstellungenController::class, 'eventworxPruefen'], 'settings.manage');
 // Kundenbereich: Datenschutzhinweis, Ansprechpartner, Gültigkeit der Einrichtungslinks, Aufbewahrung der Prüfnachweise.
 $router->post('/system/einstellungen/kundenbereich', [EinstellungenController::class, 'kundenbereich'], 'settings.manage');
+
+// Anmeldung über SSO (OpenID Connect): Verbindung, Prüfen, Ein-/Ausschalten,
+// Optionen, Gruppen → Rollen, Anmeldeanfragen. Gruppen zuordnen und Anfragen
+// freischalten zusätzlich nur mit „Benutzer verwalten“ und nur, was man
+// selbst vergeben bzw. verwalten darf (App\Auth\Sso\Konten). Feste Pfade
+// vor {id}.
+$router->get('/system/sso', [SsoEinstellungenController::class, 'index'], 'sso.manage');
+foreach (['verbindung', 'pruefen', 'schalten', 'optionen', 'zuordnung'] as $aktion) {
+    $router->post('/system/sso/' . $aktion, [SsoEinstellungenController::class, $aktion], 'sso.manage');
+}
+$router->post('/system/sso/zuordnung/{id}/loeschen', [SsoEinstellungenController::class, 'zuordnungLoeschen'], 'sso.manage');
+$router->post('/system/sso/anfrage/{id}/freischalten', [SsoEinstellungenController::class, 'anfrageFreischalten'], 'sso.manage');
+$router->post('/system/sso/anfrage/{id}/anlegen', [SsoEinstellungenController::class, 'anfrageAnlegen'], 'sso.manage');
+$router->post('/system/sso/anfrage/{id}/verwerfen', [SsoEinstellungenController::class, 'anfrageVerwerfen'], 'sso.manage');
 
 // Schnittstelle (API): Zugänge für andere Instanzen. Anlegen, Ändern,
 // Anzeigen und Löschen zusätzlich nur mit „Alle Standorte …“ (prüft der

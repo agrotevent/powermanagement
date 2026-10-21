@@ -1382,6 +1382,30 @@ pruefe($lauf['antwort']['status'] === 200 && $lauf['dauer'] < 1.5,
 pruefe($lauf['langsam'][0]['status'] === 302 && str_starts_with($ortAus($lauf['langsam'][0]['kopf']), 'http://127.0.0.1:' . $oidcPort . '/application/o/authorize/?'),
     'SSO: der Start leitet danach zum Anmeldedienst');
 
+// „Verbindung prüfen“ und „Einschalten“ unter System → Anmeldung (SSO):
+// Discovery, Schlüssel und Token-Probe (zusammen bis 24 s) ohne
+// Sitzungssperre – danach stehen Befund und Meldung trotzdem da. Angemeldet
+// als „pruefer“ über SSO (sein Kennwort hat ein Abschnitt weiter oben geändert).
+[, $authorize] = $ssoStart();
+holen($authorize['ziel']);
+$ssoSeite = holen($basis . '/system/sso');
+preg_match('/name="_token" value="([^"]+)"/', $ssoSeite['text'], $m);
+$ssoToken = $m[1] ?? '';
+pruefe($ssoSeite['status'] === 200 && $ssoToken !== '', 'SSO-Einstellungen: über SSO angemeldet, Seite da');
+foreach (['pruefen' => [], 'schalten' => ['an' => '1']] as $aktion => $felder) {
+    $idp->steuern(['verzoegerung' => 1]);
+    $lauf = waehrendLangsam([[$basis . '/system/sso/' . $aktion, $felder + ['_token' => $ssoToken]]], $basis . '/profil');
+    $idp->steuern(['verzoegerung' => null]);
+    pruefe($lauf['antwort']['status'] === 200 && $lauf['dauer'] < 1.5,
+        sprintf('SSO-Einstellungen: eine andere Seite kommt durch, während „%s“ auf den Anmeldedienst wartet (%.1f s)', $aktion, $lauf['dauer']));
+    $nachher = holen($basis . '/system/sso');
+    pruefe($lauf['langsam'][0]['status'] === 302 && $ortAus($lauf['langsam'][0]['kopf']) === '/system/sso'
+        && str_contains($nachher['text'], $aktion === 'pruefen' ? 'Verbindung geprüft – alles in Ordnung.' : 'ist eingeschaltet'),
+        'SSO-Einstellungen: „' . $aktion . '“ danach mit Meldung zurück');
+}
+preg_match('/name="_token" value="([^"]+)"/', holen($basis . '/profil')['text'], $m);
+holen($basis . '/logout', ['_token' => $m[1] ?? '']);
+
 $meldungen = trim((string) @file_get_contents($phpFehler));
 pruefe($meldungen === '', 'keine PHP-Meldung der Instanz' . ($meldungen !== '' ? ': ' . mb_substr($meldungen, 0, 300) : ''));
 
