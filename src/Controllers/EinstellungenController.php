@@ -3,14 +3,17 @@ declare(strict_types=1);
 
 namespace App\Controllers;
 
+use App\Berichte\Einstellungen;
 use App\Messung\Influx;
 use App\Messung\Messdaten;
 use App\Messung\Mqtt;
+use App\Services\Eventworx;
 use App\Services\LocationSync;
 use App\Support\Audit;
 use App\Support\Config;
 use App\Support\Flash;
 use App\Support\Request;
+use App\Support\Session;
 use App\Support\Settings;
 
 final class EinstellungenController extends Controller
@@ -24,6 +27,8 @@ final class EinstellungenController extends Controller
                 'mqtt'    => Settings::geheimnisHinterlegt(Settings::GEHEIM_MQTT_KENNWORT),
                 'repo'    => LocationSync::tokenQuelle(),
             ],
+            'eventworx' => Eventworx::zustand(),
+            'berichte'  => Einstellungen::alle(),
         ]);
     }
 
@@ -87,6 +92,49 @@ final class EinstellungenController extends Controller
         $this->redirect('/system/einstellungen');
     }
 
+    /**
+     * Firma & Übergabeberichte: Firmendaten für Kopf und Fuß, Nummernkürzel,
+     * Vorgaben und Texte. Ein ungültiger Wert verwirft die ganze Eingabe.
+     * Namen im Formular: „firma.name“ → „firma__name“ (PHP machte aus dem
+     * Punkt einen Unterstrich).
+     */
+    public function firma(Request $request): void
+    {
+        $daten = [];
+        foreach (array_keys(Einstellungen::VORGABEN) as $schluessel) {
+            $feld = str_replace('.', '__', $schluessel);
+            if (array_key_exists($feld, $_POST)) {
+                $daten[$schluessel] = $_POST[$feld];
+            }
+        }
+        $ergebnis = Einstellungen::speichern($daten);
+        $ergebnis['ok'] ? Flash::success($ergebnis['message']) : Flash::error($ergebnis['message']);
+        $this->redirect('/system/einstellungen#firma');
+    }
+
+    /** Eventworx: Mandant und API-Token – das Token gilt nur für den Host, für den es eingetragen wird. */
+    public function eventworx(Request $request): void
+    {
+        $ergebnis = Eventworx::einstellungenSpeichern($request->str('eventworx_adresse'), $request->str('eventworx_token'));
+        if (!$ergebnis['ok']) {
+            Flash::error($ergebnis['message']);
+        } elseif (!empty($ergebnis['warnung'])) {
+            Flash::warning($ergebnis['message']);
+        } else {
+            Flash::success($ergebnis['message']);
+        }
+        $this->redirect('/system/einstellungen');
+    }
+
+    public function eventworxPruefen(Request $request): void
+    {
+        // Zwei Anfragen an Eventworx (Drossel, bis 12 s je Versuch) – ohne
+        // die Sitzung zu halten; die Meldung kommt danach.
+        $ergebnis = Session::ohneSperre(static fn (): array => Eventworx::verbindungTesten());
+        $ergebnis['ok'] ? Flash::success($ergebnis['message']) : Flash::error($ergebnis['message']);
+        $this->redirect('/system/einstellungen');
+    }
+
     public function pruefen(Request $request): void
     {
         if (Config::isDemo()) {
@@ -94,22 +142,31 @@ final class EinstellungenController extends Controller
             $this->redirect('/system/einstellungen');
             return;
         }
-        $influx = Influx::pruefen();
-        $influx['ok'] ? Flash::success($influx['message']) : Flash::error($influx['message']);
-        try {
-            $mqtt = Mqtt::ausKonfiguration('pm-einstellungen');
-            $mqtt->abonnieren([trim((string) Config::get('mqtt.prefix', 'pm'), '/') . '/status/nodered']);
-            $herz = $mqtt->lauschen(2, static fn () => true);
-            $mqtt->trennen();
-            Flash::success('MQTT-Broker erreichbar.' . ($herz === [] ? ' Von Node-RED kam kein Herzschlag (pm/status/nodered).' : ' Node-RED meldet sich.'));
-        } catch (\Throwable $e) {
-            Flash::error('MQTT: ' . $e->getMessage());
-        }
-        if ($influx['ok']) {
-            $p = Messdaten::pipeline();
-            $p === null
-                ? Flash::warning('In der letzten Stunde hat Node-RED nichts in die InfluxDB geschrieben (Messung „pipeline“ leer).')
-                : Flash::info('Node-RED schreibt: zuletzt ' . date('d.m.Y H:i:s', intdiv($p['zeit'], 1000)) . ', ' . (int) $p['fehler'] . ' Fehler, ' . (int) $p['puffer'] . ' Zeilen im Puffer.');
+        // InfluxDB (bis influx.timeout je Abfrage) und Broker (zwei Sekunden
+        // lauschen) – ohne die Sitzung zu halten. Die Meldungen erst danach.
+        $meldungen = Session::ohneSperre(static function (): array {
+            $meldungen = [];
+            $influx = Influx::pruefen();
+            $meldungen[] = [$influx['ok'] ? 'success' : 'error', $influx['message']];
+            try {
+                $mqtt = Mqtt::ausKonfiguration('pm-einstellungen');
+                $mqtt->abonnieren([trim((string) Config::get('mqtt.prefix', 'pm'), '/') . '/status/nodered']);
+                $herz = $mqtt->lauschen(2, static fn () => true);
+                $mqtt->trennen();
+                $meldungen[] = ['success', 'MQTT-Broker erreichbar.' . ($herz === [] ? ' Von Node-RED kam kein Herzschlag (pm/status/nodered).' : ' Node-RED meldet sich.')];
+            } catch (\Throwable $e) {
+                $meldungen[] = ['error', 'MQTT: ' . $e->getMessage()];
+            }
+            if ($influx['ok']) {
+                $p = Messdaten::pipeline();
+                $meldungen[] = $p === null
+                    ? ['warning', 'In der letzten Stunde hat Node-RED nichts in die InfluxDB geschrieben (Messung „pipeline“ leer).']
+                    : ['info', 'Node-RED schreibt: zuletzt ' . date('d.m.Y H:i:s', intdiv($p['zeit'], 1000)) . ', ' . (int) $p['fehler'] . ' Fehler, ' . (int) $p['puffer'] . ' Zeilen im Puffer.'];
+            }
+            return $meldungen;
+        });
+        foreach ($meldungen as [$art, $text]) {
+            Flash::add($art, $text);
         }
         $this->redirect('/system/einstellungen');
     }

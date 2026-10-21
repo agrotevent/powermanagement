@@ -8,7 +8,10 @@ declare(strict_types=1);
 require __DIR__ . '/hilfen/pruefung.php';
 
 use App\Services\AnlagenService;
+use App\Services\InventarService;
 use App\Services\LeitungService;
+use App\Services\LocationBundle;
+use App\Services\MesspunktService;
 use App\Services\SchutzService;
 use App\Services\SiteService;
 use App\Support\Database;
@@ -25,6 +28,7 @@ foreach (['powerlock', 'cee125', 'cee63', 'cee32', 'cee16', 'schuko'] as $k) {
 $siteId = SiteService::saveSite(null, ['name' => 'Prüfung Anschlüsse ' . bin2hex(random_bytes(3))]);
 $floorId = SiteService::saveFloor(null, ['site_id' => $siteId, 'name' => 'Fläche']);
 $angelegt = [];
+$inventarId = null;
 
 try {
     // Vorschlag je Art
@@ -247,7 +251,87 @@ try {
     $k1 = AnlagenService::find($ausMobil);
     pruefe($art['ok'] && $k1['art'] === 'verteilung' && str_contains($art['message'], 'Verteilung'), 'Art geändert: ' . $art['message']);
     gleich([AnlagenService::anzahlen($ausMobil), $k1['eigenschaften']], [$vorher, ['schutzart' => 'IP54']], 'Anschlüsse bleiben, Angaben passen zur neuen Art');
+
+    // Belegung aus einer Datei ersetzen (Location- und Verteiler-Abgleich,
+    // Schnittstelle): Anschlüsse und Schutzorgane entstehen neu – was hier
+    // daran hängt, zeigt danach auf den neuen an derselben Stelle.
+    $bel = (int) AnlagenService::speichern(null, ['art' => 'anschluss', 'name' => 'Prüf-Belegung', 'fest' => 1, 'floor_id' => $floorId, 'ohne_anschluesse' => true])['id'];
+    $angelegt[] = $bel;
+    AnlagenService::anzahlSetzen($bel, ['eingang' => [$typ['cee63'] => 1], 'abgang' => [$typ['cee32'] => 2, $typ['cee16'] => 2]]);
+    SchutzService::vorschlagen($bel);
+    $benutzt = [];
+    $belegung = LocationBundle::belegungLesen($bel, AnlagenService::steckertypenNachId(), $benutzt);
+    $abg = Database::select("SELECT id, nr, schutzorgan_id FROM anschluesse WHERE objekt_id = ? AND richtung = 'abgang' ORDER BY nr", [$bel]);
+    pruefe(count($abg) === 4 && $abg[0]['schutzorgan_id'] !== null, 'Prüfanlage mit vier abgesicherten Abgängen');
+    $anRef = static function (mixed $id) use ($bel): ?string {
+        if ($id === null) {
+            return null;
+        }
+        $r = Database::first('SELECT richtung, nr FROM anschluesse WHERE id = ? AND objekt_id = ?', [(int) $id, $bel]);
+        return $r === null ? 'zeigt ins Leere' : $r['richtung'] . ':' . (int) $r['nr'];
+    };
+    $schutzRef = static function (mixed $id) use ($bel): ?string {
+        if ($id === null) {
+            return null;
+        }
+        foreach (SchutzService::liste($bel) as $n => $s) {
+            if ((int) $s['id'] === (int) $id) {
+                return 's' . ($n + 1);
+            }
+        }
+        return 'zeigt ins Leere';
+    };
+    $geraet = 'shellypro3em-belegung-' . bin2hex(random_bytes(3));
+    $mJetzt = (int) MesspunktService::speichern($bel, null, ['geraet' => $geraet, 'kanal' => 'em:0',
+        'anschluss_id' => (int) $abg[0]['id'], 'schutzorgan_id' => (int) $abg[0]['schutzorgan_id']])['id'];
+    $mFrueher = Database::insert('messpunkte', ['objekt_id' => $bel, 'anschluss_id' => (int) $abg[1]['id'], 'schutzorgan_id' => null,
+        'geraet' => $geraet . '-alt', 'kanal' => 'em:0', 'rolle' => 'abgang', 'bezeichnung' => '',
+        'gueltig_ab' => '2026-01-01T00:00:00+00:00', 'gueltig_bis' => '2026-02-01T00:00:00+00:00', 'created_at' => gmdate('c')]);
+    $mWeg = (int) MesspunktService::speichern($bel, null, ['geraet' => $geraet . '-weg', 'kanal' => 'em:0', 'anschluss_id' => (int) $abg[3]['id']])['id'];
+    $inventarId = (int) InventarService::speichern(null, ['art' => 'zwischenstecker', 'kennung' => 'PRUEF-BEL-' . bin2hex(random_bytes(3)), 'steckertyp_id' => $typ['cee16'],
+        'messgeraete' => [['geraet' => $geraet . '-zs', 'kanal' => 'em:0', 'stelle' => 'durchgang']]])['id'];
+    $einsatz = InventarService::einsetzen($inventarId, $bel, (int) $abg[2]['id']);
+    pruefe($einsatz['ok'], 'Zwischenstecker an Abgang ' . (int) $abg[2]['nr'] . ' eingesetzt: ' . $einsatz['message']);
+    $mEinsatz = (int) Database::scalar('SELECT id FROM messpunkte WHERE objekt_id = ? AND einsatz_id = ?', [$bel, (int) ($einsatz['einsatz_id'] ?? 0)]);
+    $vorher = [
+        'jetzt'   => [$anRef(Database::scalar('SELECT anschluss_id FROM messpunkte WHERE id = ?', [$mJetzt])), $schutzRef(Database::scalar('SELECT schutzorgan_id FROM messpunkte WHERE id = ?', [$mJetzt]))],
+        'frueher' => $anRef(Database::scalar('SELECT anschluss_id FROM messpunkte WHERE id = ?', [$mFrueher])),
+        'einsatz' => $anRef(Database::scalar('SELECT anschluss_id FROM messpunkte WHERE id = ?', [$mEinsatz])),
+        'eintrag' => $anRef(Database::scalar('SELECT anschluss_id FROM einsaetze WHERE id = ?', [(int) ($einsatz['einsatz_id'] ?? 0)])),
+    ];
+    pruefe($mEinsatz > 0 && $vorher['einsatz'] === 'abgang:' . (int) $abg[2]['nr'] && $vorher['jetzt'][1] !== null, 'vorher: Messpunkte und Einsatz an ihren Abgängen');
+    $alteIds = array_map(static fn ($r) => (int) $r['id'], $abg);
+
+    // Die Datei ohne den vierten Abgang, Messpunkte nennt sie nicht (bleiben hier)
+    $ohneVierten = array_values(array_filter($belegung['anschluesse'], static fn ($x) => !($x['richtung'] === 'abgang' && (int) $x['nr'] === (int) $abg[3]['nr'])));
+    $neu = LocationBundle::belegungErsetzen($bel, ['schutzorgane' => $belegung['schutzorgane'], 'anschluesse' => $ohneVierten],
+        LocationBundle::steckertypenSichern(LocationBundle::steckertypenFuerDatei($benutzt)));
+    pruefe(array_intersect($alteIds, array_values($neu)) === [] && count($neu) === count($ohneVierten), 'Anschlüsse neu angelegt');
+    gleich((int) Database::scalar('SELECT COUNT(*) FROM messpunkte WHERE objekt_id = ?', [$bel]), 4, 'Messpunkte bleiben (Datei ohne Messpunkte)');
+    $nachher = [
+        'jetzt'   => [$anRef(Database::scalar('SELECT anschluss_id FROM messpunkte WHERE id = ?', [$mJetzt])), $schutzRef(Database::scalar('SELECT schutzorgan_id FROM messpunkte WHERE id = ?', [$mJetzt]))],
+        'frueher' => $anRef(Database::scalar('SELECT anschluss_id FROM messpunkte WHERE id = ?', [$mFrueher])),
+        'einsatz' => $anRef(Database::scalar('SELECT anschluss_id FROM messpunkte WHERE id = ?', [$mEinsatz])),
+        'eintrag' => $anRef(Database::scalar('SELECT anschluss_id FROM einsaetze WHERE id = ?', [(int) ($einsatz['einsatz_id'] ?? 0)])),
+    ];
+    gleich($nachher['jetzt'], $vorher['jetzt'], 'Messpunkt: derselbe Abgang und dasselbe Schutzorgan (sN)');
+    gleich($nachher['frueher'], $vorher['frueher'], 'früherer Messpunkt: derselbe Abgang');
+    gleich($nachher['einsatz'], $vorher['einsatz'], 'Messpunkt des Zwischensteckers: derselbe Abgang');
+    gleich($nachher['eintrag'], $vorher['eintrag'], 'Einsatz: derselbe Abgang');
+    pruefe(Database::scalar('SELECT anschluss_id FROM messpunkte WHERE id = ?', [$mWeg]) === null, 'Messpunkt am entfallenen Abgang: Verweis leer statt ins Leere');
+    gleich((int) Database::scalar('SELECT COUNT(*) FROM messpunkte m LEFT JOIN anschluesse a ON a.id = m.anschluss_id
+        WHERE m.objekt_id = ? AND m.anschluss_id IS NOT NULL AND a.id IS NULL', [$bel]), 0, 'kein Messpunkt zeigt auf einen gelöschten Anschluss');
+    gleich((int) Database::scalar('SELECT COUNT(*) FROM messpunkte m LEFT JOIN schutzorgane s ON s.id = m.schutzorgan_id
+        WHERE m.objekt_id = ? AND m.schutzorgan_id IS NOT NULL AND s.id IS NULL', [$bel]), 0, 'kein Messpunkt zeigt auf ein gelöschtes Schutzorgan');
+    gleich((int) Database::scalar('SELECT COUNT(*) FROM einsaetze e LEFT JOIN anschluesse a ON a.id = e.anschluss_id
+        WHERE e.objekt_id = ? AND e.anschluss_id IS NOT NULL AND a.id IS NULL', [$bel]), 0, 'kein Einsatz zeigt auf einen gelöschten Anschluss');
 } finally {
+    if ($inventarId !== null) {
+        foreach (Database::select('SELECT id FROM einsaetze WHERE inventar_id = ? AND bis IS NULL', [$inventarId]) as $e) {
+            InventarService::beenden((int) $e['id']);
+        }
+        InventarService::loeschen($inventarId);
+    }
     foreach ($angelegt as $id) {
         AnlagenService::loeschen((int) $id);
     }

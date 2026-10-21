@@ -5,7 +5,7 @@ use App\Support\Zeit;
 
 $title = 'Benutzer & Freigaben';
 $subtitle = 'Konten, Rollen auf Zeit und Freigaben mit Zeitfenstern';
-$form = $benutzer ?? ($neu ? ['id' => 0, 'username' => '', 'full_name' => '', 'email' => '', 'is_active' => 1, 'gueltig_ab' => null, 'gueltig_bis' => null, 'notizen' => ''] : null);
+$form = $benutzer ?? ($neu ? ['id' => 0, 'username' => '', 'full_name' => '', 'email' => '', 'is_active' => 1, 'gueltig_ab' => null, 'gueltig_bis' => null, 'notizen' => '', 'pruefer_qualifikation' => ''] : null);
 ?>
 <div class="toolbar-zeile">
     <a class="btn btn-sm btn-primary" href="/system/benutzer?neu=1">+ Neuer Benutzer</a>
@@ -35,6 +35,9 @@ $form = $benutzer ?? ($neu ? ['id' => 0, 'username' => '', 'full_name' => '', 'e
             <p class="help">Außerhalb dieses Zeitraums ist keine Anmeldung möglich – eine offene Sitzung endet mit.</p>
             <label class="check"><input type="checkbox" name="is_active" value="1"<?= (int) $form['is_active'] === 1 ? ' checked' : '' ?>> Konto aktiv</label>
             <div class="field"><label for="b-notiz">Notiz</label><input id="b-notiz" name="notizen" value="<?= View::e((string) $form['notizen']) ?>"></div>
+            <div class="field"><label for="b-quali">Prüfer-Qualifikation</label><input id="b-quali" name="pruefer_qualifikation" maxlength="120"
+                value="<?= View::e((string) ($form['pruefer_qualifikation'] ?? '')) ?>" placeholder="z. B. Elektrofachkraft für Veranstaltungstechnik">
+                <div class="help">Steht im Übergabebericht beim Prüfer. Ohne Qualifikation keine Prüfer-Unterschrift – auch mit dem Recht dazu.</div></div>
         </div>
         <div>
             <h3>Rollen</h3>

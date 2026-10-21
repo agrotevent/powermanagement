@@ -4,6 +4,9 @@ declare(strict_types=1);
 namespace App\Services;
 
 use App\Auth\Auth;
+use App\Berichte\BerichtService;
+use App\Berichte\Einstellungen;
+use App\Berichte\Pruefgeraete;
 use App\Messung\Datenquellen;
 use App\Support\Config;
 use App\Support\Database;
@@ -13,13 +16,17 @@ use App\Tanks\TankService;
 /**
  * Ein Demo-Festivalgelände: Netzanschluss, Aggregat mit Tank am
  * Kraftstoffschlauch, Speicher, Verteilungen mit Sicherungen und RCDs, Kabel,
- * Kabelbrücken, Messgeräte, Benutzer mit zeitlich begrenzten Freigaben.
+ * Kabelbrücken, Messgeräte, Benutzer mit zeitlich begrenzten Freigaben,
+ * Prüfgeräte und drei Übergabeberichte (abgeschlossen, vom Prüfer
+ * unterschrieben, Entwurf).
  *
  * Der Tank des Aggregats (QUADRO-AG 3000 aus dem mitgelieferten Katalog)
  * misst mit dem Tanksensor TS-01 seit drei Tagen; vorgestern bzw. gestern um
  * 06:00 ist er laut Lieferschein DEMO-0815 betankt worden, daraus kennt er
  * seinen Inhalt je mm. Der Reservetank am Catering hat keinen Sensor, nur
  * eine Peilung von heute früh; TS-02 liegt im Lager.
+ *
+ * Alle Namen, Firmen und Unterschriften sind erfunden.
  *
  * Grundlage der Screenshots und der Prüfskripte. Die Messwerte dazu
  * erzeugt App\Messung\Demo.
@@ -29,9 +36,16 @@ final class DemoSeed
     public static function anlegen(bool $zuruecksetzen): string
     {
         if ($zuruecksetzen) {
-            foreach (['tank_ereignisse', 'tank_kennlinien', 'aufbau_posten', 'aufbauten', 'einsaetze', 'inventar_messgeraete', 'inventar', 'bereich_mitglieder', 'bereiche', 'leitungen', 'messpunkte', 'anschluesse', 'schutzorgane', 'objekte', 'datenquellen', 'freigaben', 'floors', 'sites', 'schaltvorgaenge', 'mqtt_zugaenge'] as $tabelle) {
+            // Mit allen Berichten auch die Nummernzähler: die Demo beginnt wieder bei …-0001.
+            foreach (['bericht_ereignisse', 'bericht_pdf', 'bericht_unterschriften', 'bericht_objekte', 'berichte', 'bericht_nummern', 'kundenmodus_geraete', 'pruefgeraete',
+                'tank_ereignisse', 'tank_kennlinien',
+                'aufbau_posten', 'aufbauten', 'einsaetze', 'inventar_messgeraete', 'inventar', 'bereich_mitglieder', 'bereiche', 'leitungen', 'messpunkte', 'anschluesse', 'schutzorgane', 'objekte', 'datenquellen', 'freigaben', 'floors', 'sites', 'schaltvorgaenge', 'mqtt_zugaenge'] as $tabelle) {
                 Database::execute('DELETE FROM ' . $tabelle);
             }
+            // Wie SiteService::deleteSite: Standort-Freigaben der Tokens
+            // gehen mit, Vorschläge bleiben – nur ohne Standort.
+            Database::execute('DELETE FROM api_token_standorte');
+            Database::execute('UPDATE api_vorschlaege SET site_id = NULL WHERE site_id IS NOT NULL');
             Database::execute("DELETE FROM user_roles WHERE user_id IN (SELECT id FROM users WHERE username IN ('veranstalter', 'technik'))");
             Database::execute("DELETE FROM users WHERE username IN ('veranstalter', 'technik')");
             @unlink(dirname(__DIR__, 2) . '/storage/demo/schalter.json');
@@ -320,7 +334,7 @@ final class DemoSeed
             'notiz' => 'Festivalwoche', 'created_by' => 'demo', 'created_at' => gmdate('c'),
         ]);
         $technik = BenutzerService::anlegen('technik', 'Technik2026!!', 'technik', false);
-        Database::update('users', $technik, ['full_name' => 'Elektrik vor Ort']);
+        Database::update('users', $technik, ['full_name' => 'Tom Technik']);
         Database::insert('freigaben', [
             'subject_type' => 'user', 'subject_id' => $technik, 'ziel_art' => 'site', 'ziel_id' => $siteId, 'ziel_kanal' => '',
             'darf_bearbeiten' => 1, 'darf_steuern' => 0, 'gueltig_ab' => null, 'gueltig_bis' => null, 'daten_ab' => null, 'daten_bis' => null,
@@ -376,6 +390,9 @@ final class DemoSeed
             ]);
         }
 
+        // ---- Übergabeberichte
+        self::berichte($siteId, $aufbau, $technik, ['aggregat' => $gen, 'licht' => $licht, 'foodtruck' => $truckV, 'catering' => $catering, 'kasse' => $kasse]);
+
         return 'Demo-Gelände angelegt: ' . (int) Database::scalar('SELECT COUNT(*) FROM objekte WHERE ist_vorlage = 0') . ' Anlagen (davon '
             . (int) Database::scalar('SELECT COUNT(*) FROM objekte WHERE ist_vorlage = 0 AND fest = 1') . ' Feststromanschlüsse, '
             . (int) Database::scalar("SELECT COUNT(*) FROM objekte WHERE ist_vorlage = 0 AND art = 'tank'") . ' Tanks), '
@@ -383,9 +400,202 @@ final class DemoSeed
             . (int) Database::scalar('SELECT COUNT(*) FROM bereiche') . ' Bereich, '
             . (int) Database::scalar('SELECT COUNT(*) FROM inventar') . ' Inventarstücke, '
             . (int) Database::scalar('SELECT COUNT(*) FROM aufbauten') . ' Aufbau, '
-            . (int) Database::scalar('SELECT COUNT(*) FROM objekte WHERE ist_vorlage = 1') . ' Katalog-Einträge. '
-            . 'Zugänge: veranstalter / Veranstalter2026! (nur Festivalwoche), technik / Technik2026!! (schaltet nur das Licht).'
+            . (int) Database::scalar('SELECT COUNT(*) FROM objekte WHERE ist_vorlage = 1') . ' Katalog-Einträge, '
+            . (int) Database::scalar('SELECT COUNT(*) FROM berichte') . ' Übergabeberichte. '
+            . 'Zugänge: veranstalter / Veranstalter2026! (nur Festivalwoche), technik / Technik2026!! (schaltet nur das Licht, unterschreibt Übergabeberichte als Prüfer).'
             . (Config::isDemo() ? '' : ' Hinweis: app.demo ist aus – ohne InfluxDB bleiben die Messwerte leer.');
+    }
+
+    /**
+     * Drei Übergabeberichte zum Aufbau „Sommerfestival 2026“, angelegt und
+     * unterschrieben über BerichtService wie am Tablet – als Prüfer
+     * „technik“:
+     *
+     *  1. abgeschlossen: Aggregat 1 und „Licht Gelände“ (am Aggregat), mit
+     *     Messwerten, einer Zeile „Abschaltung durch RCD“, Unterschriften
+     *     von Prüfer und Kunde und gespeichertem PDF;
+     *  2. vom Prüfer unterschrieben: „Kasse Einlass“ – wartet auf den Kunden
+     *     (Kundenmodus zum Ausprobieren);
+     *  3. Entwurf: Foodtruck-Verteiler und Catering, halb ausgefüllt, ohne
+     *     Kunde (Eventworx-Suche zum Ausprobieren).
+     *
+     * Die Unterschriften sind feste, erfundene Strichlisten
+     * (resources/demo); jeder Bericht bekommt eigene Striche, sonst greift
+     * der Kopierschutz.
+     *
+     * @param array{aggregat:int, licht:int, foodtruck:int, catering:int, kasse:int} $anlagen
+     */
+    private static function berichte(int $siteId, int $aufbauId, int $technik, array $anlagen): void
+    {
+        // Erfundene Firmendaten – nur im Demo-Modus und nur, wenn noch keine eingetragen sind.
+        if (Config::isDemo() && Einstellungen::wert('firma.name') === '') {
+            Einstellungen::speichern([
+                'firma.name'            => 'Muster Eventstrom GmbH',
+                'firma.zusatz'          => 'Mobile Stromversorgung für Veranstaltungen',
+                'firma.anschrift'       => "Muster Eventstrom GmbH\nMusterstraße 1\n12345 Musterstadt",
+                'firma.kontakt'         => "Tel. 0123 4567-0\ninfo@example.org\nwww.example.org",
+                'firma.bank'            => "Musterbank Musterstadt\nIBAN DE00 0000 0000 0000 0000 00\nBIC MUSTDEXXXX",
+                'firma.register'        => "Amtsgericht Musterstadt HRB 0000\nGeschäftsführung: Max Muster\nUSt-IdNr. DE000000000",
+                'berichte.bereitschaft' => '0170 0000000',
+            ]);
+        }
+        Database::update('users', $technik, ['pruefer_qualifikation' => 'Elektrofachkraft für Veranstaltungstechnik']);
+        $heute = new \DateTimeImmutable('today', Zeit::zone());
+        $fluke = (int) Pruefgeraete::speichern(null, ['fabrikat' => 'Fluke', 'typ' => '1664 FC', 'seriennummer' => 'DEMO-0001',
+            'kalibriert_bis' => $heute->modify('+1 year')->format('Y-m-d'), 'aktiv' => 1])['id'];
+        Pruefgeraete::speichern(null, ['fabrikat' => 'Benning', 'typ' => 'IT 130', 'seriennummer' => 'DEMO-0002',
+            'kalibriert_bis' => $heute->modify('-2 months')->format('Y-m-d'), 'aktiv' => 1, 'notizen' => 'Erdungsmesser – Kalibrierung abgelaufen, zur Kalibrierung geben.']);
+
+        $striche = static function (string $wer, int $versatz = 0): string {
+            $s = json_decode((string) file_get_contents(dirname(__DIR__, 2) . '/resources/demo/unterschrift-' . $wer . '.json'), true);
+            foreach ($s['s'] as &$linie) {
+                foreach ($linie as &$p) {
+                    $p = [max(0, min(10000, $p[0] + $versatz)), max(0, min(10000, $p[1] + intdiv($versatz, 2)))];
+                }
+            }
+            return json_encode(['s' => $s['s']]);
+        };
+        $anfrage = static fn (): string => bin2hex(random_bytes(16));
+        // Querschnitt der Abgänge (innen) nach Steckverbinder.
+        $querschnitt = ['CEE 63 A' => '16', 'CEE 32 A' => '6', 'CEE 16 A' => '2.5', 'Schuko' => '2.5'];
+        $wert = static fn (string $w, string $op = ''): array => ['op' => $op, 'w' => $w];
+        /**
+         * Messwerte für $kreise[$von..$bis): je Kreis Zs und R_iso, die RCD-Werte
+         * einmal je RCD und Anlage – die weiteren Kreise am selben RCD verweisen
+         * mit rcd_von auf diese Zeile.
+         */
+        $messen = static function (array $kreise, int $von, int $bis, array $zs = []) use ($querschnitt, $wert): array {
+            $rcdZeile = [];
+            for ($n = $von; $n < min($bis, count($kreise)); $n++) {
+                $k = $kreise[$n];
+                $art = (string) $k['leitung']['art'];
+                if (!isset($querschnitt[$art])) {
+                    $k['status'] = 'nicht_gemessen';
+                    $k['grund'] = 'Abgang nicht belegt';
+                    $kreise[$n] = $k;
+                    continue;
+                }
+                $k['leitung']['querschnitt'] = $querschnitt[$art];
+                $k['status'] = 'gemessen';
+                // Zs 0,35–0,90 Ω je nach Lage; C32 unter 0,72 Ω.
+                $k['w']['zs'] = $wert($zs[$n] ?? sprintf('%.2f', min((string) $k['ueb']['in'] === '32' ? 0.68 : 0.9, 0.35 + (($n * 37) % 56) / 100)));
+                $k['w']['riso'] = $wert('550', '>');
+                $gruppe = $k['objekt_id'] . '|' . $k['rcd']['bez'];
+                if ((string) $k['rcd']['idn'] === '') {
+                    // ohne RCD
+                } elseif (isset($rcdZeile[$gruppe])) {
+                    $k['rcd_von'] = $rcdZeile[$gruppe];
+                } else {
+                    $rcdZeile[$gruppe] = (string) $k['z'];
+                    $idn = (int) $k['rcd']['idn'];
+                    $k['w']['idelta'] = $wert((string) intdiv($idn * (60 + ($n * 7) % 21), 100));
+                    $k['w']['ta'] = $wert((string) (14 + ($n * 5) % 15));
+                    $k['w']['ub'] = $wert(sprintf('%.1f', 0.4 + (($n * 3) % 9) / 10));
+                }
+                $kreise[$n] = $k;
+            }
+            return $kreise;
+        };
+        $kurzlisteIo = static function (): array {
+            $punkte = ['besichtigung' => [], 'erprobung' => []];
+            foreach (['besichtigung' => \App\Berichte\Katalog::besichtigung(), 'erprobung' => \App\Berichte\Katalog::erprobung()] as $teil => $katalog) {
+                foreach ($katalog as $schluessel => $punkt) {
+                    if ($punkt['kurz']) {
+                        $punkte[$teil][$schluessel] = 'io';
+                    }
+                }
+            }
+            return $punkte;
+        };
+        $speichern = static function (int $id, array $inhalt): void {
+            $r = BerichtService::speichern($id, (int) BerichtService::find($id)['version'], (string) json_encode($inhalt, JSON_UNESCAPED_UNICODE));
+            if (!$r['ok']) {
+                throw new \RuntimeException('Demo-Bericht: ' . $r['message']);
+            }
+        };
+        $unterschreiben = static function (int $id, string $striche) use ($anfrage): void {
+            $b = BerichtService::find($id);
+            $p = BerichtService::abschlussPruefen($b);
+            if ($p['fehler'] !== []) {
+                throw new \RuntimeException('Demo-Bericht: ' . implode(' ', array_column($p['fehler'], 'text')));
+            }
+            $r = BerichtService::prueferUnterschreiben($id, (int) $b['version'], ['striche' => $striche, 'name' => 'Tom Technik', 'ort' => 'Musterstadt',
+                'anfrage' => $anfrage(), 'warnungen' => array_column($p['warnungen'], 'code')]);
+            if (!$r['ok']) {
+                throw new \RuntimeException('Demo-Bericht: ' . $r['message']);
+            }
+        };
+        $anlegen = static function (array $objekte) use ($siteId, $aufbauId): int {
+            $r = BerichtService::anlegen($siteId, $aufbauId, $objekte);
+            if (!$r['ok']) {
+                throw new \RuntimeException('Demo-Bericht: ' . $r['message']);
+            }
+            return (int) $r['id'];
+        };
+
+        Auth::alsBenutzer($technik);
+        try {
+            // ---- 1: abgeschlossen
+            $id = $anlegen([$anlagen['aggregat'], $anlagen['licht']]);
+            $i = BerichtService::find($id)['inhalt'];
+            $i['kopf']['kunde'] = ['firma' => 'Musterfilm Produktion GmbH', 'anschrift' => "Filmallee 5\n12345 Musterstadt", 'kundennummer' => '',
+                'ansprechpartner' => 'Max Mustermann', 'telefon' => '0123 9876-0', 'email' => 'produktion@example.org', 'quelle' => 'freitext'];
+            $i['kopf']['ort'] = 'Musterstadt';
+            $i['kopf']['anlage'] = ['bezeichnung' => 'Aggregat 1 (G-100-07) mit Verteiler „Licht Gelände“ (PD32-12)', 'details' => 'Stromerzeuger 100 kVA, Unterverteilung PD 32/16',
+                'aufstellort' => 'Festivalgelände Nordwiese, Technikfläche'];
+            $i['kopf']['anlagenverantwortlicher'] = 'Max Mustermann';
+            $i['netz'] = ['einspeisung' => 'generator', 'spannung' => '400', 'frequenz' => '50', 'form' => 'TN-S', 'erder' => 'Staberder am Aggregat',
+                'u_ln' => '231', 'drehfeld' => 'rechts'];
+            $i['punkte'] = $kurzlisteIo();
+            $i['punkte']['besichtigung']['zus_potentialausgleich'] = 'entf';
+            $i['messung']['erdung'] = ['op' => '', 'w' => '12.4', 'methode' => 'Erdungsmessung 3-Leiter', 'basis' => 'generator', 'grenze' => ''];
+            $i['messung']['riso_u'] = '500';
+            $i['messung']['geraete'] = [(string) $fluke];
+            // Kreis 3 (Grill-Truck, 108 m Kabel): Zs 0,90 Ω an C63 – abgeschaltet wird über den RCD.
+            $i['kreise'] = $messen($i['kreise'], 0, count($i['kreise']), [1 => '0.35', 2 => '0.90', 3 => '0.58']);
+            $i['ergebnis'] = ['entspricht' => 'ja', 'maengelfrei' => 'ja', 'instand_bis' => '', 'plakette' => 'ja', 'plakette_nr' => 'P-2026-0117',
+                'naechste' => \App\Berichte\BerichtSchema::NAECHSTE, 'errichter' => '1'];
+            $i['bemerkungen'] = 'Prüfung nach dem Aufbau im Beisein des Kunden. Abgang X1 (Powerlock) nicht belegt.';
+            $speichern($id, $i);
+            $unterschreiben($id, $striche('pruefer'));
+            $r = BerichtService::kundeUnterschreiben($id, ['striche' => $striche('kunde'), 'name' => 'Max Mustermann', 'funktion' => 'Produktionsleitung',
+                'ort' => 'Musterstadt', 'bestaetigungen' => ['erhalten', 'eingewiesen', 'uebernommen'], 'vorbehalte' => '', 'anfrage' => $anfrage(),
+                'inhalt_hash' => (string) BerichtService::find($id)['inhalt_hash']]);
+            if (!$r['ok']) {
+                throw new \RuntimeException('Demo-Bericht: ' . $r['message']);
+            }
+
+            // ---- 2: vom Prüfer unterschrieben, der Kunde fehlt noch
+            $id = $anlegen([$anlagen['kasse']]);
+            $i = BerichtService::find($id)['inhalt'];
+            $i['kopf']['kunde'] = ['firma' => 'Muster Events GmbH & Co. KG', 'anschrift' => "Musterstraße 1\n12345 Musterstadt", 'kundennummer' => 'K-10023',
+                'ansprechpartner' => 'Erika Musterfrau', 'telefon' => '+49 30 1234567', 'email' => 'erika.musterfrau@example.org', 'quelle' => 'freitext'];
+            $i['kopf']['ort'] = 'Musterstadt';
+            $i['kopf']['anlage'] = ['bezeichnung' => 'Schukoverteiler „Kasse Einlass“ (SV16-03)', 'details' => 'an Energiesäule 2', 'aufstellort' => 'Einlass, Kassenhaus'];
+            $i['netz'] = ['einspeisung' => 'fest', 'spannung' => '400', 'frequenz' => '50', 'form' => 'TN-C-S', 'erder' => '', 'u_ln' => '229', 'drehfeld' => 'rechts'];
+            $i['punkte'] = $kurzlisteIo();
+            $i['messung']['riso_u'] = '500';
+            $i['messung']['geraete'] = [(string) $fluke];
+            $i['kreise'] = $messen($i['kreise'], 0, count($i['kreise']));
+            $i['ergebnis'] = ['entspricht' => 'ja', 'maengelfrei' => 'ja', 'instand_bis' => '', 'plakette' => 'nein', 'plakette_nr' => '',
+                'naechste' => \App\Berichte\BerichtSchema::NAECHSTE, 'errichter' => '1'];
+            $speichern($id, $i);
+            $unterschreiben($id, $striche('pruefer', 37));
+
+            // ---- 3: Entwurf, halb ausgefüllt, ohne Kunde
+            $id = $anlegen([$anlagen['foodtruck'], $anlagen['catering']]);
+            $i = BerichtService::find($id)['inhalt'];
+            $i['kopf']['ort'] = 'Musterstadt';
+            $i['kopf']['anlage']['aufstellort'] = 'Foodtruck-Meile und Catering';
+            $i['netz']['einspeisung'] = 'generator';
+            $i['punkte']['besichtigung'] = ['auswahl' => 'io', 'maengelfrei' => 'io', 'verlegung' => 'nio', 'kennzeichnung' => 'io'];
+            $i['punkt_bemerkung'] = ['verlegung' => 'Kabel zur Bar liegt ohne Kabelbrücke über dem Fluchtweg.'];
+            $i['messung']['geraete'] = [(string) $fluke];
+            $i['kreise'] = $messen($i['kreise'], 0, intdiv(count($i['kreise']), 2));
+            $speichern($id, $i);
+        } finally {
+            Auth::alsBenutzer(null);
+        }
     }
 
     /** Ein einfaches Festivalgelände als SVG (1600 × 1000). */

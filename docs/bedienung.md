@@ -361,6 +361,30 @@ was das für die nächste Planung heißt:
 
   gegen ihre Grenze.
 
+## Übergabeberichte
+
+Nach dem Aufbau prüft die Elektrofachkraft die Anlage und übergibt sie mit
+einem **Übergabebericht** – Prüfprotokoll nach DIN VDE 0100-600 und
+Errichterbestätigung nach DGUV Vorschrift 3 in einem (*Übersicht →
+Übergabeberichte*, im Aufbau oder an der Anlage *Übergabebericht*):
+
+1. Anlagen wählen – Abgänge, Sicherungen, RCDs und Kabel kommen aus dem
+   Plan, **Messwerte nie**.
+2. Am Tablet oder Telefon ausfüllen; das Formular speichert selbst, auch
+   bei schwacher Verbindung. Die Bewertung je Stromkreis kommt vom Server.
+3. *Prüfen*, dann **als Prüfer unterschreiben** – der Bericht ist
+   eingefroren und hat seine Nummer.
+4. **An Kunden übergeben**: Das Gerät zeigt nur noch diesen Bericht, der
+   Kunde bestätigt den Erhalt und unterschreibt. Zurück mit dem Kennwort des
+   Prüfers.
+5. Das PDF ist gespeichert – ansehen, herunterladen, teilen.
+
+![Formular eines Übergabeberichts am Tablet](bilder/bericht-formular.png)
+
+Alles Weitere – Felder, Grenzwerte, Kundenmodus, Korrektur, Integrität,
+Datenschutz, Aufbewahrung – steht in [berichte.md](berichte.md);
+Kundendaten aus Eventworx in [eventworx.md](eventworx.md).
+
 ## Inventar
 
 Im **Inventar** (*Anlagen → Inventar*) stehen die Geräte aus dem Lager, in
@@ -913,6 +937,44 @@ PDF (wird serverseitig gerastert und gekachelt), PNG/JPG oder SVG.
 
 Adresse und Token des Repositorys stehen unter **System → Einstellungen →
 Location- und Verteiler-Abgleich**.
+
+## Andere Instanzen (Schnittstelle)
+
+Ohne gemeinsames Repository geht dasselbe direkt von Installation zu
+Installation – auch mit MasterAdmin. Die Instanz, die einen Standort teilt
+(A), gibt unter **System → Schnittstelle (API)** einen Zugang aus: ein Token
+mit Befugnissen und den Standorten, die es sehen bzw. bearbeiten darf.
+
+![Zugänge für andere Instanzen](bilder/schnittstelle.png)
+
+Die Instanz, die übernimmt (B), trägt A unter **Standorte → Andere
+Instanzen** mit Adresse und Token ein. Ihre Seite zeigt je Location von A
+die Etagen, welche Etage hier dazugehört, und wie es steht – *noch nicht
+hier*, *passt zu …*, *aktuell*, *dort geändert*, *hier geändert*, *beide
+geändert*:
+
+![Locations von A, gesehen von B](bilder/instanz.png)
+
+- **Übernehmen** holt Grundrisse, Maßstab und Georeferenz, zwischen zwei
+  PowerManagement-Instanzen mit dem Kästchen *Feststrom* daneben (in der
+  Liste und beim Zuordnen, vorgewählt) auch die Feststromanschlüsse und
+  festen Kabel. Namen, Schaltsperren und Messpunkte hier bleiben, gelöscht
+  wird nichts; die mobile Planung der Veranstaltung bleibt unberührt.
+- **Zuordnen …** wählt Standort und Etagen hier einzeln; **Nur
+  verknüpfen** merkt sich die Zuordnung, ohne etwas zu holen; **Lösen**
+  nimmt sie wieder weg.
+- Zurück geht es je nach Befugnis bei A: **Hochladen** (A übernimmt gleich,
+  aber nur, wenn sich dort seit dem letzten Übernehmen nichts geändert hat)
+  oder **Als Vorschlag schicken** (bei A bestätigt es jemand).
+
+Vorschläge prüft A unter **Standorte → Änderungsvorschläge**: je Etage, was
+sich ändern würde, dann **Annehmen** (gewählte Etagen und Teile) oder
+**Ablehnen**.
+
+![Ein Änderungsvorschlag mit den Unterschieden je Etage](bilder/vorschlag.png)
+
+Alles Weitere – Befugnisse, Zustände, Zusammenspiel mit MasterAdmin,
+Endpunkte für Skripte – steht in [schnittstelle.md](schnittstelle.md).
 
 ## Verteiler-Abgleich
 

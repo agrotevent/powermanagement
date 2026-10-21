@@ -3,10 +3,23 @@ declare(strict_types=1);
 
 namespace App\Support;
 
+use App\Berichte\Kundenmodus;
+
 final class Flash
 {
+    /**
+     * Eine Meldung für die nächste Seite. Nicht, wenn der Kundenmodus diese
+     * Anfrage sperrt: Er begann, während sie ohne Sitzungssperre wartete
+     * (Session::ohneSperre() – InfluxDB, Broker, Cloud, git, eine andere
+     * Instanz), und die nächste Seite ist die Kundenseite. Dort stünden
+     * sonst Adressen, Einheiten und Fehler aus einem anderen Reiter.
+     */
     public static function add(string $type, string $message): void
     {
+        $request = new Request();
+        if (Kundenmodus::sperrt($request->method(), $request->path()) !== null) {
+            return;
+        }
         $_SESSION['flash'][] = ['type' => $type, 'message' => $message];
     }
 

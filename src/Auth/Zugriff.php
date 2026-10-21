@@ -143,6 +143,24 @@ final class Zugriff
 
     public static function siehtStandort(int $siteId): bool
     {
+        if (self::siehtGanzenStandort($siteId)) {
+            return true;
+        }
+        // Wer nur eine einzelne Anlage sieht, sieht auch den Standort, auf
+        // dem sie steht – sonst fände er sie auf der Karte nicht.
+        return in_array($siteId, self::standorteEinzelnerObjekte(), true);
+    }
+
+    /**
+     * Sieht der Benutzer den ganzen Standort – mit allem darauf?
+     *
+     * Ja mit „alles“ oder einer Freigabe für alles bzw. diesen Standort.
+     * Nicht über eine einzeln freigegebene Anlage: die zeigt den Standort nur,
+     * damit man sie findet. Wo ganze Etagen zu sehen sind (Änderungsvorschläge
+     * einer anderen Instanz), genügt das nicht.
+     */
+    public static function siehtGanzenStandort(int $siteId): bool
+    {
         if (self::alles()) {
             return true;
         }
@@ -152,9 +170,7 @@ final class Zugriff
                 return true;
             }
         }
-        // Wer nur eine einzelne Anlage sieht, sieht auch den Standort, auf
-        // dem sie steht – sonst fände er sie auf der Karte nicht.
-        return in_array($siteId, self::standorteEinzelnerObjekte(), true);
+        return false;
     }
 
     /** @return list<int> Standorte, auf denen einzeln freigegebene Anlagen stehen */
@@ -405,6 +421,39 @@ final class Zugriff
             }
         }
         return self::vereinigen($fenster);
+    }
+
+    /**
+     * Datenzeitraum aus Freigaben für alles oder genau diesen Standort – nicht
+     * aus Einzelanlagen. Ein Übergabebericht gilt für den Standort; wer nur
+     * eine Anlage darauf sieht, sieht ihn nicht.
+     *
+     * @return list<array{0:?int,1:?int}>|null  null = unbegrenzt, [] = keine solche Freigabe
+     */
+    public static function datenFensterStandort(int $siteId): ?array
+    {
+        if (self::alles()) {
+            return null;
+        }
+        $fenster = [];
+        foreach (self::freigaben() as $freigabe) {
+            $art = (string) $freigabe['ziel_art'];
+            if ($art === 'alles' || ($art === 'site' && (int) $freigabe['ziel_id'] === $siteId)) {
+                $fenster[] = [Zeit::ts($freigabe['daten_ab']), Zeit::ts($freigabe['daten_bis'])];
+            }
+        }
+        return self::vereinigen($fenster);
+    }
+
+    /**
+     * Berührt der Zeitraum [$von, $bis) das Fenster? begrenzen() braucht
+     * $bis > $von – einen Zeitpunkt deshalb als ganzen Tag übergeben.
+     *
+     * @param list<array{0:?int,1:?int}>|null $fenster
+     */
+    public static function imFenster(?array $fenster, int $von, int $bis): bool
+    {
+        return self::begrenzen($fenster, $von, $bis) !== [];
     }
 
     /**

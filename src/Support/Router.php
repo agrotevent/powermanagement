@@ -4,6 +4,7 @@ declare(strict_types=1);
 namespace App\Support;
 
 use App\Auth\Auth;
+use App\Berichte\Kundenmodus;
 
 /** Minimaler Router mit Rechteprüfung pro Route. */
 final class Router
@@ -54,6 +55,26 @@ final class Router
             $method = 'GET';
         }
 
+        // Kundenmodus: das Gerät liegt beim Kunden. Offen ist nur, was er
+        // für diesen einen Bericht braucht – kein Schalten, kein Formular,
+        // keine anderen Seiten, kein Abmelden. Geprüft vor allem anderen:
+        // auch eine unbekannte Adresse, eine verbotene Seite oder eine
+        // falsche Methode führt zurück zur Kundenseite statt auf eine
+        // Fehlerseite (die früher die ganze Navigation samt „Abmelden“ zeigte).
+        // Beginnt er erst, während eine Anfrage ohne Sitzungssperre wartet
+        // (InfluxDB, git, Geräte), prüft Controller::kundenmodusSperrt() vor
+        // der Seite oder dem Download noch einmal, und Flash::add() schreibt
+        // keine Meldung mehr, die dann auf der Kundenseite stünde.
+        $gesperrt = Kundenmodus::sperrt($method, $path);
+        if ($gesperrt !== null) {
+            if (self::willJson()) {
+                Response::json(['ok' => false, 'kundenmodus' => true, 'message' => 'Kundenmodus aktiv – erst mit dem Kennwort des Prüfers entsperren.'], 423);
+                return;
+            }
+            Response::redirect('/berichte/' . $gesperrt . '/kunde');
+            return;
+        }
+
         foreach ($this->routes as $route) {
             if (!preg_match($route['pattern'], $path, $matches)) {
                 continue;
@@ -67,19 +88,32 @@ final class Router
 
             if ($route['permission'] !== null) {
                 if (!Auth::check()) {
+                    // Wer JSON erwartet (Autosave eines Berichts, PM.post),
+                    // bekommt eine lesbare Antwort statt der Anmeldeseite –
+                    // die Eingaben bleiben dann auf dem Gerät.
+                    if (self::willJson()) {
+                        Response::json(['ok' => false, 'anmelden' => true, 'message' => 'Sitzung abgelaufen – bitte neu anmelden.'], 401);
+                        return;
+                    }
                     Response::redirect('/login?next=' . rawurlencode($path));
                     return;
                 }
-                if (!Auth::can($route['permission'])) {
+                // Kundenseite und Entsperren auch ohne das Recht: Endet die
+                // Rolle, während das Gerät beim Kunden liegt, bliebe es sonst
+                // gesperrt – alle anderen Wege führen ja zur Kundenseite.
+                if (!Auth::can($route['permission']) && !Kundenmodus::ausweg($method, $path)) {
                     Response::forbidden();
                     return;
                 }
             }
 
             // Ein Konto mit vorläufigem Kennwort kommt nur bis zum Profil:
-            // erst ein eigenes Kennwort, dann der Rest.
+            // erst ein eigenes Kennwort, dann der Rest. Nicht im Kundenmodus –
+            // das Profil führte zur Kundenseite, die zum Profil, im Kreis, und
+            // entsperren ließe sich nie. Erst entsperren (mit dem vorläufigen
+            // Kennwort), danach geht es zum Profil.
             if (Auth::check() && (int) (Auth::user()['must_change_password'] ?? 0) === 1
-                && !in_array($path, self::OHNE_NEUES_KENNWORT, true)) {
+                && !in_array($path, self::OHNE_NEUES_KENNWORT, true) && Kundenmodus::aktiv() === null) {
                 Flash::warning('Bitte zuerst ein neues Passwort vergeben.');
                 Response::redirect('/profil');
                 return;
@@ -89,6 +123,10 @@ final class Router
             // Protokollen, im Verlauf und im Referer landen würde.
             $token = $_POST['_token'] ?? null;
             if ($method === 'POST' && !Csrf::check(is_string($token) ? $token : null)) {
+                if (self::willJson()) {
+                    Response::json(['ok' => false, 'token' => true, 'message' => 'Sicherheitstoken abgelaufen – Seite neu laden.'], 419);
+                    return;
+                }
                 Flash::error('Sicherheitstoken ungültig oder abgelaufen. Bitte erneut versuchen.');
                 Response::redirect(Response::zurueckZiel('/'));
                 return;
@@ -106,5 +144,16 @@ final class Router
         }
 
         Response::notFound($methodMismatch ? 'Methode nicht erlaubt.' : 'Seite nicht gefunden.');
+    }
+
+    /**
+     * Erwartet die Anfrage JSON? Nur der Accept-Kopf zählt – nicht
+     * X-Requested-With: Formulare mit `data-laeuft` (app.js) gehen per fetch
+     * hinaus und sollen wie ein gewöhnliches Formular mit Meldung und
+     * Weiterleitung enden. Dieselbe Regel wie Request::wantsJson().
+     */
+    private static function willJson(): bool
+    {
+        return str_contains((string) ($_SERVER['HTTP_ACCEPT'] ?? ''), 'application/json');
     }
 }

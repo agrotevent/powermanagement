@@ -71,6 +71,7 @@ try {
     pruefe(Zugriff::siehtObjekt($o), 'wirksame Standortfreigabe macht die Anlage sichtbar');
     pruefe(!Zugriff::siehtObjekt($of), 'anderer Standort bleibt unsichtbar');
     pruefe(Zugriff::siehtStandort($siteId) && !Zugriff::siehtStandort($anderer), 'Standortsicht folgt der Freigabe');
+    pruefe(Zugriff::siehtGanzenStandort($siteId) && !Zugriff::siehtGanzenStandort($anderer), 'Standortfreigabe zeigt den ganzen Standort');
     $fenster = Zugriff::datenFenster($o);
     gleich($fenster, [[$jetzt - 2 * 86400, $jetzt + 86400]], 'Datenfenster aus der Freigabe');
     gleich(Zugriff::begrenzen($fenster, $jetzt - 30 * 86400, $jetzt), [[$jetzt - 2 * 86400, $jetzt]], '30-Tage-Abfrage wird auf zwei Tage gekürzt');
@@ -112,6 +113,7 @@ try {
     Database::delete('freigaben', $f3);
     $f4 = $freigabe(['ziel_art' => 'objekt', 'ziel_id' => $fremd, 'darf_steuern' => 1]);
     Zugriff::vergessen();
+    pruefe(Zugriff::siehtStandort($anderer) && !Zugriff::siehtGanzenStandort($anderer), 'einzeln freigegebene Anlage zeigt den Standort, aber nicht den ganzen');
     pruefe(!Zugriff::darfSteuern($q, 'switch:0', $of), 'Freigabe für eine Anlage schaltet kein Gerät, das dort nicht misst');
     pruefe(!Zugriff::darfSteuern($q, 'switch:0'), 'ohne Anlage: Gerät misst nicht an der freigegebenen');
     Database::delete('freigaben', $f4);

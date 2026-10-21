@@ -5,6 +5,7 @@ namespace App\Services;
 
 use App\Support\Config;
 use App\Support\Database;
+use App\Support\Fingerabdruck;
 use App\Tanks\TankRechnung;
 use App\Tanks\TankService;
 
@@ -282,16 +283,10 @@ final class VerteilerBundle
         return $inhalt;
     }
 
+    /** Maps nach Schlüssel sortiert, Listen wie sie sind – siehe Fingerabdruck. */
     private static function geordnet(mixed $wert): mixed
     {
-        if (!is_array($wert)) {
-            return $wert;
-        }
-        $wert = array_map([self::class, 'geordnet'], $wert);
-        if (!array_is_list($wert)) {
-            ksort($wert);
-        }
-        return $wert;
+        return Fingerabdruck::geordnet($wert);
     }
 
     /**

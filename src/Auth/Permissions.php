@@ -24,6 +24,12 @@ final class Permissions
             'stecker.manage'     => 'Steckverbinder-Katalog pflegen (Powerlock, CEE, Schuko …)',
             'inventar.manage'    => 'Inventar pflegen: Verteiler und Zwischenstecker mit ihren Shellys (ansehen: „Datenquellen ansehen“)',
         ],
+        'Übergabeberichte' => [
+            'berichte.view'      => 'Übergabeberichte ansehen und als PDF laden (ohne „ausfüllen“ nur abgeschlossene, nur mit Freigabe für den Standort und im freigegebenen Datenzeitraum)',
+            'berichte.manage'    => 'Übergabeberichte anlegen, ausfüllen und vom Kunden unterschreiben lassen; Prüfgeräte pflegen (nur Standorte mit „bearbeiten“)',
+            'berichte.pruefen'   => 'Als Prüfer unterschreiben, ohne Kunde abschließen, zurückziehen, Korrektur anlegen (nur mit hinterlegter Qualifikation)',
+            'berichte.eventworx' => 'Kundendaten aus Eventworx suchen und übernehmen (Eventworx zeigt dort alle Vorgänge)',
+        ],
         'Karte & Standorte' => [
             'karte.view'         => 'Karte mit Grundriss ansehen',
             'plans.manage'       => 'Standorte, Etagen und Grundrisse pflegen, Maßstab setzen',
@@ -47,6 +53,14 @@ final class Permissions
         'Location- und Verteiler-Abgleich' => [
             'inventory.pull'     => 'Locations und Verteiler aus dem gemeinsamen Repository übernehmen (Verteiler: nur mit dem Recht, Katalog bzw. Inventar zu pflegen)',
             'inventory.push'     => 'Locations, Feststromanschlüsse und Verteiler ins Repository hochladen und dort entfernen',
+        ],
+        'Schnittstelle (API)' => [
+            // Was ein Token von außen sieht, legen seine Befugnisse und
+            // Standorte fest (ApiZugang) – nicht die Freigaben in Zugriff.
+            // Deshalb gibt Standorte nur frei, wer selbst alles sieht.
+            'api.manage'         => 'Zugänge (Tokens) für andere Instanzen anlegen, anzeigen und widerrufen – Standorte freigeben nur mit „Alle Standorte, Anlagen und Messdaten“',
+            'api.partner'        => 'Andere Instanzen eintragen, Locations von dort übernehmen und Änderungen zurückschicken (nur auf Standorten, die man ändern darf)',
+            'api.vorschlaege'    => 'Änderungsvorschläge anderer Instanzen ansehen, annehmen und ablehnen (annehmen nur mit „bearbeiten“ am Standort)',
         ],
         'System' => [
             'system.users.manage'=> 'Benutzer, Rollen und Freigaben verwalten',
@@ -102,6 +116,7 @@ final class Permissions
                     'dashboard.view', 'anlagen.view', 'anlagen.manage', 'anlagen.scope.all', 'stecker.manage',
                     'karte.view', 'plans.manage', 'leitungen.manage', 'statistik.view', 'statistik.export',
                     'datenquellen.view', 'inventory.pull', 'inventar.manage',
+                    'berichte.view', 'berichte.manage', 'berichte.eventworx',
                 ],
             ],
             'technik' => [
@@ -110,8 +125,12 @@ final class Permissions
                 'permissions' => [
                     'dashboard.view', 'anlagen.view', 'anlagen.manage', 'karte.view', 'leitungen.manage',
                     'statistik.view', 'datenquellen.view', 'steuern', 'steuern.protokoll',
+                    'berichte.view', 'berichte.manage', 'berichte.eventworx', 'berichte.pruefen',
                 ],
             ],
+            // Keine Übergabeberichte: ein Gelände hat mehrere Veranstalter,
+            // und Berichte enthalten Kundendaten. Wer sie sehen soll, bekommt
+            // „berichte.view“ einzeln – mit Freigabe und Datenzeitraum.
             'kunde' => [
                 'name'        => 'Kunde / Veranstalter',
                 'description' => 'Sieht Anlagen und Statistiken der freigegebenen Standorte im freigegebenen Zeitraum.',

@@ -16,6 +16,12 @@
 /storage/demo/*
 !/storage/*/.gitkeep
 
+# Speicherdatei eines Mosquitto, der mit „persistence true“ und ohne
+# persistence_location im Projektordner lief. Die Prüf-Broker laufen mit
+# „persistence false“; im Wurzelverzeichnis gehört keine Datenbankdatei hin.
+/mosquitto.db
+/*.db
+
 # Werkzeuge
 node_modules/
 /vendor/

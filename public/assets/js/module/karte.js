@@ -249,7 +249,14 @@ async function liveLaden() {
     const frist = setTimeout(() => abbruch.abort(), 15000);
     try {
         const antwort = await fetch(`/karte/${etage}/live`, { headers: { Accept: 'application/json' }, credentials: 'same-origin', signal: abbruch.signal });
-        live = (await antwort.json()).objekte || {};
+        const daten = await antwort.json();
+        // Kundenmodus, gestartet, während diese Seite lud (423): neu laden
+        // führt zur Kundenseite – wie in live.js.
+        if (daten && daten.kundenmodus === true) {
+            window.location.reload();
+            return;
+        }
+        live = daten.objekte || {};
         liveAnwenden();
         if (auswahl && auswahl.art === 'objekt') { panelLiveSetzen(auswahl.id); }
     } catch (e) { /* nächster Versuch in 5 Sekunden */ } finally {

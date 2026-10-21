@@ -534,6 +534,7 @@ final class LeitungService
         if ($l === null) {
             return ['ok' => false, 'message' => 'Diese Leitung gibt es nicht.'];
         }
+        Database::execute("DELETE FROM api_zuordnungen WHERE tabelle = 'leitungen' AND ziel_id = ?", [$id]);
         Database::delete('leitungen', $id);
         Audit::log('leitung.delete', 'leitung', (string) $id, ['art' => $l['art']]);
         return ['ok' => true, 'message' => self::ARTEN[$l['art']] . ' entfernt.'];

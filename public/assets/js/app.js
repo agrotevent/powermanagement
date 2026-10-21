@@ -1,4 +1,76 @@
 // Kleine Helfer ohne Framework.
+
+/*
+ * PMNetz.post(adresse, FormData, ms[, { keepalive }]): POST mit Zeitgrenze.
+ *
+ * fetch kennt von sich aus keine Zeitgrenze – eine hängende Anfrage (Funkloch,
+ * Proxy, der nicht antwortet) blockierte Autosave und Unterschrift sonst
+ * minutenlang. Nach `ms` wird abgebrochen, und es geht weiter wie bei einem
+ * Netzfehler (das Versprechen wird abgelehnt). Ergebnis: { status, erg } mit
+ * der gelesenen JSON-Antwort. `.abbrechen()` am Versprechen bricht von Hand
+ * ab (etwa „Abbrechen“ im Unterschriftsdialog).
+ */
+window.PMNetz = {
+    post: function (adresse, daten, ms, optionen) {
+        var steuerung = typeof window.AbortController === 'function' ? new window.AbortController() : null;
+        var abbrechen = function () { if (steuerung) { steuerung.abort(); } };
+        var uhr = window.setTimeout(abbrechen, ms || 15000);
+        var anfrage = { method: 'POST', body: daten, credentials: 'same-origin', headers: { 'Accept': 'application/json' } };
+        if (steuerung) { anfrage.signal = steuerung.signal; }
+        if (optionen && optionen.keepalive) { anfrage.keepalive = true; }
+        var p = fetch(adresse, anfrage).then(function (antwort) {
+            return antwort.json().then(function (erg) {
+                return { status: antwort.status, erg: erg || {} };
+            }, function (fehler) {
+                if (steuerung && steuerung.signal.aborted) { throw fehler; }
+                return { status: antwort.status, erg: { ok: false, message: 'Unerwartete Antwort des Servers (' + antwort.status + ').' } };
+            });
+        }).then(function (r) {
+            window.clearTimeout(uhr);
+            return r;
+        }, function (fehler) {
+            window.clearTimeout(uhr);
+            throw fehler;
+        });
+        p.abbrechen = abbrechen;
+        return p;
+    }
+};
+
+/*
+ * Kundenmodus in einem anderen Tab gestartet (bericht-kunde.js meldet es per
+ * BroadcastChannel, ersatzweise über localStorage): dieser Tab zeigt dann
+ * nichts mehr von dem, was er geladen hat – etwa Kundendaten eines anderen
+ * Berichts –, sondern geht zur Kundenseite. Der Server sperrt jede neue
+ * Anfrage ohnehin; hier geht es um das, was schon auf dem Bildschirm steht.
+ */
+(function () {
+    function sperren(nachricht) {
+        var id = nachricht && /^\d+$/.test(String(nachricht.bericht)) ? String(nachricht.bericht) : '';
+        if (id === '') { return; }
+        var ziel = '/berichte/' + id + '/kunde';
+        if (window.location.pathname === ziel) { return; }
+        var inhalt = document.querySelector('main') || document.body;
+        if (inhalt) {
+            while (inhalt.firstChild) { inhalt.removeChild(inhalt.firstChild); }
+            var hinweis = document.createElement('p');
+            hinweis.className = 'notice';
+            hinweis.textContent = 'Kundenmodus aktiv – dieses Gerät ist gesperrt.';
+            inhalt.appendChild(hinweis);
+        }
+        window.location.replace(ziel);
+    }
+    try {
+        if (typeof window.BroadcastChannel === 'function') {
+            new window.BroadcastChannel('pm-kundenmodus').onmessage = function (e) { sperren(e.data); };
+        }
+    } catch (e) { /* ohne BroadcastChannel bleibt localStorage */ }
+    window.addEventListener('storage', function (e) {
+        if (e.key !== 'pm-kundenmodus' || !e.newValue) { return; }
+        try { sperren(JSON.parse(e.newValue)); } catch (x) { /* kaputt: nichts tun */ }
+    });
+}());
+
 document.addEventListener('DOMContentLoaded', function () {
     // Navigation auf Tablet/Smartphone ein- und ausblenden.
     var navToggle = document.getElementById('nav-toggle');
@@ -22,6 +94,23 @@ document.addEventListener('DOMContentLoaded', function () {
         });
     }
 
+    /*
+     * Abmelden räumt die lokalen Entwürfe der Übergabeberichte weg
+     * (pm-bericht:<id>:<benutzer>): Tablets werden geteilt, und was hier
+     * noch stünde, sähe der Nächste nach seiner Anmeldung nicht – es läge
+     * aber im Speicher des Geräts.
+     */
+    document.querySelectorAll('form[action="/logout"]').forEach(function (formular) {
+        formular.addEventListener('submit', function () {
+            try {
+                for (var i = window.localStorage.length - 1; i >= 0; i--) {
+                    var schluessel = window.localStorage.key(i);
+                    if (schluessel && schluessel.indexOf('pm-bericht:') === 0) { window.localStorage.removeItem(schluessel); }
+                }
+            } catch (e) { /* privater Modus: nichts gespeichert */ }
+        });
+    });
+
     // Port-Kacheln: Klick markiert die Checkbox – oder das Optionsfeld.
     document.querySelectorAll('.port input[type=checkbox], .port input[type=radio]').forEach(function (box) {
         var tile = box.closest('.port');
@@ -41,12 +130,14 @@ document.addEventListener('DOMContentLoaded', function () {
         sync();
     });
 
-    // "Alle auswählen" in Tabellen und Port-Gittern.
+    // "Alle auswählen" in Tabellen und Port-Gittern. Mit data-toggle-name
+    // nur die Kästchen dieses Namens (eine Spalte, etwa „sehen[]“).
     document.querySelectorAll('[data-toggle-all]').forEach(function (master) {
         master.addEventListener('change', function () {
             var scope = document.querySelector(master.dataset.toggleAll);
             if (!scope) { return; }
             scope.querySelectorAll('input[type=checkbox]:not([disabled])').forEach(function (box) {
+                if (master.dataset.toggleName && box.name !== master.dataset.toggleName) { return; }
                 box.checked = master.checked;
                 box.dispatchEvent(new Event('change'));
             });
@@ -139,8 +230,93 @@ document.addEventListener('DOMContentLoaded', function () {
      * Seite bleibt stehen und zeigt, dass gearbeitet wird; erst danach
      * wird neu geladen. Ohne JavaScript bleibt es beim gewöhnlichen
      * Formular mit Weiterleitung – langsam, aber nie kaputt.
+     *
+     * Ausnahme `data-laeuft-seite`: Dort antwortet der Server nicht mit
+     * Meldung und Weiterleitung, sondern mit der Seite selbst – ein
+     * Kennwort, das genau einmal angezeigt wird (MQTT-Zugänge: Gen1, „von
+     * Hand“, „Neues Kennwort“). fetch holte sie, das Neuladen danach
+     * verwürfe sie, und das Kennwort wäre weg. Solche Formulare schickt der
+     * Browser selbst ab, wie die Links mit `data-laeuft` weiter unten; bis
+     * die Antwort da ist, bleibt die alte Seite stehen und zeigt den
+     * Hinweis (gemessen in Chromium 141 bei 3 s bis zur Antwort: er kommt
+     * aufs Bild). Jeder weitere Klick auf so ein Formular oder einen
+     * solchen Link wird solange abgefangen – er bräche das erste
+     * Navigieren ab, und gezeigt würde die Antwort des zweiten.
+     *
+     * `data-laeuft-seite` braucht auch ein Formular, dessen Weiterleitung
+     * woandershin führt als auf die Seite, auf der es steht („Zuordnen“ →
+     * Übersicht der Instanz). Den Location-Kopf einer abgefangenen
+     * Umleitung sieht fetch nicht; das Neuladen bliebe auf der alten
+     * Adresse – dort stand wieder das Formular, das zum zweiten Übernehmen
+     * einlud.
+     *
+     * Mit Strg, Umschalt oder Mittelklick (neuer Reiter) bleibt es beim
+     * Browser, bei Formularen wie bei Links: Diese Seite bleibt offen.
+     * Bricht das Navigieren ab (Stopp-Knopf, Esc), meldet die Navigation
+     * API das mit `navigateerror` (Chromium: AbortError) – dann ist die
+     * Seite wieder frei, statt jeden weiteren Klick stumm abzufangen. Ohne
+     * Navigation API hilft dort nur neu laden.
      */
+    var navigiert = false;
+    var aufheben = null;
+
+    /** Ab jetzt wird navigiert; `zuruecknehmen` stellt die Seite wieder her, falls es abbricht. */
+    function sperren(zuruecknehmen) {
+        navigiert = true;
+        aufheben = zuruecknehmen;
+    }
+
+    window.addEventListener('pageshow', function (e) {
+        // Zurück aus dem Verlauf (bfcache): frisch laden statt gesperrt stehen.
+        if (e.persisted && navigiert) { window.location.reload(); }
+    });
+    if (window.navigation && typeof window.navigation.addEventListener === 'function') {
+        window.navigation.addEventListener('navigateerror', function () {
+            if (!navigiert) { return; }
+            var zuruecknehmen = aufheben;
+            navigiert = false;
+            aufheben = null;
+            if (zuruecknehmen) { zuruecknehmen(); }
+        });
+    }
+
+    function laeuftAnzeigen(knopf, beschriftung, hinweis) {
+        var anzeige = document.createElement('div');
+        anzeige.className = 'knopf-laeuft';
+
+        var balken = document.createElement('div');
+        balken.className = 'progress gross unbestimmt';
+        balken.setAttribute('role', 'progressbar');
+        balken.setAttribute('aria-label', beschriftung || 'läuft');
+        balken.appendChild(document.createElement('span'));
+
+        var text = document.createElement('div');
+        text.className = 'small muted';
+        text.setAttribute('role', 'status');
+        text.textContent = hinweis || 'Das dauert einen Moment. Bitte nicht noch einmal klicken.';
+
+        anzeige.appendChild(balken);
+        anzeige.appendChild(text);
+        knopf.insertAdjacentElement('afterend', anzeige);
+        return { element: anzeige, balken: balken, text: text };
+    }
+
     document.querySelectorAll('form[data-laeuft]').forEach(function (formular) {
+        /*
+         * Strg- oder Umschalt-Klick auf den Knopf: Der Browser schickt das
+         * Formular in einen neuen Reiter ab. Das submit-Ereignis kennt die
+         * Tasten nicht, der click unmittelbar davor schon – auch bei Enter
+         * im Feld, dann klickt der Browser selbst auf den ersten Knopf.
+         */
+        var neuerReiter = false;
+        formular.addEventListener('click', function (ereignis) {
+            var ziel = ereignis.target && ereignis.target.closest
+                ? ereignis.target.closest('button, input[type=submit], input[type=image]') : null;
+            if (!ziel || ziel.form !== formular) { return; }
+            neuerReiter = ereignis.button !== 0 || ereignis.ctrlKey || ereignis.metaKey || ereignis.shiftKey || ereignis.altKey;
+            window.setTimeout(function () { neuerReiter = false; }, 0);
+        });
+
         formular.addEventListener('submit', function (ereignis) {
             /*
              * Hat die Rückfrage (`data-confirm`) abgebrochen, wird nichts
@@ -149,18 +325,20 @@ document.addEventListener('DOMContentLoaded', function () {
              * hier nachgesehen werden.
              */
             if (ereignis.defaultPrevented) { return; }
+            // Neuer Reiter: Hier wird nicht navigiert, also auch nichts gesperrt.
+            if (neuerReiter) { return; }
+            if (navigiert) { ereignis.preventDefault(); return; }
 
-            var knopf = formular.querySelector('button:not([type=button])');
+            /*
+             * Der gedrückte Knopf – ein Formular kann mehrere haben
+             * („Übernehmen“ und „Nur verknüpfen“). FormData nimmt seinen
+             * Namen und Wert nicht mit; ohne sie käme beim Server die
+             * falsche Aktion an. Gesperrt werden alle, sonst ginge der
+             * andere Knopf während der Wartezeit noch hinaus.
+             */
+            var knoepfe = formular.querySelectorAll('button:not([type=button])');
+            var knopf = ereignis.submitter && ereignis.submitter.form === formular ? ereignis.submitter : knoepfe[0];
             if (!knopf || knopf.disabled) { return; }
-
-            ereignis.preventDefault();
-
-            knopf.disabled = true;
-            var vorher = knopf.textContent;
-            knopf.textContent = formular.dataset.laeuft || 'läuft …';
-
-            var anzeige = document.createElement('div');
-            anzeige.className = 'knopf-laeuft';
 
             /*
              * Der Hilfetext daneben erklärt, was der Knopf tut. Während
@@ -168,28 +346,51 @@ document.addEventListener('DOMContentLoaded', function () {
              * derselbe Satz liest sich wie ein Fehler.
              */
             var hilfe = formular.querySelector('.help');
+            var beschriftung = knopf.dataset.laeuft || formular.dataset.laeuft || 'läuft …';
+
+            var vorher = knopf.textContent;
+            knopf.textContent = beschriftung;
             if (hilfe) { hilfe.hidden = true; }
+            var anzeige = laeuftAnzeigen(knopf, beschriftung, formular.dataset.laeuftHinweis);
+            var balken = anzeige.balken;
+            var text = anzeige.text;
+            // Navigieren abgebrochen: Knöpfe, Beschriftung und Hilfe wie vorher.
+            var freigeben = function () {
+                knoepfe.forEach(function (k) { k.disabled = false; });
+                knopf.textContent = vorher;
+                if (hilfe) { hilfe.hidden = false; }
+                anzeige.element.remove();
+            };
 
-            var balken = document.createElement('div');
-            balken.className = 'progress gross unbestimmt';
-            balken.setAttribute('role', 'progressbar');
-            balken.setAttribute('aria-label', formular.dataset.laeuft || 'läuft');
-            balken.appendChild(document.createElement('span'));
+            if (formular.hasAttribute('data-laeuft-seite')) {
+                // Der Browser schickt ab (kein preventDefault). Gesperrt
+                // wird erst danach – ein gesperrter Knopf fehlte sonst in
+                // den Formulardaten.
+                sperren(freigeben);
+                window.setTimeout(function () {
+                    // Schon abgebrochen und freigegeben? Dann bleibt es so.
+                    if (aufheben === freigeben) { knoepfe.forEach(function (k) { k.disabled = true; }); }
+                }, 0);
+                return;
+            }
 
-            var text = document.createElement('div');
-            text.className = 'small muted';
-            text.setAttribute('role', 'status');
-            text.textContent = formular.dataset.laeuftHinweis
-                || 'Das dauert einen Moment. Bitte nicht noch einmal klicken.';
+            ereignis.preventDefault();
 
-            anzeige.appendChild(balken);
-            anzeige.appendChild(text);
-            knopf.insertAdjacentElement('afterend', anzeige);
+            var daten = new FormData(formular);
+            if (knopf.name) { daten.append(knopf.name, knopf.value); }
+            knoepfe.forEach(function (k) { k.disabled = true; });
 
             fetch(formular.action, {
                 method: (formular.method || 'post').toUpperCase(),
-                headers: { 'X-Requested-With': 'XMLHttpRequest' },
-                body: new FormData(formular),
+                /*
+                 * Weder Accept: application/json noch X-Requested-With:
+                 * Der Server soll antworten wie auf ein gewöhnliches
+                 * Formular – Meldung und Weiterleitung. X-Requested-With
+                 * galt früher als JSON-Wunsch; Controller::antwort() gab
+                 * dann JSON ohne Meldung zurück, und das Neuladen zeigte
+                 * nichts – auch keinen Fehler.
+                 */
+                body: daten,
                 /*
                  * Der Umleitung wird hier NICHT gefolgt. Täte sie es,
                  * holte der Browser die Zielseite im Hintergrund – und
@@ -217,15 +418,45 @@ document.addEventListener('DOMContentLoaded', function () {
                 if (formular.hasAttribute('data-laeuft-oben') && 'scrollRestoration' in window.history) {
                     window.history.scrollRestoration = 'manual';
                 }
+                // Das Neuladen ist auch ein Navigieren – „Repository
+                // abfragen“ dazwischen bräche es ab.
+                sperren(freigeben);
                 window.location.reload();
             }).catch(function (fehler) {
-                knopf.disabled = false;
+                knoepfe.forEach(function (k) { k.disabled = false; });
                 knopf.textContent = vorher;
                 if (hilfe) { hilfe.hidden = false; }
                 balken.remove();
                 text.className = 'small';
                 text.textContent = 'Das hat nicht geklappt: ' + (fehler && fehler.message ? fehler.message : fehler)
                     + ' – noch einmal versuchen.';
+            });
+        });
+    });
+
+    /*
+     * Links, hinter denen etwas dauert: „Repository abfragen“ wartet auf
+     * git, über eine langsame Leitung Minuten. Die Anfrage hält dabei die
+     * Sitzung nicht mehr – ein zweiter Klick lief also neben dem ersten,
+     * stieß an die Sperre der Arbeitskopie, und der Browser zeigte seine
+     * Antwort: „wird gerade schon abgeglichen“ statt der Liste. Also zählt
+     * der erste Klick; die Seite zeigt bis zur Antwort, dass gefragt wird.
+     * Mit Strg, Umschalt oder Mittelklick (neuer Reiter) bleibt es beim
+     * Browser.
+     */
+    document.querySelectorAll('a[data-laeuft]').forEach(function (link) {
+        link.addEventListener('click', function (ereignis) {
+            if (ereignis.defaultPrevented || ereignis.button !== 0
+                || ereignis.ctrlKey || ereignis.metaKey || ereignis.shiftKey || ereignis.altKey) { return; }
+            if (navigiert) { ereignis.preventDefault(); return; }
+            var vorher = link.textContent;
+            link.setAttribute('aria-disabled', 'true');
+            link.textContent = link.dataset.laeuft || 'läuft …';
+            var anzeige = laeuftAnzeigen(link, link.dataset.laeuft, link.dataset.laeuftHinweis);
+            sperren(function () {
+                link.removeAttribute('aria-disabled');
+                link.textContent = vorher;
+                anzeige.element.remove();
             });
         });
     });
@@ -338,16 +569,44 @@ document.addEventListener('DOMContentLoaded', function () {
         });
     });
 
-    // data-kopieren="#id": Text des Elements in die Zwischenablage.
+    // data-auswaehlen: ein Feld zum Kopieren (Token) beim Antippen ganz markieren.
+    document.querySelectorAll('[data-auswaehlen]').forEach(function (feld) {
+        ['focus', 'click'].forEach(function (art) {
+            feld.addEventListener(art, function () { if (feld.select) { feld.select(); } });
+        });
+    });
+
+    // data-kopieren="#id": Text des Elements (bei Eingabefeldern ihr Wert) in
+    // die Zwischenablage. Ohne sichere Verbindung (http im lokalen Netz) gibt
+    // es navigator.clipboard nicht – dann markieren und den alten Weg nehmen.
     document.querySelectorAll('[data-kopieren]').forEach(function (knopf) {
         knopf.addEventListener('click', function () {
             var quelle = document.querySelector(knopf.dataset.kopieren);
-            if (!quelle || !navigator.clipboard) { return; }
-            navigator.clipboard.writeText(quelle.textContent).then(function () {
+            if (!quelle) { return; }
+            var feld = quelle.tagName === 'INPUT' || quelle.tagName === 'TEXTAREA';
+            var text = feld ? quelle.value : quelle.textContent;
+            var gemeldet = function () {
                 var vorher = knopf.textContent;
                 knopf.textContent = 'kopiert';
                 window.setTimeout(function () { knopf.textContent = vorher; }, 1500);
-            });
+            };
+            if (navigator.clipboard && window.isSecureContext) {
+                navigator.clipboard.writeText(text).then(gemeldet);
+                return;
+            }
+            if (feld) {
+                quelle.focus();
+                quelle.select();
+            } else {
+                var bereich = document.createRange();
+                bereich.selectNodeContents(quelle);
+                var auswahl = window.getSelection();
+                auswahl.removeAllRanges();
+                auswahl.addRange(bereich);
+            }
+            try {
+                if (document.execCommand('copy')) { gemeldet(); }
+            } catch (e) { /* markiert ist es – dann von Hand kopieren */ }
         });
     });
 
@@ -355,7 +614,7 @@ document.addEventListener('DOMContentLoaded', function () {
     var live = document.querySelector('[data-job-live]');
     if (live) {
         setInterval(function () {
-            fetch(live.dataset.jobLive, { headers: { 'X-Requested-With': 'XMLHttpRequest' } })
+            fetch(live.dataset.jobLive, { headers: { 'Accept': 'application/json' } })
                 .then(function (r) { return r.json(); })
                 .then(function (data) {
                     if (data.job && ['success', 'failed', 'partial', 'cancelled'].indexOf(data.job.status) !== -1) {

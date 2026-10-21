@@ -3,6 +3,7 @@ declare(strict_types=1);
 
 namespace App\Services;
 
+use App\Berichte\BerichtService;
 use App\Support\Audit;
 use App\Support\Database;
 use App\Tanks\TankService;
@@ -598,10 +599,12 @@ final class AnlagenService
         BereichService::objektEntfernt($id);
         InventarService::objektEntfernt($id);
         TankService::objektEntfernt($id);
+        BerichtService::objektEntfernt($id);
         Database::execute('DELETE FROM anschluesse WHERE objekt_id = ?', [$id]);
         Database::execute('DELETE FROM schutzorgane WHERE objekt_id = ?', [$id]);
         Database::execute('DELETE FROM messpunkte WHERE objekt_id = ?', [$id]);
         Database::execute("DELETE FROM freigaben WHERE ziel_art = 'objekt' AND ziel_id = ?", [$id]);
+        Database::execute("DELETE FROM api_zuordnungen WHERE tabelle = 'objekte' AND ziel_id = ?", [$id]);
         Database::delete('objekte', $id);
         Audit::log('anlage.delete', 'objekt', (string) $id, ['name' => $objekt['name']]);
         return ['ok' => true, 'message' => $objekt['art_name'] . ' „' . $objekt['name'] . '“ gelöscht.'];
