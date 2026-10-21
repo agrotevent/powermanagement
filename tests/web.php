@@ -16,6 +16,7 @@ require __DIR__ . '/hilfen/grundriss-dateien.php';
 
 use App\Berichte\BerichtService;
 use App\Berichte\Einstellungen;
+use App\Berichte\Kundenmodus;
 use App\Services\BenutzerService;
 use App\Services\BereichService;
 use App\Services\Eventworx;
@@ -233,7 +234,8 @@ try {
         $seiten[] = '/karte?etage=' . $etage . '&modus=aufbau';
     }
     // Inventar: Liste, Formulare, jedes Stück
-    array_push($seiten, '/inventar', '/inventar?art=zwischenstecker', '/inventar?suche=PD', '/inventar/neu?art=verteilung', '/inventar/neu?art=zwischenstecker');
+    array_push($seiten, '/inventar', '/inventar?art=zwischenstecker', '/inventar?art=tanksensor', '/inventar?suche=PD', '/inventar/neu?art=verteilung',
+        '/inventar/neu?art=zwischenstecker', '/inventar/neu?art=tanksensor');
     foreach (array_map('intval', array_column(Database::select('SELECT id FROM inventar ORDER BY id LIMIT 10'), 'id')) as $id) {
         array_push($seiten, '/inventar/' . $id, '/inventar/' . $id . '/bearbeiten');
     }
@@ -328,6 +330,297 @@ try {
         $art = aufruf($basis, $admin['dose'], 'GET', '/anlagen/' . (int) ($mobil['id'] ?? 0) . '/bearbeiten?art=generator');
         pruefe($art['status'] === 200 && str_contains($art['text'], 'Wird beim Speichern zu „Generator“') && phpMeldung($art['text']) === null, 'Art im Formular umstellbar');
         Database::execute('DELETE FROM leitungen WHERE name LIKE ?', [$kennung . '%']);
+
+        // Tanks: im Plan setzen, eigene Seite ohne Anschlüsse, Formular ohne elektrische Felder, Art bleibt
+        $tank = $setzen(['art' => 'tank', 'fest' => 0, 'name' => $kennung . '-tank']);
+        $tankId = (int) ($tank['id'] ?? 0);
+        pruefe(($tank['ok'] ?? false) && (int) Database::scalar('SELECT COUNT(*) FROM anschluesse WHERE objekt_id = ?', [$tankId]) === 0, 'Karte: Tank gesetzt, ohne Anschlüsse');
+        $r = aufruf($basis, $admin['dose'], 'POST', '/anlagen/speichern', ['id' => $tankId, 'art' => 'tank', 'name' => $kennung . '-tank', 'floor_id' => $etage,
+            'status' => 'geplant', 'nennleistung_kva' => '80', 'eigenschaften' => ['inhalt_l' => '3000', 'kraftstoff' => 'Diesel', 'liter_je_mm' => '2,78'], '_token' => $admin['token']]);
+        pruefe($r['status'] === 302 && $r['ziel'] === '/anlagen/' . $tankId && Database::scalar('SELECT nennleistung_kva FROM objekte WHERE id = ?', [$tankId]) === null,
+            'Tank per Formular gespeichert, ohne Nennleistung → ' . $r['ziel']);
+        foreach (['', '?reiter=anschluesse', '/bearbeiten', '/druck', '/live'] as $zusatz) {
+            $r = aufruf($basis, $admin['dose'], 'GET', '/anlagen/' . $tankId . $zusatz);
+            pruefe($r['status'] === 200 && phpMeldung($r['text']) === null, 'Tank /anlagen/' . $tankId . $zusatz . ' → ' . $r['status'] . ' ' . (string) phpMeldung($r['text']));
+        }
+        foreach (['/anlagen?art=tank', '/anlagen/neu?art=tank', '/anlagen/neu?art=tank&vorlage=1', '/karte/objekt/' . $tankId] as $pfad) {
+            $r = aufruf($basis, $admin['dose'], 'GET', $pfad);
+            pruefe($r['status'] === 200 && phpMeldung($r['text']) === null, 'Admin ' . $pfad . ' → ' . $r['status']);
+        }
+        $seite = aufruf($basis, $admin['dose'], 'GET', '/anlagen/' . $tankId)['text'];
+        pruefe(str_contains($seite, '3.000 l · Diesel') && str_contains($seite, '2,78') && !str_contains($seite, 'Verteilerplan') && !str_contains($seite, '?reiter=anschluesse'),
+            'Tankseite: Daten mit Inhalt, ohne Verteilerplan und Anschluss-Reiter');
+        $form = aufruf($basis, $admin['dose'], 'GET', '/anlagen/' . $tankId . '/bearbeiten?art=generator')['text'];
+        pruefe(!str_contains($form, 'name="nennleistung_kva"') && !str_contains($form, 'name="steuerung_gesperrt"') && str_contains($form, '<legend>Kennlinie</legend>')
+            && !str_contains($form, '<option value="generator"') && !str_contains($form, 'Wird beim Speichern zu'), 'Tank-Formular: ohne elektrische Felder, in Gruppen, Art bleibt Tank');
+        pruefe(str_contains(aufruf($basis, $admin['dose'], 'GET', '/anlagen/neu?art=tank')['text'], 'Neuer Tank'), 'Formular „Neuer Tank“');
+        $mobilForm = aufruf($basis, $admin['dose'], 'GET', '/anlagen/' . (int) ($mobil['id'] ?? 0) . '/bearbeiten?art=tank')['text'];
+        pruefe(!str_contains($mobilForm, '<option value="tank"') && !str_contains($mobilForm, 'Wird beim Speichern zu „Tank“'), 'eine Verteilung lässt sich nicht zum Tank umstellen');
+        $r = aufruf($basis, $admin['dose'], 'POST', '/anlagen/speichern', ['id' => $tankId, 'art' => 'generator', 'name' => $kennung . '-tank', 'floor_id' => $etage, '_token' => $admin['token']]);
+        pruefe($r['status'] === 302 && (string) Database::scalar('SELECT art FROM objekte WHERE id = ?', [$tankId]) === 'tank', 'Tank → Generator über das Formular abgelehnt');
+        $r = json_decode(aufruf($basis, $admin['dose'], 'POST', '/anlagen/' . $tankId . '/anschluesse', ['abgang' => [(int) Database::scalar("SELECT id FROM steckertypen WHERE schluessel = 'cee16'") => 2],
+            '_token' => $admin['token']], $json)['text'], true);
+        pruefe(($r['ok'] ?? true) === false && (int) Database::scalar('SELECT COUNT(*) FROM anschluesse WHERE objekt_id = ?', [$tankId]) === 0, 'Anschlüsse am Tank abgelehnt');
+        $r = $kabel(['von_objekt_id' => (int) ($mobil['id'] ?? 0), 'zu_objekt_id' => $tankId, 'name' => $kennung . '-zum-tank']);
+        pruefe(($r['ok'] ?? true) === false && str_contains((string) ($r['message'] ?? ''), 'Tank'), 'Karte: Kabel zum Tank abgelehnt – ' . (string) ($r['message'] ?? ''));
+        $stand = json_decode(aufruf($basis, $admin['dose'], 'GET', '/karte/' . $etage . '/stand')['text'], true);
+        $imPlan = array_column($stand['objekte'] ?? [], null, 'id');
+        pruefe(($imPlan[$tankId]['elektrisch'] ?? null) === false && str_contains((string) ($imPlan[$tankId]['kurz'] ?? ''), '3.000 l'), 'Karte: Stand kennt den Tank mit Inhalt');
+        $katalog = aufruf($basis, $admin['dose'], 'GET', '/anlagen/katalog')['text'];
+        pruefe(str_contains($katalog, 'href="/anlagen/neu?art=tank&amp;vorlage=1"'), 'Katalog: Knopf „+ Tank-Typ“');
+        pruefe(str_contains($katalog, 'href="/anlagen?art=tank"'), 'Navigation: Tanks');
+        $siteTank = (int) Database::scalar('SELECT site_id FROM objekte WHERE id = ?', [$tankId]);
+        $bereichForm = aufruf($basis, $admin['dose'], 'GET', '/bereiche/neu?standort=' . $siteTank)['text'];
+        pruefe(str_contains($bereichForm, htmlspecialchars($kennung . '-mobil')) && !str_contains($bereichForm, htmlspecialchars($kennung . '-tank')), 'Bereich: Tank nicht wählbar');
+
+        // Kraftstoffschlauch über die Karte: Tank ↔ Generator (nicht zur Verteilung), Stand, Fenster, Tankseite, Material
+        $genWeb = (int) ($setzen(['art' => 'generator', 'fest' => 0, 'name' => $kennung . '-gen'])['id'] ?? 0);
+        $schlauch = static fn (array $felder): array => json_decode(aufruf($basis, $admin['dose'], 'POST', '/karte/leitung/speichern',
+            $felder + ['art' => 'kraftstoff', 'floor_id' => $etage, 'punkte' => '[[50,50],[51,51]]', '_token' => $admin['token']], $json)['text'], true) ?? [];
+        $r = $schlauch(['von_objekt_id' => $tankId, 'zu_objekt_id' => (int) ($mobil['id'] ?? 0), 'name' => $kennung . '-schlauch-falsch']);
+        pruefe(($r['ok'] ?? true) === false && str_contains((string) ($r['message'] ?? ''), 'kein Generator'), 'Karte: Schlauch Tank → Verteilung abgelehnt – ' . (string) ($r['message'] ?? ''));
+        $r = $schlauch(['von_objekt_id' => $genWeb, 'zu_objekt_id' => $tankId, 'name' => $kennung . '-schlauch', 'kabeltyp' => 'DN 10 (3/8″)', 'anzahl' => '2',
+            'modell' => '', 'laenge_m' => '', 'fest' => '0', 'notizen' => '']);
+        $schlauchId = (int) ($r['id'] ?? 0);
+        pruefe(($r['ok'] ?? false) && (int) Database::scalar('SELECT von_objekt_id FROM leitungen WHERE id = ?', [$schlauchId]) === $tankId,
+            'Karte: Schlauch vom Generator zum Tank gezogen – „von“ ist der Tank');
+        $stand = json_decode(aufruf($basis, $admin['dose'], 'GET', '/karte/' . $etage . '/stand')['text'], true);
+        $l = array_column($stand['leitungen'] ?? [], null, 'id')[$schlauchId] ?? [];
+        gleich([$l['art'] ?? null, $l['von'] ?? null, $l['zu'] ?? null, $l['modell'] ?? null, $l['anzahl'] ?? null], ['kraftstoff', $tankId, $genWeb, 'HK-A3', 2],
+            'Karte: Stand mit dem Schlauch (Kupplung HK-A3, Vor- und Rücklauf)');
+        $fenster = json_decode(aufruf($basis, $admin['dose'], 'GET', '/karte/leitung/' . $schlauchId)['text'], true);
+        pruefe(($fenster['ok'] ?? false) && ($fenster['leitung']['art'] ?? '') === 'kraftstoff' && ($fenster['enden'] ?? null) === ['von' => [], 'zu' => []] && ($fenster['darf'] ?? false),
+            'Karte: Schlauchfenster ohne Anschlüsse');
+        $r = json_decode(aufruf($basis, $admin['dose'], 'POST', '/karte/leitung/ende', ['id' => $schlauchId, 'ende' => 'zu', 'objekt_id' => 0, 'punkte' => '[[50,50],[52,52]]',
+            '_token' => $admin['token']], $json)['text'], true) ?? [];
+        pruefe(($r['ok'] ?? true) === false && (int) Database::scalar('SELECT zu_objekt_id FROM leitungen WHERE id = ?', [$schlauchId]) === $genWeb, 'Karte: Schlauchende lässt sich nicht lösen');
+        $karteSeite = aufruf($basis, $admin['dose'], 'GET', '/karte?etage=' . $etage)['text'];
+        pruefe(str_contains($karteSeite, 'data-modus="schlauch"') && str_contains($karteSeite, 'data-ebene="kraftstoff"') && str_contains($karteSeite, '"schlauchtypen"'),
+            'Karte: Werkzeug „Schlauch“, Ebene und Schlauchtypen');
+        $seite = aufruf($basis, $admin['dose'], 'GET', '/anlagen/' . $tankId);
+        pruefe($seite['status'] === 200 && phpMeldung($seite['text']) === null && str_contains($seite['text'], 'id="versorgung"') && str_contains($seite['text'], htmlspecialchars($kennung . '-gen'))
+            && str_contains($seite['text'], 'data-tank="rest"'), 'Tankseite: Versorgung mit dem Generator am Schlauch');
+        $material = aufruf($basis, $admin['dose'], 'GET', '/karte/' . $etage . '/material');
+        pruefe($material['status'] === 200 && phpMeldung($material['text']) === null && str_contains($material['text'], 'Kraftstoff') && str_contains($material['text'], 'DN 10 (3/8″)')
+            && str_contains($material['text'], 'HK-A3'), 'Material der Etage: Kraftstoff mit Schlauch und Kupplungen');
+        $genSeite = aufruf($basis, $admin['dose'], 'GET', '/anlagen/' . $genWeb);
+        pruefe($genSeite['status'] === 200 && phpMeldung($genSeite['text']) === null, 'Generator am Schlauch: Seite ohne PHP-Meldung');
+
+        // Tanksensor: über das Formular anlegen, in den Tank einbauen (mit Einbaumaß), ausbauen
+        $neuTs = aufruf($basis, $admin['dose'], 'GET', '/inventar/neu?art=tanksensor');
+        pruefe($neuTs['status'] === 200 && phpMeldung($neuTs['text']) === null && str_contains($neuTs['text'], 'Neuer Tanksensor')
+            && str_contains($neuTs['text'], 'name="eigenschaften[prinzip]"') && str_contains($neuTs['text'], 'value="4-20mA-wandler" selected')
+            && !str_contains($neuTs['text'], 'name="steckertyp_id"') && !str_contains($neuTs['text'], 'data-zeile-dazu'),
+            'Formular „Neuer Tanksensor“: Sensordaten mit Vorgabe Wandler, ohne Stecker und ohne weitere Shellys');
+        $r = aufruf($basis, $admin['dose'], 'POST', '/inventar/speichern', ['id' => '', 'art' => 'tanksensor', 'kennung' => $kennung . '-TS',
+            'geraet[]' => $kennung . '-uni', 'kanal[]' => 'voltmeter:100', 'stelle[]' => 'fuellstand', 'bezeichnung[]' => '',
+            'eigenschaften' => ['prinzip' => 'hydrostatisch', 'feld' => 'u', 'signal' => '4-20mA-wandler', 'u_bei_4ma' => '2,0', 'u_bei_20ma' => '10',
+                'bereich_von' => '0', 'bereich_bis' => '2', 'bereich_einheit' => 'mWS', 'schritt_roh' => ''], '_token' => $admin['token']]);
+        $ts = (int) Database::scalar('SELECT id FROM inventar WHERE kennung = ?', [$kennung . '-TS']);
+        pruefe($r['status'] === 302 && $r['ziel'] === '/inventar/' . $ts, 'Tanksensor per Formular angelegt → ' . $r['ziel']);
+        foreach (['/inventar/' . $ts => 'Hydrostatisch 0–2 mWS', '/inventar?art=tanksensor' => 'Hydrostatisch 0–2 mWS', '/inventar/' . $ts . '/bearbeiten' => 'value="mWS" selected'] as $pfad => $text) {
+            $r = aufruf($basis, $admin['dose'], 'GET', $pfad);
+            pruefe($r['status'] === 200 && phpMeldung($r['text']) === null && str_contains($r['text'], $text), 'Admin ' . $pfad . ' → ' . $r['status'] . ' mit „' . $text . '“');
+        }
+        $karteTank = json_decode(aufruf($basis, $admin['dose'], 'GET', '/karte/objekt/' . $tankId)['text'], true);
+        $karteMobil = json_decode(aufruf($basis, $admin['dose'], 'GET', '/karte/objekt/' . (int) ($mobil['id'] ?? 0))['text'], true);
+        pruefe(in_array($ts, array_column($karteTank['inventar_frei'] ?? [], 'id'), true) && array_diff(array_column($karteTank['inventar_frei'] ?? [], 'art'), ['tanksensor']) === []
+            && !in_array($ts, array_column($karteMobil['inventar_frei'] ?? [], 'id'), true), 'Karte: am Tank nur Tanksensoren zum Einsetzen, an der Verteilung keine');
+        $verteilerSeite = aufruf($basis, $admin['dose'], 'GET', '/anlagen/' . (int) ($mobil['id'] ?? 0) . '?reiter=messung')['text'];
+        pruefe(!str_contains($verteilerSeite, $kennung . '-TS'), 'Verteilung bietet keinen Tanksensor zum Einsetzen an');
+        $seite = aufruf($basis, $admin['dose'], 'GET', '/anlagen/' . $tankId)['text'];
+        pruefe(str_contains($seite, 'Tanksensor einbauen') && str_contains($seite, $kennung . '-TS') && str_contains($seite, 'name="einbau[offset_mm]"'), 'Tankseite: Tanksensor einbauen');
+        $peilungenVorher = (int) Database::scalar("SELECT COUNT(*) FROM tank_ereignisse WHERE objekt_id = ? AND art = 'peilung'", [$tankId]);
+        $r = aufruf($basis, $admin['dose'], 'POST', '/anlagen/' . $tankId . '/einsetzen', ['inventar_id' => $ts, 'einbau' => ['offset_mm' => '25'], 'peilung_prozent' => '55',
+            '_token' => $admin['token']]);
+        $mpTs = Database::first("SELECT * FROM messpunkte WHERE objekt_id = ? AND rolle = 'fuellstand' AND gueltig_bis IS NULL", [$tankId]);
+        $fTs = $mpTs !== null ? json_decode((string) Database::scalar('SELECT rechnung FROM tank_kennlinien WHERE messpunkt_id = ? ORDER BY id DESC LIMIT 1', [(int) $mpTs['id']]), true) : null;
+        pruefe($r['status'] === 302 && ($mpTs['geraet'] ?? '') === $kennung . '-uni' && ($fTs['herkunft']['einbau']['offset_mm'] ?? null) == 25,
+            'Tanksensor über das Formular eingebaut, Einbaumaß in der Kennlinie');
+        // Eine Peilung beim Einsetzen gibt es nicht: Rohwerte zählen erst ab dem Einbau – erst einbauen, dann die Sonde einhängen, dann peilen.
+        gleich((int) Database::scalar("SELECT COUNT(*) FROM tank_ereignisse WHERE objekt_id = ? AND art = 'peilung'", [$tankId]), $peilungenVorher,
+            'Einsetzen trägt keine Peilung ein (auch nicht mit einem alten Feld „peilung_prozent“)');
+        $seite = aufruf($basis, $admin['dose'], 'GET', '/anlagen/' . $tankId);
+        pruefe($seite['status'] === 200 && phpMeldung($seite['text']) === null && str_contains($seite['text'], 'seit Einbau nicht gepeilt') && str_contains($seite['text'], 'Ausbauen'),
+            'Tankseite: eingebauter Sensor, ungeprüft, mit „Ausbauen“');
+        pruefe(str_contains($seite['text'], 'Jetzt die Sonde einhängen und peilen, sobald der Sensor meldet') && !str_contains($seite['text'], 'name="peilung_prozent"'),
+            'Meldung nach dem Einsetzen nennt die Reihenfolge; das Einbauformular fragt keine Anzeige mehr ab');
+        // Gleich nach dem Einbau peilen: Der Sensor meldet noch nicht – die Peilung steht nur im Protokoll.
+        $r = aufruf($basis, $admin['dose'], 'POST', '/anlagen/' . $tankId . '/tank/peilung', ['art' => 'prozent', 'wert' => '55', '_token' => $admin['token']], $json);
+        $erste = json_decode($r['text'], true);
+        pruefe($r['status'] === 200 && ($erste['ok'] ?? false) === true && empty($erste['kalibriert']) && str_contains((string) ($erste['message'] ?? ''), 'sobald er meldet'),
+            'Peilung gleich nach dem Einbau: im Protokoll, kalibriert wird erst mit einem Wert seit dem Einbau – ' . (string) ($erste['message'] ?? ''));
+        $seite = aufruf($basis, $admin['dose'], 'GET', '/anlagen/' . $tankId);
+        pruefe(str_contains($seite['text'], 'action="/anlagen/' . $tankId . '/tank/peilung"') && str_contains($seite['text'], 'action="/anlagen/' . $tankId . '/tank/betankung"')
+            && str_contains($seite['text'], 'name="sensor[mm_je_roh]"') && str_contains($seite['text'], 'name="rueckwirkend"') && str_contains($seite['text'], 'id="protokoll"')
+            && str_contains($seite['text'], 'action="/anlagen/' . $tankId . '/tank/ereignis/loeschen"') && str_contains($seite['text'], '/assets/js/tank.js'),
+            'Tankseite: Vor Ort (Peilung, Betankung), Protokoll mit Löschen, Erweitert mit „rückwirkend“');
+        pruefe(str_contains($seite['text'], 'data-quelle="/anlagen/' . $tankId . '/tank/verlauf"') && str_contains($seite['text'], 'Fassungen der Kennlinie')
+            && str_contains($seite['text'], 'data-tank="roh"') && str_contains($seite['text'], 'data-live-url="/anlagen/' . $tankId . '/live"')
+            && str_contains($seite['text'], 'id="statistik-daten"'), 'Tankseite: Jetzt (live), Verlauf, Fassungen');
+        pruefe(str_contains($seite['text'], 'data-tank-tage="/anlagen/' . $tankId . '/tank/tage?') && str_contains($seite['text'], '<template data-tage-vorlage>')
+            && str_contains($seite['text'], '/tank/csv?zeitraum=24h&amp;groesse=liter&amp;inhalt=tage'), 'Tankseite: Verbrauch je Tag mit Vorlage „Als Betankung eintragen“ und CSV');
+        foreach (['?zeitraum=7d&groesse=roh', '?zeitraum=frei&von=2026-01-01&bis=2026-01-02&groesse=prozent', '?groesse=unsinn'] as $zusatz) {
+            $r = aufruf($basis, $admin['dose'], 'GET', '/anlagen/' . $tankId . $zusatz);
+            pruefe($r['status'] === 200 && phpMeldung($r['text']) === null, 'Tankseite ' . $zusatz . ' → ' . $r['status']);
+        }
+        $live = json_decode(aufruf($basis, $admin['dose'], 'GET', '/anlagen/' . $tankId . '/live')['text'], true);
+        $lt = $live['objekte'][$tankId] ?? [];
+        pruefe(($lt['tank']['sensor'] ?? null) === true && ($lt['tank']['messpunkt'] ?? 0) === (int) ($mpTs['id'] ?? -1) && ($lt['stufe'] ?? '') === 'stumm'
+            && str_contains((string) ($lt['hinweis'] ?? ''), 'seit dem Einbau'), 'Tank live: Sensor eingebaut, noch kein Wert seit dem Einbau – ' . (string) ($lt['hinweis'] ?? ''));
+        gleich([$lt['tank']['generatoren'] ?? null, array_key_exists('restlaufzeit_h', $lt['tank'] ?? []) ? $lt['tank']['restlaufzeit_h'] : 'fehlt'],
+            [[['id' => $genWeb, 'name' => $kennung . '-gen', 'laeuft' => false]], null], 'Tank live: Generator am Schlauch (ohne Messgerät), ohne Restlaufzeit');
+        // Eingebaut vor einem Augenblick – im Zeitraum der Statistik läge sonst nichts.
+        Database::execute('UPDATE messpunkte SET gueltig_ab = ? WHERE id = ?', [gmdate('c', time() - 600), (int) ($mpTs['id'] ?? 0)]);
+        $r = aufruf($basis, $admin['dose'], 'GET', '/statistik?mp[]=' . (int) ($mpTs['id'] ?? 0));
+        pruefe($r['status'] === 200 && phpMeldung($r['text']) === null && str_contains($r['text'], 'data-quelle="/anlagen/' . $tankId . '/tank/verlauf?mp=' . (int) ($mpTs['id'] ?? 0) . '"')
+            && !str_contains($r['text'], 'Spitzenleistung') && str_contains($r['text'], 'Tankseite'), 'Statistik: Tanksensor mit dem Verlauf des Tanks, ohne Leistungskennzahlen');
+        pruefe(str_contains($r['text'], 'data-tank-tage="/anlagen/' . $tankId . '/tank/tage?mp=' . (int) ($mpTs['id'] ?? 0) . '&amp;zeitraum=24h"')
+            && !str_contains($r['text'], 'data-tage-vorlage') && str_contains($r['text'], '/assets/js/tank.js'), 'Statistik: Verbrauch je Tag des Tanks, ohne Eintragen');
+        $karteTank = json_decode(aufruf($basis, $admin['dose'], 'GET', '/karte/objekt/' . $tankId)['text'], true);
+        pruefe(($karteTank['tank']['sensor']['kennung'] ?? '') === $kennung . '-TS' && ($karteTank['tank']['darf']['einsetzen'] ?? false) === true
+            && is_int($karteTank['tank']['sensor']['einsatz_id'] ?? null) && array_key_exists('tank', $karteTank['live'] ?? []), 'Karte: Tank-Panel mit Sensor, Ausbau und Livewerten');
+        // Den Messpunkt eines Tanksensors löscht niemand – er geht nur über „Ausbauen“, sonst nähme er alle Fassungen mit.
+        $nFassungen = (int) Database::scalar('SELECT COUNT(*) FROM tank_kennlinien WHERE messpunkt_id = ?', [(int) ($mpTs['id'] ?? 0)]);
+        $r = aufruf($basis, $admin['dose'], 'POST', '/anlagen/' . $tankId . '/messpunkt/loeschen', ['messpunkt_id' => (int) ($mpTs['id'] ?? 0), '_token' => $admin['token']], $json);
+        pruefe($r['status'] === 422 && Database::scalar('SELECT id FROM messpunkte WHERE id = ?', [(int) ($mpTs['id'] ?? 0)]) !== false && $nFassungen > 0
+            && (int) Database::scalar('SELECT COUNT(*) FROM tank_kennlinien WHERE messpunkt_id = ?', [(int) ($mpTs['id'] ?? 0)]) === $nFassungen,
+            'Messpunkt eines Tanksensors löschen abgelehnt (' . $r['status'] . '): Messpunkt und Fassungen bleiben');
+        // Ein Kunde im Kartenpanel: den Sensor sieht er, Knöpfe bekommt er keine.
+        BenutzerService::freigabeSpeichern(['subject_type' => 'user', 'subject_id' => $benutzer['zwei'], 'ziel_art' => 'objekt', 'ziel_id' => $tankId]);
+        $kundePanel = anmelden($basis, $kennung . '-zwei', $kennwort);
+        $dosen[] = $kundePanel['dose'];
+        $p = json_decode(aufruf($basis, $kundePanel['dose'], 'GET', '/karte/objekt/' . $tankId)['text'], true);
+        gleich([$p['tank']['darf'] ?? null, $p['tank']['sensor']['kennung'] ?? null,
+            array_key_exists('einsatz_id', (array) ($p['tank']['sensor'] ?? [])) ? $p['tank']['sensor']['einsatz_id'] : 'fehlt', $p['darf'] ?? null],
+            [['peilen' => false, 'betanken' => false, 'einsetzen' => false], $kennung . '-TS', null, false],
+            'Kunde im Kartenpanel: Sensor sichtbar – ohne Peilen, Betanken, Einsetzen und Ausbauen');
+        Database::execute("DELETE FROM freigaben WHERE subject_type = 'user' AND subject_id = ?", [$benutzer['zwei']]);
+        $r = aufruf($basis, $admin['dose'], 'POST', '/anlagen/' . $tankId . '/messpunkt', ['geraet' => $kennung . '-hand', 'kanal' => 'voltmeter:100', '_token' => $admin['token']], $json);
+        pruefe(Database::scalar('SELECT id FROM messpunkte WHERE geraet = ?', [$kennung . '-hand']) === false, 'kein Messpunkt von Hand am Tank (' . $r['status'] . ')');
+        $r = aufruf($basis, $admin['dose'], 'POST', '/einsatz/' . (int) ($mpTs['einsatz_id'] ?? 0) . '/beenden', ['_token' => $admin['token']]);
+        pruefe($r['status'] === 302 && Database::scalar("SELECT id FROM messpunkte WHERE objekt_id = ? AND rolle = 'fuellstand' AND gueltig_bis IS NULL", [$tankId]) === false,
+            'Tanksensor ausgebaut');
+
+        // Peilung und Betankung vor Ort: Formular, Kartenpanel (JSON), CSRF, Löschen, Protokoll-CSV
+        $ereignisse = static fn (): int => (int) Database::scalar('SELECT COUNT(*) FROM tank_ereignisse WHERE objekt_id = ?', [$tankId]);
+        $n = $ereignisse();
+        $r = aufruf($basis, $admin['dose'], 'POST', '/anlagen/' . $tankId . '/tank/peilung', ['art' => 'liter', 'wert' => '1500', '_token' => $admin['token']]);
+        pruefe($r['status'] === 302 && $r['ziel'] === '/anlagen/' . $tankId && $ereignisse() === $n + 1, 'Peilung per Formular → ' . $r['ziel']);
+        pruefe(str_contains(aufruf($basis, $admin['dose'], 'GET', '/anlagen/' . $tankId)['text'], 'Peilung 1.500 l eingetragen'), '… mit Meldung auf der Tankseite');
+        $r = aufruf($basis, $admin['dose'], 'POST', '/anlagen/' . $tankId . '/tank/peilung', ['art' => 'prozent', 'wert' => '60', '_token' => $admin['token']], $json);
+        $antwort = json_decode($r['text'], true);
+        pruefe($r['status'] === 200 && ($antwort['ok'] ?? false) === true && str_contains((string) ($antwort['message'] ?? ''), '60 %') && $ereignisse() === $n + 2, 'Peilung aus dem Kartenpanel (JSON)');
+        $r = aufruf($basis, $admin['dose'], 'POST', '/anlagen/' . $tankId . '/tank/peilung', ['art' => 'prozent', 'wert' => '60', '_token' => 'falsch'], $json);
+        pruefe($r['status'] !== 200 && $ereignisse() === $n + 2, 'Peilung ohne gültiges Token: nichts eingetragen (' . $r['status'] . ')');
+        $r = aufruf($basis, $admin['dose'], 'POST', '/anlagen/' . $tankId . '/tank/peilung', ['art' => 'prozent', 'wert' => '250', '_token' => $admin['token']], $json);
+        pruefe($r['status'] === 422 && (json_decode($r['text'], true)['ok'] ?? true) === false && $ereignisse() === $n + 2, 'Peilung über dem Tank abgelehnt (422)');
+        $r = aufruf($basis, $admin['dose'], 'POST', '/anlagen/' . $tankId . '/tank/betankung', ['liter' => '1000', 'zeit' => '', 'lieferschein' => '=SUMME(A1:A9)',
+            'kalibrieren' => '1', '_token' => $admin['token']], $json);
+        $antwort = json_decode($r['text'], true);
+        pruefe($r['status'] === 200 && ($antwort['ok'] ?? false) === true && is_int($antwort['id'] ?? null) && str_contains((string) ($antwort['message'] ?? ''), 'nur im Protokoll'),
+            'Betankung ohne Sensor im Tank: nur im Protokoll – ' . (string) ($antwort['message'] ?? ''));
+        $betankung = (int) ($antwort['id'] ?? 0);
+        gleich(aufruf($basis, $admin['dose'], 'POST', '/anlagen/' . $tankId . '/tank/betankung', ['liter' => '0', '_token' => $admin['token']], $json)['status'], 422, 'Betankung ohne Menge → 422');
+        gleich(aufruf($basis, $admin['dose'], 'POST', '/anlagen/' . $tankId . '/tank/betankung/auswerten', ['ereignis_id' => $betankung, '_token' => $admin['token']], $json)['status'], 422,
+            'Betankung ohne Sensor lässt sich nicht auswerten');
+        gleich(aufruf($basis, $admin['dose'], 'POST', '/anlagen/' . $tankId . '/tank/kennlinie', ['messpunkt' => $mpTs['id'] ?? 0, 'sensor' => ['roh_anker' => 2, 'mm_anker' => 20, 'mm_je_roh' => 100],
+            '_token' => $admin['token']], $json)['status'], 422, 'Kennlinie von Hand ohne laufenden Sensor → 422');
+        gleich(aufruf($basis, $admin['dose'], 'POST', '/anlagen/' . $tankId . '/tank/steigung', ['ereignis_id' => $betankung, '_token' => $admin['token']], $json)['status'], 422,
+            'Steigung ohne Haken → 422');
+        $csv = aufruf($basis, $admin['dose'], 'GET', '/anlagen/' . $tankId . '/tank/csv?inhalt=protokoll');
+        pruefe($csv['status'] === 200 && str_contains($csv['kopf'], 'text/csv') && str_contains($csv['text'], '"Zeit";"Art";"Inhalt [l]"') && str_contains($csv['text'], '"Betankung";1000;')
+            && str_contains($csv['text'], '"\'=SUMME(A1:A9)"'), 'Protokoll als CSV, der Lieferschein als Text');
+        $r = aufruf($basis, $admin['dose'], 'POST', '/anlagen/' . $tankId . '/tank/ereignis/loeschen', ['ereignis_id' => $betankung, '_token' => $admin['token']]);
+        pruefe($r['status'] === 302 && Database::scalar('SELECT id FROM tank_ereignisse WHERE id = ?', [$betankung]) === false, 'Betankung gelöscht (Formular)');
+        gleich(aufruf($basis, $admin['dose'], 'POST', '/anlagen/' . (int) ($mobil['id'] ?? 0) . '/tank/peilung', ['art' => 'prozent', 'wert' => '60', '_token' => $admin['token']], $json)['status'],
+            404, 'Peilung an einer Verteilung → 404');
+        $karteTank = json_decode(aufruf($basis, $admin['dose'], 'GET', '/karte/objekt/' . $tankId)['text'], true);
+        pruefe(($karteTank['tank']['nenn_l'] ?? null) == 3000 && ($karteTank['tank']['darf']['peilen'] ?? false) === true && count($karteTank['tank']['ereignisse'] ?? []) === 3,
+            'Kartenpanel: Nennvolumen, Peilen erlaubt, letzte drei Einträge');
+        // Ein Kunde mit Freigabe sieht Tank und Protokoll, trägt aber nichts ein
+        $kundeFreigabe = BenutzerService::freigabeSpeichern(['subject_type' => 'user', 'subject_id' => $benutzer['zwei'], 'ziel_art' => 'objekt', 'ziel_id' => $tankId]);
+        $kundeTank = anmelden($basis, $kennung . '-zwei', $kennwort);
+        $dosen[] = $kundeTank['dose'];
+        $r = aufruf($basis, $kundeTank['dose'], 'GET', '/anlagen/' . $tankId);
+        pruefe($r['status'] === 200 && phpMeldung($r['text']) === null && str_contains($r['text'], 'id="protokoll"') && !str_contains($r['text'], '/tank/peilung')
+            && !str_contains($r['text'], '/tank/betankung') && !str_contains($r['text'], 'Erweitert') && !str_contains($r['text'], '/tank/ereignis/loeschen')
+            && !str_contains($r['text'], 'data-tage-vorlage'),
+            'Kunde: Tankseite mit Protokoll, ohne Peilung, Betankung, Erweitert, Löschen und „Als Betankung eintragen“');
+        pruefe(str_contains($r['text'], 'id="versorgung"') && str_contains($r['text'], 'Generator (nicht freigegeben)') && !str_contains($r['text'], htmlspecialchars($kennung . '-gen')),
+            'Kunde: Versorgung ohne den Namen des Generators, den er nicht sieht');
+        $n = $ereignisse();
+        $r = aufruf($basis, $kundeTank['dose'], 'POST', '/anlagen/' . $tankId . '/tank/peilung', ['art' => 'prozent', 'wert' => '60', '_token' => $kundeTank['token']], $json);
+        pruefe($r['status'] === 403 && $ereignisse() === $n, 'Kunde: Peilung → 403');
+        $eineEreignis = (int) Database::scalar('SELECT id FROM tank_ereignisse WHERE objekt_id = ? ORDER BY id LIMIT 1', [$tankId]);
+        $r = aufruf($basis, $kundeTank['dose'], 'POST', '/anlagen/' . $tankId . '/tank/ereignis/loeschen', ['ereignis_id' => $eineEreignis, '_token' => $kundeTank['token']]);
+        pruefe($eineEreignis > 0 && $r['status'] === 403 && $ereignisse() === $n, 'Kunde: Löschen → 403');
+        Database::execute("DELETE FROM freigaben WHERE subject_type = 'user' AND subject_id = ?", [$benutzer['zwei']]);
+        unset($kundeFreigabe);
+
+        // Technik mit „bearbeiten“, dessen Datenfenster vor einer Stunde endete: sieht den Tank, trägt aber nichts mehr ein –
+        // was ab jetzt gälte, könnte er selbst nicht sehen.
+        Database::insert('freigaben', ['subject_type' => 'user', 'subject_id' => $benutzer['technik'], 'ziel_art' => 'objekt', 'ziel_id' => $tankId,
+            'darf_bearbeiten' => 1, 'darf_steuern' => 0, 'gueltig_ab' => null, 'gueltig_bis' => null,
+            'daten_ab' => gmdate('c', time() - 86400), 'daten_bis' => gmdate('c', time() - 3600), 'notiz' => '', 'created_by' => 'test', 'created_at' => gmdate('c')]);
+        $technikTank = anmelden($basis, $kennung . '-technik', $kennwort);
+        $dosen[] = $technikTank['dose'];
+        $r = aufruf($basis, $technikTank['dose'], 'GET', '/anlagen/' . $tankId);
+        pruefe($r['status'] === 200 && phpMeldung($r['text']) === null && !str_contains($r['text'], '/tank/peilung') && !str_contains($r['text'], '/tank/betankung'),
+            'Technik nach dem Ende des Datenfensters: Tankseite ohne Peilung und Betankung');
+        $n = $ereignisse();
+        foreach (['/tank/peilung' => ['art' => 'liter', 'wert' => '1000'], '/tank/betankung' => ['liter' => '100'], '/tank/kennlinie' => ['messpunkt' => 0],
+            '/tank/ereignis/loeschen' => ['ereignis_id' => $eineEreignis]] as $pfad => $felder) {
+            $r = aufruf($basis, $technikTank['dose'], 'POST', '/anlagen/' . $tankId . $pfad, $felder + ['_token' => $technikTank['token']], $json);
+            pruefe($r['status'] === 403 && str_contains((string) (json_decode($r['text'], true)['message'] ?? ''), 'Freigabe für die Messdaten'),
+                'Technik nach dem Ende des Datenfensters: ' . $pfad . ' → ' . $r['status']);
+        }
+        $r = aufruf($basis, $technikTank['dose'], 'POST', '/anlagen/' . $tankId . '/einsetzen', ['inventar_id' => $ts, '_token' => $technikTank['token']], $json);
+        gleich([$r['status'], $ereignisse(), Database::scalar("SELECT id FROM messpunkte WHERE objekt_id = ? AND rolle = 'fuellstand' AND gueltig_bis IS NULL", [$tankId])],
+            [403, $n, false], '… auch keinen Tanksensor einsetzen, nichts eingetragen');
+        Database::execute("DELETE FROM freigaben WHERE subject_type = 'user' AND subject_id = ?", [$benutzer['technik']]);
+
+        // Füllstand: Live, Verlauf, CSV, Statistik, Karte, Übersicht, Einstellungen
+        $mpAlt = (int) ($mpTs['id'] ?? 0);
+        $live = json_decode(aufruf($basis, $admin['dose'], 'GET', '/anlagen/' . $tankId . '/live')['text'], true);
+        pruefe(($live['objekte'][$tankId]['stufe'] ?? '') === 'keine' && ($live['objekte'][$tankId]['tank']['sensor'] ?? null) === false, 'Tank live nach dem Ausbau: kein Sensor');
+        $r = aufruf($basis, $admin['dose'], 'GET', '/anlagen/' . $tankId . '/tank/verlauf?zeitraum=7d&feld=roh');
+        $v = json_decode($r['text'], true);
+        pruefe($r['status'] === 200 && str_contains($r['kopf'], 'application/json') && ($v['ok'] ?? false) === true && ($v['feld'] ?? '') === 'roh'
+            && isset($v['zeiten'], $v['serien'], $v['marken'], $v['teile'], $v['schritt']), 'Tankverlauf als JSON (früherer Sensor zählt mit)');
+        $r = aufruf($basis, $admin['dose'], 'GET', '/anlagen/' . $tankId . '/tank/verlauf?mp=' . $mpAlt . '&groesse=liter');
+        pruefe($r['status'] === 200 && (json_decode($r['text'], true)['feld'] ?? '') === 'liter', 'Tankverlauf eines Sensors');
+        $r = aufruf($basis, $admin['dose'], 'GET', '/anlagen/' . $tankId . '/tank/verlauf?mp=' . ($mpAlt + 999999));
+        pruefe($r['status'] === 404 && (json_decode($r['text'], true)['ok'] ?? true) === false, 'Tankverlauf: fremder Messpunkt → 404 (JSON)');
+        gleich(aufruf($basis, $admin['dose'], 'GET', '/anlagen/' . (int) ($mobil['id'] ?? 0) . '/tank/verlauf')['status'], 404, 'Tankverlauf einer Verteilung → 404');
+        $r = aufruf($basis, $admin['dose'], 'GET', '/anlagen/' . $tankId . '/tank/tage?zeitraum=7d');
+        $v = json_decode($r['text'], true);
+        pruefe($r['status'] === 200 && phpMeldung($r['text']) === null && str_contains($r['kopf'], 'application/json') && ($v['ok'] ?? false) === true
+            && isset($v['tage'], $v['betankungen'], $v['summe'], $v['schwelle_text']) && ($v['darf_eintragen'] ?? null) === true, 'Verbrauch je Tag als JSON');
+        $r = aufruf($basis, $admin['dose'], 'GET', '/anlagen/' . $tankId . '/tank/tage?mp=' . ($mpAlt + 999999));
+        pruefe($r['status'] === 404 && (json_decode($r['text'], true)['ok'] ?? true) === false, 'Verbrauch je Tag: fremder Messpunkt → 404 (JSON)');
+        gleich(aufruf($basis, $admin['dose'], 'GET', '/anlagen/' . (int) ($mobil['id'] ?? 0) . '/tank/tage')['status'], 404, 'Verbrauch je Tag einer Verteilung → 404');
+        $r = aufruf($basis, $admin['dose'], 'GET', '/anlagen/' . $tankId . '/tank/csv?inhalt=tage&zeitraum=frei&von=2026-01-01&bis=2026-01-03');
+        pruefe($r['status'] === 200 && str_contains($r['kopf'], 'text/csv') && str_contains($r['text'], '"Tag";"Verbrauch [l]";"Getankt [l]";"Mittel [l/h]"')
+            && str_contains($r['kopf'], 'tage-20260101'), 'Verbrauch je Tag als CSV');
+        $r = aufruf($basis, $admin['dose'], 'GET', '/anlagen/' . $tankId . '/tank/csv?zeitraum=24h&mp=' . $mpAlt);
+        pruefe($r['status'] === 200 && str_contains($r['kopf'], 'text/csv') && str_contains($r['text'], '"Zeit";"Sensor";"Rohwert') && str_contains($r['text'], '"Inhalt [l]";"Füllstand [%]"'),
+            'Tank-CSV mit Kopfzeile');
+        pruefe((int) Database::scalar("SELECT COUNT(*) FROM audit_log WHERE action = 'tank.csv' AND target_id = ?", [(string) $tankId]) > 0, 'Tank-CSV steht im Audit');
+        $csv = aufruf($basis, $admin['dose'], 'GET', '/statistik/csv?zeitraum=24h&mp[]=' . $mpAlt)['text'];
+        pruefe(!str_contains($csv, $kennung . '-TS'), 'Statistik-CSV übergeht den Tanksensor');
+        $stand = json_decode(aufruf($basis, $admin['dose'], 'GET', '/karte/' . $etage . '/stand')['text'], true);
+        $imPlan = array_column($stand['objekte'] ?? [], null, 'id');
+        gleich($imPlan[$tankId]['tank'] ?? null, ['nenn_l' => 3000.0, 'sensor' => false], 'Karte: Stand mit Nennvolumen und Sensor des Tanks');
+        pruefe(array_key_exists('tank', $imPlan[(int) ($mobil['id'] ?? 0)] ?? []) && $imPlan[(int) ($mobil['id'] ?? 0)]['tank'] === null, 'Karte: eine Verteilung hat keinen Tankteil');
+        pruefe(str_contains(aufruf($basis, $admin['dose'], 'GET', '/dashboard')['text'], 'data-art="tank"'), 'Übersicht: Tank-Kachel');
+        pruefe(str_contains(aufruf($basis, $admin['dose'], 'GET', '/anlagen?art=tank')['text'], 'data-tank="menge"'), 'Anlagenliste: Inhalt des Tanks statt Leistung');
+        $einst = aufruf($basis, $admin['dose'], 'GET', '/system/einstellungen')['text'];
+        pruefe(str_contains($einst, 'name="grenzen__tank_warnung"') && str_contains($einst, 'name="grenzen__tank_stumm_h"'), 'Einstellungen: Grenzen der Tanks');
+        $r = aufruf($basis, $admin['dose'], 'POST', '/system/einstellungen/speichern', ['grenzen__tank_warnung' => '30', '_token' => $admin['token']]);
+        pruefe($r['status'] === 302 && Database::scalar("SELECT setting_value FROM settings WHERE setting_key = 'grenzen.tank_warnung'") === '30', 'Einstellungen: Tank-Warngrenze gespeichert');
+        aufruf($basis, $admin['dose'], 'POST', '/system/einstellungen/speichern', ['grenzen__tank_warnung' => '', '_token' => $admin['token']]);
+        \App\Support\Settings::forget('grenzen.tank_warnung');
     }
 
     // Georeferenz: GeoJSON, Koordinaten im Anlagenfenster, Speichern prüft
@@ -747,6 +1040,13 @@ try {
         '/inventar', '/inventar/neu', '/verteiler-abgleich', '/location', '/anlagen/katalog/import', '/system/schnittstelle', '/system/schnittstelle/' . $zugangId] as $pfad) {
         gleich(aufruf($basis, $kunde['dose'], 'GET', $pfad)['status'], 403, 'Kunde ' . $pfad);
     }
+    if (($tankId ?? 0) > 0) {
+        $r = aufruf($basis, $kunde['dose'], 'GET', '/anlagen/' . $tankId . '/tank/verlauf');
+        pruefe($r['status'] === 404 && (json_decode($r['text'], true)['ok'] ?? true) === false, 'Kunde ohne Freigabe: fremder Tank, Verlauf → 404');
+        gleich(aufruf($basis, $kunde['dose'], 'GET', '/anlagen/' . $tankId . '/tank/csv')['status'], 404, 'Kunde ohne Freigabe: fremder Tank, CSV → 404');
+        $r = aufruf($basis, $kunde['dose'], 'GET', '/anlagen/' . $tankId . '/tank/tage');
+        pruefe($r['status'] === 404 && (json_decode($r['text'], true)['ok'] ?? true) === false, 'Kunde ohne Freigabe: fremder Tank, Verbrauch je Tag → 404');
+    }
     // Ohne „api.manage“ nichts an den Zugängen – auch nicht widerrufen
     foreach (['anlegen' => ['name' => $kennung . ' vom Kunden', 'befugnisse' => ['plaene.lesen']], $zugangId . '/widerrufen' => [],
         $zugangId . '/anzeigen' => ['kennwort' => $kennwort], $zugangId . '/speichern' => ['name' => $kennung . ' vom Kunden']] as $aktion => $felder) {
@@ -949,7 +1249,46 @@ try {
         BenutzerService::freigabeSpeichern(['subject_type' => 'user', 'subject_id' => $benutzer['planer'], 'ziel_art' => 'site', 'ziel_id' => (int) $fremd['site_id']]);
         $planer = anmelden($basis, $kennung . '-planer', $kennwort);
         $dosen[] = $planer['dose'];
+        if (($tankId ?? 0) > 0) {
+            gleich(aufruf($basis, $planer['dose'], 'GET', '/anlagen/' . $tankId . '/tank/verlauf')['status'], 403, 'Planer ohne „statistik.view“: Tankverlauf → 403');
+            gleich(aufruf($basis, $planer['dose'], 'GET', '/anlagen/' . $tankId . '/tank/csv')['status'], 403, 'Planer ohne „statistik.export“: Tank-CSV → 403');
+            gleich(aufruf($basis, $planer['dose'], 'GET', '/anlagen/' . $tankId . '/tank/tage')['status'], 403, 'Planer ohne „statistik.view“: Verbrauch je Tag → 403');
+        }
         $json = ['Accept: application/json'];
+        // Ein Tank auf dem nur sichtbaren Standort: ansehen ja, peilen und betanken nein
+        $fremderTank = (int) \App\Services\AnlagenService::speichern(null, ['art' => 'tank', 'name' => $kennung . ' fremder Tank', 'floor_id' => (int) $fremd['floor_id'],
+            'plan_x' => 12, 'plan_y' => 12, 'eigenschaften' => ['inhalt_l' => '1000']])['id'];
+        $r = aufruf($basis, $planer['dose'], 'GET', '/anlagen/' . $fremderTank);
+        pruefe($r['status'] === 200 && !str_contains($r['text'], '/tank/peilung') && !str_contains($r['text'], '/tank/betankung'), 'Planer: fremder Tank sichtbar, ohne Peilung und Betankung');
+        foreach (['/tank/peilung' => ['art' => 'prozent', 'wert' => '50'], '/tank/betankung' => ['liter' => '100'], '/tank/kennlinie' => ['messpunkt' => 0]] as $pfad => $felder) {
+            $r = aufruf($basis, $planer['dose'], 'POST', '/anlagen/' . $fremderTank . $pfad, $felder + ['_token' => $planer['token']], $json);
+            pruefe($r['status'] === 403 && (json_decode($r['text'], true)['ok'] ?? true) === false, 'Planer ohne „bearbeiten“: ' . $pfad . ' → 403 (JSON)');
+        }
+        gleich((int) Database::scalar('SELECT COUNT(*) FROM tank_ereignisse WHERE objekt_id = ?', [$fremderTank]), 0, '… nichts eingetragen');
+        // Leitungen nur zwischen Anlagen auf der Etage – nicht über den eigenen Plan zwischen zwei fremden Anlagen
+        $fremdGen = (int) \App\Services\AnlagenService::speichern(null, ['art' => 'generator', 'name' => $kennung . ' fremder Generator', 'floor_id' => (int) $fremd['floor_id'],
+            'plan_x' => 14, 'plan_y' => 14, 'ohne_anschluesse' => true])['id'];
+        $fremdeV = (int) \App\Services\AnlagenService::speichern(null, ['art' => 'verteilung', 'name' => $kennung . ' fremde Verteilung', 'floor_id' => (int) $fremd['floor_id'],
+            'plan_x' => 16, 'plan_y' => 16, 'ohne_anschluesse' => true])['id'];
+        $leitungen = static fn (): int => (int) Database::scalar('SELECT COUNT(*) FROM leitungen');
+        $nL = $leitungen();
+        foreach ([['art' => 'kraftstoff', 'von_objekt_id' => $fremderTank, 'zu_objekt_id' => $fremdGen], ['art' => 'kabel', 'von_objekt_id' => $fremdeV, 'zu_objekt_id' => $fremdGen]] as $felder) {
+            $r = aufruf($basis, $planer['dose'], 'POST', '/karte/leitung/speichern', $felder + ['floor_id' => $werkEtage, 'punkte' => '[[10,10],[12,12]]', 'name' => $kennung . ' quer',
+                '_token' => $planer['token']], $json);
+            gleich($r['status'], 403, 'Planer: ' . $felder['art'] . ' auf der eigenen Etage zwischen zwei Anlagen eines fremden Standorts → 403');
+        }
+        gleich($leitungen(), $nL, '… nichts eingezeichnet');
+        // Ein Schlauch braucht „bearbeiten“ an beiden Enden – er ändert Vorrat und Restlaufzeit aller Tanks am Generator.
+        $schlauchPlaner = static fn () => aufruf($basis, $planer['dose'], 'POST', '/karte/leitung/speichern', ['art' => 'kraftstoff', 'von_objekt_id' => $fremderTank,
+            'zu_objekt_id' => $fremdGen, 'floor_id' => (int) $fremd['floor_id'], 'punkte' => '[[12,12],[14,14]]', 'name' => $kennung . ' schlauch', '_token' => $planer['token']], $json);
+        BenutzerService::freigabeSpeichern(['subject_type' => 'user', 'subject_id' => $benutzer['planer'], 'ziel_art' => 'objekt', 'ziel_id' => $fremderTank, 'darf_bearbeiten' => 1]);
+        $r = $schlauchPlaner();
+        pruefe($r['status'] === 403 && $leitungen() === $nL && \App\Tanks\TankService::versorgung($fremderTank)['generatoren'] === [],
+            'Planer: Schlauch vom eigenen Tank zum nur sichtbaren Generator → 403, die Versorgung bleibt');
+        BenutzerService::freigabeSpeichern(['subject_type' => 'user', 'subject_id' => $benutzer['planer'], 'ziel_art' => 'objekt', 'ziel_id' => $fremdGen, 'darf_bearbeiten' => 1]);
+        $r = $schlauchPlaner();
+        pruefe($r['status'] === 200 && \App\Tanks\TankService::versorgung($fremderTank)['generatoren'] === [$fremdGen], 'mit „bearbeiten“ an Tank und Generator: Schlauch gezogen');
+        \App\Services\AnlagenService::loeschen($fremderTank);
         aufruf($basis, $planer['dose'], 'POST', '/standorte/etage', ['site_id' => $werk, 'id' => (int) $fremd['floor_id'], 'name' => $kennung . ' gekapert', '_token' => $planer['token']]);
         gleich(Database::first('SELECT name, site_id FROM floors WHERE id = ?', [(int) $fremd['floor_id']]), ['name' => $fremd['etage'], 'site_id' => $fremd['site_id']],
             'eine fremde Etage lässt sich über ihre ID nicht umbenennen oder herüberziehen');
@@ -983,7 +1322,10 @@ try {
     $bEtage = \App\Services\SiteService::saveFloor(null, ['site_id' => $bSite, 'name' => 'Wiese']);
     $bVert = (int) \App\Services\AnlagenService::speichern(null, ['art' => 'verteilung', 'name' => $kennung . ' Bühne', 'site_id' => $bSite,
         'floor_id' => $bEtage, 'ohne_anschluesse' => true])['id'];
-    array_push($auditZiele, ['site', $bSite], ['floor', $bEtage], ['objekt', $bVert]);
+    // Ein Tank auf demselben Standort gehört in keinen Übergabebericht.
+    $bTank = (int) \App\Services\AnlagenService::speichern(null, ['art' => 'tank', 'name' => $kennung . ' Bühnentank', 'site_id' => $bSite,
+        'floor_id' => $bEtage, 'eigenschaften' => ['inhalt_l' => '1000']])['id'];
+    array_push($auditZiele, ['site', $bSite], ['floor', $bEtage], ['objekt', $bVert], ['objekt', $bTank]);
     \App\Services\AnlagenService::anzahlSetzen($bVert, ['eingang' => [$typen['cee63'] => 1], 'abgang' => [$typen['cee32'] => 1, $typen['schuko'] => 2]]);
     \App\Services\SchutzService::vorschlagen($bVert);
     $bAufbau = (int) \App\Services\AufbauService::starten($bSite, $kennung . ' Sommerfest')['id'];
@@ -1001,11 +1343,17 @@ try {
     $r = aufruf($basis, $admin['dose'], 'GET', '/berichte/neu?aufbau=' . $bAufbau);
     pruefe($r['status'] === 200 && str_contains($r['text'], 'value="' . $bVert . '" checked') && phpMeldung($r['text']) === null,
         'Neuer Bericht aus dem Aufbau: mobile Anlagen vorausgewählt');
+    pruefe(!str_contains($r['text'], 'value="' . $bTank . '"'), 'Neuer Bericht: der Tank steht nicht zur Wahl');
+    $r = aufruf($basis, $admin['dose'], 'POST', '/berichte/anlegen', ['site_id' => $bSite, 'objekte' => [$bVert, $bTank], '_token' => $admin['token']]);
+    pruefe($r['status'] === 302 && str_starts_with((string) $r['ziel'], '/berichte/neu')
+        && (int) Database::scalar('SELECT COUNT(*) FROM berichte WHERE site_id = ?', [$bSite]) === 0
+        && str_contains(aufruf($basis, $admin['dose'], 'GET', (string) $r['ziel'])['text'], 'ist ein Tank'), 'Bericht mit Tank abgelehnt, mit Meldung');
     $r = aufruf($basis, $admin['dose'], 'POST', '/berichte/anlegen', ['site_id' => $bSite, 'aufbau_id' => $bAufbau, 'objekte' => [$bVert], '_token' => $admin['token']]);
     $bId = (int) Database::scalar('SELECT id FROM berichte WHERE site_id = ? ORDER BY id DESC LIMIT 1', [$bSite]);
     pruefe($bId > 0 && $r['status'] === 302 && $r['ziel'] === '/berichte/' . $bId, 'Bericht angelegt → Formular ' . $r['ziel']);
     $form = aufruf($basis, $admin['dose'], 'GET', '/berichte/' . $bId);
     pruefe($form['status'] === 200 && str_contains($form['text'], 'data-bericht="' . $bId . '"') && phpMeldung($form['text']) === null, 'Formular des Entwurfs');
+    pruefe(str_contains($form['text'], $kennung . ' Bühne') && !str_contains($form['text'], $kennung . ' Bühnentank'), 'Formular: Anlagen zum Ergänzen ohne den Tank');
     gleich(substr_count($form['text'], 'data-zeile="k'), 3, 'je Abgang ein Stromkreis im Formular');
     pruefe(str_contains($form['text'], 'data-feld="kopf.kunde.firma"') && str_contains($form['text'], 'id="kreis-vorlage"'), 'Felder mit data-feld, Vorlage für neue Zeilen');
     pruefe(str_contains($form['text'], 'href="/berichte/' . $bId . '/pdf"'), 'Formular: Link zur PDF-Vorschau');
@@ -1333,6 +1681,26 @@ try {
     gleich([(int) Database::scalar('SELECT COUNT(*) FROM api_tokens'), Database::scalar('SELECT status FROM api_vorschlaege WHERE id = ?', [$vorschlagId]),
         Database::first('SELECT verified_at FROM api_partner WHERE id = ?', [$selbstId])], [$tokensVorher, 'offen', $partnerVorher],
         'Kundenmodus: kein Zugang angelegt, kein Vorschlag abgelehnt, keine Instanz geprüft');
+    // Ebenso der Tank: Seite, Verlauf, Tage, CSV, Peilung und Betankung.
+    if (($tankId ?? 0) > 0) {
+        $ereignisseVorher = (int) Database::scalar('SELECT COUNT(*) FROM tank_ereignisse WHERE objekt_id = ?', [$tankId]);
+        foreach (['/anlagen/' . $tankId, '/anlagen/' . $tankId . '/tank/csv', '/anlagen/' . $tankId . '/tank/csv?inhalt=protokoll',
+            '/anlagen/' . $tankId . '/tank/csv?inhalt=tage'] as $pfad) {
+            $r = aufruf($basis, $admin['dose'], 'GET', $pfad);
+            pruefe($r['status'] === 302 && $r['ziel'] === '/berichte/' . $b3 . '/kunde' && !str_contains($r['text'], 'Füllhöhe'), 'Kundenmodus: GET ' . $pfad . ' → Kundenseite');
+        }
+        foreach (['/anlagen/' . $tankId . '/tank/verlauf', '/anlagen/' . $tankId . '/tank/tage', '/anlagen/' . $tankId . '/live'] as $pfad) {
+            $r = aufruf($basis, $admin['dose'], 'GET', $pfad, [], $json);
+            pruefe($r['status'] === 423 && (json_decode($r['text'], true)['kundenmodus'] ?? false) === true, 'Kundenmodus: ' . $pfad . ' mit JSON → 423');
+        }
+        foreach (['peilung' => ['art' => 'liter', 'wert' => '100'], 'betankung' => ['liter' => '100']] as $aktion => $felder) {
+            $r = aufruf($basis, $admin['dose'], 'POST', '/anlagen/' . $tankId . '/tank/' . $aktion, $felder + ['_token' => $admin['token']]);
+            pruefe($r['status'] === 302 && $r['ziel'] === '/berichte/' . $b3 . '/kunde', 'Kundenmodus: ' . $aktion . ' am Tank → Kundenseite');
+            $r = aufruf($basis, $admin['dose'], 'POST', '/anlagen/' . $tankId . '/tank/' . $aktion, $felder + ['_token' => $admin['token']], $json);
+            gleich($r['status'], 423, 'Kundenmodus: ' . $aktion . ' am Tank (Kartenpanel, JSON) → 423');
+        }
+        gleich((int) Database::scalar('SELECT COUNT(*) FROM tank_ereignisse WHERE objekt_id = ?', [$tankId]), $ereignisseVorher, 'Kundenmodus: am Tank nichts eingetragen');
+    }
     // /api/v1 hängt nicht an der Sitzung: mit Token antwortet sie wie sonst,
     // ohne Token mit 401 – nie mit der Kundenseite.
     $r = aufruf($basis, $admin['dose'], 'GET', '/api/v1/info', [], ['Authorization: Bearer ' . (string) ($selbstZugang['token'] ?? '')]);
@@ -1353,6 +1721,121 @@ try {
     aufruf($basis, $geraet, 'POST', '/login', ['username' => $kennung . '-admin', 'password' => $kennwort, '_token' => token($seite['text'])]);
     $r = aufruf($basis, $geraet, 'GET', '/dashboard');
     pruefe($r['status'] === 302 && $r['ziel'] === '/berichte/' . $b3 . '/kunde', 'Kundenmodus am Gerät: nach neuer Anmeldung in diesem Browser weiter gesperrt');
+    // Ein anderes Konto im selben Browser: Endet die Sitzung des Prüfers, ohne
+    // zerstört zu werden (die Verwaltung setzt sein Kennwort zurück), bleiben
+    // ihre Daten samt Sperre stehen – die Anmeldung vergibt nur eine neue
+    // Kennung. Wer sich dann anmeldete, erbte die fremde Sperre: kein
+    // Abmelden, Kundenseite und Entsperren ohne das Recht (Kundenmodus::ausweg()),
+    // und seine Fehlversuche bremsten das Entsperren für den Prüfer. Die
+    // Sperre gilt nur für das Konto, das sie gestartet hat – am Gerät gilt sie
+    // weiter, sobald es sich wieder anmeldet.
+    $hashVorher = (string) Database::scalar('SELECT password_hash FROM users WHERE id = ?', [$benutzer['admin']]);
+    Database::execute('UPDATE users SET password_hash = ? WHERE id = ?', [password_hash('Zurueckgesetzt-' . bin2hex(random_bytes(6)), PASSWORD_DEFAULT), $benutzer['admin']]);
+    $ereignisseVorher = (int) Database::scalar('SELECT COUNT(*) FROM bericht_ereignisse WHERE bericht_id = ?', [$b3]);
+    $fehlVorher = (int) Database::scalar("SELECT COUNT(*) FROM audit_log WHERE action = 'auth.kundenmodus_fehlversuch' AND user_id = ?", [$benutzer['bkunde']]);
+    $geraetVorher = Database::select('SELECT id, bericht_id, user_id FROM kundenmodus_geraete WHERE user_id = ? ORDER BY id', [$benutzer['admin']]);
+    $r = aufruf($basis, $geraet, 'GET', '/dashboard');
+    pruefe($r['status'] === 302 && str_starts_with((string) $r['ziel'], '/login'), 'Kennwort des Prüfers zurückgesetzt: seine Sitzung im gesperrten Browser ist zu Ende');
+    $seite = aufruf($basis, $geraet, 'GET', '/login');
+    aufruf($basis, $geraet, 'POST', '/login', ['username' => $kennung . '-bkunde', 'password' => $kennwort, '_token' => token($seite['text'])]);
+    $aStart = aufruf($basis, $geraet, 'GET', '/anlagen');
+    $aListe = aufruf($basis, $geraet, 'GET', '/berichte');
+    pruefe($aStart['status'] === 200 && $aStart['ziel'] === null && $aListe['status'] === 200 && $aListe['ziel'] === null,
+        'anderes Konto im selben Browser: nicht gesperrt (' . $aStart['status'] . ' ' . (string) $aStart['ziel'] . ')');
+    $aKunde = aufruf($basis, $geraet, 'GET', '/berichte/' . $b3 . '/kunde');
+    // Das Token der Seite, die das Konto bekommt – auch der Kundenseite, wenn sie käme.
+    $aToken = token($aStart['text']) ?: token($aKunde['text']);
+    $aBeenden = [];
+    for ($n = 1; $n <= Kundenmodus::HOECHSTENS_FEHL; $n++) {
+        $aBeenden[] = aufruf($basis, $geraet, 'POST', '/berichte/' . $b3 . '/kunde/beenden', ['kennwort' => $kennwort, '_token' => $aToken])['status'];
+    }
+    pruefe($aKunde['status'] === 403 && !str_contains($aKunde['text'], 'kunde/beenden') && $aBeenden === array_fill(0, Kundenmodus::HOECHSTENS_FEHL, 403),
+        'anderes Konto: Kundenseite und Entsperren des fremden Kundenmodus → 403 wie ohne Recht (' . $aKunde['status'] . ', ' . implode('/', $aBeenden) . ')');
+    gleich([(int) Database::scalar('SELECT COUNT(*) FROM bericht_ereignisse WHERE bericht_id = ?', [$b3]),
+        (int) Database::scalar("SELECT COUNT(*) FROM audit_log WHERE action = 'auth.kundenmodus_fehlversuch' AND user_id = ?", [$benutzer['bkunde']]),
+        Database::select('SELECT id, bericht_id, user_id FROM kundenmodus_geraete WHERE user_id = ? ORDER BY id', [$benutzer['admin']])],
+        [$ereignisseVorher, $fehlVorher, $geraetVorher], 'anderes Konto: kein Ereignis am Bericht, kein Fehlversuch, die Sperre am Gerät bleibt');
+    $r = aufruf($basis, $geraet, 'POST', '/logout', ['_token' => $aToken]);
+    pruefe($r['status'] === 302 && $r['ziel'] === '/login', 'anderes Konto: Abmelden geht (' . (string) $r['ziel'] . ')');
+    // Ein Konto, das selbst übergeben darf („berichte.manage“, „bearbeiten“ am
+    // Standort), startete hier sonst seinen eigenen Kundenmodus: Das löschte
+    // die Sperre des Prüfers am Gerät und ersetzte das Cookie – nach dem
+    // eigenen Entsperren und Abmelden war der Prüfer bei seiner nächsten
+    // Anmeldung nicht mehr gesperrt, und am Bericht stand „kundenmodus_start“
+    // (kein Zurückziehen mehr). Ebenso, wenn vom Prüfer nur das Gerätecookie
+    // übrig ist (Sitzung abgelaufen). Solange die fremde Sperre gilt, startet
+    // an diesem Gerät kein anderer Kundenmodus.
+    $planerFreigabe = ['user', $benutzer['bplaner'], 'site', $bSite];
+    Database::execute('UPDATE freigaben SET darf_bearbeiten = 1 WHERE subject_type = ? AND subject_id = ? AND ziel_art = ? AND ziel_id = ?', $planerFreigabe);
+    $nurGeraet = (string) tempnam(sys_get_temp_dir(), 'pm-web-');
+    $dosen[] = $nurGeraet;
+    file_put_contents($nurGeraet, "# Netscape HTTP Cookie File\n" . implode("\n", array_filter(explode("\n", (string) file_get_contents($geraet)),
+        static fn (string $z): bool => str_contains($z, "\tpm_kundenmodus\t"))) . "\n");
+    $geraeteB3 = static fn (): array => Database::select('SELECT id, bericht_id, user_id, seit FROM kundenmodus_geraete WHERE bericht_id = ? ORDER BY id', [$b3]);
+    $geraetecookie = static fn (string $dose): array => array_values(array_filter(explode("\n", (string) @file_get_contents($dose)),
+        static fn (string $z): bool => str_contains($z, "\tpm_kundenmodus\t")));
+    $vorher = [$geraeteB3(), (int) Database::scalar('SELECT COUNT(*) FROM bericht_ereignisse WHERE bericht_id = ?', [$b3]),
+        (int) Database::scalar('SELECT version FROM berichte WHERE id = ?', [$b3])];
+    foreach (['nach Kennwort-Rücksetzung' => $geraet, 'nur mit dem Gerätecookie' => $nurGeraet] as $fall => $dose) {
+        $cookieVorher = $geraetecookie($dose);
+        $seite = aufruf($basis, $dose, 'GET', '/login');
+        aufruf($basis, $dose, 'POST', '/login', ['username' => $kennung . '-bplaner', 'password' => $kennwort, '_token' => token($seite['text'])]);
+        $pSeite = aufruf($basis, $dose, 'GET', '/berichte/' . $b3);
+        $pStart = aufruf($basis, $dose, 'POST', '/berichte/' . $b3 . '/kundenmodus', ['_token' => token($pSeite['text'])]);
+        $pDanach = aufruf($basis, $dose, 'GET', '/berichte/' . $b3);
+        pruefe($cookieVorher !== [] && $pSeite['status'] === 200 && str_contains($pSeite['text'], 'action="/berichte/' . $b3 . '/kundenmodus"') && $pStart['status'] === 302
+            && $pStart['ziel'] === '/berichte/' . $b3 && $pDanach['status'] === 200 && str_contains($pDanach['text'], 'eines anderen Kontos gesperrt'),
+            'Planer mit „bearbeiten“ (' . $fall . '): kein eigener Kundenmodus über die Sperre des Prüfers – ' . $pStart['status'] . ' ' . (string) $pStart['ziel']);
+        gleich([$geraeteB3(), (int) Database::scalar('SELECT COUNT(*) FROM bericht_ereignisse WHERE bericht_id = ?', [$b3]),
+            (int) Database::scalar('SELECT version FROM berichte WHERE id = ?', [$b3]), $geraetecookie($dose)], [...$vorher, $cookieVorher],
+            'Planer (' . $fall . '): die Sperre des Prüfers am Gerät und das Cookie bleiben, kein Ereignis, keine neue Version');
+        $r = aufruf($basis, $dose, 'POST', '/logout', ['_token' => token($pDanach['text'])]);
+        pruefe($r['status'] === 302 && $r['ziel'] === '/login', 'Planer (' . $fall . '): Abmelden geht (' . (string) $r['ziel'] . ')');
+    }
+    Database::execute('UPDATE freigaben SET darf_bearbeiten = 0 WHERE subject_type = ? AND subject_id = ? AND ziel_art = ? AND ziel_id = ?', $planerFreigabe);
+    Database::execute('UPDATE users SET password_hash = ? WHERE id = ?', [$hashVorher, $benutzer['admin']]);
+    $seite = aufruf($basis, $geraet, 'GET', '/login');
+    aufruf($basis, $geraet, 'POST', '/login', ['username' => $kennung . '-admin', 'password' => $kennwort, '_token' => token($seite['text'])]);
+    $r = aufruf($basis, $geraet, 'GET', '/dashboard');
+    $kSeite = aufruf($basis, $geraet, 'GET', '/berichte/' . $b3 . '/kunde');
+    pruefe($r['status'] === 302 && $r['ziel'] === '/berichte/' . $b3 . '/kunde' && $kSeite['status'] === 200 && str_contains($kSeite['text'], 'data-kunde="' . $b3 . '"')
+        && !str_contains($kSeite['text'], 'Entsperren erst in'), 'danach der Prüfer im selben Browser: wieder gesperrt, auf seiner Kundenseite, ungebremst');
+    // Vorläufiges Kennwort („muss ändern“ – der Prüfer hatte seins vergessen,
+    // das Gerät ist gesperrt): Das Profil führte zur Kundenseite, die zum
+    // Profil, im Kreis, und entsperren ließ sich nie. Die Kundenseite kommt,
+    // das Entsperren landet beim Kennwort, nicht beim Profil.
+    Database::execute('UPDATE users SET must_change_password = 1 WHERE id = ?', [$benutzer['admin']]);
+    $kProfil = aufruf($basis, $geraet, 'GET', '/profil');
+    $kSeite = aufruf($basis, $geraet, 'GET', '/berichte/' . $b3 . '/kunde');
+    $kAntwort = aufruf($basis, $geraet, 'POST', '/berichte/' . $b3 . '/kunde/beenden', ['kennwort' => 'falsch', '_token' => token($kSeite['text'])]);
+    $kDanach = aufruf($basis, $geraet, 'GET', '/berichte/' . $b3 . '/kunde');
+    Database::execute('UPDATE users SET must_change_password = 0 WHERE id = ?', [$benutzer['admin']]);
+    pruefe($kProfil['ziel'] === '/berichte/' . $b3 . '/kunde' && $kSeite['status'] === 200 && str_contains($kSeite['text'], 'action="/berichte/' . $b3 . '/kunde/beenden"'),
+        'Kundenmodus mit vorläufigem Kennwort: Profil → Kundenseite, und die kommt (kein Kreis über /profil) – ' . $kSeite['status'] . ' ' . (string) $kSeite['ziel']);
+    pruefe($kAntwort['status'] === 302 && $kAntwort['ziel'] === '/berichte/' . $b3 . '/kunde' && str_contains($kDanach['text'], 'Kennwort falsch'),
+        'Kundenmodus mit vorläufigem Kennwort: Entsperren prüft das Kennwort, statt zum Profil zu führen – ' . (string) $kAntwort['ziel']);
+    // Die Rolle endet, während das Gerät beim Kunden liegt: Kundenseite und
+    // Entsperren gaben 403, alles andere führte zur Kundenseite – eine
+    // Sackgasse. Jetzt zeigt die Kundenseite nur das Entsperren, und das
+    // Kennwort dessen, der übergeben hat, entsperrt.
+    $rollen = Database::select('SELECT id, gueltig_bis FROM user_roles WHERE user_id = ?', [$benutzer['admin']]);
+    Database::execute('UPDATE user_roles SET gueltig_bis = ? WHERE user_id = ?', [gmdate('c', time() - 60), $benutzer['admin']]);
+    $kSeite = aufruf($basis, $geraet, 'GET', '/berichte/' . $b3 . '/kunde');
+    $kPdf = aufruf($basis, $geraet, 'GET', '/berichte/' . $b3 . '/pdf');
+    $kAntwort = aufruf($basis, $geraet, 'POST', '/berichte/' . $b3 . '/kunde/beenden', ['kennwort' => $kennwort, '_token' => token($kSeite['text'])]);
+    $kDanach = aufruf($basis, $geraet, 'GET', (string) $kAntwort['ziel']);
+    foreach ($rollen as $z) {
+        Database::execute('UPDATE user_roles SET gueltig_bis = ? WHERE id = ?', [$z['gueltig_bis'], $z['id']]);
+    }
+    pruefe($rollen !== [] && $kSeite['status'] === 200 && str_contains($kSeite['text'], 'Gerät gesperrt') && str_contains($kSeite['text'], 'action="/berichte/' . $b3 . '/kunde/beenden"')
+        && !str_contains($kSeite['text'], 'data-kunde="') && !str_contains($kSeite['text'], 'class="sidebar'),
+        'Kundenmodus, Rolle abgelaufen: die Kundenseite zeigt nur das Entsperren statt 403 (' . $kSeite['status'] . ')');
+    gleich($kPdf['status'], 403, 'Kundenmodus, Rolle abgelaufen: das PDF bleibt beim Recht der Route');
+    // Zurück zum Bericht ginge nicht (403 ohne „berichte.view“): Es geht zur
+    // ersten Seite, die das Konto sehen darf – ohne Rolle das Profil.
+    pruefe($kAntwort['status'] === 302 && $kAntwort['ziel'] === '/profil' && $kDanach['status'] === 200 && str_contains($kDanach['text'], 'Kundenmodus beendet'),
+        'Kundenmodus, Rolle abgelaufen: mit dem Kennwort entsperrt, danach das Profil statt 403 (' . $kAntwort['status'] . ' ' . (string) $kAntwort['ziel'] . ' → ' . $kDanach['status'] . ')');
+    pruefe(aufruf($basis, $admin['dose'], 'GET', '/dashboard')['ziel'] === '/berichte/' . $b3 . '/kunde', 'Kundenmodus: die Sitzung, die übergeben hat, bleibt gesperrt');
     $kundeFelder = ['striche' => unterschriftStriche(), 'name' => 'Kim Kunde', 'funktion' => 'Produktion', 'ort' => 'Musterstadt', 'vorbehalte' => '',
         'anfrage' => bin2hex(random_bytes(16)), 'geraet_am' => gmdate('c'), '_token' => $admin['token'], 'inhalt_hash' => (string) BerichtService::find($b3)['inhalt_hash']];
     $r = aufruf($basis, $admin['dose'], 'POST', '/berichte/' . $b3 . '/kunde/unterschreiben', ['inhalt_hash' => str_repeat('0', 64)] + $kundeFelder + ['bestaetigungen' => ['erhalten']], $json);

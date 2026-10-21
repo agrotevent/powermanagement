@@ -10,6 +10,7 @@ use App\Support\Config;
 use App\Support\Database;
 use App\Support\Fingerabdruck;
 use App\Support\Logger;
+use App\Tanks\TankService;
 
 /**
  * Locations einer anderen Instanz (Seite B): Liste mit Zustand, Übernehmen,
@@ -1124,8 +1125,10 @@ final class PartnerAbgleich
      * verknüpfter Etage Plan (Prüfsumme, Seite), Maßstab-Text, Notizen,
      * Maßstab und Georeferenz (ohne wer/wann); bei einer PowerManagement-
      * Instanz dazu die Feststromanschlüsse auf diesen Etagen oder mit
-     * Schlüssel von dort und die festen Kabel dort – ohne Messpunkte. Namen
-     * zählen nicht: sie bleiben ohnehin hier.
+     * Schlüssel von dort und die festen Kabel dort – ohne Messpunkte und ohne
+     * den Inhalt je mm, den ein Tank hier gelernt hat
+     * (TankService::ohneKennlinieHier()). Namen zählen nicht: sie bleiben,
+     * wie diese beiden, ohnehin hier.
      *
      * $ohneNurHier: ohne die Anlagen und Kabel, die es nur hier gibt (ohne
      * partner_schluessel) – so wird partner_hash nach dem Übernehmen und
@@ -1177,7 +1180,7 @@ final class PartnerAbgleich
                 $verknuepft = in_array((string) $a['schluessel'], $vonDort, true);
                 if ($ohneNurHier ? $verknuepft : (in_array((string) ($a['etage'] ?? ''), $etagenKeys, true) || $verknuepft)) {
                     unset($a['messpunkte']);
-                    $anlagen[] = $a;
+                    $anlagen[] = TankService::ohneKennlinieHier($a);
                 }
             }
             $leitungen = array_values(array_filter((array) $strom['leitungen'],

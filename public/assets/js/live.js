@@ -5,7 +5,8 @@
  * Anlagenseite, Karte). Ohne Rahmenwerk: fetch und ein paar Zeilen DOM.
  *
  *   [data-live-url]     alle 5 s neu laden und die Kacheln [data-objekt-id]
- *                       aktualisieren – nur die Zahlen, nicht die Kachel.
+ *                       aktualisieren – nur die Zahlen, nicht die Kachel
+ *                       (bei Tanks Inhalt, Füllstand und Rohwert, [data-tank]).
  *   [data-schalten]     Schaltbefehl mit Rückfrage; die Freigabe prüft der
  *                       Server bei jedem Klick erneut.
  *   [data-auswertung]   Messgerät in die Auswertung aufnehmen/herausnehmen.
@@ -107,6 +108,36 @@
     });
 
     // --------------------------------------------------------------- Kacheln
+
+    /** Eine Zahl ohne feste Nachkommastellen: 7,5 · 2.390 · 0,835. */
+    function kurz(wert, einheit) {
+        return wert.toLocaleString('de-DE', { maximumFractionDigits: 3 }) + (einheit ? ' ' + einheit : '');
+    }
+
+    /** Tank: Inhalt, Füllstand, Balken, Rohwert mit Alter – alles per textContent. */
+    function tankSetzen(kachel, t) {
+        t = t || {};
+        var da = function (w) { return w !== null && w !== undefined; };
+        var ganz = function (w, einheit) { return da(w) ? PM.format(w, einheit, 0) : ''; };
+        var feld = function (name, text) {
+            kachel.querySelectorAll('[data-tank="' + name + '"]').forEach(function (el) { el.textContent = text; });
+        };
+        feld('menge', ganz(t.liter, 'l') || ganz(t.hoehe_mm, 'mm') || '–');
+        feld('prozent', da(t.prozent) ? Math.round(t.prozent) + ' %' : '');
+        feld('nutzbar', da(t.nutzbar_l) ? 'nutzbar ' + ganz(t.nutzbar_l, 'l') : '');
+        feld('hoehe', ganz(t.hoehe_mm, 'mm') || '–');
+        feld('roh', da(t.roh) ? kurz(t.roh, t.roh_einheit) + (t.stand ? ' · ' + t.stand : '') : '–');
+        feld('online', t.online === true ? 'online' : (t.online === false ? 'offline' : '–'));
+        feld('kennlinie', t.kennlinie || '–');
+        // Versorgung: Restlaufzeit und „nachbestellen bis“ – sonst der Verbrauch („Generator steht“)
+        feld('rest', t.restlaufzeit_text ? t.restlaufzeit_text + (t.nachbestellen_text ? ' · nachbestellen bis ' + t.nachbestellen_text : '') : (t.verbrauch_text || ''));
+        feld('verbrauch', t.verbrauch_text || '–');
+        feld('leer', t.leer_um_text || '–');
+        kachel.querySelectorAll('[data-tank-balken]').forEach(function (b) {
+            b.style.width = Math.max(0, Math.min(100, da(t.prozent) ? t.prozent : 0)) + '%';
+        });
+    }
+
     function kachelSetzen(kachel, l) {
         // Die eigene Klasse behalten (Kachel, Tabellenzeile, Baumkarte) –
         // nur die Stufe wechselt.
@@ -116,6 +147,7 @@
             kachel.dataset.basis = basis;
         }
         kachel.className = basis + ' stufe-' + (l.stufe || 'keine');
+        if ('tank' in l) { tankSetzen(kachel, l.tank); }
         var p = kachel.querySelector('[data-feld="p"]');
         if (p) { p.textContent = PM.format(l.p, 'W'); }
         var a = kachel.querySelector('[data-feld="auslastung"]');
@@ -156,7 +188,8 @@
             });
         }
         var h = kachel.querySelector('[data-feld="hinweis"]');
-        if (h) { h.textContent = l.hinweis || ''; }
+        // Ein Tank zeigt Restlaufzeit und Verbrauch in eigener Zeile – der Hinweis ohne sie.
+        if (h) { h.textContent = (l.tank && typeof l.tank.hinweis_kurz === 'string' ? l.tank.hinweis_kurz : l.hinweis) || ''; }
         // Messpunkte in Listen (Anlagenseite): Leistung und Schaltzustand
         Object.keys(l.messpunkte || {}).forEach(function (id) {
             var m = l.messpunkte[id];
@@ -197,6 +230,14 @@
             fetch(liveQuelle.dataset.liveUrl, { headers: { 'Accept': 'application/json' }, credentials: 'same-origin', signal: abbruch ? abbruch.signal : undefined })
                 .then(function (a) { return a.json(); })
                 .then(function (daten) {
+                    // Kundenmodus, gestartet in einem anderen Reiter, während
+                    // diese Seite noch lud – die Sperre per BroadcastChannel
+                    // hat sie nie gehört. Der Server antwortet 423; neu laden
+                    // führt zur Kundenseite, statt hier weiter Werte zu zeigen.
+                    if (daten && daten.kundenmodus === true) {
+                        window.location.reload();
+                        return;
+                    }
                     // Sitzung abgelaufen: der Server antwortet 401 mit Meldung (JSON).
                     if (daten && daten.ok === false) {
                         liveStand.textContent = daten.message || 'Livewerte gerade nicht erreichbar – neuer Versuch in 5 Sekunden.';

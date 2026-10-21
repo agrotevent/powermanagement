@@ -95,7 +95,9 @@ final class BereichController extends Controller
     private function formular(array $bereich, array $gewaehlt, array $standorte): void
     {
         $siteId = (int) $bereich['site_id'];
-        $objekte = $siteId > 0 ? Zugriff::filtern(AnlagenService::liste(['site_id' => $siteId])) : [];
+        // Nur, was Strom führt – ein Tank zählt in keiner Lastsumme.
+        $objekte = $siteId > 0 ? array_values(array_filter(Zugriff::filtern(AnlagenService::liste(['site_id' => $siteId])),
+            static fn (array $o): bool => AnlagenService::elektrisch((string) $o['art']))) : [];
         // Messgeräte an Abgängen – einzeln wählbar (der Shelly am Abgang eines
         // Foodtrucks). Je Abgang eine Zeile, auch wenn dort nacheinander
         // verschiedene Geräte steckten (Inventar-Einsätze): gezählt wird die Stelle.
@@ -246,6 +248,11 @@ final class BereichController extends Controller
                 $zeile[] = isset($werte[$s]) ? str_replace('.', ',', (string) round((float) $werte[$s], 3)) : '';
             }
             $zeilen[] = implode(';', $zeile);
+        }
+        // Die Messwerte kamen aus der InfluxDB, ohne Sitzungssperre – vielleicht
+        // liegt das Gerät inzwischen beim Kunden.
+        if ($this->kundenmodusSperrt()) {
+            return;
         }
         Audit::log('bereich.csv', 'bereich', (string) $b['id'], ['von' => Zeit::iso($von), 'bis' => Zeit::iso($bis)]);
         $name = 'bereich-' . preg_replace('/[^a-z0-9]+/', '-', strtolower((string) $b['name'])) . '-' . date('Ymd-Hi', $von) . '.csv';

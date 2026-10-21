@@ -101,7 +101,7 @@ $aktiv = $darf && ($grund === null || \App\Support\Config::isDemo());
                         <?php if ($aktiv): ?>
                         <div class="btn-row">
                             <?php if ($zugang === null && $z['umstellbar']): ?>
-                                <form method="post" action="/datenquellen/mqtt-zugaenge/einrichten" data-laeuft="richtet ein …"
+                                <form method="post" action="/datenquellen/mqtt-zugaenge/einrichten" data-laeuft="richtet ein …"<?= (int) $z['generation'] === 1 ? ' data-laeuft-seite data-laeuft-hinweis="Benutzer und Kennwort erscheinen gleich – nur dieses eine Mal. Bitte warten und nicht noch einmal klicken."' : '' ?>
                                       data-confirm="<?= View::e((int) $z['generation'] === 1
                                           ? 'Eigenen Zugang für ' . $z['praefix'] . ' anlegen? Benutzer und Kennwort werden einmal angezeigt.'
                                           : 'Eigenen Zugang für ' . $z['praefix'] . ' anlegen und ans Gerät übertragen? Wirksam ab dem nächsten Neustart des Geräts.') ?>">
@@ -109,7 +109,7 @@ $aktiv = $darf && ($grund === null || \App\Support\Config::isDemo());
                                     <button class="btn btn-sm btn-primary" type="submit">Eigenen Zugang einrichten</button>
                                 </form>
                                 <?php if ((int) $z['generation'] === 2): ?>
-                                    <form method="post" action="/datenquellen/mqtt-zugaenge/einrichten" data-laeuft="richtet ein …"
+                                    <form method="post" action="/datenquellen/mqtt-zugaenge/einrichten" data-laeuft="richtet ein …" data-laeuft-seite data-laeuft-hinweis="Benutzer und Kennwort erscheinen gleich – nur dieses eine Mal. Bitte warten und nicht noch einmal klicken."
                                           data-confirm="<?= View::e('Eigenen Zugang für ' . $z['praefix'] . ' anlegen, ohne ihn per MQTT zu übertragen? Benutzer und Kennwort werden einmal angezeigt und in der Weboberfläche des Shelly eingetragen.') ?>">
                                         <?= Csrf::field() ?><input type="hidden" name="praefix" value="<?= View::e($z['praefix']) ?>"><input type="hidden" name="generation" value="2"><input type="hidden" name="von_hand" value="1">
                                         <button class="btn btn-sm btn-ghost" type="submit" title="Kennwort anzeigen und am Gerät eintragen – geht nicht über MQTT">von Hand</button>
@@ -136,7 +136,7 @@ $aktiv = $darf && ($grund === null || \App\Support\Config::isDemo());
                                 <?php endif; ?>
                             <?php endif; ?>
                             <?php if ($zugang !== null && in_array($z['zustand'], ['angelegt', 'eigen'], true)): ?>
-                                <form method="post" action="/datenquellen/mqtt-zugaenge/erneuern" data-laeuft="erneuert …"
+                                <form method="post" action="/datenquellen/mqtt-zugaenge/erneuern" data-laeuft="erneuert …" data-laeuft-seite data-laeuft-hinweis="Benutzer und Kennwort erscheinen gleich – nur dieses eine Mal. Bitte warten und nicht noch einmal klicken."
                                       data-confirm="<?= View::e('Neues Kennwort für ' . $z['praefix'] . '? Es wird einmal angezeigt und am Gerät eingetragen. Bis dahin ist das Gerät getrennt.') ?>">
                                     <?= Csrf::field() ?><input type="hidden" name="id" value="<?= $id ?>">
                                     <button class="btn btn-sm btn-ghost" type="submit">Neues Kennwort</button>

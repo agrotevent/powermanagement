@@ -9,6 +9,7 @@
  *   emeter/N/power|voltage|current|pf|reactive_power|total|total_returned
  *                           total/total_returned in Wh
  *   input/N                 "0" / "1"
+ *   adc/N                   V (Shelly Uni, Analogeingang) → Kanal adc:N, u
  *   online                  "true" / "false"
  *   temperature             °C
  *   announce                JSON mit id, model, mac, ip, fw_ver
@@ -213,6 +214,13 @@ if (rest.length === 1 && rest[0] === 'online') {
     const wert = alsZahl(text);
     if (wert !== undefined) {
         ausgabe.push(messwert('input:' + rest[1], null, { eingang: wert }));
+    }
+} else if (rest[0] === 'adc' && rest.length === 2 && /^\d+$/.test(rest[1])) {
+    // Shelly Uni: Spannung am Analogeingang in Volt (Text, z. B. „6.42"),
+    // ein Rohwert für Tanksensoren – Füllhöhe und Liter rechnet die App.
+    const wert = alsZahl(text);
+    if (wert !== undefined) {
+        ausgabe.push(messwert('adc:' + rest[1], null, { u: wert }));
     }
 } else if (rest[0] === 'emeter' && rest.length === 3 && /^\d+$/.test(rest[1]) && EMETER_FELDER[rest[2]]) {
     const feld = EMETER_FELDER[rest[2]];

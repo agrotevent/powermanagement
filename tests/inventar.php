@@ -91,6 +91,18 @@ try {
     $zs = (int) InventarService::speichern(null, ['art' => 'zwischenstecker', 'kennung' => $gr('ZS63'), 'steckertyp_id' => $typ['cee63'],
         'messgeraete' => [['geraet' => $gr('zs'), 'kanal' => 'em:0', 'stelle' => 'irgendwo']]])['id'];
     gleich(InventarService::messgeraete($zs)[0]['stelle'] ?? '', 'durchgang', 'Zwischenstecker misst im Durchgang');
+    // Tanksensor: kein Stecker, kein Typ, genau ein Messkanal am Füllstand – und Sensordaten
+    $ts = InventarService::speichern(null, ['art' => 'tanksensor', 'kennung' => $gr('TS-01'), 'steckertyp_id' => $typ['cee16'], 'vorlage_id' => $pd63,
+        'eigenschaften' => ['prinzip' => 'hydrostatisch', 'feld' => 'u', 'signal' => '4-20mA-wandler', 'u_bei_4ma' => '2', 'u_bei_20ma' => '10',
+            'bereich_bis' => '2', 'bereich_einheit' => 'mWS'],
+        'messgeraete' => [['geraet' => $gr('uni'), 'kanal' => 'voltmeter:100', 'stelle' => 'einspeisung']]]);
+    pruefe($ts['ok'], 'Tanksensor ohne Stecker gespeichert: ' . $ts['message']);
+    $tsItem = InventarService::find((int) ($ts['id'] ?? 0));
+    gleich([$tsItem['art_name'], $tsItem['typ'], $tsItem['steckertyp_id'], $tsItem['vorlage_id'], InventarService::stellen($tsItem)],
+        ['Tanksensor', 'Hydrostatisch 0–2 mWS, 4–20 mA über Wandler 2–10 V', null, null, ['fuellstand' => 'Füllstand']],
+        'aufbereiten und stellen() für den Tanksensor: Typ aus den Sensordaten, weder Stecker noch Typ');
+    gleich(InventarService::messgeraete((int) $tsItem['id'])[0]['stelle'] ?? '', 'fuellstand', 'Tanksensor misst am Füllstand');
+    gleich([InventarService::find($v1)['eigenschaften'], InventarService::find($zs)['eigenschaften']], [[], []], 'Verteiler und Zwischenstecker ohne Sensordaten');
     $v2 = (int) InventarService::speichern(null, ['art' => 'verteilung', 'kennung' => $gr('PD63-02'), 'vorlage_id' => $pd63,
         'messgeraete' => [['geraet' => $gr('3em-b'), 'kanal' => 'em:0', 'stelle' => 'einspeisung']]])['id'];
 

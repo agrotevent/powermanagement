@@ -965,6 +965,46 @@ try {
     pruefe((Kundenmodus::aktiv()['user'] ?? 0) === $benutzer['technik'] && (Kundenmodus::aktiv()['name'] ?? '') === 'Tom Technik'
         && (int) Database::scalar('SELECT COUNT(*) FROM kundenmodus_geraete WHERE bericht_id = ? AND user_id = ?', [$u2, $benutzer['technik']]) === 1,
         'Kundenmodus: wer ihn gestartet hat, steht in der Sitzung und am Gerät');
+    // Ein anderes Konto mit „berichte.manage“ und „bearbeiten“ am selben Gerät
+    // (die Sitzung des Prüfers ist zu Ende, sein Gerätecookie noch da): Sein
+    // eigener Kundenmodus löschte die Sperre des Prüfers am Gerät und ersetzte
+    // das Cookie – nach dem eigenen Entsperren war der Prüfer bei seiner
+    // nächsten Anmeldung dort nicht mehr gesperrt, und am Bericht stand
+    // „kundenmodus_start“. Solange die fremde Sperre gilt, startet an diesem
+    // Gerät kein anderer Kundenmodus.
+    $geraetToken = bin2hex(random_bytes(32));
+    Database::execute('UPDATE kundenmodus_geraete SET token_hash = ? WHERE bericht_id = ? AND user_id = ?', [hash('sha256', $geraetToken), $u2, $benutzer['technik']]);
+    $_COOKIE[Kundenmodus::COOKIE] = $geraetToken;
+    $prueferSitzung = $_SESSION;
+    $_SESSION = [];
+    alsBenutzer($benutzer['admin']);
+    $geraete = static fn (): array => Database::select('SELECT id, token_hash, bericht_id, user_id, seit FROM kundenmodus_geraete WHERE bericht_id = ? ORDER BY id', [$u2]);
+    [$geraeteVorher, $versionVorher, $ereignisseVorher] = [$geraete(), $version($u2), count(BerichtService::ereignisse($u2))];
+    $r = BerichtService::kundenmodusStarten($u2);
+    pruefe(!$r['ok'] && $r['status'] === 409 && str_contains($r['message'], 'anderen Kontos') && Kundenmodus::aktiv() === null
+        && ($_COOKIE[Kundenmodus::COOKIE] ?? '') === $geraetToken, 'Kundenmodus am Gerät mit der Sperre eines anderen Kontos → 409, das Cookie bleibt (' . $r['message'] . ')');
+    gleich([$geraete(), $version($u2), count(BerichtService::ereignisse($u2))], [$geraeteVorher, $versionVorher, $ereignisseVorher],
+        'anderes Konto: die Sperre des Prüfers am Gerät bleibt, keine neue Version, kein „kundenmodus_start“');
+    // Abgelaufen (älter als eine Woche) hält sie niemanden mehr auf.
+    Database::execute('UPDATE kundenmodus_geraete SET seit = ? WHERE bericht_id = ? AND user_id = ?', [gmdate('c', time() - 8 * 86400), $u2, $benutzer['technik']]);
+    $r = BerichtService::kundenmodusStarten($u2);
+    pruefe($r['ok'] && (Kundenmodus::aktiv()['user'] ?? 0) === $benutzer['admin'], 'abgelaufene Sperre eines anderen Kontos am Gerät: der eigene Kundenmodus startet');
+    Kundenmodus::beenden();
+    gleich((int) Database::scalar('SELECT COUNT(*) FROM kundenmodus_geraete WHERE bericht_id = ? AND user_id = ?', [$u2, $benutzer['admin']]), 0,
+        'eigener Kundenmodus beendet: seine Sperre am Gerät weg');
+    // Die Sperre eines gelöschten Kontos gälte nie mehr – sie geht mit dem
+    // Konto, statt andere an diesem Gerät eine Woche lang aufzuhalten.
+    $wegId = BenutzerService::anlegen($kennung . '-weg', $kennwort, 'technik', false);
+    $wegToken = bin2hex(random_bytes(32));
+    Database::insert('kundenmodus_geraete', ['token_hash' => hash('sha256', $wegToken), 'bericht_id' => $u2, 'user_id' => $wegId, 'seit' => gmdate('c')]);
+    $_COOKIE[Kundenmodus::COOKIE] = $wegToken;
+    $vorLoeschen = Kundenmodus::fremdAmGeraet();
+    BenutzerService::loeschen($wegId);
+    pruefe($vorLoeschen && !Kundenmodus::fremdAmGeraet() && (int) Database::scalar('SELECT COUNT(*) FROM kundenmodus_geraete WHERE user_id = ?', [$wegId]) === 0,
+        'Konto gelöscht: seine Sperre am Gerät geht mit und hält kein anderes Konto mehr auf');
+    unset($_COOKIE[Kundenmodus::COOKIE]);
+    alsBenutzer($benutzer['technik']);
+    $_SESSION = $prueferSitzung;
     Kundenmodus::beenden();
     gleich((int) Database::scalar('SELECT COUNT(*) FROM kundenmodus_geraete WHERE bericht_id = ?', [$u2]), 0, 'Kundenmodus beendet: Sperre am Gerät weg');
     pruefe(!BerichtService::zurueckziehbar(BerichtService::find($u2)) && BerichtService::zurueckziehen($u2, 'zu spät')['status'] === 409, 'nach dem Kundenmodus kein Zurückziehen');

@@ -95,16 +95,17 @@ final class BereichService
             'updated_at' => gmdate('c'),
         ];
 
-        // Mitglieder: nur Anlagen und Messgeräte dieses Standorts.
+        // Mitglieder: nur Anlagen und Messgeräte dieses Standorts – und nur
+        // elektrische (ein Tank zählt in keiner Lastsumme).
         $mitglieder = [];
         foreach ((array) ($daten['mitglieder'] ?? []) as $schluessel) {
             if (preg_match('/^([om]):(\d+)$/', (string) $schluessel, $m) !== 1) {
                 continue;
             }
             $zeile = $m[1] === 'o'
-                ? Database::first('SELECT id FROM objekte WHERE id = ? AND site_id = ? AND ist_vorlage = 0', [(int) $m[2], $siteId])
-                : Database::first('SELECT mp.id FROM messpunkte mp JOIN objekte o ON o.id = mp.objekt_id WHERE mp.id = ? AND o.site_id = ?', [(int) $m[2], $siteId]);
-            if ($zeile !== null) {
+                ? Database::first('SELECT id, art FROM objekte WHERE id = ? AND site_id = ? AND ist_vorlage = 0', [(int) $m[2], $siteId])
+                : Database::first('SELECT mp.id, o.art FROM messpunkte mp JOIN objekte o ON o.id = mp.objekt_id WHERE mp.id = ? AND o.site_id = ?', [(int) $m[2], $siteId]);
+            if ($zeile !== null && AnlagenService::elektrisch((string) $zeile['art'])) {
                 $mitglieder[$m[1] . ':' . (int) $m[2]] = [$m[1] === 'o' ? (int) $m[2] : null, $m[1] === 'm' ? (int) $m[2] : null];
             }
         }
@@ -175,7 +176,10 @@ final class BereichService
         $siteId = (int) $bereich['site_id'];
         $objekte = [];
         foreach (AnlagenService::liste(['site_id' => $siteId]) as $o) {
-            $objekte[(int) $o['id']] = $o;
+            // Ein Tank zählt nicht mit, auch wenn er (aus alter Zeit) Mitglied ist.
+            if (AnlagenService::elektrisch((string) $o['art'])) {
+                $objekte[(int) $o['id']] = $o;
+            }
         }
         $kinder = [];
         $hinterAbgang = [];

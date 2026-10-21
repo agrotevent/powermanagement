@@ -3,7 +3,8 @@ declare(strict_types=1);
 
 /**
  * Aufbau-Modus: Plan festhalten, Positionen bestätigen, fertig, beenden –
- * und der Abgleich Planung ↔ Umsetzung.
+ * und der Abgleich Planung ↔ Umsetzung. Ein Kraftstoffschlauch ist ein
+ * Posten wie ein Kabel (mit echter Länge); ein Tank hat keine Last.
  */
 
 require __DIR__ . '/hilfen/pruefung.php';
@@ -143,11 +144,16 @@ try {
     // Last im Betrieb (Demo-Messwerte)
     if (Config::isDemo()) {
         MesspunktService::speichern($a, null, ['geraet' => 'shellypro3em-catering', 'kanal' => 'em:0', 'rolle' => 'einspeisung']);
+        // Ein Tank mit einem Messgerät hat trotzdem keinen Nennstrom und keine Last.
+        $tank = $neu(['art' => 'tank', 'name' => $kennung . ' Tank', 'plan_x' => 30.0, 'plan_y' => 30.0]);
+        Database::insert('messpunkte', ['objekt_id' => $tank, 'geraet' => 'shellypro3em-foodtruck', 'kanal' => 'em:0', 'rolle' => 'einspeisung',
+            'bezeichnung' => '', 'gueltig_ab' => gmdate('c', time() - 7 * 3600), 'created_at' => gmdate('c')]);
         Database::update('aufbauten', $id, ['betrieb_ab' => gmdate('c', time() - 6 * 3600)]);
         $last = array_column(AufbauService::abgleich(AufbauService::find($id))['last'], null, 'id');
         pruefe(isset($last[$a]) && $last[$a]['i_max'] > 0 && $last[$a]['nennstrom'] == 63.0 && $last[$a]['auslastung'] > 0,
             'Last: höchster Strom gegen 63 A – ' . ($last[$a]['auslastung'] ?? '?') . ' %');
         pruefe(($last[$a]['empfehlung']['text'] ?? '') !== '', 'Empfehlung: ' . ($last[$a]['empfehlung']['text'] ?? ''));
+        pruefe(!isset($last[$tank]), 'Last: keine Zeile für einen Tank');
     } else {
         echo "  (Last übersprungen: kein Demo-Modus)\n";
     }
@@ -161,7 +167,22 @@ try {
     gleich(AufbauService::find($id)['status'], 'beendet', 'beendet');
     gleich(AufbauService::aktiv($siteId), null, 'kein laufender Aufbau mehr');
     pruefe(!AufbauService::postenSetzen($id, 'objekt', $a, 'entfallen')['ok'], 'nach dem Ende keine Bestätigungen mehr');
-    pruefe(AufbauService::starten($siteId, $kennung . ' Nächstes')['ok'], 'danach lässt sich der nächste starten');
+    // Der nächste Aufbau mit Tank, Aggregat und Kraftstoffschlauch: der Schlauch ist ein Posten wie ein Kabel
+    $tank = $neu(['art' => 'tank', 'name' => $kennung . ' Tank', 'plan_x' => 70.0, 'plan_y' => 60.0]);
+    $gen = $neu(['art' => 'generator', 'name' => $kennung . ' Aggregat', 'plan_x' => 75.0, 'plan_y' => 60.0, 'ohne_anschluesse' => true]);
+    $schlauch = $leitung(['art' => 'kraftstoff', 'name' => 'Schlauch', 'von_objekt_id' => $tank, 'zu_objekt_id' => $gen, 'kabeltyp' => 'DN 10 (3/8″)',
+        'punkte' => [[70.0, 60.0], [75.0, 60.0]]]);                                                                                  // 10 m
+    $e = AufbauService::starten($siteId, $kennung . ' Nächstes');
+    pruefe($e['ok'], 'danach lässt sich der nächste starten');
+    $naechst = AufbauService::find((int) ($e['id'] ?? 0));
+    $imPlan = array_column($naechst['plan']['leitungen'], 'art', 'id');
+    gleich($imPlan[$schlauch] ?? null, 'kraftstoff', 'Plan: der Kraftstoffschlauch ist ein Posten');
+    gleich(array_column($naechst['plan']['material']['schlaeuche'] ?? [], 'straenge', 'titel'), ['DN 10 (3/8″)' => 2], 'Plan: Material mit dem Schlauch');
+    $posten = array_column(AufbauService::uebersicht($naechst)['eintraege'], null, 'schluessel')['l:' . $schlauch] ?? [];
+    gleich([$posten['status'] ?? null, $posten['leitung'] ?? null, $posten['text'] ?? null], ['offen', 'kraftstoff', '2 × DN 10 (3/8″) HK-A3'], 'Posten des Schlauchs: offen, mit Typ und Kupplung');
+    pruefe(AufbauService::postenSetzen((int) $naechst['id'], 'leitung', $schlauch, 'geaendert', 14.0, 'um den Tank herum')['ok'], 'Schlauch geändert: 14 m');
+    $k = array_column(AufbauService::abgleich(AufbauService::find((int) $naechst['id']))['kabel'], null, 'id')[$schlauch] ?? [];
+    gleich([$k['art'] ?? null, $k['laenge_plan'] ?? null, $k['laenge_ist'] ?? null, $k['differenz'] ?? null], ['kraftstoff', 10.0, 14.0, 4.0], 'Abgleich: Schlauch 10 m geplant, 14 m gelegt');
 
     // Standort gelöscht: Aufbauten weg
     SiteService::deleteSite($anderer);

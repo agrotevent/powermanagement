@@ -11,6 +11,7 @@ declare(strict_types=1);
 require __DIR__ . '/hilfen/pruefung.php';
 
 use App\Services\AnlagenService;
+use App\Services\ApiBestand;
 use App\Services\InventarService;
 use App\Services\LeitungService;
 use App\Services\LocationBundle;
@@ -119,6 +120,9 @@ try {
     $erd = LeitungService::speichern(null, ['art' => 'kabel', 'floor_id' => $floorId, 'name' => 'Erdkabel Halle', 'von_objekt_id' => $an,
         'zu_objekt_id' => $wv, 'zu_anschluss_id' => (int) $wvEin['id'], 'kabeltyp' => 'NYY-J', 'querschnitt_mm2' => 25, 'punkte' => [[5, 5], [60, 5], [60, 10]]]);
     pruefe($erd['ok'] && (int) Database::scalar('SELECT fest FROM leitungen WHERE id = ?', [(int) $erd['id']]) === 1, 'Erdkabel zwischen Feststromanschlüssen ist fest verlegt');
+    // Ein fest verlegter Kraftstoffschlauch bleibt hier – ältere Gegenstellen kennen keinen Schlauch
+    $festerSchlauch = Database::insert('leitungen', ['art' => 'kraftstoff', 'fest' => 1, 'floor_id' => $floorId, 'name' => 'Schlauch Bodentank', 'kabeltyp' => 'DN 25 (1″)',
+        'anzahl' => 2, 'modell' => 'HK-A3', 'punkte' => '[[70,10],[72,12]]', 'farbe' => '', 'notizen' => '', 'created_at' => gmdate('c'), 'updated_at' => gmdate('c')]);
 
     $hoch = LocationSync::locationHochladen($siteId, 'pruefung');
     pruefe($hoch['ok'] && !str_contains($hoch['message'], 'Hinweis: Der Grundriss'), 'hochgeladen (kleiner Plan, ohne Hinweis zur Größe): ' . $hoch['message']);
@@ -127,7 +131,7 @@ try {
     $namen = array_column($strom['anlagen'] ?? [], 'name');
     sort($namen);
     gleich($namen, ['Hausanschluss Lager', 'Wandverteiler Halle'], 'strom.json enthält nur die Feststromanschlüsse');
-    gleich(array_column($strom['leitungen'] ?? [], 'name'), ['Erdkabel Halle'], 'strom.json enthält nur das fest verlegte Kabel – kein mobiles, keine Kabelbrücke');
+    gleich(array_column($strom['leitungen'] ?? [], 'name'), ['Erdkabel Halle'], 'strom.json enthält nur das fest verlegte Kabel – kein mobiles, keine Kabelbrücke, kein Schlauch');
     $erdJson = $strom['leitungen'][0] ?? [];
     pruefe(($erdJson['fest'] ?? false) === true && $erdJson['von'] !== null && $erdJson['zu'] !== null && ($erdJson['zu_anschluss'] ?? '') === 'eingang:1',
         'festes Kabel mit beiden Enden und Anschluss');
@@ -235,6 +239,7 @@ try {
     gleich(count($fremd['dosen'] ?? [1]), 0, 'leere Liste: keine Dosen mehr');
     gleich((int) Database::scalar('SELECT COUNT(*) FROM objekte WHERE site_id = ? AND fest = 0', [$siteId]), 1, 'mobile Anlagen unverändert');
     gleich((int) Database::scalar('SELECT COUNT(*) FROM leitungen WHERE floor_id = ? AND fest = 0', [$floorId]), 2, 'mobile Leitungen unverändert');
+    gleich((string) Database::scalar('SELECT art FROM leitungen WHERE id = ?', [$festerSchlauch]), 'kraftstoff', 'der feste Schlauch bleibt beim Übernehmen stehen');
 
     // Eine strom.json im alten Format 1 (mit ganzer Planung) liefert nur
     // ihre Stromanschlüsse – mobile Anlagen und Kabel daraus kommen nicht an.
@@ -478,6 +483,74 @@ try {
     pruefe(!$hoch['ok'] && str_contains($hoch['message'], 'länger, als eine Anfrage hier dauern darf (zusammen höchstens 285 Sekunden')
         && LocationSync::fernerStand() === $dortVorher, 'Frist der Anfrage um: Hochladen meldet es, nichts hochgeladen – ' . $hoch['message']);
     pruefe(!$holen['ok'] && str_contains($holen['message'], 'bin/power location:uebernehmen'), 'Frist der Anfrage um: Übernehmen meldet es, mit dem Weg über die Kommandozeile');
+
+    // ------------------------------------------------ Tanks und Kraftstoffschläuche über die Schnittstelle
+    // Ein fester Tank (Bodentank) ist feste Infrastruktur wie über Git: Er geht
+    // mit „feststrom“ hinaus – ohne Anschlüsse, Schutzorgane und Messpunkte –,
+    // ein Kraftstoffschlauch nie. Beim Übernehmen bleibt, was die Kennlinie
+    // eines Tanks hier gelernt hat; ein Tank wird keine Verteilung, ein
+    // Schlauch kein Kabel.
+    $boden = (int) AnlagenService::speichern(null, ['art' => 'tank', 'name' => $marke . ' Bodentank', 'fest' => 1, 'floor_id' => $floorId, 'plan_x' => 70, 'plan_y' => 12,
+        'eigenschaften' => ['inhalt_l' => '5000', 'bauform' => 'Quader', 'liter_je_mm' => '4,2', 'liter_je_mm_herkunft' => 'Peilung dort']])['id'];
+    $bodenKey = LocationBundle::schluesselSichern('objekte', $boden, $marke . ' Bodentank');
+    $mitTank = json_decode((string) json_encode(ApiBestand::locationDaten($siteId, true)['strom']), true);
+    $tankDort = array_values(array_filter($mitTank['anlagen'] ?? [], static fn (array $a): bool => $a['schluessel'] === $bodenKey))[0] ?? null;
+    pruefe($tankDort !== null && $tankDort['art'] === 'tank' && $tankDort['fest'] === true && $tankDort['anschluesse'] === [] && $tankDort['schutzorgane'] === []
+        && !array_key_exists('messpunkte', $tankDort) && (float) ($tankDort['eigenschaften']['inhalt_l'] ?? 0) === 5000.0,
+        'Schnittstelle: der feste Tank geht mit „feststrom“ hinaus, ohne Anschlüsse, Schutzorgane und Messpunkte');
+    gleich(array_values(array_filter(array_column($mitTank['leitungen'] ?? [], 'art'), static fn (string $art): bool => !in_array($art, ['kabel', 'kabelweg'], true))), [],
+        'Schnittstelle: kein Kraftstoffschlauch und keine Kabelbrücke in „leitungen“');
+    pruefe(!array_key_exists('anlagen', ApiBestand::locationDaten($siteId, false)['strom']), 'ohne „feststrom“ auch kein Tank');
+
+    $nurStrom = ['teile' => ['feststrom']] + $nachB;
+    $kEtageId = (int) $kEtage['id'];
+    $t1 = LocationUebertrag::anwenden($kopieId, $dortLoc, $mitTank, ['grundriss' => $kEtageId], $aufloesen, $nurStrom);
+    $kTank = Database::first('SELECT * FROM objekte WHERE site_id = ? AND partner_schluessel = ?', [$kopieId, $bodenKey]);
+    pruefe($t1['ok'] && $kTank !== null && $kTank['art'] === 'tank' && (int) $kTank['fest'] === 1 && (int) $kTank['floor_id'] === $kEtageId,
+        'B übernimmt: der Tank kommt als fester Tank an – ' . $t1['message']);
+    gleich([count(AnlagenService::anschluesse((int) $kTank['id'])), count(SchutzService::liste((int) $kTank['id'])),
+        (float) (AnlagenService::find((int) $kTank['id'])['eigenschaften']['liter_je_mm'] ?? 0)], [0, 0, 4.2], 'neu: ohne Anschlüsse, mit dem Inhalt je mm von dort');
+    // Hier gelernt: ein anderer Inhalt je mm. Dort ändern sich Nennvolumen und Inhalt je mm.
+    AnlagenService::eigenschaftSetzen((int) $kTank['id'], ['liter_je_mm' => 3.9, 'liter_je_mm_herkunft' => 'Betankung hier'], true);
+    $mitTank2 = $mitTank;
+    foreach ($mitTank2['anlagen'] as &$a) {
+        if ($a['schluessel'] === $bodenKey) {
+            $a['eigenschaften']['inhalt_l'] = 5200;
+            $a['eigenschaften']['liter_je_mm'] = 4.4;
+            $a['eigenschaften']['liter_je_mm_herkunft'] = 'Peilung dort, neu';
+        }
+    }
+    unset($a);
+    $t2 = LocationUebertrag::anwenden($kopieId, $dortLoc, $mitTank2, ['grundriss' => $kEtageId], $aufloesen, $nurStrom);
+    $eig = AnlagenService::find((int) $kTank['id'])['eigenschaften'];
+    gleich([$t2['ok'], (float) ($eig['inhalt_l'] ?? 0), (float) ($eig['liter_je_mm'] ?? 0), $eig['liter_je_mm_herkunft'] ?? null], [true, 5200.0, 3.9, 'Betankung hier'],
+        'B übernimmt erneut: Nennvolumen von dort, der hier gelernte Inhalt je mm bleibt');
+    // Dort ist derselbe Schlüssel eine Verteilung: hier bleibt es ein Tank.
+    $alsVerteilung = $mitTank2;
+    foreach ($alsVerteilung['anlagen'] as &$a) {
+        if ($a['schluessel'] === $bodenKey) {
+            $a['art'] = 'verteilung';
+            $a['anschluesse'] = [['richtung' => 'abgang', 'nr' => 1, 'stecker' => 'cee16']];
+        }
+    }
+    unset($a);
+    $t3 = LocationUebertrag::anwenden($kopieId, $dortLoc, $alsVerteilung, ['grundriss' => $kEtageId], $aufloesen, $nurStrom);
+    pruefe($t3['ok'] && $t3['uebergangen'] >= 1 && AnlagenService::find((int) $kTank['id'])['art'] === 'tank' && AnlagenService::anschluesse((int) $kTank['id']) === [],
+        'derselbe Schlüssel als Verteilung: übergangen, hier bleibt ein Tank ohne Anschlüsse – ' . $t3['message']);
+    // Ein Schlauch hier mit dem Schlüssel eines Kabels dort bleibt ein Schlauch – über die Schnittstelle wie über Git.
+    $schlauchHier = Database::insert('leitungen', ['art' => 'kraftstoff', 'fest' => 1, 'floor_id' => $kEtageId, 'name' => $marke . ' Schlauch', 'kabeltyp' => 'DN 25 (1″)',
+        'anzahl' => 2, 'modell' => '', 'punkte' => '[[70,12],[72,14]]', 'farbe' => '', 'notizen' => '', 'partner_schluessel' => $marke . '-leitung',
+        'sync_key' => $marke . '-leitung-git', 'created_at' => gmdate('c'), 'updated_at' => gmdate('c')]);
+    $kabelDort = ['schluessel' => $marke . '-leitung', 'art' => 'kabel', 'fest' => true, 'etage' => 'grundriss', 'name' => 'Kabel dort', 'von' => null, 'zu' => null,
+        'kabeltyp' => 'NYY-J', 'querschnitt_mm2' => 16, 'punkte' => [[1, 1], [2, 2]]];
+    $t4 = LocationUebertrag::anwenden($kopieId, $dortLoc, ['leitungen' => [$kabelDort]] + $mitTank, ['grundriss' => $kEtageId], $aufloesen, $nurStrom);
+    $g = LocationBundle::stromAnwenden($kopieId, ['format' => 2, 'art' => 'strom', 'anlagen' => [], 'leitungen' => [['schluessel' => $marke . '-leitung-git'] + $kabelDort]],
+        ['etagen' => ['grundriss' => $kEtageId], 'georeferenz_leeren' => false]);
+    $schlauch = Database::first('SELECT art, name, kabeltyp FROM leitungen WHERE id = ?', [$schlauchHier]);
+    pruefe($t4['ok'] && $t4['uebergangen'] >= 1 && $g['ok'] && $g['uebergangen'] === 1 && $schlauch === ['art' => 'kraftstoff', 'name' => $marke . ' Schlauch', 'kabeltyp' => 'DN 25 (1″)'],
+        'ein Kabel dort mit dem Schlüssel eines Schlauchs hier: übergangen, der Schlauch bleibt (Schnittstelle und Git)');
+    gleich(LocationBundle::festeLeitungen(['format' => 2, 'leitungen' => [['schluessel' => 'x', 'art' => 'kraftstoff', 'fest' => true]]]), [],
+        'ein Schlauch in einer Datei zählt nicht zu den festen Leitungen');
 } finally {
     if ($inventarId !== null) {
         foreach (Database::select('SELECT id FROM einsaetze WHERE inventar_id = ? AND bis IS NULL', [$inventarId]) as $e) {

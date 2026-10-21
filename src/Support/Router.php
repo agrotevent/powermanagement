@@ -61,13 +61,17 @@ final class Router
         // auch eine unbekannte Adresse, eine verbotene Seite oder eine
         // falsche Methode führt zurück zur Kundenseite statt auf eine
         // Fehlerseite (die früher die ganze Navigation samt „Abmelden“ zeigte).
-        $sperre = Auth::check() ? Kundenmodus::aktiv() : null;
-        if ($sperre !== null && !Kundenmodus::erlaubt($method, $path, $sperre['bericht'])) {
+        // Beginnt er erst, während eine Anfrage ohne Sitzungssperre wartet
+        // (InfluxDB, git, Geräte), prüft Controller::kundenmodusSperrt() vor
+        // der Seite oder dem Download noch einmal, und Flash::add() schreibt
+        // keine Meldung mehr, die dann auf der Kundenseite stünde.
+        $gesperrt = Kundenmodus::sperrt($method, $path);
+        if ($gesperrt !== null) {
             if (self::willJson()) {
                 Response::json(['ok' => false, 'kundenmodus' => true, 'message' => 'Kundenmodus aktiv – erst mit dem Kennwort des Prüfers entsperren.'], 423);
                 return;
             }
-            Response::redirect('/berichte/' . $sperre['bericht'] . '/kunde');
+            Response::redirect('/berichte/' . $gesperrt . '/kunde');
             return;
         }
 
@@ -94,16 +98,22 @@ final class Router
                     Response::redirect('/login?next=' . rawurlencode($path));
                     return;
                 }
-                if (!Auth::can($route['permission'])) {
+                // Kundenseite und Entsperren auch ohne das Recht: Endet die
+                // Rolle, während das Gerät beim Kunden liegt, bliebe es sonst
+                // gesperrt – alle anderen Wege führen ja zur Kundenseite.
+                if (!Auth::can($route['permission']) && !Kundenmodus::ausweg($method, $path)) {
                     Response::forbidden();
                     return;
                 }
             }
 
             // Ein Konto mit vorläufigem Kennwort kommt nur bis zum Profil:
-            // erst ein eigenes Kennwort, dann der Rest.
+            // erst ein eigenes Kennwort, dann der Rest. Nicht im Kundenmodus –
+            // das Profil führte zur Kundenseite, die zum Profil, im Kreis, und
+            // entsperren ließe sich nie. Erst entsperren (mit dem vorläufigen
+            // Kennwort), danach geht es zum Profil.
             if (Auth::check() && (int) (Auth::user()['must_change_password'] ?? 0) === 1
-                && !in_array($path, self::OHNE_NEUES_KENNWORT, true)) {
+                && !in_array($path, self::OHNE_NEUES_KENNWORT, true) && Kundenmodus::aktiv() === null) {
                 Flash::warning('Bitte zuerst ein neues Passwort vergeben.');
                 Response::redirect('/profil');
                 return;
@@ -157,8 +167,9 @@ final class Router
 
     /**
      * Erwartet die Anfrage JSON? Nur der Accept-Kopf zählt – nicht
-     * X-Requested-With: damit schickt `data-laeuft` in app.js Formulare ab,
-     * und die sollen weiter wie bisher mit Meldung und Weiterleitung enden.
+     * X-Requested-With: Formulare mit `data-laeuft` (app.js) gehen per fetch
+     * hinaus und sollen wie ein gewöhnliches Formular mit Meldung und
+     * Weiterleitung enden. Dieselbe Regel wie Request::wantsJson().
      */
     private static function willJson(): bool
     {

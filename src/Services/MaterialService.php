@@ -10,10 +10,12 @@ use App\Support\Database;
 /**
  * Materialliste für den Aufbau – für einen Bereich oder eine ganze Etage.
  *
- * Gezählt wird, was mitgebracht werden muss: mobile Anlagen (nach Typ),
- * mobile Kabel in üblichen Stücklängen und Kabelbrücken. Fest installierte
- * Anlagen und fest verlegte Kabel sind vor Ort und stehen nur zur
- * Orientierung dabei.
+ * Gezählt wird, was mitgebracht werden muss: mobile Anlagen (nach Typ –
+ * auch Tanks), mobile Kabel in üblichen Stücklängen, Kabelbrücken und unter
+ * „Kraftstoff“ die Schläuche vom Tank zum Generator (Länge mit Reserve je
+ * Strang, Kupplungen je Strang zwei). Fest installierte Anlagen und fest
+ * verlegte Kabel und Schläuche sind vor Ort und stehen nur zur Orientierung
+ * dabei.
  *
  * Stückelung: Aus der Länge im Plan (bzw. der eingetragenen Länge) plus
  * Reserve für Durchhang und den Weg zur Dose werden Stücke der üblichen
@@ -118,7 +120,8 @@ final class MaterialService
     /**
      * Material eines Bereichs: seine Anlagen, alle Kabel an ihnen (auch das
      * Zuleitungskabel vom Aggregat außerhalb), die Kabel an seinen gemessenen
-     * Abgängen und die Kabelbrücken über diesen Kabeln.
+     * Abgängen, die Kabelbrücken über diesen Kabeln und die
+     * Kraftstoffschläuche an seinen Generatoren.
      */
     public static function fuerBereich(array $bereich, ?array $aufbau = null): array
     {
@@ -143,6 +146,12 @@ final class MaterialService
             foreach (LeitungService::fuerEtage((int) $f['id']) as $l) {
                 if ($l['art'] === 'kabelbruecke') {
                     $bruecken[] = [$l, $massstab];
+                    continue;
+                }
+                if ($l['art'] === 'kraftstoff') {
+                    if (isset($objekte[(int) $l['von_objekt_id']]) || isset($objekte[(int) $l['zu_objekt_id']])) {
+                        $kabel[(int) $l['id']] = $l;
+                    }
                     continue;
                 }
                 if ($l['art'] !== 'kabel') {
@@ -200,7 +209,37 @@ final class MaterialService
         $ohneLaenge = [];
         $festeKabel = 0;
         $bruecken = [];
+        $schlaeuche = [];
+        $schlaeucheEinzeln = [];
+        $schlaeucheOhneLaenge = [];
+        $kupplungen = [];
+        $festeSchlaeuche = 0;
         foreach ($leitungen as $l) {
+            if ($l['art'] === 'kraftstoff') {
+                if ((int) $l['fest'] === 1) {
+                    $festeSchlaeuche++;
+                    continue;
+                }
+                // Je Strang (Vor- und Rücklauf) ein Schlauch mit zwei Kupplungen.
+                $typ = trim((string) $l['kabeltyp']) !== '' ? (string) $l['kabeltyp'] : 'Kraftstoffschlauch';
+                $n = max(1, (int) $l['anzahl']);
+                $kupplung = trim((string) $l['modell']) !== '' ? (string) $l['modell'] : LeitungService::KUPPLUNG_VORGABE;
+                $kupplungen[$kupplung] = ($kupplungen[$kupplung] ?? 0) + 2 * $n;
+                $name = trim((string) $l['name']) !== '' ? (string) $l['name'] : (($l['von_name'] ?? '?') . ' → ' . ($l['zu_name'] ?? '?'));
+                if ($l['laenge'] === null) {
+                    $schlaeucheOhneLaenge[] = ['name' => $name, 'titel' => $typ];
+                    continue;
+                }
+                $benoetigt = (int) ceil((float) $l['laenge'] * (1 + $reserve / 100) - 1e-9);
+                $schlaeuche[$typ] ??= ['titel' => $typ, 'schlaeuche' => 0, 'straenge' => 0, 'meter_plan' => 0.0, 'meter' => 0];
+                $schlaeuche[$typ]['schlaeuche']++;
+                $schlaeuche[$typ]['straenge'] += $n;
+                $schlaeuche[$typ]['meter_plan'] += (float) $l['laenge'] * $n;
+                $schlaeuche[$typ]['meter'] += $benoetigt * $n;
+                $schlaeucheEinzeln[] = ['name' => $name, 'titel' => $typ, 'laenge' => round((float) $l['laenge'], 1), 'benoetigt' => $benoetigt,
+                    'anzahl' => $n, 'kupplung' => $kupplung, 'gemessen' => $l['laenge_m'] !== null];
+                continue;
+            }
             if ($l['art'] === 'kabelbruecke') {
                 $modell = trim((string) $l['modell']) !== '' ? (string) $l['modell'] : 'Kabelbrücke';
                 $bruecken[$modell] = ($bruecken[$modell] ?? 0) + max(1, (int) $l['anzahl']);
@@ -258,6 +297,9 @@ final class MaterialService
         uasort($gruppen, static fn ($a, $b) => [$b['strom'], $a['titel']] <=> [$a['strom'], $b['titel']]);
         ksort($bruecken);
         usort($einzeln, static fn ($a, $b) => [$a['titel'], $a['name']] <=> [$b['titel'], $b['name']]);
+        ksort($schlaeuche);
+        ksort($kupplungen);
+        usort($schlaeucheEinzeln, static fn ($a, $b) => [$a['titel'], $a['name']] <=> [$b['titel'], $b['name']]);
 
         return [
             'reserve'     => $reserve,
@@ -268,6 +310,12 @@ final class MaterialService
             'ohne_laenge' => $ohneLaenge,
             'feste_kabel' => $festeKabel,
             'bruecken'    => $bruecken,
+            // Kraftstoff: Schläuche je Typ (Meter mit Reserve × Stränge), Kupplungen je Modell
+            'schlaeuche'  => array_values($schlaeuche),
+            'schlaeuche_einzeln' => $schlaeucheEinzeln,
+            'schlaeuche_ohne_laenge' => $schlaeucheOhneLaenge,
+            'kupplungen'  => $kupplungen,
+            'feste_schlaeuche' => $festeSchlaeuche,
         ];
     }
 

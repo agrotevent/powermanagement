@@ -75,10 +75,17 @@ final class Request
         return substr((string) ($_SERVER['HTTP_USER_AGENT'] ?? ''), 0, 255);
     }
 
+    /**
+     * Erwartet die Anfrage JSON? Nur der Accept-Kopf zählt, wie im Router –
+     * nicht X-Requested-With. Damit schickte `data-laeuft` (app.js) seine
+     * Formulare ab; Controller::antwort() gab dann JSON statt Meldung und
+     * Weiterleitung zurück, und das Neuladen danach zeigte keine Meldung –
+     * auch keinen Fehler (Verteiler-Abgleich, MQTT-Zugänge). Wer JSON will
+     * (PMNetz.post, PM.post, live.js, karte.js), sagt es mit Accept.
+     */
     public function wantsJson(): bool
     {
-        return str_contains((string) ($_SERVER['HTTP_ACCEPT'] ?? ''), 'application/json')
-            || ($_SERVER['HTTP_X_REQUESTED_WITH'] ?? '') === 'XMLHttpRequest';
+        return str_contains((string) ($_SERVER['HTTP_ACCEPT'] ?? ''), 'application/json');
     }
 
     /**

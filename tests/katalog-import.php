@@ -2,7 +2,7 @@
 declare(strict_types=1);
 
 /**
- * Katalog-Import: Standard-Verteiler und Aggregate aus einem Paket.
+ * Katalog-Import: Standard-Verteiler, Aggregate und Tanks aus einem Paket.
  *
  * Geprüft wird das Format (kein JSON, falsche Art, Format 2, leere Liste,
  * doppelter Schlüssel, unbekannte Art, Stecker ohne Beschreibung, neuer
@@ -12,7 +12,9 @@ declare(strict_types=1);
  * Steckertypen, ohne Messpunkte → beim nächsten Lesen „schon da“), dass
  * importierte Typen bearbeitbar bleiben und ein erneuter Import die Korrektur
  * nur auf ausdrücklichen Wunsch und nur im Stand der Vorschau ersetzt, der
- * Typwechsel einer Anlage samt Eigenschaften, die Rechte, „alles oder
+ * Typwechsel einer Anlage samt Eigenschaften, ein Tank-Typ (nur
+ * Eigenschaften, feste elektrische Werte, Anschlüsse in der Datei abgelehnt,
+ * gelernter Inhalt je mm → „hier anders“), die Rechte, „alles oder
  * nichts“, die abgelegte Vorschau und die Kommandozeile in einer eigenen
  * Instanz – und jedes mitgelieferte Paket unter resources/kataloge in seiner
  * eigenen, leeren Instanz.
@@ -114,6 +116,15 @@ $t3 = $typ($k . '-sv16', [
 ]);
 $drei = $paket([$t1, $t2, $t3]);
 $schluessel = [$k . '-pd63', $k . '-sg60', $k . '-sv16'];
+// Ein Tank-Typ wie aus der Strombibel (Seite 20) – mit elektrischen Werten,
+// die ein Tank nicht hat (sie werden fest) und dem Kraftstoff klein geschrieben.
+$tankTyp = $typ($k . '-ag3000', [
+    'art' => 'tank', 'name' => $k . ' QUADRO-AG 3000', 'modell' => 'QUADRO-AG 3000', 'nennstrom_a' => 63, 'spannung_v' => 230, 'phasen' => 1,
+    'steuerung_gesperrt' => true,
+    'eigenschaften' => ['artikelnummer' => '1004093', 'inhalt_l' => 3000.0, 'gewicht_kg' => 840.0, 'gewicht_voll_kg' => 3840.0,
+        'abmessungen' => '2.400 × 1.200 × 1.548 mm (L × B × H)', 'zulassung' => 'D/BAM/16125/31A, Z-38.12-223', 'tankanschluss' => '2 Anschlüsse',
+        'kraftstoff' => 'diesel'],
+]);
 
 try {
     $planung = BenutzerService::anlegen($k . '-planung', $kennwort, 'planung', false);
@@ -173,6 +184,13 @@ try {
     $einzeln($kaputt($t3, static function (array &$t) use ($abgang): void {
         $t['typ']['anschluesse'] = array_map(static fn ($n) => $abgang('schuko', $n), range(1, KatalogImport::HOECHSTENS_JE_TYP + 1));
     }), 'Mehr als ' . KatalogImport::HOECHSTENS_JE_TYP . ' Anschlüsse', 'zu viele Anschlüsse');
+    // Ein Tank hat weder Anschlüsse noch Schutzorgane – fielen sie still weg, stünde er nach dem Import „hier anders“ da.
+    $einzeln($kaputt($tankTyp, static function (array &$t) use ($abgang): void { $t['typ']['anschluesse'] = [$abgang('cee16', 1)]; }),
+        'Ein Tank hat keine Anschlüsse und keine Schutzorgane', 'Tank-Typ mit Anschluss');
+    $einzeln($kaputt($tankTyp, static function (array &$t): void { $t['typ']['schutzorgane'] = [['art' => 'ls', 'bezeichnung' => 'Q1', 'nennstrom_a' => 16]]; }),
+        'Ein Tank hat keine Anschlüsse und keine Schutzorgane', 'Tank-Typ mit Schutzorgan');
+    $einzeln($kaputt($tankTyp, static function (array &$t): void { $t['typ']['eigenschaften']['bauform'] = 'Kugel'; }),
+        'Eigenschaft „Bauform“: „Kugel“ gibt es nicht', 'Tank-Typ mit unbekannter Bauform');
     // Was still anders ankäme: leere Spannung (wäre 1 V), ein Kraftstoff, den
     // die Auswahl nicht kennt (ginge beim ersten Speichern verloren), ein
     // neuer Stecker ohne Nennstrom (wäre 16 A), mit Text (0 A), ohne Namen.
@@ -368,6 +386,33 @@ try {
     gleich([(int) Database::scalar('SELECT COUNT(*) FROM objekte WHERE ist_vorlage = 1 AND name = ?', [$k . ' SV 16']),
         (string) Database::scalar('SELECT sync_key FROM objekte WHERE id = ?', [$hand])], [1, $k . '-sv16'], 'überschrieben statt doppelt, Schlüssel jetzt fest');
     $id3 = $hand;
+
+    // ---------------------------------------------------------------- Tank-Typ: nur Eigenschaften
+    $l = KatalogImport::lesen($json($paket([$tankTyp])));
+    $zt = $zeile($l, $k . '-ag3000');
+    gleich([$zt['zustand'], $zt['fehler'], $zt['art_name']], ['neu', null, 'Tank'], 'Tank-Typ: neu');
+    gleich($zt['kurz'], 'Tank · QUADRO-AG 3000 · 3.000 l · Diesel', 'Kurzbeschreibung des Tank-Typs: Nennvolumen und Kraftstoff statt Anschlüssen');
+    $u = KatalogImport::uebernehmen((array) $l['paket'], [$k . '-ag3000'], []);
+    pruefe($u['ok'] && $u['neu'] === [$k . ' QUADRO-AG 3000'], 'Tank-Typ übernommen: ' . $u['message']);
+    $idT = $id($k . '-ag3000');
+    $vt = AnlagenService::find($idT);
+    gleich([$vt['art'], $vt['nennleistung_kva'], $vt['nennstrom_a'], (int) $vt['spannung_v'], (int) $vt['phasen'], (int) $vt['steuerung_gesperrt'],
+        count(AnlagenService::anschluesse($idT)), count(SchutzService::liste($idT))],
+        ['tank', null, null, 400, 3, 0, 0, 0], 'Tank-Typ ohne Leistung, Nennstrom, Anschlüsse und Schutzorgane (feste Spannung und Phasen)');
+    gleich($vt['eigenschaften'], ['artikelnummer' => '1004093', 'inhalt_l' => 3000.0, 'kraftstoff' => 'Diesel', 'abmessungen' => '2.400 × 1.200 × 1.548 mm (L × B × H)',
+        'gewicht_kg' => 840.0, 'gewicht_voll_kg' => 3840.0, 'zulassung' => 'D/BAM/16125/31A, Z-38.12-223', 'tankanschluss' => '2 Anschlüsse'],
+        'Eigenschaften des Tank-Typs erhalten, Kraftstoff in der Schreibweise der Auswahl');
+    gleich($zeile(KatalogImport::lesen($json($paket([$tankTyp]))), $k . '-ag3000')['zustand'], 'gleich',
+        'erneut gelesen: schon da – auch mit Nennstrom, 230 V und gesperrter Steuerung in der Datei');
+    gleich([AnlagenService::einheit('text', 'mm', $vt['eigenschaften']['abmessungen']), AnlagenService::einheit('text', 'mm', '3200 × 1100 × 1800'),
+        AnlagenService::einheit('zahl', 'l', 3000.0), AnlagenService::einheit('text', 'l/h', '100% 22L / 70% 16L')], ['', 'mm', 'l', ''],
+        'Anzeige: ein Text, der seine Einheit schon nennt, bekommt keine zweite');
+    AnlagenService::eigenschaftSetzen($idT, ['liter_je_mm' => 2.78]);
+    $zt = $zeile(KatalogImport::lesen($json($paket([$tankTyp]))), $k . '-ag3000');
+    $abw = array_column($zt['abweichungen'], null, 'feld');
+    $inhaltJeMm = AnlagenService::FELDER['tank']['liter_je_mm'][0];
+    gleich([$zt['zustand'], $zt['unterschiede'], $abw[$inhaltJeMm]['hier'] ?? null, $abw[$inhaltJeMm]['datei'] ?? null],
+        ['anders', ['Eigenschaften'], '2,78 l/mm', '–'], 'Inhalt je mm hier gelernt: „hier anders“, die Datei überschreibt es nicht still');
 
     // ---------------------------------------------------------------- Rechte
     $neuerTyp = $typ($k . '-pd32', ['art' => 'verteilung', 'name' => $k . ' PD 32', 'anschluesse' => [$abgang('cee16', 1)]]);

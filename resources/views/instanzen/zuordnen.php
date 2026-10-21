@@ -12,6 +12,11 @@
  * (hier oder beide geändert, ein vorhandener Standort) – „Nur verknüpfen“
  * ändert nichts und fragt nicht.
  *
+ * Das Formular schickt der Browser selbst ab (`data-laeuft-seite`): Nach
+ * dem Übernehmen geht es zur Übersicht der Instanz, nicht zurück hierher.
+ * Per fetch lüde app.js danach diese Seite neu – und zeigte wieder das
+ * Formular, nun mit „Übernehmen“ samt Rückfrage zum Überschreiben.
+ *
  * @var array<string,mixed> $partner
  * @var array{schluessel:string,name:string} $location
  * @var string $zustand                      PartnerAbgleich::ZUSTAENDE
@@ -74,7 +79,7 @@ $basis = '/instanzen/' . (int) $partner['id'];
     </div>
 </div>
 
-<form method="post" action="<?= View::e($basis) ?>/uebernehmen" class="card" data-laeuft="läuft …" data-laeuft-oben
+<form method="post" action="<?= View::e($basis) ?>/uebernehmen" class="card" data-laeuft="läuft …" data-laeuft-seite
       data-laeuft-hinweis="Holt die Location von dort. Mit Grundrissen kann das einige Minuten dauern. Bitte nicht noch einmal klicken.">
     <?= Csrf::field() ?>
     <input type="hidden" name="schluessel" value="<?= View::e($location['schluessel']) ?>">

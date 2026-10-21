@@ -20,10 +20,12 @@ use App\Support\Database;
 use App\Support\Request;
 use App\Support\Response;
 use App\Support\Session;
+use App\Tanks\TankRechnung;
+use App\Tanks\TankService;
 
 /**
  * Die Karte: Grundriss (wie in MasterAdmin) mit Anlagen, Kabeln,
- * Kabelwegen und Kabelbrücken.
+ * Kabelwegen, Kabelbrücken und Kraftstoffschläuchen (Tank → Generator).
  *
  * Gelesen wird über JSON (stand, live, objekt, leitung), geschrieben über
  * kleine POSTs – die Karte lädt sich dabei nicht neu, und auf dem Tablet
@@ -52,19 +54,28 @@ final class KarteController extends Controller
      * eine Freigabe mit „bearbeiten“ – für den Standort oder für eine Anlage
      * an einem der Kabelenden. Den Standort nur zu sehen genügt nicht.
      *
+     * Ein Kraftstoffschlauch ($alleEnden) braucht „bearbeiten“ an beiden
+     * Enden: Er ändert Vorrat, Restlaufzeit und Verbrauch aller Tanks am
+     * Generator – auch fremder.
+     *
      * @param list<mixed> $enden Anlagen-IDs an den Enden
      */
-    private function darfLeitung(int $siteId, array $enden): bool
+    private function darfLeitung(int $siteId, array $enden, bool $alleEnden = false): bool
     {
         if (Zugriff::darfStandortAendern($siteId)) {
             return true;
         }
-        foreach ($enden as $id) {
-            if ($id !== null && (int) $id > 0 && ($o = AnlagenService::find((int) $id)) !== null && Zugriff::bearbeitetObjekt($o)) {
+        $ids = array_values(array_filter(array_map('intval', $enden), static fn (int $id): bool => $id > 0));
+        foreach ($ids as $id) {
+            $darf = ($o = AnlagenService::find($id)) !== null && Zugriff::bearbeitetObjekt($o);
+            if ($darf && !$alleEnden) {
                 return true;
             }
+            if (!$darf && $alleEnden) {
+                return false;
+            }
         }
-        return false;
+        return $alleEnden && $ids !== [];
     }
 
     /** Die Leitung und ihr Standort – oder null, wenn sie nicht sichtbar ist. */
@@ -149,12 +160,19 @@ final class KarteController extends Controller
                 continue;
             }
             $art = AnlagenService::ARTEN[$o['art']];
+            $elektrisch = AnlagenService::elektrisch((string) $o['art']);
             $liste[] = [
                 'id'        => (int) $o['id'],
                 'art'       => $o['art'],
                 'kuerzel'   => $art['kuerzel'],
                 'farbe'     => $art['farbe'],
                 'fest'      => $o['fest'] === 1,
+                'elektrisch' => $elektrisch,
+                // Tanks: Nennvolumen und ob ein Tanksensor misst (Pegel im Zeichen).
+                'tank'      => $elektrisch ? null : [
+                    'nenn_l' => TankRechnung::zahlLesen($o['eigenschaften']['inhalt_l'] ?? null),
+                    'sensor' => array_filter($mpJe[(int) $o['id']] ?? [], static fn ($m) => $m['rolle'] === 'fuellstand') !== [],
+                ],
                 'art_name'  => $o['art_anzeige'],
                 'name'      => $o['name'],
                 'kennung'   => $o['kennung'],
@@ -303,6 +321,7 @@ final class KarteController extends Controller
             'art'         => $objekt['art'],
             'art_name'    => $objekt['art_anzeige'],
             'fest'        => $objekt['fest'] === 1,
+            'elektrisch'  => AnlagenService::elektrisch((string) $objekt['art']),
             'kennung'     => $objekt['kennung'],
             'modell'      => trim($objekt['hersteller'] . ' ' . $objekt['modell']),
             'status'      => AnlagenService::STATUS[$objekt['status']] ?? $objekt['status'],
@@ -315,6 +334,8 @@ final class KarteController extends Controller
                 'in_auswertung' => in_array((int) $m['id'], $auswertung, true),
             ], MesspunktService::fuerObjekt($id)),
             'live'        => LiveService::fuerObjekte([$objekt])[$id] ?? null,
+            // Tank: Sensor, letzte Peilungen und Betankungen, was der Betrachter darf.
+            'tank'        => AnlagenService::elektrisch((string) $objekt['art']) ? null : TankService::panelDaten($objekt),
             'schaltbar'   => LiveService::schaltbar([$objekt]),
             'darf'        => Zugriff::darfBearbeiten($objekt),
             'darf_statistik' => Auth::can('statistik.view'),
@@ -324,10 +345,17 @@ final class KarteController extends Controller
             // Was sich hier einsetzen ließe – für den Aufbau-Modus.
             'inventar_frei' => Zugriff::darfBearbeiten($objekt) && Auth::can('datenquellen.view') ? array_values(array_map(static fn ($i) => [
                 'id' => (int) $i['id'], 'kennung' => $i['kennung'], 'typ' => $i['typ'], 'art' => $i['art'],
+                // Tanksensor: das Messprinzip entscheidet, welches Einbaumaß gefragt ist.
+                'prinzip' => $i['art'] === 'tanksensor' ? (string) ($i['eigenschaften']['prinzip'] ?? '') : null,
                 'passend' => $i['art'] === 'verteilung' && trim((string) $i['vorlage_modell']) === trim((string) $objekt['modell']),
                 'woanders' => $i['einsatz'] !== null ? (string) ($i['einsatz']['anlage_name'] ?? $i['einsatz']['objekt_name']) : null,
             ], array_filter(InventarService::fuerBetrachter(InventarService::liste()), static fn ($i) => $i['zustand'] !== 'defekt' && (int) ($i['einsatz']['objekt_id'] ?? 0) !== $id
-                && ($i['art'] === 'zwischenstecker' || $objekt['art'] === 'verteilung')))) : [],
+                // Zwischenstecker an jede elektrische Anlage, Verteiler nur in eine Verteilung, Tanksensoren nur in einen Tank.
+                && match ($i['art']) {
+                    'zwischenstecker' => AnlagenService::elektrisch((string) $objekt['art']),
+                    'tanksensor'      => $objekt['art'] === 'tank',
+                    default           => $objekt['art'] === 'verteilung',
+                }))) : [],
         ]);
     }
 
@@ -351,7 +379,8 @@ final class KarteController extends Controller
                 $l[$ende . '_anschluss'] = null;
                 $l[$ende . '_anschluss_id'] = null;
             }
-            $enden[$ende] = $objektId === null || !$sieht[$ende] ? [] : array_values(array_map(static fn ($a) => [
+            // Ein Kraftstoffschlauch hat keine Anschlüsse – nur Tank und Generator.
+            $enden[$ende] = $objektId === null || !$sieht[$ende] || $l['art'] === 'kraftstoff' ? [] : array_values(array_map(static fn ($a) => [
                 'id' => (int) $a['id'], 'text' => $a['bezeichnung'] . ' · ' . $a['typ_name'] . ($a['leitung'] !== null ? ' (belegt)' : ''),
                 'frei' => $a['leitung'] === null,
             ], array_filter(AnlagenService::anschluesse((int) $objektId), static fn ($a) => $a['richtung'] === $richtung)));
@@ -366,7 +395,8 @@ final class KarteController extends Controller
             'belastbarkeit' => $l['belastbarkeit_a'], 'anzahl' => (int) $l['anzahl'], 'modell' => $l['modell'],
             'notizen' => (string) ($l['notizen'] ?? ''), 'hinweise' => $l['hinweise'],
         ], 'enden' => $enden, 'darf' => Auth::can('leitungen.manage')
-            && $this->darfLeitung((int) Database::scalar('SELECT site_id FROM floors WHERE id = ?', [(int) $l['floor_id']]), [$l['von_objekt_id'], $l['zu_objekt_id']])]);
+            && $this->darfLeitung((int) Database::scalar('SELECT site_id FROM floors WHERE id = ?', [(int) $l['floor_id']]), [$l['von_objekt_id'], $l['zu_objekt_id']],
+                $l['art'] === 'kraftstoff')]);
     }
 
     // ------------------------------------------------------------ Schreiben
@@ -460,17 +490,28 @@ final class KarteController extends Controller
         }
         // Eine vorhandene Leitung ändert, wer an ihren bisherigen Enden
         // bearbeiten darf; eine neue, wer es an einem ihrer neuen Enden darf.
-        $enden = $alt !== null ? [$alt['von_objekt_id'], $alt['zu_objekt_id']] : [$request->int('von_objekt_id'), $request->int('zu_objekt_id')];
-        if (!$this->darfLeitung((int) $etage['site_id'], $enden)) {
-            $this->json(['ok' => false, 'message' => 'Hier darfst du keine Kabel zeichnen oder ändern.'], 403);
+        // Ein Kraftstoffschlauch: an allen Enden, bisherigen wie neuen.
+        $neueEnden = [$request->int('von_objekt_id'), $request->int('zu_objekt_id')];
+        $enden = $alt !== null ? [$alt['von_objekt_id'], $alt['zu_objekt_id']] : $neueEnden;
+        $schlauch = $request->str('art') === 'kraftstoff' || ($alt['art'] ?? '') === 'kraftstoff';
+        if (!$this->darfLeitung((int) $etage['site_id'], $enden, $schlauch) || ($schlauch && !$this->darfLeitung((int) $etage['site_id'], $neueEnden, true))) {
+            $this->json(['ok' => false, 'message' => $schlauch
+                ? 'Einen Kraftstoffschlauch zieht, wer an Tank und Generator bearbeiten darf.'
+                : 'Hier darfst du keine Kabel zeichnen oder ändern.'], 403);
             return;
         }
-        foreach (['von_objekt_id', 'zu_objekt_id'] as $feld) {
-            $objektId = $request->int($feld);
+        // Neue Enden stehen auf dieser Etage – sonst verbände man über den
+        // eigenen Plan zwei Anlagen eines fremden Standorts.
+        $bisher = $alt !== null ? [(int) $alt['von_objekt_id'], (int) $alt['zu_objekt_id']] : [];
+        foreach ($neueEnden as $objektId) {
             if ($objektId > 0) {
                 $objekt = AnlagenService::find($objektId);
                 if ($objekt === null || !Zugriff::siehtObjekt($objekt)) {
                     $this->json(['ok' => false, 'message' => 'Ein Kabelende liegt an einer nicht freigegebenen Anlage.'], 403);
+                    return;
+                }
+                if ((int) ($objekt['floor_id'] ?? 0) !== (int) $etage['id'] && !in_array($objektId, $bisher, true)) {
+                    $this->json(['ok' => false, 'message' => 'Ein Kabelende liegt an einer Anlage auf einer anderen Etage.'], 403);
                     return;
                 }
             }
@@ -487,7 +528,7 @@ final class KarteController extends Controller
     public function leitungVerlauf(Request $request): void
     {
         $l = $this->leitungMitStandort($request->int('id'));
-        if ($l === null || !$this->darfLeitung((int) $l['site_id'], [$l['von_objekt_id'], $l['zu_objekt_id']])) {
+        if ($l === null || !$this->darfLeitung((int) $l['site_id'], [$l['von_objekt_id'], $l['zu_objekt_id']], $l['art'] === 'kraftstoff')) {
             $this->json(['ok' => false, 'message' => 'Diese Leitung darfst du nicht ändern.'], 403);
             return;
         }
@@ -498,15 +539,18 @@ final class KarteController extends Controller
     public function leitungEnde(Request $request): void
     {
         $l = $this->leitungMitStandort($request->int('id'));
-        if ($l === null || !$this->darfLeitung((int) $l['site_id'], [$l['von_objekt_id'], $l['zu_objekt_id']])) {
+        $schlauch = ($l['art'] ?? '') === 'kraftstoff';
+        if ($l === null || !$this->darfLeitung((int) $l['site_id'], [$l['von_objekt_id'], $l['zu_objekt_id']], $schlauch)) {
             $this->json(['ok' => false, 'message' => 'Diese Leitung darfst du nicht ändern.'], 403);
             return;
         }
         $objektId = $request->int('objekt_id') ?: null;
         if ($objektId !== null) {
             $objekt = AnlagenService::find($objektId);
-            if ($objekt === null || !Zugriff::siehtObjekt($objekt) || (int) $objekt['floor_id'] !== (int) $l['floor_id']) {
-                $this->json(['ok' => false, 'message' => 'An diese Anlage lässt sich das Kabel nicht anschließen.'], 403);
+            if ($objekt === null || !Zugriff::siehtObjekt($objekt) || (int) $objekt['floor_id'] !== (int) $l['floor_id']
+                || ($schlauch && !$this->darfLeitung((int) $l['site_id'], [$objektId], true))) {
+                $this->json(['ok' => false, 'message' => $schlauch ? 'An diese Anlage darfst du den Schlauch nicht anschließen.'
+                    : 'An diese Anlage lässt sich das Kabel nicht anschließen.'], 403);
                 return;
             }
         }
@@ -516,7 +560,7 @@ final class KarteController extends Controller
     public function leitungLoeschen(Request $request): void
     {
         $l = $this->leitungMitStandort($request->int('id'));
-        if ($l === null || !$this->darfLeitung((int) $l['site_id'], [$l['von_objekt_id'], $l['zu_objekt_id']])) {
+        if ($l === null || !$this->darfLeitung((int) $l['site_id'], [$l['von_objekt_id'], $l['zu_objekt_id']], $l['art'] === 'kraftstoff')) {
             $this->json(['ok' => false, 'message' => 'Diese Leitung darfst du nicht löschen.'], 403);
             return;
         }

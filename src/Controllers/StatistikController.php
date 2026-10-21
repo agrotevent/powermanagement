@@ -68,6 +68,16 @@ final class StatistikController extends Controller
         foreach ($gewaehlt as $id) {
             $m = $alle[$id];
             $fenster = MesspunktService::fenster($m, $m['objekt']);
+            if ($m['rolle'] === 'fuellstand') {
+                // Ein Tanksensor misst keinen Strom: sein Verlauf kommt in Litern
+                // (mit der jeweiligen Kennlinie) von der Tankseite.
+                $auswahl[] = [
+                    'id' => $id, 'titel' => $m['titel'], 'geraet' => $m['geraet'], 'kanal' => $m['kanal'], 'rolle' => $m['rolle'],
+                    'objekt' => $m['objekt'], 'fenster' => Zugriff::beschreiben($fenster),
+                    'teile' => Zugriff::begrenzen($fenster, $von, min($bis, time())), 'kennzahlen' => null, 'energie' => [],
+                ];
+                continue;
+            }
             $auswahl[] = [
                 'id'       => $id,
                 'titel'    => $m['titel'],
@@ -91,7 +101,8 @@ final class StatistikController extends Controller
             'vorgabe'     => $vorgabe,
             'auswertung'  => MesspunktService::auswertung(),
             'stylesheets' => ['/assets/vendor/uplot/uPlot.min.css'],
-            'scripts'     => ['/assets/vendor/uplot/uPlot.iife.min.js', '/assets/js/live.js', '/assets/js/statistik.js'],
+            // tank.js: Verbrauch je Tag eines Tanksensors
+            'scripts'     => ['/assets/vendor/uplot/uPlot.iife.min.js', '/assets/js/live.js', '/assets/js/statistik.js', '/assets/js/tank.js'],
         ]);
     }
 
@@ -142,7 +153,8 @@ final class StatistikController extends Controller
         $daten = [];
         foreach (array_map('intval', $request->arr('mp')) as $id) {
             $m = $alle[$id] ?? null;
-            if ($m === null) {
+            // Ein Tanksensor hat seine eigene CSV (Tankseite) – Strom misst er nicht.
+            if ($m === null || $m['rolle'] === 'fuellstand') {
                 continue;
             }
             $fenster = MesspunktService::fenster($m, $m['objekt']);
@@ -168,6 +180,11 @@ final class StatistikController extends Controller
                 $zeile[] = isset($werte[$s]) ? str_replace('.', ',', (string) round((float) $werte[$s], 3)) : '';
             }
             $zeilen[] = implode(';', $zeile);
+        }
+        // Die Messwerte kamen aus der InfluxDB, ohne Sitzungssperre – vielleicht
+        // liegt das Gerät inzwischen beim Kunden.
+        if ($this->kundenmodusSperrt()) {
+            return;
         }
         Audit::log('statistik.csv', 'messpunkte', implode(',', $request->arr('mp')), ['von' => Zeit::iso($von), 'bis' => Zeit::iso($bis)]);
         $name = 'messwerte-' . date('Ymd-Hi', $von) . '-' . date('Ymd-Hi', $bis) . '.csv';
