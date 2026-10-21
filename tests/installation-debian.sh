@@ -420,7 +420,9 @@ update_starten() {
 # letzte Abruf älter als 60 s ist – mit „konsole“ auch darauf warten.
 abstand_abwarten() {
     local bis=0 t jetzt
-    t="$(sed -n 's/^aktualisieren \([0-9][0-9]*\).*/\1/p' /var/lib/powermanagement/update/zeiten 2>/dev/null | head -n 1)"
+    # Vor dem ersten Aktualisieren über den Dienst gibt es zeiten noch nicht –
+    # sed endet dann mit 2, und set -o pipefail bräche das ganze Skript ab.
+    t="$(sed -n 's/^aktualisieren \([0-9][0-9]*\).*/\1/p' /var/lib/powermanagement/update/zeiten 2>/dev/null | head -n 1 || true)"
     [[ -n "$t" ]] && bis=$((t + 125))
     if [[ "${1:-}" == konsole ]]; then
         t="$(stat -c %Y "$ZIEL/.git/FETCH_HEAD" 2>/dev/null || echo 0)"
