@@ -9,9 +9,10 @@ declare(strict_types=1);
  * ohne fremde Vorgeschichte; Schalt-Freigaben für einen Kanal gelten nur für
  * ihn; am Standort ändern braucht „bearbeiten“; Schlüssel aus dem Repository
  * werden keine Pfade; Namen brechen kein Line Protocol; CSV ohne Formeln
- * (auch die des Tanks); nur http(s); kein öffentlicher Schlüssel;
- * PDF-Werkzeuge hängen nicht; der Tankverlauf verrät die Abfrage an die
- * InfluxDB nur der Messtechnik.
+ * (auch die des Tanks und sein Protokoll mit Lieferscheinen); nur http(s);
+ * kein öffentlicher Schlüssel; PDF-Werkzeuge hängen nicht; der Tankverlauf
+ * verrät die Abfrage an die InfluxDB nur der Messtechnik; eine Kennlinie von
+ * Hand nimmt nur Anker und Steigung als endliche Zahlen.
  *
  * Die Prüfungen über HTTP (Weiterleitungen, Sitzung, Token, Benutzer-
  * verwaltung) stehen in web.php.
@@ -203,6 +204,18 @@ try {
     $csv = $aufruf('csv', ['zeitraum' => '6h']);
     pruefe(str_contains($csv, '"\'=SUMME(A1:A9)"') && !str_contains($csv, ';"=SUMME') && substr_count($csv, "\r\n") > 10,
         'Tank-CSV: der Name des Sensors als Text, keine Formel');
+    $e = TankService::betankungSpeichern(AnlagenService::find($tank), ['liter' => '500', 'lieferschein' => '=SUMME(B1:B9)', 'notizen' => '@HYPERLINK("x")', 'kalibrieren' => false]);
+    $csv = $aufruf('csv', ['inhalt' => 'protokoll']);
+    pruefe($e['ok'] && str_contains($csv, '"\'=SUMME(B1:B9)"') && str_contains($csv, '"\'@HYPERLINK(""x"")"') && !str_contains($csv, ';"=SUMME') && !str_contains($csv, ';"@'),
+        'Protokoll-CSV: Lieferschein und Notiz als Text, keine Formel');
+    // Kennlinie von Hand: nur Anker und Steigung, nur endliche Zahlen
+    $fassungenVorher = (int) Database::scalar('SELECT COUNT(*) FROM tank_kennlinien WHERE objekt_id = ?', [$tank]);
+    foreach ([['roh_anker' => '2', 'mm_anker' => '20', 'mm_je_roh' => '150', 'roh_max' => '99'], ['roh_anker' => '2', 'mm_anker' => '20', 'mm_je_roh' => '1e999'],
+        ['roh_anker' => ['2'], 'mm_anker' => '20', 'mm_je_roh' => '150'], ['roh_anker' => 'NAN', 'mm_anker' => '20', 'mm_je_roh' => '150']] as $hand) {
+        $e = TankService::sensorVonHand(AnlagenService::find($tank), ['messpunkt' => $mp, 'sensor' => $hand], false);
+        pruefe(!$e['ok'], 'Kennlinie von Hand abgelehnt: ' . json_encode($hand) . ' – ' . $e['message']);
+    }
+    gleich((int) Database::scalar('SELECT COUNT(*) FROM tank_kennlinien WHERE objekt_id = ?', [$tank]), $fassungenVorher, '… keine Fassung daraus');
     $urlVorher = Config::get('influx.url');
     Config::set('app.demo', false);
     Config::set('influx.url', 'http://127.0.0.1:' . freierPort());

@@ -48,6 +48,36 @@ final class Session
         }
     }
 
+    /**
+     * Nach freigeben() doch noch etwas in die Sitzung schreiben, wenn das
+     * Warten vorbei ist: Die Sitzung wird kurz wieder geöffnet – dabei neu
+     * gelesen, was andere Anfragen inzwischen geschrieben haben, bleibt also
+     * erhalten –, $aenderung schreibt in $_SESSION, dann wird sie wieder
+     * freigegeben. Ist es inzwischen eine andere Sitzung oder ein anderer
+     * Benutzer (abgemeldet, abgelaufen), wird nichts geschrieben: false.
+     */
+    public static function nachtragen(callable $aenderung): bool
+    {
+        if (session_status() === PHP_SESSION_ACTIVE) {
+            $aenderung();
+            return true;
+        }
+        $id = session_id();
+        $benutzer = $_SESSION['user_id'] ?? null;
+        // Dieselbe Kennung wie vorhin, ohne das Cookie ein zweites Mal zu
+        // senden – und ohne eins für eine neue, leere Sitzung.
+        if ($id === '' || $id === false || session_status() !== PHP_SESSION_NONE || headers_sent() || !session_start(['use_cookies' => 0])) {
+            return false;
+        }
+        if (session_id() !== $id || ($_SESSION['user_id'] ?? null) !== $benutzer) {
+            session_abort();
+            return false;
+        }
+        $aenderung();
+        session_write_close();
+        return true;
+    }
+
     /** Hinter einem Reverse-Proxy kommt das Schema per Header. */
     public static function isHttps(): bool
     {

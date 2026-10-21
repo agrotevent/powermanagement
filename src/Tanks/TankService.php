@@ -14,6 +14,7 @@ use App\Services\PlanGeoService;
 use App\Support\Audit;
 use App\Support\Config;
 use App\Support\Database;
+use App\Support\Logger;
 use App\Support\Zeit;
 
 /**
@@ -45,6 +46,12 @@ final class TankService
 {
     /** Wie weit Live zurückschaut: Gen2 meldet einen Analogwert nur bei Änderung. */
     public const LIVE_FENSTER_S = 7 * 86400;
+
+    /** Eine Betankung wird frühestens 30 min nach dem Tanken ausgewertet – vorher fehlen die Werte danach. */
+    public const AUSWERTEN_NACH_S = 1800;
+
+    /** Wie weit eine Betankung zurückliegen darf. */
+    public const BETANKUNG_ZURUECK_S = 7 * 86400;
 
     /** Größen eines Verlaufs: Beschriftung und Einheit (Rohwert: Einheit des Felds). */
     public const GROESSEN = [
@@ -131,7 +138,8 @@ final class TankService
                 $wert = $eigenschaften[$k];
                 $zeilen[] = [
                     'beschriftung' => self::beschriftung($beschriftung),
-                    'wert'         => is_float($wert) || is_int($wert) ? self::zahl((float) $wert) : (string) $wert,
+                    // Zum Lesen auf 4 Stellen (ein gelernter Inhalt je mm hat 6) – das Formular zeigt alle.
+                    'wert'         => is_float($wert) || is_int($wert) ? self::zahl(round((float) $wert, 4)) : (string) $wert,
                     'einheit'      => $typ !== 'auswahl' ? (string) $zusatz : '',
                 ];
             }
@@ -170,6 +178,11 @@ final class TankService
             'fenster'     => $fenster,
             'fassungen'   => $vorlage ? [] : self::fassungenSichtbar($tank),
             'frueher'     => $frueher,
+            // Vor Ort: Protokoll, das Angebot aus zwei Peilungen, „Erweitert“ (rückwirkend nur ohne Datengrenze)
+            'ereignisse'  => $vorlage ? [] : self::ereignisse($tank),
+            'steigung'    => !$vorlage && $darfAendern ? self::steigungAngebot($tank) : null,
+            'rueckwirkend' => !$vorlage && $darfAendern && $fenster === null,
+            'nenn_l'      => TankRechnung::zahlLesen($eigenschaften['inhalt_l'] ?? null),
         ];
     }
 
@@ -182,7 +195,7 @@ final class TankService
         $r = $fassung['rechnung'];
         $teile = [(self::ANLAESSE[$fassung['anlass']] ?? $fassung['anlass']) . ' ' . Zeit::anzeige($fassung['ab'], 'd.m.Y H:i')];
         if (($r['tank']['liter_je_mm'] ?? null) !== null && ($r['sensor']['art'] ?? '') === 'linear') {
-            array_unshift($teile, self::zahl((float) $r['tank']['liter_je_mm']) . ' l/mm');
+            array_unshift($teile, self::zahl(round((float) $r['tank']['liter_je_mm'], 3)) . ' l/mm');
         }
         $teile[] = $fassung['geprueft'] ? 'geprüft' : ($fassung['anlass'] === 'einsatz' ? 'seit Einbau nicht gepeilt' : 'ungeprüft – bitte peilen');
         return implode(' · ', $teile);
@@ -572,6 +585,18 @@ final class TankService
     public static function ereignisse(array $tank, int $grenze = 50): array
     {
         $fenster = Zugriff::datenFenster($tank);
+        // Welche Ereignisse kalibriert haben, und ob ihre Fassung noch die
+        // jüngste ihres Messpunkts ist – nur dann lassen sie sich löschen.
+        $juengste = [];
+        $eigene = [];
+        foreach (Database::select('SELECT id, messpunkt_id, ereignis_id FROM tank_kennlinien WHERE objekt_id = ? ORDER BY id', [(int) $tank['id']]) as $f) {
+            $juengste[(int) $f['messpunkt_id']] = (int) $f['id'];
+            if ($f['ereignis_id'] !== null) {
+                $eigene[(int) $f['ereignis_id']][(int) $f['messpunkt_id']] = (int) $f['id'];
+            }
+        }
+        $einheiten = [];
+        $jetzt = time();
         $out = [];
         foreach (Database::select('SELECT * FROM tank_ereignisse WHERE objekt_id = ? ORDER BY zeit DESC, id DESC LIMIT 2000', [(int) $tank['id']]) as $e) {
             $ts = Zeit::ts((string) $e['zeit']);
@@ -579,11 +604,26 @@ final class TankService
                 continue;
             }
             $zahl = static fn (mixed $x): ?float => $x !== null ? (float) $x : null;
+            $mp = $e['messpunkt_id'] !== null ? (int) $e['messpunkt_id'] : null;
+            if ($mp !== null && !array_key_exists($mp, $einheiten)) {
+                $feld = self::fassungJetzt($mp, $ts)['rechnung']['feld'] ?? null;
+                $einheiten[$mp] = is_string($feld) ? (TankRechnung::ROHFELDER[$feld][1] ?? '') : '';
+            }
+            $fassungen = $eigene[(int) $e['id']] ?? [];
+            $ausgewertet = $e['roh_vor'] !== null && $e['roh_nach'] !== null;
             $eintrag = [
                 'id' => (int) $e['id'], 'art' => (string) $e['art'], 'zeit' => (string) $e['zeit'],
                 'liter' => $zahl($e['liter']), 'prozent' => $zahl($e['prozent']), 'hoehe_mm' => $zahl($e['hoehe_mm']), 'roh' => $zahl($e['roh']),
+                'roh_vor' => $zahl($e['roh_vor']), 'roh_nach' => $zahl($e['roh_nach']), 'roh_einheit' => $mp !== null ? $einheiten[$mp] : '',
                 'lieferschein' => (string) $e['lieferschein'], 'von' => (string) $e['von'], 'notizen' => (string) ($e['notizen'] ?? ''),
-                'messpunkt_id' => $e['messpunkt_id'] !== null ? (int) $e['messpunkt_id'] : null,
+                'messpunkt_id' => $mp,
+                // hat eine Fassung ergeben (kalibriert)
+                'fassung' => $fassungen !== [],
+                'loeschbar' => array_filter($fassungen, static fn (int $id, int $m): bool => ($juengste[$m] ?? 0) !== $id, ARRAY_FILTER_USE_BOTH) === [],
+                'ausgewertet' => $ausgewertet,
+                // Betankung mit Sensor, noch nicht ausgewertet: ab wann (30 min nach dem Tanken)
+                'auswerten_ab' => $e['art'] === 'betankung' && $mp !== null && !$ausgewertet ? Zeit::iso($ts + self::AUSWERTEN_NACH_S) : null,
+                'auswerten_jetzt' => $e['art'] === 'betankung' && $mp !== null && !$ausgewertet && $jetzt >= $ts + self::AUSWERTEN_NACH_S,
             ];
             $out[] = $eintrag + ['text' => self::ereignisText($eintrag)];
             if (count($out) >= $grenze) {
@@ -623,6 +663,8 @@ final class TankService
                 'kurz'      => (string) $sensor['sensor_kurz'],
                 'einsatz_id' => $darf && $sensor['einsatz_id'] !== null ? (int) $sensor['einsatz_id'] : null,
             ],
+            // Für die Peilung in %: ohne Nennvolumen geht nur Liter oder Peilstab.
+            'nenn_l'     => TankRechnung::zahlLesen(((array) $tank['eigenschaften'])['inhalt_l'] ?? null),
             'ereignisse' => array_map(static fn (array $e): array => ['art' => $e['art'], 'zeit' => Zeit::anzeige($e['zeit'], 'd.m. H:i'), 'text' => $e['text']],
                 self::ereignisse($tank, 3)),
             'darf'       => ['peilen' => $darf, 'betanken' => $darf, 'einsetzen' => $darf && Auth::can('datenquellen.view')],
@@ -664,6 +706,640 @@ final class TankService
     private static function zeitImFenster(int $ts, ?array $fenster): bool
     {
         return Zugriff::begrenzen($fenster, $ts, $ts + 1) !== [];
+    }
+
+    // ------------------------------------------------------------ Kalibrieren vor Ort
+
+    /**
+     * Peilung vor Ort: genau eine Angabe – Anzeige am Tank (prozent), Inhalt
+     * (liter) oder Peilstab (hoehe_mm). Zeit ist jetzt; den Rohwert nimmt der
+     * Server (rohJetzt), nie der Browser.
+     *
+     * Die Peilung steht immer im Protokoll. Mit Rohwert und Kennlinie wird sie
+     * zur Fassung „peilung“ (geprüft): Der Peilstab setzt den Anker, die
+     * Steigung bleibt; Anzeige oder Inhalt setzen ihn auf die Höhe dieses
+     * Inhalts – oder bestimmen, solange er unbekannt ist, den Inhalt je mm des
+     * Tanks (der dann in den Eigenschaften des Tanks steht).
+     *
+     * @param array<string,mixed> $daten liter | prozent | hoehe_mm, notizen
+     * @return array{ok:bool,message:string,id?:int,kalibriert?:bool,warnung?:bool}
+     */
+    public static function peilen(array $tank, array $daten): array
+    {
+        if (!Zugriff::darfBearbeiten($tank)) {
+            return ['ok' => false, 'message' => 'An diesem Tank darfst du nichts eintragen.'];
+        }
+        $eig = (array) $tank['eigenschaften'];
+        $nenn = TankRechnung::zahlLesen($eig['inhalt_l'] ?? null);
+        $nenn = $nenn !== null && $nenn > 0 ? $nenn : null;
+        $angaben = array_filter(array_intersect_key($daten, ['liter' => 1, 'prozent' => 1, 'hoehe_mm' => 1]),
+            static fn (mixed $w): bool => is_scalar($w) && trim((string) $w) !== '');
+        if (count($angaben) !== 1) {
+            return ['ok' => false, 'message' => 'Bitte genau eine Angabe: Anzeige (%), Inhalt (l) oder Peilstab (mm).'];
+        }
+        $art = (string) array_key_first($angaben);
+        $wert = TankRechnung::zahlLesen((string) $angaben[$art]);
+        if ($wert === null || $wert < 0) {
+            return ['ok' => false, 'message' => 'Die Peilung ist keine Zahl ab 0.'];
+        }
+        if ($art === 'prozent' && $nenn === null) {
+            return ['ok' => false, 'message' => 'Für eine Anzeige in % fehlt das Nennvolumen des Tanks – Inhalt in Litern oder Peilstab eintragen.'];
+        }
+        if ($wert > match ($art) { 'prozent' => 110.0, 'liter' => $nenn !== null ? 1.1 * $nenn : 100000.0, default => 5000.0 }) {
+            return ['ok' => false, 'message' => 'Die Peilung ist größer als der Tank.'];
+        }
+
+        $jetzt = gmdate('c');
+        $m = self::sensor((int) $tank['id']);
+        $roh = $m !== null ? self::rohJetzt($tank, $m) : null;
+        $ereignis = [
+            'objekt_id'    => (int) $tank['id'],
+            'messpunkt_id' => $m !== null ? (int) $m['id'] : null,
+            'art'          => 'peilung',
+            'zeit'         => $jetzt,
+            // Bei einer Anzeige in % steht der Inhalt daneben – er folgt aus dem Nennvolumen.
+            'liter'        => match ($art) { 'liter' => round($wert, 3), 'prozent' => round($wert / 100 * (float) $nenn, 3), default => null },
+            'prozent'      => $art === 'prozent' ? round($wert, 3) : null,
+            'hoehe_mm'     => $art === 'hoehe_mm' ? round($wert, 3) : null,
+            'roh'          => $roh !== null ? round($roh['roh'], 6) : null,
+            'lieferschein' => '',
+            'von'          => self::wer(),
+            'notizen'      => self::notiz($daten['notizen'] ?? null),
+            'created_at'   => $jetzt,
+        ];
+        $id = Database::insert('tank_ereignisse', $ereignis);
+        Audit::log('tank.peilung', 'objekt', (string) $tank['id'], [$art => round($wert, 3)]);
+        $angabe = self::angabeText($art, $wert);
+        $was = ($art === 'hoehe_mm' ? 'Peilstab ' : 'Peilung ') . $angabe;
+        $antwort = static fn (string $text, bool $kalibriert, bool $warnung = false): array
+            => ['ok' => true, 'message' => $text, 'id' => $id, 'kalibriert' => $kalibriert, 'warnung' => $warnung];
+
+        if ($m === null) {
+            return $antwort($was . ' eingetragen.', false);
+        }
+        if ($roh === null) {
+            return $antwort($was . ' eingetragen – der Sensor meldet keinen gültigen Wert, kalibriert wird nicht. '
+                . 'Bitte noch einmal peilen, sobald er meldet.', false, true);
+        }
+        $f = self::fassungJetzt((int) $m['id']);
+        if ($f === null) {
+            return $antwort($was . ' eingetragen – ohne Kennlinie (Sensordaten unvollständig) wird nicht kalibriert.', false, true);
+        }
+        $r = $f['rechnung'];
+        $rohText = self::rohText($roh, $r['feld']);
+        // Ein Rohwert, den die Kennlinie als Fehler wertet (Leitungsbruch,
+        // Totzone …), kalibriert nichts – die Peilung bleibt im Protokoll.
+        $jetztWert = TankRechnung::umrechnen($r, $roh['roh']);
+        if ($jetztWert['fehler'] !== null && $jetztWert['hoehe_mm'] === null && $jetztWert['liter'] === null && $r['sensor']['art'] === 'linear') {
+            return $antwort($was . ' eingetragen. ' . $jetztWert['fehler'] . ' (' . $rohText . ') – Peilung nur protokolliert.', false, true);
+        }
+        $erg = TankRechnung::peilen($r, $roh['roh'], [$art => $wert]);
+        if (isset($erg['fehler'])) {
+            return $antwort($was . ' eingetragen. ' . $erg['fehler'], false, true);
+        }
+        if (!isset($erg['rechnung'])) {
+            return $antwort($was . ' eingetragen. ' . (string) ($erg['hinweis'] ?? ''), false);
+        }
+        $neu = $erg['rechnung'];
+        $neu['herkunft']['text'] = 'Peilung ' . Zeit::anzeige($jetzt, 'd.m.Y H:i') . ': ' . $angabe . ' bei ' . $rohText;
+        self::fassungAnlegen($m, $neu, 'peilung', $jetzt, true, $id);
+        $text = $was . ' eingetragen und kalibriert (' . $rohText . ').';
+        if (isset($erg['liter_je_mm'])) {
+            // Was die Peilung über den Tank lernt, gehört zum Tank – auch der nächste Sensor rechnet damit.
+            AnlagenService::eigenschaftSetzen((int) $tank['id'], [
+                'liter_je_mm'          => $erg['liter_je_mm'],
+                'liter_je_mm_herkunft' => 'Peilung ' . Zeit::anzeige($jetzt, 'd.m.Y H:i') . ' (' . $angabe . ')',
+            ], true);
+            $text .= ' Inhalt je mm: ' . self::zahl(round($erg['liter_je_mm'], 3)) . ' l.';
+        }
+        if (self::steigungAngebot(AnlagenService::find((int) $tank['id']) ?? $tank) !== null) {
+            $text .= ' Mit einer früheren Peilung lässt sich jetzt auch die Steigung setzen (Protokoll auf der Tankseite).';
+        }
+        return $antwort($text, true);
+    }
+
+    /**
+     * Betankung eintragen: geliefert in Litern (laut Lieferschein), Ende des
+     * Tankens (leer = jetzt, höchstens 7 Tage zurück), Lieferschein, Notiz.
+     * Liegt das Ende mindestens 30 min zurück und soll gleich kalibriert
+     * werden (Vorgabe), folgt betankungAuswerten(); sonst zeigt das Protokoll
+     * den Knopf dafür.
+     *
+     * @param array<string,mixed> $daten liter, zeit, lieferschein, notizen, kalibrieren
+     * @return array{ok:bool,message:string,id?:int,kalibriert?:bool,warnung?:bool}
+     */
+    public static function betankungSpeichern(array $tank, array $daten): array
+    {
+        if (!Zugriff::darfBearbeiten($tank)) {
+            return ['ok' => false, 'message' => 'An diesem Tank darfst du nichts eintragen.'];
+        }
+        $nenn = TankRechnung::zahlLesen(((array) $tank['eigenschaften'])['inhalt_l'] ?? null);
+        $nenn = $nenn !== null && $nenn > 0 ? $nenn : null;
+        $liter = TankRechnung::zahlLesen(is_scalar($daten['liter'] ?? null) ? (string) $daten['liter'] : null);
+        if ($liter === null || $liter <= 0) {
+            return ['ok' => false, 'message' => 'Bitte die gelieferte Menge in Litern eintragen.'];
+        }
+        if ($liter > ($nenn !== null ? 1.5 * $nenn : 100000.0)) {
+            return ['ok' => false, 'message' => $nenn !== null
+                ? 'Mehr als das Anderthalbfache des Nennvolumens (' . self::liter($nenn) . ') – bitte die Menge prüfen.'
+                : 'Mehr als 100.000 l – bitte die Menge prüfen.'];
+        }
+        $jetzt = time();
+        $ts = self::zeitLesen($daten['zeit'] ?? null, $jetzt);
+        if ($ts === null) {
+            return ['ok' => false, 'message' => 'Das Ende des Tankens ist nicht lesbar.'];
+        }
+        if ($ts > $jetzt + 60) {
+            return ['ok' => false, 'message' => 'Das Ende des Tankens liegt in der Zukunft.'];
+        }
+        if ($ts < $jetzt - self::BETANKUNG_ZURUECK_S) {
+            return ['ok' => false, 'message' => 'Eine Betankung lässt sich höchstens 7 Tage zurück eintragen.'];
+        }
+        $ts = min($ts, $jetzt);
+        $lieferschein = trim(is_scalar($daten['lieferschein'] ?? null) ? (string) $daten['lieferschein'] : '');
+        if (mb_strlen($lieferschein) > 64) {
+            return ['ok' => false, 'message' => 'Die Nummer des Lieferscheins hat höchstens 64 Zeichen.'];
+        }
+        $m = self::sensorZu((int) $tank['id'], $ts);
+        $id = Database::insert('tank_ereignisse', [
+            'objekt_id'    => (int) $tank['id'],
+            'messpunkt_id' => $m !== null ? (int) $m['id'] : null,
+            'art'          => 'betankung',
+            'zeit'         => Zeit::iso($ts),
+            'liter'        => round($liter, 3),
+            'prozent'      => null, 'hoehe_mm' => null, 'roh' => null, 'roh_vor' => null, 'roh_nach' => null,
+            'lieferschein' => $lieferschein,
+            'von'          => self::wer(),
+            'notizen'      => self::notiz($daten['notizen'] ?? null),
+            'created_at'   => gmdate('c'),
+        ]);
+        Audit::log('tank.betankung', 'objekt', (string) $tank['id'], ['liter' => round($liter, 3), 'lieferschein' => $lieferschein]);
+        $text = 'Betankung ' . self::liter($liter) . ' (Ende ' . Zeit::anzeige(Zeit::iso($ts), 'd.m. H:i') . ') eingetragen.';
+        if ($m === null) {
+            return ['ok' => true, 'message' => $text . ' Ohne Tanksensor steht sie nur im Protokoll.', 'id' => $id, 'kalibriert' => false];
+        }
+        if (array_key_exists('kalibrieren', $daten) && !$daten['kalibrieren']) {
+            return ['ok' => true, 'message' => $text . ' Kalibrieren lässt sich daraus im Protokoll.', 'id' => $id, 'kalibriert' => false];
+        }
+        if ($jetzt < $ts + self::AUSWERTEN_NACH_S) {
+            return ['ok' => true, 'message' => $text . ' Kalibrieren geht ab ' . self::uhrzeit($ts + self::AUSWERTEN_NACH_S, $jetzt)
+                . ' – dann liegen Messwerte nach dem Tanken vor (Knopf im Protokoll).', 'id' => $id, 'kalibriert' => false];
+        }
+        $aus = self::betankungAuswerten($tank, $id, false);
+        return ['ok' => true, 'message' => $text . ' ' . $aus['message'], 'id' => $id, 'kalibriert' => !empty($aus['kalibriert']), 'warnung' => !$aus['ok']];
+    }
+
+    /**
+     * Kalibrieren aus einer Betankung: Im Fenster [Ende − 3 h, Ende + 1 h]
+     * sucht TankRechnung::anstieg() den Sprung in den Rohwerten des Sensors,
+     * der damals im Tank war (Median je Minute, im Datenfenster). Gelernt wird
+     * der **Inhalt je mm des Tanks**: Er geht in die Eigenschaften des Tanks
+     * und – als Fassung „betankung“ ab jetzt – in die Kennlinie des Sensors,
+     * der jetzt misst; deren Sensorteil bleibt. Weicht der Wert um mehr als
+     * 25 % vom bisherigen ab, nur mit $trotzdem.
+     *
+     * @return array{ok:bool,message:string,kalibriert?:bool,trotzdem?:bool}
+     */
+    public static function betankungAuswerten(array $tank, int $ereignisId, bool $trotzdem): array
+    {
+        if (!Zugriff::darfBearbeiten($tank)) {
+            return ['ok' => false, 'message' => 'An diesem Tank darfst du nichts eintragen.'];
+        }
+        $e = self::ereignisFinden($tank, $ereignisId, 'betankung');
+        if ($e === null) {
+            return ['ok' => false, 'message' => 'Diese Betankung gibt es an diesem Tank nicht.'];
+        }
+        if ($e['roh_vor'] !== null && $e['roh_nach'] !== null) {
+            return ['ok' => false, 'message' => 'Diese Betankung ist schon ausgewertet.'];
+        }
+        $ts = (int) Zeit::ts((string) $e['zeit']);
+        $jetzt = time();
+        if ($jetzt < $ts + self::AUSWERTEN_NACH_S) {
+            return ['ok' => false, 'message' => 'Kalibrieren geht ab ' . self::uhrzeit($ts + self::AUSWERTEN_NACH_S, $jetzt) . ' – dann liegen Messwerte nach dem Tanken vor.'];
+        }
+        $m = $e['messpunkt_id'] !== null
+            ? Database::first("SELECT * FROM messpunkte WHERE id = ? AND objekt_id = ? AND rolle = 'fuellstand'", [(int) $e['messpunkt_id'], (int) $tank['id']])
+            : null;
+        if ($m === null) {
+            return ['ok' => false, 'message' => 'Zur Zeit der Betankung war kein Tanksensor im Tank – sie steht nur im Protokoll.'];
+        }
+        $damals = self::fassungJetzt((int) $m['id'], $ts);
+        if ($damals === null) {
+            return ['ok' => false, 'message' => 'Zur Zeit der Betankung galt keine Kennlinie – aus den Rohwerten allein lässt sich nichts lernen.'];
+        }
+        // Die Füllhöhe rechnet der Sensorteil von damals; verglichen wird mit dem
+        // Inhalt je mm, den der Tank jetzt kennt.
+        $r = TankRechnung::mitTank($damals['rechnung'], TankRechnung::tankTeil((array) $tank['eigenschaften']));
+        $fehler = null;
+        $reihe = Messdaten::reihe('zustand', (string) $m['geraet'], (string) $m['kanal'], (string) $r['feld'], [], $ts - 3 * 3600, $ts + 3600,
+            MesspunktService::fenster($m, $tank), 60, 'median', $fehler);
+        if ($fehler !== null) {
+            Logger::info('Tank-Betankung auswerten: ' . $fehler);
+            return ['ok' => false, 'message' => 'Die Messdaten ließen sich gerade nicht abfragen – bitte später noch einmal.'];
+        }
+        $punkte = [];
+        foreach ($reihe['zeiten'] as $i => $ms) {
+            $w = $reihe['serien'][$r['feld']][$i] ?? null;
+            if ($w !== null) {
+                $punkte[] = [(int) $ms, (float) $w];
+            }
+        }
+        $sprung = TankRechnung::anstieg($punkte, $r);
+        if ($sprung === null) {
+            return ['ok' => false, 'message' => 'Kein deutlicher Anstieg um diese Zeit in den Messwerten – stimmt das Ende des Tankens?'];
+        }
+        // Der Verbrauch währenddessen (Generator am Schlauch) zählt erst mit Schritt 7 – bis dahin 0.
+        $erg = TankRechnung::betanken($r, $sprung['roh_vor'], $sprung['roh_nach'], (float) $e['liter'], $trotzdem);
+        if (isset($erg['fehler'])) {
+            return ['ok' => false, 'message' => $erg['fehler'], 'trotzdem' => isset($erg['abweichung']) && !isset($erg['rechnung'])];
+        }
+        // Rohwerte davor und danach ins Protokoll – die Betankung ist damit ausgewertet.
+        Database::execute('UPDATE tank_ereignisse SET roh_vor = ?, roh_nach = ? WHERE id = ?',
+            [round($sprung['roh_vor'], 6), round($sprung['roh_nach'], 6), $ereignisId]);
+        $einheit = TankRechnung::ROHFELDER[$r['feld']][1] ?? '';
+        $sprungText = 'Sprung ' . self::zahl(round($sprung['roh_vor'], 3)) . ' → ' . self::zahl(round($sprung['roh_nach'], 3)) . ($einheit !== '' ? ' ' . $einheit : '');
+        if (!isset($erg['liter_je_mm'])) {
+            return ['ok' => true, 'message' => 'Ausgewertet (' . $sprungText . '): ' . (string) ($erg['hinweis'] ?? ''), 'kalibriert' => false];
+        }
+        $wann = Zeit::anzeige((string) $e['zeit'], 'd.m.Y H:i');
+        AnlagenService::eigenschaftSetzen((int) $tank['id'], [
+            'liter_je_mm'          => $erg['liter_je_mm'],
+            'liter_je_mm_herkunft' => 'Betankung ' . $wann . ' (' . self::liter((float) $e['liter']) . ')',
+        ], true);
+        // Der Sensor, der jetzt misst, rechnet ab jetzt mit dem neuen Inhalt je mm.
+        $tankNeu = AnlagenService::find((int) $tank['id']) ?? $tank;
+        $lauf = self::sensor((int) $tank['id']);
+        $f = $lauf !== null ? self::fassungJetzt((int) $lauf['id']) : null;
+        if ($f !== null) {
+            $neu = TankRechnung::mitTank($f['rechnung'], TankRechnung::tankTeil((array) $tankNeu['eigenschaften']));
+            $neu['herkunft']['text'] = 'Betankung ' . $wann . ', ' . self::liter((float) $e['liter']) . ' laut Lieferschein'
+                . ((string) $e['lieferschein'] !== '' ? ' ' . $e['lieferschein'] : '');
+            if (TankRechnung::pruefen($neu) === null) {
+                self::fassungAnlegen($lauf, $neu, 'betankung', gmdate('c'), true, $ereignisId);
+            }
+        }
+        $abweichung = $erg['abweichung'] ?? null;
+        return ['ok' => true, 'kalibriert' => true, 'message' => 'Kalibriert: ' . self::zahl(round($erg['liter_je_mm'], 3)) . ' l je mm ('
+            . $sprungText . ($abweichung !== null ? ', ' . ($abweichung > 0 ? '+' : '') . self::zahl($abweichung) . ' % gegenüber bisher' : '') . ').'
+            . ' Der Verbrauch während des Tankens ist nicht abgezogen.'];
+    }
+
+    /**
+     * Eine Peilung oder Betankung löschen.
+     *
+     * Ohne eigene Fassung ist sie einfach weg. Hat sie kalibriert und ist ihre
+     * Fassung noch die jüngste ihres Messpunkts, gilt ab deren Beginn eine
+     * Fassung „zurueck“ – eine Kopie der vorigen –, und der Inhalt je mm des
+     * Tanks geht auf den Stand davor. Wurde danach schon neu kalibriert, wird
+     * abgelehnt: Die Regel „größte id gilt“ überdeckte sonst Späteres.
+     *
+     * @return array{ok:bool,message:string}
+     */
+    public static function ereignisLoeschen(array $tank, int $ereignisId): array
+    {
+        if (!Zugriff::darfBearbeiten($tank)) {
+            return ['ok' => false, 'message' => 'An diesem Tank darfst du nichts eintragen.'];
+        }
+        $e = self::ereignisFinden($tank, $ereignisId);
+        if ($e === null) {
+            return ['ok' => false, 'message' => 'Diesen Eintrag gibt es an diesem Tank nicht.'];
+        }
+        $eintrag = ['art' => (string) $e['art'], 'liter' => $e['liter'] !== null ? (float) $e['liter'] : null, 'prozent' => $e['prozent'] !== null ? (float) $e['prozent'] : null,
+            'hoehe_mm' => $e['hoehe_mm'] !== null ? (float) $e['hoehe_mm'] : null, 'lieferschein' => (string) $e['lieferschein']];
+        $was = self::ereignisText($eintrag) . ' vom ' . Zeit::anzeige((string) $e['zeit'], 'd.m.Y H:i');
+        // Erst alles prüfen, dann schreiben.
+        $plan = [];
+        $eigene = [];
+        foreach (Database::select('SELECT id, messpunkt_id FROM tank_kennlinien WHERE ereignis_id = ? AND objekt_id = ? ORDER BY id', [$ereignisId, (int) $tank['id']]) as $f) {
+            $eigene[(int) $f['messpunkt_id']][] = (int) $f['id'];
+        }
+        foreach ($eigene as $mp => $ids) {
+            if ((int) Database::scalar('SELECT MAX(id) FROM tank_kennlinien WHERE messpunkt_id = ?', [$mp]) !== max($ids)) {
+                return ['ok' => false, 'message' => 'Danach wurde schon neu kalibriert – über „Erweitert“ korrigieren.'];
+            }
+            $messpunkt = Database::first('SELECT * FROM messpunkte WHERE id = ?', [$mp]);
+            if ($messpunkt === null) {
+                continue;
+            }
+            // Die vorige gilt wieder: die mit der größten id vor der ersten dieses Ereignisses.
+            $alle = array_column(self::fassungen($mp), null, 'id');
+            $vorige = null;
+            foreach ($alle as $fid => $f) {
+                if ($fid < min($ids)) {
+                    $vorige = $f;
+                }
+            }
+            $erste = $alle[min($ids)] ?? null;
+            $letzte = $alle[max($ids)] ?? null;
+            if ($vorige === null || $erste === null || $letzte === null) {
+                return ['ok' => false, 'message' => 'Vor dieser Kalibrierung galt keine Kennlinie – über „Erweitert“ korrigieren.'];
+            }
+            $plan[] = [$messpunkt, $vorige, $erste['ab'], $letzte];
+        }
+        foreach ($plan as [$messpunkt, $vorige, $ab, $letzte]) {
+            $r = $vorige['rechnung'];
+            $r['herkunft']['text'] = 'Zurück auf den Stand vor ' . $was . ' (gelöscht)';
+            if (TankRechnung::pruefen($r) !== null) {
+                $r = $vorige['rechnung'];
+            }
+            // Die Kopie stammt aus demselben Ereignis wie die vorige – so lässt
+            // sich auch jenes später noch löschen.
+            self::fassungAnlegen($messpunkt, $r, 'zurueck', $ab, $vorige['geprueft'], $vorige['ereignis_id'], '');
+            // Hat die Kalibrierung den Inhalt je mm des Tanks gelernt, gilt wieder der vorige.
+            $vorher = $vorige['rechnung']['tank']['liter_je_mm'] ?? null;
+            if (($letzte['rechnung']['tank']['liter_je_mm'] ?? null) != $vorher) {
+                AnlagenService::eigenschaftSetzen((int) $tank['id'], [
+                    'liter_je_mm'          => $vorher,
+                    'liter_je_mm_herkunft' => $vorher !== null ? 'wie vor ' . mb_substr($was, 0, 150) : null,
+                ], true);
+            }
+        }
+        Database::execute('DELETE FROM tank_ereignisse WHERE id = ?', [$ereignisId]);
+        Audit::log('tank.ereignis_geloescht', 'objekt', (string) $tank['id'], ['art' => (string) $e['art']]);
+        return ['ok' => true, 'message' => $was . ' gelöscht.' . ($plan !== [] ? ' Die Kennlinie rechnet wieder wie davor.' : '')];
+    }
+
+    /**
+     * „Erweitert“: Anker und Steigung des laufenden Tanksensors von Hand – ab
+     * jetzt (Fassung „hand“) oder, nur mit unbegrenztem Datenfenster,
+     * rückwirkend für diesen Einbau (Fassung „rueckwirkend“ ab dem Einbau,
+     * im Audit vermerkt). Nur roh_anker, mm_anker und mm_je_roh; was sonst
+     * kommt, wird abgelehnt, ebenso alles, was pruefen() nicht besteht.
+     *
+     * @param array<string,mixed> $daten messpunkt (der laufende), sensor {roh_anker, mm_anker, mm_je_roh}, notizen
+     * @return array{ok:bool,message:string}
+     */
+    public static function sensorVonHand(array $tank, array $daten, bool $rueckwirkend): array
+    {
+        if (!Zugriff::darfBearbeiten($tank)) {
+            return ['ok' => false, 'message' => 'An diesem Tank darfst du nichts eintragen.'];
+        }
+        $m = self::sensor((int) $tank['id']);
+        if ($m === null) {
+            return ['ok' => false, 'message' => 'In diesem Tank misst gerade kein Tanksensor.'];
+        }
+        if ((int) ($daten['messpunkt'] ?? 0) !== (int) $m['id']) {
+            return ['ok' => false, 'message' => 'Der Tanksensor hat inzwischen gewechselt – bitte die Seite neu laden.'];
+        }
+        if ($rueckwirkend && Zugriff::datenFenster($tank) !== null) {
+            return ['ok' => false, 'message' => 'Rückwirkend ändern darf nur, wer alle Messdaten des Tanks sehen darf.'];
+        }
+        $f = self::fassungJetzt((int) $m['id']);
+        if ($f === null) {
+            return ['ok' => false, 'message' => 'Ohne Kennlinie gibt es nichts zu korrigieren – erst die Sensordaten am Tanksensor nachtragen.'];
+        }
+        if (!in_array($f['rechnung']['sensor']['art'], ['linear', 'roh'], true)) {
+            return ['ok' => false, 'message' => 'Das Gerät liefert den Füllstand selbst – Anker und Steigung gibt es dafür nicht.'];
+        }
+        $eingabe = $daten['sensor'] ?? null;
+        if (!is_array($eingabe) || array_diff(array_keys($eingabe), ['roh_anker', 'mm_anker', 'mm_je_roh']) !== []) {
+            return ['ok' => false, 'message' => 'Von Hand gehen nur Anker (Rohwert und Füllhöhe) und Steigung.'];
+        }
+        $werte = [];
+        foreach (['roh_anker' => 1e6, 'mm_anker' => 10000.0, 'mm_je_roh' => 1e6] as $k => $grenze) {
+            $w = TankRechnung::zahlLesen(is_scalar($eingabe[$k] ?? null) ? (string) $eingabe[$k] : null);
+            if ($w === null || abs($w) > $grenze) {
+                return ['ok' => false, 'message' => 'Anker und Steigung: bitte endliche Zahlen in sinnvoller Größe eintragen.'];
+            }
+            $werte[$k] = round($w, 6);
+        }
+        if ($werte['mm_je_roh'] == 0.0) {
+            return ['ok' => false, 'message' => 'Die Steigung ist nicht 0.'];
+        }
+        if ($werte['mm_anker'] < -1000) {
+            return ['ok' => false, 'message' => 'Die Füllhöhe am Anker liegt weit unter dem Boden.'];
+        }
+        $r = $f['rechnung'];
+        $r['sensor'] = array_merge($r['sensor'], ['art' => 'linear'], $werte);
+        $jetzt = gmdate('c');
+        $r['herkunft']['text'] = 'Von Hand ' . Zeit::anzeige($jetzt, 'd.m.Y H:i') . ($rueckwirkend ? ', rückwirkend für diesen Einbau' : '');
+        $fehler = TankRechnung::pruefen($r);
+        if ($fehler !== null) {
+            return ['ok' => false, 'message' => $fehler];
+        }
+        if ($r['sensor'] == $f['rechnung']['sensor'] && !$rueckwirkend) {
+            return ['ok' => true, 'message' => 'Anker und Steigung sind unverändert – keine neue Fassung.'];
+        }
+        $ab = $rueckwirkend ? (string) $m['gueltig_ab'] : $jetzt;
+        self::fassungAnlegen($m, $r, $rueckwirkend ? 'rueckwirkend' : 'hand', $ab, false, null, self::notiz($daten['notizen'] ?? null));
+        return ['ok' => true, 'message' => $rueckwirkend
+            ? 'Kennlinie von Hand gesetzt – rückwirkend ab dem Einbau (' . Zeit::anzeige($ab, 'd.m.Y H:i') . '). Ungeprüft, bis gepeilt ist.'
+            : 'Kennlinie von Hand gesetzt – ab jetzt, ungeprüft, bis gepeilt ist.'];
+    }
+
+    /**
+     * Zwei Peilungen im selben Einbau, mindestens 300 mm Füllhöhe
+     * auseinander: das Angebot „Steigung aus beiden Peilungen setzen“ – nach
+     * der zweiten, nie automatisch (TankRechnung::zweiPeilungen). Es gilt
+     * nur, solange die zweite Peilung die jüngste Kalibrierung ist. Zählen
+     * nur Peilungen mit Rohwert: mit dem Peilstab, oder mit Inhalt bzw.
+     * Anzeige, wenn der Inhalt je mm schon vorher bekannt war (sonst hätte
+     * diese Peilung ihn erst bestimmt).
+     *
+     * @return ?array{ereignis:int,alt:array{roh:float,hoehe_mm:float,zeit:string},neu:array{roh:float,hoehe_mm:float,zeit:string},mm_je_roh:float,bisher:float,abweichung:?float,warnung:?string,einheit:string,rechnung:array}
+     */
+    public static function steigungAngebot(array $tank): ?array
+    {
+        $m = self::sensor((int) $tank['id']);
+        $f = $m !== null ? self::fassungJetzt((int) $m['id']) : null;
+        if ($f === null || $f['anlass'] !== 'peilung' || $f['ereignis_id'] === null || $f['rechnung']['sensor']['art'] !== 'linear') {
+            return null;
+        }
+        $neuE = self::ereignisFinden($tank, (int) $f['ereignis_id'], 'peilung');
+        if ($neuE === null || $neuE['roh'] === null || (int) ($neuE['messpunkt_id'] ?? 0) !== (int) $m['id']) {
+            return null;
+        }
+        $alle = self::fassungen((int) $m['id']);
+        $neu = self::peilPunkt($neuE, $alle, $f['rechnung']['tank']);
+        if ($neu === null) {
+            return null;
+        }
+        $neuTs = (int) Zeit::ts((string) $neuE['zeit']);
+        $einbau = (int) Zeit::ts((string) $m['gueltig_ab']);
+        $fenster = Zugriff::datenFenster($tank);
+        $sensor = self::sensordaten($m['sensordaten'] ?? null);
+        $bezug = null;
+        if (TankRechnung::sensorPruefen($sensor) === null) {
+            [$teil] = TankRechnung::sensorTeil($sensor, (array) ($f['rechnung']['herkunft']['einbau'] ?? []), TankRechnung::dichte((array) $tank['eigenschaften']));
+            $bezug = $teil['art'] === 'linear' ? (float) $teil['mm_je_roh'] : null;
+        }
+        foreach (Database::select("SELECT * FROM tank_ereignisse WHERE objekt_id = ? AND messpunkt_id = ? AND art = 'peilung' AND roh IS NOT NULL AND id <> ?
+                                   ORDER BY zeit DESC, id DESC LIMIT 50", [(int) $tank['id'], (int) $m['id'], (int) $neuE['id']]) as $altE) {
+            $ts = Zeit::ts((string) $altE['zeit']);
+            if ($ts === null || $ts > $neuTs || $ts < $einbau || !self::zeitImFenster($ts, $fenster)) {
+                continue;
+            }
+            // Derselbe Aufbau: gleiche Sensordaten, gleicher Einbau, gleiche Dichte – sonst passen die Rohwerte nicht zusammen.
+            $damals = self::fassungJetzt((int) $m['id'], $ts);
+            if ($damals === null || !self::gleicherAufbau($damals['rechnung'], $f['rechnung'])) {
+                continue;
+            }
+            $alt = self::peilPunkt($altE, $alle, $f['rechnung']['tank']);
+            if ($alt === null) {
+                continue;
+            }
+            $zp = TankRechnung::zweiPeilungen($f['rechnung'], $alt, $neu, $bezug);
+            if ($zp === null || isset($zp['fehler'])) {
+                continue;
+            }
+            if (abs((float) $zp['mm_je_roh'] - (float) $f['rechnung']['sensor']['mm_je_roh']) < 1e-6) {
+                return null;    // schon gesetzt
+            }
+            return [
+                'ereignis'   => (int) $neuE['id'],
+                'alt'        => $alt + ['zeit' => (string) $altE['zeit']],
+                'neu'        => $neu + ['zeit' => (string) $neuE['zeit']],
+                'mm_je_roh'  => (float) $zp['mm_je_roh'],
+                'bisher'     => (float) $f['rechnung']['sensor']['mm_je_roh'],
+                'abweichung' => $zp['abweichung'],
+                'warnung'    => $zp['warnung'],
+                'einheit'    => TankRechnung::ROHFELDER[$f['rechnung']['feld']][1] ?? '',
+                'rechnung'   => $zp['rechnung'],
+            ];
+        }
+        return null;
+    }
+
+    /**
+     * Das Angebot übernehmen: Fassung „peilung“ ab jetzt mit der Steigung aus
+     * beiden Peilungen und dem Anker der jüngeren, geprüft.
+     *
+     * @return array{ok:bool,message:string}
+     */
+    public static function steigungSetzen(array $tank, int $ereignisId): array
+    {
+        if (!Zugriff::darfBearbeiten($tank)) {
+            return ['ok' => false, 'message' => 'An diesem Tank darfst du nichts eintragen.'];
+        }
+        $a = self::steigungAngebot($tank);
+        $m = self::sensor((int) $tank['id']);
+        if ($a === null || $m === null || $a['ereignis'] !== $ereignisId) {
+            return ['ok' => false, 'message' => 'Dafür gibt es gerade kein Angebot – inzwischen wurde neu gepeilt oder kalibriert.'];
+        }
+        $r = $a['rechnung'];
+        $r['herkunft']['text'] = 'Steigung aus den Peilungen ' . Zeit::anzeige($a['alt']['zeit'], 'd.m.Y H:i') . ' und ' . Zeit::anzeige($a['neu']['zeit'], 'd.m.Y H:i');
+        self::fassungAnlegen($m, $r, 'peilung', gmdate('c'), true, $ereignisId);
+        return ['ok' => true, 'warnung' => $a['warnung'] !== null, 'message' => 'Steigung gesetzt: ' . self::zahl(round($a['mm_je_roh'], 2)) . ' mm je '
+            . ($a['einheit'] !== '' ? $a['einheit'] : 'Rohwert') . ' (bisher ' . self::zahl(round($a['bisher'], 2)) . ').' . ($a['warnung'] !== null ? ' ' . $a['warnung'] : '')];
+    }
+
+    /** Ein Ereignis des Tanks – nur, wenn es im Datenfenster liegt. */
+    private static function ereignisFinden(array $tank, int $id, ?string $art = null): ?array
+    {
+        $e = Database::first('SELECT * FROM tank_ereignisse WHERE id = ? AND objekt_id = ?', [$id, (int) $tank['id']]);
+        $ts = $e !== null ? Zeit::ts((string) $e['zeit']) : null;
+        if ($e === null || $ts === null || ($art !== null && $e['art'] !== $art) || !self::zeitImFenster($ts, Zugriff::datenFenster($tank))) {
+            return null;
+        }
+        return $e;
+    }
+
+    /** Der Füllstand-Messpunkt, der zur Zeit $ts im Tank gemessen hat (der erste nach id). */
+    private static function sensorZu(int $tankId, int $ts): ?array
+    {
+        foreach (Database::select("SELECT * FROM messpunkte WHERE objekt_id = ? AND rolle = 'fuellstand' ORDER BY id", [$tankId]) as $m) {
+            $ab = Zeit::ts($m['gueltig_ab'] ?? null);
+            $bis = Zeit::ts($m['gueltig_bis'] ?? null);
+            if (($ab === null || $ab <= $ts) && ($bis === null || $bis > $ts)) {
+                return $m;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Rohwert und Füllhöhe einer Peilung für zwei Peilungen – oder null. Der
+     * Peilstab zählt immer; Inhalt oder Anzeige nur, wenn vor dieser Peilung
+     * der Inhalt je mm schon bekannt war.
+     *
+     * @param list<array<string,mixed>> $fassungen des Messpunkts
+     * @return ?array{roh:float,hoehe_mm:float}
+     */
+    private static function peilPunkt(array $e, array $fassungen, array $tankTeil): ?array
+    {
+        if ($e['hoehe_mm'] !== null) {
+            return ['roh' => (float) $e['roh'], 'hoehe_mm' => (float) $e['hoehe_mm']];
+        }
+        if ($e['liter'] === null) {
+            return null;
+        }
+        $ts = (int) Zeit::ts((string) $e['zeit']);
+        $vorher = null;
+        foreach ($fassungen as $f) {
+            if ($f['ab_ts'] <= $ts && $f['ereignis_id'] !== (int) $e['id'] && ($vorher === null || $f['id'] > $vorher['id'])) {
+                $vorher = $f;
+            }
+        }
+        if ($vorher === null || !TankRechnung::kalibriert($vorher['rechnung']) || ($vorher['rechnung']['tank']['form'] ?? '') === 'unbekannt') {
+            return null;
+        }
+        $h = TankRechnung::hoeheAusLiter($tankTeil, (float) $e['liter']);
+        return $h !== null ? ['roh' => (float) $e['roh'], 'hoehe_mm' => $h] : null;
+    }
+
+    /** Messen zwei Fassungen mit demselben Aufbau – Feld, Sensordaten, Einbau, Dichte? */
+    private static function gleicherAufbau(array $a, array $b): bool
+    {
+        $aufbau = static fn (array $r): array => [$r['feld'] ?? null, $r['herkunft']['sensor'] ?? null, $r['herkunft']['einbau'] ?? null,
+            $r['herkunft']['tank']['dichte_kg_l'] ?? null];
+        return $aufbau($a) == $aufbau($b);
+    }
+
+    /**
+     * Ende des Tankens aus dem Formular: leer = jetzt, „08:10“ = heute (lag
+     * die Uhrzeit heute noch nicht, gestern), sonst Datum und Uhrzeit in
+     * Ortszeit. Null, wenn nicht lesbar.
+     */
+    private static function zeitLesen(mixed $wert, int $jetzt): ?int
+    {
+        $text = is_scalar($wert) ? trim((string) $wert) : '';
+        if ($text === '' || $text === 'jetzt') {
+            return $jetzt;
+        }
+        if (preg_match('/^([01]?\d|2[0-3])[:.]([0-5]\d)$/', $text, $t) === 1) {
+            $heute = (new \DateTimeImmutable('@' . $jetzt))->setTimezone(Zeit::zone())->setTime((int) $t[1], (int) $t[2]);
+            return $heute->getTimestamp() > $jetzt + 60 ? $heute->modify('-1 day')->getTimestamp() : $heute->getTimestamp();
+        }
+        if (preg_match('/^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(:\d{2})?$/', $text) !== 1) {
+            return null;
+        }
+        return Zeit::ts(Zeit::ausEingabe($text));
+    }
+
+    /** „14:02“ heute, sonst „15.10. 14:02“ – in Ortszeit. */
+    private static function uhrzeit(int $ts, int $jetzt): string
+    {
+        $zone = Zeit::zone();
+        $tag = static fn (int $t): string => (new \DateTimeImmutable('@' . $t))->setTimezone($zone)->format('Y-m-d');
+        return Zeit::anzeige(Zeit::iso($ts), $tag($ts) === $tag($jetzt) ? 'H:i' : 'd.m. H:i');
+    }
+
+    /** „Rohwert 7,5 V von 14:02“. */
+    private static function rohText(array $roh, string $feld): string
+    {
+        $einheit = TankRechnung::ROHFELDER[$feld][1] ?? '';
+        return 'Rohwert ' . self::zahl(round((float) $roh['roh'], 3)) . ($einheit !== '' ? ' ' . $einheit : '')
+            . ' von ' . self::uhrzeit(intdiv((int) $roh['zeit'], 1000), time());
+    }
+
+    /** „60 %“, „1.800 l“, „650 mm“. */
+    private static function angabeText(string $art, float $wert): string
+    {
+        return match ($art) {
+            'prozent' => self::zahl(round($wert, 1)) . ' %',
+            'liter'   => self::liter($wert),
+            default   => self::zahl(round($wert)) . ' mm',
+        };
+    }
+
+    private static function wer(): string
+    {
+        return mb_substr((string) (Auth::user()['username'] ?? 'system'), 0, 64);
+    }
+
+    private static function notiz(mixed $text): string
+    {
+        return mb_substr(trim(is_scalar($text) ? (string) $text : ''), 0, 500);
     }
 
     // ------------------------------------------------------------ Sensor und Fassungen

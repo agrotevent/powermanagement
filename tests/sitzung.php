@@ -11,7 +11,8 @@ declare(strict_types=1);
  * Geprüft wird, dass die Live-Endpunkte (Anlage, Dashboard, Karte, Bereiche,
  * Tank live und Tankverlauf) die Sitzung freigeben, bevor sie warten: Speichern und Seitenaufrufe
  * kommen durch, während mehrere langsame Live-Abfragen laufen, und die
- * Live-Abfragen liefern trotzdem ihre Antwort.
+ * Live-Abfragen liefern trotzdem ihre Antwort. Ebenso die Peilung eines
+ * Tanks, die den Rohwert liest – ihre Meldung kommt danach trotzdem an.
  *
  * Eigene Instanz (POWERMANAGEMENT_CONFIG, eigene SQLite-Datenbank mit dem
  * Demo-Gelände, dann ohne Demo-Modus) und eine InfluxDB-Attrappe, die jede
@@ -243,6 +244,35 @@ foreach ([
         pruefe($l['status'] === 200 && is_array($l['json']), $name . ': Abfrage liefert trotzdem ihre Antwort');
     }
 }
+
+// ------------------------------------------------------------ Tank: Peilung wartet auf den Rohwert, nicht die Sitzung
+// Den Rohwert einer Peilung liest der Server aus der InfluxDB; die Meldung
+// danach kommt über Session::nachtragen trotzdem an.
+$mehrfach = curl_multi_init();
+$peilung = griff($basis . '/anlagen/' . $tank . '/tank/peilung', $dose, ['_token' => $token, 'art' => 'hoehe_mm', 'wert' => '650']);
+curl_multi_add_handle($mehrfach, $peilung);
+$bis = microtime(true) + 0.6;
+do {
+    curl_multi_exec($mehrfach, $laufend);
+    curl_multi_select($mehrfach, 0.05);
+} while (microtime(true) < $bis);
+$start = microtime(true);
+$profil = holen($basis . '/profil', $dose);
+$dauer = microtime(true) - $start;
+do {
+    curl_multi_exec($mehrfach, $laufend);
+    curl_multi_select($mehrfach, 0.1);
+} while ($laufend > 0);
+$peilStatus = (int) curl_getinfo($peilung, CURLINFO_RESPONSE_CODE);
+curl_multi_remove_handle($mehrfach, $peilung);
+curl_close($peilung);
+curl_multi_close($mehrfach);
+gleich([$profil['status'], $peilStatus], [200, 302], 'Peilung: andere Seite, während der Rohwert gelesen wird');
+pruefe($dauer < 2.0, sprintf('Peilung hält die Sitzung nicht (%.1f s)', $dauer));
+pruefe($abfrage("SELECT id FROM tank_ereignisse WHERE objekt_id = ? AND art = 'peilung' AND hoehe_mm = 650", [$tank]) !== [], 'Peilung eingetragen');
+file_put_contents($verzoegerung, '0');
+$seite = holen($basis . '/anlagen/' . $tank, $dose);
+pruefe($seite['status'] === 200 && str_contains($seite['text'], 'Peilstab 650 mm eingetragen'), 'die Meldung zur Peilung kommt nach dem Warten in die Sitzung');
 
 // Die Sitzung bleibt dabei gültig: nach allem noch angemeldet.
 file_put_contents($verzoegerung, '0');

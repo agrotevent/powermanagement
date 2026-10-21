@@ -7,6 +7,7 @@ use App\Auth\Auth;
 use App\Auth\Zugriff;
 use App\Services\AnlagenService;
 use App\Support\Audit;
+use App\Support\Flash;
 use App\Support\Logger;
 use App\Support\Request;
 use App\Support\Response;
@@ -17,12 +18,16 @@ use App\Tanks\TankRechnung;
 use App\Tanks\TankService;
 
 /**
- * Tanks: Verlauf und CSV des Füllstands.
+ * Tanks: Verlauf und CSV des Füllstands, Peilung, Betankung und Kennlinie
+ * vor Ort.
  *
- * Das Recht prüft die Route (statistik.view bzw. statistik.export); hier
- * wird jede ID einzeln geprüft: der Tank (sichtbar, kein Katalog-Typ) und
- * ein gewählter Messpunkt (Füllstand dieses Tanks). Gelesen wird über
- * TankService, und der liest nur über Messdaten – im Datenfenster.
+ * Das Recht prüft die Route (statistik.view bzw. statistik.export zum
+ * Lesen, anlagen.manage zum Eintragen); hier wird jede ID einzeln geprüft:
+ * der Tank (sichtbar, kein Katalog-Typ; zum Eintragen mit „bearbeiten“),
+ * ein gewählter Messpunkt (Füllstand dieses Tanks), ein Ereignis (gehört
+ * zum Tank, im Datenfenster – das prüft TankService). Gelesen wird über
+ * TankService, und der liest nur über Messdaten – im Datenfenster. Den
+ * Rohwert einer Peilung oder Betankung nimmt der Server, nie der Browser.
  */
 final class TankController extends Controller
 {
@@ -96,6 +101,10 @@ final class TankController extends Controller
             return;
         }
         Session::freigeben();
+        if ($request->str('inhalt') === 'protokoll') {
+            $this->protokollCsv($tank);
+            return;
+        }
         $mp = $this->messpunkt($request, $tank);
         if ($mp === false) {
             Response::notFound('Dieser Messpunkt gehört nicht zu diesem Tank.');
@@ -129,6 +138,137 @@ final class TankController extends Controller
         header('Content-Type: text/csv; charset=utf-8');
         header('Content-Disposition: attachment; filename="tank-' . (int) $tank['id'] . '-' . date('Ymd-Hi', $von) . '-' . date('Ymd-Hi', $bis) . '.csv"');
         echo "\xEF\xBB\xBF" . implode("\r\n", $zeilen) . "\r\n";
+    }
+
+    /** CSV des Protokolls: Peilungen und Betankungen im Datenfenster, Texte gegen Formeln abgesichert. */
+    private function protokollCsv(array $tank): void
+    {
+        $zahl = static fn (?float $w, int $n): string => $w === null ? '' : str_replace('.', ',', (string) round($w, $n));
+        $zeilen = [implode(';', array_map([StatistikController::class, 'csvFeld'],
+            ['Zeit', 'Art', 'Inhalt [l]', 'Anzeige [%]', 'Peilstab [mm]', 'Rohwert', 'Rohwert davor', 'Rohwert danach', 'Lieferschein', 'von', 'Notiz']))];
+        foreach (array_reverse(TankService::ereignisse($tank, 2000)) as $e) {
+            $zeilen[] = implode(';', [
+                Zeit::anzeige($e['zeit'], 'Y-m-d H:i:s'),
+                StatistikController::csvFeld($e['art'] === 'betankung' ? 'Betankung' : 'Peilung'),
+                $zahl($e['liter'], 1), $zahl($e['prozent'], 1), $zahl($e['hoehe_mm'], 0),
+                $zahl($e['roh'], 4), $zahl($e['roh_vor'], 4), $zahl($e['roh_nach'], 4),
+                StatistikController::csvFeld($e['lieferschein']),
+                StatistikController::csvFeld($e['von']),
+                StatistikController::csvFeld($e['notizen']),
+            ]);
+        }
+        Audit::log('tank.csv', 'objekt', (string) $tank['id'], ['protokoll' => true]);
+        header('Content-Type: text/csv; charset=utf-8');
+        header('Content-Disposition: attachment; filename="tank-' . (int) $tank['id'] . '-protokoll.csv"');
+        echo "\xEF\xBB\xBF" . implode("\r\n", $zeilen) . "\r\n";
+    }
+
+    /** Peilung vor Ort: genau eine Angabe – Anzeige (%), Inhalt (l) oder Peilstab (mm); Zeit jetzt. */
+    public function peilung(Request $request, array $params): void
+    {
+        $tank = $this->tank($request, $params, true);
+        if ($tank === null) {
+            return;
+        }
+        // Das Formular schickt Art und Wert, das Kartenpanel ebenso; sonst je ein Feld.
+        $art = $request->str('art');
+        $daten = in_array($art, ['prozent', 'liter', 'hoehe_mm'], true)
+            ? [$art => $request->str('wert')]
+            : ['prozent' => $request->str('prozent'), 'liter' => $request->str('liter'), 'hoehe_mm' => $request->str('hoehe_mm')];
+        $daten['notizen'] = $request->str('notizen');
+        // Den Rohwert liest der Server aus der InfluxDB – solange nicht die Sitzung halten.
+        Session::freigeben();
+        $this->fertig($request, $tank, TankService::peilen($tank, $daten));
+    }
+
+    /** Betankung eintragen – und, liegt sie 30 min zurück, gleich auswerten. */
+    public function betankung(Request $request, array $params): void
+    {
+        $tank = $this->tank($request, $params, true);
+        if ($tank === null) {
+            return;
+        }
+        $daten = [
+            'liter' => $request->str('liter'), 'zeit' => $request->str('zeit'), 'lieferschein' => $request->str('lieferschein'),
+            'notizen' => $request->str('notizen'),
+            // Vorgabe an: Das Formular schickt 0 vor dem Haken, ein Aufruf ohne Feld kalibriert.
+            'kalibrieren' => $request->input('kalibrieren') === null || $request->bool('kalibrieren'),
+        ];
+        Session::freigeben();
+        $this->fertig($request, $tank, TankService::betankungSpeichern($tank, $daten));
+    }
+
+    /** „Kalibrieren aus dieser Betankung“ – ein POST; ein GET schreibt nie. */
+    public function betankungAuswerten(Request $request, array $params): void
+    {
+        $tank = $this->tank($request, $params, true);
+        if ($tank === null) {
+            return;
+        }
+        Session::freigeben();
+        $this->fertig($request, $tank, TankService::betankungAuswerten($tank, $request->int('ereignis_id'), $request->bool('trotzdem')));
+    }
+
+    /** Eine Peilung oder Betankung löschen (§6.6: nur, solange danach nicht neu kalibriert wurde). */
+    public function ereignisLoeschen(Request $request, array $params): void
+    {
+        $tank = $this->tank($request, $params, true);
+        if ($tank === null) {
+            return;
+        }
+        $this->fertig($request, $tank, TankService::ereignisLoeschen($tank, $request->int('ereignis_id')));
+    }
+
+    /** „Erweitert“: Anker und Steigung von Hand, ab jetzt oder rückwirkend für diesen Einbau. */
+    public function kennlinie(Request $request, array $params): void
+    {
+        $tank = $this->tank($request, $params, true);
+        if ($tank === null) {
+            return;
+        }
+        $this->fertig($request, $tank, TankService::sensorVonHand($tank, [
+            'messpunkt' => $request->int('messpunkt'),
+            'sensor'    => $_POST['sensor'] ?? null,
+            'notizen'   => $request->str('notizen'),
+        ], $request->bool('rueckwirkend')));
+    }
+
+    /** Steigung aus zwei Peilungen setzen – nur mit Haken, nie von selbst. */
+    public function steigung(Request $request, array $params): void
+    {
+        $tank = $this->tank($request, $params, true);
+        if ($tank === null) {
+            return;
+        }
+        $this->fertig($request, $tank, $request->bool('uebernehmen')
+            ? TankService::steigungSetzen($tank, $request->int('ereignis_id'))
+            : ['ok' => false, 'message' => 'Bitte den Haken setzen – die Steigung wird nur auf ausdrücklichen Wunsch übernommen.']);
+    }
+
+    /**
+     * Antwort nach dem Eintragen: JSON fürs Kartenpanel, sonst Meldung und
+     * zurück zur Seite. Die Sitzung ist dann womöglich schon freigegeben –
+     * die Meldung geht über Session::nachtragen hinein.
+     *
+     * @param array{ok:bool,message:string,warnung?:bool} $ergebnis
+     */
+    private function fertig(Request $request, array $tank, array $ergebnis): void
+    {
+        $ok = !empty($ergebnis['ok']);
+        $text = (string) $ergebnis['message'];
+        if ($request->wantsJson()) {
+            $this->json(['ok' => $ok, 'message' => $text] + array_intersect_key($ergebnis, ['id' => 1, 'kalibriert' => 1, 'warnung' => 1, 'trotzdem' => 1]),
+                $ok ? 200 : 422);
+            return;
+        }
+        Session::nachtragen(static function () use ($ok, $text, $ergebnis): void {
+            match (true) {
+                !$ok                         => Flash::error($text),
+                !empty($ergebnis['warnung']) => Flash::warning($text),
+                default                      => Flash::success($text),
+            };
+        });
+        $this->redirect(Response::zurueckZiel('/anlagen/' . (int) $tank['id']));
     }
 
     /** Die Meldung der InfluxDB zeigt Aufbau und Inhalt der Abfrage – im Klartext nur für die Messtechnik. */

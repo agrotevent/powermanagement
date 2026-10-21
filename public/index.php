@@ -94,10 +94,17 @@ $router->post('/anlagen/{id}/anschluesse/details', [AnlagenController::class, 'a
 $router->post('/anlagen/{id}/schutz', [AnlagenController::class, 'schutzSpeichern'], 'anlagen.manage');
 $router->post('/anlagen/{id}/schutz/loeschen', [AnlagenController::class, 'schutzLoeschen'], 'anlagen.manage');
 $router->post('/anlagen/{id}/schutz/vorschlag', [AnlagenController::class, 'schutzVorschlag'], 'anlagen.manage');
-// Tanks: Verlauf und CSV des Füllstands. Den Tank (sichtbar) und den
-// Messpunkt (Füllstand dieses Tanks) prüft der Controller.
+// Tanks: Verlauf und CSV des Füllstands, Peilung, Betankung und Kennlinie vor
+// Ort. Den Tank (sichtbar, zum Eintragen mit „bearbeiten“), den Messpunkt
+// (Füllstand dieses Tanks) und das Ereignis (dieses Tanks) prüft der Controller.
 $router->get('/anlagen/{id}/tank/verlauf', [TankController::class, 'verlauf'], 'statistik.view');
 $router->get('/anlagen/{id}/tank/csv', [TankController::class, 'csv'], 'statistik.export');
+$router->post('/anlagen/{id}/tank/peilung', [TankController::class, 'peilung'], 'anlagen.manage');
+$router->post('/anlagen/{id}/tank/betankung', [TankController::class, 'betankung'], 'anlagen.manage');
+$router->post('/anlagen/{id}/tank/betankung/auswerten', [TankController::class, 'betankungAuswerten'], 'anlagen.manage');
+$router->post('/anlagen/{id}/tank/ereignis/loeschen', [TankController::class, 'ereignisLoeschen'], 'anlagen.manage');
+$router->post('/anlagen/{id}/tank/kennlinie', [TankController::class, 'kennlinie'], 'anlagen.manage');
+$router->post('/anlagen/{id}/tank/steigung', [TankController::class, 'steigung'], 'anlagen.manage');
 // Aufbau-Modus: Plan festhalten, vor Ort bestätigen, danach abgleichen.
 $router->get('/aufbau', [AufbauController::class, 'index'], 'anlagen.view');
 $router->post('/aufbau/starten', [AufbauController::class, 'starten'], 'anlagen.manage');

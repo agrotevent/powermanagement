@@ -12,7 +12,9 @@ use App\Support\Database;
 use App\Support\Flash;
 use App\Support\Request;
 use App\Support\Response;
+use App\Support\Session;
 use App\Tanks\TankRechnung;
+use App\Tanks\TankService;
 
 /**
  * Inventar: Verteiler, Zwischenstecker und Tanksensoren mit ihren Shellys –
@@ -164,7 +166,25 @@ final class InventarController extends Controller
         $einbau = is_array($_POST['einbau'] ?? null) ? $_POST['einbau'] : [];
         $ergebnis = InventarService::einsetzen($request->int('inventar_id'), (int) $objekt['id'], $anschluss > 0 ? $anschluss : null,
             $request->input('typ_uebernehmen') === null || $request->bool('typ_uebernehmen'), $einbau);
-        $this->antwort($request, $ergebnis, '/anlagen/' . (int) $objekt['id'] . '?reiter=messung');
+        $ziel = '/anlagen/' . (int) $objekt['id'] . '?reiter=messung';
+        // Tanksensor: gleich die erste Peilung („Anzeige am Tank“). Kalibriert
+        // wird erst mit einem Rohwert seit dem Einbau – den liest der Server,
+        // und solange hält die Anfrage die Sitzung nicht.
+        $peilung = $request->str('peilung_prozent');
+        if (!empty($ergebnis['ok']) && $peilung !== '' && !AnlagenService::elektrisch((string) $objekt['art'])) {
+            Session::freigeben();
+            $p = TankService::peilen(AnlagenService::find((int) $objekt['id']) ?? $objekt, ['prozent' => $peilung]);
+            $ergebnis['message'] = trim($ergebnis['message'] . ' ' . ($p['ok'] ? '' : 'Peilung nicht eingetragen: ') . $p['message']);
+            if ($request->wantsJson()) {
+                $this->json($ergebnis);
+                return;
+            }
+            $text = (string) $ergebnis['message'];
+            Session::nachtragen(static fn () => $p['ok'] && empty($p['warnung']) ? Flash::success($text) : Flash::warning($text));
+            $this->redirect($ziel);
+            return;
+        }
+        $this->antwort($request, $ergebnis, $ziel);
     }
 
     /** Einen Einsatz beenden (Abbau). */

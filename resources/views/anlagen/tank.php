@@ -6,11 +6,18 @@
  * der elektrischen Anlagen stehen hier untereinander (auf breiten
  * Bildschirmen in zwei Spalten):
  *   Jetzt              Füllstand live (live.js über /anlagen/{id}/live)
+ *   Vor Ort            Peilung und Betankung eintragen (nur mit „bearbeiten“)
  *   Verlauf            Liter, %, mm oder Rohwert (statistik.js über
  *                      /anlagen/{id}/tank/verlauf)
+ *   Protokoll          Peilungen und Betankungen: kalibrieren, löschen, CSV;
+ *                      das Angebot „Steigung aus beiden Peilungen“
  *   Sensor & Kennlinie der eingebaute Tanksensor, die jetzige Fassung, die
- *                      Fassungen im Datenfenster, frühere Sensoren
+ *                      Fassungen im Datenfenster, „Erweitert“ (Anker und
+ *                      Steigung von Hand), frühere Sensoren
  *   Daten              die Eigenschaften in den Gruppen des Formulars
+ *
+ * Felder je Peilart und das Einbaumaß je Messprinzip blendet tank.js um
+ * (data-Attribute, kein Inline-JS); ohne Skript geht alles auch.
  *
  * @var array<string,mixed> $objekt
  * @var bool $vorlage
@@ -27,6 +34,10 @@
  * @var ?array $fenster Datenfenster
  * @var list<array<string,mixed>> $fassungen Fassungen im Datenfenster
  * @var list<array<string,mixed>> $frueher frühere Tanksensoren
+ * @var list<array<string,mixed>> $ereignisse Peilungen und Betankungen im Datenfenster (TankService::ereignisse)
+ * @var ?array<string,mixed> $steigung Angebot aus zwei Peilungen (TankService::steigungAngebot)
+ * @var bool $rueckwirkend „rückwirkend für diesen Einbau“ erlaubt (unbegrenztes Datenfenster)
+ * @var ?float $nenn_l Nennvolumen
  * @var int $von
  * @var int $bis
  * @var string $vorgabe Zeitraum (1h, 6h, heute, 24h, 7d, 30d, frei)
@@ -56,6 +67,9 @@ $query = static function (array $zusatz) use ($vorgabe, $von, $bis, $groesse): s
     return '?' . http_build_query(array_merge($basis, $zusatz));
 };
 $kennung = static fn (array $m): string => (string) ($m['kennung'] ?? '') !== '' ? (string) $m['kennung'] : (string) $m['bezeichnung'];
+$sensorArt = (string) ($fassung['rechnung']['sensor']['art'] ?? '');
+$rohEinheit = (string) (\App\Tanks\TankRechnung::ROHFELDER[(string) ($fassung['rechnung']['feld'] ?? '')][1] ?? '');
+$jetztMax = Zeit::fuerEingabe(Zeit::iso(time()));
 ob_start();
 ?>
         <div class="card">
@@ -107,6 +121,50 @@ $datenKarte = (string) ob_get_clean();
                 <p class="small muted">Sichtbarer Datenzeitraum: <?= View::e(Zugriff::beschreiben($fenster)) ?>.</p>
             <?php endif; ?>
         <?php endif; ?>
+        <?php if (!$vorlage && $darfAendern): ?>
+            <div class="card">
+                <div class="card-head"><h2>Vor Ort</h2><span class="hint">peilen und betanken</span></div>
+                <div class="card-body grid grid-2 tank-vorort">
+                    <form method="post" action="/anlagen/<?= $id ?>/tank/peilung" class="tank-peilung">
+                        <?= Csrf::field() ?>
+                        <h3 class="abschnitt">Peilung</h3>
+                        <div class="field"><label for="peil_art">Abgelesen</label>
+                            <select id="peil_art" name="art" data-peilart>
+                                <option value="prozent" data-einheit="%"<?= $nenn_l === null ? ' disabled' : ' selected' ?>>Anzeige am Tank (%)<?= $nenn_l === null ? ' – Nennvolumen fehlt' : '' ?></option>
+                                <option value="liter" data-einheit="l"<?= $nenn_l === null ? ' selected' : '' ?>>Inhalt (l)</option>
+                                <option value="hoehe_mm" data-einheit="mm">Peilstab (mm)</option>
+                            </select></div>
+                        <div class="field-row">
+                            <div class="field"><label for="peil_wert">Wert <span data-peileinheit><?= $nenn_l === null ? '(l)' : '(%)' ?></span></label>
+                                <input id="peil_wert" name="wert" inputmode="decimal" autocomplete="off" required></div>
+                            <div class="field"><label for="peil_notiz">Notiz</label><input id="peil_notiz" name="notizen" maxlength="500"></div>
+                        </div>
+                        <button class="btn btn-primary btn-sm" type="submit">Peilung eintragen</button>
+                        <p class="help">Zeit: jetzt. Den Rohwert des Sensors nimmt der Server. Der Peilstab setzt den Nullpunkt der Kennlinie;
+                            Anzeige oder Inhalt bestimmen beim ersten Mal den Inhalt je mm. Nicht peilen, während getankt wird.</p>
+                    </form>
+                    <form method="post" action="/anlagen/<?= $id ?>/tank/betankung" class="tank-betankung">
+                        <?= Csrf::field() ?>
+                        <h3 class="abschnitt">Betankung</h3>
+                        <div class="field-row">
+                            <div class="field"><label for="tank_liter">Geliefert (l)</label>
+                                <input id="tank_liter" name="liter" inputmode="decimal" autocomplete="off" required></div>
+                            <div class="field"><label for="tank_ende">Ende des Tankens</label>
+                                <input id="tank_ende" name="zeit" type="datetime-local" max="<?= View::e($jetztMax) ?>"></div>
+                        </div>
+                        <div class="field-row">
+                            <div class="field"><label for="tank_ls">Lieferschein</label><input id="tank_ls" name="lieferschein" maxlength="64" autocomplete="off"></div>
+                            <div class="field"><label for="tank_bnotiz">Notiz</label><input id="tank_bnotiz" name="notizen" maxlength="500"></div>
+                        </div>
+                        <input type="hidden" name="kalibrieren" value="0">
+                        <div class="check"><input type="checkbox" id="tank_kal" name="kalibrieren" value="1" checked>
+                            <label for="tank_kal">Gleich kalibrieren – aus dem Sprung in den Messwerten (ab 30 min nach dem Tanken)</label></div>
+                        <button class="btn btn-primary btn-sm" type="submit">Betankung eintragen</button>
+                        <p class="help">Ende leer = jetzt; höchstens 7 Tage zurück. Später kalibrieren geht im Protokoll.</p>
+                    </form>
+                </div>
+            </div>
+        <?php endif; ?>
         <?php if ($verlauf): ?>
             <div class="card">
                 <div class="card-head"><h2>Verlauf</h2><span class="hint">je Zeitpunkt mit der Kennlinie, die damals galt</span></div>
@@ -138,6 +196,77 @@ $datenKarte = (string) ob_get_clean();
                 </div>
             </div>
         <?php endif; ?>
+        <?php if (!$vorlage && ($ereignisse !== [] || $steigung !== null)): ?>
+            <div class="card" id="protokoll">
+                <div class="card-head"><h2>Protokoll</h2><span class="hint">Peilungen und Betankungen</span></div>
+                <?php if ($steigung !== null): ?>
+                    <div class="card-body">
+                        <form method="post" action="/anlagen/<?= $id ?>/tank/steigung" class="notice<?= $steigung['warnung'] !== null ? ' warn' : '' ?>">
+                            <?= Csrf::field() ?>
+                            <input type="hidden" name="ereignis_id" value="<?= (int) $steigung['ereignis'] ?>">
+                            <p><strong>Zwei Peilungen, <?= View::e(TankService::zahl(round(abs($steigung['neu']['hoehe_mm'] - $steigung['alt']['hoehe_mm'])))) ?> mm auseinander:</strong>
+                                Steigung <?= View::e(TankService::zahl(round($steigung['mm_je_roh'], 2))) ?> mm je <?= View::e($steigung['einheit'] !== '' ? $steigung['einheit'] : 'Rohwert') ?>
+                                statt <?= View::e(TankService::zahl(round($steigung['bisher'], 2))) ?><?= $steigung['abweichung'] !== null
+                                    ? ' (' . View::e(($steigung['abweichung'] > 0 ? '+' : '') . TankService::zahl($steigung['abweichung'])) . ' % gegenüber den Sensordaten)' : '' ?>.</p>
+                            <?php if ($steigung['warnung'] !== null): ?><p class="small"><?= View::e($steigung['warnung']) ?></p><?php endif; ?>
+                            <div class="check"><input type="checkbox" id="steigung_ok" name="uebernehmen" value="1" required>
+                                <label for="steigung_ok">Steigung aus beiden Peilungen setzen (<?= View::e(Zeit::anzeige($steigung['alt']['zeit'], 'd.m. H:i')) ?>
+                                    und <?= View::e(Zeit::anzeige($steigung['neu']['zeit'], 'd.m. H:i')) ?>)</label></div>
+                            <button class="btn btn-sm" type="submit">Übernehmen</button>
+                        </form>
+                    </div>
+                <?php endif; ?>
+                <?php if ($ereignisse !== []): ?>
+                    <div class="table-wrap">
+                        <table class="tabelle-karten tank-protokoll">
+                            <thead><tr><th>Zeit</th><th>Eintrag</th><th>Rohwert</th><th>Von</th><?= $darfAendern ? '<th></th>' : '' ?></tr></thead>
+                            <tbody>
+                            <?php foreach ($ereignisse as $e): ?>
+                                <?php $einheit = $e['roh_einheit'] !== '' ? ' ' . $e['roh_einheit'] : '';
+                                $rohText = $e['roh'] !== null ? TankService::zahl(round($e['roh'], 3)) . $einheit
+                                    : ($e['roh_vor'] !== null && $e['roh_nach'] !== null ? TankService::zahl(round($e['roh_vor'], 3)) . ' → ' . TankService::zahl(round($e['roh_nach'], 3)) . $einheit : '–'); ?>
+                                <tr>
+                                    <td data-label="Zeit"><?= View::e(Zeit::anzeige($e['zeit'], 'd.m.Y H:i')) ?></td>
+                                    <td data-label="Eintrag"><?= View::e($e['text']) ?>
+                                        <?= $e['fassung'] ? '<span class="badge ok">kalibriert</span>' : '' ?>
+                                        <?php if ($e['notizen'] !== ''): ?><div class="small muted"><?= View::e($e['notizen']) ?></div><?php endif; ?></td>
+                                    <td data-label="Rohwert" class="small"><?= View::e($rohText) ?></td>
+                                    <td data-label="Von" class="small"><?= View::e($e['von']) ?></td>
+                                    <?php if ($darfAendern): ?>
+                                        <td><div class="btn-row">
+                                            <?php if ($e['auswerten_ab'] !== null): ?>
+                                                <form method="post" action="/anlagen/<?= $id ?>/tank/betankung/auswerten" class="btn-row">
+                                                    <?= Csrf::field() ?><input type="hidden" name="ereignis_id" value="<?= (int) $e['id'] ?>">
+                                                    <?php if ($e['auswerten_jetzt']): ?>
+                                                        <button class="btn btn-sm" type="submit">Kalibrieren aus dieser Betankung</button>
+                                                        <span class="check"><input type="checkbox" id="trotzdem_<?= (int) $e['id'] ?>" name="trotzdem" value="1">
+                                                            <label for="trotzdem_<?= (int) $e['id'] ?>">auch über 25 % Abweichung</label></span>
+                                                    <?php else: ?>
+                                                        <button class="btn btn-sm" type="submit" disabled>Kalibrieren ab <?= View::e(Zeit::anzeige($e['auswerten_ab'], 'H:i')) ?></button>
+                                                    <?php endif; ?>
+                                                </form>
+                                            <?php endif; ?>
+                                            <?php if ($e['loeschbar']): ?>
+                                                <form method="post" action="/anlagen/<?= $id ?>/tank/ereignis/loeschen"
+                                                      data-confirm="<?= View::e($e['text']) ?> löschen?<?= $e['fassung'] ? ' Die Kennlinie rechnet dann wieder wie davor.' : '' ?>">
+                                                    <?= Csrf::field() ?><input type="hidden" name="ereignis_id" value="<?= (int) $e['id'] ?>">
+                                                    <button class="btn btn-sm btn-ghost" type="submit">Löschen</button></form>
+                                            <?php elseif ($e['fassung']): ?>
+                                                <span class="small muted">danach neu kalibriert</span>
+                                            <?php endif; ?>
+                                        </div></td>
+                                    <?php endif; ?>
+                                </tr>
+                            <?php endforeach; ?>
+                            </tbody>
+                        </table>
+                    </div>
+                    <?php if (View::can('statistik.export')): ?>
+                        <div class="card-body small"><a href="/anlagen/<?= $id ?>/tank/csv?inhalt=protokoll">Protokoll als CSV</a></div>
+                    <?php endif; ?>
+                <?php endif; ?>
+            </div>
+        <?php endif; ?>
         <?php if ($vorlage): ?><?= $datenKarte ?><?php endif; ?>
     </div>
     <div>
@@ -164,24 +293,52 @@ $datenKarte = (string) ob_get_clean();
                             <form method="post" action="/einsatz/<?= (int) $sensor['einsatz_id'] ?>/beenden" class="mt" data-confirm="<?= View::e($kennung($sensor)) ?> ausbauen? Der Sensor misst dann nicht mehr hier.">
                                 <?= Csrf::field() ?><button class="btn btn-sm" type="submit">Ausbauen</button></form>
                         <?php endif; ?>
+                        <?php if ($darfAendern && $fassung !== null && in_array($sensorArt, ['linear', 'roh'], true)): ?>
+                            <?php $s = $fassung['rechnung']['sensor']; $zahlFeld = static fn (mixed $w): string => is_numeric($w) ? View::zahlFeld((float) $w) : ''; ?>
+                            <details class="mt tank-erweitert">
+                                <summary class="small">Erweitert: Anker und Steigung von Hand</summary>
+                                <form method="post" action="/anlagen/<?= $id ?>/tank/kennlinie" class="mt">
+                                    <?= Csrf::field() ?>
+                                    <input type="hidden" name="messpunkt" value="<?= (int) $sensor['id'] ?>">
+                                    <div class="field-row">
+                                        <div class="field"><label for="hand_roh">Rohwert am Anker<?= $rohEinheit !== '' ? ' (' . View::e($rohEinheit) . ')' : '' ?></label>
+                                            <input id="hand_roh" name="sensor[roh_anker]" inputmode="decimal" required value="<?= View::e($zahlFeld($s['roh_anker'])) ?>"></div>
+                                        <div class="field"><label for="hand_mm">Füllhöhe dort (mm)</label>
+                                            <input id="hand_mm" name="sensor[mm_anker]" inputmode="decimal" required value="<?= View::e($zahlFeld($s['mm_anker'])) ?>"></div>
+                                    </div>
+                                    <div class="field"><label for="hand_steigung">Steigung (mm je <?= View::e($rohEinheit !== '' ? $rohEinheit : 'Rohwert') ?>)</label>
+                                        <input id="hand_steigung" name="sensor[mm_je_roh]" inputmode="decimal" required value="<?= View::e($zahlFeld($s['mm_je_roh'])) ?>"></div>
+                                    <?php if ($rueckwirkend): ?>
+                                        <div class="check"><input type="checkbox" id="hand_rueck" name="rueckwirkend" value="1">
+                                            <label for="hand_rueck">Rückwirkend für diesen Einbau (ab <?= View::e(Zeit::anzeige((string) $sensor['gueltig_ab'], 'd.m.Y H:i')) ?>) – auch der Verlauf rechnet dann so</label></div>
+                                    <?php endif; ?>
+                                    <button class="btn btn-sm" type="submit">Kennlinie setzen</button>
+                                    <p class="help">Eine neue Fassung, ungeprüft – ältere bleiben, wie sie sind. Meist besser: mit dem Peilstab peilen.</p>
+                                </form>
+                            </details>
+                        <?php endif; ?>
                     <?php endif; ?>
                     <?php if ($sensorFrei !== []): ?>
                         <form method="post" action="/anlagen/<?= $id ?>/einsetzen" class="mt">
                             <?= Csrf::field() ?>
                             <div class="field"><label for="ts_inventar"><?= $sensor === null ? 'Tanksensor einbauen' : 'Anderen Tanksensor einbauen' ?></label>
-                                <select id="ts_inventar" name="inventar_id" required>
+                                <select id="ts_inventar" name="inventar_id" required data-prinzip-wahl>
                                     <option value="">– Sensor wählen –</option>
                                     <?php foreach ($sensorFrei as $i): ?>
-                                        <option value="<?= (int) $i['id'] ?>"><?= View::e($i['kennung'] . ' – ' . $i['typ']
+                                        <option value="<?= (int) $i['id'] ?>" data-prinzip="<?= View::e((string) ($i['eigenschaften']['prinzip'] ?? '')) ?>"><?= View::e($i['kennung'] . ' – ' . $i['typ']
                                             . ($i['einsatz'] !== null ? ' (jetzt: ' . ($i['einsatz']['anlage_name'] ?? $i['einsatz']['objekt_name']) . ')' : '')) ?></option>
                                     <?php endforeach; ?>
                                 </select></div>
                             <div class="field-row">
-                                <div class="field"><label for="ts_offset">Sondenspitze über dem Boden (mm)</label>
+                                <div class="field" data-ausser-prinzip="ultraschall"><label for="ts_offset">Sondenspitze über dem Boden (mm)</label>
                                     <input id="ts_offset" name="einbau[offset_mm]" inputmode="decimal" placeholder="20"></div>
-                                <div class="field"><label for="ts_dleer">Ultraschall: Sensorfläche über dem Boden (mm)</label>
+                                <div class="field" data-nur-prinzip="ultraschall"><label for="ts_dleer">Ultraschall: Sensorfläche über dem Boden (mm)</label>
                                     <input id="ts_dleer" name="einbau[d_leer_mm]" inputmode="decimal" placeholder="nur Ultraschall"></div>
                             </div>
+                            <?php if ($nenn_l !== null): ?>
+                                <div class="field"><label for="ts_peilung">Anzeige am Tank (%) – erste Peilung, optional</label>
+                                    <input id="ts_peilung" name="peilung_prozent" inputmode="decimal" autocomplete="off" placeholder="z. B. 60"></div>
+                            <?php endif; ?>
                             <button class="btn btn-primary btn-sm" type="submit">Einbauen</button>
                             <p class="help">Ab jetzt misst der Sensor hier; ein Sensor, der schon im Tank steckt, wird ersetzt. Danach peilen – die Einbautiefe ändert sich mit jedem Einbau.</p>
                         </form>
@@ -197,7 +354,7 @@ $datenKarte = (string) ob_get_clean();
                                 <li><strong><?= View::e(Zeit::anzeige($f['ab'], 'd.m.Y H:i')) ?></strong> · <?= View::e(TankService::ANLAESSE[$f['anlass']] ?? $f['anlass']) ?>
                                     <?= $jetzt ? '<span class="badge primary">jetzt</span>' : '' ?>
                                     <?= $f['geprueft'] ? '<span class="badge ok">geprüft</span>' : '<span class="badge">ungeprüft</span>' ?>
-                                    <div class="muted"><?= View::e(implode(' · ', array_filter([(string) $f['kennung'], $ljm !== null ? TankService::zahl((float) $ljm) . ' l/mm' : 'Inhalt je mm unbekannt',
+                                    <div class="muted"><?= View::e(implode(' · ', array_filter([(string) $f['kennung'], $ljm !== null ? TankService::zahl(round((float) $ljm, 3)) . ' l/mm' : 'Inhalt je mm unbekannt',
                                         $f['von'] !== '' ? 'von ' . $f['von'] : '']))) ?></div></li>
                             <?php endforeach; ?>
                         </ul>

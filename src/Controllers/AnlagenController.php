@@ -206,7 +206,7 @@ final class AnlagenController extends Controller
                 'von' => $von, 'bis' => $bis, 'vorgabe' => $vorgabe,
                 'groesse' => isset(TankService::GROESSEN[$groesse]) ? $groesse : 'liter',
                 'stylesheets' => ['/assets/vendor/uplot/uPlot.min.css'],
-                'scripts' => ['/assets/vendor/uplot/uPlot.iife.min.js', '/assets/js/live.js', '/assets/js/statistik.js'],
+                'scripts' => ['/assets/vendor/uplot/uPlot.iife.min.js', '/assets/js/live.js', '/assets/js/statistik.js', '/assets/js/tank.js'],
             ]);
             return;
         }

@@ -9,7 +9,15 @@
  *   tankPanelLive(seite, l)             die Werte darin neu setzen (alle 5 s).
  *   einsetzenFormular(ziel, frei, id, aktionen)
  *                                       Tanksensor mit Einbaumaß einsetzen –
- *                                       im Panel und im Aufbau-Modus.
+ *                                       im Panel und im Aufbau-Modus, dazu
+ *                                       optional die Anzeige am Tank als erste
+ *                                       Peilung.
+ *   peilungFormular(ziel, o, aktionen)  Peilung: Anzeige %, Inhalt l oder
+ *                                       Peilstab mm – Zeit jetzt, den Rohwert
+ *                                       nimmt der Server.
+ *   betankungFormular(ziel, o, aktionen)
+ *                                       Betankung: Liter, Lieferschein, Ende
+ *                                       jetzt oder Uhrzeit.
  *
  * Alles aus Antworten des Servers kommt per textContent ins Dokument, nie
  * als HTML. Was jemand darf, sagt der Server (o.darf, o.tank.darf); er
@@ -103,10 +111,12 @@ export function einsetzenFormular(ziel, frei, objektId, aktionen) {
     const dLeer = el('input', { id: 'tank-dleer', inputmode: 'decimal', placeholder: 'z. B. 1300' });
     const offsetFeld = el('div', { klasse: 'field' }, el('label', { for: 'tank-offset' }, 'Sondenspitze über dem Boden (mm)'), offset);
     const dLeerFeld = el('div', { klasse: 'field', hidden: true }, el('label', { for: 'tank-dleer' }, 'Sensorfläche über dem Boden (mm)'), dLeer);
+    const peilung = el('input', { id: 'tank-erste-peilung', inputmode: 'decimal', autocomplete: 'off', placeholder: 'z. B. 60' });
+    const peilungFeld = el('div', { klasse: 'field' }, el('label', { for: 'tank-erste-peilung' }, 'Anzeige am Tank (%) – optional'), peilung);
     const knopf = el('button', { type: 'submit', klasse: 'btn btn-sm btn-primary' }, 'Einsetzen');
     const form = el('form', { klasse: 'tank-einsetzen' },
         el('div', { klasse: 'field' }, el('label', { for: 'tank-stueck' }, 'Welcher Tanksensor?'), auswahl),
-        offsetFeld, dLeerFeld, knopf,
+        offsetFeld, dLeerFeld, peilungFeld, knopf,
         el('p', { klasse: 'help' }, 'Ein Sensor, der schon im Tank steckt, wird ersetzt. Danach peilen – die Einbautiefe ändert sich mit jedem Einbau.'));
     auswahl.addEventListener('change', () => {
         const opt = auswahl.selectedOptions[0];
@@ -124,6 +134,7 @@ export function einsetzenFormular(ziel, frei, objektId, aktionen) {
                 inventar_id: auswahl.value,
                 'einbau[offset_mm]': offsetFeld.hidden ? '' : offset.value,
                 'einbau[d_leer_mm]': dLeerFeld.hidden ? '' : dLeer.value,
+                peilung_prozent: peilung.value,
             });
             PM.melden(erg.message || (erg.ok ? 'Eingesetzt.' : 'Nicht möglich.'), !!erg.ok);
             if (erg.ok) { await aktionen.nachher(); }
@@ -132,6 +143,75 @@ export function einsetzenFormular(ziel, frei, objektId, aktionen) {
         }
     });
     ziel.replaceChildren(form);
+}
+
+/** Ein Formular im Panel abschicken: Knopf sperren, Meldung zeigen, danach neu laden. */
+async function senden(knopf, url, daten, aktionen) {
+    knopf.disabled = true;
+    try {
+        const erg = await PM.post(url, daten);
+        PM.melden(erg.message || (erg.ok ? 'Eingetragen.' : 'Nicht möglich.'), !!erg.ok && !erg.warnung);
+        if (erg.ok) { await aktionen.nachher(); }
+    } catch {
+        PM.melden('Keine Verbindung zum Server.', false);
+    } finally {
+        knopf.disabled = false;
+    }
+}
+
+/**
+ * Peilung: was abgelesen wurde (Anzeige am Tank in %, Inhalt in l, Peilstab in
+ * mm) und der Wert. Zeit ist jetzt; den Rohwert nimmt der Server.
+ *
+ * @param o        Antwort von /karte/objekt/{id} (o.tank.nenn_l: ohne Nennvolumen keine %)
+ * @param aktionen { nachher: async () => {} }
+ */
+export function peilungFormular(ziel, o, aktionen) {
+    const mitProzent = da(o.tank && o.tank.nenn_l);
+    const arten = [['prozent', 'Anzeige am Tank (%)', '%'], ['liter', 'Inhalt (l)', 'l'], ['hoehe_mm', 'Peilstab (mm)', 'mm']]
+        .filter(([art]) => art !== 'prozent' || mitProzent);
+    const auswahl = el('select', { id: 'tank-peilart' }, arten.map(([art, text, einheit]) => el('option', { value: art, 'data-einheit': einheit }, text)));
+    const einheit = el('span', {}, '(' + arten[0][2] + ')');
+    const wert = el('input', { id: 'tank-peilwert', inputmode: 'decimal', autocomplete: 'off', required: true });
+    auswahl.addEventListener('change', () => { einheit.textContent = '(' + auswahl.selectedOptions[0].dataset.einheit + ')'; });
+    const knopf = el('button', { type: 'submit', klasse: 'btn btn-sm btn-primary' }, 'Peilung eintragen');
+    const form = el('form', { klasse: 'tank-peilung' },
+        el('div', { klasse: 'field' }, el('label', { for: 'tank-peilart' }, 'Abgelesen'), auswahl),
+        el('div', { klasse: 'field' }, el('label', { for: 'tank-peilwert' }, 'Wert ', einheit), wert),
+        knopf,
+        el('p', { klasse: 'help' }, 'Zeit: jetzt. Der Peilstab setzt den Nullpunkt; Anzeige oder Inhalt bestimmen beim ersten Mal den Inhalt je mm.'));
+    form.addEventListener('submit', (e) => {
+        e.preventDefault();
+        senden(knopf, `/anlagen/${o.id}/tank/peilung`, { art: auswahl.value, wert: wert.value }, aktionen);
+    });
+    ziel.replaceChildren(form);
+    wert.focus();
+}
+
+/**
+ * Betankung: geliefert in Litern, Lieferschein, Ende des Tankens (leer =
+ * jetzt, sonst Uhrzeit). Liegt das Ende 30 min zurück, kalibriert der Server
+ * gleich daraus.
+ *
+ * @param aktionen { nachher: async () => {} }
+ */
+export function betankungFormular(ziel, o, aktionen) {
+    const liter = el('input', { id: 'tank-liter', inputmode: 'decimal', autocomplete: 'off', required: true });
+    const ende = el('input', { id: 'tank-ende', type: 'time' });
+    const schein = el('input', { id: 'tank-lieferschein', maxlength: '64', autocomplete: 'off' });
+    const knopf = el('button', { type: 'submit', klasse: 'btn btn-sm btn-primary' }, 'Betankung eintragen');
+    const form = el('form', { klasse: 'tank-betankung' },
+        el('div', { klasse: 'field' }, el('label', { for: 'tank-liter' }, 'Geliefert (l)'), liter),
+        el('div', { klasse: 'field' }, el('label', { for: 'tank-ende' }, 'Ende des Tankens (leer = jetzt)'), ende),
+        el('div', { klasse: 'field' }, el('label', { for: 'tank-lieferschein' }, 'Lieferschein'), schein),
+        knopf,
+        el('p', { klasse: 'help' }, 'Kalibriert wird aus dem Sprung in den Messwerten – frühestens 30 min nach dem Tanken, sonst später im Protokoll der Tankseite.'));
+    form.addEventListener('submit', (e) => {
+        e.preventDefault();
+        senden(knopf, `/anlagen/${o.id}/tank/betankung`, { liter: liter.value, zeit: ende.value, lieferschein: schein.value }, aktionen);
+    });
+    ziel.replaceChildren(form);
+    liter.focus();
 }
 
 /**
@@ -154,6 +234,27 @@ export function tankPanel(seite, o, aktionen) {
             el('a', { href: o.geo.link, target: '_blank', rel: 'noopener' }, 'in der Karte öffnen')));
     }
     teile.push(el('div', { 'data-tank-live': true }));
+    // Vor Ort: peilen und betanken – je ein Formular unter den Knöpfen, immer nur eins offen.
+    const formZiel = el('div', { klasse: 'mt tank-formular', hidden: true });
+    if (tank.darf.peilen || tank.darf.betanken) {
+        const vorOrt = el('div', { klasse: 'btn-row mt' });
+        const oeffnen = (bauen) => () => {
+            bauen(formZiel, o, { nachher: aktionen.neuLaden });
+            formZiel.hidden = false;
+        };
+        if (tank.darf.peilen) {
+            const k = el('button', { type: 'button', klasse: 'btn btn-sm' }, 'Peilung …');
+            k.addEventListener('click', oeffnen(peilungFormular));
+            vorOrt.append(k);
+        }
+        if (tank.darf.betanken) {
+            const k = el('button', { type: 'button', klasse: 'btn btn-sm' }, 'Betankung …');
+            k.addEventListener('click', oeffnen(betankungFormular));
+            vorOrt.append(k);
+        }
+        teile.push(vorOrt, formZiel);
+    }
+
     teile.push(el('h3', { klasse: 'mt' }, 'Inhalt'), el('p', { klasse: 'small' }, o.kurz));
 
     teile.push(el('h3', { klasse: 'mt' }, 'Tanksensor'));
