@@ -1527,8 +1527,10 @@ try {
         AnlagenService::eigenschaftSetzen($id, ['sumpf_l' => round($liter - 30)]);
     }
     $l = TankService::live([$o($t1)], $gLive(64000.0))[$t1];
-    pruefe($l['stufe'] === 'bad' && str_contains($l['hinweis'], 'sofort nachtanken') && $l['tank']['restlaufzeit_h'] < 4 && abs($l['tank']['vorrat_l'] - 60) < 1,
-        'Vorrat 60 l bei 18 l/h: Restlaufzeit unter 4 h, rot – ' . $l['hinweis']);
+    // Je Tank der Inhalt über dem gerundeten Sumpf – die Demo-Sonde liefert auch halbe Liter (2372,5 l → Sumpf 2343 l, 29,5 l).
+    $vorrat = 2 * ($liter - round($liter - 30));
+    pruefe($l['stufe'] === 'bad' && str_contains($l['hinweis'], 'sofort nachtanken') && $l['tank']['restlaufzeit_h'] < 4 && abs($l['tank']['vorrat_l'] - $vorrat) < 0.2,
+        'Vorrat ≈ 60 l bei 18 l/h: Restlaufzeit unter 4 h, rot – ' . $l['hinweis']);
     foreach ([$t1, $t2] as $id) {
         AnlagenService::eigenschaftSetzen($id, ['sumpf_l' => 140]);
     }
