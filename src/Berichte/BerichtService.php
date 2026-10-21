@@ -1820,15 +1820,16 @@ final class BerichtService
     }
 
     /**
-     * Der Kunde hat das PDF im Kundenbereich geladen – im Lebenslauf ohne
-     * seinen Namen (der Lebenslauf bleibt so lange wie der Bericht), nur mit
-     * der Konto-ID; wer genau, steht in kunden_abrufe (geht mit dem Kunden).
+     * Der Kunde hat das PDF im Kundenbereich geladen ($pdf) bzw. den Bericht
+     * dort angesehen – im Lebenslauf ohne seinen Namen (der Lebenslauf bleibt
+     * so lange wie der Bericht), nur mit der Konto-ID; wer genau, steht in
+     * kunden_abrufe (geht mit dem Kunden).
      */
-    public static function pdfImKundenbereich(int $id, int $userId): void
+    public static function imKundenbereich(int $id, int $userId, bool $pdf): void
     {
         Database::insert('bericht_ereignisse', [
             'bericht_id' => $id,
-            'ereignis'   => 'pdf_kunde',
+            'ereignis'   => $pdf ? 'pdf_kunde' : 'ansicht_kunde',
             'am'         => gmdate('c'),
             'user_id'    => $userId,
             'username'   => 'kundenbereich',
@@ -2157,7 +2158,7 @@ final class BerichtService
             Database::execute("DELETE FROM {$tabelle} WHERE bericht_id = ?", [$id]);
         }
         // Die Abrufe im Kundenbereich gehen mit dem Dokument (Audit-Einträge bleiben ihre 400 Tage).
-        Database::execute("DELETE FROM kunden_abrufe WHERE art = 'bericht' AND ziel_id = ?", [$id]);
+        Database::execute("DELETE FROM kunden_abrufe WHERE art IN ('bericht', 'ansicht') AND ziel_id = ?", [$id]);
         Database::delete('berichte', $id);
     }
 

@@ -14,6 +14,9 @@ use App\Support\Zeit;
 $title = 'Konto';
 $mussAendern = (int) ($konto['must_change_password'] ?? 0) === 1;
 ?>
+<h1 class="kb-titel">Konto</h1>
+<?php /* Der eine Hinweis zum vorläufigen Kennwort – Anmeldung und Tor schicken nur hierher, ohne eigene Meldung. */ ?>
+<?php if ($mussAendern): ?><p class="notice warn">Bitte legen Sie zuerst ein eigenes Kennwort fest – vorher öffnen sich die anderen Seiten nicht.</p><?php endif; ?>
 <div class="kb-karten">
     <section class="card">
         <div class="card-head"><h2>Ihr Zugang</h2></div>
@@ -34,7 +37,6 @@ $mussAendern = (int) ($konto['must_change_password'] ?? 0) === 1;
         <?= Csrf::field() ?>
         <div class="card-head"><h2>Kennwort ändern</h2></div>
         <div class="card-body">
-            <?php if ($mussAendern): ?><p class="notice">Bitte legen Sie jetzt ein eigenes Kennwort fest.</p><?php endif; ?>
             <div class="field"><label for="kb-aktuell">Aktuelles Kennwort</label>
                 <input id="kb-aktuell" name="current_password" type="password" autocomplete="current-password" required></div>
             <div class="field"><label for="kb-neu">Neues Kennwort</label>

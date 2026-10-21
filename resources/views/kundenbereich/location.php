@@ -7,7 +7,7 @@
  * oder Messgeräte (KundenSicht::location()).
  *
  * @var array<string,mixed> $kunde
- * @var array{site:array{id:int,name:string,address:string},freigaben:list<array<string,mixed>>,etagen:list<array{id:int,name:string,plan:string,seite:int}>,feststrom:list<array<string,string>>} $location
+ * @var array{site:array{id:int,name:string,address:string},freigaben:list<array<string,mixed>>,etagen:list<array{id:int,name:string,plan:string,seite:int,vorschau:bool}>,feststrom:list<array<string,string>>} $location
  */
 use App\Kunden\Kundenbereich;
 use App\Support\View;
@@ -53,9 +53,11 @@ $basis = Kundenbereich::PFAD . '/locations/' . (int) $site['id'];
                                 <a class="btn" href="<?= View::e($basis . '/plan/' . (int) $e['id']) ?>" download>Plan herunterladen</a>
                             <?php else: ?>
                                 <a class="btn" href="<?= View::e($basis . '/plan/' . (int) $e['id']) ?>">Plan ansehen</a>
-                                <?php /* Vorschau als Bild: in <img> läuft auch in einem SVG nichts; antippen öffnet den Plan groß. */ ?>
-                                <a class="kb-plan-vorschau" href="<?= View::e($basis . '/plan/' . (int) $e['id']) ?>" tabindex="-1" aria-hidden="true">
-                                    <img src="<?= View::e($basis . '/plan/' . (int) $e['id']) ?>" alt="" loading="lazy"></a>
+                            <?php endif; ?>
+                            <?php if ($e['vorschau']): ?>
+                                <?php /* Vorschau: ein kleines Bild (Kachel der Stufe 0 oder kleiner Plan), nie der große Plan; in <img> läuft auch in einem SVG nichts. */ ?>
+                                <a class="kb-plan-vorschau" href="<?= View::e($basis . '/plan/' . (int) $e['id']) ?>" tabindex="-1" aria-hidden="true"<?= $e['plan'] === 'pdf' ? ' download' : '' ?>>
+                                    <img src="<?= View::e($basis . '/plan/' . (int) $e['id'] . '/vorschau') ?>" alt="" loading="lazy"></a>
                             <?php endif; ?>
                         </li>
                     <?php endforeach; ?>

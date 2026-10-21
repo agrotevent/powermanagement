@@ -10,6 +10,7 @@
  * @var list<array<string,mixed>> $zugaenge KundenService::zugaenge()
  * @var string $einmal Einmal-Marke des Formulars „Neuer Zugang“
  * @var ?string $adresse KundenEinstellungen::adresse()
+ * @var bool $darfAusgeben KundenService::darfZugangAusgeben() – sonst kein neuer Zugang, Link oder Kennwort
  * @var array<string,mixed> $eingabe
  */
 use App\Kunden\Kundenbereich;
@@ -60,7 +61,7 @@ $abzeichen = [
                                 <label class="check"><input type="checkbox" name="is_active" value="1"<?= (int) $z['is_active'] === 1 ? ' checked' : '' ?>> aktiv</label>
                                 <div class="btn-row mt">
                                     <button class="btn btn-sm btn-primary" type="submit" name="aktion" value="speichern">Speichern</button>
-                                    <?php if ($kundeOffen && (int) $z['is_active'] === 1): ?>
+                                    <?php if ($kundeOffen && $darfAusgeben && (int) $z['is_active'] === 1): ?>
                                         <button class="btn btn-sm" type="submit" name="aktion" value="link"
                                                 data-confirm="Neuen Einrichtungslink erzeugen? Ein früherer gilt dann nicht mehr.">Neuer Einrichtungslink</button>
                                         <button class="btn btn-sm" type="submit" name="aktion" value="kennwort"
@@ -84,6 +85,9 @@ $abzeichen = [
 
 <?php if (!$kundeOffen): ?>
     <p class="notice warn mt">Der Kunde ist nicht aktiv – neue Zugänge, Links und Kennwörter gibt es erst, wenn er wieder aktiv ist (Reiter „Stammdaten“).</p>
+<?php elseif (!$darfAusgeben): ?>
+    <p class="notice mt">Neue Zugänge, Einrichtungslinks und vorläufige Kennwörter gibt nur aus, wer selbst alles sieht, was der Kunde sieht
+        (Recht „Alle Standorte, Anlagen und Messdaten“, dazu die Protokolle des Kunden) – ein Zugang erbt alles, was dem Kunden freigegeben ist.</p>
 <?php else: ?>
 <form method="post" action="/kunden/<?= $id ?>/zugang" class="card mt kunden-formular" id="neuer-zugang">
     <?= Csrf::field() ?>

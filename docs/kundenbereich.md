@@ -110,6 +110,15 @@ gibt das Personal selbst weiter – am Telefon, per eigener Mail, ausgedruckt.
    *Einrichtungslink offen*, *Einrichtungslink abgelaufen*, *gesperrt*
    (nach fünf falschen Kennwörtern, *Entsperren*), *abgelaufen*,
    *deaktiviert*.
+
+   Zugänge, Einrichtungslinks und vorläufige Kennwörter gibt nur aus, wer
+   **selbst alles sieht, was der Kunde sieht**: „Kunden pflegen“ reicht
+   dafür nicht, dazu gehören „Alle Standorte, Anlagen und Messdaten“,
+   „Kunden ansehen“ und die Protokolle des Kunden (sonst legte sich jemand
+   ein Kundenkonto an und läse dort Pläne und Protokolle, die er nicht
+   bekommt). Dasselbe gilt, wenn ein beendeter Kunde oder Zugang wieder
+   **aktiv** wird oder sein Ende **später** rückt. Stammdaten ändern und
+   früher beenden darf jeder mit „Kunden pflegen“.
 3. **Location freigeben** (Reiter *Freigaben*): Standort, *gültig ab/bis*,
    *Daten ab/bis* (oder „wie die Gültigkeit“) und die Veranstaltung als
    Notiz. Ende und Datenzeitraum sind **Pflicht** – ein Gelände hat viele
@@ -272,7 +281,7 @@ Am Telefon liegt die Navigation als Leiste unten, am Rechner als Reiter oben:
 | Seite | Inhalt |
 |---|---|
 | **Übersicht** | Locations, die letzten Protokolle, Prüfnachweise (was bald abläuft), „Demnächst“, Ansprechpartner mit Anruf-Knopf, Hilfe |
-| **Locations** | je Location die Veranstaltung mit Zeitraum, die Pläne der Etagen (Bild im Browser, PDF als Datei), die festen Stromanschlüsse mit Anschlüssen und Vorsicherung, die eigenen Protokolle und Nachweise dort |
+| **Locations** | je Location die Veranstaltung mit Zeitraum, die Pläne der Etagen (Bild im Browser, PDF als Datei; als Vorschau nur ein kleines Bild – die Kachel der Übersicht oder ein Plan bis 2 MB, nie der große Plan), die festen Stromanschlüsse mit Anschlüssen und Vorsicherung, die eigenen Protokolle und Nachweise dort |
 | **Protokolle** | gültige Fassung je Nummer, frühere darunter; Leseansicht und PDF |
 | **Prüfnachweise** | mit Gültigkeit, Mietzeit und Quelle, Filter je Location; PDF als Datei |
 | **Konto** | Benutzername, Name, Kennwort ändern, Datenschutzhinweis |
@@ -284,18 +293,21 @@ no-store`), senden keinen Referer und kommen ohne Skript im Seitentext aus.
 ## Abrufe
 
 Jeder **Download** eines Dokuments im Kundenbereich wird festgehalten –
-damit sich nach einer Fehlzuordnung sagen lässt, ob der falsche Kunde das
-Dokument wirklich hatte:
+und die **Leseansicht eines Protokolls** genauso, denn sie zeigt den ganzen
+Bericht (Ansprechpartner, Anschrift, Unterschriften). So lässt sich nach
+einer Fehlzuordnung sagen, ob der falsche Kunde das Dokument wirklich hatte:
 
 | Spur | was | wie lange |
 |---|---|---|
-| `kunden_abrufe` (Reiter *Abrufe* am Kunden) | Kunde, Zugang, Dokument, Prüfsumme, Zeit – ohne IP | mit dem Dokument bzw. dem Kunden |
+| `kunden_abrufe` (Reiter *Abrufe* am Kunden) | Kunde, Zugang, Dokument (Protokoll als PDF oder angesehen, Prüfnachweis), Prüfsumme des PDF, Zeit – ohne IP | mit dem Dokument bzw. dem Kunden |
 | Audit-Log `kundenbereich.abruf` | Art und Kennung des Dokuments, mit IP | 400 Tage |
-| Verlauf des Berichts `pdf_kunde` | Zeit, ohne Namen | so lange wie der Bericht |
+| Verlauf des Berichts `pdf_kunde` bzw. `ansicht_kunde` | Zeit, ohne Namen | so lange wie der Bericht |
 
-Seitenaufrufe werden nicht festgehalten. Am Bericht und am Nachweis steht
-„zuletzt geladen“; hat ein **anderer** Kunde den Bericht geladen, warnt die
-Karte.
+Eine Ansicht desselben Protokolls durch denselben Zugang zählt höchstens
+einmal in der Stunde (Neuladen ist kein neuer Abruf). Andere Seitenaufrufe
+(Übersicht, Listen, Locations) werden nicht festgehalten. Am Bericht steht
+„zuletzt angesehen“ bzw. „zuletzt als PDF geladen“, am Nachweis „zuletzt
+geladen“; hat ein **anderer** Kunde den Bericht aufgerufen, warnt die Karte.
 
 ## Kunde beenden und löschen
 
@@ -342,9 +354,11 @@ einen fremden Nachweis bekommen:
 
 1. Sofort **herausnehmen** (Karte am Bericht) bzw. **zurückziehen**
    (Nachweis) – wirkt bei der nächsten Anfrage.
-2. Unter *Abrufe* am Kunden bzw. „zuletzt geladen“ nachsehen, ob er das
-   Dokument **geladen** hat. Nur angezeigt oder gar nicht geöffnet ist
-   anders zu bewerten als heruntergeladen.
+2. Unter *Abrufe* am Kunden bzw. „zuletzt angesehen/geladen“ nachsehen, ob
+   er das Dokument **angesehen** (Leseansicht des Protokolls – zeigt den
+   ganzen Inhalt) oder **heruntergeladen** hat. Steht dort nichts, hat
+   er es im Kundenbereich nicht geöffnet – in der Liste standen nur Nummer,
+   Titel, Location und Prüfdatum.
 3. Bewerten und, wenn nötig, binnen **72 Stunden** der Aufsichtsbehörde
    melden; den betroffenen Kunden informieren.
 
@@ -396,7 +410,7 @@ Umstellen je Kunde:
 bin/power kunden:liste                       Kunden: ID, Name, aktiv, Zugänge, aktive Locations, Nachweise
 bin/power kunden:zugang <kunde-id> <benutzer> [--kennwort] [--name=…] [--email=…]
 bin/power kunden:aufbewahrung [--ausfuehren] Prüfnachweise über der Aufbewahrungsfrist
-bin/power kunden:nachweise-pruefen           Dateien der Prüfnachweise nachrechnen
+bin/power kunden:nachweise-pruefen           Dateien der Prüfnachweise nachrechnen; Nachweise und Vorgänge ohne Kunden melden
 bin/power eventworx:sonde [--job=OID] …      Lese-Probe (eventworx.md)
 bin/power wartung                            macht abgelaufene Einrichtungslinks unbrauchbar, meldet fällige Nachweise
 ```
@@ -419,8 +433,8 @@ gefragt.
 
 | Skript | prüft |
 |---|---|
-| `tests/kundenbereich.php` | Kundenzugänge ohne Rechte, Tor über alle Routen, Freigaben nur am Kunden, mehrere Veranstalter je Gelände, Locations und Pläne, Protokolle nur über die Zuordnung, gleiche 404 für Fremdes, PDF-Kopfzeilen und Abrufe, Einrichtungslink, Kunde beendet, Benutzer- und Kundenverwaltung |
-| `tests/pruefnachweise.php` | Upload nur PDF, Dubletten, Angaben, Sichtbarkeit, Gültigkeit in der Mietzeit, Aufbewahrung, Integrität, Übernahme aus Eventworx |
+| `tests/kundenbereich.php` | Kundenzugänge ohne Rechte, Tor über alle Routen, Freigaben nur am Kunden, mehrere Veranstalter je Gelände, Locations und Pläne, Protokolle nur über die Zuordnung, gleiche 404 für Fremdes, PDF-Kopfzeilen und Abrufe (auch der Leseansicht), Einrichtungslink, Zugänge nur von dem, der alles sieht, Kundenmodus neben dem Kundenbereich, Kunde beendet, Benutzer- und Kundenverwaltung |
+| `tests/pruefnachweise.php` | Upload nur PDF, Dubletten, Angaben, Sichtbarkeit, Gültigkeit in der Mietzeit, Aufbewahrung, Integrität (auch Heilen und Datensätze ohne Kunden), Übernahme aus Eventworx (auch mit gleichzeitigem Löschen) |
 | `tests/eventworx.php` | Dateien am Vorgang, Verknüpfen, Lese-Probe |
 | `tests/sitzung.php` | Suche, Verknüpfen und Dateiliste halten die Sitzung nicht |
 | `tests/web.php`, `tests/sicherheit.php`, `tests/berichte.php`, `tests/zeitfenster.php`, `tests/schnittstelle.php` | Seiten der Kundenverwaltung, Rechte, Zuordnung am Bericht, Freigaben am Kunden, keine Tokens für Kundenzugänge |

@@ -25,8 +25,9 @@ nach Ihrer Zeit dort geplant ist, gehört nicht zu Ihrem Zugang.
 - **Wann:** nach dem Aufbau, bevor wir Ihnen die Anlage übergeben.
 - **Grundlage:** DIN VDE 0100-600 (Erstprüfung) und DIN VDE 0100-711 (Ausstellungen, Shows und Stände). Damit
   bestätigen wir als Errichter, dass die Anlage den Vorschriften entspricht (DGUV Vorschrift 3 § 5 Abs. 4).
-- **Was Sie bekommen:** einen Bericht mit Messwerten, unterschrieben von unserem Prüfer und von Ihnen bei der
-  Übergabe.
+- **Was Sie bekommen:** einen Bericht mit Messwerten, unterschrieben von unserem Prüfer und in der Regel auch von
+  Ihnen bei der Übergabe. War bei der Übergabe niemand von Ihnen da, steht im Bericht, dass er ohne Ihre Unterschrift
+  abgeschlossen wurde.
 
 ### Prüfnachweis – Prüfung eines Geräts
 

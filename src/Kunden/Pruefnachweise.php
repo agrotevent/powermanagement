@@ -216,6 +216,10 @@ final class Pruefnachweise
         $dateiName = self::dateiname($name);
         $jetzt = gmdate('c');
         $id = self::transaktion(static function () use ($kundeId, $bytes, $a, $dateiName, $freigeben, $jetzt): int {
+            // Kunde und Vorgang noch da? (Ein großer Upload dauert.)
+            if (!self::nochDa($kundeId, $a['felder']['vorgang_id'])) {
+                return 0;
+            }
             return Database::insert('pruefnachweise', $a['felder'] + [
                 'kunde_id'        => $kundeId,
                 'status'          => $freigeben ? 'freigegeben' : 'entwurf',
@@ -230,6 +234,9 @@ final class Pruefnachweise
                 'created_at'      => $jetzt,
             ]);
         });
+        if ($id === 0) {
+            return ['ok' => false, 'message' => 'Den Kunden oder den gewählten Vorgang gibt es inzwischen nicht mehr – nichts hinterlegt.'];
+        }
         Audit::log('kunden.nachweis_hochgeladen', 'pruefnachweis', (string) $id,
             ['kunde_id' => $kundeId, 'nachweis_id' => $id, 'quelle' => 'hand', 'freigegeben' => $freigeben]);
         return ['ok' => true, 'message' => $freigeben ? 'Prüfnachweis hinterlegt und für den Kunden freigegeben.'
@@ -609,7 +616,15 @@ final class Pruefnachweise
             $jetzt = gmdate('c');
             $dateiName = self::dateiname($name);
             try {
-                $ids[] = (int) self::transaktion(static function () use ($a, $kundeId, $v, $d, $bytes, $dateiName, $name, $liste, $freigeben, $jetzt): int {
+                $neu = (int) self::transaktion(static function () use ($a, $kundeId, $v, $vorgangId, $d, $bytes, $dateiName, $name, $liste, $freigeben, $jetzt): int {
+                    // Geprüft wurde vor dem Warten auf Eventworx (bis zu
+                    // Minuten); inzwischen kann der Kunde gelöscht oder der
+                    // Vorgang gelöst sein. Dann nichts mehr schreiben – ein
+                    // Nachweis ohne Kunden sähe niemand, und er sperrte die
+                    // Datei für jeden anderen (UNIQUE).
+                    if (!self::nochDa($kundeId, $vorgangId)) {
+                        return 0;
+                    }
                     return Database::insert('pruefnachweise', $a['felder'] + [
                         'kunde_id'        => $kundeId,
                         'status'          => $freigeben ? 'freigegeben' : 'entwurf',
@@ -636,10 +651,25 @@ final class Pruefnachweise
                         'created_at'      => $jetzt,
                     ]);
                 });
-            } catch (\PDOException) {
-                // UNIQUE (ewx_host, ewx_datei_id): ein zweiter Prozess war schneller.
-                $fehler[] = $name . ': schon übernommen.';
+            } catch (\PDOException $e) {
+                // UNIQUE (ewx_host, ewx_datei_id): ein zweiter Prozess war schneller –
+                // nur dann heißt es so. Jeder andere Fehler (Paketgrenze, Platte voll,
+                // Sperre) ist einer: nichts übernommen, Ursache ins Protokoll (nur IDs).
+                $schon = self::schonUebernommen((string) $v['ewx_host'], $d);
+                if ($schon !== null) {
+                    $fehler[] = $name . ': ' . ($schon === $kundeId ? 'schon übernommen.' : 'schon bei einem anderen Kunden übernommen – nicht noch einmal.');
+                } else {
+                    Logger::error('Prüfnachweis aus Eventworx: Datenbankfehler beim Speichern', ['kunde_id' => $kundeId, 'vorgang_id' => $vorgangId,
+                        'sqlstate' => (string) $e->getCode()]);
+                    $fehler[] = $name . ': konnte nicht gespeichert werden – nichts übernommen (Ursache im Protokoll des Servers).';
+                }
+                continue;
             }
+            if ($neu === 0) {
+                $fehler[] = 'Den Kunden oder diesen Vorgang gibt es inzwischen nicht mehr – nichts weiter übernommen.';
+                break;
+            }
+            $ids[] = $neu;
         }
         if ($ids !== []) {
             Audit::log('kunden.nachweis_eventworx', 'kunde', (string) $kundeId,
@@ -723,21 +753,57 @@ final class Pruefnachweise
     public static function dateiSpeichern(string $bytes): int
     {
         $sha = hash('sha256', $bytes);
-        $id = Database::scalar('SELECT id FROM pruefnachweis_dateien WHERE sha256 = ?', [$sha]);
-        if ($id !== false && $id !== null) {
-            return (int) $id;
+        $vorhanden = Database::first('SELECT id, groesse, daten FROM pruefnachweis_dateien WHERE sha256 = ?', [$sha]);
+        if ($vorhanden !== null) {
+            self::dateiHeilen($vorhanden, $sha, $bytes);
+            return (int) $vorhanden['id'];
         }
         try {
             return Database::insert('pruefnachweis_dateien', ['sha256' => $sha, 'art' => 'pdf', 'groesse' => strlen($bytes),
                 'daten' => base64_encode($bytes), 'created_at' => gmdate('c')]);
         } catch (\PDOException $e) {
             // Dieselben Bytes kamen eben aus einem zweiten Prozess (UNIQUE sha256).
-            $id = Database::scalar('SELECT id FROM pruefnachweis_dateien WHERE sha256 = ?', [$sha]);
-            if ($id === false || $id === null) {
+            $vorhanden = Database::first('SELECT id, groesse, daten FROM pruefnachweis_dateien WHERE sha256 = ?', [$sha]);
+            if ($vorhanden === null) {
                 throw $e;
             }
-            return (int) $id;
+            self::dateiHeilen($vorhanden, $sha, $bytes);
+            return (int) $vorhanden['id'];
         }
+    }
+
+    /**
+     * Gleiche Prüfsumme heißt nur dann gleiche Datei, wenn die gespeicherten
+     * Bytes noch dazu passen. Ist die Zeile beschädigt (base64, Größe oder
+     * Prüfsumme), kommen die frischen Bytes hinein – das heilt jeden
+     * Nachweis, der sie nutzt; sonst nähme jedes neue Hochladen wieder die
+     * kaputte Zeile, und ein freigegebener Nachweis gäbe 404.
+     *
+     * @param array<string,mixed> $zeile id, groesse, daten
+     */
+    private static function dateiHeilen(array $zeile, string $sha, string $bytes): void
+    {
+        $gespeichert = base64_decode((string) $zeile['daten'], true);
+        if (is_string($gespeichert) && strlen($gespeichert) === (int) $zeile['groesse'] && hash_equals($sha, hash('sha256', $gespeichert))) {
+            return;
+        }
+        Database::update('pruefnachweis_dateien', (int) $zeile['id'], ['groesse' => strlen($bytes), 'daten' => base64_encode($bytes)]);
+        Logger::error('Prüfnachweis: gespeicherte Datei war beschädigt – mit denselben Bytes (gleiche Prüfsumme) neu geschrieben',
+            ['datei_id' => (int) $zeile['id']]);
+    }
+
+    /**
+     * In einer laufenden Schreib-Transaktion: gibt es den Kunden noch – und,
+     * mit $vorgangId, seinen Vorgang? Unter MySQL mit Zeilensperre (das
+     * Löschen des Kunden sperrt dieselbe Zeile und wartet).
+     */
+    private static function nochDa(int $kundeId, ?int $vorgangId): bool
+    {
+        if (Database::first('SELECT id FROM kunden WHERE id = ?' . KundenService::fuerUpdate(), [$kundeId]) === null) {
+            return false;
+        }
+        return $vorgangId === null
+            || Database::first('SELECT id FROM kunden_vorgaenge WHERE id = ? AND kunde_id = ?' . KundenService::fuerUpdate(), [$vorgangId, $kundeId]) !== null;
     }
 
     /**
@@ -959,6 +1025,13 @@ final class Pruefnachweise
         }
         foreach (Database::select('SELECT d.id FROM pruefnachweis_dateien d WHERE NOT EXISTS (SELECT 1 FROM pruefnachweise n WHERE n.datei_id = d.id) ORDER BY d.id') as $z) {
             $befunde[] = 'Datei #' . (int) $z['id'] . ': von keinem Nachweis genutzt.';
+        }
+        // Ohne Kunden sieht sie niemand – und über UNIQUE sperrten sie Datei bzw. Vorgang für jeden anderen.
+        foreach (Database::select('SELECT n.id, n.kunde_id FROM pruefnachweise n WHERE NOT EXISTS (SELECT 1 FROM kunden k WHERE k.id = n.kunde_id) ORDER BY n.id') as $z) {
+            $befunde[] = 'Nachweis #' . (int) $z['id'] . ': ohne Kunde (Kunde #' . (int) $z['kunde_id'] . ' gibt es nicht).';
+        }
+        foreach (Database::select('SELECT v.id, v.kunde_id FROM kunden_vorgaenge v WHERE NOT EXISTS (SELECT 1 FROM kunden k WHERE k.id = v.kunde_id) ORDER BY v.id') as $z) {
+            $befunde[] = 'Vorgang #' . (int) $z['id'] . ': ohne Kunde (Kunde #' . (int) $z['kunde_id'] . ' gibt es nicht).';
         }
         return $befunde;
     }

@@ -131,7 +131,10 @@ final class Router
             // eigenes Kennwort, dann der Rest.
             if (Auth::check() && (int) (Auth::user()['must_change_password'] ?? 0) === 1
                 && !in_array($path, self::OHNE_NEUES_KENNWORT, true)) {
-                Flash::warning($kundenzugang ? 'Bitte legen Sie zuerst ein eigenes Kennwort fest.' : 'Bitte zuerst ein neues Passwort vergeben.');
+                // Das Konto im Kundenbereich sagt es selbst (ein Hinweis, nicht zwei).
+                if (!$kundenzugang) {
+                    Flash::warning('Bitte zuerst ein neues Passwort vergeben.');
+                }
                 Response::redirect($kundenzugang ? Kundenbereich::KONTO : '/profil');
                 return;
             }

@@ -25,7 +25,7 @@ final class KundenEinstellungen
     public const DATENSCHUTZ = 'Im Kundenbereich verarbeiten wir die Angaben zu Ihrem Zugang (Benutzername, Name, '
         . 'E-Mail-Adresse, letzte Anmeldung) sowie Prüfprotokolle und Prüfnachweise zu unseren Leistungen für Ihr '
         . 'Unternehmen, um sie Ihnen nach Vertrag und den Nachweispflichten (BetrSichV, DGUV Vorschrift 3) '
-        . 'bereitzustellen (Art. 6 Abs. 1 lit. b und c DSGVO). Abrufe von Dokumenten speichern wir mit Zeitpunkt. '
+        . 'bereitzustellen (Art. 6 Abs. 1 lit. b und c DSGVO). Wann Sie ein Dokument ansehen oder herunterladen, speichern wir mit Zeitpunkt. '
         . 'Prüfnachweise können aus unserer Auftragsverwaltung (Eventworx) stammen. Verantwortlich: {firma.name}, '
         . '{firma.anschrift}. Sie haben das Recht auf Auskunft, Berichtigung, Löschung, Einschränkung, Widerspruch '
         . 'und Beschwerde bei einer Aufsichtsbehörde.';

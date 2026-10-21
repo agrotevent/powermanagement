@@ -282,7 +282,7 @@ Drei Rechte für das Personal:
 | Recht | erlaubt | ab Werk |
 |---|---|---|
 | „Kunden mit ihren Protokollen, Prüfnachweisen und Eventworx-Vorgängen ansehen“ (`kunden.view`) | Kundenliste, Kunde mit Übersicht („Der Kunde sieht derzeit …“), Stammdaten, Vorgänge, Protokolle, Prüfnachweise; die Karte „Kundenbereich“ am Übergabebericht | Stromplanung, Elektrotechnik |
-| „Kunden und Kundenzugänge pflegen …“ (`kunden.manage`) | Kunden anlegen, ändern, beenden, löschen; Zugänge, Einrichtungslinks, vorläufige Kennwörter; Freigaben am Kunden; Abrufe sehen; Übergabeberichte zuordnen; Eventworx-Vorgänge verknüpfen und lösen | Stromplanung |
+| „Kunden und Kundenzugänge pflegen …“ (`kunden.manage`) | Kunden anlegen, ändern, beenden, löschen; Zugänge, Einrichtungslinks, vorläufige Kennwörter und Freigaben am Kunden (beides nur mit „Alle Standorte …“, siehe unten); Abrufe sehen; Übergabeberichte zuordnen; Eventworx-Vorgänge verknüpfen und lösen | Stromplanung |
 | „Prüfnachweise (DGUV V3) …“ (`kunden.nachweise`) | Prüfnachweise hochladen, aus Eventworx übernehmen, freigeben, zurückziehen, löschen | Stromplanung, Elektrotechnik |
 
 Dazu gilt jeweils:
@@ -294,6 +294,14 @@ Dazu gilt jeweils:
   oder ein Gerät gibt es für Kunden nicht, auch nicht per SQL. *gültig bis*
   und beide Datenenden sind Pflicht; fehlt ein Datenende doch, ist der
   Datenzeitraum leer, nie „ohne Grenze“.
+- **Zugänge, Einrichtungslinks und vorläufige Kennwörter** gibt nur aus,
+  wer selbst alles sieht, was der Kunde sieht: „Kunden pflegen“ **und**
+  „Alle Standorte, Anlagen und Messdaten“, „Kunden ansehen“ und jedes
+  Protokoll des Kunden. Ein Zugang erbt alles, was dem Kunden freigegeben
+  und zugeordnet ist – mit weniger Rechten legte sich sonst jemand ein
+  Kundenkonto an (oder übernähme eines) und läse dort, was er selbst nicht
+  sieht. Dasselbe gilt, wenn ein Kunde oder Zugang wieder aktiv wird oder
+  sein Ende später rückt.
 - **Freigaben an der Rolle `kunde` oder am Konto** gelten für
   Kundenzugänge **nicht** – eine Freigabe an der Rolle gälte sonst für alle
   Kunden.

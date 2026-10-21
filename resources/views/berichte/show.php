@@ -18,7 +18,7 @@ $ereignisNamen = [
     'ohne_kunde' => 'ohne Kunde abgeschlossen', 'korrektur_angelegt' => 'Korrektur angelegt', 'ersetzt' => 'durch Korrektur ersetzt',
     'verworfen' => 'verworfen', 'eventworx_uebernommen' => 'aus Eventworx übernommen', 'eventworx_entfernt' => 'Eventworx-Verweis entfernt',
     'pdf_abgerufen' => 'PDF abgerufen', 'kunde_zugeordnet' => 'einem Kunden des Kundenbereichs zugeordnet',
-    'kunde_entfernt' => 'aus dem Kundenbereich genommen', 'pdf_kunde' => 'PDF im Kundenbereich geladen',
+    'kunde_entfernt' => 'aus dem Kundenbereich genommen', 'pdf_kunde' => 'PDF im Kundenbereich geladen', 'ansicht_kunde' => 'im Kundenbereich angesehen',
 ];
 ?>
 <div class="toolbar-zeile">

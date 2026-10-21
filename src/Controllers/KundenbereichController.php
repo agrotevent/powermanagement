@@ -10,6 +10,7 @@ use App\Kunden\Einrichtung;
 use App\Kunden\KundenEinstellungen;
 use App\Kunden\Kundenbereich;
 use App\Kunden\KundenSicht;
+use App\Services\PlanTileService;
 use App\Services\SiteService;
 use App\Support\Config;
 use App\Support\Flash;
@@ -110,6 +111,40 @@ final class KundenbereichController extends Controller
         }
     }
 
+    /**
+     * Die Vorschau eines Plans: die Kachel der Stufe 0 (ganzer Plan, 256
+     * Pixel) oder ein kleiner Plan am Stück – nie der große Plan
+     * (PlanTileService::vorschau). Dieselbe Prüfung wie der Plan.
+     */
+    public function planVorschau(Request $request, array $params): void
+    {
+        $kunde = $this->kunde($request);
+        if ($kunde === null) {
+            return;
+        }
+        $siteId = self::id($params, 'id');
+        $floorId = self::id($params, 'etage');
+        $etage = $siteId === null || $floorId === null ? null : KundenSicht::etage((int) $kunde['id'], $siteId, $floorId);
+        $vorschau = $etage === null ? null : PlanTileService::vorschau($etage);
+        if ($vorschau === null) {
+            Response::notFound();
+            return;
+        }
+        Session::freigeben();
+        if (!$vorschau['kachel']) {
+            SiteService::planAusliefern((array) $etage, true);
+            return;
+        }
+        header('Content-Type: ' . $vorschau['mime']);
+        header('Content-Length: ' . (string) filesize($vorschau['pfad']));
+        header('Content-Disposition: inline; filename="plan-vorschau.' . ($vorschau['mime'] === 'image/png' ? 'png' : 'jpg') . '"');
+        header('X-Content-Type-Options: nosniff');
+        header('Cache-Control: private, no-store');
+        header("Content-Security-Policy: default-src 'none'; style-src 'unsafe-inline'; sandbox");
+        header('Referrer-Policy: no-referrer');
+        readfile($vorschau['pfad']);
+    }
+
     /** Die Protokolle des Kunden – je Nummer die gültige Fassung, frühere darunter. */
     public function protokolle(Request $request): void
     {
@@ -120,7 +155,12 @@ final class KundenbereichController extends Controller
         $this->seite('kundenbereich/protokolle', ['kunde' => $kunde, 'berichte' => KundenSicht::berichte((int) $kunde['id'])]);
     }
 
-    /** Ein Protokoll zum Lesen – wie im PDF, ohne Lebenslauf, Prüfnachweis der Integrität und Knöpfe des Personals. */
+    /**
+     * Ein Protokoll zum Lesen – wie im PDF, ohne Lebenslauf, Prüfnachweis der
+     * Integrität und Knöpfe des Personals. Die Ansicht zeigt den ganzen
+     * Bericht (auch Ansprechpartner und Unterschriften) und wird deshalb wie
+     * ein Download festgehalten (Abrufe, Art „ansicht“).
+     */
     public function protokoll(Request $request, array $params): void
     {
         $kunde = $this->kunde($request);
@@ -133,6 +173,7 @@ final class KundenbereichController extends Controller
             Response::notFound();
             return;
         }
+        Abrufe::merken((int) $kunde['id'], 'ansicht', (int) $id, null);
         $this->seite('kundenbereich/protokoll', ['kunde' => $kunde] + $protokoll);
     }
 
@@ -247,7 +288,8 @@ final class KundenbereichController extends Controller
             (string) $request->input('new_password_repeat', '')
         );
         if (!$ergebnis['ok']) {
-            Flash::error($ergebnis['message']);
+            // Im Kundenbereich heißt es überall „Kennwort“ (das Personal kennt „Passwort“).
+            Flash::error(strtr($ergebnis['message'], ['Passwörter' => 'Kennwörter', 'Passwort' => 'Kennwort']));
             $this->redirect(Kundenbereich::KONTO);
             return;
         }

@@ -236,6 +236,17 @@ try {
     $a2 = $etageAnlegen($sites['a'], 'Außengelände', 'pdf', $pdfBytes);
     $a3 = $etageAnlegen($sites['a'], 'Keller', null);
     $b1 = $etageAnlegen($sites['b'], 'Halle B', 'png', $planBytes);
+    // Große Rasterpläne (über PlanTileService::VORSCHAU_BYTES): a4 gekachelt (Stufe 0 als Vorschau), a5 ohne Kacheln (keine Vorschau).
+    $grossBytes = "\x89PNG\r\n\x1a\n" . str_repeat("\0", \App\Services\PlanTileService::VORSCHAU_BYTES + 1);
+    $a4 = $etageAnlegen($sites['a'], 'Halle Nord', 'png', $grossBytes);
+    $a5 = $etageAnlegen($sites['a'], 'Halle West', 'png', $grossBytes);
+    $kachelBytes = (string) base64_decode('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==');
+    $etageA4 = Database::first('SELECT * FROM floors WHERE id = ?', [$a4]) ?? [];
+    $kachelOrdner = \App\Services\PlanTileService::planDir($etageA4);
+    @mkdir($kachelOrdner . '/0/0', 0775, true);
+    file_put_contents($kachelOrdner . '/0/0/0.png', $kachelBytes);
+    file_put_contents($kachelOrdner . '/kacheln.json', json_encode(['breite' => 4000, 'hoehe' => 3000, 'max_zoom' => 4, 'kacheln' => 1, 'format' => 'png',
+        'quelle' => basename((string) $etageA4['plan_file'])]));
     // Feststromanschluss FA (fest) und mobile Verteilung MA auf A, dazu eine feste Vorlage.
     $fa = (int) Database::insert('objekte', ['art' => 'anschluss', 'name' => $kennung . ' Energiesäule FA', 'site_id' => $sites['a'], 'floor_id' => $a1,
         'fest' => 1, 'eigenschaften' => json_encode(['anschlussart' => 'Energiesäule', 'absicherung_a' => 63, 'netzbetreiber' => $kennung . '-netz']),
@@ -514,8 +525,9 @@ try {
     gleich(KundenSicht::location($kunden['k1'], 999999999), null, 'location(K1, unbekannt) === null');
     gleich(KundenSicht::location($kunden['k3'], $sites['a']), null, 'location() eines beendeten Kunden === null');
     $la = KundenSicht::location($kunden['k1'], $sites['a']) ?? [];
-    gleich(array_map(static fn (array $e): array => [$e['id'], $e['plan'], $e['seite']], $la['etagen'] ?? []), [[$a2, 'pdf', 2], [$a1, 'bild', 1]],
-        'Location A: nur Etagen mit Plan (Bild, PDF mit Seite), ohne A3, ohne B1');
+    gleich(array_map(static fn (array $e): array => [$e['id'], $e['plan'], $e['seite'], $e['vorschau']], $la['etagen'] ?? []),
+        [[$a2, 'pdf', 2, false], [$a4, 'bild', 1, true], [$a1, 'bild', 1, true], [$a5, 'bild', 1, false]],
+        'Location A: nur Etagen mit Plan (Bild, PDF mit Seite), ohne A3, ohne B1; Vorschau nur aus Kachel oder kleinem Bild');
     gleich($la['feststrom'] ?? [], [['name' => $kennung . ' Energiesäule FA', 'art' => 'Energiesäule', 'etage' => 'Halle Süd',
         'anschluss' => '2× CEE 32 A', 'vorsicherung' => '63 A']], 'feste Anschlüsse: nur FA – nicht die mobile Verteilung, nicht die Vorlage');
     gleich([$la['freigaben'][0]['veranstaltung'] ?? '', Zeit::ts($la['freigaben'][0]['bis'] ?? null), $la['freigaben'][0]['daten'] ?? ''], ['Sommerfestival',
@@ -817,7 +829,58 @@ try {
     pruefe(!KundenService::freigabeSpeichern($kunden['k5'], ['site_id' => $sites['b'], 'gueltig_ab' => $eingabe($jetzt),
         'gueltig_bis' => $eingabe($jetzt + $tag), 'daten_wie_gueltig' => 1])['ok'], 'ohne „Alle Standorte …“: keine Freigabe');
     pruefe(!KundenService::freigabeLoeschen($kunden['k2'], (int) $k2b['id'])['ok'], 'ohne „Alle Standorte …“: keine Freigabe entfernen');
+    // Anmeldedaten gibt nur aus, wer selbst alles sieht, was der Kunde sieht – sonst legte er sich ein
+    // Kundenkonto an (oder übernähme eines) und läse dort Pläne und Protokolle, die er nicht bekommt.
+    $kontoStand = static fn (int $uid): array => array_values(Database::first('SELECT password_hash, einrichtung_hash, must_change_password FROM users WHERE id = ?', [$uid]) ?? []);
+    $usersVorher = (int) Database::scalar('SELECT COUNT(*) FROM users');
+    $kwVorher = $kontoStand($zugaenge['kw']);
+    pruefe(!KundenService::darfZugangAusgeben($kunden['k5']), 'ohne „Alle Standorte …“: darfZugangAusgeben() nein');
+    foreach ([
+        'Zugang mit vorläufigem Kennwort' => KundenService::zugangAnlegen($kunden['k5'], ['username' => $kennung . '-schatten'], 'kennwort'),
+        'Zugang mit Einrichtungslink'     => KundenService::zugangAnlegen($kunden['k5'], ['username' => $kennung . '-schatten2'], 'link'),
+        'neuer Einrichtungslink'          => KundenService::zugangLink($kunden['k5'], $zugaenge['kw']),
+        'neues vorläufiges Kennwort'      => KundenService::zugangKennwort($kunden['k5'], $zugaenge['kw']),
+    ] as $fall => $r) {
+        pruefe(!$r['ok'] && !isset($r['kennwort']) && !isset($r['link']) && !isset($r['pfad']) && $r['message'] === KundenService::NICHT_AUSGEBEN,
+            'ohne „Alle Standorte …“: kein ' . $fall);
+    }
+    gleich([(int) Database::scalar('SELECT COUNT(*) FROM users'), $kontoStand($zugaenge['kw'])], [$usersVorher, $kwVorher], '… kein Konto angelegt, keins geändert');
+    // Die Kommandozeile des Servers (bin/power) darf es – wer sie hat, hat ohnehin alles.
+    exec(escapeshellarg(PHP_BINARY) . ' ' . escapeshellarg(dirname(__DIR__) . '/bin/power') . ' kunden:zugang ' . (int) $kunden['k5'] . ' '
+        . escapeshellarg($kennung . '-cli') . ' --kennwort 2>&1', $cliAus, $cliCode);
+    $cliKonto = Database::first('SELECT id, kunde_id FROM users WHERE username = ?', [$kennung . '-cli']) ?? [];
+    pruefe($cliCode === 0 && str_contains(implode("\n", $cliAus), 'Vorläufiges Kennwort: ') && (int) ($cliKonto['kunde_id'] ?? 0) === $kunden['k5'],
+        'kunden:zugang auf der Kommandozeile: Zugang mit vorläufigem Kennwort');
+    $zugaenge['cli'] = (int) ($cliKonto['id'] ?? 0);
+    // Wieder öffnen (Kunde oder Zugang aktiv, späteres Ende) gilt wie Ausgeben; Stammdaten ändern und Schließen nicht.
+    $k5Daten = ['name' => $kennung . ' Einrichtung GmbH', 'kundennummer' => 'kb-' . $kennung, 'notizen' => "Nur für uns\nzweite Zeile"];
+    $bisIn = static fn (int $tage): string => (new DateTimeImmutable('now', Zeit::zone()))->modify('+' . $tage . ' days')->format('Y-m-d');
     alsBenutzer($personal['planung']);
+    pruefe(KundenService::speichern($kunden['k5'], $k5Daten + ['aktiv' => 0])['ok'] && KundenService::zugangSpeichern($kunden['k5'], $zugaenge['kw'],
+        ['full_name' => 'Erika Muster', 'email' => $mail, 'is_active' => 0])['ok'], 'Kunde K5 und ein Zugang beendet (Stromplanung)');
+    alsBenutzer($personal['ohnealles']);
+    pruefe(!KundenService::speichern($kunden['k5'], $k5Daten + ['aktiv' => 1])['ok'] && (int) (KundenService::find($kunden['k5'])['aktiv'] ?? 1) === 0,
+        'ohne „Alle Standorte …“: Kunde nicht wieder aktiv');
+    pruefe(KundenService::speichern($kunden['k5'], $k5Daten + ['aktiv' => 0, 'kundennummer' => 'kb-' . $kennung])['ok'], '… Stammdaten eines beendeten Kunden ändern geht');
+    alsBenutzer($personal['planung']);
+    pruefe(KundenService::speichern($kunden['k5'], $k5Daten + ['aktiv' => 1, 'gueltig_bis' => $bisIn(10)])['ok'], 'Stromplanung: wieder aktiv, Ende in 10 Tagen');
+    alsBenutzer($personal['ohnealles']);
+    pruefe(!KundenService::speichern($kunden['k5'], $k5Daten + ['aktiv' => 1, 'gueltig_bis' => $bisIn(20)])['ok']
+        && !KundenService::speichern($kunden['k5'], $k5Daten + ['aktiv' => 1, 'gueltig_bis' => ''])['ok'], 'ohne „Alle Standorte …“: Ende nicht verlängern, nicht aufheben');
+    pruefe(KundenService::speichern($kunden['k5'], $k5Daten + ['aktiv' => 1, 'gueltig_bis' => $bisIn(5)])['ok'], '… früher beenden geht');
+    pruefe(!KundenService::zugangSpeichern($kunden['k5'], $zugaenge['kw'], ['full_name' => 'Erika Muster', 'email' => $mail, 'is_active' => 1])['ok']
+        && (int) Database::scalar('SELECT is_active FROM users WHERE id = ?', [$zugaenge['kw']]) === 0, 'ohne „Alle Standorte …“: Zugang nicht wieder aktiv');
+    // Mit „Alle Standorte …“, aber ohne die Protokolle des Kunden: auch nicht (K1 hat Protokolle).
+    $rollen['alleohneberichte'] = (int) BenutzerService::rolleSpeichern(null, $kennung . ' alle ohne Berichte', '',
+        ['kunden.view', 'kunden.manage', 'anlagen.scope.all', 'dashboard.view'])['id'];
+    $personal['alleohneberichte'] = BenutzerService::anlegen($kennung . '-alleohneberichte', $kennwort,
+        (string) Database::scalar('SELECT role_key FROM roles WHERE id = ?', [$rollen['alleohneberichte']]), false);
+    alsBenutzer($personal['alleohneberichte']);
+    gleich([KundenService::darfZugangAusgeben($kunden['k1']), KundenService::darfZugangAusgeben($kunden['k5'])], [false, true],
+        'alle Standorte ohne „Berichte ansehen“: nicht für K1 (hat Protokolle), wohl für K5 (keine)');
+    alsBenutzer($personal['planung']);
+    pruefe(KundenService::speichern($kunden['k5'], $k5Daten + ['aktiv' => 1, 'gueltig_bis' => ''])['ok'] && KundenService::zugangSpeichern($kunden['k5'], $zugaenge['kw'],
+        ['full_name' => 'Erika Muster', 'email' => $mail, 'is_active' => 1])['ok'], 'Stromplanung: K5 und der Zugang wieder offen');
     $zustaende = array_column(KundenService::freigaben($kunden['k2']), 'zustand', 'id');
     gleich([$zustaende[(int) $k2a['id']] ?? '', $zustaende[(int) $k2b['id']] ?? '', $zustaende[(int) $k2c['id']] ?? ''], ['abgelaufen', 'wirksam', 'kommend'],
         'Freigaben des Kunden mit Zustand');
@@ -994,20 +1057,34 @@ try {
     gleich([$pdf['status'], kopfzeile($pdf, 'Content-Type'), kopfzeile($pdf, 'Content-Disposition'), kopfzeile($pdf, 'Cache-Control'), $pdf['text'] === $pdfBytes],
         [200, 'application/pdf', 'attachment; filename="plan-Aussengelaende.pdf"', 'private, no-store', true], 'PDF-Plan: als Anhang (sandbox sperrt die PDF-Ansicht)');
 
-    // Fremd und nicht vorhanden: dieselbe 404, im Kundenlayout, ohne Navigationsmarke.
+    // Vorschau: nie der ganze große Plan – die Kachel der Stufe 0 oder ein kleiner Plan am Stück.
+    $vorschau = static fn (int $site, int $etage): string => '/kundenbereich/locations/' . $site . '/plan/' . $etage . '/vorschau';
+    pruefe(str_contains($ort, '<img src="' . $vorschau($sites['a'], $a1) . '"') && str_contains($ort, '<img src="' . $vorschau($sites['a'], $a4) . '"')
+        && !str_contains($ort, $vorschau($sites['a'], $a5)) && !str_contains($ort, $vorschau($sites['a'], $a2)) && !preg_match('#<img src="[^"]*/plan/\d+"#', $ort),
+        'Location: Vorschau als kleines Bild (nie die Plandatei selbst), keine für einen großen Plan ohne Kacheln und für ein PDF ohne Kacheln');
+    $v1 = anfrage($basis, $z1['dose'], 'GET', $vorschau($sites['a'], $a1));
+    $v4 = anfrage($basis, $z1['dose'], 'GET', $vorschau($sites['a'], $a4));
+    gleich([$v1['status'], kopfzeile($v1, 'Content-Type'), kopfzeile($v1, 'Cache-Control'), $v1['text'] === $planBytes,
+        $v4['status'], kopfzeile($v4, 'Content-Type'), kopfzeile($v4, 'Cache-Control'), kopfzeile($v4, 'Content-Security-Policy'), kopfzeile($v4, 'X-Content-Type-Options'),
+        $v4['text'] === $kachelBytes],
+        [200, 'image/png', 'private, no-store', true, 200, 'image/png', 'private, no-store', "default-src 'none'; style-src 'unsafe-inline'; sandbox", 'nosniff', true],
+        'Vorschau: kleiner Plan am Stück, großer gekachelt als Kachel der Stufe 0 (nicht die 2 MB) – no-store, sandbox');
+
     $ohneMarken = static fn (string $html): string => (string) preg_replace('/nonce="[^"]*"|value="[^"]*"/', '', $html);
     $vorlage = anfrage($basis, $z1['dose'], 'GET', '/kundenbereich/gibt-es-nicht');
     $abweichend = [];
     foreach (['/kundenbereich/locations/' . $sites['b'], '/kundenbereich/locations/' . $sites['c'], '/kundenbereich/locations/999999999',
         '/kundenbereich/locations/0', '/kundenbereich/locations/' . $sites['a'] . 'x', '/kundenbereich/locations/-' . $sites['a'],
         '/kundenbereich/locations/0' . $sites['a'], $plan($sites['a'], $b1), $plan($sites['b'], $b1), $plan($sites['a'], $a3), $plan($sites['a'], 999999999),
-        $plan($sites['c'], $b1), '/kundenbereich/locations/' . $sites['a'] . '/plan/' . $a1 . 'x', '/kundenbereich/locations/' . $sites['a'] . '/plan'] as $pfad) {
+        $plan($sites['c'], $b1), '/kundenbereich/locations/' . $sites['a'] . '/plan/' . $a1 . 'x', '/kundenbereich/locations/' . $sites['a'] . '/plan',
+        $vorschau($sites['a'], $b1), $vorschau($sites['b'], $b1), $vorschau($sites['a'], $a3), $vorschau($sites['a'], $a5), $vorschau($sites['a'], $a2),
+        $vorschau($sites['a'], 999999999)] as $pfad) {
         $r = anfrage($basis, $z1['dose'], 'GET', $pfad);
         if ($r['status'] !== 404 || $ohneMarken($r['text']) !== $ohneMarken($vorlage['text']) || kopfzeile($r, 'Cache-Control') !== 'private, no-store') {
             $abweichend[] = $pfad . ' → ' . $r['status'];
         }
     }
-    gleich($abweichend, [], 'IDOR: fremde/abgelaufene/kommende Location, fremde Etage, Etage ohne Plan, kaputte IDs – dieselbe 404');
+    gleich($abweichend, [], 'IDOR: fremde/abgelaufene/kommende Location, fremde Etage, Etage ohne Plan, kaputte IDs, Vorschau ohne Bild – dieselbe 404');
     pruefe(!str_contains($vorlage['text'], 'aria-current'), '404 markiert keinen Eintrag der Navigation');
     $z2 = anmeldenAls($basis, $kennung . '-z2', $kennwort, $dosen);
     gleich([anfrage($basis, $z2['dose'], 'GET', '/kundenbereich/locations/' . $sites['b'])['status'], anfrage($basis, $z2['dose'], 'GET', '/kundenbereich/locations/' . $sites['a'])['status'],
@@ -1034,6 +1111,18 @@ try {
     pruefe(str_contains($alt1, 'durch eine Korrektur ersetzt') && str_contains($alt1, 'href="/kundenbereich/protokolle/' . $ub1k . '"'), 'ersetzte Fassung: Hinweis mit Link auf die gültige');
     pruefe(str_contains($start['text'], 'Ihre Protokolle') && str_contains($start['text'], $nummer(1, 2)) && str_contains($ort, $nummer(1, 2)) && !str_contains($ort, $nummer(2)),
         'Übersicht und Location A: die Protokolle von K1, nicht das von K2');
+
+    // Die Leseansicht zeigt den ganzen Bericht – sie zählt wie ein Download (höchstens einmal je Stunde und Zugang).
+    $ansichten = static fn (int $id): int => (int) Database::scalar("SELECT COUNT(*) FROM kunden_abrufe WHERE art = 'ansicht' AND ziel_id = ? AND user_id = ?", [$id, $zugaenge['z1']]);
+    anfrage($basis, $z1['dose'], 'GET', '/kundenbereich/protokolle/' . $ub1k);
+    $abrufAnsicht = Database::first("SELECT * FROM kunden_abrufe WHERE art = 'ansicht' AND ziel_id = ? ORDER BY id DESC LIMIT 1", [$ub1k]) ?? [];
+    gleich([$ansichten($ub1k), (int) ($abrufAnsicht['kunde_id'] ?? 0), array_key_exists('sha256', $abrufAnsicht) ? $abrufAnsicht['sha256'] : 'x', $ansichten($ub1)],
+        [1, $kunden['k1'], null, 1], 'Ansicht eines Protokolls festgehalten (Kunde, Zugang) – zweimal geöffnet, einmal gezählt');
+    $ereignis = Database::first("SELECT * FROM bericht_ereignisse WHERE bericht_id = ? AND ereignis = 'ansicht_kunde' ORDER BY id DESC LIMIT 1", [$ub1k]) ?? [];
+    $auditAnsicht = Database::first("SELECT * FROM audit_log WHERE action = 'kundenbereich.abruf' AND target_type = 'ansicht' AND target_id = ? ORDER BY id DESC LIMIT 1",
+        [(string) $ub1k]) ?? [];
+    gleich([(int) ($ereignis['user_id'] ?? 0), $ereignis['username'] ?? '', $auditAnsicht['username'] ?? ''], [$zugaenge['z1'], 'kundenbereich', $kennung . '-z1'],
+        'Ansicht: im Lebenslauf (ohne Namen) und im Audit');
 
     // Das PDF: gespeicherte Bytes, Kopfzeilen, Abruf in drei Spuren.
     $abrufeK1 = static fn (): int => (int) Database::scalar('SELECT COUNT(*) FROM kunden_abrufe WHERE kunde_id = ?', [$kunden['k1']]);
@@ -1144,8 +1233,8 @@ try {
     $r = anfrage($basis, $z1b['dose'], 'GET', '/profil');
     gleich([$r['status'], $r['ziel']], [302, '/kundenbereich'], 'vorläufiges Kennwort: /profil bleibt zu (Tor)');
     $konto = anfrage($basis, $z1b['dose'], 'GET', '/kundenbereich/konto');
-    pruefe($konto['status'] === 200 && str_contains($konto['text'], 'Bitte legen Sie zuerst ein eigenes Kennwort fest.')
-        && str_contains($konto['text'], 'autocomplete="current-password"'), 'Konto: Hinweis und Kennwortformular');
+    pruefe($konto['status'] === 200 && substr_count($konto['text'], 'eigenes Kennwort fest') === 1 && str_contains($konto['text'], '<h1 class="kb-titel">Konto</h1>')
+        && str_contains($konto['text'], 'autocomplete="current-password"'), 'Konto: Überschrift, genau ein Hinweis aufs eigene Kennwort (nach Anmeldung und Tor), Kennwortformular');
     $hash = static fn (): string => (string) Database::scalar('SELECT password_hash FROM users WHERE id = ?', [$zugaenge['z1b']]);
     $hashZ1b = $hash();
     $neu = 'Neu-' . $kennwort;
@@ -1156,6 +1245,7 @@ try {
         'current_password' => 'falsch', 'new_password' => $neu, 'new_password_repeat' => $neu]);
     pruefe($r['ziel'] === '/kundenbereich/konto' && $hash() === $hashZ1b, 'falsches aktuelles Kennwort: nichts geändert');
     $konto = anfrage($basis, $z1b['dose'], 'GET', '/kundenbereich/konto');
+    pruefe(str_contains($konto['text'], 'Das aktuelle Kennwort stimmt nicht.') && !str_contains($konto['text'], 'Passwort'), 'Meldung im Kundenbereich: „Kennwort“, nie „Passwort“');
     $r = anfrage($basis, $z1b['dose'], 'POST', '/kundenbereich/konto/kennwort', ['_token' => csrfAus($konto['text']),
         'current_password' => $kennwort, 'new_password' => $neu, 'new_password_repeat' => $neu]);
     gleich([$r['status'], $r['ziel']], [302, '/kundenbereich'], 'Kennwort geändert → Übersicht');
@@ -1247,6 +1337,7 @@ try {
     gleich($verbraucht['status'], 404, 'derselbe Link noch einmal: 404');
     $fremd = anfrage($basis, $gast, 'GET', Einrichtung::PFAD . rtrim(strtr(base64_encode(random_bytes(32)), '+/', '-_'), '='));
     $ohneMarken = static fn (string $html): string => (string) preg_replace('/nonce="[^"]*"|value="[^"]*"/', '', $html);
+    alsBenutzer($personal['planung']);   // Links gibt nur aus, wer alles sieht, was der Kunde sieht
     $abgelaufen = KundenService::zugangLink($kunden['k1'], $zugaenge['http']);
     Database::update('users', $zugaenge['http'], ['einrichtung_bis' => gmdate('c', time() - 60)]);
     $abgelaufenSeite = anfrage($basis, $gast, 'GET', (string) $abgelaufen['pfad']);
@@ -1257,6 +1348,7 @@ try {
     $z = anmeldenAls($basis, $kennung . '-httplink', $neu, $dosen);
     gleich($z['ziel'], '/kundenbereich', 'mit dem festgelegten Kennwort angemeldet → Kundenbereich');
     $neuerLink = KundenService::zugangLink($kunden['k1'], $zugaenge['http']);
+    alsBenutzer(null);
     $r = anfrage($basis, $planung['dose'], 'GET', (string) $neuerLink['pfad']);
     pruefe($r['status'] === 200 && str_contains($r['text'], 'bitte zuerst abmelden') && !str_contains($r['text'], 'name="kennwort"'), 'als Personal angemeldet: Hinweis, kein Formular');
     $r = anfrage($basis, $z['dose'], 'POST', (string) $neuerLink['pfad'], ['_token' => csrfAus(anfrage($basis, $z['dose'], 'GET', '/kundenbereich')['text']),
@@ -1294,7 +1386,7 @@ try {
     // Protokolle zuordnen – am Bericht (Karte „Kundenbereich“) und im Reiter Protokolle.
     $karte = anfrage($basis, $planung['dose'], 'GET', '/berichte/' . $ub1k);
     pruefe($karte['status'] === 200 && str_contains($karte['text'], 'id="kundenbereich"') && str_contains($karte['text'], 'href="/kunden/' . $kunden['k1'] . '?tab=protokolle"')
-        && str_contains($karte['text'], 'Zuletzt im Kundenbereich geladen') && str_contains($karte['text'], 'Der Kunde sieht den Bericht')
+        && str_contains($karte['text'], 'Zuletzt im Kundenbereich als PDF geladen') && str_contains($karte['text'], 'Der Kunde sieht den Bericht')
         && str_contains($karte['text'], 'action="/berichte/' . $ub1k . '/kundenbereich"'), 'Bericht b1k: Karte „Kundenbereich“ – zugeordnet, sichtbar, zuletzt geladen, Formular');
     pruefe(str_contains(anfrage($basis, $planung['dose'], 'GET', '/berichte/' . $ub4)['text'], 'Vorschlag: <strong>' . htmlspecialchars($kundeK1)), 'Bericht b4: Vorschlag K1 aus Eventworx');
     $tabP = anfrage($basis, $planung['dose'], 'GET', '/kunden/' . $kunden['k1'] . '?tab=protokolle');
@@ -1302,7 +1394,8 @@ try {
         && str_contains($tabP['text'], 'ohne PDF') && str_contains($tabP['text'], $nummer(4)) && !str_contains($tabP['text'], $nummer(2)),
         'Reiter Protokolle: zugeordnete mit Zustand, Vorschlag b4, nicht b2');
     $tabA = anfrage($basis, $planung['dose'], 'GET', '/kunden/' . $kunden['k1'] . '?tab=abrufe');
-    pruefe(str_contains($tabA['text'], $kennung . '-z1') && str_contains($tabA['text'], $nummer(1, 2)), 'Reiter Abrufe: Zugang und Dokument');
+    pruefe(str_contains($tabA['text'], $kennung . '-z1') && str_contains($tabA['text'], $nummer(1, 2)) && str_contains($tabA['text'], 'Protokoll angesehen')
+        && str_contains($tabA['text'], 'Protokoll (PDF)'), 'Reiter Abrufe: Zugang und Dokument, Ansicht und PDF');
     $pt = csrfAus($tabP['text']);
     $kundeVon = static fn (int $bid): ?int => ($k = Database::scalar('SELECT kunde_id FROM berichte WHERE id = ?', [$bid])) === null ? null : (int) $k;
     $r = anfrage($basis, $planung['dose'], 'POST', '/berichte/' . $ub4 . '/kundenbereich', ['_token' => $pt, 'kunde_id' => $kunden['k1'], 'zurueck' => $kunden['k1']]);
@@ -1375,7 +1468,39 @@ try {
     $r = anfrage($basis, anmeldenAls($basis, $kennung . '-ohnealles', $kennwort, $dosen)['dose'], 'GET', '/kunden/' . $kunden['k2'] . '?tab=freigaben');
     pruefe($r['status'] === 200 && str_contains($r['text'], 'darf nur, wer selbst alle Standorte sieht') && !str_contains($r['text'], 'id="neue-freigabe"'),
         'pflegen ohne „Alle Standorte …“: Freigaben nur ansehen');
+    $ohneAlles = anmeldenAls($basis, $kennung . '-ohnealles', $kennwort, $dosen);
+    $r = anfrage($basis, $ohneAlles['dose'], 'GET', '/kunden/' . $kunden['k1'] . '?tab=zugaenge');
+    pruefe($r['status'] === 200 && str_contains($r['text'], 'gibt nur aus, wer selbst alles sieht') && !str_contains($r['text'], 'id="neuer-zugang"')
+        && !str_contains($r['text'], 'value="kennwort"') && !str_contains($r['text'], 'value="link"'), 'pflegen ohne „Alle Standorte …“: kein neuer Zugang, kein Link, kein Kennwort angeboten');
+    $z1Hash = (string) Database::scalar('SELECT password_hash FROM users WHERE id = ?', [$zugaenge['z1']]);
+    foreach (['kennwort', 'link'] as $aktion) {
+        $p = anfrage($basis, $ohneAlles['dose'], 'POST', '/kunden/' . $kunden['k1'] . '/zugang/' . $zugaenge['z1'], ['_token' => csrfAus($r['text']), 'aktion' => $aktion]);
+        pruefe($p['status'] === 302 && !str_contains($p['text'], 'e-geheim') && (string) Database::scalar('SELECT password_hash FROM users WHERE id = ?', [$zugaenge['z1']]) === $z1Hash
+            && Database::scalar('SELECT einrichtung_hash FROM users WHERE id = ?', [$zugaenge['z1']]) === null, 'pflegen ohne „Alle Standorte …“: POST ' . $aktion . ' abgelehnt, Zugang unverändert');
+    }
     gleich(meldungenDesServers($serverFehler), [], 'Rechte der Kundenverwaltung ohne PHP-Meldung');
+
+    // Kundenmodus und Kundenbereich nebeneinander: der Prüfer übergibt sein Gerät, seine Sitzung endet
+    // (Kennwort per SQL geändert), auf demselben Gerät meldet sich ein Kundenzugang an. Die Sperre aus der
+    // Sitzung des Prüfers gilt für ihn nicht – sonst ginge es im Kreis: Kundenmodus → Bericht, Tor → Kundenbereich.
+    $personal['kmodus'] = BenutzerService::anlegen($kennung . '-kmodus', $kennwort, 'admin', false);
+    $ubm = $berichtAnlegen('bm', ['status' => 'geprueft', 'jahr' => null, 'pruefdatum' => $heute]);
+    $geraet = anmeldenAls($basis, $kennung . '-kmodus', $kennwort, $dosen);
+    $r = anfrage($basis, $geraet['dose'], 'POST', '/berichte/' . $ubm . '/kundenmodus', ['_token' => csrfAus(anfrage($basis, $geraet['dose'], 'GET', '/profil')['text'])]);
+    gleich([$r['status'], $r['ziel']], [302, '/berichte/' . $ubm . '/kunde'], 'Prüfer: Kundenmodus gestartet');
+    $r = anfrage($basis, $geraet['dose'], 'GET', '/kundenbereich');
+    gleich([$r['status'], $r['ziel']], [302, '/berichte/' . $ubm . '/kunde'], 'im Kundenmodus: auch /kundenbereich führt zur Kundenseite');
+    Database::update('users', $personal['kmodus'], ['password_hash' => password_hash('Anders-' . $kennwort, PASSWORD_DEFAULT)]);
+    $seite = anfrage($basis, $geraet['dose'], 'GET', '/login');
+    $r = anfrage($basis, $geraet['dose'], 'POST', '/login', ['username' => $kennung . '-z2', 'password' => $kennwort, '_token' => csrfAus($seite['text'])]);
+    gleich([$seite['status'], $r['status'], $r['ziel']], [200, 302, '/kundenbereich'], 'Sitzung des Prüfers zu Ende: auf demselben Gerät meldet sich ein Kundenzugang an');
+    $r = anfrage($basis, $geraet['dose'], 'GET', '/kundenbereich');
+    pruefe($r['status'] === 200 && str_contains($r['text'], $kennung . ' Stadtmarketing'), 'Kundenzugang auf dem Gerät des Prüfers: /kundenbereich 200 – die Sperre gilt ihm nicht');
+    $r = anfrage($basis, $geraet['dose'], 'GET', '/berichte/' . $ubm . '/kunde');
+    gleich([$r['status'], $r['ziel']], [302, '/kundenbereich'], '… die Kundenseite des Kundenmodus bleibt ihm zu (Tor) – kein Kreis');
+    gleich((int) Database::scalar('SELECT COUNT(*) FROM kundenmodus_geraete WHERE bericht_id = ? AND user_id = ?', [$ubm, $personal['kmodus']]), 1,
+        '… und die Sperre am Gerät bleibt beim Prüfer');
+    gleich(meldungenDesServers($serverFehler), [], 'Kundenmodus neben dem Kundenbereich ohne PHP-Meldung');
 
     // Kunde beendet: die offenen Sitzungen enden bei der nächsten Anfrage – auch mitten im Plan.
     $zweiteSitzung = anmeldenAls($basis, $kennung . '-z1b', 'Neu-' . $kennwort, $dosen);
@@ -1447,7 +1572,7 @@ try {
         foreach (['bericht_unterschriften', 'bericht_pdf', 'bericht_objekte', 'bericht_ereignisse', 'kundenmodus_geraete'] as $tabelle) {
             Database::execute("DELETE FROM {$tabelle} WHERE bericht_id = ?", [(int) $zeile['id']]);
         }
-        Database::execute("DELETE FROM kunden_abrufe WHERE art = 'bericht' AND ziel_id = ?", [(int) $zeile['id']]);
+        Database::execute("DELETE FROM kunden_abrufe WHERE art IN ('bericht', 'ansicht') AND ziel_id = ?", [(int) $zeile['id']]);
         Database::execute("DELETE FROM audit_log WHERE target_type = 'bericht' AND target_id = ?", [(string) $zeile['id']]);
     }
     Database::execute('DELETE FROM berichte WHERE titel = ?', [$kennung]);

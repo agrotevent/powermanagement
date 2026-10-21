@@ -370,6 +370,7 @@ final class KundenController extends Controller
             $daten['uebersicht'] = KundenService::uebersicht($id);
         } elseif ($tab === 'zugaenge') {
             $daten['zugaenge'] = KundenService::zugaenge($id);
+            $daten['darfAusgeben'] = KundenService::darfZugangAusgeben($id);
             $daten['einmal'] = EinmalMarke::ausgeben(self::EINMAL);
             $daten['adresse'] = KundenEinstellungen::adresse();
         } elseif ($tab === 'freigaben') {

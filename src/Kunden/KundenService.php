@@ -12,6 +12,7 @@ use App\Services\EventworxFehler;
 use App\Support\Audit;
 use App\Support\Crypto;
 use App\Support\Database;
+use App\Support\Logger;
 use App\Support\Session;
 use App\Support\Settings;
 use App\Support\Zeit;
@@ -23,7 +24,10 @@ use App\Support\Zeit;
  * Jede Unter-ID (Zugang, Freigabe) wird gegen den Kunden geprüft: ein Zugang
  * eines anderen Kunden ist hier „nicht vorhanden“. Rechte prüft die Route
  * (kunden.view / kunden.manage); Standorte freigeben zusätzlich nur, wer
- * alles sieht (BenutzerService::freigabeFuerKunde).
+ * alles sieht (BenutzerService::freigabeFuerKunde), und Anmeldedaten
+ * ausgeben (Zugang, Link, vorläufiges Kennwort) oder einen Kunden bzw.
+ * Zugang wieder öffnen nur, wer alles sieht, was der Kunde sieht
+ * (darfZugangAusgeben).
  *
  * Im Audit stehen nur IDs – nie Kundennamen, E-Mail-Adressen, Kennwörter
  * oder Links.
@@ -65,6 +69,10 @@ final class KundenService
 
     /** Was mit einem Kunden verknüpft wird: Aufträge und Lieferscheine (ein Angebot ist noch keine Lieferung). */
     public const EWX_ARTEN = ['order', 'deliverynote'];
+
+    /** Wer nicht alles sieht, was der Kunde sieht, gibt keinen Zugang aus (darfZugangAusgeben). */
+    public const NICHT_AUSGEBEN = 'Zugänge, Einrichtungslinks und vorläufige Kennwörter gibt nur aus – und einen Kunden oder Zugang wieder öffnen darf nur –, '
+        . 'wer selbst alles sieht, was der Kunde sieht: das Recht „Alle Standorte, Anlagen und Messdaten“, dazu „Kunden ansehen“ und die Protokolle des Kunden.';
 
     // ------------------------------------------------------------ Kunden
 
@@ -200,6 +208,12 @@ final class KundenService
             'notizen'      => $notizen,
             'updated_at'   => gmdate('c'),
         ];
+        // Wieder aktiv oder länger offen: die Zugänge des Kunden kommen damit
+        // wieder an alles, was ihm freigegeben ist – das darf nur, wer es
+        // selbst sieht (wie beim Ausgeben eines Zugangs).
+        if ($id !== null && self::oeffnetWieder(self::find($id), $felder['aktiv'], $felder['gueltig_bis'], 'aktiv') && !self::darfZugangAusgeben($id)) {
+            return ['ok' => false, 'message' => self::NICHT_AUSGEBEN];
+        }
         if ($id !== null) {
             $vorher = self::find($id);
             Database::update('kunden', $id, $felder);
@@ -243,6 +257,9 @@ final class KundenService
         // Alle zugeordneten Berichte (auch Entwürfe) verlieren die Zuordnung.
         $berichte = (int) Database::scalar('SELECT COUNT(*) FROM berichte WHERE kunde_id = ?', [$id]);
         self::transaktion(static function () use ($id): void {
+            // Unter MySQL: wer gerade einen Vorgang verknüpft oder Nachweise
+            // übernimmt, sperrt dieselbe Zeile – erst danach wird gelöscht.
+            Database::first('SELECT id FROM kunden WHERE id = ?' . self::fuerUpdate(), [$id]);
             foreach (Database::select('SELECT id FROM users WHERE kunde_id = ?', [$id]) as $u) {
                 BenutzerService::kontoEntfernen((int) $u['id']);
             }
@@ -265,6 +282,55 @@ final class KundenService
     }
 
     // ------------------------------------------------------------ Zugänge
+
+    /**
+     * Darf der Angemeldete für diesen Kunden Anmeldedaten ausgeben (Zugang,
+     * Einrichtungslink, vorläufiges Kennwort) oder einen Kunden bzw. Zugang
+     * wieder öffnen? Ein Zugang erbt alles, was dem Kunden freigegeben und
+     * zugeordnet ist – Standorte mit Plänen, Protokolle, Prüfnachweise. Wer
+     * selbst weniger sieht, legte sich sonst ein Kundenkonto an (oder
+     * übernähme eines) und läse dort, was er nicht bekommt: „Rechte und
+     * Freigaben vergibt nur, wer sie selbst hat“.
+     *
+     * Ja mit „*“; sonst nur mit „Alle Standorte, Anlagen und Messdaten“ (wie
+     * Standorte für Kunden freigeben), „Kunden ansehen“ (Prüfnachweise) und
+     * wenn jeder Bericht, den der Kunde sieht, auch für den Fragenden
+     * sichtbar ist.
+     */
+    public static function darfZugangAusgeben(int $kundeId): bool
+    {
+        if (in_array('*', Auth::permissions(), true)) {
+            return true;
+        }
+        if (!Zugriff::alles() || !Auth::can('kunden.view')) {
+            return false;
+        }
+        foreach (BerichtService::fuerKunde($kundeId) as $b) {
+            if (!BerichtService::sichtbar($b)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
+     * Öffnet die Änderung einen Kunden bzw. Zugang wieder – von inaktiv auf
+     * aktiv oder mit späterem (oder keinem) Ende als bisher?
+     *
+     * @param array<string,mixed>|null $vorher
+     */
+    private static function oeffnetWieder(?array $vorher, int $aktiv, ?string $bis, string $aktivFeld): bool
+    {
+        if ($vorher === null) {
+            return false;
+        }
+        if ((int) $vorher[$aktivFeld] !== 1 && $aktiv === 1) {
+            return true;
+        }
+        $alt = Zeit::ts($vorher['gueltig_bis'] ?? null);
+        $neu = Zeit::ts($bis);
+        return $alt !== null && ($neu === null || $neu > $alt);
+    }
 
     /**
      * Die Zugänge eines Kunden – ohne Kennwort-Hash und Link-HMAC, mit Zustand.
@@ -298,17 +364,24 @@ final class KundenService
      * Kleinschreibung („Muster“ neben „muster“ wäre eine Verwechslung, die
      * jemand ausnutzt). Keine Rolle, keine Freigaben am Konto.
      *
+     * Ausgeben darf nur, wer alles sieht, was der Kunde sieht
+     * (darfZugangAusgeben) – außer auf der Kommandozeile des Servers
+     * ($kommandozeile, nur bin/power): wer sie hat, hat ohnehin alles.
+     *
      * @param array<string,mixed> $daten username, full_name, email
      * @param string $weg link | kennwort
      * @return array{ok:bool,message:string,user_id?:int,username?:string,weg?:string,link?:?string,pfad?:string,kennwort?:string,bis?:string}
      */
-    public static function zugangAnlegen(int $kundeId, array $daten, string $weg): array
+    public static function zugangAnlegen(int $kundeId, array $daten, string $weg, bool $kommandozeile = false): array
     {
         if (self::find($kundeId) === null) {
             return ['ok' => false, 'message' => 'Diesen Kunden gibt es nicht.'];
         }
         if (Kundenbereich::kundeSperre($kundeId) !== null) {
             return ['ok' => false, 'message' => 'Der Kunde ist nicht aktiv – Zugänge erst, wenn er wieder aktiv ist.'];
+        }
+        if (!$kommandozeile && !self::darfZugangAusgeben($kundeId)) {
+            return ['ok' => false, 'message' => self::NICHT_AUSGEBEN];
         }
         if (!in_array($weg, ['link', 'kennwort'], true)) {
             return ['ok' => false, 'message' => 'Bitte wählen: Einrichtungslink oder vorläufiges Kennwort.'];
@@ -382,10 +455,14 @@ final class KundenService
         if ($wert('gueltig_bis') !== '' && $bis === null) {
             return ['ok' => false, 'message' => 'Kein gültiges Datum: „' . mb_substr($wert('gueltig_bis'), 0, 40) . '“.'];
         }
+        $aktiv = !empty($daten['is_active']) ? 1 : 0;
+        if (self::oeffnetWieder($z, $aktiv, $bis, 'is_active') && !self::darfZugangAusgeben($kundeId)) {
+            return ['ok' => false, 'message' => self::NICHT_AUSGEBEN];
+        }
         Database::update('users', $userId, [
             'full_name'   => mb_substr($wert('full_name'), 0, 190),
             'email'       => mb_substr($wert('email'), 0, 190),
-            'is_active'   => !empty($daten['is_active']) ? 1 : 0,
+            'is_active'   => $aktiv,
             'gueltig_bis' => $bis,
             'updated_at'  => gmdate('c'),
         ]);
@@ -757,9 +834,19 @@ final class KundenService
         $tag = static fn (?string $iso): ?string => $iso === null ? null : Zeit::anzeige($iso, 'Y-m-d');
         $zeitraum = $v['gruppen']['zeitraum'];
         $kundennummer = mb_substr((string) $v['gruppen']['kunde']['kundennummer'], 0, 64);
+        $weg = false;
         try {
             $id = 0;
-            self::transaktion(static function () use (&$id, $kundeId, $kunde, $host, $jobId, $verweis, $nummer, $jobRef, $v, $tag, $zeitraum, $refSetzen, $firma, $stammdaten, $kundennummer): void {
+            self::transaktion(static function () use (&$id, &$weg, $kundeId, $kunde, $host, $jobId, $verweis, $nummer, $jobRef, $v, $tag, $zeitraum, $refSetzen, $firma, $stammdaten, $kundennummer): void {
+                // Geprüft wurde vor dem Warten auf Eventworx; inzwischen kann
+                // jemand den Kunden gelöscht haben. Ohne ihn bliebe ein Vorgang
+                // zurück, den niemand sieht und der für jeden anderen Kunden
+                // gesperrt wäre (UNIQUE). Unter MySQL mit Zeilensperre – das
+                // Löschen wartet dann (loeschen() sperrt dieselbe Zeile).
+                if (Database::first('SELECT id FROM kunden WHERE id = ?' . self::fuerUpdate(), [$kundeId]) === null) {
+                    $weg = true;
+                    return;
+                }
                 $id = Database::insert('kunden_vorgaenge', [
                     'kunde_id'       => $kundeId,
                     'ewx_host'       => $host,
@@ -790,9 +877,20 @@ final class KundenService
                     Database::update('kunden', $kundeId, $felder + ['updated_at' => gmdate('c')]);
                 }
             });
-        } catch (\PDOException) {
-            // Ein zweiter Prozess war schneller (UNIQUE Vorgang bzw. Eventworx-Kunde).
-            return ['ok' => false, 'message' => 'Der Vorgang oder dieser Eventworx-Kunde ist inzwischen einem Kunden zugeordnet – bitte die Seite neu laden.'];
+        } catch (\PDOException $e) {
+            // Ein zweiter Prozess war schneller (UNIQUE Vorgang bzw. Eventworx-Kunde)?
+            // Nur dann heißt es so – jeder andere Fehler der Datenbank ist einer.
+            $vergeben = Database::first('SELECT id FROM kunden_vorgaenge WHERE ewx_host = ? AND ewx_id = ?', [$host, $jobId]) !== null
+                || ($refSetzen && Database::first('SELECT id FROM kunden WHERE ewx_host = ? AND ewx_kunde_ref = ? AND id <> ?', [$host, $jobRef, $kundeId]) !== null);
+            if ($vergeben) {
+                return ['ok' => false, 'message' => 'Der Vorgang oder dieser Eventworx-Kunde ist inzwischen einem Kunden zugeordnet – bitte die Seite neu laden.'];
+            }
+            Logger::error('Kundenbereich: Vorgang verknüpfen – Datenbankfehler', ['kunde_id' => $kundeId, 'sqlstate' => (string) $e->getCode()]);
+            return ['ok' => false, 'message' => 'Die Verknüpfung konnte nicht gespeichert werden – nichts verknüpft. Bitte später noch einmal; die Ursache steht im Protokoll des Servers.'];
+        }
+        if ($weg) {
+            self::vergessen();
+            return ['ok' => false, 'message' => 'Diesen Kunden gibt es inzwischen nicht mehr – nichts verknüpft.'];
         }
         self::vergessen();
         Audit::log('kunden.vorgang_verknuepft', 'kunde', (string) $kundeId, ['kunde_id' => $kundeId, 'vorgang_id' => $id, 'ewx_nummer' => $nummer]
@@ -1021,6 +1119,7 @@ final class KundenService
             $z === null                                    => 'Diesen Zugang gibt es nicht.',
             Kundenbereich::kundeSperre($kundeId) !== null  => 'Der Kunde ist nicht aktiv – erst wieder aktivieren.',
             (int) $z['is_active'] !== 1                    => 'Der Zugang ist deaktiviert – erst wieder aktivieren.',
+            !self::darfZugangAusgeben($kundeId)            => self::NICHT_AUSGEBEN,
             default                                        => null,
         };
     }
@@ -1044,6 +1143,16 @@ final class KundenService
             return 'Die E-Mail-Adresse sieht nicht gültig aus.';
         }
         return null;
+    }
+
+    /**
+     * Zusatz für ein SELECT, dessen Zeile bis zum Ende der Transaktion
+     * gesperrt bleiben soll: unter MySQL/MariaDB „FOR UPDATE“; unter SQLite
+     * nichts – dort hält BEGIN IMMEDIATE die Schreibsperre ohnehin.
+     */
+    public static function fuerUpdate(): string
+    {
+        return Database::driver() === 'sqlite' ? '' : ' FOR UPDATE';
     }
 
     /**

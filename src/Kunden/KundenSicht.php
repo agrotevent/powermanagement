@@ -9,6 +9,7 @@ use App\Berichte\BerichtSchema;
 use App\Berichte\BerichtService;
 use App\Berichte\Grenzwerte;
 use App\Services\AnlagenService;
+use App\Services\PlanTileService;
 use App\Services\SiteService;
 use App\Support\Database;
 use App\Support\Logger;
@@ -105,7 +106,7 @@ final class KundenSicht
      * des Kunden an diesem Standort (berichte()); nachweise: seine
      * Prüfnachweise, die diesem Standort zugeordnet sind (nachweise()).
      *
-     * @return array{site:array{id:int,name:string,address:string},freigaben:list<array<string,mixed>>,etagen:list<array{id:int,name:string,plan:string,seite:int}>,feststrom:list<array{name:string,art:string,etage:string,anschluss:string,vorsicherung:string}>,berichte:list<array<string,mixed>>,nachweise:list<array<string,mixed>>}|null
+     * @return array{site:array{id:int,name:string,address:string},freigaben:list<array<string,mixed>>,etagen:list<array{id:int,name:string,plan:string,seite:int,vorschau:bool}>,feststrom:list<array{name:string,art:string,etage:string,anschluss:string,vorsicherung:string}>,berichte:list<array<string,mixed>>,nachweise:list<array<string,mixed>>}|null
      */
     public static function location(int $kundeId, int $siteId, ?int $jetzt = null): ?array
     {
@@ -126,7 +127,9 @@ final class KundenSicht
             $art = self::planArt($f);
             if ($art !== '') {
                 $etagen[] = ['id' => (int) $f['id'], 'name' => (string) $f['name'], 'plan' => $art,
-                    'seite' => $art === 'pdf' ? max(1, (int) $f['plan_page']) : 1];
+                    'seite' => $art === 'pdf' ? max(1, (int) $f['plan_page']) : 1,
+                    // Ein kleines Bild des Plans (Kachel der Stufe 0 oder ein kleiner Plan) – nie der ganze große Plan.
+                    'vorschau' => PlanTileService::vorschau($f) !== null];
             }
         }
         $feststrom = [];

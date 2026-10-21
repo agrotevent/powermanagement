@@ -429,6 +429,18 @@ try {
     Database::execute('UPDATE pruefnachweise SET datei_id = ? WHERE id = ?', [$datei1, $n2]);
     Pruefnachweise::status($kunden['k1'], $n1, 'freigegeben');
     gleich($befunde(), [], 'wiederhergestellt: kein Befund');
+    // Entdopplung: dieselben (richtigen) Bytes noch einmal hinterlegt heilen eine beschädigte Zeile –
+    // sonst nähme jeder neue Upload die kaputte Zeile, und ein freigegebener Nachweis gäbe 404.
+    Database::execute('UPDATE pruefnachweis_dateien SET daten = ? WHERE id = ?', [base64_encode($kaputt), $datei1]);
+    $r = Pruefnachweise::pdfAnlegen($kunden['k2'], $bytes1, 'gleich.pdf', $angaben(['site_id' => (string) $sites['b']]), true);
+    $nGleich = (int) ($r['id'] ?? 0);
+    $zGleich = $nachweis($nGleich) ?? ['id' => 0, 'datei_id' => null, 'datei_name' => ''];
+    gleich([$r['ok'], (int) $zGleich['datei_id'], Pruefnachweise::datei($zGleich)['bytes'] ?? null, Pruefnachweise::datei($nachweis($n1))['bytes'] ?? null, $befunde()],
+        [true, $datei1, $bytes1, $bytes1, []], 'gleiche Bytes zu einer beschädigten Datei: dieselbe Zeile, mit den frischen Bytes geheilt – auch für n1');
+    clearstatcache(true, $logDatei);
+    pruefe(preg_grep('/gespeicherte Datei war beschädigt.*"datei_id":' . $datei1 . '/', explode("\n", (string) @file_get_contents($logDatei, false, null, $logVorher))) !== [],
+        'Heilung im Protokoll (nur die ID)');
+    Pruefnachweise::loeschen($kunden['k2'], $nGleich);
 
     // ------------------------------------------------ Inventar
     pruefe(InventarService::loeschen($inventar['pd'])['ok'], 'Inventarstück gelöscht');
@@ -692,9 +704,14 @@ try {
             'path' => '/job/documents/P-77', 'ownerDocumentId' => $jobE, 'description' => ''], 'bytes' => $bytes ?? $pdf($name)];
         return $id;
     };
-    Http::$attrappe = static function (string $methode, string $url, array $optionen) use (&$ewxPfade, &$ewxDateien, &$jobRef, $jobE): array {
+    /** @var ?callable(string):void $waehrend läuft mitten in einer Anfrage an Eventworx (ein zweiter Prozess währenddessen) */
+    $waehrend = null;
+    Http::$attrappe = static function (string $methode, string $url, array $optionen) use (&$ewxPfade, &$ewxDateien, &$jobRef, &$waehrend, $jobE): array {
         $pfad = substr((string) parse_url($url, PHP_URL_PATH), strlen('/backend/'));
         $ewxPfade[] = $pfad;
+        if ($waehrend !== null) {
+            ($waehrend)($pfad);
+        }
         $json = static fn (array $d): array => ['ok' => true, 'status' => 200, 'fehler' => '', 'rumpf' => (string) json_encode($d)];
         if ($pfad === 'job/' . $jobE) {
             return $json(['success' => true, 'data' => ['id' => $jobE, 'docType' => 'order', 'jobNumber' => 'AU-9901', 'title' => 'Fest']
@@ -801,6 +818,91 @@ try {
     pruefe(!$r['ok'] && str_contains($r['message'], 'anderen Kunden') && $ewxPfade === [] && Pruefnachweise::fuerKunde($kunden['k2'], false) !== []
         && !in_array($d1, array_column(Pruefnachweise::fuerKunde($kunden['k2']), 'ewx_datei_id'), true), 'dieselbe Datei für einen anderen Kunden → abgelehnt');
     pruefe(Pruefnachweise::eventworxUebernehmen($kunden['k2'], $vE, [$d2], $ewxAngaben(), false)['ok'] === false, 'Vorgang eines anderen Kunden → abgelehnt');
+
+    // Während des Wartens auf Eventworx (bis zu Minuten, ohne Sitzungssperre) ändert ein
+    // zweiter Prozess etwas: geschrieben wird nur, was danach noch stimmt.
+    $nachweisZuDatei = static fn (string $d): int => (int) Database::scalar('SELECT COUNT(*) FROM pruefnachweise WHERE ewx_host = ? AND ewx_datei_id = ?', [$ewxHost, $d]);
+    $d7 = $neueDatei('Waehrenddessen.pdf');
+    Pruefnachweise::dateienMerken($kunden['k2'], $vE2, Pruefnachweise::eventworxKandidaten($kunden['k2'], $vE2)['dateien']);
+    $waehrend = static function (string $pfad) use ($d7, $vE2): void {
+        if ($pfad === 'file/' . $d7) {
+            KundenService::vorgangLoesen((int) Database::scalar('SELECT kunde_id FROM kunden_vorgaenge WHERE id = ?', [$vE2]), $vE2);
+        }
+    };
+    $r = Pruefnachweise::eventworxUebernehmen($kunden['k2'], $vE2, [$d7], $ewxAngaben(), true);
+    $waehrend = null;
+    pruefe(!$r['ok'] && str_contains($r['message'], 'inzwischen nicht mehr') && $nachweisZuDatei($d7) === 0,
+        'Vorgang währenddessen gelöst → nichts übernommen, die Datei bleibt für andere frei: ' . $r['message']);
+    $vE3 = Database::insert('kunden_vorgaenge', ['kunde_id' => $kunden['k2'], 'ewx_host' => $ewxHost, 'ewx_id' => $jobE, 'ewx_art' => 'order', 'ewx_nummer' => 'AU-9901',
+        'ewx_kunde_ref' => $refE, 'titel' => $kennung, 'verknuepft_am' => gmdate('c')]);
+    Pruefnachweise::dateienMerken($kunden['k2'], $vE3, Pruefnachweise::eventworxKandidaten($kunden['k2'], $vE3)['dateien']);
+    // Ein Datenbankfehler (hier: ein Trigger bricht das Einfügen ab) ist kein „schon übernommen“.
+    if (Database::driver() === 'sqlite') {
+        Database::pdo()->exec("CREATE TEMP TRIGGER pm_pn_abbruch BEFORE INSERT ON main.pruefnachweise BEGIN SELECT RAISE(ABORT, 'Pruefung'); END");
+        try {
+            $r = Pruefnachweise::eventworxUebernehmen($kunden['k2'], $vE3, [$d7], $ewxAngaben(), false);
+        } finally {
+            Database::pdo()->exec('DROP TRIGGER IF EXISTS pm_pn_abbruch');
+        }
+        clearstatcache(true, $logDatei);
+        $log = (string) @file_get_contents($logDatei, false, null, $logVorher);
+        pruefe(!$r['ok'] && str_contains($r['message'], 'konnte nicht gespeichert werden') && !str_contains($r['message'], 'schon übernommen') && $nachweisZuDatei($d7) === 0
+            && str_contains($log, 'Prüfnachweis aus Eventworx: Datenbankfehler') && !str_contains($log, 'Waehrenddessen'),
+            'Datenbankfehler beim Speichern → „nichts übernommen“ (nicht „schon übernommen“), Logeintrag nur mit IDs: ' . $r['message']);
+    }
+    // Der Kunde wird währenddessen gelöscht (beendet, mit Namen).
+    Database::update('kunden', $kunden['k2'], ['aktiv' => 0]);
+    KundenService::vergessen();
+    $nameK2 = (string) KundenService::find($kunden['k2'])['name'];
+    $waehrend = static function (string $pfad) use ($d7, $kunden, $nameK2): void {
+        if ($pfad === 'file/' . $d7) {
+            KundenService::loeschen($kunden['k2'], $nameK2);
+            KundenService::vergessen();
+        }
+    };
+    $r = Pruefnachweise::eventworxUebernehmen($kunden['k2'], $vE3, [$d7], $ewxAngaben(), true);
+    $waehrend = null;
+    pruefe(!$r['ok'] && str_contains($r['message'], 'inzwischen nicht mehr') && $nachweisZuDatei($d7) === 0 && KundenService::find($kunden['k2']) === null,
+        'Kunde währenddessen gelöscht → kein Nachweis ohne Kunden: ' . $r['message']);
+    // Verknüpfen genauso: der Vorgang ist wieder frei, der neue Kunde wird beim Lesen des Vorgangs gelöscht.
+    $kunden['k9'] = Database::insert('kunden', ['name' => $kennung . ' Kurzlebig', 'kundennummer' => '', 'aktiv' => 0, 'created_at' => gmdate('c')]);
+    KundenService::vergessen();
+    KundenService::trefferMerken($kunden['k9'], [['id' => $jobE, 'nummer' => 'AU-9901', 'art' => 'order']]);
+    $waehrend = static function (string $pfad) use ($jobE, $kunden, $kennung): void {
+        if ($pfad === 'job/' . $jobE) {
+            KundenService::loeschen($kunden['k9'], $kennung . ' Kurzlebig');
+        }
+    };
+    $r = KundenService::vorgangVerknuepfen($kunden['k9'], $jobE, true, false);
+    $waehrend = null;
+    pruefe(!$r['ok'] && str_contains($r['message'], 'inzwischen nicht mehr')
+        && (int) Database::scalar('SELECT COUNT(*) FROM kunden_vorgaenge WHERE ewx_host = ? AND ewx_id = ?', [$ewxHost, $jobE]) === 0,
+        'Verknüpfen, Kunde währenddessen gelöscht → kein Vorgang ohne Kunden: ' . $r['message']);
+    $kunden['k10'] = Database::insert('kunden', ['name' => $kennung . ' Neu', 'kundennummer' => '', 'aktiv' => 1, 'created_at' => gmdate('c')]);
+    KundenService::vergessen();
+    KundenService::trefferMerken($kunden['k10'], [['id' => $jobE, 'nummer' => 'AU-9901', 'art' => 'order']]);
+    if (Database::driver() === 'sqlite') {
+        Database::pdo()->exec("CREATE TEMP TRIGGER pm_pn_abbruch BEFORE INSERT ON main.kunden_vorgaenge BEGIN SELECT RAISE(ABORT, 'Pruefung'); END");
+        try {
+            $r = KundenService::vorgangVerknuepfen($kunden['k10'], $jobE, true, false);
+        } finally {
+            Database::pdo()->exec('DROP TRIGGER IF EXISTS pm_pn_abbruch');
+        }
+        pruefe(!$r['ok'] && str_contains($r['message'], 'konnte nicht gespeichert werden') && !str_contains($r['message'], 'inzwischen einem Kunden zugeordnet'),
+            'Verknüpfen: Datenbankfehler → nicht „inzwischen zugeordnet“: ' . $r['message']);
+    }
+    $r = KundenService::vorgangVerknuepfen($kunden['k10'], $jobE, true, false);
+    pruefe($r['ok'], 'danach: der Vorgang lässt sich mit einem anderen Kunden verknüpfen (nichts sperrt ihn): ' . $r['message']);
+    // Bliebe doch etwas ohne Kunden zurück (per SQL), meldet es die Prüfung.
+    $waise = Database::insert('kunden_vorgaenge', ['kunde_id' => 999999999, 'ewx_host' => $ewxHost, 'ewx_id' => bin2hex(random_bytes(12)), 'ewx_art' => 'order',
+        'ewx_nummer' => 'AU-0', 'ewx_kunde_ref' => '', 'titel' => $kennung, 'verknuepft_am' => gmdate('c')]);
+    $waisN = Database::insert('pruefnachweise', ['kunde_id' => 999999999, 'status' => 'entwurf', 'quelle' => 'hand', 'bezeichnung' => $kennung . ' Waise',
+        'geprueft_am' => $tagIn(-1), 'created_at' => gmdate('c')]);
+    $ohne = array_values(array_filter(Pruefnachweise::pruefen(), static fn (string $b): bool => str_starts_with($b, 'Vorgang #' . $waise . ':') || str_starts_with($b, 'Nachweis #' . $waisN . ':')));
+    gleich($ohne, ['Nachweis #' . $waisN . ': ohne Kunde (Kunde #999999999 gibt es nicht).', 'Vorgang #' . $waise . ': ohne Kunde (Kunde #999999999 gibt es nicht).'],
+        'Prüfung: Nachweis und Vorgang ohne Kunden sind Befunde');
+    Database::delete('kunden_vorgaenge', $waise);
+    Database::delete('pruefnachweise', $waisN);
     Http::$attrappe = null;
     Eventworx::$uhr = null;
     Eventworx::$schlafen = null;
@@ -826,6 +928,15 @@ try {
     }
     Config::set('app.timezone', $zoneVorher);
     $jahreVorher === null ? Settings::forget('kundenbereich.nachweise_jahre') : Settings::put('kundenbereich.nachweise_jahre', (string) $jahreVorher);
+    // Die eigenen Audit-Einträge – nur über eigene IDs und die Kennung, nie
+    // über Zeitfenster und Typ allein (sonst gingen Einträge anderer mit,
+    // die währenddessen geschrieben wurden: Anmeldungen, Wartung).
+    $eigeneZiele = ['kunde' => $kunden, 'site' => $sites, 'role' => $rollen, 'user' => $personal, 'inventar' => $inventar];
+    foreach ($kunden as $id) {
+        foreach (Database::select('SELECT id FROM users WHERE kunde_id = ?', [$id]) as $u) {
+            $eigeneZiele['user'][] = (int) $u['id'];
+        }
+    }
     foreach ($kunden as $id) {
         Pruefnachweise::kundeEntfernt($id);
         foreach (['kunden_vorgaenge', 'kunden_abrufe'] as $tabelle) {
@@ -849,13 +960,24 @@ try {
     foreach ($rollen as $id) {
         BenutzerService::rolleLoeschen($id);
     }
-    Database::execute('DELETE FROM audit_log WHERE id > ? AND (username LIKE ? OR username = ? OR details LIKE ? OR target_type IN (?, ?, ?, ?, ?, ?, ?))',
-        [$auditVorher, $kennung . '%', 'cli', '%' . $kennung . '%', 'pruefnachweis', 'nachweis', 'inventar', 'site', 'role', 'user', 'kunde']);
+    foreach ($eigeneZiele as $typ => $ids) {
+        foreach ($ids as $id) {
+            Database::execute('DELETE FROM audit_log WHERE id > ? AND target_type = ? AND target_id = ?', [$auditVorher, $typ, (string) $id]);
+        }
+    }
+    // Nachweise (auch die, die die Prüfung selbst gelöscht hat): über den eigenen Kunden in den Details.
+    foreach ($kunden as $id) {
+        Database::execute("DELETE FROM audit_log WHERE id > ? AND target_type = 'pruefnachweis' AND (details LIKE ? OR details LIKE ?)",
+            [$auditVorher, '%"kunde_id":' . (int) $id . ',%', '%"kunde_id":' . (int) $id . '}%']);
+    }
+    Database::execute('DELETE FROM audit_log WHERE id > ? AND (username LIKE ? OR details LIKE ?)', [$auditVorher, $kennung . '%', '%' . $kennung . '%']);
     foreach ($dosen as $d) {
         @unlink($d);
     }
 }
-gleich((int) Database::scalar('SELECT COUNT(*) FROM audit_log WHERE id > ?', [$auditVorher]), 0, 'aufgeräumt: kein Audit-Eintrag dieses Laufs übrig');
+gleich(array_map(static fn (array $z): string => $z['username'] . ' ' . $z['action'] . ' ' . $z['target_type'] . ' ' . $z['target_id'],
+    Database::select('SELECT username, action, target_type, target_id FROM audit_log WHERE id > ? ORDER BY id', [$auditVorher])), [],
+    'aufgeräumt: kein Audit-Eintrag dieses Laufs übrig');
 gleich((int) Database::scalar('SELECT COUNT(*) FROM kunden WHERE name LIKE ?', [$kennung . '%']) + (int) Database::scalar('SELECT COUNT(*) FROM users WHERE username LIKE ?', [$kennung . '%'])
     + (int) Database::scalar('SELECT COUNT(*) FROM pruefnachweise WHERE bezeichnung LIKE ?', [$kennung . '%']), 0, 'aufgeräumt: keine Kunden, Konten und Nachweise übrig');
 

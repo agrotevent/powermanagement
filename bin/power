@@ -694,7 +694,7 @@ switch ($befehl) {
             'username'  => $name,
             'full_name' => is_string($optionen['name'] ?? null) ? $optionen['name'] : '',
             'email'     => is_string($optionen['email'] ?? null) ? $optionen['email'] : '',
-        ], isset($optionen['kennwort']) ? 'kennwort' : 'link');
+        ], isset($optionen['kennwort']) ? 'kennwort' : 'link', true);
         if (!$erg['ok']) {
             $fehler($erg['message']);
         }

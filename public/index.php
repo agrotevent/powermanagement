@@ -74,6 +74,7 @@ $router->get('/kundenbereich', [KundenbereichController::class, 'index']);
 $router->get('/kundenbereich/locations', [KundenbereichController::class, 'locations']);
 $router->get('/kundenbereich/locations/{id}', [KundenbereichController::class, 'location']);
 $router->get('/kundenbereich/locations/{id}/plan/{etage}', [KundenbereichController::class, 'plan']);
+$router->get('/kundenbereich/locations/{id}/plan/{etage}/vorschau', [KundenbereichController::class, 'planVorschau']);
 $router->get('/kundenbereich/protokolle', [KundenbereichController::class, 'protokolle']);
 $router->get('/kundenbereich/protokolle/{id}', [KundenbereichController::class, 'protokoll']);
 $router->get('/kundenbereich/protokolle/{id}/pdf', [KundenbereichController::class, 'protokollPdf']);

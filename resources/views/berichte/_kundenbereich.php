@@ -2,7 +2,7 @@
 /**
  * Karte „Kundenbereich“ am Bericht (KundenService::berichtKarte, nur mit
  * „kunden.view“): wem der Bericht im Kundenbereich gehört, ob der Kunde ihn
- * jetzt sieht und wann er ihn zuletzt geladen hat. Mit „kunden.manage“:
+ * jetzt sieht und wann er ihn zuletzt angesehen oder als PDF geladen hat. Mit „kunden.manage“:
  * zuordnen (ein Vorschlag aus Eventworx, nie automatisch), herausnehmen und
  * die Rückfrage, wenn der Kunde im Bericht anders heißt.
  *
@@ -44,11 +44,11 @@ $kundenname = static fn (array $x): string => (string) $x['name'] . ((string) ($
             </p>
         <?php endif; ?>
         <?php if ($abruf !== null): ?>
-            <p class="small<?= $karte['abruf_anderer'] !== null ? ' text-warn' : '' ?>">Zuletzt im Kundenbereich geladen: <?= View::e(Zeit::anzeige((string) $abruf['am'])) ?>
+            <p class="small<?= $karte['abruf_anderer'] !== null ? ' text-warn' : '' ?>">Zuletzt im Kundenbereich <?= ($abruf['art'] ?? '') === 'ansicht' ? 'angesehen' : 'als PDF geladen' ?>: <?= View::e(Zeit::anzeige((string) $abruf['am'])) ?>
                 <?php if ($karte['abruf_anderer'] !== null): ?> – von einem anderen Kunden (<?= View::e($karte['abruf_anderer']) ?>)<?php endif; ?>
                 <?php if ($karte['pflegen'] && (string) $abruf['username'] !== ''): ?> · Zugang <?= View::e((string) $abruf['username']) ?><?php endif; ?></p>
         <?php elseif ($k !== null && $abgeschlossen): ?>
-            <p class="small muted">Im Kundenbereich noch nicht geladen.</p>
+            <p class="small muted">Im Kundenbereich noch nicht angesehen oder geladen.</p>
         <?php endif; ?>
 
         <?php if ($karte['pflegen']): ?>

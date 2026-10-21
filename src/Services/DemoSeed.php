@@ -43,9 +43,10 @@ final class DemoSeed
             Database::execute('DELETE FROM api_token_standorte');
             Database::execute('UPDATE api_vorschlaege SET site_id = NULL WHERE site_id IS NOT NULL');
             // Die Demo-Konten und alle Kundenzugänge (Konten mit kunde_id) samt ihren Kunden.
-            $konten = "SELECT id FROM users WHERE username IN ('veranstalter', 'technik', 'muster-events', 'stadtmarketing') OR kunde_id IS NOT NULL";
-            Database::execute('DELETE FROM user_roles WHERE user_id IN (' . $konten . ')');
-            Database::execute('DELETE FROM users WHERE id IN (' . $konten . ')');
+            // Ohne Unterabfrage auf users im DELETE FROM users: MySQL lehnt das ab (Fehler 1093).
+            $konten = "username IN ('veranstalter', 'technik', 'muster-events', 'stadtmarketing') OR kunde_id IS NOT NULL";
+            Database::execute('DELETE FROM user_roles WHERE user_id IN (SELECT id FROM users WHERE ' . $konten . ')');
+            Database::execute('DELETE FROM users WHERE ' . $konten);
             Database::execute('DELETE FROM kunden');
             @unlink(dirname(__DIR__, 2) . '/storage/demo/schalter.json');
         } elseif (Database::first("SELECT id FROM sites WHERE sync_key = 'demo-festival'") !== null) {

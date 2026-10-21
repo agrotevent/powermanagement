@@ -37,7 +37,7 @@ $rueckfrage = $rueckfrage ?? null;
     <div class="card-head"><h2>Zugeordnete Protokolle</h2><span class="hint">Übergabeberichte – für alle Fassungen einer Nummer</span></div>
     <div class="table-wrap">
         <table class="tabelle-karten">
-            <thead><tr><th>Bericht</th><th>Anlage / Veranstaltung</th><th>Prüfung</th><th>Im Kundenbereich</th><th>Geladen</th><th></th></tr></thead>
+            <thead><tr><th>Bericht</th><th>Anlage / Veranstaltung</th><th>Prüfung</th><th>Im Kundenbereich</th><th>Zuletzt aufgerufen</th><th></th></tr></thead>
             <tbody>
             <?php if ($protokolle['zugeordnet'] === []): ?>
                 <tr><td colspan="6" class="muted">Noch keinem Bericht zugeordnet. Zugeordnet wird am Bericht (Karte „Kundenbereich“) oder unten aus den Vorschlägen.</td></tr>
@@ -53,7 +53,7 @@ $rueckfrage = $rueckfrage ?? null;
                         <?php elseif (in_array($b['status'], ['entwurf', 'geprueft'], true)): ?><span class="badge">nach dem Abschluss</span>
                         <?php elseif ($b['pdf_sha256'] === null): ?><span class="badge warn">ohne PDF</span>
                         <?php else: ?><span class="badge">nicht sichtbar</span><?php endif; ?></td>
-                    <td data-label="Geladen" class="small"><?= $b['abruf'] !== null ? View::e(Zeit::anzeige((string) $b['abruf']['am'])) : '<span class="muted">nie</span>' ?></td>
+                    <td data-label="Zuletzt aufgerufen" class="small"><?= $b['abruf'] !== null ? View::e(Zeit::anzeige((string) $b['abruf']['am']) . (($b['abruf']['art'] ?? '') === 'ansicht' ? ' (angesehen)' : ' (PDF)')) : '<span class="muted">nie</span>' ?></td>
                     <td class="right">
                         <?php if ($pflegen && $b['sichtbar']): ?>
                             <form method="post" action="/berichte/<?= (int) $b['id'] ?>/kundenbereich" data-confirm="<?= View::e($nummer($b)) ?> aus dem Kundenbereich nehmen? Der Kunde sieht den Bericht sofort nicht mehr.">

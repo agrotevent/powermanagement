@@ -33,8 +33,11 @@ final class AuthController extends Controller
         if (!empty($result['must_change_password'])) {
             // Kundenzugänge ändern ihr Kennwort im Kundenbereich – das Profil
             // des Personals erreichen sie nicht.
+            // Das Konto im Kundenbereich sagt es selbst (ein Hinweis, nicht zwei).
             $kunde = Kundenbereich::istKundenzugang($result['user']);
-            Flash::warning($kunde ? 'Bitte legen Sie zuerst ein eigenes Kennwort fest.' : 'Bitte zuerst ein neues Passwort vergeben.');
+            if (!$kunde) {
+                Flash::warning('Bitte zuerst ein neues Passwort vergeben.');
+            }
             $this->redirect($kunde ? Kundenbereich::KONTO : '/profil');
             return;
         }
