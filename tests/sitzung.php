@@ -1075,6 +1075,35 @@ if ($geprueft > 0) {
     $entsperren('Prüfen');
     pruefe(!str_contains(implode(' ', $meldungen(holen($basis . '/dashboard')['text'])), 'InfluxDB'), 'Kundenmodus: die Meldung von „Prüfen“ kommt auch nach dem Entsperren nicht');
 
+    // Ebenso die Kundenverwaltung: Eventworx-Suche, Dateien am Vorgang und
+    // Übernehmen warten ohne Sitzungssperre (Controller::ohneSitzungssperre()).
+    // Beginnt der Kundenmodus mittendrin, kommen danach weder Treffer noch
+    // Dateiliste an – die Seite führt zur Kundenseite –, und auf der
+    // Kundenseite steht keine Meldung aus der Kundenverwaltung.
+    $nachweiseVorher = count($abfrage("SELECT id FROM pruefnachweise WHERE kunde_id = ? AND quelle = 'ewx_vorgang'", [$kundeId]));
+    foreach ([
+        'die Eventworx-Suche der Kundenverwaltung wartet' => ['/kunden/' . $kundeId . '/eventworx/suche', ['q' => $nummer], $nummer, true],
+        'die Dateien am Vorgang aus Eventworx kommen'     => ['/kunden/' . $kundeId . '/nachweise/eventworx', ['vorgang' => (string) $vorgangId], 'Pruefprotokoll Sitzung.pdf', true],
+        'Übernehmen auf Eventworx wartet'                  => ['/kunden/' . $kundeId . '/nachweise/eventworx/uebernehmen', ['vorgang' => (string) $vorgangId,
+            'datei' => ['6650a1f2c9e77a1b000000aa'], 'geprueft_am' => gmdate('Y-m-d', time() - 86400)], 'Pruefprotokoll Sitzung.pdf', false],
+    ] as $wofuer => [$pfad, $felder, $inhalt, $zurKundenseite]) {
+        file_put_contents($ewxVerzoegerung, '1.5');
+        $lauf = $starten($wofuer, [[$basis . $pfad, ['_token' => $token] + $felder]]);
+        file_put_contents($ewxVerzoegerung, '0');
+        $antwort = $lauf['langsam'][0];
+        $ziel = preg_match('#^location:\s*(\S+)\s*$#mi', $antwort['kopf'], $z) === 1 ? $z[1] : '';
+        // Eine Seite (Treffer, Dateiliste) führt selbst zur Kundenseite; eine
+        // Weiterleitung mit Meldung (Übernehmen) geht wie sonst, die Meldung
+        // schreibt Flash::add() nicht mehr, und die nächste Seite ist die Kundenseite.
+        pruefe($antwort['status'] === 302 && ($zurKundenseite ? $ziel === $kunde : $ziel !== '') && !str_contains($antwort['text'], $inhalt),
+            'Kundenmodus: ' . $wofuer . ' – danach nichts aus Eventworx (' . $antwort['status'] . ' ' . $ziel . ')');
+        $seite = holen($basis . $kunde);
+        gleich([$seite['status'], $meldungen($seite['text'])], [200, []], 'Kundenmodus: keine Meldung auf der Kundenseite, nachdem ' . $wofuer);
+        $entsperren($wofuer);
+    }
+    gleich(count($abfrage("SELECT id FROM pruefnachweise WHERE kunde_id = ? AND quelle = 'ewx_vorgang'", [$kundeId])), $nachweiseVorher,
+        'Kundenmodus: die schon übernommene Datei bleibt einmal da');
+
     // Eine Meldung, die beim Start noch auf ihre Seite wartete (ein Reiter hat
     // abgeschickt und noch nicht neu geladen), steht ebenso nicht dort.
     $r = holen($basis . '/profil/passwort', ['_token' => 'veraltet']);
