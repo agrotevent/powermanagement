@@ -574,6 +574,23 @@ pruefe($lauf['langsam'][0]['status'] === 302 && $vorgangId > 0, 'Vorgang verknü
 $lauf = waehrendLangsam([[$basis . '/kunden/' . $kundeId . '/nachweise/eventworx', ['_token' => $token, 'vorgang' => (string) $vorgangId]]], $basis . '/profil');
 pruefe($lauf['dauer'] < 2.0, sprintf('Dateien am Vorgang: hält die Sitzung nicht (%.1f s)', $lauf['dauer']));
 pruefe($lauf['langsam'][0]['status'] === 200 && str_contains($lauf['langsam'][0]['text'], 'Pruefprotokoll Sitzung.pdf'), 'Dateien am Vorgang trotzdem gezeigt');
+// Formulare, die auf Eventworx warten, tragen `data-laeuft-seite`: Der
+// Browser schickt sie selbst ab (die Antwort ist eine Seite – Treffer,
+// Rückfrage, Dateiliste – oder eine Weiterleitung mit Meldung), app.js zeigt,
+// dass gewartet wird, und fängt einen zweiten Klick ab. Der liefe sonst neben
+// dem ersten (die Sitzung hält ihn nicht mehr auf), und gezeigt würde seine
+// Antwort – nach „Übernehmen“ etwa „schon übernommen“.
+$eventworxFormulare = static function (string $html): array {
+    preg_match_all('#<form\b[^>]*\baction="/kunden/\d+/(?:eventworx/(?:suche|verknuepfen)|nachweise/eventworx(?:/uebernehmen)?)"[^>]*>#', $html, $m);
+    return $m[0];
+};
+$formulare = array_merge($eventworxFormulare($suche['text']), $eventworxFormulare($lauf['langsam'][0]['text']),
+    $eventworxFormulare(holen($basis . '/kunden/' . $kundeId . '?tab=vorgaenge')['text']), $eventworxFormulare(holen($basis . '/kunden/' . $kundeId . '?tab=nachweise')['text']));
+$ziele = array_values(array_unique(array_map(static fn (string $f): string => (string) preg_replace('#^.*action="/kunden/\d+/([^"]+)".*$#s', '$1', $f), $formulare)));
+sort($ziele);
+gleich($ziele, ['eventworx/suche', 'eventworx/verknuepfen', 'nachweise/eventworx', 'nachweise/eventworx/uebernehmen'], 'Eventworx-Formulare der Kundenverwaltung gefunden');
+gleich(array_values(array_filter($formulare, static fn (string $f): bool => !str_contains($f, ' data-laeuft-seite') || !str_contains($f, ' data-laeuft="'))), [],
+    'Eventworx-Formulare der Kundenverwaltung tragen data-laeuft-seite – der Browser schickt ab, ein zweiter Klick wird abgefangen');
 file_put_contents($ewxVerzoegerung, '0');
 $r = holen($basis . '/kunden/' . $kundeId . '/nachweise/eventworx/uebernehmen', ['_token' => $token, 'vorgang' => (string) $vorgangId,
     'datei' => ['6650a1f2c9e77a1b000000aa'], 'geprueft_am' => gmdate('Y-m-d', time() - 2 * 86400)]);

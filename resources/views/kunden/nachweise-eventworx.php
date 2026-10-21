@@ -34,7 +34,7 @@ $offen = array_filter($dateien, static fn (array $d): bool => $d['schon'] === nu
     <a class="btn btn-sm btn-ghost" href="/kunden/<?= $id ?>?tab=nachweise">← Prüfnachweise des Kunden</a>
 </div>
 
-<form method="post" action="/kunden/<?= $id ?>/nachweise/eventworx/uebernehmen" class="kunden-formular">
+<form method="post" action="/kunden/<?= $id ?>/nachweise/eventworx/uebernehmen" class="kunden-formular" data-laeuft="übernimmt …" data-laeuft-seite>
     <?= Csrf::field() ?>
     <input type="hidden" name="vorgang" value="<?= (int) $vorgang['id'] ?>">
     <div class="card">

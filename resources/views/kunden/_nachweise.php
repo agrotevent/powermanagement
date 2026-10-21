@@ -118,7 +118,7 @@ $felder = ['standorte' => $standorte, 'vorgaenge' => $vorgaenge, 'inventar' => $
         <?php else: ?>
             <div class="aktionen-zeile">
                 <?php foreach ($vorgaenge as $vg): ?>
-                    <form method="post" action="<?= View::e($basis . 'eventworx') ?>">
+                    <form method="post" action="<?= View::e($basis . 'eventworx') ?>" data-laeuft="liest Dateien …" data-laeuft-seite>
                         <?= Csrf::field() ?><input type="hidden" name="vorgang" value="<?= (int) $vg['id'] ?>">
                         <button class="btn btn-sm" type="submit"><?= View::e((\App\Services\Eventworx::ART_NAMEN[(string) $vg['ewx_art']] ?? 'Vorgang') . ' ' . (string) $vg['ewx_nummer']) ?></button></form>
                 <?php endforeach; ?>

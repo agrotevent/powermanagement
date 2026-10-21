@@ -34,7 +34,7 @@ $mietzeit = static fn (?string $von, ?string $bis): string => $von === null && $
     : ($von === $bis || $bis === null ? Pruefnachweise::datum($von) : Pruefnachweise::datum($von) . ' – ' . Pruefnachweise::datum($bis));
 ?>
 <?php if ($rueckfrage !== null): ?>
-    <form method="post" action="/kunden/<?= $id ?>/eventworx/verknuepfen" class="notice warn" id="eventworx-rueckfrage">
+    <form method="post" action="/kunden/<?= $id ?>/eventworx/verknuepfen" class="notice warn" id="eventworx-rueckfrage" data-laeuft="verknüpft …" data-laeuft-seite>
         <?= Csrf::field() ?>
         <input type="hidden" name="job_id" value="<?= View::e($rueckfrage['job_id']) ?>">
         <?php if ($rueckfrage['stammdaten']): ?><input type="hidden" name="stammdaten" value="1"><?php endif; ?>
@@ -72,7 +72,7 @@ $mietzeit = static fn (?string $von, ?string $bis): string => $von === null && $
                     <td class="right">
                         <div class="aktionen-zeile">
                             <?php if ($darfNachweise && $eingerichtet): ?>
-                                <form method="post" action="/kunden/<?= $id ?>/nachweise/eventworx">
+                                <form method="post" action="/kunden/<?= $id ?>/nachweise/eventworx" data-laeuft="liest Dateien …" data-laeuft-seite>
                                     <?= Csrf::field() ?><input type="hidden" name="vorgang" value="<?= (int) $v['id'] ?>">
                                     <button class="btn btn-sm" type="submit">PDF-Dateien ansehen</button></form>
                             <?php endif; ?>
@@ -93,7 +93,7 @@ $mietzeit = static fn (?string $von, ?string $bis): string => $von === null && $
 <?php if (!$eingerichtet): ?>
     <p class="notice mt">Eventworx ist nicht eingerichtet (Systemeinstellungen) – Vorgänge lassen sich erst danach verknüpfen.</p>
 <?php elseif ($darfSuchen): ?>
-<form method="post" action="/kunden/<?= $id ?>/eventworx/suche" class="card mt kunden-formular" id="eventworx-suche">
+<form method="post" action="/kunden/<?= $id ?>/eventworx/suche" class="card mt kunden-formular" id="eventworx-suche" data-laeuft="sucht …" data-laeuft-seite>
     <?= Csrf::field() ?>
     <div class="card-head"><h2>Vorgang verknüpfen</h2><span class="hint">Aufträge und Lieferscheine</span></div>
     <div class="card-body">
@@ -125,7 +125,7 @@ $mietzeit = static fn (?string $von, ?string $bis): string => $von === null && $
                         <?php elseif ($t['verknuepft'] !== null): ?>
                             <span class="badge">bei „<?= View::e((string) $t['verknuepft']) ?>“</span>
                         <?php else: ?>
-                            <form method="post" action="/kunden/<?= $id ?>/eventworx/verknuepfen">
+                            <form method="post" action="/kunden/<?= $id ?>/eventworx/verknuepfen" data-laeuft="verknüpft …" data-laeuft-seite>
                                 <?= Csrf::field() ?><input type="hidden" name="job_id" value="<?= View::e((string) $t['id']) ?>">
                                 <?php if ((string) $kunde['kundennummer'] === ''): ?>
                                     <label class="check small"><input type="checkbox" name="stammdaten" value="1" checked> <span>Kundennummer aus Eventworx</span></label>
