@@ -261,9 +261,13 @@ Person ihn **freigibt** – und nur mit unversehrter Datei.
 ### Von Hand
 
 - **Nur PDF** (beginnt mit `%PDF-`), höchstens **10 MB**. Gleiche Bytes
-  liegen nur einmal in der Datenbank. Was größer ist als die Grenze des
-  Servers (`post_max_size`, im Container 66 MB), verwirft PHP ganz – dann
-  steht da „Sicherheitstoken ungültig“ statt einer Größenmeldung.
+  liegen nur einmal in der Datenbank. Eine größere Datei hält schon der
+  Browser beim Auswählen an (Meldung unter dem Feld). Ohne JavaScript lehnt
+  die App sie mit der Größe ab – bis 16 MB: Mehr lässt nginx außerhalb von
+  `/standorte/grundriss` und `/api/` nicht durch und antwortet dann selbst
+  mit 413. Ohne nginx davor gilt `post_max_size` (im Container 105M);
+  darüber verwirft PHP den Körper ganz, und die App meldet die Größe statt
+  „Sicherheitstoken ungültig“.
 - **Angaben aus dem Protokoll** trägt eine Person ein – das PDF wird nicht
   ausgewertet: Gerät/Bezeichnung (Pflicht), Inventar- und Seriennummer,
   **geprüft am** (Pflicht, nicht in der Zukunft), **nächste Prüfung**,

@@ -1248,6 +1248,10 @@ rm -f "$SITE_NEU"
 if [[ "$VORLAGE_ERGEBNIS" == "behalten" ]]; then
     hinweis "$SITE ist von Hand verändert und bleibt so. Die neue Fassung liegt unter"
     hinweis "/etc/nginx/powermanagement.powermanagement-neu (Unterschiede: diff -u $SITE /etc/nginx/powermanagement.powermanagement-neu)."
+    if ! grep -q 'location = /standorte/grundriss' "$SITE"; then
+        hinweis "Darin fehlt der Block für Grundrisse bis 100 MB (location = /standorte/grundriss, client_max_body_size 105m) –"
+        hinweis "von dort übernehmen, sonst lehnt nginx große Pläne ab."
+    fi
 fi
 ln -sf "$SITE" /etc/nginx/sites-enabled/powermanagement
 rm -f /etc/nginx/sites-enabled/default

@@ -901,7 +901,9 @@ final class UpdateService
      * statt 423 und zeigte weiter, was er geladen hat), und für
      * Kundenzugänge alles außerhalb des Kundenbereichs (das Tor: 403 bzw.
      * zum Kundenbereich – ein Kunde bekäme sonst zu einer Adresse des
-     * Personals eine Meldung über ein Update).
+     * Personals eine Meldung über ein Update). Ebenso ein Körper über
+     * post_max_size (ein zu großer Grundriss): Die Größe ist die Meldung,
+     * die weiterhilft, und ohne Körper gibt es nichts zu schreiben.
      *
      * Im Kundenbereich (Kundenzugänge, Einrichtungslink) steht die Meldung
      * im Ton des Kundenbereichs (GESPERRT_KUNDE) in dessen Layout – die
@@ -915,6 +917,15 @@ final class UpdateService
     public static function wartungsSperre(?Router $router = null): void
     {
         if (strtoupper((string) ($_SERVER['REQUEST_METHOD'] ?? 'GET')) !== 'POST') {
+            return;
+        }
+        // Größer als post_max_size: PHP hat den Körper samt Token und Datei
+        // schon verworfen – schreiben kann diese Anfrage nichts mehr. Dann
+        // weder anmelden (das Update wartete umsonst auf sie) noch „in etwa
+        // einer Minute wieder möglich“ melden: Der zweite Versuch schickte
+        // dieselben 100 MB und scheiterte an der Größe. Die nennt der Router
+        // (nach Anmeldung und Recht, wie ohne Update).
+        if ((new Request())->koerperVerworfen() !== null) {
             return;
         }
         // Erst anmelden, dann fragen: Wer vor der Sperre hereinkam, auf den

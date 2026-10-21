@@ -1178,7 +1178,11 @@ try {
 
     // ------------------------------------------------------------ HTTP
     $port = freierPort();
-    hintergrund(['php', '-d', 'session.save_path=' . $ordner . '/sitzungen', '-S', '127.0.0.1:' . $port, '-t', $wurzel . '/public'],
+    // Feste Grenzen für den Körper (nicht die der php.ini): ein Grundriss über
+    // post_max_size während der Schreibsperre (unten). Startmeldungen von PHP
+    // dabei nicht in die Seite – sonst gingen die Köpfe der Antwort verloren.
+    hintergrund(['php', '-d', 'session.save_path=' . $ordner . '/sitzungen', '-d', 'post_max_size=4M', '-d', 'upload_max_filesize=3M',
+        '-d', 'display_errors=0', '-S', '127.0.0.1:' . $port, '-t', $wurzel . '/public'],
         ['POWERMANAGEMENT_CONFIG' => $ordner . '/config.php', 'PHP_CLI_SERVER_WORKERS' => '8']);
     $demoPort = freierPort();
     hintergrund(['php', '-d', 'session.save_path=' . $ordner . '/sitzungen', '-S', '127.0.0.1:' . $demoPort, '-t', $wurzel . '/public'],
@@ -1441,6 +1445,21 @@ stream_wrapper_register("langsam", LangsamAttrappe::class);
     pruefe($r['status'] === 200 && ($r['json']['ok'] ?? false) === true, 'Schnittstelle + Schreibsperre: Lesen geht (' . $r['status'] . ')');
     gleich(api($apiBasis, 'POST', '/api/v1/locations/' . $kennung . '/vorschlaege', 'mtma_' . str_repeat('x', 40), '{}')['status'], 401,
         'Schnittstelle + Schreibsperre: ungültiges Token weiter 401');
+
+    // Ein Grundriss über post_max_size (hier 4M) während der Schreibsperre: PHP
+    // hat den Körper samt Token schon verworfen, geschrieben würde nichts. Die
+    // Antwort nennt die Größe wie ohne Update – „in etwa einer Minute wieder
+    // möglich“ hieße, dieselben 100 MB noch einmal zu schicken, und auch die
+    // scheiterten. Darauf wartet das Update auch nicht (nicht angemeldet).
+    $zuGross = ['_token' => $a['token'], 'site_id' => '1', 'neue_etagen' => '1', 'fuellung' => str_repeat('x', 5 * 1024 * 1024)];
+    $r = $aufruf($port, $a['dose'], 'POST', '/standorte/grundriss', $zuGross, ['Accept: application/json']);
+    $j = json_decode($r['text'], true);
+    pruefe($r['status'] === 413 && str_contains((string) ($j['message'] ?? ''), 'größer, als der Server annimmt (post_max_size 4M)') && !isset($j['wartung']),
+        'Schreibsperre + Körper über post_max_size (JSON): 413 mit der Größe, nicht 503 (' . $r['status'] . ')');
+    $r = $aufruf($port, $a['dose'], 'POST', '/standorte/grundriss', $zuGross);
+    $seite = $aufruf($port, $a['dose'], 'GET', '/standorte')['text'];
+    pruefe($r['status'] === 302 && str_contains($seite, 'größer, als der Server annimmt (post_max_size 4M)') && !str_contains($seite, UpdateService::GESPERRT),
+        'Schreibsperre + Körper über post_max_size (Formular): die Größe gemeldet, nicht das Update');
 
     $schreiben('wartung', UpdateService::KOPF_WARTUNG . "\nseit " . (time() - 4000) . "\nkennung -\n");
     $r = $aufruf($port, $a['dose'], 'POST', '/system/update/automatik', $sperrFelder, ['Accept: application/json']);

@@ -6,6 +6,7 @@ namespace App\Services;
 use App\Auth\Auth;
 use App\Berichte\BerichtService;
 use App\Kunden\KundenService;
+use App\Support\Anfragezeit;
 use App\Support\Audit;
 use App\Support\Database;
 use App\Support\Response;
@@ -20,7 +21,31 @@ use App\Support\Response;
  */
 final class SiteService
 {
-    public const MAX_UPLOAD_BYTES = 40 * 1024 * 1024;
+    /**
+     * Größte Plandatei – die eine Zahl, an der alles hängt: Formular und
+     * Prüfung im Browser (data-max-bytes, app.js), die Prüfung hier, das
+     * Übernehmen aus dem Repository (LocationBundle) und das Holen von einer
+     * anderen Instanz (PartnerService). Gerechnet in MiB, angezeigt als
+     * „100 MB“ wie früher „40 MB“.
+     *
+     * Die Vorlagen in deploy/ passen dazu: upload_max_filesize 100M und
+     * post_max_size 105M im PHP-FPM-Pool, client_max_body_size 105m für
+     * /standorte/grundriss in der nginx-Site. Was PHP hier tatsächlich
+     * annimmt, sagt uploadGrenze().
+     */
+    public const MAX_UPLOAD_BYTES = 100 * 1024 * 1024;
+
+    /**
+     * So viele Sekunden kachelt der Upload selbst, bevor er antwortet.
+     *
+     * Ein gewöhnlicher Plan ist in dieser Zeit fertig. Ein 100-MB-Plan
+     * nicht: gemessen 73 Sekunden für einen eingebetteten Scan, 270 für
+     * eine A0-Seite mit 104 MB Vektordaten, eine halbe Stunde für 60
+     * Seiten. Was dann noch fehlt, rechnet ein eigener Prozess weiter
+     * (PlanTileService::imHintergrund) – der Browser wartet nicht, bis
+     * nginx aufgibt.
+     */
+    public const KACHELZEIT_IM_UPLOAD = 30;
     public const ALLOWED = [
         'application/pdf' => 'pdf',
         'image/png'       => 'png',
@@ -174,13 +199,34 @@ final class SiteService
 
         // Plandatei nur löschen, wenn keine andere Etage sie benutzt.
         if ($floor && $floor['plan_file'] !== '') {
-            $stillUsed = (int) Database::scalar('SELECT COUNT(*) FROM floors WHERE plan_file = ?', [$floor['plan_file']]);
-            if ($stillUsed === 0) {
-                @unlink(self::planDir() . '/' . basename((string) $floor['plan_file']));
-                PlanTileService::aufraeumen($floor);
-            }
+            self::planAufraeumen([$floor]);
         }
         Audit::log('floor.delete', 'floor', (string) $id);
+    }
+
+    /**
+     * Pläne, die diese Etagen bisher hatten, wegräumen – soweit keine Etage
+     * sie noch benutzt: die Kacheln, wenn keine mehr auf sie zeigt (bei
+     * einem PDF je Seite), die Datei, wenn keine Etage sie mehr nennt.
+     * Gerechnet wird gerade daran? Dann räumt der Bau am Ende selbst auf
+     * (PlanTileService::verwaist()).
+     *
+     * @param list<array<string,mixed>> $etagen Zeilen von floors, wie sie vorher waren
+     */
+    public static function planAufraeumen(array $etagen): void
+    {
+        foreach ($etagen as $f) {
+            $datei = basename((string) ($f['plan_file'] ?? ''));
+            if ($datei === '') {
+                continue;
+            }
+            if (PlanTileService::verwaist($f)) {
+                PlanTileService::aufraeumen($f);
+            }
+            if ((int) Database::scalar('SELECT COUNT(*) FROM floors WHERE plan_file = ?', [$datei]) === 0) {
+                @unlink(self::planDir() . '/' . $datei);
+            }
+        }
     }
 
     /**
@@ -207,7 +253,12 @@ final class SiteService
      * Nimmt einen Upload an, legt die Datei ab und verknüpft sie mit den
      * gewählten Etagen (eine Seite je Etage) bzw. legt Etagen automatisch an.
      *
+     * Gekachelt wird höchstens KACHELZEIT_IM_UPLOAD Sekunden lang
+     * ($options['kachelzeit'] für Prüfskripte); den Rest rechnet
+     * PlanTileService::imHintergrund().
+     *
      * @param array{name:string,type:string,tmp_name:string,error:int,size:int} $file
+     * @param array{floor_ids?:array<int|string>,neue_etagen?:bool,kachelzeit?:float|int} $options
      * @return array{ok:bool,message:string,pages:int,floors:array<int,int>}
      */
     public static function uploadPlan(int $siteId, array $file, array $options = []): array
@@ -216,7 +267,7 @@ final class SiteService
             return ['ok' => false, 'message' => self::uploadError((int) ($file['error'] ?? 4)), 'pages' => 0, 'floors' => []];
         }
         if ((int) $file['size'] > self::MAX_UPLOAD_BYTES) {
-            return ['ok' => false, 'message' => 'Datei zu groß (maximal ' . (self::MAX_UPLOAD_BYTES / 1024 / 1024) . ' MB).', 'pages' => 0, 'floors' => []];
+            return ['ok' => false, 'message' => self::zuGross((int) $file['size']), 'pages' => 0, 'floors' => []];
         }
 
         $finfo = new \finfo(FILEINFO_MIME_TYPE);
@@ -226,6 +277,12 @@ final class SiteService
         }
 
         $extension = self::ALLOWED[$mime];
+        if ($extension === 'png' || $extension === 'jpg') {
+            $bildFehler = self::bildPruefen((string) $file['tmp_name']);
+            if ($bildFehler !== null) {
+                return ['ok' => false, 'message' => $bildFehler, 'pages' => 0, 'floors' => []];
+            }
+        }
 
         /*
          * Ohne Auswahl wurde bisher stillschweigend eine neue Etage
@@ -251,6 +308,12 @@ final class SiteService
             ];
         }
 
+        // Die Seiten zählen, solange die Datei noch im Upload-Ordner liegt:
+        // Scheitert es hart, räumt PHP sie dort selbst weg – in storage/plans
+        // bliebe sie ohne Etage liegen, bei jedem Versuch 100 MB mehr.
+        $pages = $extension === 'pdf' ? self::countPdfPages((string) $file['tmp_name']) : 1;
+        $type  = $extension === 'pdf' ? 'pdf' : 'image';
+
         $name = sprintf('site%d_%s.%s', $siteId, bin2hex(random_bytes(8)), $extension);
         $target = self::planDir() . '/' . $name;
 
@@ -261,9 +324,6 @@ final class SiteService
             return ['ok' => false, 'message' => 'Datei konnte nicht gespeichert werden.', 'pages' => 0, 'floors' => []];
         }
         chmod($target, 0640);
-
-        $pages = $extension === 'pdf' ? self::countPdfPages($target) : 1;
-        $type  = $extension === 'pdf' ? 'pdf' : 'image';
 
         $floorIds = $floorIdsGewaehlt;
         $created  = [];
@@ -281,6 +341,11 @@ final class SiteService
             }
         }
 
+        // Was die Etagen bisher hatten – wird es danach von keiner mehr
+        // benutzt, kommt es weg (planAufraeumen()).
+        $vorher = array_values(array_filter(array_map(static fn ($id) => self::floor((int) $id), $floorIds),
+            static fn (?array $f): bool => $f !== null && (string) $f['plan_file'] !== ''));
+
         $page = 1;
         foreach ($floorIds as $floorId) {
             Database::update('floors', (int) $floorId, [
@@ -294,6 +359,7 @@ final class SiteService
             ]);
             $page++;
         }
+        self::planAufraeumen($vorher);
 
         /*
          * Pläne gleich in Kacheln zerlegen – dann ist der erste Aufruf der
@@ -308,6 +374,9 @@ final class SiteService
         $kachelN = 0;
         $klemmt  = '';
         $namen   = [];
+        $spaeter = [];
+        $grossesBild = $extension !== 'pdf' && $extension !== 'svg' && PlanTileService::ueberGd($target);
+        $bis = microtime(true) + Anfragezeit::hoechstens((float) ($options['kachelzeit'] ?? self::KACHELZEIT_IM_UPLOAD));
         foreach ($floorIds as $floorId) {
             $etage = self::floor((int) $floorId);
             if ($etage === null) {
@@ -315,11 +384,20 @@ final class SiteService
             }
             $namen[] = (string) $etage['name'];
 
-            $ergebnis = PlanTileService::bauen($etage, true);
-            if ($ergebnis['ok'] && $ergebnis['kacheln'] > 0) {
+            // Die Zeit im Upload ist um: der Rest kommt in den Hintergrund.
+            if (microtime(true) > $bis) {
+                if (PlanTileService::lohnt($target)) {
+                    $spaeter[] = (int) $floorId;
+                }
+                continue;
+            }
+            $ergebnis = PlanTileService::bauen($etage, true, true, $bis);
+            if (!empty($ergebnis['abgebrochen'])) {
+                $spaeter[] = (int) $floorId;
+            } elseif ($ergebnis['ok'] && $ergebnis['kacheln'] > 0) {
                 $gebaut++;
                 $kachelN += (int) $ergebnis['kacheln'];
-            } elseif (!$ergebnis['ok'] && $extension === 'pdf' && $klemmt === '') {
+            } elseif (!$ergebnis['ok'] && ($extension === 'pdf' || $grossesBild) && $klemmt === '') {
                 $klemmt = ' ' . $ergebnis['message'];
             }
         }
@@ -327,6 +405,14 @@ final class SiteService
         $kacheln = $gebaut > 0
             ? sprintf(' %d Kacheln berechnet%s.', $kachelN, $gebaut > 1 ? ' (' . $gebaut . ' Seiten)' : '')
             : $klemmt;
+
+        if ($spaeter !== []) {
+            $wieviele = count($spaeter) > 1 ? count($spaeter) . ' Etagen' : 'diesen Plan';
+            $kacheln .= PlanTileService::imHintergrund($spaeter)
+                ? sprintf(' Die Kacheln für %s rechnet der Server im Hintergrund weiter – bei so einem Plan einige Minuten.'
+                    . ' Bis dahin zeichnet der Browser den Plan selbst (langsamer, weniger scharf); danach die Karte neu laden.', $wieviele)
+                : sprintf(' Die Kacheln für %s fehlen noch: bin/power plan:kacheln rechnet sie nach, sonst die nächtliche Wartung.', $wieviele);
+        }
 
         /*
          * Ohne poppler kann der Server nicht rastern – der Browser kann es
@@ -341,9 +427,10 @@ final class SiteService
 
         Audit::log('plan.upload', 'site', (string) $siteId, [
             'file'   => $file['name'],
+            'bytes'  => (int) $file['size'],
             'pages'  => $pages,
             'floors' => $floorIds,
-        ]);
+        ] + ($spaeter !== [] ? ['im_hintergrund' => $spaeter] : []));
 
         // Ausdrücklich sagen, wo der Grundriss jetzt liegt – sonst sucht ihn
         // der Benutzer auf der falschen Etage.
@@ -467,36 +554,137 @@ final class SiteService
      * Seitenzahl eines PDFs ohne externe Werkzeuge bestimmen.
      * Reicht für die üblichen CAD-Exporte; im Zweifel korrigiert der Browser
      * die Anzeige und die Seite lässt sich je Etage von Hand setzen.
+     *
+     * Gezählt wird ohne Liste der Treffer: Ein PDF mit 100 MB aus lauter
+     * „/Type/Page“ hat fast zehn Millionen davon, und als Array hielten sie
+     * gemessen über 512 MB – die Anfrage starb an memory_limit. So bleibt es
+     * bei der Datei selbst im Speicher (100 MB) und einer Drittelsekunde.
      */
     public static function countPdfPages(string $path): int
     {
         $content = (string) file_get_contents($path);
 
-        if (preg_match_all('/\/Type\s*\/Page\b(?!s)/', $content, $matches)) {
-            $count = count($matches[0]);
-            if ($count > 0) {
-                return min($count, self::MAX_PDF_SEITEN);
-            }
+        $count = (int) preg_match_all('/\/Type\s*\/Page\b(?!s)/', $content);
+        if ($count > 0) {
+            return min($count, self::MAX_PDF_SEITEN);
         }
-        if (preg_match_all('/\/Count\s+(\d+)/', $content, $matches)) {
-            $counts = array_map('intval', $matches[1]);
-            $max = $counts === [] ? 0 : max($counts);
-            if ($max > 0) {
-                // Die Zahl steht im PDF – „/Count 99999999“ legte sonst so
-                // viele Etagen an und kachelte jede.
-                return min($max, self::MAX_PDF_SEITEN);
-            }
+        // Die größte Zahl hinter /Count – der Reihe nach, höchstens so viele
+        // Treffer, wie ein echtes PDF Seitenbäume hat. Die Zahl steht im PDF:
+        // „/Count 99999999“ legte sonst so viele Etagen an und kachelte jede.
+        $max = 0;
+        $ab = 0;
+        for ($i = 0; $i < 10_000 && $max < self::MAX_PDF_SEITEN
+            && preg_match('/\/Count\s+(\d+)/', $content, $m, PREG_OFFSET_CAPTURE, $ab) === 1; $i++) {
+            $max = max($max, (int) $m[1][0]);
+            $ab = (int) $m[0][1] + strlen((string) $m[0][0]);
         }
-        return 1;
+        return $max > 0 ? min($max, self::MAX_PDF_SEITEN) : 1;
     }
 
     /** Mehr Seiten werden aus einem PDF nicht auf Etagen verteilt. */
     public const MAX_PDF_SEITEN = 60;
 
+    /**
+     * Wie viel PHP hier wirklich annimmt – höchstens MAX_UPLOAD_BYTES.
+     *
+     * Steht im PHP-FPM-Pool weniger (eine alte Vorlage, ein eigener Pool,
+     * der eingebaute Server mit 2 MB), zeigt das Formular diese Zahl und
+     * prüft der Browser gegen sie – statt 100 MB zu versprechen, die nach
+     * dem Hochladen an upload_max_filesize scheitern. Vom Körper geht ein
+     * wenig für die übrigen Formularfelder ab.
+     */
+    public static function uploadGrenze(): int
+    {
+        $datei = self::iniBytes('upload_max_filesize');
+        $koerper = self::iniBytes('post_max_size');
+        $grenze = self::MAX_UPLOAD_BYTES;
+        if ($datei > 0) {
+            $grenze = min($grenze, $datei);
+        }
+        if ($koerper > 0) {
+            $grenze = min($grenze, max(0, $koerper - 64 * 1024));
+        }
+        return $grenze;
+    }
+
+    /**
+     * Eine Byte-Zahl, wie die Oberfläche sie nennt: „100 MB“, „123,4 MB“
+     * (gerechnet in MiB). $aufrunden für Dateien über einer Grenze – sonst
+     * hieße es bei einem Byte zu viel „100 MB groß, erlaubt 100 MB“.
+     */
+    public static function mb(int $bytes, bool $aufrunden = false): string
+    {
+        if ($bytes % 1048576 === 0) {
+            return number_format(intdiv($bytes, 1048576), 0, ',', '.') . ' MB';
+        }
+        $zehntel = $bytes / 104857.6;
+        return number_format(($aufrunden ? ceil($zehntel) : round($zehntel)) / 10, 1, ',', '.') . ' MB';
+    }
+
+    /** Die Meldung für eine zu große Datei. */
+    public static function zuGross(int $bytes): string
+    {
+        return sprintf('Die Datei ist %s groß – Grundrisse lassen sich bis %s hochladen.', self::mb($bytes, true), self::mb(self::MAX_UPLOAD_BYTES))
+            . ' Ein PDF wird meist deutlich kleiner, wenn eingebettete Bilder mit geringerer Auflösung exportiert werden.';
+    }
+
+    /** Eine Größenangabe aus php.ini in Bytes (0 = ohne Grenze oder unlesbar). */
+    private static function iniBytes(string $schluessel): int
+    {
+        $wert = trim((string) ini_get($schluessel));
+        if ($wert === '' || $wert === '0' || $wert === '-1') {
+            return 0;
+        }
+        return max(0, (int) @ini_parse_quantity($wert));
+    }
+
+    /**
+     * Passt ein Rasterbild (PNG, JPEG) zu dem, was hier aufbereitet wird?
+     *
+     * Bis PlanTileService::MAX_PIXEL schneidet gd es, darüber poppler
+     * (BildPdf) – sofern es sich dafür eignet und nicht größer ist als
+     * MAX_PIXEL_QUELLE. Geprüft wird nur der Kopf der Datei. Ein Bild, das
+     * keinen Weg hat, käme sonst ganz und unverkleinert im Browser an –
+     * ein Tablet scheitert an 139 Megapixeln.
+     *
+     * @return string|null die Meldung, oder null, wenn es passt
+     */
+    public static function bildPruefen(string $pfad): ?string
+    {
+        $info = @getimagesize($pfad);
+        if ($info === false || (int) $info[0] <= 0 || (int) $info[1] <= 0) {
+            return 'Die Bilddatei ist beschädigt oder unvollständig – sie ließ sich nicht lesen.';
+        }
+        $pixel = (int) $info[0] * (int) $info[1];
+        if ($pixel <= PlanTileService::MAX_PIXEL) {
+            return null;
+        }
+        $wie = sprintf('%s Megapixel (%s × %s Pixel)', number_format($pixel / 1_000_000, 0, ',', '.'),
+            number_format((int) $info[0], 0, ',', '.'), number_format((int) $info[1], 0, ',', '.'));
+        if ($pixel > PlanTileService::MAX_PIXEL_QUELLE) {
+            return sprintf('Das Bild hat %s – aufbereitet werden höchstens %d Megapixel. Bitte verkleinern oder als PDF hochladen.',
+                $wie, intdiv(PlanTileService::MAX_PIXEL_QUELLE, 1_000_000));
+        }
+        $pruefung = BildPdf::pruefen($pfad);
+        if (!$pruefung['ok']) {
+            return sprintf('Das Bild hat %s. Über %d Megapixel rechnet der Server es mit poppler herunter, und dafür muss es so gespeichert sein: '
+                . 'JPEG nicht progressiv, in RGB oder Graustufen – PNG ohne Transparenz und ohne Zeilensprung. %s '
+                . 'Anders gespeichert oder auf höchstens %d Megapixel verkleinert klappt es.',
+                $wie, intdiv(PlanTileService::MAX_PIXEL, 1_000_000), $pruefung['grund'], intdiv(PlanTileService::MAX_PIXEL, 1_000_000));
+        }
+        if (!PdfRasterService::verfuegbar()) {
+            return sprintf('Das Bild hat %s. Über %d Megapixel rechnet der Server es mit poppler herunter. %s',
+                $wie, intdiv(PlanTileService::MAX_PIXEL, 1_000_000), PdfRasterService::werkzeug()['hinweis']);
+        }
+        return null;
+    }
+
     private static function uploadError(int $code): string
     {
         return match ($code) {
-            UPLOAD_ERR_INI_SIZE, UPLOAD_ERR_FORM_SIZE => 'Die Datei überschreitet das Upload-Limit von PHP (upload_max_filesize/post_max_size).',
+            UPLOAD_ERR_INI_SIZE, UPLOAD_ERR_FORM_SIZE => sprintf('Die Datei ist größer, als der Server annimmt (höchstens %s). '
+                . 'Grenzen: upload_max_filesize und post_max_size im PHP-FPM-Pool, client_max_body_size in nginx – siehe docs/installation-debian-lxc.md.',
+                self::mb(self::uploadGrenze())),
             UPLOAD_ERR_PARTIAL   => 'Der Upload wurde abgebrochen.',
             UPLOAD_ERR_NO_FILE   => 'Es wurde keine Datei ausgewählt.',
             UPLOAD_ERR_NO_TMP_DIR, UPLOAD_ERR_CANT_WRITE => 'Der Server konnte die Datei nicht zwischenspeichern.',

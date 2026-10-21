@@ -43,9 +43,13 @@ $subtitle = 'Gelände und Gebäude mit ihren Grundrissen';
                     </table>
                     <details class="mt">
                         <summary class="btn btn-sm">Grundriss hochladen</summary>
-                        <form method="post" action="/standorte/grundriss" enctype="multipart/form-data" class="mt">
+                        <form method="post" action="/standorte/grundriss" enctype="multipart/form-data" class="mt"
+                              data-laeuft="wird hochgeladen …"
+                              data-laeuft-hinweis="Die Datei wird hochgeladen und aufbereitet – bei großen Plänen über eine langsame Leitung einige Minuten. Bitte die Seite offen lassen.">
                             <?= Csrf::field() ?><input type="hidden" name="site_id" value="<?= (int) $s['id'] ?>">
-                            <div class="field"><label>Datei (PDF, PNG, JPEG, SVG – bis 40 MB)</label><input type="file" name="plan" accept=".pdf,.png,.jpg,.jpeg,.svg" required></div>
+                            <div class="field"><label for="plan-<?= (int) $s['id'] ?>">Datei (PDF, PNG, JPEG, SVG – bis <?= View::e($uploadText) ?>)</label>
+                                <input id="plan-<?= (int) $s['id'] ?>" type="file" name="plan" accept=".pdf,.png,.jpg,.jpeg,.svg" required
+                                       data-max-bytes="<?= (int) $uploadGrenze ?>" data-max-text="<?= View::e($uploadText) ?>"></div>
                             <?php if ($s['floors'] !== []): ?>
                                 <div class="field"><label>Für Etage(n)</label>
                                     <?php foreach ($s['floors'] as $f): ?>

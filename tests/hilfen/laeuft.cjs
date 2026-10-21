@@ -1,6 +1,6 @@
 /*
- * Formulare und Links mit `data-laeuft` (public/assets/js/app.js) und die
- * Live-Abfrage im Kundenmodus (public/assets/js/live.js) ohne Browser:
+ * Formulare und Links mit `data-laeuft` (public/assets/js/app.js), davor die
+ * Größe eines Dateifelds (`data-max-bytes`), und die Live-Abfrage im Kundenmodus (public/assets/js/live.js) ohne Browser:
  * DOM, fetch, Navigation API und Ereignisse von Hand, Ergebnis als JSON auf
  * der Standardausgabe.
  * Aufruf: node tests/hilfen/laeuft.cjs public/assets/js/app.js public/assets/js/live.js
@@ -243,6 +243,40 @@ const hinweisText = (el) => (el.danach && !el.danach.entfernt ? el.danach.kinder
             text: anderes.knopf.textContent, hinweis: hinweisText(anderes.knopf),
             linkDanachAbgefangen: a.feuern('click', ereignis()).defaultPrevented };
         out.abbruch = ergebnis;
+    }
+
+    // 8. Grundriss-Upload: data-laeuft und ein Dateifeld mit data-max-bytes. Eine zu große
+    //    Datei hält das Formular an, bevor data-laeuft sperrt – kein fetch, Knopf frei,
+    //    kein „läuft“; mit einer passenden Datei geht es danach per fetch hinaus. Der
+    //    Browser hielte es schon über setCustomValidity an; abgeschickt wird hier trotzdem
+    //    (wie mit `novalidate`/`formnovalidate`), damit der Zuhörer davor zählt.
+    {
+        const f = formular({ action: '/standorte/grundriss', 'data-laeuft': 'wird hochgeladen …', 'data-laeuft-hinweis': 'Die Datei wird hochgeladen.' });
+        f.passt = ['form[data-laeuft]'];
+        const feld = element('input', { type: 'file', name: 'plan', 'data-max-bytes': '1000', 'data-max-text': '1000 Bytes' });
+        feld.passt = ['input[type=file][data-max-bytes]'];
+        feld.form = f;
+        feld.files = [];
+        feld.gueltigkeit = null;
+        feld.setCustomValidity = (t) => { feld.gueltigkeit = t; };
+        feld.focus = () => { feld.fokussiert = true; };
+        const s = seite([feld, f]);
+        const anfang = feld.gueltigkeit;
+        feld.files = [{ name: 'halle.pdf', size: 1001 }];
+        feld.feuern('change', ereignis());
+        f.feuern('click', ereignis({ target: f.knopf }));
+        const zuGross = f.feuern('submit', ereignis({ submitter: f.knopf })).defaultPrevented;
+        await warten();
+        const nachZuGross = { anfragen: s.anfragen.length, knopfGesperrt: f.knopf.disabled, text: f.knopf.textContent, hinweis: hinweisText(f.knopf),
+            meldung: feld.danach ? feld.danach.textContent : '', gueltigkeit: feld.gueltigkeit, fokussiert: Boolean(feld.fokussiert) };
+        feld.files = [{ name: 'halle.pdf', size: 1000 }];
+        feld.feuern('change', ereignis());
+        f.feuern('click', ereignis({ target: f.knopf }));
+        const passt = f.feuern('submit', ereignis({ submitter: f.knopf })).defaultPrevented;
+        for (let i = 0; i < 3; i++) { await warten(); }
+        out.grundriss = { anfang, zuGrossAbgefangen: zuGross, nachZuGross, passtAbgefangen: passt, anfragen: s.anfragen.length,
+            adresse: s.anfragen[0] ? s.anfragen[0].adresse : null, neuGeladen: s.zustand.neuGeladen, gueltigkeit: feld.gueltigkeit,
+            meldungVersteckt: feld.danach ? feld.danach.hidden : null };
     }
 
     // 7. live.js: 423 mit „kundenmodus“ → neu laden (zur Kundenseite); 401 → nur die Meldung.

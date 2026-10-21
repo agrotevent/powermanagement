@@ -3,6 +3,7 @@ declare(strict_types=1);
 
 namespace App\Services;
 
+use App\Support\Anfragezeit;
 use App\Support\Audit;
 use App\Support\Config;
 use App\Support\Crypto;
@@ -58,7 +59,36 @@ final class LocationSync
     /** Wie lange ein Git-Aufruf höchstens dauern darf. */
     private const ZEITGRENZE = 120;
 
-    /** Die git-Befehle, die das Repository fragen – auf die wird gewartet, ohne die Sitzung zu halten. */
+    /**
+     * Wie lange Klonen, Holen und Hochladen je Aufruf dauern dürfen.
+     *
+     * Ein Grundriss hat bis zu 100 MB (SiteService::MAX_UPLOAD_BYTES); über
+     * eine Leitung mit 5 Mbit/s sind das fast drei Minuten. Eine Anfrage
+     * macht aber oft mehrere Aufrufe – Hochladen holt erst und schiebt dann –,
+     * deshalb gilt in der Oberfläche zusätzlich die Frist der ganzen Anfrage
+     * (Anfragezeit, knapp unter fastcgi_read_timeout): Was danach noch
+     * fehlt, scheitert mit einer Meldung, statt dass nginx mit 504 aufgibt.
+     */
+    private const ZEITGRENZE_UEBERTRAGUNG = 280;
+
+    /**
+     * Ab dieser Größe einer Plandatei warnt GitHub beim Hochladen – und jede
+     * Fassung bleibt für immer in der Geschichte des Repositories, die jede
+     * Instanz beim Holen mitnimmt.
+     */
+    public const GIT_DATEI_WARNUNG = 50 * 1024 * 1024;
+
+    /**
+     * Größer nimmt GitHub keine Datei an (100 MiB) – der Push scheiterte
+     * dann nach dem vollständigen Hochladen. Deshalb vorher abgelehnt.
+     */
+    public const GIT_DATEI_HOECHSTENS = 100 * 1024 * 1024;
+
+    /**
+     * Die git-Befehle, die das Repository fragen: Auf die wird gewartet, ohne
+     * die Sitzung zu halten, und nur für sie gilt die Frist der Anfrage
+     * (Anfragezeit).
+     */
     private const UEBERS_NETZ = ['clone', 'fetch', 'ls-remote', 'push'];
 
     /** Was ein zweiter Abgleich meldet, während einer läuft. */
@@ -362,7 +392,7 @@ final class LocationSync
              * noch nicht, und `clone --branch main` scheitert daran – das
              * ist aber kein Fehler, sondern der erste Tag.
              */
-            $ergebnis = self::git(['clone', '--depth', '50', '--', self::repoUrl(), $kopie], dirname($kopie));
+            $ergebnis = self::git(['clone', '--depth', '50', '--', self::repoUrl(), $kopie], dirname($kopie), self::ZEITGRENZE_UEBERTRAGUNG);
             if (!$ergebnis['ok']) {
                 return ['ok' => false, 'message' => 'Das Repository ließ sich nicht holen: ' . $ergebnis['message'], 'commit' => ''];
             }
@@ -426,7 +456,7 @@ final class LocationSync
             $holen = self::git([
                 'fetch', 'origin',
                 '+refs/heads/' . $zweig . ':refs/remotes/origin/' . $zweig,
-            ], $kopie);
+            ], $kopie, self::ZEITGRENZE_UEBERTRAGUNG);
             if (!$holen['ok']) {
                 return ['ok' => false, 'message' => 'Holen fehlgeschlagen: ' . $holen['message']];
             }
@@ -696,6 +726,10 @@ final class LocationSync
 
         $vorhanden = self::locationLesen($schluessel);
         $location = LocationBundle::locationFuerRepo($siteId, $vorhanden);
+        $groesse = self::planGroessen($location['dateien'], $location['daten']);
+        if ($groesse['fehler'] !== '') {
+            return ['ok' => false, 'message' => $groesse['fehler']];
+        }
         foreach ($location['dateien'] as $imRepo => $aufPlatte) {
             $dateiZiel = $ziel . '/' . $imRepo;
             if (!is_dir(dirname($dateiZiel))) {
@@ -725,7 +759,46 @@ final class LocationSync
         return ['ok' => true, 'message' => $site['name'] . ' ist hochgeladen'
             . ($location['geaendert'] ? ' (Etagen/Grundriss in location.json ergänzt)' : '') . '. ' . $ergebnis['wo']
             . ($geruest !== [] ? ' Das Repository war leer und ist jetzt angelegt.' : '')
-            . self::zweigHinweis()];
+            . self::zweigHinweis() . $groesse['hinweis']];
+    }
+
+    /**
+     * Passen die Plandateien, die mit hochgehen, ins Repository?
+     *
+     * Über GIT_DATEI_HOECHSTENS ein Fehler, bevor etwas eingecheckt wird –
+     * sonst ginge die Datei ganz über die Leitung, und GitHub lehnte den
+     * Push danach ab. Über GIT_DATEI_WARNUNG ein Hinweis zur Erfolgsmeldung.
+     *
+     * @param array<string,string> $dateien im Repository → auf der Platte
+     * @param array<string,mixed> $daten location.json (für die Etagennamen)
+     * @return array{fehler:string,hinweis:string}
+     */
+    public static function planGroessen(array $dateien, array $daten): array
+    {
+        $namen = [];
+        foreach ((array) ($daten['etagen'] ?? []) as $etage) {
+            if (is_array($etage['plan'] ?? null) && is_string($etage['plan']['datei'] ?? null)) {
+                $namen[$etage['plan']['datei']] = (string) ($etage['name'] ?? $etage['schluessel'] ?? '');
+            }
+        }
+        $hinweise = [];
+        foreach ($dateien as $imRepo => $aufPlatte) {
+            clearstatcache(true, $aufPlatte);
+            $bytes = (int) @filesize($aufPlatte);
+            $wer = '„' . (($namen[$imRepo] ?? '') !== '' ? $namen[$imRepo] : $imRepo) . '“';
+            if ($bytes > self::GIT_DATEI_HOECHSTENS) {
+                return ['fehler' => sprintf('Der Grundriss von %s ist %s groß – GitHub nimmt keine Datei über %s an, der Push scheiterte. '
+                    . 'Nichts hochgeladen. Den Plan kleiner exportieren (eingebettete Bilder mit geringerer Auflösung) und neu hinterlegen.',
+                    $wer, SiteService::mb($bytes, true), SiteService::mb(self::GIT_DATEI_HOECHSTENS)), 'hinweis' => ''];
+            }
+            if ($bytes > self::GIT_DATEI_WARNUNG) {
+                $hinweise[] = sprintf('%s (%s)', $wer, SiteService::mb($bytes, true));
+            }
+        }
+        return ['fehler' => '', 'hinweis' => $hinweise === [] ? '' : sprintf(
+            ' Hinweis: Der Grundriss von %s ist größer als %s. GitHub warnt ab dieser Größe, und jede Fassung bleibt für immer im Repository – '
+            . 'jede Instanz holt sie beim Abgleich mit. Wenn möglich kleiner exportieren.',
+            implode(', ', $hinweise), SiteService::mb(self::GIT_DATEI_WARNUNG))];
     }
 
     /** JSON so, wie es im Repository steht – lesbar und mit Zeilenende. */
@@ -794,7 +867,7 @@ final class LocationSync
         $dort = self::fernerStand();
         $hochgeladen = false;
         if ($dort !== $hier) {
-            $push = self::git(['push', 'origin', 'HEAD:' . $zweig], $kopie);
+            $push = self::git(['push', 'origin', 'HEAD:' . $zweig], $kopie, self::ZEITGRENZE_UEBERTRAGUNG);
             if (!$push['ok']) {
                 return $fehler('Das Hochladen scheiterte: ' . $push['message']);
             }
@@ -1045,11 +1118,24 @@ final class LocationSync
      * @param list<string> $argumente
      * @return array{ok:bool,ausgabe:string,message:string}
      */
-    private static function git(array $argumente, string $verzeichnis): array
+    private static function git(array $argumente, string $verzeichnis, int $zeit = self::ZEITGRENZE): array
     {
         $git = self::gitPfad();
         if ($git === null) {
             return ['ok' => false, 'ausgabe' => '', 'message' => 'git ist nicht vorhanden.'];
+        }
+        /*
+         * Was über die Leitung geht, nie über die Frist der ganzen Anfrage
+         * hinaus (Anfragezeit) – sonst gäbe nginx auf, und die Meldung käme
+         * nicht mehr an. Örtliche Befehle sind schnell und bleiben davon
+         * unberührt: Scheiterte etwa `remote get-url`, hielte holen() die
+         * Arbeitskopie für fremd und holte sie ganz neu.
+         */
+        $netz = in_array($argumente[0] ?? '', self::UEBERS_NETZ, true);
+        $frist = $netz ? Anfragezeit::hoechstens((float) $zeit) : (float) $zeit;
+        $knapp = $frist < $zeit;
+        if ($frist < 1.0) {
+            return ['ok' => false, 'ausgabe' => '', 'message' => self::fristMeldung()];
         }
 
         $umgebung = [
@@ -1070,20 +1156,27 @@ final class LocationSync
          * desselben Browsers an der Sitzung an: andere Reiter, Live-Abfragen,
          * das Speichern eines Formulars. Also ohne Sitzungssperre wie
          * PartnerService::anfrage(); die Aufrufer schreiben ihre Meldungen
-         * erst danach, und zwei Abgleiche hält gesperrt() auseinander.
+         * erst danach, und zwei Abgleiche hält gesperrt() auseinander. Die
+         * Frist steht schon fest, bevor die Sitzung frei ist: Sie zählt ab
+         * dem Beginn der Anfrage (REQUEST_TIME_FLOAT), nicht ab dem
+         * Wiederöffnen, und starten() bricht an ihr ab, auch ohne Sitzung.
          */
-        $lauf = static fn (): array => self::starten($git, $argumente, $verzeichnis, $umgebung);
-        return in_array($argumente[0] ?? '', self::UEBERS_NETZ, true) ? Session::ohneSperre($lauf) : $lauf();
+        $lauf = static fn (): array => self::starten($git, $argumente, $verzeichnis, $umgebung, $frist, $knapp);
+        return $netz ? Session::ohneSperre($lauf) : $lauf();
     }
 
     /**
-     * git starten und auf sein Ende warten – höchstens ZEITGRENZE Sekunden.
+     * git starten und auf sein Ende warten – höchstens $frist Sekunden.
+     *
+     * Läuft für Befehle übers Netz ohne Sitzungssperre (Session::ohneSperre):
+     * hier nichts in die Sitzung schreiben, auch nicht über Flash.
      *
      * @param list<string> $argumente
      * @param array<string,string> $umgebung
+     * @param bool $knapp die Frist der Anfrage (Anfragezeit) ist kürzer als die des Befehls
      * @return array{ok:bool,ausgabe:string,message:string}
      */
-    private static function starten(string $git, array $argumente, string $verzeichnis, array $umgebung): array
+    private static function starten(string $git, array $argumente, string $verzeichnis, array $umgebung, float $frist, bool $knapp): array
     {
         $prozess = @proc_open(
             array_merge([$git], $argumente),
@@ -1100,7 +1193,7 @@ final class LocationSync
         stream_set_blocking($rohre[2], false);
         $ausgabe = '';
         $fehler  = '';
-        $ende    = microtime(true) + self::ZEITGRENZE;
+        $ende    = microtime(true) + $frist;
         $rc      = -1;
 
         while (true) {
@@ -1122,7 +1215,7 @@ final class LocationSync
                 fclose($rohre[1]);
                 fclose($rohre[2]);
                 proc_close($prozess);
-                return ['ok' => false, 'ausgabe' => $ausgabe, 'message' => 'git hat zu lange gebraucht.'];
+                return ['ok' => false, 'ausgabe' => $ausgabe, 'message' => $knapp ? self::fristMeldung() : 'git hat zu lange gebraucht.'];
             }
             usleep(50_000);
         }
@@ -1145,6 +1238,15 @@ final class LocationSync
         }
 
         return ['ok' => true, 'ausgabe' => $ausgabe, 'message' => ''];
+    }
+
+    /** Die Anfrage ist an ihrer Frist (Anfragezeit) angekommen. */
+    private static function fristMeldung(): string
+    {
+        return sprintf('git brauchte länger, als eine Anfrage hier dauern darf (zusammen höchstens %d Sekunden, danach gibt der Webserver auf). '
+            . 'Noch einmal versuchen – was schon vollständig geholt ist, geht dabei nicht noch einmal über die Leitung. '
+            . 'Übernehmen über eine sehr langsame Leitung geht auf dem Server ohne diese Frist: bin/power location:uebernehmen <schlüssel>.',
+            Anfragezeit::SEKUNDEN);
     }
 
     /** Ein Token, das doch einmal in einer Meldung landet, wird unkenntlich. */
