@@ -12,11 +12,13 @@ use App\Services\BenutzerService;
 use App\Support\Database;
 use App\Support\Flash;
 use App\Support\Request;
+use App\Support\Response;
 
 /**
  * System → Anmeldung (SSO): Verbindung zum Anmeldedienst, „Verbindung
- * prüfen“, Ein-/Ausschalten, Optionen, Gruppen → Rollen, Anmeldeanfragen und
- * die verknüpften Konten.
+ * prüfen“, Ein-/Ausschalten, Optionen, Schutz (Verwaltung per SSO, MFA, „nur
+ * SSO“ – nur mit allen Rechten), Gruppen → Rollen, Anmeldeanfragen und die
+ * verknüpften Konten.
  *
  * Die Route verlangt `sso.manage`. Was darüber hinausgeht, prüfen die
  * Klassen in App\Auth\Sso selbst: Gruppen Rollen zuordnen nur mit
@@ -78,6 +80,12 @@ final class SsoEinstellungenController extends Controller
             'konten'         => $konten,
             'verknuepfungen' => $verknuepfungen,
             'darfBenutzer'   => $darfBenutzer,
+            'stern'          => Auth::can('*'),
+            'schutz'         => [
+                'vorbedingungen' => Schutz::nurSsoVorbedingungen(),
+                'notzugaenge'    => array_map(static fn (array $u): string => (string) $u['username'], Schutz::notzugaenge()),
+                'warnungen'      => Schutz::nurSsoWarnungen(),
+            ],
         ]);
     }
 
@@ -140,6 +148,27 @@ final class SsoEinstellungenController extends Controller
         ]);
         $r['ok'] ? Flash::success($r['message']) : Flash::error($r['message']);
         $this->redirect(self::ZIEL . '#optionen');
+    }
+
+    /**
+     * Der Schutz: Verwaltung per SSO, MFA-Pflicht für Verwaltungskonten,
+     * „nur SSO“ – nur mit allen Rechten (sonst 403). Das Formular schickt alle
+     * drei Häkchen (fehlt eins, ist es aus); „nur SSO“ einschalten verlangt
+     * die Vorbedingungen und das Eintippen (Einstellungen::schutzSpeichern).
+     */
+    public function schutz(Request $request): void
+    {
+        if (!Auth::can('*')) {
+            Response::forbidden('Verwaltung per SSO, MFA und „nur SSO“ ändert nur, wer alle Rechte hat.');
+            return;
+        }
+        $r = Einstellungen::schutzSpeichern([
+            'admins'         => self::feld('admins') === '1',
+            'mfa_verwaltung' => self::feld('mfa_verwaltung') === '1',
+            'nur_sso'        => self::feld('nur_sso') === '1',
+        ], self::feld('bestaetigung'));
+        $r['ok'] ? Flash::success($r['message']) : Flash::error($r['message']);
+        $this->redirect(self::ZIEL . '#schutz');
     }
 
     /** Gruppe → Rolle (bzw. mit Schritt 5 → Kunde) – Konten::zuordnungFehler entscheidet. */

@@ -24,7 +24,17 @@ declare(strict_types=1);
  *   7. Anmeldeanfrage: unbekannte Person → Anfrage → freischalten → Anmeldung.
  *   8. Einstellungsseite: Rechte, Secret nie im HTML, „Prüfen“, ohne Token
  *      ändert keine neue Route etwas; Lösen und Sitzungen beenden in der
- *      Benutzerverwaltung.
+ *      Benutzerverwaltung; die Schutz-Karte ohne alle Rechte nur lesend, ihr
+ *      Formular abgelehnt.
+ *   9. Nur SSO: einschalten aus einer SSO-Sitzung (Eintippen), danach endet
+ *      eine Kennwort-Sitzung eines verknüpften Kontos, seine Kennwort-
+ *      Anmeldung wird abgelehnt, der Notzugang meldet sich mit Hinweis an.
+ *  10. Kundenmodus (Gerät gesperrt) eines Prüfers „nur über SSO“: kein
+ *      Kennwortfeld, Link zum Entsperren; Kennwort zählt nicht; nicht neu
+ *      angemeldet und andere Person → bleibt gesperrt; dieselbe Identität →
+ *      entsperrt; fünf Fehlversuche → gebremst, nicht abgemeldet.
+ *  11. Token anzeigen (Schnittstelle) für ein Konto „nur über SSO“: ohne
+ *      Bestätigung abgelehnt, nach der Bestätigung genau einmal (no-store).
  *  13. Die Seiten ohne PHP-Meldung (im HTML und im Fehlerprotokoll des Servers).
  * Dazu: Fehlertexte des Anbieters und Angaben aus Anfragen erscheinen nur
  * maskiert.
@@ -210,6 +220,17 @@ $erika = BenutzerService::anlegen($kennung . '-erika', $pw, 'planung', false);
 $verwalterRolle = (int) BenutzerService::rolleSpeichern(null, $kennung . ' verwalter', '', ['system.users.manage', 'dashboard.view'])['id'];
 \App\Auth\Auth::alsBenutzer(null);
 $verwalter = BenutzerService::anlegen($kennung . '-verwalter', $pw, (string) Database::scalar('SELECT role_key FROM roles WHERE id = ?', [$verwalterRolle]), false);
+// Für den Schutz (9–11): alle Rechte und verknüpft (schaltet „nur SSO“ ein), alle
+// Rechte und nie verknüpft (Notzugang), ein Prüfer und ein Konto mit allen
+// Rechten „nur über SSO“, ein Konto mit „SSO einrichten“ ohne alle Rechte.
+$chef = BenutzerService::anlegen($kennung . '-chef', $pw, 'admin', false);
+$notfall = BenutzerService::anlegen($kennung . '-notfall', $pw, 'admin', false);
+$pruefer = BenutzerService::anlegen($kennung . '-pruefer', $pw, 'technik', false);
+$stern = BenutzerService::anlegen($kennung . '-stern', $pw, 'admin', false);
+\App\Auth\Auth::alsBenutzer($admin);
+$ssoRolle = (int) BenutzerService::rolleSpeichern(null, $kennung . ' sso', '', ['sso.manage', 'dashboard.view'])['id'];
+\App\Auth\Auth::alsBenutzer(null);
+$ssoVerwalter = BenutzerService::anlegen($kennung . '-ssoverwalter', $pw, (string) Database::scalar('SELECT role_key FROM roles WHERE id = ?', [$ssoRolle]), false);
 $sessionName = (string) Config::get('security.session_name', 'pm_session');
 $client = $idp->client();
 
@@ -288,7 +309,8 @@ $ohne = ['/system/sso/verbindung' => ['aussteller' => 'https://evil.example/', '
     '/system/sso/zuordnung' => ['gruppe' => 'pm-ohne-token', 'ziel_id' => (string) $planungId],
     '/system/sso/zuordnung/' . $zuordnungId . '/loeschen' => [], '/system/sso/anfrage/' . $anfrageOhne . '/freischalten' => ['user_id' => (string) $erika],
     '/system/sso/anfrage/' . $anfrageOhne . '/anlegen' => ['username' => $kennung . '-ohne'], '/system/sso/anfrage/' . $anfrageOhne . '/verwerfen' => [],
-    '/system/benutzer/' . $zweit . '/sso' => ['aktion' => 'loesen'], '/profil/sso/loesen' => []];
+    '/system/benutzer/' . $zweit . '/sso' => ['aktion' => 'loesen'], '/profil/sso/loesen' => [],
+    '/system/sso/schutz' => ['admins' => '1', 'mfa_verwaltung' => '1']];
 foreach ($ohne as $pfad => $felder) {
     $r = browser($pfad, $adminDose, 'POST', $felder);
     pruefe($r['status'] === 302, '8: ' . $pfad . ' ohne _token → zurück (' . $r['status'] . ')');
@@ -490,6 +512,180 @@ pruefe($r['status'] === 302 && $r['ziel'] === '/system/benutzer?id=' . $planer &
 $r = $senden($adminDose, '/system/benutzer/' . $planer . '/sso', ['aktion' => 'loesen', 'zurueck' => 'sso'], '/system/sso');
 pruefe($r['status'] === 302 && $r['ziel'] === '/system/sso#verknuepft' && Konten::identitaet($planer) === null, '8: Lösen (von /system/sso aus) → Verknüpfung weg');
 
+// ================================================================ 8. Schutz nur mit allen Rechten
+$schalter = static function (string $s) use ($frisch): bool {
+    $frisch();
+    return \App\Auth\Sso\Einstellungen::schalter($s);
+};
+$sv = $kennwortAnmelden($kennung . '-ssoverwalter', $pw);
+$seite = browser('/system/sso', $sv);
+$schutzKarte = static fn (string $html): string => (string) strstr((string) strstr($html, 'id="schutz"'), 'id="verknuepft"', true);
+pruefe($seite['status'] === 200 && str_contains($schutzKarte($seite['text']), 'nur mit allen Rechten änderbar')
+    && preg_match('#name="admins" value="1" disabled>#', $seite['text']) === 1 && !str_contains($seite['text'], 'Schutz speichern'),
+    '8: Schutz-Karte ohne alle Rechte nur lesend (Häkchen gesperrt, kein Knopf)');
+$r = $senden($sv, '/system/sso/schutz', ['admins' => '1', 'nur_sso' => '1', 'bestaetigung' => 'nur SSO'], '/system/sso');
+pruefe($r['status'] === 403 && !$schalter(\App\Auth\Sso\Einstellungen::ADMINS) && !$schalter(\App\Auth\Sso\Einstellungen::NUR_SSO),
+    '8: Schutz-Formular ohne alle Rechte → 403, nichts geändert');
+$abmelden($sv);
+
+// ================================================================ 9. Nur SSO
+$r = $senden($adminDose, '/system/sso/schutz', ['admins' => '1'], '/system/sso');
+pruefe($r['status'] === 302 && $r['ziel'] === '/system/sso#schutz' && $schalter(\App\Auth\Sso\Einstellungen::ADMINS)
+    && str_contains(browser('/system/sso', $adminDose)['text'], 'Schutz der Anmeldung über Authentik gespeichert.'), '9: „Verwaltung per SSO“ eingeschaltet (Administrator, Kennwort-Sitzung)');
+Konten::verknuepfen($chef, $idp->aussteller(), 'sub-chef-' . $kennung, 'cli', 'chef-dort', []);
+$idp->benutzer($person('sub-chef-' . $kennung, 'chef-dort'));
+$chefDose = $dose();
+[, , $rueck] = $ssoAnmelden($chefDose);
+pruefe($rueck !== null && $rueck['ziel'] === '/dashboard', '9: Chef (alle Rechte, verknüpft) über SSO angemeldet');
+$karte = $schutzKarte(browser('/system/sso', $chefDose)['text']);
+pruefe(substr_count($karte, 'class="text-ok"') === 5 && !str_contains($karte, 'text-bad') && str_contains($karte, 'name="bestaetigung"')
+    && str_contains($karte, $kennung . '-notfall'), '9: Checkliste ganz erfüllt, Eintippfeld, Notzugänge genannt');
+$zweitDose = $kennwortAnmelden($kennung . '-zweit', $pw);
+gleich(browser('/dashboard', $zweitDose)['status'], 200, '9: verknüpftes Konto (zweit) mit Kennwort angemeldet – vor „nur SSO“');
+$r = $senden($chefDose, '/system/sso/schutz', ['admins' => '1', 'nur_sso' => '1', 'bestaetigung' => 'nur'], '/system/sso');
+pruefe(!$schalter(\App\Auth\Sso\Einstellungen::NUR_SSO) && str_contains(browser('/system/sso', $chefDose)['text'], 'eintippen'), '9: falsch eingetippt → „nur SSO“ bleibt aus');
+$r = $senden($chefDose, '/system/sso/schutz', ['admins' => '1', 'nur_sso' => '1', 'bestaetigung' => 'nur SSO'], '/system/sso');
+pruefe($r['status'] === 302 && $schalter(\App\Auth\Sso\Einstellungen::NUR_SSO), '9: „nur SSO“ eingeschaltet (SSO-Sitzung, eingetippt)');
+pruefe(browser('/dashboard', $chefDose)['status'] === 200, '9: die SSO-Sitzung des Chefs läuft weiter');
+$r = browser('/dashboard', $zweitDose);
+pruefe($r['status'] === 302 && str_starts_with($r['ziel'], '/login'), '9: die laufende Kennwort-Sitzung eines verknüpften Kontos endet bei der nächsten Anfrage');
+$zd = $dose();
+$seite = browser('/login', $zd);
+pruefe(str_contains($seite['text'], '<details class="lokal"'), '9: Anmeldeseite: Kennwortformular eingeklappt');
+$r = browser('/login', $zd, 'POST', ['username' => $kennung . '-zweit', 'password' => $pw, '_token' => token($seite['text'])]);
+pruefe($r['status'] === 302 && str_starts_with($r['ziel'], '/login') && str_contains(browser('/login', $zd)['text'], 'Bitte über Authentik anmelden')
+    && browser('/dashboard', $zd)['status'] === 302, '9: Kennwort-Anmeldung eines verknüpften Kontos → abgelehnt');
+$nd = $kennwortAnmelden($kennung . '-notfall', $pw);
+$seite = browser('/dashboard', $nd);
+pruefe($seite['status'] === 200 && str_contains($seite['text'], 'class="notzugang"') && str_contains($seite['text'], 'Angemeldet über den Notzugang'),
+    '9: Notzugang (alle Rechte, nie verknüpft) meldet sich an – mit Hinweis im HTML');
+gleich(phpMeldung($seite['text']), null, '13: Seite des Notzugangs ohne PHP-Meldung');
+pruefe(!str_contains(browser('/dashboard', $chefDose)['text'], 'class="notzugang"'), '9: … der Hinweis nur beim Notzugang');
+gleich(json_decode((string) Database::scalar("SELECT details FROM audit_log WHERE action = 'auth.login' AND user_id = ? ORDER BY id DESC LIMIT 1", [$notfall]), true)['weg'] ?? null,
+    'notzugang', '9: Audit auth.login mit Weg notzugang');
+$abmelden($nd);
+$r = $senden($chefDose, '/system/sso/schutz', ['admins' => '1'], '/system/sso');
+pruefe($r['status'] === 302 && !$schalter(\App\Auth\Sso\Einstellungen::NUR_SSO) && $schalter(\App\Auth\Sso\Einstellungen::ADMINS), '9: „nur SSO“ wieder aus');
+$abmelden($chefDose);
+
+// ================================================================ 10. Kundenmodus entsperren über den Anmeldedienst
+/** Bestätigen über den Anmeldedienst: Start (Link) → Anbieter → Rückruf. @return array{0:array, 1:?array, 2:?array} */
+$bestaetigen = static function (string $d, string $link) use ($idpBasis, $basis): array {
+    $start = browser($link, $d, 'GET', [], ['Sec-Fetch-Site: same-origin']);
+    $auth = str_starts_with($start['ziel'], $idpBasis . '/') ? browser($start['ziel'], $d) : null;
+    $rueck = $auth !== null && str_starts_with($auth['ziel'], $basis . '/login/sso/rueckruf?') ? browser($auth['ziel'], $d) : null;
+    return [$start, $auth, $rueck];
+};
+Konten::verknuepfen($pruefer, $idp->aussteller(), 'sub-pruefer-' . $kennung, 'cli', 'pruefer-dort', []);
+Database::update('users', $pruefer, ['nur_sso' => 1]);
+$idp->benutzer($person('sub-pruefer-' . $kennung, 'pruefer-dort'));
+$pd = $dose();
+[, , $rueck] = $ssoAnmelden($pd);
+pruefe($rueck !== null && $rueck['ziel'] === '/dashboard' && browser('/dashboard', $pd)['status'] === 200, '10: Prüfer („nur über SSO“) über SSO angemeldet');
+// Ein Bericht, den der Prüfer nicht sieht (kein Standort, nicht von ihm) – die Kundenseite zeigt dann nur das Entsperren.
+$bericht = Database::insert('berichte', ['status' => 'geprueft', 'version' => 1, 'pruefdatum' => gmdate('Y-m-d'), 'inhalt' => '{}',
+    'titel' => $kennung, 'erstellt_von' => $admin, 'created_at' => gmdate('c')]);
+/** Sperre am Gerät wie nach „An Kunden übergeben“ (Kundenmodus::starten): Zeile und Cookie. */
+$sperren = static function (string $d) use ($bericht, $pruefer): void {
+    $geraet = bin2hex(random_bytes(32));
+    Database::insert('kundenmodus_geraete', ['token_hash' => hash('sha256', $geraet), 'bericht_id' => $bericht, 'user_id' => $pruefer, 'seit' => gmdate('c')]);
+    file_put_contents($d, "127.0.0.1\tFALSE\t/\tFALSE\t0\tpm_kundenmodus\t" . $geraet . "\n", FILE_APPEND);
+};
+$kunde = '/berichte/' . $bericht . '/kunde';
+$link = '/login/sso/bestaetigen?zweck=kundenmodus%3A' . $bericht . '&zurueck=%2Fberichte%2F' . $bericht;
+$sperren($pd);
+$r = browser('/dashboard', $pd);
+pruefe($r['status'] === 302 && $r['ziel'] === $kunde, '10: Gerät gesperrt: /dashboard → Kundenseite');
+$k = browser($kunde, $pd);
+pruefe($k['status'] === 200 && !str_contains($k['text'], 'name="kennwort"') && str_contains($k['text'], 'href="' . View_e($link) . '"')
+    && str_contains($k['text'], 'Mit Authentik entsperren'), '10: Kundenseite ohne Kennwortfeld, mit Link „Mit Authentik entsperren“');
+gleich(phpMeldung($k['text']), null, '13: Kundenseite (gesperrt) ohne PHP-Meldung');
+// Ohne Kennwortfeld auch kein Formular – das Token steht dann nur für die Skripte in der Seite.
+$pmToken = preg_match('/window\.PM_TOKEN = "([^"]+)"/', $k['text'], $m) === 1 ? $m[1] : '';
+pruefe($pmToken !== '', '10: Sicherheitstoken der Kundenseite gefunden');
+$r = browser($kunde . '/beenden', $pd, 'POST', ['kennwort' => $pw, '_token' => $pmToken]);
+pruefe($r['ziel'] === $kunde && str_contains(browser($kunde, $pd)['text'], 'entsperrt nur über Authentik') && browser('/dashboard', $pd)['ziel'] === $kunde,
+    '10: das (richtige) Kennwort entsperrt ein Konto „nur über SSO“ nicht');
+$r = browser($link, $pd, 'GET', [], ['Sec-Fetch-Site: cross-site']);
+pruefe($r['status'] === 403 && $r['ziel'] === '', '10: Bestätigen mit Sec-Fetch-Site: cross-site → 403');
+$idp->benutzer($person('sub-pruefer-' . $kennung, 'pruefer-dort') + ['auth_time' => time() - 3600]);
+$idp->steuern(['prompt_ignorieren' => true]);
+[$start, $auth, $rueck] = $bestaetigen($pd, $link);
+$idp->zuruecksetzen();
+$q = query($start['ziel']);
+pruefe(($q['prompt'] ?? null) === 'login' && ($q['max_age'] ?? null) === '0' && ($q['redirect_uri'] ?? null) === $basis . '/login/sso/rueckruf',
+    '10: Bestätigen → Anbieter mit prompt=login und max_age=0');
+pruefe($rueck !== null && $rueck['ziel'] === $kunde && str_contains(browser($kunde, $pd)['text'], 'nicht neu angemeldet') && browser('/dashboard', $pd)['ziel'] === $kunde,
+    '10: Anbieter übergeht prompt=login → nicht_neu, bleibt gesperrt');
+$idp->benutzer($person('sub-fremd-' . $kennung, 'fremd-dort'));
+[, , $rueck] = $bestaetigen($pd, $link);
+pruefe($rueck !== null && $rueck['ziel'] === $kunde && str_contains(browser($kunde, $pd)['text'], 'anderen Person') && browser('/dashboard', $pd)['ziel'] === $kunde,
+    '10: andere Person beim Anmeldedienst → bleibt gesperrt');
+$idp->benutzer($person('sub-pruefer-' . $kennung, 'pruefer-dort'));
+[, , $rueck] = $bestaetigen($pd, $link);
+$r = browser('/dashboard', $pd);
+pruefe($rueck !== null && $rueck['status'] === 302 && $rueck['ziel'] === '/dashboard' && $r['status'] === 200 && $r['ziel'] === '',
+    '10: dieselbe Identität, frisch angemeldet → Kundenmodus beendet (/dashboard 200 statt Kundenseite)');
+pruefe(preg_match('/^Cache-Control:\s*no-store/mi', (string) $rueck['kopf']) === 1, '10: Rückruf mit no-store');
+$ereignisse = Database::select('SELECT ereignis, details FROM bericht_ereignisse WHERE bericht_id = ? ORDER BY id', [$bericht]);
+pruefe(in_array(['ereignis' => 'kundenmodus_ende', 'details' => '{"weg":"sso"}'], $ereignisse, false), '10: Ereignis kundenmodus_ende mit Weg sso');
+gleich((int) Database::scalar('SELECT COUNT(*) FROM kundenmodus_geraete WHERE bericht_id = ?', [$bericht]), 0, '10: die Sperre am Gerät ist weg');
+// Fünf Fehlversuche: gebremst – nicht abgemeldet (sonst stünde dem Kunden die Anmeldeseite offen).
+$sperren($pd);
+gleich(browser('/dashboard', $pd)['ziel'], $kunde, '10: wieder gesperrt');
+$n = count($protokoll('authorize'));
+$r = browser('/login/sso/bestaetigen?zweck=kundenmodus%3A' . ($bericht + 1000) . '&zurueck=%2Fdashboard', $pd, 'GET', [], ['Sec-Fetch-Site: same-origin']);
+pruefe($r['ziel'] === $kunde && str_contains(browser($kunde, $pd)['text'], 'nicht mehr aktiv'), '10: Entsperren eines anderen Berichts → zurück zur eigenen Kundenseite');
+$r = browser('/login/sso/bestaetigen?zweck=token%3A1&zurueck=%2Fdashboard', $pd, 'GET', [], ['Sec-Fetch-Site: same-origin']);
+pruefe($r['ziel'] === $kunde && str_contains(browser($kunde, $pd)['text'], 'Im Kundenmodus geht nur') && count($protokoll('authorize')) === $n,
+    '10: im Kundenmodus kein anderer Zweck (kein Vorgang beim Anbieter)');
+$idp->benutzer($person('sub-fremd-' . $kennung, 'fremd-dort'));
+for ($i = 0; $i < \App\Berichte\Kundenmodus::HOECHSTENS_FEHL; $i++) {
+    $bestaetigen($pd, $link);
+}
+$n = count($protokoll('authorize'));
+[$start, , ] = $bestaetigen($pd, $link);
+pruefe($start['status'] === 302 && $start['ziel'] === $kunde && count($protokoll('authorize')) === $n && str_contains(browser($kunde, $pd)['text'], 'gebremst'),
+    '10: nach fünf Fehlversuchen gebremst – kein neuer Vorgang beim Anbieter');
+$r = browser('/dashboard', $pd);
+pruefe($r['status'] === 302 && $r['ziel'] === $kunde, '10: … weiter gesperrt, nicht abgemeldet');
+pruefe((int) Database::scalar("SELECT COUNT(*) FROM bericht_ereignisse WHERE bericht_id = ? AND ereignis = 'kundenmodus_gebremst' AND details LIKE ?", [$bericht, '%"weg":"sso"%']) === 1,
+    '10: Ereignis kundenmodus_gebremst (Weg sso)');
+
+// ================================================================ 11. Token anzeigen über den Anmeldedienst
+Konten::verknuepfen($stern, $idp->aussteller(), 'sub-stern-' . $kennung, 'cli', 'stern-dort', []);
+Database::update('users', $stern, ['nur_sso' => 1]);
+\App\Auth\Auth::alsBenutzer($admin);
+$zugang = \App\Services\ApiZugaenge::anlegen(['name' => $kennung . ' Partner', 'befugnisse' => ['plaene.lesen']]);
+\App\Auth\Auth::alsBenutzer(null);
+$tokenId = (int) ($zugang['id'] ?? 0);
+$tokenKlar = (string) ($zugang['token'] ?? '');
+pruefe($zugang['ok'] && $tokenId > 0 && $tokenKlar !== '', '11: Zugang der Schnittstelle angelegt');
+$idp->benutzer($person('sub-stern-' . $kennung, 'stern-dort'));
+$sd = $dose();
+[, , $rueck] = $ssoAnmelden($sd, '/system/schnittstelle');
+pruefe($rueck !== null && $rueck['ziel'] === '/system/schnittstelle', '11: Konto mit allen Rechten „nur über SSO“ über SSO angemeldet (Verwaltung per SSO an)');
+$tLink = '/login/sso/bestaetigen?zweck=token%3A' . $tokenId . '&zurueck=%2Fsystem%2Fschnittstelle';
+$seite = browser('/system/schnittstelle', $sd);
+pruefe($seite['status'] === 200 && !str_contains($seite['text'], 'name="kennwort"') && str_contains($seite['text'], 'href="' . View_e($tLink) . '"'),
+    '11: Liste ohne Kennwortfeld, mit „Mit Authentik bestätigen“');
+$anzeigen = '/system/schnittstelle/' . $tokenId . '/anzeigen';
+foreach (['ohne Bestätigung' => [], 'mit dem Kennwort' => ['kennwort' => $pw]] as $wie => $felder) {
+    $r = $senden($sd, $anzeigen, $felder, '/system/schnittstelle');
+    pruefe($r['status'] === 302 && !str_contains($r['text'], $tokenKlar), '11: „Anzeigen“ ' . $wie . ' → abgelehnt');
+}
+[, , $rueck] = $bestaetigen($sd, $tLink);
+$seite = browser('/system/schnittstelle', $sd);
+pruefe($rueck !== null && $rueck['ziel'] === '/system/schnittstelle' && str_contains($seite['text'], 'Token jetzt anzeigen') && !str_contains($seite['text'], $tokenKlar),
+    '11: nach der Bestätigung: „Token jetzt anzeigen“ (ohne Kennwortfeld), das Token noch nicht in der Seite');
+$r = browser($anzeigen, $sd, 'POST', ['_token' => token($seite['text'])]);
+pruefe($r['status'] === 200 && str_contains($r['text'], 'value="' . $tokenKlar . '"') && preg_match('/^Cache-Control:\s*no-store/mi', $r['kopf']) === 1,
+    '11: das Token einmal angezeigt (no-store)');
+$r = $senden($sd, $anzeigen, [], '/system/schnittstelle');
+pruefe($r['status'] === 302 && !str_contains($r['text'], $tokenKlar), '11: ein zweites „Anzeigen“ → abgelehnt');
+gleich((int) Database::scalar("SELECT COUNT(*) FROM audit_log WHERE action = 'api.token.angezeigt' AND target_id = ?", [(string) $tokenId]), 1,
+    '11: genau ein „angezeigt“ im Audit');
+
 // ================================================================ 13. ohne PHP-Meldung
 foreach ([['/login', $dose()], ['/abgemeldet', $dose()], ['/profil', $adminDose], ['/profil', $u], ['/system/sso', $adminDose], ['/system/benutzer', $adminDose],
     ['/system/benutzer?id=' . $erika, $adminDose], ['/system/benutzer?neu=1', $adminDose]] as [$pfad, $dd]) {
@@ -505,7 +701,8 @@ pruefe(preg_match('/PHP (Warning|Notice|Deprecated|Fatal error|Parse error)/', $
 
 // Geheimnisse: Secret und Tokens nie im Audit, in keiner Sitzungsdatei das Secret.
 $audit = json_encode(Database::select('SELECT * FROM audit_log'));
-pruefe(!str_contains((string) $audit, $client['secret']) && !str_contains((string) $audit, 'code-'), 'Audit ohne Secret und Code');
+pruefe(!str_contains((string) $audit, $client['secret']) && !str_contains((string) $audit, 'code-') && !str_contains((string) $audit, $tokenKlar),
+    'Audit ohne Secret, Code und Token der Schnittstelle');
 $sitzungen = implode("\n", array_map('file_get_contents', glob($ordner . '/sitzungen/sess_*') ?: []));
 pruefe(!str_contains($sitzungen, $client['secret']), 'Sitzungsdateien ohne Secret');
 

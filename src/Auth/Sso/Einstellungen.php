@@ -9,6 +9,7 @@ use App\Support\Audit;
 use App\Support\Config;
 use App\Support\Crypto;
 use App\Support\Database;
+use App\Support\Session;
 use App\Support\Settings;
 
 /**
@@ -41,6 +42,8 @@ final class Einstellungen
     public const MAX_SCOPES = 8, MAX_PFLICHTGRUPPEN = 20, MAX_INAKTIV_TAGE = 3650;
     /** Sitzung und SSO-Rollen ohne security.max_session: 12 h. */
     public const SITZUNG_VORGABE = 43200;
+    /** Zum Einschalten von „nur SSO“ einzutippen (ohne Groß/Klein). */
+    public const NUR_SSO_EINTIPPEN = 'nur SSO';
 
     /** Schalter, die optionenSpeichern() setzt (schutzSpeichern() und kundenSchalten() setzen die übrigen). */
     private const OPTIONEN_SCHALTER = ['anlegen' => self::ANLEGEN, 'abmelde_rueckkehr' => self::RUECKKEHR];
@@ -511,6 +514,104 @@ final class Einstellungen
             'inaktiv_tage'      => self::inaktivTage(),
         ]]);
         return ['ok' => true, 'message' => 'Optionen der Anmeldung über SSO gespeichert.'];
+    }
+
+    /**
+     * Der Schutz: Verwaltung per SSO (`admins`), MFA-Pflicht für
+     * Verwaltungskonten (`mfa_verwaltung`), „nur SSO“ (`nur_sso`) – nur mit
+     * allen Rechten („*“; der Controller prüft es, hier noch einmal).
+     *
+     * „Nur SSO“ einschalten nur mit allen Vorbedingungen (§6.12,
+     * Schutz::nurSsoVorbedingungen) und dem eingetippten NUR_SSO_EINTIPPEN;
+     * ausschalten geht immer. Solange „nur SSO“ an ist, bleibt „Verwaltung per
+     * SSO“ an – verknüpfte Verwaltungskonten kämen sonst nur noch über den
+     * Notzugang herein. Die MFA-Pflicht schaltet eine Sitzung über SSO ohne
+     * zweiten Faktor nicht ein – sie endete damit sofort, und ob der
+     * Anmeldedienst den zweiten Faktor überhaupt meldet (amr), wäre ungeprüft.
+     *
+     * `admins` aus löscht sofort die Rollen aus Gruppen, die Verwaltungsrechte
+     * tragen oder Systemrolle sind (W19); laufende SSO-Sitzungen von
+     * Verwaltungskonten enden über Schutz::sitzungGilt.
+     *
+     * @param array{admins?:mixed, mfa_verwaltung?:mixed, nur_sso?:mixed} $o fehlende Schlüssel bleiben, wie sie sind
+     * @return array{ok:bool,message:string}
+     */
+    public static function schutzSpeichern(array $o, string $bestaetigung): array
+    {
+        if (!Auth::can('*')) {
+            return ['ok' => false, 'message' => 'Verwaltung per SSO, MFA und „nur SSO“ ändert nur, wer alle Rechte hat.'];
+        }
+        $schluessel = ['admins' => self::ADMINS, 'mfa_verwaltung' => self::MFA, 'nur_sso' => self::NUR_SSO];
+        $vorher = array_map([self::class, 'schalter'], $schluessel);
+        $neu = $vorher;
+        foreach (array_keys($schluessel) as $feld) {
+            if (array_key_exists($feld, $o)) {
+                $neu[$feld] = self::wahr($o[$feld]);
+            }
+        }
+        if ($neu === $vorher) {
+            return ['ok' => true, 'message' => 'Am Schutz hat sich nichts geändert.'];
+        }
+        $name = self::name();
+        if ($neu['nur_sso'] && !$neu['admins']) {
+            return ['ok' => false, 'message' => 'Solange „nur SSO“ an ist, bleibt „Verwaltung per SSO“ an – verknüpfte Verwaltungskonten kämen sonst nur noch über den Notzugang herein. Erst „nur SSO“ ausschalten.'];
+        }
+        $sso = (array) Session::get('sso', []);
+        if ($neu['mfa_verwaltung'] && !$vorher['mfa_verwaltung'] && Auth::anmeldeweg() === 'sso' && empty($sso['mfa'])) {
+            return ['ok' => false, 'message' => 'Diese Sitzung ist über ' . $name . ' ohne zweiten Faktor angemeldet – mit der MFA-Pflicht endete sie sofort. Erst bei ' . $name . ' mit zweitem Faktor anmelden (oder hier mit Kennwort), dann einschalten.'];
+        }
+        if ($neu['nur_sso'] && !$vorher['nur_sso']) {
+            foreach (Schutz::nurSsoVorbedingungen($neu['admins']) as $b) {
+                if (!$b['ok']) {
+                    return ['ok' => false, 'message' => '„Nur SSO“ bleibt aus: ' . $b['fehlt']];
+                }
+            }
+            $getippt = mb_strtolower(trim((string) preg_replace('/\s+/u', ' ', $bestaetigung)));
+            if ($getippt !== mb_strtolower(self::NUR_SSO_EINTIPPEN)) {
+                return ['ok' => false, 'message' => '„Nur SSO“ bleibt aus: zur Bestätigung „' . self::NUR_SSO_EINTIPPEN . '“ eintippen.'];
+            }
+        }
+        foreach ($schluessel as $feld => $s) {
+            if ($neu[$feld] !== $vorher[$feld]) {
+                Settings::put($s, $neu[$feld] ? '1' : '0');
+            }
+        }
+        $details = ['schalter' => array_filter($neu, static fn (bool $w, string $k): bool => $w !== $vorher[$k], ARRAY_FILTER_USE_BOTH)];
+        $meldung = ['Schutz der Anmeldung über ' . $name . ' gespeichert.'];
+        if ($vorher['admins'] && !$neu['admins']) {
+            $rollen = Schutz::verwaltendeRollen();
+            $weg = $rollen === [] ? 0 : Database::execute("DELETE FROM user_roles WHERE quelle = 'sso' AND role_id IN ("
+                . implode(',', array_fill(0, count($rollen), '?')) . ')', $rollen);
+            Zugriff::vergessen();
+            Auth::rechteVergessen();
+            $details['sso_rollen'] = $weg;
+            $meldung[] = 'Verwaltungskonten melden sich wieder nur mit Kennwort an; ihre Sitzungen über ' . $name . ' enden'
+                . ($weg > 0 ? ', ' . $weg . ' verwaltende Rolle(n) aus Gruppen sind entfernt' : '') . '.';
+        }
+        if ($neu['nur_sso'] && !$vorher['nur_sso']) {
+            $meldung[] = 'Verknüpfte Konten (' . Schutz::nurSsoWarnungen()['verknuepft'] . ') melden sich ab jetzt nur noch über ' . $name
+                . ' an; ihre laufenden Kennwort-Sitzungen enden.';
+        }
+        Audit::log('einstellungen.sso', 'settings', '', $details);
+        return ['ok' => true, 'message' => implode(' ', $meldung)];
+    }
+
+    /** War die letzte „Verbindung prüfen“ (auch beim Einschalten) ganz erfolgreich? */
+    public static function letztePruefungOk(): bool
+    {
+        if (!ctype_digit((string) Settings::get(self::GEPRUEFT_AM, ''))) {
+            return false;
+        }
+        $befund = json_decode((string) Settings::get(self::BEFUND, '[]'), true);
+        if (!is_array($befund) || $befund === []) {
+            return false;
+        }
+        foreach ($befund as $b) {
+            if (!is_array($b) || ($b['ok'] ?? null) !== true) {
+                return false;
+            }
+        }
+        return true;
     }
 
     /**

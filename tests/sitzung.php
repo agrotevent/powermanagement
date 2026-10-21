@@ -1403,6 +1403,18 @@ foreach (['pruefen' => [], 'schalten' => ['an' => '1']] as $aktion => $felder) {
         && str_contains($nachher['text'], $aktion === 'pruefen' ? 'Verbindung geprüft – alles in Ordnung.' : 'ist eingeschaltet'),
         'SSO-Einstellungen: „' . $aktion . '“ danach mit Meldung zurück');
 }
+// Bestätigen über den Anmeldedienst (Step-up, etwa „Token anzeigen“): auch
+// dieser Rückruf wartet ohne Sitzungssperre und schreibt die Bestätigung danach.
+$r = holen($basis . '/login/sso/bestaetigen?zweck=token%3A1&zurueck=%2Fprofil');
+$authorize = str_starts_with($r['ziel'], 'http://127.0.0.1:' . $oidcPort . '/') ? holen($r['ziel']) : ['status' => 0, 'ziel' => ''];
+pruefe(str_starts_with($authorize['ziel'], $basis . '/login/sso/rueckruf?'), 'SSO: Bestätigen → Anmeldedienst → Rückruf-Adresse');
+$idp->steuern(['verzoegerung' => 3]);
+$lauf = waehrendLangsam([$authorize['ziel']], $basis . '/profil');
+$idp->steuern(['verzoegerung' => null]);
+pruefe($lauf['antwort']['status'] === 200 && $lauf['dauer'] < 1.5,
+    sprintf('SSO: eine andere Seite kommt durch, während der Rückruf des Bestätigens wartet (%.1f s)', $lauf['dauer']));
+pruefe($lauf['langsam'][0]['status'] === 302 && $ortAus($lauf['langsam'][0]['kopf']) === '/profil' && str_contains(holen($basis . '/profil')['text'], 'Bestätigt.'),
+    'SSO: danach bestätigt, zurück zum Ziel');
 preg_match('/name="_token" value="([^"]+)"/', holen($basis . '/profil')['text'], $m);
 holen($basis . '/logout', ['_token' => $m[1] ?? '']);
 

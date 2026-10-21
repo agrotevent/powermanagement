@@ -31,10 +31,20 @@ declare(strict_types=1);
  *    *-Rolle übergangen, zuordnungFehler, Gruppe „123“.
  * I. Sitzung: sitzungGilt (Marke, Sitzungen beendet, Dauer, aus, sso.admins,
  *    Lösen), kennwortVerboten, „nur SSO“ und Notzugang.
+ * J. Schutz speichern: nur mit allen Rechten; „nur SSO“ nur mit SSO-Sitzung,
+ *    Verwaltung per SSO, Notzugang, erfolgreicher Prüfung und Eintippen;
+ *    MFA-Pflicht nicht aus einer SSO-Sitzung ohne zweiten Faktor; Kennwort-
+ *    Anmeldung danach (verknüpft abgelehnt, Notzugang laut, Kunde normal);
+ *    der letzte Notzugang bleibt; sso.admins aus nimmt verwaltende Rollen
+ *    aus Gruppen; bin/power sso:aus --nur-sso.
+ * K. Bestätigen (Step-up): token:<id> einmal, 300 s, nur dieser Zweck und
+ *    dieses Konto; andere Person, nicht neu angemeldet, Verwaltung ohne
+ *    sso.admins (W7); Auth::bestaetigen mit Kennwort bzw. nie bei nur_sso;
+ *    Kundenmodus entsperren (Fehlversuche zählen, Bremse vor dem Netz).
  * M. Keine Geheimnisse (Code, Access-/ID-Token) in Sitzung, Audit und Log.
  *
- * Die Abschnitte J–L und N (nur SSO speichern, Step-up, Kunden, CLI)
- * kommen mit den nächsten Schritten dazu.
+ * Die Abschnitte L und N (Kunden, CLI) kommen mit den nächsten Schritten
+ * dazu.
  */
 
 require __DIR__ . '/hilfen/instanz.php';
@@ -52,6 +62,8 @@ use App\Auth\Sso\Konten;
 use App\Auth\Sso\Schutz;
 use App\Auth\Sso\SsoFehler;
 use App\Auth\Zugriff;
+use App\Berichte\BerichtService;
+use App\Berichte\Kundenmodus;
 use App\Kunden\KundenService;
 use App\Messung\Http;
 use App\Services\BenutzerService;
@@ -1299,6 +1311,214 @@ pruefe(Schutz::letzterNotzugang($admin) === (count(Schutz::notzugaenge()) === 1)
 $abmelden();
 Settings::put(Einstellungen::NUR_SSO, '0');
 pruefe(Auth::attempt($kennung . '-planer', $pw, $ip)['ok'] && Auth::anmeldeweg() === 'kennwort', '„nur SSO“ aus: wieder mit Kennwort');
+$abmelden();
+
+// ================================================================ J. Nur SSO und Notzugang
+$schalter = static fn (string $s): bool => Einstellungen::schalter($s);
+Settings::put(Einstellungen::NUR_SSO, '0');
+Settings::put(Einstellungen::ADMINS, '0');
+Settings::put(Einstellungen::MFA, '0');
+pruefe(Anbieter::pruefen()['ok'] && Einstellungen::letztePruefungOk(), 'J: Verbindung frisch geprüft, Befund ohne Fehler');
+$chef = BenutzerService::anlegen($kennung . '-chef', $pw, 'admin', false);
+$subChef = 'sub-chef-' . $kennung;
+Konten::verknuepfen($chef, $iss, $subChef, 'cli', 'chef-dort', []);
+$kundeKonto = BenutzerService::anlegen($kennung . '-kunde', $pw, 'kunde', false);
+$verwalter2 = BenutzerService::anlegen($kennung . '-verwalter2', $pw, 'kunde', false);
+Database::insert('user_roles', ['user_id' => $verwalter2, 'role_id' => $rolleVerwalter, 'gueltig_ab' => null, 'gueltig_bis' => null]);
+
+// J.1 Schutz speichern
+$abmelden();
+alsBenutzer($planer);
+$r = Einstellungen::schutzSpeichern(['admins' => true], '');
+pruefe(!$r['ok'] && str_contains($r['message'], 'alle Rechte') && !$schalter(Einstellungen::ADMINS), 'J.1: Schutz ohne alle Rechte → abgelehnt');
+alsBenutzer(null);
+$abmelden();
+pruefe(Auth::attempt($kennung . '-chef', $pw, $ip)['ok'] && Auth::anmeldeweg() === 'kennwort', 'J.1: Chef (alle Rechte, verknüpft) mit Kennwort angemeldet');
+$r = Einstellungen::schutzSpeichern(['admins' => true, 'nur_sso' => true], 'nur SSO');
+pruefe(!$r['ok'] && str_contains($r['message'], 'erst über Authentik anmelden') && !$schalter(Einstellungen::ADMINS) && !$schalter(Einstellungen::NUR_SSO),
+    'J.1: „nur SSO“ ohne SSO-Sitzung → abgelehnt, auch der zweite Schalter nicht gespeichert');
+$r = Einstellungen::schutzSpeichern(['admins' => true], '');
+pruefe($r['ok'] && $schalter(Einstellungen::ADMINS), 'J.1: „Verwaltung per SSO“ aus einer Kennwort-Sitzung eingeschaltet');
+gleich($letztesAudit('einstellungen.sso'), ['schalter' => ['admins' => true]], 'J.1: Audit nennt nur den geänderten Schalter');
+gleich(Einstellungen::schutzSpeichern(['admins' => true], '')['message'], 'Am Schutz hat sich nichts geändert.', 'J.1: nichts geändert');
+$abmelden();
+$r = $ablauf($person($subChef, 'chef-dort'));
+pruefe($r['ok'] && Auth::id() === $chef && Auth::anmeldeweg() === 'sso', 'J.1: Chef über SSO angemeldet');
+$offenePunkte = array_values(array_filter(Schutz::nurSsoVorbedingungen(), static fn (array $b): bool => !$b['ok']));
+gleich($offenePunkte, [], 'J.1: die Checkliste ist ganz erfüllt');
+gleich(count(Schutz::nurSsoVorbedingungen()), 5, 'J.1: fünf Punkte (alle Rechte, Prüfung, SSO-Sitzung, Verwaltung per SSO, Notzugang)');
+$r = Einstellungen::schutzSpeichern(['admins' => false, 'nur_sso' => true], 'nur SSO');
+pruefe(!$r['ok'] && str_contains($r['message'], 'bleibt „Verwaltung per SSO“ an') && !$schalter(Einstellungen::NUR_SSO) && $schalter(Einstellungen::ADMINS),
+    'J.1: „nur SSO“ ohne „Verwaltung per SSO“ → abgelehnt');
+$notzugaenge = array_map('intval', array_column(Schutz::notzugaenge(), 'id'));
+pruefe(in_array($admin, $notzugaenge, true) && !in_array($chef, $notzugaenge, true) && !in_array($verwalter2, $notzugaenge, true),
+    'J.1: Notzugänge sind unverknüpfte Konten mit allen Rechten (nicht der verknüpfte Chef, nicht der Verwalter)');
+Database::execute('UPDATE users SET is_active = 0 WHERE id IN (' . implode(',', $notzugaenge) . ')');
+$r = Einstellungen::schutzSpeichern(['nur_sso' => true], 'nur SSO');
+pruefe(!$r['ok'] && str_contains($r['message'], 'keinen Notzugang') && !$schalter(Einstellungen::NUR_SSO), 'J.1: ohne Notzugang → abgelehnt');
+Database::execute('UPDATE users SET is_active = 1 WHERE id IN (' . implode(',', $notzugaenge) . ')');
+$befund = (string) Settings::get(Einstellungen::BEFUND, '');
+Settings::put(Einstellungen::BEFUND, (string) json_encode([['ok' => true, 'text' => 'a'], ['ok' => false, 'text' => 'b']]));
+$r = Einstellungen::schutzSpeichern(['nur_sso' => true], 'nur SSO');
+pruefe(!$r['ok'] && str_contains($r['message'], 'Verbindung prüfen') && !$schalter(Einstellungen::NUR_SSO), 'J.1: letzte Prüfung mit Befund → abgelehnt');
+Settings::put(Einstellungen::BEFUND, $befund);
+foreach (['', 'nur', 'nur SSO!', 'SSO nur'] as $falsch) {
+    $r = Einstellungen::schutzSpeichern(['nur_sso' => true], $falsch);
+    pruefe(!$r['ok'] && str_contains($r['message'], 'eintippen') && !$schalter(Einstellungen::NUR_SSO), 'J.1: eingetippt ' . json_encode($falsch) . ' → abgelehnt');
+}
+$r = Einstellungen::schutzSpeichern(['admins' => true, 'nur_sso' => true], "  Nur   sso ");
+pruefe($r['ok'] && $schalter(Einstellungen::NUR_SSO) && str_contains($r['message'], 'nur noch über Authentik'), 'J.1: mit allem → „nur SSO“ an (eingetippt ohne Groß/Klein)');
+gleich($letztesAudit('einstellungen.sso'), ['schalter' => ['nur_sso' => true]], 'J.1: Audit „nur SSO“ an');
+Auth::vergessen();
+pruefe(Auth::id() === $chef && Auth::anmeldeweg() === 'sso', 'J.1: die eigene SSO-Sitzung läuft weiter');
+// Die MFA-Pflicht nicht aus einer SSO-Sitzung ohne zweiten Faktor – sie endete sofort.
+$r = Einstellungen::schutzSpeichern(['mfa_verwaltung' => true], '');
+pruefe(!$r['ok'] && str_contains($r['message'], 'ohne zweiten Faktor') && !$schalter(Einstellungen::MFA), 'J.1: MFA-Pflicht aus einer SSO-Sitzung ohne zweiten Faktor → abgelehnt');
+$abmelden();
+pruefe($ablauf($person($subChef, 'chef-dort', [], ['amr' => ['pwd', 'mfa']]))['ok'], 'J.1: Chef mit zweitem Faktor über SSO angemeldet');
+$r = Einstellungen::schutzSpeichern(['mfa_verwaltung' => true], '');
+pruefe($r['ok'] && $schalter(Einstellungen::MFA) && $schalter(Einstellungen::NUR_SSO), 'J.1: … dann geht die MFA-Pflicht, „nur SSO“ bleibt');
+Auth::vergessen();
+pruefe(Auth::id() === $chef, 'J.1: die Sitzung mit zweitem Faktor läuft weiter');
+pruefe(Einstellungen::schutzSpeichern(['mfa_verwaltung' => false], '')['ok'] && !$schalter(Einstellungen::MFA), 'J.1: MFA-Pflicht wieder aus');
+$warnungen = Schutz::nurSsoWarnungen();
+pruefe(in_array($kennung . '-verwalter2', $warnungen['verwaltend'], true) && !in_array($kennung . '-admin', $warnungen['verwaltend'], true)
+    && $warnungen['verknuepft'] >= 3, 'J.1: Warnliste: unverknüpfter Verwalter (kein Notzugang), Zahl der verknüpften Konten');
+$abmelden();
+
+// J.2 Kennwort-Anmeldung bei „nur SSO“
+$r = Auth::attempt($kennung . '-planer', $pw, $ip);
+pruefe(!$r['ok'] && str_contains($r['message'], 'Bitte über Authentik anmelden') && Auth::id() === null, 'J.2: verknüpftes Personal mit richtigem Kennwort → „Bitte über …“');
+gleich(json_decode((string) Database::scalar("SELECT details FROM audit_log WHERE action = 'auth.login_failed' ORDER BY id DESC LIMIT 1"), true),
+    ['reason' => 'nur SSO'], 'J.2: … als auth.login_failed (nur SSO)');
+gleich(Auth::attempt($kennung . '-planer', 'falsch-' . $pw, $ip)['message'], 'Benutzername oder Passwort falsch.', 'J.2: falsches Kennwort → die allgemeine Meldung');
+Database::update('users', $planer, ['failed_logins' => 0, 'locked_until' => null]);
+pruefe(Auth::attempt($kennung . '-admin', $pw, $ip)['ok'] && Auth::anmeldeweg() === 'notzugang', 'J.2: unverknüpftes Konto mit allen Rechten → Weg notzugang');
+gleich(json_decode((string) Database::scalar("SELECT details FROM audit_log WHERE action = 'auth.login' ORDER BY id DESC LIMIT 1"), true)['weg'] ?? null,
+    'notzugang', 'J.2: Audit auth.login mit Weg notzugang');
+$abmelden();
+pruefe(Auth::attempt($kennung . '-kunde', $pw, $ip)['ok'] && Auth::anmeldeweg() === 'kennwort', 'J.2: unverknüpftes Konto mit Rolle „kunde“ → Weg kennwort');
+$abmelden();
+
+// J.3 Der letzte Notzugang bleibt
+$andere = array_values(array_diff(array_map('intval', array_column(Schutz::notzugaenge(), 'id')), [$admin]));
+if ($andere !== []) {
+    Database::execute('UPDATE users SET is_active = 0 WHERE id IN (' . implode(',', $andere) . ')');
+}
+pruefe(Schutz::letzterNotzugang($admin) && !Schutz::letzterNotzugang($chef), 'J.3: der Administrator ist der letzte Notzugang');
+alsBenutzer($chef);
+gleich($code(static fn () => Konten::verknuepfen($admin, $iss, 'sub-letzter-' . $kennung, 'cli', '', [])), 'notzugang', 'J.3: den letzten Notzugang verknüpfen → abgelehnt');
+$adminRolle = (int) Database::scalar("SELECT role_id FROM user_roles WHERE user_id = ? AND quelle = 'hand'", [$admin]);
+$daten = ['username' => $kennung . '-admin', 'is_active' => 1, 'nur_sso_feld' => '1'];
+gleich(BenutzerService::speichern($admin, ['is_active' => 0] + $daten, [$adminRolle => ['aktiv' => 1]])['message'], Schutz::T_LETZTER_NOTZUGANG,
+    'J.3: … deaktivieren → abgelehnt');
+gleich(BenutzerService::speichern($admin, ['nur_sso' => '1'] + $daten, [$adminRolle => ['aktiv' => 1]])['message'], Schutz::T_LETZTER_NOTZUGANG,
+    'J.3: … auf „nur über SSO“ stellen → abgelehnt');
+gleich(BenutzerService::speichern($admin, $daten, [])['message'], Schutz::T_LETZTER_NOTZUGANG, 'J.3: … „*“ nehmen → abgelehnt');
+gleich(BenutzerService::loeschen($admin)['message'], Schutz::T_LETZTER_NOTZUGANG, 'J.3: … löschen → abgelehnt');
+pruefe(BenutzerService::speichern($admin, ['full_name' => 'Notfall ' . $kennung] + $daten, [$adminRolle => ['aktiv' => 1]])['ok']
+    && Schutz::letzterNotzugang($admin), 'J.3: andere Änderungen am letzten Notzugang gehen');
+alsBenutzer(null);
+if ($andere !== []) {
+    Database::execute('UPDATE users SET is_active = 1 WHERE id IN (' . implode(',', $andere) . ')');
+}
+
+// J.4 Der Notausgang auf der Kommandozeile
+$p = proc_open([PHP_BINARY, APP_ROOT . '/bin/power', 'sso:aus', '--nur-sso'], [0 => ['file', '/dev/null', 'r'], 1 => ['pipe', 'w'], 2 => ['pipe', 'w']],
+    $rohre, APP_ROOT, getenv());
+$cliAus = is_resource($p) ? (string) stream_get_contents($rohre[1]) . (string) stream_get_contents($rohre[2]) : '';
+$rc = is_resource($p) ? proc_close($p) : -1;
+(new ReflectionProperty(Settings::class, 'cache'))->setValue(null, null);
+pruefe($rc === 0 && str_contains($cliAus, '„Nur SSO“ ist aus') && !$schalter(Einstellungen::NUR_SSO) && Einstellungen::aktiv() && $schalter(Einstellungen::ADMINS),
+    'J.4: bin/power sso:aus --nur-sso → „nur SSO“ aus, SSO bleibt an (' . trim($cliAus) . ')');
+pruefe(Auth::attempt($kennung . '-planer', $pw, $ip)['ok'] && Auth::anmeldeweg() === 'kennwort', 'J.4: verknüpftes Konto wieder mit Kennwort');
+$abmelden();
+
+// J.5 „Verwaltung per SSO“ aus nimmt verwaltende Rollen aus Gruppen sofort
+Database::insert('user_roles', ['user_id' => $kundeKonto, 'role_id' => $rolleVerwalter, 'gueltig_bis' => gmdate('c', time() + 3600), 'quelle' => 'sso']);
+Database::insert('user_roles', ['user_id' => $kundeKonto, 'role_id' => $rolleA, 'gueltig_bis' => gmdate('c', time() + 3600), 'quelle' => 'sso']);
+alsBenutzer($admin);
+$r = Einstellungen::schutzSpeichern(['admins' => false], '');
+pruefe($r['ok'] && !$schalter(Einstellungen::ADMINS) && $ssoRollen($kundeKonto) === [$rolleA], 'J.5: sso.admins aus → verwaltende Rolle aus der Gruppe weg, die andere bleibt');
+gleich($letztesAudit('einstellungen.sso'), ['schalter' => ['admins' => false], 'sso_rollen' => 1], 'J.5: Audit mit der Zahl der entfernten Rollen');
+pruefe(in_array($rolleVerwalter, Schutz::verwaltendeRollen(), true) && !in_array($rolleA, Schutz::verwaltendeRollen(), true)
+    && in_array((int) Database::scalar('SELECT id FROM roles WHERE is_system = 1'), Schutz::verwaltendeRollen(), true), 'J.5: verwaltende Rollen: Systemrolle und Verwaltungsrechte');
+alsBenutzer(null);
+Database::execute("DELETE FROM user_roles WHERE user_id = ? AND quelle = 'sso'", [$kundeKonto]);
+
+// ================================================================ K. Bestätigen (Step-up)
+$abmelden();
+pruefe($ablauf($person($subPlaner, 'planer-dort'))['ok'] && Auth::id() === $planer, 'K: Planer über SSO angemeldet');
+gleich(Anmeldung::bestaetigenFehler('token:5'), null, 'K: Bestätigen über SSO angeboten');
+pruefe(Anmeldung::bestaetigenFehler('alles:5') !== null && str_contains((string) Anmeldung::bestaetigenFehler('kundenmodus:7'), 'nicht mehr aktiv'),
+    'K: unbekannter Zweck bzw. Kundenmodus ohne Kundenmodus → nicht angeboten');
+// K.1 einmal, 300 s, nur dieser Zweck, nur dieses Konto
+$r = $ablauf(null, [], 'token:5', $planer, null, '/system/schnittstelle');
+pruefe($r['ok'] && $r['zweck'] === 'token' && $r['ziel'] === '/system/schnittstelle' && Auth::id() === $planer && Auth::anmeldeweg() === 'sso',
+    'K.1: Step-up token:5 → bestätigt, zurück zum Ziel, die Sitzung bleibt');
+pruefe(Anmeldung::bestaetigt('token:5', false) && !Anmeldung::bestaetigt('token:6', false), 'K.1: gilt für genau diesen Zweck');
+$uhr += Anmeldung::BESTAETIGT_SEKUNDEN + 1;
+pruefe(!Anmeldung::bestaetigt('token:5', false), 'K.1: nach 301 s nicht mehr');
+$uhr -= Anmeldung::BESTAETIGT_SEKUNDEN + 1;
+Auth::alsBenutzer($admin);
+pruefe(!Anmeldung::bestaetigt('token:5', false), 'K.1: für ein anderes Konto nicht');
+Auth::alsBenutzer(null);
+pruefe(Auth::id() === $planer && Auth::bestaetigen('token:5', '') && !Auth::bestaetigen('token:5', ''), 'K.1: Auth::bestaetigen ohne Kennwort: einmal, danach nicht mehr');
+gleich($letztesAudit('auth.bestaetigung_fehlversuch'), ['zweck' => 'token:5'], 'K.1: der zweite Versuch steht im Audit');
+// K.2 andere Person, nicht neu angemeldet, Verwaltung ohne sso.admins (W7)
+$r = $ablauf($person('sub-fremd-' . $kennung, 'fremd-dort'), [], 'token:5', $planer);
+pruefe($r['code'] === 'andere_person' && !Anmeldung::bestaetigt('token:5', false) && Auth::id() === $planer,
+    'K.2: andere Person beim Anmeldedienst → andere_person, nicht bestätigt, angemeldet bleibt der Planer');
+$r = $ablauf($person($subPlaner, 'planer-dort', [], ['auth_time' => time() - 3600]), ['prompt_ignorieren' => true], 'token:5', $planer);
+pruefe($r['code'] === 'nicht_neu' && !Anmeldung::bestaetigt('token:5', false), 'K.2: Anbieter übergeht prompt=login (auth_time alt) → nicht_neu');
+$abmelden();
+pruefe(Auth::attempt($kennung . '-verwalter', $pw, $ip)['ok'] && !$schalter(Einstellungen::ADMINS), 'K.2: Verwalter (verknüpft) mit Kennwort, sso.admins aus');
+pruefe(str_contains((string) Anmeldung::bestaetigenFehler('token:5'), 'Verwaltung per SSO'), 'K.2: Verwaltungskonto: Bestätigen über SSO nicht angeboten (W7)');
+$r = $ablauf($person($subVerwalter, 'verwalter-dort'), [], 'token:5', $verwalter);
+pruefe($r['code'] === 'verwaltung' && !Anmeldung::bestaetigt('token:5', false), 'K.2: … und im Rückruf abgelehnt (verwaltung)');
+// K.3 Auth::bestaetigen mit Kennwort
+pruefe(!Auth::bestaetigen('token:5', ''), 'K.3: ohne Kennwort und ohne Step-up → falsch');
+pruefe(Auth::bestaetigen('token:5', $pw), 'K.3: mit richtigem Kennwort (nicht nur_sso) → wahr');
+pruefe(!Auth::bestaetigen('token:5', 'falsch-' . $pw) && (int) Database::scalar('SELECT failed_logins FROM users WHERE id = ?', [$verwalter]) === 0,
+    'K.3: falsches Kennwort → falsch, zählt nicht gegen das Konto');
+try {
+    Auth::bestaetigen('alles', $pw);
+    pruefe(false, 'K.3: unbekannter Zweck → LogicException');
+} catch (LogicException) {
+    pruefe(true, 'K.3: unbekannter Zweck → LogicException');
+}
+Database::update('users', $verwalter, ['nur_sso' => 1]);
+alsBenutzer($verwalter);
+pruefe(!Auth::bestaetigen('token:5', $pw) && !Auth::kennwortBestaetigen(7, $pw), 'K.3: Konto mit nur_sso und richtigem Kennwort → falsch (auch beim Kundenmodus)');
+Database::update('users', $verwalter, ['nur_sso' => 0]);
+alsBenutzer(null);
+$abmelden();
+// K.4 Kundenmodus entsperren über den Anmeldedienst
+pruefe($ablauf($person($subPlaner, 'planer-dort'))['ok'], 'K.4: Planer über SSO angemeldet');
+$bericht = 900000 + random_int(1, 99999);
+$_SESSION[Kundenmodus::SITZUNG] = ['bericht' => $bericht, 'seit' => time(), 'fehl' => 0, 'bis' => 0, 'user' => $planer, 'name' => '', 'geraet' => 0];
+pruefe(Anmeldung::bestaetigenFehler('kundenmodus:' . $bericht) === null && str_contains((string) Anmeldung::bestaetigenFehler('token:5'), 'Im Kundenmodus')
+    && Anmeldung::bestaetigenFehler('kundenmodus:' . ($bericht + 1)) !== null, 'K.4: im Kundenmodus nur dessen Entsperren');
+gleich($ablauf(null, [], 'token:5', $planer)['code'], 'kundenmodus', 'K.4: im Kundenmodus ein anderer Zweck → kundenmodus');
+$r = $ablauf($person('sub-fremd-' . $kennung, 'fremd-dort'), [], 'kundenmodus:' . $bericht, $planer);
+pruefe($r['code'] === 'andere_person' && $r['ziel'] === '/berichte/' . $bericht . '/kunde' && (Kundenmodus::aktiv()['fehl'] ?? 0) === 1,
+    'K.4: andere Person → bleibt gesperrt, zurück zur Kundenseite, ein Fehlversuch');
+$r = $ablauf($person($subPlaner, 'planer-dort'), [], 'kundenmodus:' . $bericht, $planer);
+pruefe($r['ok'] && $r['zweck'] === 'kundenmodus' && Kundenmodus::aktiv() === null && Auth::id() === $planer, 'K.4: dieselbe Identität, frisch → Kundenmodus beendet');
+gleich(array_column(BerichtService::ereignisse($bericht), 'details', 'ereignis')['kundenmodus_ende'] ?? null, ['weg' => 'sso'], 'K.4: Ereignis kundenmodus_ende mit Weg sso');
+$_SESSION[Kundenmodus::SITZUNG] = ['bericht' => $bericht, 'seit' => time(), 'fehl' => 0, 'bis' => 0, 'user' => $planer, 'name' => '', 'geraet' => 0];
+for ($i = 0; $i < Kundenmodus::HOECHSTENS_FEHL; $i++) {
+    $ablauf($person('sub-fremd-' . $kennung, 'fremd-dort'), [], 'kundenmodus:' . $bericht, $planer);
+}
+pruefe(Kundenmodus::wartezeit() > 0 && Kundenmodus::aktiv() !== null && Auth::id() === $planer, 'K.4: nach fünf Fehlversuchen gebremst, weiter gesperrt (nicht abgemeldet)');
+pruefe(in_array('kundenmodus_gebremst', array_column(BerichtService::ereignisse($bericht), 'ereignis'), true), 'K.4: Ereignis kundenmodus_gebremst');
+$n = $anfragen('token');
+$fehl = (int) (Kundenmodus::aktiv()['fehl'] ?? 0);
+$r = $ablauf($person($subPlaner, 'planer-dort'), [], 'kundenmodus:' . $bericht, $planer);
+pruefe($r['code'] === 'kundenmodus' && $r['meldung'] === Anmeldung::T_GEBREMST && $anfragen('token') === $n && (int) (Kundenmodus::aktiv()['fehl'] ?? 0) === $fehl,
+    'K.4: gebremst → abgelehnt, ohne den Code einzulösen und ohne weiteren Fehlversuch');
+unset($_SESSION[Kundenmodus::SITZUNG]);
+Database::execute('DELETE FROM bericht_ereignisse WHERE bericht_id = ?', [$bericht]);
 $abmelden();
 
 // ================================================================ M. Geheimnisse im Ablauf

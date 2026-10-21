@@ -57,6 +57,7 @@ final class Anmeldung
     public const T_INTERN = 'Die Anmeldung über SSO ist fehlgeschlagen – Details im Log.';
     public const T_SITZUNG = 'Während der Anmeldung hat sich in einem anderen Fenster jemand an- oder abgemeldet – bitte erneut anmelden.';
     public const T_NICHT_EINGERICHTET = 'Die Anmeldung über SSO ist nicht eingerichtet.';
+    public const T_GEBREMST = 'Zu viele Fehlversuche – das Entsperren ist noch gebremst.';
 
     private const COOKIE_NEU_SEKUNDEN = 43200;
     /** Claims, die aus der Userinfo ergänzt werden dürfen – nie iss/sub/aud/azp/nonce/exp/iat/nbf/auth_time/amr/acr/sid. */
@@ -307,6 +308,54 @@ final class Anmeldung
         return null;
     }
 
+    /**
+     * Darf das angemeldete Konto diesen Zweck jetzt über den Anmeldedienst
+     * bestätigen (Step-up, §6.8)? null = ja, sonst die Meldung.
+     *
+     * SSO an; das Konto hat eine Identität beim jetzigen Aussteller und darf
+     * sich per SSO anmelden (Schutz::darfPerSso – W7: ein Verwaltungskonto
+     * ohne „Verwaltung per SSO“ bestätigt auch nicht so, sonst sähe, wer die
+     * Identität dort hat, hier API-Tokens). kundenmodus:<id> nur im
+     * Kundenmodus genau dieses Berichts (Kundenmodus::aktiv() gilt nur für
+     * das Konto, das ihn gestartet hat), im Kundenmodus nichts anderes. Ob
+     * das Entsperren gerade gebremst ist, prüft der Start eigens. Für den
+     * Start (SsoController::bestaetigen) und die Links (Kundenseite,
+     * Schnittstelle).
+     */
+    public static function bestaetigenFehler(string $zweck): ?string
+    {
+        if (preg_match('/^(kundenmodus|token):\d{1,10}$/', $zweck) !== 1) {
+            return 'Diese Bestätigung gibt es nicht.';
+        }
+        $user = Auth::user();
+        if ($user === null) {
+            return 'Bitte zuerst anmelden.';
+        }
+        if (!Einstellungen::aktiv()) {
+            return self::T_NICHT_EINGERICHTET;
+        }
+        $name = Einstellungen::name();
+        if (Konten::identitaet((int) $user['id']) === null) {
+            return 'Dieses Konto ist nicht mit ' . $name . ' verknüpft – bitte mit dem Kennwort bestätigen.';
+        }
+        $sperre = Schutz::darfPerSso($user);
+        if ($sperre !== null) {
+            return $sperre === 'verwaltung'
+                ? 'Bestätigen über ' . $name . ' geht für Verwaltungskonten erst, wenn „Verwaltung per SSO“ eingeschaltet ist.'
+                : Schutz::T_KUNDE_LOKAL;
+        }
+        [$art, $id] = explode(':', $zweck, 2);
+        $m = Kundenmodus::aktiv();
+        if ($art === 'kundenmodus') {
+            if ($m === null || $m['bericht'] !== (int) $id) {
+                return 'Dieser Kundenmodus ist nicht mehr aktiv.';
+            }
+        } elseif ($m !== null) {
+            return 'Im Kundenmodus geht nur das Entsperren dieses Berichts.';
+        }
+        return null;
+    }
+
     /** Nach dem Abmelden: Die nächste SSO-Anmeldung in diesem Browser verlangt prompt=login (12 h). */
     public static function cookieNeuSetzen(): void
     {
@@ -392,7 +441,7 @@ final class Anmeldung
                 throw new SsoFehler('kundenmodus', 'Dieser Kundenmodus ist nicht mehr aktiv.');
             }
             if (Kundenmodus::wartezeit() > 0) {
-                throw new SsoFehler('kundenmodus', 'Zu viele Fehlversuche – Entsperren ist noch gebremst.');
+                throw new SsoFehler('kundenmodus', self::T_GEBREMST);
             }
             BerichtService::ereignis($id, 'kundenmodus_ende', ['weg' => 'sso']);
             Kundenmodus::beenden();
@@ -461,6 +510,10 @@ final class Anmeldung
         if ($m !== null && $v['zweck'] !== 'kundenmodus:' . $m['bericht']) {
             throw new SsoFehler('kundenmodus', 'Im Kundenmodus geht nur das Entsperren dieses Berichts.');
         }
+        // Gebremst: gar nicht erst beim Anmeldedienst einlösen.
+        if ($m !== null && Kundenmodus::wartezeit() > 0) {
+            throw new SsoFehler('kundenmodus', self::T_GEBREMST);
+        }
     }
 
     /** error/error_description des Anmeldedienstes – Code geprüft, Text ohne Steuerzeichen, Meldung ≤ 200 Zeichen. */
@@ -506,8 +559,16 @@ final class Anmeldung
                 'ip'          => $ip,
                 'created_at'  => gmdate('c', Einstellungen::jetzt()),
             ]);
-            if (self::basis($v) === 'kundenmodus' && Kundenmodus::aktiv() !== null) {
-                Kundenmodus::fehlversuch();
+            // Im Kundenmodus zählt ein gescheitertes Entsperren wie ein falsches
+            // Kennwort – auch die Anmeldung einer anderen Person dort.
+            // Ist das Entsperren schon gebremst, wurde nichts geprüft – wie beim
+            // Kennwort zählt das nicht (die Wartezeit verdoppelte sich sonst).
+            $m = self::basis($v) === 'kundenmodus' ? Kundenmodus::aktiv() : null;
+            if ($m !== null && Kundenmodus::wartezeit() === 0) {
+                $fehl = Kundenmodus::fehlversuch();
+                if ($fehl >= Kundenmodus::HOECHSTENS_FEHL) {
+                    BerichtService::ereignis($m['bericht'], 'kundenmodus_gebremst', ['fehlversuche' => (string) $fehl, 'weg' => 'sso']);
+                }
             }
         } catch (\Throwable $x) {
             Logger::error('sso', ['fehler' => get_class($x) . ': ' . mb_substr($x->getMessage(), 0, 300)]);

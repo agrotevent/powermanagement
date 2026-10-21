@@ -17,7 +17,7 @@ $subtitle = 'Das Token steht nur auf dieser Seite';
 $pruefen = "curl -i -H 'Authorization: Bearer " . $token . "' " . rtrim($adresse, '/') . '/info';
 ?>
 <div class="notice warn">Das Token wird hier <strong>nur jetzt</strong> angezeigt. Jetzt kopieren und bei der anderen Instanz
-    eintragen. Geht es verloren: mit dem eigenen Kennwort „Anzeigen“ – oder widerrufen und einen neuen Zugang anlegen.</div>
+    eintragen. Geht es verloren: mit dem eigenen Kennwort (oder über SSO bestätigt) „Anzeigen“ – oder widerrufen und einen neuen Zugang anlegen.</div>
 <div class="card">
     <div class="card-body">
         <p><?= View::e($meldung) ?></p>

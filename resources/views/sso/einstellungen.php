@@ -1,7 +1,8 @@
 <?php
 /**
  * System → Anmeldung (SSO): Zustand, Verbindung, Optionen, Gruppen → Rollen,
- * Anmeldeanfragen und verknüpfte Konten. Alles über View::e – auch was der
+ * Anmeldeanfragen, Schutz (nur mit allen Rechten bedienbar) und verknüpfte
+ * Konten. Alles über View::e – auch was der
  * Anmeldedienst geschickt hat (Name dort, Gruppen, Name und E-Mail einer
  * Anfrage). Das Secret steht nie in der Seite.
  *
@@ -12,6 +13,8 @@
  * @var list<array<string,mixed>> $konten Ziele zum Freischalten (unverknüpft, verwaltbar)
  * @var list<array<string,mixed>> $verknuepfungen
  * @var bool $darfBenutzer system.users.manage
+ * @var bool $stern alle Rechte – nur dann ist die Schutz-Karte bedienbar
+ * @var array{vorbedingungen:list<array{ok:bool,text:string,fehlt:string}>, notzugaenge:list<string>, warnungen:array{verwaltend:list<string>,verknuepft:int}} $schutz
  */
 use App\Support\Csrf;
 use App\Support\View;
@@ -21,6 +24,10 @@ $title = 'Anmeldung (SSO)';
 $subtitle = 'OpenID Connect, etwa Authentik – Verbindung, Gruppen → Rollen, Anmeldeanfragen';
 $z = $zustand;
 $name = (string) $z['name'];
+$stern = !empty($stern);
+$schutz = ($schutz ?? null) ?: ['vorbedingungen' => [], 'notzugaenge' => [], 'warnungen' => ['verwaltend' => [], 'verknuepft' => 0]];
+$schalter = (array) ($z['schalter'] ?? []);
+$sperre = $stern ? '' : ' disabled';
 $alter = static function (?int $sekunden): string {
     if ($sekunden === null) {
         return '–';
@@ -313,6 +320,63 @@ $gruppenListe = static function (array $gruppen): string {
         <div class="card-body"><p class="muted mb0">Freischalten darf nur, wer Benutzer verwalten darf.</p></div>
     <?php endif; ?>
 </div>
+
+<form method="post" action="/system/sso/schutz" class="card" id="schutz">
+    <?= Csrf::field() ?>
+    <div class="card-head"><h2>Schutz</h2><?= $stern ? '' : '<span class="hint">nur mit allen Rechten änderbar</span>' ?></div>
+    <div class="card-body">
+        <label class="check"><input type="checkbox" name="admins" value="1"<?= !empty($schalter['admins']) ? ' checked' : '' ?><?= $sperre ?>>
+            Verwaltung per SSO</label>
+        <p class="help">Konten mit Verwaltungsrechten (alle Rechte, Benutzer, Einstellungen, SSO, Schnittstelle) melden sich auch über <?= View::e($name) ?> an
+            und bestätigen dort; Rollen mit solchen Rechten lassen sich Gruppen zuordnen. Aus: nur mit Kennwort – ausschalten beendet ihre Sitzungen
+            über <?= View::e($name) ?> und entfernt solche Rollen aus Gruppen sofort.</p>
+        <label class="check"><input type="checkbox" name="mfa_verwaltung" value="1"<?= !empty($schalter['mfa_verwaltung']) ? ' checked' : '' ?><?= $sperre ?>>
+            Zweiter Faktor für Verwaltungskonten</label>
+        <p class="help">Verwaltungskonten nur, wenn <?= View::e($name) ?> einen zweiten Faktor meldet (amr „mfa“ oder „sc“). Eine Passkey-Anmeldung ohne
+            Kennwort meldet Authentik anders – sie zählt hier nicht.</p>
+
+        <h3 class="mt">Nur SSO</h3>
+        <label class="check"><input type="checkbox" name="nur_sso" value="1"<?= !empty($schalter['nur_sso']) ? ' checked' : '' ?><?= $sperre ?>>
+            Verknüpfte Konten melden sich nur über <?= View::e($name) ?> an</label>
+        <p class="help">Konten ohne Verknüpfung (Kundenzugänge, Notzugang) bleiben bei Benutzername und Kennwort. Ausschalten geht jederzeit, auch auf
+            der Kommandozeile: <code>bin/power sso:aus --nur-sso</code>.</p>
+        <?php if (empty($schalter['nur_sso'])): ?>
+            <ul class="liste-schlicht small sso-befund" aria-label="Vorbedingungen für „nur SSO“">
+                <?php foreach ($schutz['vorbedingungen'] as $b): ?>
+                    <li class="<?= $b['ok'] ? 'text-ok' : 'text-bad' ?>"><?= $b['ok'] ? '✓' : '✗' ?> <?= View::e($b['ok'] ? (string) $b['text'] : ucfirst((string) $b['fehlt'])) ?></li>
+                <?php endforeach; ?>
+            </ul>
+            <div class="field mt"><label for="sso-nur-bestaetigung">Zum Einschalten „<?= View::e(\App\Auth\Sso\Einstellungen::NUR_SSO_EINTIPPEN) ?>“ eintippen</label>
+                <input id="sso-nur-bestaetigung" name="bestaetigung" maxlength="20" autocomplete="off" autocapitalize="none" spellcheck="false"<?= $sperre ?>></div>
+        <?php endif; ?>
+
+        <h3 class="mt">Notzugang</h3>
+        <?php if ($schutz['notzugaenge'] === []): ?>
+            <p class="notice warn">Kein Notzugang: ein aktives Konto mit allen Rechten, das mit keiner Anmeldung bei <?= View::e($name) ?> verknüpft ist.
+                Ohne ihn lässt sich „nur SSO“ nicht einschalten – anlegen mit <code>bin/power user:add notfall admin</code>, nie verknüpfen,
+                das Kennwort offline verwahren.</p>
+        <?php else: ?>
+            <p class="small">Melden sich auch bei „nur SSO“ mit Kennwort an – laut (Hinweis auf jeder Seite, Audit, Fehlerprotokoll):
+                <?= implode(', ', array_map(static fn (string $u): string => '<strong>' . View::e($u) . '</strong>', $schutz['notzugaenge'])) ?></p>
+        <?php endif; ?>
+        <?php if ($schutz['warnungen']['verwaltend'] !== [] || $schutz['warnungen']['verknuepft'] > 0): ?>
+            <h3 class="mt">Was „nur SSO“ ändert</h3>
+            <ul class="small">
+                <?php if ($schutz['warnungen']['verknuepft'] > 0): ?>
+                    <li>Verknüpfte Konten: <?= (int) $schutz['warnungen']['verknuepft'] ?> – <?= empty($schalter['nur_sso'])
+                        ? 'ihre Kennwort-Sitzungen enden bei der nächsten Anfrage' : 'melden sich nur noch über ' . View::e($name) . ' an' ?>.</li>
+                <?php endif; ?>
+                <?php if ($schutz['warnungen']['verwaltend'] !== []): ?>
+                    <li>Mit Verwaltungsrechten, aber ohne Verknüpfung (melden sich weiter mit Kennwort an):
+                        <?= implode(', ', array_map(static fn (string $u): string => View::e($u), $schutz['warnungen']['verwaltend'])) ?></li>
+                <?php endif; ?>
+            </ul>
+        <?php endif; ?>
+    </div>
+    <?php if ($stern): ?>
+        <div class="card-footer btn-row"><button class="btn btn-primary" type="submit">Schutz speichern</button></div>
+    <?php endif; ?>
+</form>
 
 <div class="card" id="verknuepft">
     <div class="card-head"><h2>Verknüpfte Konten</h2></div>

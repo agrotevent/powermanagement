@@ -2,11 +2,11 @@
 /**
  * Kundenmodus: der Kunde liest den eingefrorenen Bericht, bestätigt den
  * Erhalt und unterschreibt – am Gerät des Prüfers, ohne Navigation.
- * Danach „Gerät zurückgeben“; entsperrt wird mit dem Kennwort des Prüfers.
+ * Danach „Gerät zurückgeben“; entsperrt wird mit dem Kennwort des Prüfers
+ * oder über den Anmeldedienst (berichte/_entsperren).
  * Ein Autosave gibt es hier nicht (bericht.js ist nicht geladen).
  */
 use App\Berichte\Katalog;
-use App\Support\Csrf;
 use App\Support\View;
 
 $b = $bericht;
@@ -98,14 +98,7 @@ $datum = static fn (string $d): string => preg_match('/^(\d{4})-(\d{2})-(\d{2})$
     <details class="card kunde-entsperren"<?= $fertig || !$offen ? ' open' : '' ?>>
         <summary class="card-head"><h2>Für den Prüfer: Gerät entsperren</h2></summary>
         <div class="card-body">
-            <form method="post" action="/berichte/<?= $id ?>/kunde/beenden" class="inline-form">
-                <?= Csrf::field() ?>
-                <?php /* new-password: kein automatisches Ausfüllen des gespeicherten Kennworts – sonst entsperrte ein Tipp des Kunden das Gerät. */ ?>
-                <input type="password" name="kennwort" required autocomplete="new-password" aria-label="<?= View::e($kennwortVon) ?>"
-                       placeholder="<?= View::e($kennwortVon) ?>">
-                <button class="btn" type="submit">Entsperren</button>
-            </form>
-            <p class="small muted mb0">Nach <?= \App\Berichte\Kundenmodus::HOECHSTENS_FEHL ?> falschen Versuchen wird das Entsperren für einige Minuten gebremst.</p>
+            <?= View::partial('berichte/_entsperren', ['id' => $id, 'kennwortVon' => $kennwortVon, 'sso' => $sso ?? null]) ?>
         </div>
     </details>
 </div>

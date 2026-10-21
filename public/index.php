@@ -65,19 +65,22 @@ $router->post('/profil/passwort', [AuthController::class, 'changePassword']);
 
 // ---------------------------------------------------------------- Anmeldung über SSO (OpenID Connect)
 /*
- * Optional. Start und Verbinden sind Links (GET), keine Formulare: CSP
- * form-action 'self' gälte in Chromium sonst auch für die Weiterleitung zum
- * Anbieter. Der Rückruf kommt als GET (response_mode=query, das
- * Sitzungs-Cookie ist SameSite=Lax) und ist durch state (Sitzung, einmalig),
- * PKCE und nonce geschützt – ein CSRF-Token gibt es dort nicht. Ziele
- * außerhalb dieser Seite kommen nur aus der geprüften Discovery. Ohne Recht
- * an der Route: Start und Rückruf gehen ohne Anmeldung, /abgemeldet nur
- * abgemeldet; Verbinden (nur von dieser Seite, Sec-Fetch-Site) und Lösen im
- * Profil prüfen die Anmeldung selbst.
+ * Optional. Start, Verbinden und Bestätigen sind Links (GET), keine
+ * Formulare: CSP form-action 'self' gälte in Chromium sonst auch für die
+ * Weiterleitung zum Anbieter. Der Rückruf kommt als GET (response_mode=query,
+ * das Sitzungs-Cookie ist SameSite=Lax) und ist durch state (Sitzung,
+ * einmalig), PKCE und nonce geschützt – ein CSRF-Token gibt es dort nicht.
+ * Ziele außerhalb dieser Seite kommen nur aus der geprüften Discovery. Ohne
+ * Recht an der Route: Start und Rückruf gehen ohne Anmeldung, /abgemeldet nur
+ * abgemeldet; Verbinden und Bestätigen (nur von dieser Seite, Sec-Fetch-Site)
+ * und Lösen im Profil prüfen die Anmeldung selbst. Bestätigen und Rückruf
+ * sind auch im Kundenmodus offen (Kundenmodus::erlaubt) – dort nur für das
+ * Entsperren genau dieses Berichts.
  */
 $router->get('/login/sso', [SsoController::class, 'start']);
 $router->get('/login/sso/rueckruf', [SsoController::class, 'rueckruf']);
-$router->get('/login/sso/verbinden', [SsoController::class, 'verbinden']);
+$router->get('/login/sso/verbinden', [SsoController::class, 'verbinden']);      // angemeldet mit Kennwort
+$router->get('/login/sso/bestaetigen', [SsoController::class, 'bestaetigen']);  // angemeldet; Step-up
 $router->get('/abgemeldet', [SsoController::class, 'abgemeldet']);
 $router->post('/profil/sso/loesen', [SsoController::class, 'profilLoesen']);
 
@@ -355,12 +358,13 @@ $router->post('/system/einstellungen/eventworx/pruefen', [EinstellungenControlle
 $router->post('/system/einstellungen/kundenbereich', [EinstellungenController::class, 'kundenbereich'], 'settings.manage');
 
 // Anmeldung über SSO (OpenID Connect): Verbindung, Prüfen, Ein-/Ausschalten,
-// Optionen, Gruppen → Rollen, Anmeldeanfragen. Gruppen zuordnen und Anfragen
-// freischalten zusätzlich nur mit „Benutzer verwalten“ und nur, was man
-// selbst vergeben bzw. verwalten darf (App\Auth\Sso\Konten). Feste Pfade
+// Optionen, Schutz, Gruppen → Rollen, Anmeldeanfragen. Gruppen zuordnen und
+// Anfragen freischalten zusätzlich nur mit „Benutzer verwalten“ und nur, was
+// man selbst vergeben bzw. verwalten darf (App\Auth\Sso\Konten); den Schutz
+// (Verwaltung per SSO, MFA, „nur SSO“) nur mit allen Rechten. Feste Pfade
 // vor {id}.
 $router->get('/system/sso', [SsoEinstellungenController::class, 'index'], 'sso.manage');
-foreach (['verbindung', 'pruefen', 'schalten', 'optionen', 'zuordnung'] as $aktion) {
+foreach (['verbindung', 'pruefen', 'schalten', 'optionen', 'schutz', 'zuordnung'] as $aktion) {
     $router->post('/system/sso/' . $aktion, [SsoEinstellungenController::class, $aktion], 'sso.manage');
 }
 $router->post('/system/sso/zuordnung/{id}/loeschen', [SsoEinstellungenController::class, 'zuordnungLoeschen'], 'sso.manage');

@@ -658,6 +658,11 @@ details.lokal[open] > summary { margin-bottom: .5rem; }
 details.sso-neu > summary { cursor: pointer; min-height: 32px; display: flex; align-items: center; font-size: .82rem; }
 .sso-kopieren { display: flex; gap: .4rem; align-items: center; }
 .sso-kopieren input { flex: 1; min-width: 0; font-family: "JetBrains Mono", monospace; font-size: .76rem; }
+/* Angemeldet über den Notzugang (bei „nur SSO“): auf jeder Seite, nicht zu übersehen. */
+.notzugang {
+    border: 2px solid var(--danger); background: var(--danger-light); color: #7f1d1d;
+    border-radius: 8px; padding: .6rem .85rem; margin-bottom: .9rem; font-size: .84rem;
+}
 
 .demo-flag {
     background: #fef3c7; color: #92400e; padding: .15rem .5rem; border-radius: 6px;

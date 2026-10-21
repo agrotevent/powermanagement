@@ -10,6 +10,7 @@ use App\Auth\Sso\Einstellungen;
 use App\Auth\Sso\Konten;
 use App\Auth\Sso\Schutz;
 use App\Auth\Sso\SsoFehler;
+use App\Berichte\Kundenmodus;
 use App\Support\Flash;
 use App\Support\Logger;
 use App\Support\Request;
@@ -19,7 +20,8 @@ use App\Support\View;
 
 /**
  * Anmeldung über SSO (OpenID Connect): Start, Rückruf, Verbinden und Lösen im
- * Profil und die Seite nach dem Abmelden. Die Arbeit macht
+ * Profil, Bestätigen (Kundenmodus entsperren, Token anzeigen) und die Seite
+ * nach dem Abmelden. Die Arbeit macht
  * App\Auth\Sso\Anmeldung; hier stehen nur Kopfzeilen, Meldungen und
  * Weiterleitungen.
  *
@@ -121,6 +123,57 @@ final class SsoController extends Controller
             Logger::info('sso', ['schritt' => 'start', 'grund' => $e->pruefung, 'zweck' => 'verbinden']);
             Flash::error($e->getMessage());
             $this->redirect('/profil');
+            return;
+        }
+        self::zumAnbieter($adresse);
+    }
+
+    /**
+     * GET /login/sso/bestaetigen?zweck=…&zurueck=… – eine heikle Handlung über
+     * den Anmeldedienst bestätigen statt mit dem Kennwort (Step-up): den
+     * Kundenmodus entsperren (kundenmodus:<Bericht>, auch im Kundenmodus
+     * offen – Kundenmodus::erlaubt) oder ein Token der Schnittstelle anzeigen
+     * (token:<Zugang>). Wie Verbinden ein Link, nur von dieser Seite aus
+     * (Sec-Fetch-Site); beim Anmeldedienst immer eine neue Anmeldung
+     * (prompt=login, max_age=0), im Rückruf dieselbe Identität und frisches
+     * auth_time. Was erlaubt ist, sagt Anmeldung::bestaetigenFehler.
+     */
+    public function bestaetigen(Request $request): void
+    {
+        $this->ohneSpeichern();
+        if (!self::vonDieserSeite()) {
+            Response::forbidden('Bestätigen geht nur von dieser Seite aus.');
+            return;
+        }
+        $zweck = is_string($_GET['zweck'] ?? null) ? $_GET['zweck'] : '';
+        $zurueck = Anmeldung::zielNach($_GET['zurueck'] ?? '') ?? '/';
+        $kundenmodus = str_starts_with($zweck, 'kundenmodus:');
+        // Ein Fehler führt im Kundenmodus zurück zu dessen Kundenseite (nie zu
+        // einer aus der Adresse), sonst dorthin, woher es kam.
+        $modus = Kundenmodus::aktiv();
+        $fehlerZiel = $modus !== null ? '/berichte/' . $modus['bericht'] . '/kunde' : $zurueck;
+        if ($request->method() === 'HEAD') {
+            $this->redirect($fehlerZiel);   // legt keinen Vorgang an
+            return;
+        }
+        if (!Auth::check()) {
+            $this->redirect('/login?next=' . rawurlencode($zurueck));
+            return;
+        }
+        $fehler = Anmeldung::bestaetigenFehler($zweck)
+            ?? ($kundenmodus && Kundenmodus::wartezeit() > 0 ? Anmeldung::T_GEBREMST : null)
+            ?? Anmeldung::gebremst($request->ip());
+        if ($fehler !== null) {
+            Flash::error($fehler);
+            $this->redirect($fehlerZiel);
+            return;
+        }
+        try {
+            $adresse = Anmeldung::starten($zweck, $zurueck, true, Auth::id());
+        } catch (SsoFehler $e) {
+            Logger::info('sso', ['schritt' => 'start', 'grund' => $e->pruefung, 'zweck' => explode(':', $zweck, 2)[0]]);
+            Flash::error($e->getMessage());
+            $this->redirect($fehlerZiel);
             return;
         }
         self::zumAnbieter($adresse);

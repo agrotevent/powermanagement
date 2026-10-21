@@ -81,6 +81,9 @@ declare(strict_types=1);
  *   bin/power kunden:nachweise-pruefen
  *                                   Dateien der Prüfnachweise nachrechnen (Prüfsumme, Größe, Verweise,
  *                                   unbenutzte Dateien). Exit 1 bei einem Befund
+ *   bin/power sso:aus [--nur-sso]   Anmeldung über SSO ausschalten (laufende SSO-Sitzungen enden,
+ *                                   Rollen aus Gruppen weg, „nur SSO“ aus); --nur-sso schaltet nur
+ *                                   „nur SSO“ aus – der Notausgang, wenn niemand mehr hineinkommt
  *   bin/power demo:seed [--reset]   Demo-Gelände mit Anlagen, Tanks, Kabeln, Benutzern und Übergabeberichten anlegen
  *   bin/power wartung               Protokolle aufräumen, abgebrochene MQTT-Prüfungen
  *                                   zurücksetzen, alte Import-Vorschauen löschen, fällige
@@ -867,6 +870,12 @@ switch ($befehl) {
         }
         $aus(sprintf('%d Datei(en) und %d Prüfnachweis(e) geprüft, %d Befund(e).', $dateien, $nachweise, count($befunde)));
         exit($befunde === [] ? 0 : 1);
+
+    case 'sso:aus':
+        // Wie user:password: wer die Kommandozeile hat, darf das.
+        $r = \App\Auth\Sso\Einstellungen::ausschalten(isset($optionen['nur-sso']));
+        $aus($r['message']);
+        break;
 
     case 'demo:seed':
         // Die Demo legt Konten mit bekannten Kennwörtern an (technik darf

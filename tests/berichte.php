@@ -851,11 +851,23 @@ try {
         'Kundenmodus: anderer Bericht, Formular, Dashboard und Schalten zu');
     alsBenutzer($benutzer['technik']);
     $fehlVorher = (int) Database::scalar('SELECT failed_logins FROM users WHERE id = ?', [$benutzer['technik']]);
-    pruefe(Auth::kennwortBestaetigen($kennwort) && !Auth::kennwortBestaetigen('falsch') && !Auth::kennwortBestaetigen(''), 'Kennwort bestätigen: richtig ja, falsch und leer nein');
+    $fehlAudit = static fn (): int => (int) Database::scalar("SELECT COUNT(*) FROM audit_log WHERE action = 'auth.bestaetigung_fehlversuch' AND target_id = ? AND details = ?",
+        [(string) $benutzer['technik'], '{"zweck":"kundenmodus:41"}']);
+    $fehlAuditVorher = $fehlAudit();
+    pruefe(Auth::kennwortBestaetigen(41, $kennwort) && !Auth::kennwortBestaetigen(41, 'falsch') && !Auth::kennwortBestaetigen(41, ''), 'Kennwort bestätigen: richtig ja, falsch und leer nein');
     pruefe((int) Database::scalar('SELECT failed_logins FROM users WHERE id = ?', [$benutzer['technik']]) === $fehlVorher
         && Database::scalar('SELECT locked_until FROM users WHERE id = ?', [$benutzer['technik']]) === null, 'Fehlversuch zählt nicht gegen das Konto');
-    pruefe((int) Database::scalar("SELECT COUNT(*) FROM audit_log WHERE action = 'auth.kundenmodus_fehlversuch' AND target_id = ?", [(string) $benutzer['technik']]) === 2,
-        'Fehlversuche stehen im Audit');
+    gleich($fehlAudit() - $fehlAuditVorher, 2, 'Fehlversuche stehen im Audit (auth.bestaetigung_fehlversuch mit dem Zweck kundenmodus:41)');
+    // Ein Konto „nur über SSO“: für es gilt kein Kennwort, auch das richtige nicht – entsperrt wird über den Anmeldedienst.
+    Database::update('users', $benutzer['technik'], ['nur_sso' => 1]);
+    alsBenutzer($benutzer['technik']);
+    pruefe(!Auth::kennwortBestaetigen(41, $kennwort), 'Konto „nur über SSO“: das richtige Kennwort entsperrt nicht');
+    gleich($fehlAudit() - $fehlAuditVorher, 3, '… und steht als Fehlversuch im Audit');
+    Database::update('users', $benutzer['technik'], ['nur_sso' => 0]);
+    alsBenutzer($benutzer['technik']);
+    pruefe(Kundenmodus::erlaubt('GET', '/login/sso/bestaetigen', 41) && Kundenmodus::erlaubt('GET', '/login/sso/rueckruf', 41)
+        && !Kundenmodus::erlaubt('POST', '/login/sso/bestaetigen', 41) && !Kundenmodus::erlaubt('GET', '/login/sso', 41) && !Kundenmodus::erlaubt('GET', '/login/sso/verbinden', 41),
+        'Kundenmodus: Entsperren über den Anmeldedienst offen (Start und Rückruf), Anmelden und Verbinden zu');
 
     // ================================================== Einfrieren und Nummer
     Settings::put('firma.name', 'Muster Eventstrom ' . $kennung);
@@ -1017,6 +1029,16 @@ try {
     unset($_COOKIE[Kundenmodus::COOKIE]);
     alsBenutzer($benutzer['technik']);
     $_SESSION = $prueferSitzung;
+    // Fehlversuche beim Entsperren zählen in der Sitzung – für Kennwort und
+    // Anmeldedienst dieselbe Zählung; ab dem fünften gebremst, nicht abgemeldet.
+    $fehlStart = (int) (Kundenmodus::aktiv()['fehl'] ?? -1);
+    pruefe(Kundenmodus::fehlversuch() === $fehlStart + 1 && (Kundenmodus::aktiv()['fehl'] ?? 0) === $fehlStart + 1 && Kundenmodus::wartezeit() === 0,
+        'Kundenmodus::fehlversuch() zählt (noch keine Wartezeit)');
+    for ($i = $fehlStart + 1; $i < Kundenmodus::HOECHSTENS_FEHL; $i++) {
+        Kundenmodus::fehlversuch();
+    }
+    pruefe(Kundenmodus::wartezeit() > 0 && Kundenmodus::aktiv() !== null && Auth::id() === $benutzer['technik'],
+        'nach ' . Kundenmodus::HOECHSTENS_FEHL . ' Fehlversuchen gebremst – weiter gesperrt, nicht abgemeldet');
     Kundenmodus::beenden();
     gleich((int) Database::scalar('SELECT COUNT(*) FROM kundenmodus_geraete WHERE bericht_id = ?', [$u2]), 0, 'Kundenmodus beendet: Sperre am Gerät weg');
     pruefe(!BerichtService::zurueckziehbar(BerichtService::find($u2)) && BerichtService::zurueckziehen($u2, 'zu spät')['status'] === 409, 'nach dem Kundenmodus kein Zurückziehen');

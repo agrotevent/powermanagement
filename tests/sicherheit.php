@@ -301,8 +301,11 @@ try {
         glob(dirname(__DIR__) . '/resources/views/kunden/*.php') ?: [], [dirname(__DIR__) . '/resources/views/berichte/_kundenbereich.php'],
         // Anmeldung (auch über SSO): Anmeldeseite, Profil, die Seite nach dem Abmelden
         [dirname(__DIR__) . '/resources/views/auth/login.php', dirname(__DIR__) . '/resources/views/auth/profile.php',
-            dirname(__DIR__) . '/resources/views/auth/abgemeldet.php'], glob(dirname(__DIR__) . '/resources/views/sso/*.php') ?: []);
-    pruefe(count($ansichten) >= 16, 'Ansichten der Schnittstelle, der anderen Instanzen, der Vorschläge und der Kundenverwaltung gefunden');
+            dirname(__DIR__) . '/resources/views/auth/abgemeldet.php'], glob(dirname(__DIR__) . '/resources/views/sso/*.php') ?: [],
+        // Kundenmodus: Kundenseite, „Gerät gesperrt“ und das Entsperren (Kennwort oder über SSO)
+        [dirname(__DIR__) . '/resources/views/berichte/kunde.php', dirname(__DIR__) . '/resources/views/berichte/kunde-gesperrt.php',
+            dirname(__DIR__) . '/resources/views/berichte/_entsperren.php']);
+    pruefe(count($ansichten) >= 19, 'Ansichten der Schnittstelle, der anderen Instanzen, der Vorschläge und der Kundenverwaltung gefunden');
     // … und die des Kundenbereichs (dort gar kein Inline-Skript).
     $kundenAnsichten = array_merge(glob(dirname(__DIR__) . '/resources/views/kundenbereich/*.php') ?: [],
         [dirname(__DIR__) . '/resources/views/layout/kundenbereich.php']);
@@ -339,8 +342,11 @@ try {
         'verknuepfungen' => [['user_id' => 1, 'username' => $boese, 'full_name' => $boese, 'name_dort' => $boese, 'weg' => $boese, 'zuletzt_am' => null,
             'gruppen' => [$boese], 'nur_sso' => 0, 'kunde_id' => null, 'verwaltbar' => true, 'anderer_aussteller' => false]],
         'darfBenutzer'   => true,
+        'stern'          => true,
+        'schutz'         => ['vorbedingungen' => [['ok' => false, 'text' => $boese, 'fehlt' => $boese]], 'notzugaenge' => [$boese],
+            'warnungen' => ['verwaltend' => [$boese], 'verknuepft' => 1]],
     ], '');
-    pruefe(!str_contains($html, '<script>') && substr_count($html, '&lt;script&gt;') >= 15, 'SSO-Einstellungen: Angaben des Anmeldedienstes nur maskiert');
+    pruefe(!str_contains($html, '<script>') && substr_count($html, '&lt;script&gt;') >= 18, 'SSO-Einstellungen: Angaben des Anmeldedienstes und Benutzernamen (Schutz) nur maskiert');
     // Was eine andere Instanz schickt, kommt in der Instanzseite nur maskiert an:
     // ihre Meldung, Namen von Locations und Etagen; ein Schlüssel, der keiner
     // ist, wird übergangen.

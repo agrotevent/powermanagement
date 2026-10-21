@@ -3,6 +3,7 @@ declare(strict_types=1);
 
 namespace App\Auth;
 
+use App\Auth\Sso\Anmeldung;
 use App\Auth\Sso\Einstellungen;
 use App\Auth\Sso\Schutz;
 use App\Kunden\Kundenbereich;
@@ -308,23 +309,50 @@ final class Auth
     }
 
     /**
-     * Das Kennwort des angemeldeten Kontos noch einmal bestätigen – zum
-     * Entsperren des Kundenmodus. Anders als attempt() zählt ein Fehler
-     * nicht gegen das Konto: sonst sperrte ein Kunde, der am Tablet
-     * herumtippt, den Prüfer für 15 Minuten aus. Gezählt wird in der
-     * Sitzung (Kundenmodus), festgehalten im Audit.
+     * Eine heikle Handlung noch einmal bestätigen – das Token eines Zugangs
+     * der Schnittstelle anzeigen (`token:<id>`), den Kundenmodus eines
+     * Berichts entsperren (`kundenmodus:<id>`).
+     *
+     * Mit Kennwort: nur, wenn sich das Konto auch mit Kennwort anmeldet – für
+     * ein Konto „nur über SSO“ (Schutz::nurSso) gilt kein Kennwort, auch
+     * nicht das richtige. Ohne Kennwort ($kennwort = ''): eine frische
+     * Bestätigung über den Anmeldedienst für genau diesen Zweck und dieses
+     * Konto (Anmeldung::bestaetigt – einmalig, höchstens fünf Minuten alt;
+     * dieselbe Identität und die Schranken wie beim Anmelden prüft der
+     * Rückruf).
+     *
+     * Ein Fehler zählt nicht gegen das Konto (anders als attempt()) – sonst
+     * sperrte ein Kunde, der am Tablet herumtippt, den Prüfer für 15 Minuten
+     * aus. Er steht im Audit (`auth.bestaetigung_fehlversuch` mit dem
+     * Zweck); beim Kundenmodus zählt die Sitzung (Kundenmodus::fehlversuch).
      */
-    public static function kennwortBestaetigen(string $kennwort): bool
+    public static function bestaetigen(string $zweck, #[\SensitiveParameter] string $kennwort): bool
     {
+        if (preg_match('/^(kundenmodus|token):\d{1,10}$/', $zweck) !== 1) {
+            throw new \LogicException('Bestätigen: unbekannter Zweck');
+        }
         $user = self::user();
         if ($user === null) {
             return false;
         }
-        if ($kennwort !== '' && password_verify($kennwort, (string) $user['password_hash'])) {
-            return true;
+        $ok = $kennwort === ''
+            ? Anmeldung::bestaetigt($zweck)
+            : !Schutz::nurSso($user) && password_verify($kennwort, (string) $user['password_hash']);
+        if (!$ok) {
+            Audit::log('auth.bestaetigung_fehlversuch', 'user', (string) $user['id'], ['zweck' => $zweck]);
         }
-        Audit::log('auth.kundenmodus_fehlversuch', 'user', (string) $user['id']);
-        return false;
+        return $ok;
+    }
+
+    /**
+     * Den Kundenmodus des Berichts $berichtId mit dem Kennwort des
+     * angemeldeten Kontos entsperren – bestaetigen() mit `kundenmodus:<id>`.
+     * Über den Anmeldedienst entsperrt der Rückruf selbst (Sso\Anmeldung,
+     * Zweck kundenmodus:<id>); hier gilt nur das Kennwort.
+     */
+    public static function kennwortBestaetigen(int $berichtId, #[\SensitiveParameter] string $kennwort): bool
+    {
+        return self::bestaetigen('kundenmodus:' . $berichtId, $kennwort);
     }
 
     public static function logout(): void

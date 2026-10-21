@@ -252,6 +252,81 @@ final class Schutz
         return true;
     }
 
+    /**
+     * Die Vorbedingungen für „nur SSO“ (§6.12) als Checkliste – ohne das
+     * Eintippen: alle Rechte, SSO an und zuletzt erfolgreich geprüft, diese
+     * Sitzung über SSO (es geht also für dieses Konto), „Verwaltung per SSO“
+     * an ($admins: der Wert, der gespeichert werden soll) und mindestens ein
+     * Notzugang. `fehlt` ist die Meldung, wenn der Punkt nicht erfüllt ist.
+     *
+     * @return list<array{ok:bool,text:string,fehlt:string}>
+     */
+    public static function nurSsoVorbedingungen(?bool $admins = null): array
+    {
+        $admins ??= Einstellungen::schalter(Einstellungen::ADMINS);
+        $name = Einstellungen::name();
+        $notzugaenge = count(self::notzugaenge());
+        return [
+            ['ok' => Auth::can('*'), 'text' => 'Du hast alle Rechte.',
+                'fehlt' => 'nur wer alle Rechte hat, schaltet „nur SSO“ ein.'],
+            ['ok' => Einstellungen::aktiv() && Einstellungen::letztePruefungOk(), 'text' => 'Die Anmeldung über ' . $name . ' ist an, die letzte Prüfung der Verbindung war erfolgreich.',
+                'fehlt' => 'erst die Anmeldung über ' . $name . ' einschalten und „Verbindung prüfen“ ohne Befund durchlaufen.'],
+            ['ok' => Auth::anmeldeweg() === 'sso', 'text' => 'Diese Sitzung ist über ' . $name . ' angemeldet – für dein Konto geht es also.',
+                'fehlt' => 'erst über ' . $name . ' anmelden – so ist sicher, dass es für dein Konto geht.'],
+            ['ok' => $admins, 'text' => '„Verwaltung per SSO“ ist an.',
+                'fehlt' => 'erst „Verwaltung per SSO“ einschalten.'],
+            ['ok' => $notzugaenge > 0, 'text' => $notzugaenge > 0 ? 'Notzugang vorhanden (' . $notzugaenge . ').' : 'Notzugang vorhanden.',
+                'fehlt' => 'es gibt keinen Notzugang – erst ein aktives Konto mit allen Rechten ohne Verknüpfung anlegen (bin/power user:add notfall admin) und das Kennwort sicher verwahren.'],
+        ];
+    }
+
+    /**
+     * Was „nur SSO“ ändert (Warnliste der Schutz-Karte): Konten mit
+     * Verwaltungsrechten ohne Verknüpfung, die kein Notzugang sind – sie
+     * melden sich weiter mit Kennwort an –, und die Zahl der verknüpften
+     * Konten (jetziger Aussteller, aktiv, nicht ohnehin nur_sso), deren
+     * Kennwort-Sitzungen mit „nur SSO“ bei der nächsten Anfrage enden.
+     *
+     * @return array{verwaltend:list<string>, verknuepft:int}
+     */
+    public static function nurSsoWarnungen(): array
+    {
+        $verwaltend = [];
+        foreach (Database::select(
+            'SELECT * FROM users WHERE kunde_id IS NULL AND is_active = 1 AND nur_sso = 0
+             AND id NOT IN (SELECT user_id FROM sso_identitaeten) ORDER BY username'
+        ) as $u) {
+            if (self::verwaltend(Auth::rechteVon((int) $u['id'])) && !self::notzugangWirksam($u)) {
+                $verwaltend[] = (string) $u['username'];
+            }
+        }
+        $aussteller = Einstellungen::aussteller();
+        $verknuepft = 0;
+        foreach (Database::select(
+            'SELECT i.aussteller FROM sso_identitaeten i JOIN users u ON u.id = i.user_id WHERE u.is_active = 1 AND u.nur_sso = 0'
+        ) as $i) {
+            if ($aussteller !== '' && hash_equals($aussteller, (string) $i['aussteller'])) {
+                $verknuepft++;
+            }
+        }
+        return ['verwaltend' => $verwaltend, 'verknuepft' => $verknuepft];
+    }
+
+    /**
+     * Rollen, die nur mit „Verwaltung per SSO“ aus Gruppen kommen dürfen:
+     * Systemrolle oder eines der Rechte in VERWALTEND.
+     *
+     * @return list<int>
+     */
+    public static function verwaltendeRollen(): array
+    {
+        return array_map('intval', array_column(Database::select(
+            'SELECT id FROM roles WHERE is_system = 1 OR id IN (SELECT role_id FROM role_permissions WHERE permission IN ('
+            . implode(',', array_fill(0, count(self::VERWALTEND), '?')) . ')) ORDER BY id',
+            self::VERWALTEND
+        ), 'id'));
+    }
+
     // ------------------------------------------------------------ intern
 
     /** @return list<string> Rechte aller Rollen von Hand, gleich welcher Zeitraum */

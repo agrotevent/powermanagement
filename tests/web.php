@@ -1211,6 +1211,13 @@ try {
     pruefe($r['status'] === 302 && $r['ziel'] === '/login?next=%2Fprofil' && preg_match('/^Cache-Control:\s*no-store/mi', $r['kopf']) === 1,
         '/login/sso/verbinden ohne Anmeldung → /login?next=/profil');
     gleich(aufruf($basis, $ohneSso, 'GET', '/login/sso/verbinden', [], ['Sec-Fetch-Site: cross-site'])['status'], 403, '/login/sso/verbinden von fremder Seite → 403');
+    $bestaetigen = '/login/sso/bestaetigen?zweck=token%3A1&zurueck=%2Fsystem%2Fschnittstelle';
+    $r = aufruf($basis, $ohneSso, 'GET', $bestaetigen);
+    pruefe($r['status'] === 302 && $r['ziel'] === '/login?next=%2Fsystem%2Fschnittstelle' && preg_match('/^Cache-Control:\s*no-store/mi', $r['kopf']) === 1,
+        '/login/sso/bestaetigen ohne Anmeldung → /login?next=zurück');
+    gleich(aufruf($basis, $ohneSso, 'GET', $bestaetigen, [], ['Sec-Fetch-Site: cross-site'])['status'], 403, '/login/sso/bestaetigen von fremder Seite → 403');
+    $r = aufruf($basis, $ohneSso, 'GET', '/login/sso/bestaetigen?zweck=token%3A1&zurueck=https%3A%2F%2Fevil.example%2F');
+    pruefe($r['status'] === 302 && $r['ziel'] === '/login?next=%2F', '/login/sso/bestaetigen mit fremdem Ziel → nur ein eigener Pfad');
     $r = aufruf($basis, $ohneSso, 'GET', '/system/sso');
     pruefe($r['status'] === 302 && str_starts_with((string) $r['ziel'], '/login'), '/system/sso ohne Anmeldung → Anmeldeseite');
     $loginSeite = aufruf($basis, $ohneSso, 'GET', '/login');
@@ -1221,6 +1228,9 @@ try {
     $r = aufruf($basis, $ohneSso, 'GET', '/login/sso/verbinden');
     pruefe($r['status'] === 302 && $r['ziel'] === '/profil' && str_contains(aufruf($basis, $ohneSso, 'GET', '/profil')['text'], 'nicht eingerichtet'),
         'SSO aus: Verbinden → /profil mit Meldung');
+    $r = aufruf($basis, $ohneSso, 'GET', $bestaetigen);
+    pruefe($r['status'] === 302 && $r['ziel'] === '/system/schnittstelle' && str_contains(aufruf($basis, $ohneSso, 'GET', '/profil')['text'], 'nicht eingerichtet'),
+        'SSO aus: Bestätigen → zurück mit Meldung');
     $r = aufruf($basis, $ohneSso, 'GET', '/profil');
     pruefe(!str_contains($r['text'], 'id="sso"') && str_contains($r['text'], 'Passwort ändern'), 'SSO aus: Profil ohne SSO-Karte, mit Kennwort-Karte');
     $r = aufruf($basis, $ohneSso, 'POST', '/profil/sso/loesen', ['_token' => token($r['text'])]);
@@ -1787,7 +1797,7 @@ try {
     $hashVorher = (string) Database::scalar('SELECT password_hash FROM users WHERE id = ?', [$benutzer['admin']]);
     Database::execute('UPDATE users SET password_hash = ? WHERE id = ?', [password_hash('Zurueckgesetzt-' . bin2hex(random_bytes(6)), PASSWORD_DEFAULT), $benutzer['admin']]);
     $ereignisseVorher = (int) Database::scalar('SELECT COUNT(*) FROM bericht_ereignisse WHERE bericht_id = ?', [$b3]);
-    $fehlVorher = (int) Database::scalar("SELECT COUNT(*) FROM audit_log WHERE action = 'auth.kundenmodus_fehlversuch' AND user_id = ?", [$benutzer['bkunde']]);
+    $fehlVorher = (int) Database::scalar("SELECT COUNT(*) FROM audit_log WHERE action = 'auth.bestaetigung_fehlversuch' AND user_id = ?", [$benutzer['bkunde']]);
     $geraetVorher = Database::select('SELECT id, bericht_id, user_id FROM kundenmodus_geraete WHERE user_id = ? ORDER BY id', [$benutzer['admin']]);
     $r = aufruf($basis, $geraet, 'GET', '/dashboard');
     pruefe($r['status'] === 302 && str_starts_with((string) $r['ziel'], '/login'), 'Kennwort des Prüfers zurückgesetzt: seine Sitzung im gesperrten Browser ist zu Ende');
@@ -1807,7 +1817,7 @@ try {
     pruefe($aKunde['status'] === 403 && !str_contains($aKunde['text'], 'kunde/beenden') && $aBeenden === array_fill(0, Kundenmodus::HOECHSTENS_FEHL, 403),
         'anderes Konto: Kundenseite und Entsperren des fremden Kundenmodus → 403 wie ohne Recht (' . $aKunde['status'] . ', ' . implode('/', $aBeenden) . ')');
     gleich([(int) Database::scalar('SELECT COUNT(*) FROM bericht_ereignisse WHERE bericht_id = ?', [$b3]),
-        (int) Database::scalar("SELECT COUNT(*) FROM audit_log WHERE action = 'auth.kundenmodus_fehlversuch' AND user_id = ?", [$benutzer['bkunde']]),
+        (int) Database::scalar("SELECT COUNT(*) FROM audit_log WHERE action = 'auth.bestaetigung_fehlversuch' AND user_id = ?", [$benutzer['bkunde']]),
         Database::select('SELECT id, bericht_id, user_id FROM kundenmodus_geraete WHERE user_id = ? ORDER BY id', [$benutzer['admin']])],
         [$ereignisseVorher, $fehlVorher, $geraetVorher], 'anderes Konto: kein Ereignis am Bericht, kein Fehlversuch, die Sperre am Gerät bleibt');
     $r = aufruf($basis, $geraet, 'POST', '/logout', ['_token' => $aToken]);
