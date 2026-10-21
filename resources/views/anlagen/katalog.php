@@ -12,6 +12,7 @@ $darf = View::can('stecker.manage') || View::can('anlagen.scope.all');
         Typen mit „fest“ (etwa die Energiesäulen eines Geländes) ergeben Feststromanschlüsse.</p>
     <div class="spacer"></div>
     <?php if (View::can('inventory.pull')): ?><a class="btn btn-sm btn-ghost" href="/verteiler-abgleich" title="Standard-Verteiler mit anderen Installationen abgleichen">Abgleich</a><?php endif; ?>
+    <?php if (!empty($darfImport)): ?><a class="btn btn-sm" href="/anlagen/katalog/import" title="Standard-Verteiler und Aggregate aus einer Datei übernehmen">Importieren …</a><?php endif; ?>
     <?php if ($darf): ?>
         <a class="btn btn-sm" href="/anlagen/neu?art=anschluss&amp;vorlage=1&amp;fest=1">+ Feststromanschluss-Typ</a>
         <a class="btn btn-primary btn-sm" href="/anlagen/neu?art=verteilung&amp;vorlage=1">+ Neuer Standard-Verteiler</a>
@@ -23,12 +24,14 @@ $darf = View::can('stecker.manage') || View::can('anlagen.scope.all');
     <?php endif; ?>
     <?php foreach ($vorlagen as $v): ?>
         <?php $art = AnlagenService::ARTEN[$v['art']]; ?>
-        <a class="card katalog-karte" href="/anlagen/<?= (int) $v['id'] ?>">
+        <?php $import = $importiert[(int) $v['id']] ?? null; ?>
+        <a class="card katalog-karte<?= $import !== null ? ' importiert' : '' ?>" href="/anlagen/<?= (int) $v['id'] ?>">
             <div class="card-body">
                 <div class="katalog-kopf">
                     <span class="art-zeichen" style="--art-farbe: <?= View::e($art['farbe']) ?>"><?= View::e($art['kuerzel']) ?></span>
                     <strong><?= View::e($v['name']) ?></strong>
                     <?php if ((int) $v['fest'] === 1): ?><span class="badge info" title="Anlagen daraus sind fest installiert">fest</span><?php endif; ?>
+                    <?php if ($import !== null): ?><span class="badge primary"><?= $import === 'neu' ? 'importiert' : 'überschrieben' ?></span><?php endif; ?>
                 </div>
                 <div class="small muted"><?= View::e(trim($v['hersteller'] . ' ' . $v['modell'])) ?></div>
                 <p class="small mt"><?= View::e($v['kurzform']) ?></p>

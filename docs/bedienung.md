@@ -204,6 +204,92 @@ Feststromanschluss-Typ“*), etwa die Energiesäulen eines Geländes, die
 
 ![Katalog der Standard-Verteiler mit Anschlüssen und Bestückung](bilder/katalog.png)
 
+### Katalog importieren
+
+Viele Standard-Verteiler und Aggregate auf einmal – etwa alle
+Stromverteiler und Generatoren eines Verleihkatalogs wie der
+BSS-Strombibel – kommen über **Standard-Verteiler → Importieren …** in den
+Katalog. Das darf, wer Anlagen ändern darf und alle Standorte sieht; neue
+Steckertypen legt der Import nur an, wenn man auch den
+Steckverbinder-Katalog pflegen darf.
+
+**Format.** Ein Katalog-Paket ist eine JSON-Datei (höchstens 5 MB,
+höchstens 500 Typen):
+
+```json
+{ "format": 1, "art": "verteiler-typen", "quelle": "BSS Strombibel (Stand 18.03.2025)",
+  "typen": [
+    { "format": 1, "art": "verteiler-typ", "schluessel": "pd-63-32",
+      "typ": { "art": "verteilung", "name": "PD 63/32", "hersteller": "…", "modell": "…",
+               "nennstrom_a": 63, "spannung_v": 400, "phasen": 3,
+               "eigenschaften": { "artikelnummer": "…", "gehaeuse": "…", "gewicht_kg": 38.5, "zuleitung": "2,0 m 5G16" },
+               "schutzorgane": [ { "ref": "s1", "art": "hauptschalter", "nennstrom_a": 63, "pole": 3 },
+                                 { "ref": "s2", "art": "rcd", "fehlerstrom_ma": 30, "rcd_typ": "A", "vor": "s1" } ],
+               "anschluesse": [ { "richtung": "eingang", "stecker": "cee63", "nr": 1 },
+                                { "richtung": "abgang", "stecker": "cee32", "nr": 1, "schutz": "s2" } ] },
+      "steckertypen": [ { "schluessel": "cee63", "name": "CEE 63 A", "strom_a": 63, "phasen": 3, "spannung_v": 400 } ] } ] }
+```
+
+Jeder Typ ist eine Datei im Format des [Verteiler-Abgleichs](#verteiler-abgleich)
+(`verteiler-typ`) – eine solche Datei allein lässt sich ebenfalls
+importieren. Der `schluessel` ist eindeutig im Paket (a–z, 0–9,
+Bindestriche); an ihm erkennt ein späterer Import den Typ wieder. Jeden
+Stecker aus `anschluesse` gibt es hier schon, oder er ist unter
+`steckertypen` beschrieben – ein neuer vollständig mit `name`, `strom_a`,
+`phasen` (1 oder 3) und `spannung_v`, denn mit diesen Werten rechnen Kabel,
+Schutzorgane und Auslastung. Zu den Eigenschaften gehören bei Verteilungen Artikelnummer,
+Gehäuse, Schutzart, Zuleitung und Gewicht, bei Generatoren Artikelnummer,
+Gewicht leer und Abmessungen (L × B × H in mm) neben Kraftstoff (Diesel,
+HVO, Gas oder Benzin – Groß- und Kleinschreibung egal), Tank und Verbrauch.
+`spannung_v` ist eine Zahl oder fehlt ganz (dann 400 V). Messpunkte gehören
+nicht zu einem Katalog-Typ und bleiben weg.
+
+**Mitgelieferte Kataloge** liegen unter `resources/kataloge/*.json` und
+stehen auf der Import-Seite zur Auswahl – mit Quelle und Anzahl der Typen.
+Eigene Pakete werden hochgeladen.
+
+**Vorschau.** Nichts wird sofort übernommen. Die Vorschau zeigt je Typ
+Name, Art, Bestückung und Zustand:
+
+| Zustand | Bedeutung | vorausgewählt |
+|---------|-----------|---------------|
+| **neu** | gibt es hier noch nicht | ja |
+| **schon da** | steht hier genauso | – |
+| **hier anders** | steht hier anders als in der Datei – meist, weil jemand einen Fehler korrigiert hat; aufklappbar, was genau anders ist | nein („überschreiben“) |
+| **Fehler** | die Datei taugt für diesen Typ nicht (Grund steht dabei: unbekannte Art, Stecker ohne Beschreibung, neuer Stecker ohne Nennstrom, Kraftstoff, den die Auswahl nicht kennt, Abgang an einem Schutzorgan, das es nicht gibt …) | – |
+
+Darüber stehen die Steckertypen, die neu angelegt würden, mit Nennstrom,
+Phasen, Spannung und den Typen, die sie brauchen. Wer den
+Steckverbinder-Katalog nicht pflegen darf, sieht diese Typen ohne Haken und
+mit dem Hinweis, welcher Stecker fehlt. *alle neuen* und
+*keine* setzen die Haken; **Ausgewählte übernehmen** legt an bzw. ersetzt –
+alles in einem Zug: geht ein Typ schief, wird nichts übernommen. Die
+Meldung im Katalog nennt die Typen, die neuen und überschriebenen Einträge
+sind dort einmal markiert. Eine Vorschau liegt eine Stunde bereit.
+
+**Ein Import überschreibt nie still eine Korrektur.** Was hier anders
+steht, bleibt, wie es ist – auch beim nächsten Import desselben Pakets –,
+solange niemand ausdrücklich *überschreiben* anhakt. Der Haken gilt für den
+Stand, den die Vorschau gezeigt hat: korrigiert jemand den Typ, während die
+Vorschau offen ist, bleibt seine Korrektur stehen. Wird so nichts
+übernommen, bleibt die Vorschau offen und zeigt den Stand von jetzt.
+
+**Danach** sind die Typen gewöhnliche Standard-Verteiler: Name,
+Nennwerte, Eigenschaften, Anschlüsse und Sicherungen lassen sich bearbeiten,
+der Typ lässt sich kopieren und löschen. Fehlerhafte Einträge aus der
+Vorlage korrigiert man also einfach im Katalog. Ein gelöschter Typ ist beim
+nächsten Import wieder *neu*.
+
+Auf der Kommandozeile:
+
+```bash
+php bin/power katalog:import resources/kataloge/bss-strombibel.json --pruefen   # nur ansehen
+php bin/power katalog:import resources/kataloge/bss-strombibel.json             # neue anlegen
+php bin/power katalog:import paket.json --ueberschreiben                        # auch „hier anders“ ersetzen
+```
+
+![Vorschau eines Katalog-Imports: neue Typen vorausgewählt, ein hier korrigierter Typ mit aufgeklappten Unterschieden, ein Typ mit fehlendem Steckertyp](bilder/katalog-import.png)
+
 ### Verteilbaum und Steckverbinder
 
 - **Verteilbaum**: wer speist wen, aus den eingezeichneten Kabeln
