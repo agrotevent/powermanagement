@@ -101,27 +101,19 @@ final class KundenService
     }
 
     /**
-     * Was der Kunde jetzt sieht, soweit es Locations sind – aus demselben
-     * Prädikat wie der Kundenbereich (Kundenbereich::freigaben()).
+     * Reiter Übersicht: „Der Kunde sieht derzeit …“ – genau das, was der
+     * Kundenbereich ihm zeigt (KundenSicht::zusammenfassung(), dieselben
+     * Prädikate) –, dazu, wie viele seiner Zugänge sich anmelden können.
      *
-     * @return array{sperre:?string,locations:list<array<string,mixed>>,kommend:list<array<string,mixed>>,zugaenge_aktiv:int}
+     * @return array{gesperrt:?string,locations:list<array<string,mixed>>,kommend:list<array{name:string,ab:string}>,zugaenge_aktiv:int}
      */
     public static function uebersicht(int $kundeId): array
     {
-        $mitName = static function (array $f): array {
-            $f['site_name'] = (string) (Database::scalar('SELECT name FROM sites WHERE id = ?', [(int) $f['ziel_id']]) ?? '');
-            return $f;
-        };
         $aktiv = 0;
         foreach (self::zugaenge($kundeId) as $z) {
             $aktiv += in_array($z['zustand'], ['aktiv', 'erstanmeldung', 'link_offen'], true) ? 1 : 0;
         }
-        return [
-            'sperre'         => Kundenbereich::kundeSperre($kundeId),
-            'locations'      => array_map($mitName, Kundenbereich::freigaben($kundeId)),
-            'kommend'        => array_map($mitName, Kundenbereich::kommend($kundeId)),
-            'zugaenge_aktiv' => $aktiv,
-        ];
+        return KundenSicht::zusammenfassung($kundeId) + ['zugaenge_aktiv' => $aktiv];
     }
 
     /**

@@ -8,10 +8,14 @@ use App\Berichte\Einstellungen;
 use App\Kunden\Einrichtung;
 use App\Kunden\KundenEinstellungen;
 use App\Kunden\Kundenbereich;
+use App\Kunden\KundenSicht;
+use App\Services\SiteService;
 use App\Support\Config;
 use App\Support\Flash;
+use App\Support\Markdown;
 use App\Support\Request;
 use App\Support\Response;
+use App\Support\Session;
 use App\Support\View;
 
 /**
@@ -20,18 +24,80 @@ use App\Support\View;
  * Kein Recht an den Routen (Kundenzugänge haben keine); jede Aktion beginnt
  * mit kunde(): angemeldet, Kundenzugang, Kunde aktiv. Personal bekommt 403.
  * Was Kunden sehen, kommt aus Freigaben am Kunden und aus ausdrücklicher
- * Zuordnung – nie aus dem Standort allein. Eventworx wird von hier aus nie
- * gefragt.
+ * Zuordnung – nie aus dem Standort allein: jede ID aus der Adresse geht über
+ * KundenSicht gegen den Kunden, fremd und nicht vorhanden geben dieselbe
+ * 404. Eventworx wird von hier aus nie gefragt; nichts hier wartet auf
+ * andere Dienste – nur ein Plan gibt die Sitzung frei, bevor er gesendet wird.
  */
 final class KundenbereichController extends Controller
 {
+    /** Die Hilfeseite – Markdown aus dem eigenen Haus (App\Support\Markdown maskiert trotzdem alles). */
+    private const HILFE = '/resources/hilfe/kundenbereich.md';
+
     public function index(Request $request): void
     {
         $kunde = $this->kunde($request);
         if ($kunde === null) {
             return;
         }
-        $this->seite('kundenbereich/index', ['kunde' => $kunde]);
+        $id = (int) $kunde['id'];
+        $this->seite('kundenbereich/index', [
+            'kunde'     => $kunde,
+            'locations' => KundenSicht::locations($id),
+            'kommend'   => KundenSicht::kommend($id),
+            'kontakt'   => KundenEinstellungen::kontakt(),
+        ]);
+    }
+
+    public function locations(Request $request): void
+    {
+        $kunde = $this->kunde($request);
+        if ($kunde === null) {
+            return;
+        }
+        $id = (int) $kunde['id'];
+        $this->seite('kundenbereich/locations', [
+            'kunde'     => $kunde,
+            'locations' => KundenSicht::locations($id),
+            'kommend'   => KundenSicht::kommend($id),
+        ]);
+    }
+
+    public function location(Request $request, array $params): void
+    {
+        $kunde = $this->kunde($request);
+        if ($kunde === null) {
+            return;
+        }
+        $siteId = self::id($params, 'id');
+        $location = $siteId === null ? null : KundenSicht::location((int) $kunde['id'], $siteId);
+        if ($location === null) {
+            Response::notFound();
+            return;
+        }
+        $this->seite('kundenbereich/location', ['kunde' => $kunde, 'location' => $location]);
+    }
+
+    /** Der Plan einer Etage: Bild im Browser, PDF als Datei (SiteService::planAusliefern). */
+    public function plan(Request $request, array $params): void
+    {
+        $kunde = $this->kunde($request);
+        if ($kunde === null) {
+            return;
+        }
+        $siteId = self::id($params, 'id');
+        $floorId = self::id($params, 'etage');
+        $etage = $siteId === null || $floorId === null ? null : KundenSicht::etage((int) $kunde['id'], $siteId, $floorId);
+        if ($etage === null) {
+            Response::notFound();
+            return;
+        }
+        // Ein großer Plan über ein schwaches Mobilnetz dauert – solange soll
+        // die Sitzung keine andere Seite desselben Kunden aufhalten.
+        Session::freigeben();
+        if (!SiteService::planAusliefern($etage, true)) {
+            Response::notFound();
+        }
     }
 
     public function konto(Request $request): void
@@ -40,7 +106,22 @@ final class KundenbereichController extends Controller
         if ($kunde === null) {
             return;
         }
-        $this->seite('kundenbereich/konto', ['kunde' => $kunde, 'konto' => Auth::user()]);
+        $this->seite('kundenbereich/konto', ['kunde' => $kunde, 'konto' => Auth::user(), 'datenschutz' => KundenEinstellungen::datenschutz()]);
+    }
+
+    public function hilfe(Request $request): void
+    {
+        $kunde = $this->kunde($request);
+        if ($kunde === null) {
+            return;
+        }
+        $datei = dirname(__DIR__, 2) . self::HILFE;
+        $this->seite('kundenbereich/hilfe', [
+            'kunde'       => $kunde,
+            'hilfe'       => is_file($datei) ? Markdown::toHtml((string) file_get_contents($datei)) : '',
+            'datenschutz' => KundenEinstellungen::datenschutz(),
+            'kontakt'     => KundenEinstellungen::kontakt(),
+        ]);
     }
 
     /** Eigenes Kennwort ändern – derselbe Weg wie im Profil (Auth::kennwortAendern). */
@@ -154,6 +235,16 @@ final class KundenbereichController extends Controller
             return null;
         }
         return $kunde;
+    }
+
+    /**
+     * Eine ID aus der Adresse – nur Ziffern (kein „7abc“, kein „-1“, nichts
+     * über 18 Stellen); sonst null, und die Seite ist „nicht gefunden“.
+     */
+    private static function id(array $params, string $schluessel): ?int
+    {
+        $wert = (string) ($params[$schluessel] ?? '');
+        return preg_match('/^[1-9]\d{0,17}$/', $wert) === 1 ? (int) $wert : null;
     }
 
     /** Eine Seite im Layout des Kundenbereichs – nie zwischengespeichert, kein Referer hinaus. */

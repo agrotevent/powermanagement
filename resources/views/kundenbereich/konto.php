@@ -1,9 +1,11 @@
 <?php
 /**
- * Konto des Kundenzugangs: Angaben (nur lesen) und Kennwort ändern.
+ * Konto des Kundenzugangs: Angaben (nur lesen), Kennwort ändern,
+ * Datenschutzhinweis (Art. 13 DSGVO, Text aus den Einstellungen).
  *
  * @var array<string,mixed> $kunde
  * @var array<string,mixed> $konto
+ * @var string $datenschutz KundenEinstellungen::datenschutz() – als Text
  */
 use App\Support\Csrf;
 use App\Support\View;
@@ -43,4 +45,12 @@ $mussAendern = (int) ($konto['must_change_password'] ?? 0) === 1;
             <button class="btn btn-primary" type="submit">Kennwort ändern</button>
         </div>
     </form>
+
+    <section class="card kb-breit" id="datenschutz" aria-labelledby="kb-datenschutz-titel">
+        <div class="card-head"><h2 id="kb-datenschutz-titel">Datenschutzhinweis</h2></div>
+        <div class="card-body">
+            <p class="kb-datenschutz"><?= View::e($datenschutz) ?></p>
+            <p class="help">Wenn Sie sich auf einem gemeinsam genutzten Rechner angemeldet haben, melden Sie sich danach bitte ab.</p>
+        </div>
+    </section>
 </div>

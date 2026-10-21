@@ -132,7 +132,9 @@ final class Response
         $ebene = ob_get_level();
         try {
             if (Kundenbereich::istKundenzugang()) {
-                return [View::render('kundenbereich/fehler', ['code' => $code, 'flashes' => Flash::pull()], 'layout/kundenbereich'), true];
+                // fehlerseite: das Layout markiert keinen Eintrag der Navigation –
+                // sonst sähe man der 404 unter /kundenbereich/locations/… an, wo sie herkam.
+                return [View::render('kundenbereich/fehler', ['code' => $code, 'flashes' => Flash::pull(), 'fehlerseite' => true], 'layout/kundenbereich'), true];
             }
         } catch (\Throwable) {
             // Was die halbe Seite schon gepuffert hat, kommt weg; weiter mit der schlichten.

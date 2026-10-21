@@ -123,6 +123,22 @@ try {
         'datenschutz' => KundenEinstellungen::datenschutz(), 'absender' => '<i>Firma</i>', 'flashes' => []], 'layout/blank');
     pruefe(str_contains($html, '&lt;script&gt;alert(1)&lt;/script&gt;') && !str_contains($html, '<script>alert') && !str_contains($html, '<b>' . $k)
         && !str_contains($html, '<i>Firma'), 'Einrichtungsseite: Datenschutzhinweis, Benutzername und Firma maskiert');
+    // Hilfe des Kundenbereichs: Markdown ohne eigenes HTML, Links nur in den Kundenbereich (das Tor ließe
+    // /handbuch nicht durch), Datenschutzhinweis maskiert; Ansprechpartner als Text, tel: nur aus Ziffern.
+    $kontaktVorher = Settings::get('kundenbereich.kontakt');
+    pruefe(KundenEinstellungen::speichern(['kundenbereich.kontakt' => '<b>Bereitschaft</b> javascript:alert(1) Tel. +49 (0)171 / 123 45-67'])['ok'], 'Ansprechpartner gespeichert');
+    gleich(KundenEinstellungen::kontakt()['telefon'], '+491711234567', 'Ansprechpartner: Nummer zum Antippen nur aus Ziffern und „+“');
+    $hilfe = \App\Support\Markdown::toHtml((string) file_get_contents(dirname(__DIR__) . '/resources/hilfe/kundenbereich.md'));
+    preg_match_all('/href="([^"]*)"/', $hilfe, $ziele);
+    pruefe($hilfe !== '' && preg_match('/<script|\son[a-z]+\s*=/i', $hilfe) !== 1
+        && array_filter($ziele[1], static fn (string $z): bool => !str_starts_with($z, '/kundenbereich') && !str_starts_with($z, '#')) === [],
+        'Hilfe des Kundenbereichs: ohne Skript, Links nur in den Kundenbereich');
+    $html = View::render('kundenbereich/hilfe', ['hilfe' => $hilfe, 'datenschutz' => KundenEinstellungen::datenschutz(), 'kontakt' => KundenEinstellungen::kontakt()], '');
+    pruefe(str_contains($html, '&lt;script&gt;alert(1)') && !str_contains($html, '<script>alert') && str_contains($html, '&lt;b&gt;Bereitschaft')
+        && str_contains($html, 'href="tel:+491711234567"') && !str_contains($html, 'href="javascript'), 'Hilfeseite: Datenschutzhinweis und Ansprechpartner maskiert');
+    pruefe(KundenEinstellungen::speichern(['kundenbereich.kontakt' => 'Mo–Fr, Rückruf bis 24.09.2026'])['ok'] && KundenEinstellungen::kontakt()['telefon'] === null,
+        'Ansprechpartner: ein Datum ist keine Telefonnummer');
+    $kontaktVorher === null ? Settings::forget('kundenbereich.kontakt') : Settings::put('kundenbereich.kontakt', $kontaktVorher);
     foreach (['kundenbereich.einrichtung_stunden' => ['0', '169', 'x', '-1'], 'kundenbereich.nachweise_jahre' => ['0', '31', '3.5']] as $schluessel => $falsche) {
         foreach ($falsche as $falsch) {
             pruefe(!KundenEinstellungen::speichern([$schluessel => $falsch])['ok'], $schluessel . ' „' . $falsch . '“ abgelehnt');

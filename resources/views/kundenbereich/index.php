@@ -1,30 +1,57 @@
 <?php
 /**
- * Übersicht des Kundenbereichs. In diesem Stand nur Begrüßung und Kunde –
- * Locations, Protokolle und Prüfnachweise folgen.
+ * Übersicht des Kundenbereichs: die Locations, die der Kunde jetzt sieht
+ * (mit Veranstaltung und „sichtbar bis“), die kommenden (nur Name und
+ * „ab …“), Ansprechpartner und Hilfe.
  *
  * @var array<string,mixed> $kunde
+ * @var list<array<string,mixed>> $locations KundenSicht::locations()
+ * @var list<array{name:string,ab:string}> $kommend KundenSicht::kommend()
+ * @var array{text:string,telefon:?string} $kontakt KundenEinstellungen::kontakt()
  */
+use App\Kunden\Kundenbereich;
 use App\Support\View;
 use App\Support\Zeit;
 
 $title = 'Übersicht';
 ?>
+<h1 class="kb-titel">Willkommen</h1>
+<p class="kb-einleitung">Kundenbereich für <strong><?= View::e((string) $kunde['name']) ?></strong><?php
+    if ((string) $kunde['kundennummer'] !== ''): ?> · Kundennummer <?= View::e((string) $kunde['kundennummer']) ?><?php endif;
+    if (!empty($kunde['gueltig_bis'])): ?> · Zugang bis <?= View::e(Zeit::anzeige((string) $kunde['gueltig_bis'], 'd.m.Y')) ?><?php endif; ?></p>
+
 <div class="kb-karten">
-    <section class="card">
-        <div class="card-head"><h2>Willkommen</h2></div>
+    <section class="card kb-breit" aria-labelledby="kb-orte-titel">
+        <div class="card-head">
+            <h2 id="kb-orte-titel">Ihre Locations</h2>
+            <span class="spacer"></span>
+            <?php if ($locations !== []): ?><a href="<?= View::e(Kundenbereich::PFAD . '/locations') ?>">Alle ansehen</a><?php endif; ?>
+        </div>
         <div class="card-body">
-            <dl class="kb-felder">
-                <dt>Kunde</dt><dd><?= View::e((string) $kunde['name']) ?></dd>
-                <?php if ((string) $kunde['kundennummer'] !== ''): ?>
-                    <dt>Kundennummer</dt><dd><?= View::e((string) $kunde['kundennummer']) ?></dd>
-                <?php endif; ?>
-                <?php if (!empty($kunde['gueltig_bis'])): ?>
-                    <dt>Zugang bis</dt><dd><?= View::e(Zeit::anzeige((string) $kunde['gueltig_bis'], 'd.m.Y')) ?></dd>
-                <?php endif; ?>
-            </dl>
-            <p class="muted">Hier finden Sie die Locations, die wir für Sie betreuen, Ihre Prüfprotokolle und die
-                Prüfnachweise der gemieteten Geräte – sobald wir sie für Sie bereitgestellt haben.</p>
+            <?php if ($locations === []): ?>
+                <p class="kb-leer">Derzeit ist keine Location für Sie freigegeben.<?= $kommend !== [] ? ' Was demnächst dazukommt, steht unten.' : '' ?></p>
+            <?php else: ?>
+                <?= View::partial('kundenbereich/_orte', ['locations' => $locations]) ?>
+            <?php endif; ?>
+        </div>
+    </section>
+
+    <?php if ($kommend !== []): ?>
+        <section class="card" aria-labelledby="kb-kommend-titel">
+            <div class="card-head"><h2 id="kb-kommend-titel">Demnächst</h2></div>
+            <div class="card-body">
+                <?= View::partial('kundenbereich/_kommend', ['kommend' => $kommend]) ?>
+            </div>
+        </section>
+    <?php endif; ?>
+
+    <?= View::partial('kundenbereich/_kontakt', ['kontakt' => $kontakt]) ?>
+
+    <section class="card" aria-labelledby="kb-hilfe-titel">
+        <div class="card-head"><h2 id="kb-hilfe-titel">Hilfe</h2></div>
+        <div class="card-body">
+            <p>Was ein Übergabebericht ist, was ein Prüfnachweis, und was Sie vor Ort prüfen sollten.</p>
+            <a class="btn" href="<?= View::e(Kundenbereich::PFAD . '/hilfe') ?>">Zur Hilfe</a>
         </div>
     </section>
 </div>

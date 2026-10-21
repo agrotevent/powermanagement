@@ -63,14 +63,19 @@ $router->post('/profil/passwort', [AuthController::class, 'changePassword']);
 /*
  * Nur für Kundenzugänge (users.kunde_id); Personal bekommt 403. Kein Recht an
  * der Route – Kundenzugänge haben keine Rechte; KundenbereichController::kunde()
- * prüft das Konto. Kundenzugänge erreichen nichts anderes (Tor im Router,
+ * prüft das Konto, KundenSicht jede ID gegen den Kunden (fremd = nicht
+ * vorhanden = 404). Kundenzugänge erreichen nichts anderes (Tor im Router,
  * Kundenbereich::erlaubt). Was Kunden sehen, kommt aus Freigaben am Kunden
  * (nur Standorte) und aus ausdrücklicher Zuordnung – nie aus dem Standort
  * allein. Eventworx wird von hier aus nie gefragt.
  */
 $router->get('/kundenbereich', [KundenbereichController::class, 'index']);
+$router->get('/kundenbereich/locations', [KundenbereichController::class, 'locations']);
+$router->get('/kundenbereich/locations/{id}', [KundenbereichController::class, 'location']);
+$router->get('/kundenbereich/locations/{id}/plan/{etage}', [KundenbereichController::class, 'plan']);
 $router->get('/kundenbereich/konto', [KundenbereichController::class, 'konto']);
 $router->post('/kundenbereich/konto/kennwort', [KundenbereichController::class, 'kennwort']);
+$router->get('/kundenbereich/hilfe', [KundenbereichController::class, 'hilfe']);
 // Einmal-Link zum Festlegen des Kennworts: ohne Anmeldung – das Token ist die
 // Berechtigung (einmal, mit Ablauf). Das Speichern ist ein POST mit CSRF-Token.
 $router->get('/kundenbereich/einrichten/{token}', [KundenbereichController::class, 'einrichten']);

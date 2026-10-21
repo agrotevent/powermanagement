@@ -19,11 +19,20 @@ declare(strict_types=1);
  * selben Gelände (Berühren zählt nicht), Löschen nur beendeter Kunden mit
  * Namen, Standort löschen nimmt die Kunden-Freigaben mit.
  *
+ * Was ein Kunde sieht (KundenSicht, nur mit der Kunden-ID): Locations nur
+ * aus wirksamen Freigaben am Kunden (mehrere Veranstalter auf einem Gelände),
+ * kommende nur mit Name und „ab …“, je Location nur Etagen mit Plan und feste
+ * Anschlüsse – nie Notizen, Fremdbestand, mobile Anlagen oder Vorlagen –,
+ * jede Etage einzeln gegen die Location geprüft.
+ *
  * Über HTTP (eigener PHP-Server): das Tor über alle Routen aus
  * public/index.php – GET und POST mit gültigem Token führen zurück in den
  * Kundenbereich, mit JSON 403, und nichts ändert sich –, Fehlerseiten im
  * Kundenlayout, Personal bekommt 403, vorläufiges Kennwort führt ins Konto,
- * Kunde beendet beendet die Sitzung; Kundenverwaltung mit allen Reitern,
+ * Kunde beendet beendet die Sitzung; Seiten des Kundenbereichs (Übersicht,
+ * Locations, Location, Konto, Hilfe) mit no-store und ohne Inline-Skript,
+ * Pläne (Bild inline, PDF als Anhang, sandbox, neutraler Name), fremde und
+ * nicht vorhandene IDs mit derselben 404; Kundenverwaltung mit allen Reitern,
  * Geheimnis nur einmal in der Antwort (no-store, Einmal-Marke), Einrichtungs-
  * link einlösen (CSRF, gleiche 404 für falsch/abgelaufen/verbraucht, nicht
  * in eine offene Sitzung), Überschneidung mit Rückfrage, CSRF und Rechte an
@@ -42,6 +51,7 @@ use App\Kunden\Einrichtung;
 use App\Kunden\KundenEinstellungen;
 use App\Kunden\Kundenbereich;
 use App\Kunden\KundenService;
+use App\Kunden\KundenSicht;
 use App\Services\BenutzerService;
 use App\Services\SiteService;
 use App\Support\Config;
@@ -191,6 +201,38 @@ try {
     $sites['a'] = SiteService::saveSite(null, ['name' => $kennung . ' Gelände A (geteilt)', 'notes' => $kennung . '-notiz']);
     $sites['b'] = SiteService::saveSite(null, ['name' => $kennung . ' Gelände B']);
     $sites['c'] = SiteService::saveSite(null, ['name' => $kennung . ' Gelände C']);
+    // Etagen: A1 mit Bild-Plan, A2 mit PDF-Plan (Seite 2), A3 ohne Plan, B1 mit Plan auf B.
+    // Notizen und Fremdbestand tragen Marken, die der Kundenbereich nie zeigen darf.
+    $marken = [$kennung . '-notiz', $kennung . '-etagennotiz', $kennung . '-fremd'];
+    $planBytes = (string) base64_decode('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==');
+    $pdfBytes = "%PDF-1.4\n% " . $kennung . "\n%%EOF\n";
+    $etagen = [];
+    $etageAnlegen = static function (int $siteId, string $name, ?string $endung, string $inhalt = '') use ($kennung, $marken, &$etagen): int {
+        $id = SiteService::saveFloor(null, ['site_id' => $siteId, 'name' => $name, 'notes' => $marken[1]]);
+        $felder = ['fremdbestand' => json_encode(['dosen' => [['name' => $marken[2]]], 'racks' => [], 'aps' => []])];
+        if ($endung !== null) {
+            $datei = 'site' . $siteId . '_' . bin2hex(random_bytes(8)) . '.' . $endung;
+            file_put_contents(SiteService::planDir() . '/' . $datei, $inhalt);
+            $felder += ['plan_file' => $datei, 'plan_type' => $endung === 'pdf' ? 'pdf' : 'image', 'plan_page' => $endung === 'pdf' ? 2 : 1,
+                'plan_original_name' => $kennung . ' Hallenplan "intern".' . $endung];
+        }
+        Database::update('floors', $id, $felder);
+        return $etagen[] = $id;
+    };
+    $a1 = $etageAnlegen($sites['a'], 'Halle Süd', 'png', $planBytes);
+    $a2 = $etageAnlegen($sites['a'], 'Außengelände', 'pdf', $pdfBytes);
+    $a3 = $etageAnlegen($sites['a'], 'Keller', null);
+    $b1 = $etageAnlegen($sites['b'], 'Halle B', 'png', $planBytes);
+    // Feststromanschluss FA (fest) und mobile Verteilung MA auf A, dazu eine feste Vorlage.
+    $fa = (int) Database::insert('objekte', ['art' => 'anschluss', 'name' => $kennung . ' Energiesäule FA', 'site_id' => $sites['a'], 'floor_id' => $a1,
+        'fest' => 1, 'eigenschaften' => json_encode(['anschlussart' => 'Energiesäule', 'absicherung_a' => 63, 'netzbetreiber' => $kennung . '-netz']),
+        'notizen' => $kennung . '-anlagennotiz', 'created_at' => gmdate('c')]);
+    \App\Services\AnlagenService::anschlussAnlegen($fa, 'abgang', (int) Database::scalar("SELECT id FROM steckertypen WHERE schluessel = 'cee32'"));
+    \App\Services\AnlagenService::anschlussAnlegen($fa, 'abgang', (int) Database::scalar("SELECT id FROM steckertypen WHERE schluessel = 'cee32'"));
+    Database::insert('objekte', ['art' => 'verteilung', 'name' => $kennung . ' Mobilverteiler MA', 'site_id' => $sites['a'], 'floor_id' => $a1,
+        'fest' => 0, 'created_at' => gmdate('c')]);
+    Database::insert('objekte', ['art' => 'anschluss', 'name' => $kennung . ' Vorlage VA', 'site_id' => $sites['a'], 'fest' => 1, 'ist_vorlage' => 1,
+        'created_at' => gmdate('c')]);
     $kunden['k1'] = $kundeAnlegen('Muster Events');
     $kunden['k2'] = $kundeAnlegen('Stadtmarketing');
     $kunden['k3'] = $kundeAnlegen('Beendet', 0);
@@ -371,6 +413,59 @@ try {
     Database::update('kunden', $kunden['k1'], ['gueltig_bis' => null]);
     Kundenbereich::vergessen();
     gleich(Kundenbereich::kundeSperre(999999999), Kundenbereich::NICHT_AKTIV, 'gelöschter Kunde: gesperrt');
+
+    // ------------------------------------------------ KundenSicht: was ein Kunde sieht
+    // Ohne angemeldetes Konto – KundenSicht rechnet nur mit der Kunden-ID.
+    alsBenutzer(null);
+    $orte = static fn (array $l): array => array_map(static fn (array $x): int => $x['site']['id'], $l);
+    gleich($orte(KundenSicht::locations($kunden['k1'])), [$sites['a']], 'K1 sieht A (Konto-/Rollen-Freigaben auf B zählen nicht)');
+    gleich($orte(KundenSicht::locations($kunden['k2'])), [$sites['b']], 'K2 sieht B – A ist abgelaufen, C kommt erst');
+    gleich($orte(KundenSicht::locations($kunden['k2'], $jetzt + 3 * $tag)), [$sites['b'], $sites['c']], 'K2 in drei Tagen: B und C');
+    gleich(KundenSicht::locations($kunden['k3']), [], 'beendeter Kunde: keine Location, trotz Freigabe');
+    $k2kommend = KundenSicht::kommend($kunden['k2']);
+    gleich([count($k2kommend), array_keys($k2kommend[0] ?? []), $k2kommend[0]['name'] ?? ''], [1, ['name', 'ab'], $kennung . ' Gelände C'],
+        'kommend: nur Name und „ab …“');
+    gleich(Zeit::ts($k2kommend[0]['ab'] ?? null), Zeit::ts(Zeit::ausEingabe($eingabe($jetzt + 2 * $tag))), '… ab dem Beginn der Freigabe');
+    $spaeter = $freigabeRoh(['subject_type' => 'kunde', 'subject_id' => $kunden['k1'], 'ziel_art' => 'site', 'ziel_id' => $sites['a'],
+        'gueltig_ab' => Zeit::iso($jetzt + 20 * $tag), 'gueltig_bis' => Zeit::iso($jetzt + 25 * $tag)]);
+    Kundenbereich::vergessen();
+    gleich([KundenSicht::kommend($kunden['k1']), count(KundenSicht::locations($kunden['k1'])[0]['freigaben'] ?? [])], [[], 1],
+        'eine spätere Freigabe auf eine schon sichtbare Location: nicht unter „kommend“, nicht doppelt');
+    Database::delete('freigaben', $spaeter);
+    Kundenbereich::vergessen();
+    gleich(KundenSicht::location($kunden['k1'], $sites['b']), null, 'location(K1, B) === null');
+    gleich(KundenSicht::location($kunden['k2'], $sites['a']), null, 'location(K2, A) === null – Freigabe abgelaufen');
+    gleich(KundenSicht::location($kunden['k1'], 999999999), null, 'location(K1, unbekannt) === null');
+    gleich(KundenSicht::location($kunden['k3'], $sites['a']), null, 'location() eines beendeten Kunden === null');
+    $la = KundenSicht::location($kunden['k1'], $sites['a']) ?? [];
+    gleich(array_map(static fn (array $e): array => [$e['id'], $e['plan'], $e['seite']], $la['etagen'] ?? []), [[$a2, 'pdf', 2], [$a1, 'bild', 1]],
+        'Location A: nur Etagen mit Plan (Bild, PDF mit Seite), ohne A3, ohne B1');
+    gleich($la['feststrom'] ?? [], [['name' => $kennung . ' Energiesäule FA', 'art' => 'Energiesäule', 'etage' => 'Halle Süd',
+        'anschluss' => '2× CEE 32 A', 'vorsicherung' => '63 A']], 'feste Anschlüsse: nur FA – nicht die mobile Verteilung, nicht die Vorlage');
+    gleich([$la['freigaben'][0]['veranstaltung'] ?? '', Zeit::ts($la['freigaben'][0]['bis'] ?? null), $la['freigaben'][0]['daten'] ?? ''], ['Sommerfestival',
+        Zeit::ts(Zeit::ausEingabe($eingabe($jetzt + 7 * $tag), true)), 'Messdaten vom ' . Zeit::anzeige(Zeit::ausEingabe($eingabe($jetzt - 3 * $tag)))
+        . ' bis ' . Zeit::anzeige(Zeit::ausEingabe($eingabe($jetzt + 7 * $tag), true))], 'Freigabe: Veranstaltung, „sichtbar bis“, Messdaten');
+    $json = (string) json_encode($la, JSON_UNESCAPED_UNICODE);
+    $durch = array_filter(array_merge($marken, [$kennung . '-anlagennotiz', $kennung . '-netz', 'Mobilverteiler', 'Vorlage VA', 'Hallenplan', '"plan_file"']),
+        static fn (string $m): bool => str_contains($json, $m));
+    gleich(array_values($durch), [], 'location() ohne Notizen, Fremdbestand, Netzbetreiber, mobile Anlagen, Vorlagen, Dateinamen');
+    gleich(KundenSicht::location($kunden['k4'], $sites['a'])['freigaben'][0]['daten'] ?? '', 'keine Messdaten freigegeben',
+        'Freigabe ohne Datenenden (per SQL): „keine Messdaten freigegeben“');
+    gleich((KundenSicht::etage($kunden['k1'], $sites['a'], $a1) ?? [])['id'] ?? null, $a1, 'etage(K1, A, A1): da');
+    foreach ([
+        'Etage eines anderen Standorts (B1 über A)' => [$kunden['k1'], $sites['a'], $b1],
+        'Etage ohne Plan (A3)'                      => [$kunden['k1'], $sites['a'], $a3],
+        'Standort nicht freigegeben (B1 über B)'    => [$kunden['k1'], $sites['b'], $b1],
+        'Freigabe abgelaufen (K2, A1)'              => [$kunden['k2'], $sites['a'], $a1],
+        'unbekannte Etage'                          => [$kunden['k1'], $sites['a'], 999999999],
+        'beendeter Kunde'                           => [$kunden['k3'], $sites['a'], $a1],
+    ] as $fall => [$kid, $sid, $fid]) {
+        gleich(KundenSicht::etage($kid, $sid, $fid), null, 'etage(): null – ' . $fall);
+    }
+    $zf = KundenSicht::zusammenfassung($kunden['k1']);
+    gleich([$zf['gesperrt'], $zf['locations'], $zf['kommend']], [null, KundenSicht::locations($kunden['k1']), []], 'zusammenfassung(K1) = was der Kundenbereich zeigt');
+    gleich([KundenSicht::zusammenfassung($kunden['k3'])['gesperrt'], KundenSicht::zusammenfassung($kunden['k3'])['locations']], [Kundenbereich::NICHT_AKTIV, []],
+        'zusammenfassung eines beendeten Kunden: gesperrt, nichts sichtbar');
 
     // ------------------------------------------------ Benutzerverwaltung
     alsBenutzer($personal['admin']);
@@ -681,7 +776,10 @@ try {
     pruefe(str_contains($start['text'], $kennung . ' Muster Events'), 'Kundenbereich zeigt den Kunden');
     $token = csrfAus($start['text']);
     pruefe($token !== '', 'Token aus dem Kundenbereich (Abmelden)');
-    $seiten = ['/kundenbereich' => $start, '/kundenbereich/konto' => anfrage($basis, $z1['dose'], 'GET', '/kundenbereich/konto')];
+    $seiten = ['/kundenbereich' => $start];
+    foreach (['/kundenbereich/locations', '/kundenbereich/locations/' . $sites['a'], '/kundenbereich/konto', '/kundenbereich/hilfe'] as $pfad) {
+        $seiten[$pfad] = anfrage($basis, $z1['dose'], 'GET', $pfad);
+    }
     foreach ($seiten as $pfad => $r) {
         gleich($r['status'], 200, $pfad . ': 200');
         gleich(kopfzeile($r, 'Cache-Control'), 'private, no-store', $pfad . ': Cache-Control private, no-store');
@@ -741,6 +839,57 @@ try {
     gleich([$r['status'], $r['ziel']], [302, '/kundenbereich'], 'angemeldet /login → Kundenbereich');
     gleich(meldungenDesServers($serverFehler), [], 'Fehlerseiten ohne PHP-Meldung');
 
+    // Übersicht, Locations, Location, Hilfe, Konto: was drinsteht – und was nie.
+    $plan = static fn (int $site, int $etage): string => '/kundenbereich/locations/' . $site . '/plan/' . $etage;
+    pruefe(str_contains($start['text'], $kennung . ' Gelände A (geteilt)') && str_contains($start['text'], 'href="/kundenbereich/locations/' . $sites['a'] . '"')
+        && str_contains($start['text'], 'Sommerfestival') && !str_contains($start['text'], $kennung . ' Gelände B'), 'Übersicht: Location A mit Veranstaltung, nicht B');
+    pruefe(str_contains($seiten['/kundenbereich/locations']['text'], $kennung . ' Gelände A (geteilt)')
+        && str_contains($seiten['/kundenbereich/locations']['text'], 'aria-current="page"') && !str_contains($seiten['/kundenbereich/locations']['text'], $kennung . ' Gelände B'),
+        'Locations: A, nicht B, Navigation markiert');
+    $ort = $seiten['/kundenbereich/locations/' . $sites['a']]['text'];
+    pruefe(str_contains($ort, $kennung . ' Energiesäule FA') && str_contains($ort, 'data-label="Anschlüsse"') && str_contains($ort, 'href="' . $plan($sites['a'], $a1) . '"')
+        && str_contains($ort, 'href="' . $plan($sites['a'], $a2) . '" download') && !str_contains($ort, '/plan/' . $a3 . '"') && !str_contains($ort, '/plan/' . $b1 . '"'),
+        'Location A: fester Anschluss als Karte (data-label), Bild-Plan ansehen, PDF-Plan herunterladen, keine Etage ohne Plan');
+    $durch = array_filter(array_merge($marken, [$kennung . '-anlagennotiz', $kennung . '-netz', 'Mobilverteiler', 'Vorlage VA', 'Hallenplan', '/grundriss/', '/karte']),
+        static fn (string $m): bool => str_contains($ort, $m));
+    gleich(array_values($durch), [], 'Location-Seite ohne Notizen, Fremdbestand, mobile Anlagen, Vorlagen, Dateinamen, Karte');
+    $hilfe = $seiten['/kundenbereich/hilfe']['text'];
+    pruefe(str_contains($hilfe, 'DIN EN 50699') && str_contains($hilfe, 'BetrSichV § 14 Abs. 7') && str_contains($hilfe, 'id="datenschutz"')
+        && str_contains($hilfe, 'Keine Rechtsberatung') && str_contains($hilfe, 'Art. 6 Abs. 1 lit. b und c DSGVO'), 'Hilfe: Prüfnachweis ≠ Übergabebericht, Datenschutzhinweis, keine Rechtsberatung');
+    pruefe(str_contains($seiten['/kundenbereich/konto']['text'], 'Datenschutzhinweis'), 'Konto mit Datenschutzhinweis');
+
+    // Pläne: Bild im Browser, PDF als Datei – nie zwischengespeichert, sandbox, neutraler Name.
+    $bild = anfrage($basis, $z1['dose'], 'GET', $plan($sites['a'], $a1));
+    gleich([$bild['status'], kopfzeile($bild, 'Content-Type'), kopfzeile($bild, 'Content-Disposition'), kopfzeile($bild, 'Cache-Control'),
+        kopfzeile($bild, 'X-Content-Type-Options'), kopfzeile($bild, 'Content-Security-Policy'), kopfzeile($bild, 'Referrer-Policy'), $bild['text'] === $planBytes],
+        [200, 'image/png', 'inline; filename="plan-Halle-Sued.png"', 'private, no-store', 'nosniff', "default-src 'none'; style-src 'unsafe-inline'; sandbox",
+            'no-referrer', true], 'Bild-Plan: inline, no-store, sandbox, Name ohne Umlaut und ohne Originalnamen');
+    $pdf = anfrage($basis, $z1['dose'], 'GET', $plan($sites['a'], $a2));
+    gleich([$pdf['status'], kopfzeile($pdf, 'Content-Type'), kopfzeile($pdf, 'Content-Disposition'), kopfzeile($pdf, 'Cache-Control'), $pdf['text'] === $pdfBytes],
+        [200, 'application/pdf', 'attachment; filename="plan-Aussengelaende.pdf"', 'private, no-store', true], 'PDF-Plan: als Anhang (sandbox sperrt die PDF-Ansicht)');
+
+    // Fremd und nicht vorhanden: dieselbe 404, im Kundenlayout, ohne Navigationsmarke.
+    $ohneMarken = static fn (string $html): string => (string) preg_replace('/nonce="[^"]*"|value="[^"]*"/', '', $html);
+    $vorlage = anfrage($basis, $z1['dose'], 'GET', '/kundenbereich/gibt-es-nicht');
+    $abweichend = [];
+    foreach (['/kundenbereich/locations/' . $sites['b'], '/kundenbereich/locations/' . $sites['c'], '/kundenbereich/locations/999999999',
+        '/kundenbereich/locations/0', '/kundenbereich/locations/' . $sites['a'] . 'x', '/kundenbereich/locations/-' . $sites['a'],
+        '/kundenbereich/locations/0' . $sites['a'], $plan($sites['a'], $b1), $plan($sites['b'], $b1), $plan($sites['a'], $a3), $plan($sites['a'], 999999999),
+        $plan($sites['c'], $b1), '/kundenbereich/locations/' . $sites['a'] . '/plan/' . $a1 . 'x', '/kundenbereich/locations/' . $sites['a'] . '/plan'] as $pfad) {
+        $r = anfrage($basis, $z1['dose'], 'GET', $pfad);
+        if ($r['status'] !== 404 || $ohneMarken($r['text']) !== $ohneMarken($vorlage['text']) || kopfzeile($r, 'Cache-Control') !== 'private, no-store') {
+            $abweichend[] = $pfad . ' → ' . $r['status'];
+        }
+    }
+    gleich($abweichend, [], 'IDOR: fremde/abgelaufene/kommende Location, fremde Etage, Etage ohne Plan, kaputte IDs – dieselbe 404');
+    pruefe(!str_contains($vorlage['text'], 'aria-current'), '404 markiert keinen Eintrag der Navigation');
+    $z2 = anmeldenAls($basis, $kennung . '-z2', $kennwort, $dosen);
+    gleich([anfrage($basis, $z2['dose'], 'GET', '/kundenbereich/locations/' . $sites['b'])['status'], anfrage($basis, $z2['dose'], 'GET', '/kundenbereich/locations/' . $sites['a'])['status'],
+        anfrage($basis, $z2['dose'], 'GET', $plan($sites['b'], $b1))['status'], anfrage($basis, $z2['dose'], 'GET', $plan($sites['a'], $a1))['status']], [200, 404, 200, 404],
+        'K2 (anderer Veranstalter am geteilten Gelände A): B ja, A nicht mehr');
+    pruefe(str_contains(anfrage($basis, $z2['dose'], 'GET', '/kundenbereich/locations')['text'], $kennung . ' Gelände C'), 'K2: C unter „Demnächst“');
+    gleich(meldungenDesServers($serverFehler), [], 'Seiten und Pläne des Kundenbereichs ohne PHP-Meldung');
+
     // Personal.
     $admin = anmeldenAls($basis, $kennung . '-admin', $kennwort, $dosen);
     $r = anfrage($basis, $admin['dose'], 'GET', '/kundenbereich');
@@ -779,6 +928,10 @@ try {
     $zweite = anmeldenAls($basis, $kennung . '-z1b', $kennwort, $dosen);
     $r = anfrage($basis, $z1b['dose'], 'GET', '/kundenbereich');
     gleich([$r['status'], $r['ziel']], [302, '/kundenbereich/konto'], 'vorläufiges Kennwort: Kundenbereich → Konto');
+    foreach (['/kundenbereich/locations', '/kundenbereich/locations/' . $sites['a'], $plan($sites['a'], $a1), '/kundenbereich/hilfe'] as $pfad) {
+        $r = anfrage($basis, $z1b['dose'], 'GET', $pfad);
+        gleich([$r['status'], $r['ziel']], [302, '/kundenbereich/konto'], 'vorläufiges Kennwort: ' . $pfad . ' → Konto');
+    }
     $r = anfrage($basis, $z1b['dose'], 'GET', '/profil');
     gleich([$r['status'], $r['ziel']], [302, '/kundenbereich'], 'vorläufiges Kennwort: /profil bleibt zu (Tor)');
     $konto = anfrage($basis, $z1b['dose'], 'GET', '/kundenbereich/konto');
@@ -966,12 +1119,18 @@ try {
         'pflegen ohne „Alle Standorte …“: Freigaben nur ansehen');
     gleich(meldungenDesServers($serverFehler), [], 'Rechte der Kundenverwaltung ohne PHP-Meldung');
 
-    // Kunde beendet: die offene Sitzung endet bei der nächsten Anfrage.
+    // Kunde beendet: die offenen Sitzungen enden bei der nächsten Anfrage – auch mitten im Plan.
+    $zweiteSitzung = anmeldenAls($basis, $kennung . '-z1b', 'Neu-' . $kennwort, $dosen);
+    gleich(anfrage($basis, $zweiteSitzung['dose'], 'GET', '/kundenbereich/locations/' . $sites['a'])['status'], 200, 'zweiter Zugang von K1: Location A');
     Database::update('kunden', $kunden['k1'], ['aktiv' => 0]);
     $r = anfrage($basis, $z1['dose'], 'GET', '/kundenbereich');
     pruefe($r['status'] === 302 && str_starts_with((string) $r['ziel'], '/login'), 'Kunde beendet: offene Sitzung endet');
     $r = anfrage($basis, $z1['dose'], 'GET', '/system/benutzer');
     pruefe($r['status'] === 302 && str_starts_with((string) $r['ziel'], '/login'), 'Kunde beendet: auch keine Personalseite');
+    $r = anfrage($basis, $zweiteSitzung['dose'], 'GET', $plan($sites['a'], $a1));
+    pruefe($r['status'] === 302 && str_starts_with((string) $r['ziel'], '/login') && $r['text'] !== $planBytes, 'Kunde beendet: der zweite Zugang bekommt keinen Plan mehr');
+    $r = anfrage($basis, $zweiteSitzung['dose'], 'GET', '/kundenbereich/locations/' . $sites['a']);
+    pruefe($r['status'] === 302 && str_starts_with((string) $r['ziel'], '/login'), 'Kunde beendet: … und keine Location');
     $versuch = anmeldenAls($basis, $kennung . '-z1', $kennwort, $dosen);
     pruefe($versuch['ziel'] === '/login' && str_contains(anmeldeMeldung($basis, $versuch['dose']), 'nicht mehr aktiv'),
         'Kunde beendet: Anmeldung mit richtigem Kennwort „nicht mehr aktiv“');
@@ -1026,10 +1185,14 @@ try {
     if (isset($rolleKunde)) {
         Database::execute("DELETE FROM freigaben WHERE subject_type = 'role' AND subject_id = ? AND notiz = ?", [$rolleKunde, $kennung]);
     }
+    Database::execute('DELETE FROM anschluesse WHERE objekt_id IN (SELECT id FROM objekte WHERE name LIKE ?)', [$kennung . '%']);
     Database::execute('DELETE FROM objekte WHERE name LIKE ?', [$kennung . '%']);
     foreach ($sites as $id) {
-        SiteService::deleteSite($id);
+        SiteService::deleteSite($id);   // samt Etagen und Plandateien
         Database::execute("DELETE FROM audit_log WHERE target_type = 'site' AND target_id = ?", [(string) $id]);
+    }
+    foreach ($etagen ?? [] as $id) {
+        Database::execute("DELETE FROM audit_log WHERE target_type = 'floor' AND target_id = ?", [(string) $id]);
     }
     foreach ($personal as $id) {
         BenutzerService::kontoEntfernen($id);

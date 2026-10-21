@@ -83,6 +83,29 @@ final class KundenEinstellungen
     }
 
     /**
+     * Der Ansprechpartner für Kunden: „kundenbereich.kontakt“, sonst das
+     * Bereitschaftstelefon der Übergabeberichte. Dazu die erste Telefonnummer
+     * darin zum Antippen (tel:) – nur Ziffern und ein „+“ vorn, mindestens
+     * sechs Ziffern; ein Datum („24.09.2026“) ist keine.
+     *
+     * @return array{text:string,telefon:?string}
+     */
+    public static function kontakt(): array
+    {
+        $text = self::wert('kundenbereich.kontakt');
+        if ($text === '') {
+            $text = Einstellungen::wert('berichte.bereitschaft');
+        }
+        $telefon = null;
+        if (preg_match('#\+?\d[\d /()-]{4,}\d#', $text, $m) === 1) {
+            $nummer = (string) preg_replace('/^\+(\d+)\s*\(0\)/', '+$1', trim($m[0]));   // „+49 (0)171 …“ → „+49171 …“
+            $nummer = (str_starts_with($nummer, '+') ? '+' : '') . (string) preg_replace('/\D/', '', $nummer);
+            $telefon = strlen(ltrim($nummer, '+')) >= 6 ? $nummer : null;
+        }
+        return ['text' => $text, 'telefon' => $telefon];
+    }
+
+    /**
      * Die Adresse der Oberfläche aus app.url – nur http(s)://host[:port][/pfad],
      * ohne Zugangsdaten, Abfrage und Anker, ohne „/“ am Ende. null, wenn sie
      * fehlt oder nicht taugt: dann gibt es keine Einrichtungslinks.

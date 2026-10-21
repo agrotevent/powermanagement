@@ -134,6 +134,7 @@ foreach (array_merge(array_keys(Einstellungen::VORGABEN), array_keys(\App\Kunden
     $eventworxVorher[$s] = Settings::get($s);
 }
 $bSite = 0;
+$planSite = 0;
 // Audit-Einträge dieses Laufs zu eigenen Rollen, Standorten, Etagen und Anlagen
 // tragen die Kennung nicht im Text – am Ende über ihr Ziel weg.
 $auditVorher = (int) Database::scalar('SELECT COALESCE(MAX(id), 0) FROM audit_log');
@@ -255,6 +256,27 @@ try {
     pruefe($r['status'] === 404 && substr_count($r['text'], '<!DOCTYPE') === 1 && !str_contains($r['text'], 'action="/logout"'), 'unbekannte Adresse → 404, Fehlerseite ohne Layout');
     gleich(serverMeldungen($serverFehler), [], 'Admin: alle Seiten ohne PHP-Meldung im Fehlerprotokoll des Servers');
     gleich(aufruf($basis, $admin['dose'], 'GET', '/system/freigaben?id=0')['status'], 404, 'Freigaben ohne Benutzer → 404');
+
+    // Plandatei des Personals: dieselben Kopfzeilen wie immer, seit sie über
+    // SiteService::planAusliefern() läuft (das auch der Kundenbereich nutzt).
+    $planSite = \App\Services\SiteService::saveSite(null, ['name' => $kennung . ' Plan']);
+    $auditZiele[] = ['site', $planSite];
+    $planEtage = \App\Services\SiteService::saveFloor(null, ['site_id' => $planSite, 'name' => $kennung . ' EG']);
+    $planOhne = \App\Services\SiteService::saveFloor(null, ['site_id' => $planSite, 'name' => $kennung . ' OG']);
+    array_push($auditZiele, ['floor', $planEtage], ['floor', $planOhne]);
+    $planBytes = (string) base64_decode('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==');
+    $planDatei = 'site' . $planSite . '_' . bin2hex(random_bytes(8)) . '.png';
+    file_put_contents(\App\Services\SiteService::planDir() . '/' . $planDatei, $planBytes);
+    Database::update('floors', $planEtage, ['plan_file' => $planDatei, 'plan_type' => 'image', 'plan_original_name' => 'Hallenplan EG.png']);
+    $r = aufruf($basis, $admin['dose'], 'GET', '/grundriss/' . $planEtage . '/datei');
+    $kopf = static fn (array $r, string $name): string => preg_match('/^' . preg_quote($name, '/') . ':\s*(.+?)\r?$/mi', $r['kopf'], $m) === 1 ? trim($m[1]) : '';
+    gleich([$r['status'], $kopf($r, 'Content-Type'), $kopf($r, 'Content-Disposition'), $kopf($r, 'Content-Length'), $kopf($r, 'X-Content-Type-Options'),
+        $kopf($r, 'Cache-Control'), $kopf($r, 'Content-Security-Policy'), $kopf($r, 'Referrer-Policy'), $r['text'] === $planBytes],
+        [200, 'image/png', 'inline; filename="Hallenplan EG.png"', (string) strlen($planBytes), 'nosniff', 'private, max-age=600',
+            "default-src 'none'; style-src 'unsafe-inline'; sandbox", 'no-referrer', true], 'Plandatei des Personals: Kopfzeilen und Inhalt unverändert');
+    $r = aufruf($basis, $admin['dose'], 'GET', '/grundriss/' . $planOhne . '/datei');
+    gleich([$r['status'], $r['text']], [404, 'kein Grundriss hinterlegt'], 'Etage ohne Plan: 404 wie bisher');
+    gleich(aufruf($basis, $admin['dose'], 'GET', '/grundriss/999999999/datei')['status'], 404, 'Plandatei einer unbekannten Etage: 404');
 
     // Eventworx-Karte: Token verschlüsselt, an den Host gebunden, nie in der Seite
     $ewxToken = 'tok-' . $kennung . '-' . bin2hex(random_bytes(6));
@@ -1488,6 +1510,9 @@ try {
     Database::execute('DELETE FROM pruefgeraete WHERE fabrikat LIKE ?', [$kennung . '%']);
     if ($bSite > 0) {
         \App\Services\SiteService::deleteSite($bSite);
+    }
+    if ($planSite > 0) {
+        \App\Services\SiteService::deleteSite($planSite);   // samt Plandatei
     }
     foreach ($benutzer as $id) {
         Database::execute('DELETE FROM schaltvorgaenge WHERE user_id = ?', [$id]);
