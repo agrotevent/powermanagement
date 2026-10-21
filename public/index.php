@@ -73,6 +73,9 @@ $router->get('/kundenbereich', [KundenbereichController::class, 'index']);
 $router->get('/kundenbereich/locations', [KundenbereichController::class, 'locations']);
 $router->get('/kundenbereich/locations/{id}', [KundenbereichController::class, 'location']);
 $router->get('/kundenbereich/locations/{id}/plan/{etage}', [KundenbereichController::class, 'plan']);
+$router->get('/kundenbereich/protokolle', [KundenbereichController::class, 'protokolle']);
+$router->get('/kundenbereich/protokolle/{id}', [KundenbereichController::class, 'protokoll']);
+$router->get('/kundenbereich/protokolle/{id}/pdf', [KundenbereichController::class, 'protokollPdf']);
 $router->get('/kundenbereich/konto', [KundenbereichController::class, 'konto']);
 $router->post('/kundenbereich/konto/kennwort', [KundenbereichController::class, 'kennwort']);
 $router->get('/kundenbereich/hilfe', [KundenbereichController::class, 'hilfe']);
@@ -191,6 +194,9 @@ $router->post('/berichte/{id}/ohne-kunde', [BerichtController::class, 'ohneKunde
 $router->post('/berichte/{id}/korrektur', [BerichtController::class, 'korrektur'], 'berichte.pruefen');
 $router->post('/berichte/{id}/verwerfen', [BerichtController::class, 'verwerfen'], 'berichte.pruefen');
 $router->post('/berichte/{id}/loeschen', [BerichtController::class, 'loeschen'], 'berichte.manage');
+// Bericht ↔ Kunde des Kundenbereichs (auch nach dem Einfrieren; dazu BerichtService::sichtbar).
+// Bewusst nicht /berichte/{id}/kunde…: dort liegt der Kundenmodus, und seine offenen Wege dürfen nie eine Zuordnung durchlassen.
+$router->post('/berichte/{id}/kundenbereich', [KundenController::class, 'berichtZuordnen'], 'kunden.manage');
 
 // Inventar: Verteiler und Zwischenstecker mit Shellys, Einsatz beim Aufbau.
 $router->get('/inventar', [InventarController::class, 'index'], 'datenquellen.view');

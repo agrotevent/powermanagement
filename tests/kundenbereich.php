@@ -32,7 +32,13 @@ declare(strict_types=1);
  * Kunde beendet beendet die Sitzung; Seiten des Kundenbereichs (Übersicht,
  * Locations, Location, Konto, Hilfe) mit no-store und ohne Inline-Skript,
  * Pläne (Bild inline, PDF als Anhang, sandbox, neutraler Name), fremde und
- * nicht vorhandene IDs mit derselben 404; Kundenverwaltung mit allen Reitern,
+ * nicht vorhandene IDs mit derselben 404; Protokolle (Übergabeberichte) nur
+ * über die Zuordnung am Bericht – mehrere Veranstalter auf einem Gelände,
+ * ersetzte Fassungen unter der gültigen, PDF nur gespeichert (Kopfzeilen,
+ * Prüfsumme, Abruf in kunden_abrufe, Audit und Lebenslauf), Fremdes und
+ * Unfertiges mit derselben 404 –, am Bericht und im Reiter Protokolle
+ * zuordnen (Vorschlag, Rückfrage bei anderem Namen, CSRF, Rechte);
+ * Kundenverwaltung mit allen Reitern,
  * Geheimnis nur einmal in der Antwort (no-store, Einmal-Marke), Einrichtungs-
  * link einlösen (CSRF, gleiche 404 für falsch/abgelaufen/verbraucht, nicht
  * in eine offene Sitzung), Überschneidung mit Rückfrage, CSRF und Rechte an
@@ -46,6 +52,9 @@ require __DIR__ . '/hilfen/pruefung.php';
 
 use App\Auth\Auth;
 use App\Auth\Zugriff;
+use App\Berichte\BerichtSchema;
+use App\Berichte\BerichtService;
+use App\Berichte\Kanon;
 use App\Controllers\KundenController;
 use App\Kunden\Einrichtung;
 use App\Kunden\KundenEinstellungen;
@@ -78,6 +87,7 @@ $dosen = [];
 $auditVorher = (int) Database::scalar('SELECT COALESCE(MAX(id), 0) FROM audit_log');
 $appUrlVorher = (string) Config::get('app.url', '');
 $dateien = [];
+$berichte = [];
 
 /** Ein Kunde – direkt in der Tabelle (die Kundenverwaltung kommt später). */
 $kundeAnlegen = static function (string $name, int $aktiv = 1) use ($kennung): int {
@@ -253,6 +263,54 @@ try {
         (string) Database::scalar('SELECT role_key FROM roles WHERE id = ?', [$rollen['ohnealles']]), false);
     $rolleKunde = (int) Database::scalar("SELECT id FROM roles WHERE role_key = 'kunde'");
     $rolleAdmin = (int) Database::scalar('SELECT id FROM roles WHERE is_system = 1 ORDER BY id LIMIT 1');
+
+    // Übergabeberichte per SQL (den echten Weg über die Unterschriften prüft tests/berichte.php):
+    // b1 (A, K1) ist durch die Korrektur b1k ersetzt, beide mit gespeichertem PDF; b2 (A, K2, Prüfung heute – im
+    // Datenfenster von K1!); b3 (A, K1, Entwurf); b4 (A, ohne Kunde, im Bericht der Name von K1, Eventworx-Kunde wie K1);
+    // b5 (A, K1, abgeschlossen, ohne gespeichertes PDF); b6 (A, K3 – beendet, mit PDF).
+    $heute = (new DateTimeImmutable('now', Zeit::zone()))->format('Y-m-d');
+    $vorTagen = static fn (int $n): string => (new DateTimeImmutable('now', Zeit::zone()))->modify('-' . $n . ' days')->format('Y-m-d');
+    do {
+        $jahrB = random_int(3000, 8999);
+    } while ((int) Database::scalar('SELECT COUNT(*) FROM berichte WHERE jahr = ?', [$jahrB]) > 0);
+    $ewxHost = $kennung . '.eventworx.biz';
+    $ewxRef = bin2hex(random_bytes(12));
+    Database::update('kunden', $kunden['k1'], ['ewx_host' => $ewxHost, 'ewx_kunde_ref' => $ewxRef]);
+    $berichtAnlegen = static function (string $name, array $felder, ?string $pdf = null) use (&$berichte, $kennung, $sites, $personal, $jahrB): int {
+        $inhalt = BerichtSchema::leer();
+        $inhalt['kopf']['veranstaltung'] = $kennung . ' Veranstaltung ' . $name;
+        $inhalt['kopf']['anlage']['bezeichnung'] = 'Anlage ' . $name;
+        $inhalt['kopf']['kunde']['firma'] = (string) ($felder['kunde_name'] ?? '');
+        $inhalt['kopf']['pruefdatum'] = (string) $felder['pruefdatum'];
+        $id = (int) Database::insert('berichte', $felder + [
+            'jahr' => $jahrB, 'fassung' => 1, 'site_id' => $sites['a'], 'standort_name' => $kennung . ' Gelände A (geteilt)', 'titel' => $kennung,
+            'veranstaltung' => $kennung . ' Veranstaltung ' . $name, 'kunde_name' => '', 'inhalt' => Kanon::json($inhalt), 'erstellt_von' => $personal['admin'],
+            'ewx_nummer' => 'EWX-' . $kennung, 'created_at' => gmdate('c'),
+        ]);
+        if ($pdf !== null) {
+            Database::insert('bericht_pdf', ['bericht_id' => $id, 'sha256' => hash('sha256', $pdf), 'groesse' => strlen($pdf), 'daten' => base64_encode($pdf),
+                'erzeuger' => 'pruefung', 'erzeugt_am' => gmdate('c'), 'siegel' => str_repeat('0', 64), 'schluessel_id' => 'pruefung']);
+            Database::update('berichte', $id, ['pdf_hash' => hash('sha256', $pdf)]);
+        }
+        // Ein Eintrag im Lebenslauf mit Marke: der Kundenbereich zeigt ihn nie.
+        Database::insert('bericht_ereignisse', ['bericht_id' => $id, 'ereignis' => 'gespeichert', 'am' => gmdate('c'), 'username' => $kennung . '-lebenslauf']);
+        return $berichte[$name] = $id;
+    };
+    $pdfVon = static fn (string $name): string => "%PDF-1.4\n% Protokoll " . $name . ' ' . $kennung . "\n%%EOF\n";
+    $nummer = static fn (int $laufnr, int $fassung = 1): string => sprintf('UB-%d-%04d', $jahrB, $laufnr) . ($fassung > 1 ? '-K' . ($fassung - 1) : '');
+    $kundeK1 = $kennung . ' Muster Events';
+    $abgeschlossen = static fn (string $tag): array => ['status' => 'abgeschlossen', 'pruefdatum' => $tag, 'abgeschlossen_am' => gmdate('c'), 'eingefroren_am' => gmdate('c')];
+    $ub1 = $berichtAnlegen('b1', ['nummer' => $nummer(1), 'laufnr' => 1, 'kunde_id' => $kunden['k1'], 'kunde_name' => $kundeK1] + $abgeschlossen($vorTagen(5)), $pdfVon('b1'));
+    $ub1k = $berichtAnlegen('b1k', ['nummer' => $nummer(1, 2), 'laufnr' => 1, 'fassung' => 2, 'vorgaenger_id' => $ub1, 'korrektur_grund' => 'Querschnitt nachgetragen',
+        'kunde_id' => $kunden['k1'], 'kunde_name' => $kundeK1] + $abgeschlossen($vorTagen(5)), $pdfVon('b1k'));
+    Database::update('berichte', $ub1, ['status' => 'ersetzt', 'ersetzt_durch_id' => $ub1k]);
+    $ub2 = $berichtAnlegen('b2', ['nummer' => $nummer(2), 'laufnr' => 2, 'kunde_id' => $kunden['k2'], 'kunde_name' => $kennung . ' Stadtmarketing'] + $abgeschlossen($heute),
+        $pdfVon('b2'));
+    $ub3 = $berichtAnlegen('b3', ['status' => 'entwurf', 'jahr' => null, 'pruefdatum' => $heute, 'kunde_id' => $kunden['k1'], 'kunde_name' => $kundeK1]);
+    $ub4 = $berichtAnlegen('b4', ['nummer' => $nummer(4), 'laufnr' => 4, 'kunde_name' => $kundeK1 . ' GmbH & Co. KG', 'ewx_host' => $ewxHost, 'ewx_kunde_ref' => $ewxRef]
+        + $abgeschlossen($vorTagen(2)), $pdfVon('b4'));
+    $ub5 = $berichtAnlegen('b5', ['nummer' => $nummer(5), 'laufnr' => 5, 'kunde_id' => $kunden['k1'], 'kunde_name' => $kundeK1] + $abgeschlossen($vorTagen(1)));
+    $ub6 = $berichtAnlegen('b6', ['nummer' => $nummer(6), 'laufnr' => 6, 'kunde_id' => $kunden['k3']] + $abgeschlossen($vorTagen(1)), $pdfVon('b6'));
 
     // ------------------------------------------------ Rechte vergeben: Standardrollen
     alsBenutzer($personal['planung']);
@@ -453,9 +511,9 @@ try {
         'Freigabe ohne Datenenden (per SQL): „keine Messdaten freigegeben“');
     gleich((KundenSicht::etage($kunden['k1'], $sites['a'], $a1) ?? [])['id'] ?? null, $a1, 'etage(K1, A, A1): da');
     foreach ([
-        'Etage eines anderen Standorts (B1 über A)' => [$kunden['k1'], $sites['a'], $b1],
+        'Etage eines anderen Standorts (B1 über A)' => [$kunden['k1'], $sites['a'], $ub1],
         'Etage ohne Plan (A3)'                      => [$kunden['k1'], $sites['a'], $a3],
-        'Standort nicht freigegeben (B1 über B)'    => [$kunden['k1'], $sites['b'], $b1],
+        'Standort nicht freigegeben (B1 über B)'    => [$kunden['k1'], $sites['b'], $ub1],
         'Freigabe abgelaufen (K2, A1)'              => [$kunden['k2'], $sites['a'], $a1],
         'unbekannte Etage'                          => [$kunden['k1'], $sites['a'], 999999999],
         'beendeter Kunde'                           => [$kunden['k3'], $sites['a'], $a1],
@@ -466,6 +524,55 @@ try {
     gleich([$zf['gesperrt'], $zf['locations'], $zf['kommend']], [null, KundenSicht::locations($kunden['k1']), []], 'zusammenfassung(K1) = was der Kundenbereich zeigt');
     gleich([KundenSicht::zusammenfassung($kunden['k3'])['gesperrt'], KundenSicht::zusammenfassung($kunden['k3'])['locations']], [Kundenbereich::NICHT_AKTIV, []],
         'zusammenfassung eines beendeten Kunden: gesperrt, nichts sichtbar');
+
+    // ------------------------------------------------ KundenSicht: Protokolle nur über die Zuordnung
+    $prot = static fn (array $l): array => array_map(static fn (array $p): array => [$p['id'], array_column($p['fruehere'], 'id')], $l);
+    gleich($prot(KundenSicht::berichte($kunden['k1'])), [[$ub5, []], [$ub1k, [$ub1]]],
+        'K1: b5 und b1k (die ersetzte b1 darunter) – nicht b2 (K2), b3 (Entwurf), b4 (ohne Kunde, auch wenn der Name passt)');
+    gleich($prot(KundenSicht::berichte($kunden['k2'])), [[$ub2, []]], 'K2 sieht b2 – die Freigabe auf A ist abgelaufen, das Dokument bleibt');
+    gleich(KundenSicht::berichte($kunden['k3']), [], 'beendeter Kunde: keine Protokolle');
+    $liste = KundenSicht::berichte($kunden['k1']);
+    gleich([$liste[1]['nummer'], $liste[1]['status'], $liste[1]['pdf'], $liste[1]['fruehere'][0]['ersetzt_durch'] ?? null, $liste[0]['pdf']],
+        [$nummer(1, 2), 'abgeschlossen', true, $nummer(1, 2), false], 'Liste: gültige Fassung mit PDF, frühere „ersetzt durch“, b5 ohne PDF');
+    gleich(array_keys($liste[1]), ['id', 'nummer', 'fassung', 'status', 'titel', 'veranstaltung', 'standort', 'pruefdatum', 'abgeschlossen_am', 'pdf', 'ersetzt_durch', 'fruehere'],
+        'Liste nur mit Listenfeldern (kein Inhalt, keine Eventworx-Verweise)');
+    foreach (['b2 (anderer Kunde)' => $ub2, 'b3 (Entwurf)' => $ub3, 'b4 (ohne Kunde)' => $ub4, 'unbekannt' => 999999999] as $fall => $bid) {
+        gleich(KundenSicht::bericht($kunden['k1'], $bid), null, 'bericht(K1, …) === null – ' . $fall);
+    }
+    gleich(KundenSicht::bericht($kunden['k3'], $ub6), null, 'bericht() eines beendeten Kunden === null');
+    $sicht = KundenSicht::bericht($kunden['k1'], $ub1k) ?? [];
+    gleich([$sicht['pdf']['sha256'] ?? null, $sicht['vorgaenger']['id'] ?? null, array_key_exists('nachfolger', $sicht) ? $sicht['nachfolger'] : 'x'], [hash('sha256', $pdfVon('b1k')), $ub1, null],
+        'bericht(K1, b1k): Prüfsumme des gespeicherten PDF, Vorgänger b1');
+    gleich([(KundenSicht::bericht($kunden['k1'], $ub1) ?? [])['nachfolger']['id'] ?? null, array_key_exists('pdf', KundenSicht::bericht($kunden['k1'], $ub5) ?? [])
+        ? (KundenSicht::bericht($kunden['k1'], $ub5) ?? [])['pdf'] : 'x'], [$ub1k, null], 'die ersetzte b1 verweist auf b1k; b5 ohne PDF');
+    pruefe(!str_contains((string) json_encode($sicht['bericht'] ?? [], JSON_UNESCAPED_UNICODE), 'EWX-' . $kennung), 'bericht() ohne Eventworx-Verweis');
+    gleich([(KundenSicht::protokollPdf($kunden['k1'], $ub1k) ?? [])['bytes'] ?? null, KundenSicht::protokollPdf($kunden['k1'], $ub5), KundenSicht::protokollPdf($kunden['k1'], $ub2),
+        KundenSicht::protokollPdf($kunden['k3'], $ub6)], [$pdfVon('b1k'), null, null, null], 'protokollPdf: nur gespeicherte Bytes, nur eigene, nur aktive Kunden');
+    Database::execute('UPDATE bericht_pdf SET sha256 = ? WHERE bericht_id = ?', [str_repeat('a', 64), $ub1]);
+    gleich(KundenSicht::protokollPdf($kunden['k1'], $ub1), null, 'PDF, dessen Bytes nicht zur gespeicherten Prüfsumme passen: nicht ausgeliefert');
+    Database::execute('UPDATE bericht_pdf SET sha256 = ? WHERE bericht_id = ?', [hash('sha256', $pdfVon('b1')), $ub1]);
+    gleich(array_column((KundenSicht::location($kunden['k1'], $sites['a']) ?? [])['berichte'] ?? [], 'id'), [$ub5, $ub1k], 'Location A: die Protokolle von K1 dort');
+    gleich(KundenSicht::zusammenfassung($kunden['k1'])['berichte'], KundenSicht::berichte($kunden['k1']), 'zusammenfassung(K1): dieselben Protokolle');
+    gleich(BerichtService::fuerKunde($kunden['k1'], $sites['b']), [], 'fuerKunde(K1, B): keine');
+    alsBenutzer($zugaenge['z1']);
+    pruefe(!BerichtService::sichtbar(BerichtService::find($ub2) ?? []) && !BerichtService::sichtbar(BerichtService::find($ub1k) ?? []) && BerichtService::liste() === [],
+        'als z1: sichtbar() nie – auch nicht b2, dessen Prüftag im Datenfenster von K1 liegt (mehrere Veranstalter)');
+    alsBenutzer($personal['planung']);
+    $vorschlag = KundenService::vorschlagFuerBericht(BerichtService::find($ub4) ?? []);
+    gleich([(int) ($vorschlag['kunde']['id'] ?? 0), str_contains((string) ($vorschlag['grund'] ?? ''), 'denselben Kunden')], [$kunden['k1'], true],
+        'Vorschlag für b4: K1 (Eventworx nennt denselben Kunden)');
+    $vorgangK2 = (int) Database::insert('kunden_vorgaenge', ['kunde_id' => $kunden['k2'], 'ewx_host' => $ewxHost, 'ewx_id' => bin2hex(random_bytes(12)),
+        'ewx_nummer' => 'AU-' . $kennung, 'verknuepft_am' => gmdate('c')]);
+    $vorgangId = (string) Database::scalar('SELECT ewx_id FROM kunden_vorgaenge WHERE id = ?', [$vorgangK2]);
+    gleich((int) (KundenService::vorschlagFuerBericht(['ewx_host' => $ewxHost, 'ewx_id' => $vorgangId, 'ewx_nummer' => 'AU-1', 'ewx_kunde_ref' => $ewxRef])['kunde']['id'] ?? 0),
+        $kunden['k2'], 'Vorschlag: zuerst der verknüpfte Vorgang (vor der Kunden-Kennung)');
+    gleich([KundenService::vorschlagFuerBericht(['ewx_host' => 'anders.eventworx.biz', 'ewx_id' => $vorgangId, 'ewx_kunde_ref' => $ewxRef]),
+        KundenService::vorschlagFuerBericht(['ewx_host' => '', 'ewx_id' => '', 'ewx_kunde_ref' => '', 'kunde_name' => $kundeK1])], [null, null],
+        'kein Vorschlag von einem anderen Eventworx-Host oder nur über den Namen');
+    Database::delete('kunden_vorgaenge', $vorgangK2);
+    $tab = KundenService::protokolle($kunden['k1']);
+    gleich([array_map('intval', array_column($tab['zugeordnet'], 'id')), array_column($tab['zugeordnet'], 'beim_kunden'), array_map('intval', array_column($tab['vorschlaege'], 'id'))],
+        [[$ub3, $ub5, $ub1k, $ub1], [false, false, true, true], [$ub4]], 'Reiter Protokolle: zugeordnet (Entwurf und ohne PDF nicht beim Kunden), Vorschlag b4');
 
     // ------------------------------------------------ Benutzerverwaltung
     alsBenutzer($personal['admin']);
@@ -777,7 +884,8 @@ try {
     $token = csrfAus($start['text']);
     pruefe($token !== '', 'Token aus dem Kundenbereich (Abmelden)');
     $seiten = ['/kundenbereich' => $start];
-    foreach (['/kundenbereich/locations', '/kundenbereich/locations/' . $sites['a'], '/kundenbereich/konto', '/kundenbereich/hilfe'] as $pfad) {
+    foreach (['/kundenbereich/locations', '/kundenbereich/locations/' . $sites['a'], '/kundenbereich/konto', '/kundenbereich/hilfe', '/kundenbereich/protokolle',
+        '/kundenbereich/protokolle/' . $ub1k, '/kundenbereich/protokolle/' . $ub1] as $pfad) {
         $seiten[$pfad] = anfrage($basis, $z1['dose'], 'GET', $pfad);
     }
     foreach ($seiten as $pfad => $r) {
@@ -888,6 +996,64 @@ try {
         anfrage($basis, $z2['dose'], 'GET', $plan($sites['b'], $b1))['status'], anfrage($basis, $z2['dose'], 'GET', $plan($sites['a'], $a1))['status']], [200, 404, 200, 404],
         'K2 (anderer Veranstalter am geteilten Gelände A): B ja, A nicht mehr');
     pruefe(str_contains(anfrage($basis, $z2['dose'], 'GET', '/kundenbereich/locations')['text'], $kennung . ' Gelände C'), 'K2: C unter „Demnächst“');
+
+    // Protokolle: nur die zugeordneten, die gültige Fassung oben, das PDF nur gespeichert – nie etwas vom Personal.
+    $protokolle = $seiten['/kundenbereich/protokolle']['text'];
+    pruefe(str_contains($protokolle, $nummer(1, 2)) && str_contains($protokolle, 'Frühere Fassungen') && str_contains($protokolle, 'href="/kundenbereich/protokolle/' . $ub1 . '"')
+        && str_contains($protokolle, $nummer(5)) && str_contains($protokolle, 'href="/kundenbereich/protokolle/' . $ub1k . '/pdf"')
+        && !str_contains($protokolle, 'href="/kundenbereich/protokolle/' . $ub5 . '/pdf"') && str_contains($protokolle, 'gültige Fassung'),
+        'Protokolle: b1k mit früherer Fassung b1 und PDF, b5 ohne PDF');
+    $marken = ['EWX-' . $kennung, $kennung . '-lebenslauf', $kennung . '-admin'];
+    $durch = array_filter(array_merge($marken, [$nummer(2), $nummer(4), $nummer(6), 'Veranstaltung b3']), static fn (string $m): bool => str_contains($protokolle, $m));
+    gleich(array_values($durch), [], 'Protokolle: nicht b2 (K2), b4 (ohne Kunde), b6 (K3), b3 (Entwurf); keine Eventworx-Verweise, kein Lebenslauf, kein Personal');
+    $ansicht = $seiten['/kundenbereich/protokolle/' . $ub1k]['text'];
+    pruefe(str_contains($ansicht, hash('sha256', $pdfVon('b1k'))) && str_contains($ansicht, 'Messprotokoll') && str_contains($ansicht, 'Korrigierte Fassung')
+        && str_contains($ansicht, 'href="/kundenbereich/protokolle/' . $ub1 . '"') && str_contains($ansicht, 'aria-current="page"'),
+        'Protokoll b1k: Inhalt wie im PDF, Prüfsumme, Vorgänger, Navigation markiert');
+    $durch = array_filter(array_merge($marken, ['/berichte/', 'Verlauf', 'Integrität', 'Korrektur anlegen', 'kundenmodus']), static fn (string $m): bool => str_contains($ansicht, $m));
+    gleich(array_values($durch), [], 'Protokoll: ohne Eventworx-Verweis, Lebenslauf, Integrität, Links und Knöpfe des Personals');
+    $alt1 = $seiten['/kundenbereich/protokolle/' . $ub1]['text'];
+    pruefe(str_contains($alt1, 'durch eine Korrektur ersetzt') && str_contains($alt1, 'href="/kundenbereich/protokolle/' . $ub1k . '"'), 'ersetzte Fassung: Hinweis mit Link auf die gültige');
+    pruefe(str_contains($start['text'], 'Ihre Protokolle') && str_contains($start['text'], $nummer(1, 2)) && str_contains($ort, $nummer(1, 2)) && !str_contains($ort, $nummer(2)),
+        'Übersicht und Location A: die Protokolle von K1, nicht das von K2');
+
+    // Das PDF: gespeicherte Bytes, Kopfzeilen, Abruf in drei Spuren.
+    $abrufeK1 = static fn (): int => (int) Database::scalar('SELECT COUNT(*) FROM kunden_abrufe WHERE kunde_id = ?', [$kunden['k1']]);
+    $vorher = $abrufeK1();
+    $pdf = anfrage($basis, $z1['dose'], 'GET', '/kundenbereich/protokolle/' . $ub1k . '/pdf');
+    gleich([$pdf['status'], kopfzeile($pdf, 'Content-Type'), kopfzeile($pdf, 'Content-Disposition'), kopfzeile($pdf, 'X-Content-Type-Options'), kopfzeile($pdf, 'Cache-Control'),
+        kopfzeile($pdf, 'Referrer-Policy'), hash('sha256', $pdf['text'])], [200, 'application/pdf', 'inline; filename="' . $nummer(1, 2) . '.pdf"', 'nosniff', 'private, no-store',
+        'no-referrer', (string) Database::scalar('SELECT sha256 FROM bericht_pdf WHERE bericht_id = ?', [$ub1k])],
+        'PDF b1k: inline, Name nur die Nummer, nosniff, no-store, no-referrer, Bytes mit der gespeicherten Prüfsumme');
+    $abruf = Database::first('SELECT * FROM kunden_abrufe WHERE kunde_id = ? ORDER BY id DESC LIMIT 1', [$kunden['k1']]) ?? [];
+    gleich([$abrufeK1() - $vorher, $abruf['art'] ?? '', (int) ($abruf['ziel_id'] ?? 0), (int) ($abruf['user_id'] ?? 0), $abruf['sha256'] ?? '', $abruf['username'] ?? ''],
+        [1, 'bericht', $ub1k, $zugaenge['z1'], hash('sha256', $pdfVon('b1k')), $kennung . '-z1'], 'Abruf festgehalten (ohne IP): Kunde, Zugang, Dokument, Prüfsumme');
+    $audit = Database::first("SELECT * FROM audit_log WHERE action = 'kundenbereich.abruf' AND target_id = ? ORDER BY id DESC LIMIT 1", [(string) $ub1k]) ?? [];
+    gleich([$audit['username'] ?? '', json_decode((string) ($audit['details'] ?? '{}'), true), (string) ($audit['ip'] ?? '') !== ''],
+        [$kennung . '-z1', ['art' => 'bericht', 'ziel_id' => $ub1k], true], 'Audit kundenbereich.abruf: der Kundenzugang mit IP, nur Art und ID');
+    $ereignis = Database::first("SELECT * FROM bericht_ereignisse WHERE bericht_id = ? AND ereignis = 'pdf_kunde' ORDER BY id DESC LIMIT 1", [$ub1k]) ?? [];
+    gleich([(int) ($ereignis['user_id'] ?? 0), $ereignis['username'] ?? '', json_decode((string) ($ereignis['details'] ?? '{}'), true)],
+        [$zugaenge['z1'], 'kundenbereich', ['user_id' => (string) $zugaenge['z1']]], 'Lebenslauf: pdf_kunde mit der Konto-ID, ohne Namen');
+    $ersetzt = anfrage($basis, $z1['dose'], 'GET', '/kundenbereich/protokolle/' . $ub1 . '/pdf');
+    gleich([$ersetzt['status'], $ersetzt['text'] === $pdfVon('b1')], [200, true], 'PDF der ersetzten Fassung b1: weiter abrufbar');
+
+    // Fremd, unfertig, ohne gespeichertes PDF, beendeter Kunde: dieselbe 404 – und kein Abruf.
+    $abrufeAlle = static fn (): int => (int) Database::scalar('SELECT COUNT(*) FROM kunden_abrufe');
+    $vorher = $abrufeAlle();
+    $abweichend = [];
+    foreach ([$ub2, $ub2 . '/pdf', $ub3, $ub3 . '/pdf', $ub4, $ub4 . '/pdf', $ub5 . '/pdf', $ub6, $ub6 . '/pdf', '999999999', '999999999/pdf', '0', $ub1k . 'x',
+        '0' . $ub1k, '-' . $ub1k . '/pdf', $ub1k . '/pdf/x'] as $rest) {
+        $r = anfrage($basis, $z1['dose'], 'GET', '/kundenbereich/protokolle/' . $rest);
+        if ($r['status'] !== 404 || $ohneMarken($r['text']) !== $ohneMarken($vorlage['text']) || kopfzeile($r, 'Cache-Control') !== 'private, no-store') {
+            $abweichend[] = $rest . ' → ' . $r['status'];
+        }
+    }
+    gleich($abweichend, [], 'IDOR: Protokolle anderer Kunden, Entwurf, ohne Kunde, ohne gespeichertes PDF, beendeter Kunde, kaputte IDs – dieselbe 404');
+    gleich($abrufeAlle(), $vorher, '… und kein Abruf festgehalten');
+    gleich([anfrage($basis, $z2['dose'], 'GET', '/kundenbereich/protokolle/' . $ub2)['status'], anfrage($basis, $z2['dose'], 'GET', '/kundenbereich/protokolle/' . $ub2 . '/pdf')['status'],
+        anfrage($basis, $z2['dose'], 'GET', '/kundenbereich/protokolle/' . $ub1k)['status']], [200, 200, 404],
+        'K2 (anderer Veranstalter am Gelände A): sein Protokoll b2 – das von K1 nicht');
+    gleich(meldungenDesServers($serverFehler), [], 'Protokolle des Kundenbereichs ohne PHP-Meldung');
     gleich(meldungenDesServers($serverFehler), [], 'Seiten und Pläne des Kundenbereichs ohne PHP-Meldung');
 
     // Personal.
@@ -1082,9 +1248,48 @@ try {
         'neues vorläufiges Kennwort: direkt in der Antwort, no-store');
     gleich(meldungenDesServers($serverFehler), [], 'Freigaben und Zugangsaktionen ohne PHP-Meldung');
 
+    // Protokolle zuordnen – am Bericht (Karte „Kundenbereich“) und im Reiter Protokolle.
+    $karte = anfrage($basis, $planung['dose'], 'GET', '/berichte/' . $ub1k);
+    pruefe($karte['status'] === 200 && str_contains($karte['text'], 'id="kundenbereich"') && str_contains($karte['text'], 'href="/kunden/' . $kunden['k1'] . '?tab=protokolle"')
+        && str_contains($karte['text'], 'Zuletzt im Kundenbereich geladen') && str_contains($karte['text'], 'Der Kunde sieht den Bericht')
+        && str_contains($karte['text'], 'action="/berichte/' . $ub1k . '/kundenbereich"'), 'Bericht b1k: Karte „Kundenbereich“ – zugeordnet, sichtbar, zuletzt geladen, Formular');
+    pruefe(str_contains(anfrage($basis, $planung['dose'], 'GET', '/berichte/' . $ub4)['text'], 'Vorschlag: <strong>' . htmlspecialchars($kundeK1)), 'Bericht b4: Vorschlag K1 aus Eventworx');
+    $tabP = anfrage($basis, $planung['dose'], 'GET', '/kunden/' . $kunden['k1'] . '?tab=protokolle');
+    pruefe(str_contains($tabP['text'], $nummer(1, 2)) && str_contains($tabP['text'], 'Entwurf #' . $ub3) && str_contains($tabP['text'], 'nach dem Abschluss')
+        && str_contains($tabP['text'], 'ohne PDF') && str_contains($tabP['text'], $nummer(4)) && !str_contains($tabP['text'], $nummer(2)),
+        'Reiter Protokolle: zugeordnete mit Zustand, Vorschlag b4, nicht b2');
+    $tabA = anfrage($basis, $planung['dose'], 'GET', '/kunden/' . $kunden['k1'] . '?tab=abrufe');
+    pruefe(str_contains($tabA['text'], $kennung . '-z1') && str_contains($tabA['text'], $nummer(1, 2)), 'Reiter Abrufe: Zugang und Dokument');
+    $pt = csrfAus($tabP['text']);
+    $kundeVon = static fn (int $bid): ?int => ($k = Database::scalar('SELECT kunde_id FROM berichte WHERE id = ?', [$bid])) === null ? null : (int) $k;
+    $r = anfrage($basis, $planung['dose'], 'POST', '/berichte/' . $ub4 . '/kundenbereich', ['_token' => $pt, 'kunde_id' => $kunden['k1'], 'zurueck' => $kunden['k1']]);
+    gleich([$r['status'], $r['ziel'], $kundeVon($ub4)], [302, '/kunden/' . $kunden['k1'] . '?tab=protokolle', $kunden['k1']], 'Vorschlag b4 zugeordnet (Name passt) → zurück zum Reiter');
+    $z1neu = anmeldenAls($basis, $kennung . '-z1', $kennwort, $dosen);
+    gleich(anfrage($basis, $z1neu['dose'], 'GET', '/kundenbereich/protokolle/' . $ub4)['status'], 200, 'K1 sieht b4 sofort');
+    $r = anfrage($basis, $planung['dose'], 'POST', '/berichte/' . $ub4 . '/kundenbereich', ['_token' => $pt, 'kunde_id' => '', 'zurueck' => $kunden['k1']]);
+    gleich([$r['status'], $kundeVon($ub4), anfrage($basis, $z1neu['dose'], 'GET', '/kundenbereich/protokolle/' . $ub4)['status']], [302, null, 404],
+        'herausgenommen: sofort weg (404)');
+    // Anderer Name im Bericht: erst die Rückfrage, dann bewusst.
+    $r = anfrage($basis, $planung['dose'], 'POST', '/berichte/' . $ub2 . '/kundenbereich', ['_token' => $pt, 'kunde_id' => $kunden['k1']]);
+    gleich([$r['status'], $r['ziel'], $kundeVon($ub2)], [302, '/berichte/' . $ub2 . '#kundenbereich', $kunden['k2']], 'b2 an K1 (anderer Name): nichts geändert');
+    $seite = anfrage($basis, $planung['dose'], 'GET', '/berichte/' . $ub2);
+    pruefe(str_contains($seite['text'], 'name="bestaetigt"') && str_contains($seite['text'], 'Im Bericht steht „' . htmlspecialchars($kennung . ' Stadtmarketing') . '“'),
+        'Rückfrage am Bericht: „Im Bericht steht …“ mit Bestätigung');
+    pruefe(!str_contains(anfrage($basis, $planung['dose'], 'GET', '/berichte/' . $ub2)['text'], 'name="bestaetigt"'), 'die Rückfrage steht nur einmal da');
+    $r = anfrage($basis, $planung['dose'], 'POST', '/berichte/' . $ub2 . '/kundenbereich', ['_token' => $pt, 'kunde_id' => $kunden['k1'], 'bestaetigt' => 1]);
+    gleich([$kundeVon($ub2), anfrage($basis, $z1neu['dose'], 'GET', '/kundenbereich/protokolle/' . $ub2)['status'], anfrage($basis, $z2['dose'], 'GET', '/kundenbereich/protokolle/' . $ub2)['status']],
+        [$kunden['k1'], 200, 404], 'bestätigt: b2 bei K1 – K2 sieht es nicht mehr');
+    anfrage($basis, $planung['dose'], 'POST', '/berichte/' . $ub2 . '/kundenbereich', ['_token' => $pt, 'kunde_id' => $kunden['k2'], 'bestaetigt' => 1]);
+    gleich($kundeVon($ub2), $kunden['k2'], 'b2 wieder bei K2');
+    gleich([anfrage($basis, $planung['dose'], 'POST', '/berichte/999999999/kundenbereich', ['_token' => $pt, 'kunde_id' => $kunden['k1']])['status'],
+        anfrage($basis, $planung['dose'], 'POST', '/berichte/' . $ub4 . '/kundenbereich', ['_token' => $pt, 'kunde_id' => '1x'])['status'], $kundeVon($ub4)],
+        [404, 302, null], 'unbekannter Bericht → 404; kaputte Kunden-ID → nichts geändert');
+    gleich(meldungenDesServers($serverFehler), [], 'Zuordnung der Protokolle ohne PHP-Meldung');
+
     // Ohne CSRF-Token ändert keine der neuen Routen etwas.
     $stand = static fn (): array => [(int) Database::scalar('SELECT COUNT(*) FROM kunden'), $konten(), (int) Database::scalar('SELECT COUNT(*) FROM freigaben'),
-        Settings::get('kundenbereich.kontakt'), (string) Database::scalar('SELECT name FROM kunden WHERE id = ?', [$kunden['k5']])];
+        Settings::get('kundenbereich.kontakt'), (string) Database::scalar('SELECT name FROM kunden WHERE id = ?', [$kunden['k5']]),
+        Database::scalar('SELECT kunde_id FROM berichte WHERE id = ?', [$ub4])];
     $vorher = $stand();
     preg_match('/name="einmal" value="([0-9a-f]{32})"/', anfrage($basis, $planung['dose'], 'GET', '/kunden/' . $kunden['k5'] . '?tab=zugaenge')['text'], $m);
     $adminDose = anmeldenAls($basis, $kennung . '-admin', $kennwort, $dosen)['dose'];
@@ -1098,11 +1303,12 @@ try {
             'gueltig_bis' => $eingabe($jetzt + 41 * $tag), 'daten_wie_gueltig' => 1]],
         [$planung['dose'], '/kunden/' . $kunden['k2'] . '/freigabe/' . (int) $k2b['id'] . '/loeschen', []],
         [$adminDose, '/system/einstellungen/kundenbereich', ['kundenbereich__kontakt' => $kennung . ' Ohne Token']],
+        [$planung['dose'], '/berichte/' . $ub4 . '/kundenbereich', ['kunde_id' => $kunden['k1']]],
     ] as [$dose, $ziel, $felder]) {
         gleich(anfrage($basis, $dose, 'POST', $ziel, $felder)['status'], 302, 'ohne CSRF-Token: ' . $ziel . ' → zurück');
     }
     Settings::vergessen();
-    gleich($stand(), $vorher, 'ohne CSRF-Token: nichts geändert (Kunden, Konten, Freigaben, Einstellung)');
+    gleich($stand(), $vorher, 'ohne CSRF-Token: nichts geändert (Kunden, Konten, Freigaben, Einstellung, Zuordnung eines Berichts)');
 
     // Rechte: ansehen ohne pflegen, ohne Kunden-Rechte gar nicht.
     $technik = anmeldenAls($basis, $kennung . '-technik', $kennwort, $dosen);
@@ -1114,6 +1320,10 @@ try {
     gleich(anfrage($basis, $technik['dose'], 'POST', '/kunden/speichern', ['_token' => csrfAus($r['text']), 'name' => $kennung . ' Technik'])['status'], 403,
         'Elektrotechnik: Kunde anlegen 403');
     gleich(anfrage($basis, $alt['dose'], 'GET', '/kunden')['status'], 403, 'Konto mit Rolle „kunde“: /kunden 403');
+    gleich([anfrage($basis, $technik['dose'], 'POST', '/berichte/' . $ub4 . '/kundenbereich', ['_token' => csrfAus($r['text']), 'kunde_id' => $kunden['k1']])['status'],
+        anfrage($basis, $technik['dose'], 'GET', '/kunden/' . $kunden['k1'] . '?tab=protokolle')['status'], anfrage($basis, $technik['dose'], 'GET', '/kunden/' . $kunden['k1'] . '?tab=abrufe')['status'],
+        Database::scalar('SELECT kunde_id FROM berichte WHERE id = ?', [$ub4])], [403, 200, 403, null],
+        'Elektrotechnik: Protokolle ansehen ja, zuordnen und Abrufe nein');
     $r = anfrage($basis, anmeldenAls($basis, $kennung . '-ohnealles', $kennwort, $dosen)['dose'], 'GET', '/kunden/' . $kunden['k2'] . '?tab=freigaben');
     pruefe($r['status'] === 200 && str_contains($r['text'], 'darf nur, wer selbst alle Standorte sieht') && !str_contains($r['text'], 'id="neue-freigabe"'),
         'pflegen ohne „Alle Standorte …“: Freigaben nur ansehen');
@@ -1131,6 +1341,8 @@ try {
     pruefe($r['status'] === 302 && str_starts_with((string) $r['ziel'], '/login') && $r['text'] !== $planBytes, 'Kunde beendet: der zweite Zugang bekommt keinen Plan mehr');
     $r = anfrage($basis, $zweiteSitzung['dose'], 'GET', '/kundenbereich/locations/' . $sites['a']);
     pruefe($r['status'] === 302 && str_starts_with((string) $r['ziel'], '/login'), 'Kunde beendet: … und keine Location');
+    $r = anfrage($basis, $z1neu['dose'], 'GET', '/kundenbereich/protokolle/' . $ub1k . '/pdf');
+    pruefe($r['status'] === 302 && str_starts_with((string) $r['ziel'], '/login') && $r['text'] !== $pdfVon('b1k'), 'Kunde beendet: … und kein Protokoll mehr');
     $versuch = anmeldenAls($basis, $kennung . '-z1', $kennwort, $dosen);
     pruefe($versuch['ziel'] === '/login' && str_contains(anmeldeMeldung($basis, $versuch['dose']), 'nicht mehr aktiv'),
         'Kunde beendet: Anmeldung mit richtigem Kennwort „nicht mehr aktiv“');
@@ -1180,6 +1392,13 @@ try {
     foreach ($dateien as $id) {
         Database::execute('DELETE FROM pruefnachweise WHERE datei_id = ?', [$id]);
         Database::delete('pruefnachweis_dateien', $id);
+    }
+    foreach (Database::select('SELECT id FROM berichte WHERE titel = ?', [$kennung]) as $zeile) {
+        foreach (['bericht_unterschriften', 'bericht_pdf', 'bericht_objekte', 'bericht_ereignisse', 'kundenmodus_geraete'] as $tabelle) {
+            Database::execute("DELETE FROM {$tabelle} WHERE bericht_id = ?", [(int) $zeile['id']]);
+        }
+        Database::execute("DELETE FROM kunden_abrufe WHERE art = 'bericht' AND ziel_id = ?", [(int) $zeile['id']]);
+        Database::execute("DELETE FROM audit_log WHERE target_type = 'bericht' AND target_id = ?", [(string) $zeile['id']]);
     }
     Database::execute('DELETE FROM berichte WHERE titel = ?', [$kennung]);
     if (isset($rolleKunde)) {

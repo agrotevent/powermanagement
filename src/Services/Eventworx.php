@@ -47,6 +47,8 @@ final class Eventworx
     /** Die einzigen Pfade unter /backend/ – und nur mit GET. */
     private const PFADE = '#^(check/ping|job|job/[A-Za-z0-9]{8,40})$#';
     private const ID = '/^[A-Za-z0-9]{8,40}$/';
+    /** Eine ObjectId (24 Hexzeichen, klein) – so nennt Eventworx Kunden (customerRefId). */
+    public const OID = '/^[0-9a-f]{24}$/';
     private const ARTEN_SUCHE = ['order', 'offer'];
     private const ARTEN_VORGANG = ['order', 'offer', 'deliverynote'];
     public const ART_NAMEN = ['order' => 'Auftrag', 'offer' => 'Angebot', 'deliverynote' => 'Lieferschein'];
@@ -357,6 +359,8 @@ final class Eventworx
                 'nummer'   => $nummer,
                 'host'     => (string) Settings::get(self::EINSTELLUNG_HOST, ''),
                 'link'     => self::link($art, $id),
+                // Kennung des Kunden in Eventworx – nur zum Vergleich (Kundenbereich), nie ins PDF.
+                'kunde_ref' => self::kundeRef($job),
             ],
             'gruppen' => [
                 'veranstaltung' => [
@@ -390,6 +394,18 @@ final class Eventworx
                 ],
             ],
         ];
+    }
+
+    /**
+     * Die Kennung des Kunden eines Vorgangs (customerRefId) – nur als
+     * ObjectId; alles andere (eine Kundennummer wie „K-10023“, Großbuchstaben,
+     * ein Objekt) ergibt ''. Sie dient nur dem Vergleich: Gehört ein Vorgang
+     * zum selben Kunden wie ein anderer? Angezeigt wird sie nirgends.
+     */
+    public static function kundeRef(array $job): string
+    {
+        $ref = $job['customerRefId'] ?? null;
+        return is_string($ref) && preg_match(self::OID, $ref) === 1 ? $ref : '';
     }
 
     /** Link in die Web-App (nur zum Anzeigen, nie ins PDF); '' ohne gültige Adresse. */
@@ -448,7 +464,7 @@ final class Eventworx
             [
                 'id' => '64f0c0de00000000000a1042', 'docType' => 'order', 'docSubType' => 'order', 'status' => 'confirmed',
                 'jobNumber' => 'AU-1042', 'projectNumber' => 'P-2026-017', 'title' => 'Sommerfestival 2026',
-                'customerId' => 'K-10023',
+                'customerId' => 'K-10023', 'customerRefId' => '65c3716b43f4c400000a0001',
                 'customer' => ['isCompany' => true, 'companyName' => 'Muster Events GmbH &amp; Co. KG', 'customerId' => 'K-10023'],
                 'postalAddress' => ['type' => 'postal', 'street' => 'Musterstraße 1', 'addressextension' => '', 'zipcode' => '12345', 'city' => 'Musterstadt', 'country' => 'de'],
                 'contact' => ['personSalutation' => 'Frau', 'personFirstName' => 'Erika', 'personLastName' => 'Musterfrau', 'personDepartment' => 'Produktion',
@@ -463,7 +479,7 @@ final class Eventworx
             [
                 'id' => '64f0c0de00000000000a1050', 'docType' => 'offer', 'docSubType' => 'offer', 'status' => 'open',
                 'jobNumber' => 'AN-1050', 'variantNumber' => 'AN-1050-01', 'projectNumber' => 'P-2026-021', 'title' => 'Herbstmarkt Musterstadt',
-                'customerId' => 'K-10031',
+                'customerId' => 'K-10031', 'customerRefId' => '65c3716b43f4c400000a0002',
                 'customer' => ['isCompany' => true, 'companyName' => 'Stadtmarketing Musterstadt e.&#8239;V.', 'customerId' => 'K-10031'],
                 'postalAddress' => ['type' => 'postal', 'street' => 'Rathausplatz 2', 'zipcode' => '12345', 'city' => 'Musterstadt', 'country' => 'de'],
                 'contact' => ['personSalutation' => 'Herr', 'personFirstName' => 'Max', 'personLastName' => 'Mustermann',

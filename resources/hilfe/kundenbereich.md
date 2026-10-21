@@ -38,6 +38,10 @@ nach Ihrer Zeit dort geplant ist, gehört nicht zu Ihrem Zugang.
 Ein Übergabebericht kann **ersetzt** werden: Korrigieren wir einen abgeschlossenen Bericht, entsteht eine neue
 Fassung. Die alte bleibt sichtbar und trägt den Hinweis „ersetzt durch …“ – gültig ist die neueste.
 
+Unter *Protokolle* finden Sie jeden abgeschlossenen Übergabebericht, der zu Ihnen gehört, als PDF – genau die
+Datei, die bei der Übergabe gespeichert wurde. Die Prüfsumme (SHA-256) daneben zeigt, ob ein Exemplar unverändert
+ist. Die Protokolle bleiben hier, auch wenn die Location nicht mehr freigegeben ist.
+
 ## Was die Angaben bei Prüfnachweisen bedeuten
 
 | Angabe | Bedeutung |

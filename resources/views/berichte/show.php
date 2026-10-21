@@ -17,7 +17,8 @@ $ereignisNamen = [
     'kundenmodus_abgemeldet' => 'Kundenmodus: abgemeldet (falsche Kennwörter)', 'kunde_unterschrieben' => 'vom Kunden unterschrieben',
     'ohne_kunde' => 'ohne Kunde abgeschlossen', 'korrektur_angelegt' => 'Korrektur angelegt', 'ersetzt' => 'durch Korrektur ersetzt',
     'verworfen' => 'verworfen', 'eventworx_uebernommen' => 'aus Eventworx übernommen', 'eventworx_entfernt' => 'Eventworx-Verweis entfernt',
-    'pdf_abgerufen' => 'PDF abgerufen',
+    'pdf_abgerufen' => 'PDF abgerufen', 'kunde_zugeordnet' => 'einem Kunden des Kundenbereichs zugeordnet',
+    'kunde_entfernt' => 'aus dem Kundenbereich genommen', 'pdf_kunde' => 'PDF im Kundenbereich geladen',
 ];
 ?>
 <div class="toolbar-zeile">
@@ -131,6 +132,10 @@ $ereignisNamen = [
         <p class="small muted mb0" data-teilen-meldung role="status" aria-live="polite"></p>
     </div>
 </div>
+
+<?php if (($kundenbereich ?? null) !== null): ?>
+    <?= View::partial('berichte/_kundenbereich', ['bericht' => $b, 'karte' => $kundenbereich]) ?>
+<?php endif; ?>
 
 <?= View::partial('berichte/_ansicht', ['bericht' => $b, 'inhalt' => $inhalt, 'bewertung' => $bewertung, 'unterschriften' => $unterschriften]) ?>
 

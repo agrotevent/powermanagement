@@ -2,8 +2,9 @@
 /**
  * Eine Location, wie der Kunde sie sieht: Anschrift, Freigabe(n) mit
  * Veranstaltung, „sichtbar bis“ und Messzeitraum, Pläne der Etagen (Bild im
- * Browser, PDF als Datei) und die festen Stromanschlüsse. Nie Notizen,
- * mobile Anlagen, Kabel oder Messgeräte (KundenSicht::location()).
+ * Browser, PDF als Datei), die festen Stromanschlüsse und Ihre Protokolle
+ * an dieser Location. Nie Notizen, mobile Anlagen, Kabel oder Messgeräte
+ * (KundenSicht::location()).
  *
  * @var array<string,mixed> $kunde
  * @var array{site:array{id:int,name:string,address:string},freigaben:list<array<string,mixed>>,etagen:list<array{id:int,name:string,plan:string,seite:int}>,feststrom:list<array<string,string>>} $location
@@ -87,5 +88,16 @@ $basis = Kundenbereich::PFAD . '/locations/' . (int) $site['id'];
         <?php endif; ?>
         <div class="card-footer small muted">Nur was fest zur Location gehört. Mobile Verteiler und Kabel gehören zur Planung Ihrer
             Veranstaltung und stehen hier nicht.</div>
+    </section>
+
+    <section class="card kb-breit" aria-labelledby="kb-ort-protokolle-titel">
+        <div class="card-head"><h2 id="kb-ort-protokolle-titel">Ihre Protokolle an dieser Location</h2></div>
+        <div class="card-body">
+            <?php if (($location['berichte'] ?? []) === []): ?>
+                <p class="kb-leer">Für diese Location liegt noch kein abgeschlossenes Protokoll für Sie vor.</p>
+            <?php else: ?>
+                <?= View::partial('kundenbereich/_protokolle', ['berichte' => $location['berichte'], 'mitLocation' => false]) ?>
+            <?php endif; ?>
+        </div>
     </section>
 </div>

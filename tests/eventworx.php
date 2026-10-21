@@ -245,7 +245,7 @@ try {
     gleich(count($anfragen), 1, 'ein Vorgang, eine Anfrage');
     gleich(parse_url($anfragen[0]['url'] ?? '', PHP_URL_PATH), '/backend/job/' . $id, 'Pfad job/<id>');
     gleich($v['verweis'], ['id' => $id, 'art' => 'order', 'art_name' => 'Auftrag', 'nummer' => 'AU-2001', 'host' => $host,
-        'link' => 'https://' . $host . '/eventworx/#job/edit/order/' . $id], 'Verweis mit Link in die Web-App');
+        'link' => 'https://' . $host . '/eventworx/#job/edit/order/' . $id, 'kunde_ref' => ''], 'Verweis mit Link in die Web-App, ohne customerRefId keine Kunden-Kennung');
     gleich($v['gruppen']['veranstaltung'], ['veranstaltung' => 'Hoffest & Markt', 'auftrag_nr' => 'AU-2001', 'projekt_nr' => 'P-77'], 'Veranstaltung');
     gleich($v['gruppen']['kunde'], ['firma' => 'Muster & Söhne GmbH', 'anschrift' => "Hauptstraße 5\nHinterhaus\n12345 Musterstadt", 'kundennummer' => 'K-1'],
         'Kunde: Firma dekodiert, Leerraum zusammengezogen; Anschrift ohne „de“; Kundennummer aus customer');
@@ -270,6 +270,14 @@ try {
         $namen(['isCompany' => true, 'personFirstName' => 'Max', 'personLastName' => 'Muster']), $namen(['companyName' => "A\u{202E}B"])],
         ['Eri', 'Stadthalle ä', 'Max Muster', 'A B'], 'Namen: Spitzname, Ort, Rückfall auf die Person, keine Richtungszeichen');
     gleich(Eventworx::abbilden(['id' => $id, 'docType' => 'offer', 'jobNumber' => 'AN-7', 'variantNumber' => 'AN-7-03'])['verweis']['nummer'], 'AN-7-03', 'Angebot mit variantNumber');
+    // Kunden-Kennung (Kundenbereich: Vorschlag, welchem Kunden ein Bericht gehört) – nur als ObjectId.
+    gleich(Eventworx::abbilden($voll + ['customerRefId' => '65c3716b43f4c400000a0abc'])['verweis']['kunde_ref'], '65c3716b43f4c400000a0abc',
+        'abbilden(): customerRefId als kunde_ref im Verweis');
+    gleich(array_map(static fn ($ref): string => Eventworx::kundeRef(['customerRefId' => $ref]),
+        ['65c3716b43f4c400000a0abc', 'K-10023', '65C3716B43F4C400000A0ABC', '65c3716b43f4c400000a0ab', '65c3716b43f4c400000a0abcd', ['id' => 'x'], 4711, null]),
+        ['65c3716b43f4c400000a0abc', '', '', '', '', '', '', ''], 'kundeRef(): nur eine ObjectId, sonst leer (Kundennummer, Großbuchstaben, Länge, kein Text)');
+    pruefe(!str_contains((string) json_encode(Eventworx::abbilden($voll + ['customerRefId' => 'K-' . $kennung]), JSON_UNESCAPED_UNICODE), 'K-' . $kennung),
+        'eine customerRefId, die keine ObjectId ist, geht nicht hinaus');
 
     $antworten = [$json(200, ['success' => true, 'data' => ['id' => 'anderevorgangsid1', 'docType' => 'order', 'jobNumber' => 'AU-1']])];
     gleich($fehler(static fn () => Eventworx::vorgang($id))?->getMessage(), 'Eventworx: unerwartete Antwort.', 'data.id ≠ angefragte ID');
@@ -382,6 +390,8 @@ try {
     $dv = Eventworx::vorgang((string) ($demo[0]['id'] ?? ''));
     gleich([$dv['gruppen']['kunde']['firma'], $dv['gruppen']['ansprechpartner']['ansprechpartner'], $dv['gruppen']['veranstaltung']['veranstaltung']],
         ['Muster Events GmbH & Co. KG', 'Frau Erika Musterfrau, Produktion', 'Sommerfestival 2026'], 'Demo: Vorgang dekodiert');
+    gleich([$dv['verweis']['kunde_ref'], Eventworx::abbilden(Eventworx::demo()[1])['verweis']['kunde_ref']], ['65c3716b43f4c400000a0001', '65c3716b43f4c400000a0002'],
+        'Demo: die beiden Vorgänge mit eigener Kunden-Kennung');
     pruefe(in_array('AN-1050-01', array_column(Eventworx::suchen('Musterstadt'), 'nummer'), true), 'Demo: Angebot AN-1050-01');
     pruefe(Eventworx::verbindungTesten()['ok'] && Eventworx::eingerichtet(), 'Demo: eingerichtet, Verbindungstest ohne Netz');
     pruefe($fehler(static fn () => Eventworx::vorgang('unbekanntervorgang1')) !== null, 'Demo: unbekannter Vorgang');

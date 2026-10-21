@@ -5,6 +5,7 @@ namespace App\Controllers;
 
 use App\Auth\Auth;
 use App\Berichte\Einstellungen;
+use App\Kunden\Abrufe;
 use App\Kunden\Einrichtung;
 use App\Kunden\KundenEinstellungen;
 use App\Kunden\Kundenbereich;
@@ -27,7 +28,12 @@ use App\Support\View;
  * Zuordnung – nie aus dem Standort allein: jede ID aus der Adresse geht über
  * KundenSicht gegen den Kunden, fremd und nicht vorhanden geben dieselbe
  * 404. Eventworx wird von hier aus nie gefragt; nichts hier wartet auf
- * andere Dienste – nur ein Plan gibt die Sitzung frei, bevor er gesendet wird.
+ * andere Dienste – nur Pläne und PDFs geben die Sitzung frei, bevor sie
+ * gesendet werden (große Dateien über ein schwaches Mobilnetz).
+ *
+ * Protokolle sind die Übergabeberichte, die dem Kunden ausdrücklich
+ * zugeordnet und abgeschlossen sind; ihr PDF nur in den beim Abschluss
+ * gespeicherten Bytes. Jeder Download steht in den Abrufen (App\Kunden\Abrufe).
  */
 final class KundenbereichController extends Controller
 {
@@ -45,6 +51,7 @@ final class KundenbereichController extends Controller
             'kunde'     => $kunde,
             'locations' => KundenSicht::locations($id),
             'kommend'   => KundenSicht::kommend($id),
+            'berichte'  => KundenSicht::berichte($id),
             'kontakt'   => KundenEinstellungen::kontakt(),
         ]);
     }
@@ -98,6 +105,53 @@ final class KundenbereichController extends Controller
         if (!SiteService::planAusliefern($etage, true)) {
             Response::notFound();
         }
+    }
+
+    /** Die Protokolle des Kunden – je Nummer die gültige Fassung, frühere darunter. */
+    public function protokolle(Request $request): void
+    {
+        $kunde = $this->kunde($request);
+        if ($kunde === null) {
+            return;
+        }
+        $this->seite('kundenbereich/protokolle', ['kunde' => $kunde, 'berichte' => KundenSicht::berichte((int) $kunde['id'])]);
+    }
+
+    /** Ein Protokoll zum Lesen – wie im PDF, ohne Lebenslauf, Prüfnachweis der Integrität und Knöpfe des Personals. */
+    public function protokoll(Request $request, array $params): void
+    {
+        $kunde = $this->kunde($request);
+        if ($kunde === null) {
+            return;
+        }
+        $id = self::id($params, 'id');
+        $protokoll = $id === null ? null : KundenSicht::bericht((int) $kunde['id'], $id);
+        if ($protokoll === null) {
+            Response::notFound();
+            return;
+        }
+        $this->seite('kundenbereich/protokoll', ['kunde' => $kunde] + $protokoll);
+    }
+
+    /**
+     * Das PDF eines Protokolls: nur die gespeicherten Bytes (nie eine
+     * Vorschau), im Browser zum Ansehen; der Abruf wird festgehalten.
+     */
+    public function protokollPdf(Request $request, array $params): void
+    {
+        $kunde = $this->kunde($request);
+        if ($kunde === null) {
+            return;
+        }
+        $id = self::id($params, 'id');
+        $pdf = $id === null ? null : KundenSicht::protokollPdf((int) $kunde['id'], $id);
+        if ($pdf === null) {
+            Response::notFound();
+            return;
+        }
+        Abrufe::merken((int) $kunde['id'], 'bericht', (int) $id, $pdf['sha256']);
+        Session::freigeben();
+        Response::pdf($pdf['name'], $pdf['bytes']);
     }
 
     public function konto(Request $request): void

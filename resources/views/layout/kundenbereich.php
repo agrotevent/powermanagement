@@ -9,7 +9,7 @@
  * den Daumen, Ziele ≥ 48 px, über dem Home-Balken), ab 720 px Reiter oben.
  * Keine Bedienung nur über Hover. Im Kundenbereich durchgehend „Sie“.
  *
- * Neue Seiten (Protokolle, Prüfnachweise) kommen in $navigation dazu.
+ * Neue Seiten (Prüfnachweise) kommen in $navigation dazu.
  *
  * @var string $content
  * @var array<string,mixed>|null $kunde
@@ -33,6 +33,7 @@ $pfad = (string) (parse_url((string) ($_SERVER['REQUEST_URI'] ?? '/'), PHP_URL_P
 $navigation = [
     Kundenbereich::PFAD                => ['Übersicht', 'M3 11 12 4l9 7M5 10v10h5v-6h4v6h5V10'],
     Kundenbereich::PFAD . '/locations' => ['Locations', 'M12 21s-7-6.2-7-11.5a7 7 0 0 1 14 0C19 14.8 12 21 12 21zM12 12.5a3 3 0 1 0 0-6 3 3 0 0 0 0 6z'],
+    Kundenbereich::PFAD . '/protokolle' => ['Protokolle', 'M7 3h7l5 5v13H7zM14 3v5h5M10 12.5h6M10 16.5h6'],
     Kundenbereich::KONTO               => ['Konto', 'M12 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8zM4 21c0-4.4 3.6-7 8-7s8 2.6 8 7'],
 ];
 $fehlerseite = !empty($fehlerseite);

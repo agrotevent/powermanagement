@@ -246,7 +246,7 @@ try {
     // Die Ansichten der Schnittstelle: kein Skript ohne Nonce, keine on…=, kein javascript:
     $ansichten = array_merge(glob(dirname(__DIR__) . '/resources/views/schnittstelle/*.php') ?: [], glob(dirname(__DIR__) . '/resources/views/instanzen/*.php') ?: [],
         glob(dirname(__DIR__) . '/resources/views/vorschlaege/*.php') ?: [], [dirname(__DIR__) . '/resources/views/partials/token-standorte.php'],
-        glob(dirname(__DIR__) . '/resources/views/kunden/*.php') ?: []);
+        glob(dirname(__DIR__) . '/resources/views/kunden/*.php') ?: [], [dirname(__DIR__) . '/resources/views/berichte/_kundenbereich.php']);
     pruefe(count($ansichten) >= 16, 'Ansichten der Schnittstelle, der anderen Instanzen, der Vorschläge und der Kundenverwaltung gefunden');
     // … und die des Kundenbereichs (dort gar kein Inline-Skript).
     $kundenAnsichten = array_merge(glob(dirname(__DIR__) . '/resources/views/kundenbereich/*.php') ?: [],

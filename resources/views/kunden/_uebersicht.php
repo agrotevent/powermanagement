@@ -5,7 +5,7 @@
  * Prädikate).
  *
  * @var array<string,mixed> $kunde
- * @var array{gesperrt:?string,locations:list<array<string,mixed>>,kommend:list<array{name:string,ab:string}>,zugaenge_aktiv:int} $uebersicht
+ * @var array{gesperrt:?string,locations:list<array<string,mixed>>,kommend:list<array{name:string,ab:string}>,berichte:list<array<string,mixed>>,zugaenge_aktiv:int} $uebersicht
  * @var array<string,int> $zahlen
  * @var bool $pflegen
  */
@@ -15,6 +15,8 @@ use App\Support\Zeit;
 $id = (int) $kunde['id'];
 $u = $uebersicht;
 $n = count($u['locations']);
+$p = count($u['berichte']);
+$datum = static fn (string $d): string => preg_match('/^(\d{4})-(\d{2})-(\d{2})$/', $d, $m) === 1 ? $m[3] . '.' . $m[2] . '.' . $m[1] : $d;
 ?>
 <div class="grid grid-2">
     <section class="card">
@@ -23,7 +25,7 @@ $n = count($u['locations']);
             <?php if ($u['gesperrt'] !== null): ?>
                 <p class="notice warn">Nichts – der Kunde ist <?= (int) $kunde['aktiv'] === 1 ? 'abgelaufen' : 'beendet' ?>, seine Zugänge sind zu.</p>
             <?php else: ?>
-                <p><strong><?= $n ?> <?= $n === 1 ? 'Location' : 'Locations' ?></strong></p>
+                <p><strong><?= $n ?> <?= $n === 1 ? 'Location' : 'Locations' ?></strong> · <strong><?= $p ?> <?= $p === 1 ? 'Protokoll' : 'Protokolle' ?></strong></p>
                 <?php if ($u['locations'] === []): ?>
                     <p class="muted">Keine – Standorte gibt eine Freigabe frei<?= $pflegen ? ' (Reiter „Freigaben“)' : '' ?>.</p>
                 <?php else: ?>
@@ -37,6 +39,17 @@ $n = count($u['locations']);
                         <?php endforeach; ?>
                     </ul>
                 <?php endif; ?>
+                <?php if ($u['berichte'] !== []): ?>
+                    <h3 class="mt">Protokolle</h3>
+                    <ul class="liste-schlicht">
+                        <?php foreach (array_slice($u['berichte'], 0, 10) as $b): ?>
+                            <li><a href="/berichte/<?= (int) $b['id'] ?>"><?= View::e((string) $b['nummer']) ?></a>
+                                <span class="small muted"><?= View::e(implode(' · ', array_filter([(string) $b['titel'], 'Prüfung ' . $datum((string) $b['pruefdatum']),
+                                    $b['pdf'] ? '' : 'ohne PDF']))) ?><?= $b['fruehere'] !== [] ? ' · ' . count($b['fruehere']) . ' frühere Fassung(en)' : '' ?></span></li>
+                        <?php endforeach; ?>
+                    </ul>
+                    <?php if ($p > 10): ?><p class="small"><a href="/kunden/<?= $id ?>?tab=protokolle">Alle <?= $p ?> Protokolle</a></p><?php endif; ?>
+                <?php endif; ?>
                 <?php if ($u['kommend'] !== []): ?>
                     <h3 class="mt">Kommt noch</h3>
                     <ul class="liste-schlicht">
@@ -46,8 +59,8 @@ $n = count($u['locations']);
                     </ul>
                 <?php endif; ?>
                 <p class="help">Je Location: Anschrift, Pläne der Etagen und feste Stromanschlüsse – keine mobilen Anlagen, Kabel,
-                    Messgeräte oder Notizen. Protokolle und Prüfnachweise erscheinen im Kundenbereich erst, wenn sie dem Kunden
-                    ausdrücklich zugeordnet bzw. freigegeben sind – nie über den Standort allein.</p>
+                    Messgeräte oder Notizen. Protokolle sieht der Kunde erst, wenn sie ihm ausdrücklich zugeordnet und abgeschlossen sind
+                    (Reiter „Protokolle“), Prüfnachweise erst nach der Freigabe – nie über den Standort allein.</p>
             <?php endif; ?>
         </div>
     </section>

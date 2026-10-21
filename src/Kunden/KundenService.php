@@ -5,10 +5,12 @@ namespace App\Kunden;
 
 use App\Auth\Auth;
 use App\Auth\Zugriff;
+use App\Berichte\BerichtService;
 use App\Services\BenutzerService;
 use App\Support\Audit;
 use App\Support\Crypto;
 use App\Support\Database;
+use App\Support\Session;
 use App\Support\Zeit;
 
 /**
@@ -43,6 +45,16 @@ final class KundenService
 
     /** @var array<int,?array<string,mixed>> */
     private static array $cache = [];
+
+    /**
+     * Was beim Vergleich zweier Kundennamen nicht zählt: Rechtsformen und
+     * Bindewörter („Muster Events GmbH & Co. KG“ ist „Muster Events“).
+     */
+    private const NAME_FUELLWOERTER = ['gmbh', 'mbh', 'ggmbh', 'ag', 'kg', 'kgaa', 'ug', 'ohg', 'gbr', 'partg', 'se', 'eg', 'ev', 'ek', 'ltd', 'llc', 'inc',
+        'co', 'und', 'haftungsbeschränkt', 'gemeinnützige'];
+
+    /** Sitzung: Rückfrage nach einer Zuordnung mit abweichendem Namen (nur IDs und der Satz dazu). */
+    private const RUECKFRAGE = 'kunden_rueckfrage';
 
     // ------------------------------------------------------------ Kunden
 
@@ -109,11 +121,24 @@ final class KundenService
      */
     public static function uebersicht(int $kundeId): array
     {
+        return KundenSicht::zusammenfassung($kundeId) + ['zugaenge_aktiv' => self::aktiveZugaenge($kundeId)];
+    }
+
+    /**
+     * Wie viele Zugänge des Kunden sich jetzt anmelden können (oder es mit
+     * Einrichtungslink bzw. vorläufigem Kennwort gleich können) – 0, wenn
+     * der Kunde beendet ist.
+     */
+    public static function aktiveZugaenge(int $kundeId): int
+    {
+        if (Kundenbereich::kundeSperre($kundeId) !== null) {
+            return 0;
+        }
         $aktiv = 0;
         foreach (self::zugaenge($kundeId) as $z) {
             $aktiv += in_array($z['zustand'], ['aktiv', 'erstanmeldung', 'link_offen'], true) ? 1 : 0;
         }
-        return KundenSicht::zusammenfassung($kundeId) + ['zugaenge_aktiv' => $aktiv];
+        return $aktiv;
     }
 
     /**
@@ -203,6 +228,8 @@ final class KundenService
         }
         $zahlen = self::zahlen($id);
         $nachweise = (int) Database::scalar('SELECT COUNT(*) FROM pruefnachweise WHERE kunde_id = ?', [$id]);
+        // Alle zugeordneten Berichte (auch Entwürfe) verlieren die Zuordnung.
+        $berichte = (int) Database::scalar('SELECT COUNT(*) FROM berichte WHERE kunde_id = ?', [$id]);
         self::transaktion(static function () use ($id): void {
             foreach (Database::select('SELECT id FROM users WHERE kunde_id = ?', [$id]) as $u) {
                 BenutzerService::kontoEntfernen((int) $u['id']);
@@ -219,13 +246,13 @@ final class KundenService
             }
             Database::execute('DELETE FROM kunden_abrufe WHERE kunde_id = ?', [$id]);
             // Übergabeberichte bleiben für die Aufbewahrung – nur ohne Kunde.
-            Database::execute('UPDATE berichte SET kunde_id = NULL WHERE kunde_id = ?', [$id]);
+            BerichtService::kundeEntfernt($id);
             Database::delete('kunden', $id);
         });
         self::vergessen();
         Zugriff::vergessen();
         Audit::log('kunden.loeschen', 'kunde', (string) $id, [
-            'kunde_id' => $id, 'zugaenge' => $zahlen['zugaenge'], 'nachweise' => $nachweise, 'berichte' => $zahlen['berichte'],
+            'kunde_id' => $id, 'zugaenge' => $zahlen['zugaenge'], 'nachweise' => $nachweise, 'berichte' => $berichte,
         ]);
         return ['ok' => true, 'message' => 'Kunde gelöscht.'];
     }
@@ -560,6 +587,161 @@ final class KundenService
         Kundenbereich::vergessen();
     }
 
+    // ------------------------------------------------------------ Protokolle (Übergabeberichte)
+
+    /**
+     * Reiter Protokolle: die dem Kunden zugeordneten Übergabeberichte (jeder
+     * Stand außer verworfen – ob der Kunde ihn sieht, steht dabei) und
+     * Vorschläge: noch keinem Kunden zugeordnete Berichte, deren
+     * Eventworx-Vorgang mit diesem Kunden verknüpft ist oder deren
+     * Eventworx-Kunde seiner ist (vorschlagFuerBericht, nie automatisch).
+     * Vorschläge nur, soweit der Fragende die Berichte selbst sieht.
+     *
+     * @return array{zugeordnet:list<array<string,mixed>>,vorschlaege:list<array<string,mixed>>}
+     */
+    public static function protokolle(int $kundeId): array
+    {
+        $kunde = self::find($kundeId);
+        if ($kunde === null) {
+            return ['zugeordnet' => [], 'vorschlaege' => []];
+        }
+        $felder = 'b.id, b.nummer, b.jahr, b.laufnr, b.fassung, b.status, b.site_id, b.standort_entfernt, b.erstellt_von, b.standort_name, b.titel,
+            b.veranstaltung, b.kunde_name, b.pruefdatum, b.abgeschlossen_am, b.kunde_id, b.ewx_nummer, p.sha256 AS pdf_sha256';
+        $gesperrt = Kundenbereich::kundeSperre($kundeId) !== null;
+        $zugeordnet = [];
+        foreach (Database::select("SELECT {$felder} FROM berichte b LEFT JOIN bericht_pdf p ON p.bericht_id = b.id
+            WHERE b.kunde_id = ? AND b.status <> 'verworfen' ORDER BY b.pruefdatum DESC, b.id DESC", [$kundeId]) as $b) {
+            $b['kunde_id'] = (int) $b['kunde_id'];
+            $b['sichtbar'] = BerichtService::sichtbar($b);
+            $b['beim_kunden'] = !$gesperrt && BerichtService::sichtbarFuerKunde($b, $kundeId) && $b['pdf_sha256'] !== null;
+            $b['abruf'] = Abrufe::letzter('bericht', (int) $b['id']);
+            $zugeordnet[] = $b;
+        }
+        $ref = (string) ($kunde['ewx_kunde_ref'] ?? '');
+        $vorschlaege = [];
+        foreach (Database::select("SELECT {$felder}, b.ewx_host, b.ewx_id, b.ewx_kunde_ref FROM berichte b LEFT JOIN bericht_pdf p ON p.bericht_id = b.id
+            WHERE b.kunde_id IS NULL AND b.status <> 'verworfen' AND (
+                (b.ewx_id <> '' AND EXISTS (SELECT 1 FROM kunden_vorgaenge v WHERE v.kunde_id = ? AND v.ewx_host = b.ewx_host AND v.ewx_id = b.ewx_id))
+                OR (? <> '' AND b.ewx_kunde_ref = ? AND b.ewx_host = ?))
+            ORDER BY b.pruefdatum DESC, b.id DESC LIMIT 50", [$kundeId, $ref, $ref, (string) $kunde['ewx_host']]) as $b) {
+            $vorschlag = self::vorschlagFuerBericht($b);
+            if (BerichtService::sichtbar($b) && $vorschlag !== null && (int) $vorschlag['kunde']['id'] === $kundeId) {
+                $vorschlaege[] = $b + ['grund' => $vorschlag['grund']];
+            }
+        }
+        return ['zugeordnet' => $zugeordnet, 'vorschlaege' => $vorschlaege];
+    }
+
+    /**
+     * Ein Vorschlag, welchem Kunden ein Bericht gehört – nie mehr als ein
+     * Vorschlag; zugeordnet wird nur von einer Person (kundeZuordnen).
+     * Zuerst: der Eventworx-Vorgang des Berichts ist mit einem Kunden
+     * verknüpft; sonst: Eventworx nennt beim Vorgang denselben Kunden
+     * (ewx_kunde_ref). Nie über den Standort oder den Namen allein.
+     *
+     * @return array{kunde:array<string,mixed>,grund:string}|null
+     */
+    public static function vorschlagFuerBericht(array $bericht): ?array
+    {
+        $host = (string) ($bericht['ewx_host'] ?? '');
+        $ewxId = (string) ($bericht['ewx_id'] ?? '');
+        $nummer = (string) ($bericht['ewx_nummer'] ?? '');
+        if ($ewxId !== '') {
+            $v = Database::first('SELECT kunde_id, ewx_nummer FROM kunden_vorgaenge WHERE ewx_host = ? AND ewx_id = ?', [$host, $ewxId]);
+            $kunde = $v !== null ? self::find((int) $v['kunde_id']) : null;
+            if ($kunde !== null) {
+                return ['kunde' => $kunde, 'grund' => 'Der Eventworx-Vorgang ' . ($nummer !== '' ? $nummer : (string) $v['ewx_nummer']) . ' ist mit diesem Kunden verknüpft.'];
+            }
+        }
+        $ref = (string) ($bericht['ewx_kunde_ref'] ?? '');
+        if ($ref !== '' && $host !== '') {
+            $k = Database::first('SELECT id FROM kunden WHERE ewx_host = ? AND ewx_kunde_ref = ?', [$host, $ref]);
+            $kunde = $k !== null ? self::find((int) $k['id']) : null;
+            if ($kunde !== null) {
+                return ['kunde' => $kunde, 'grund' => 'Eventworx nennt beim Vorgang' . ($nummer !== '' ? ' ' . $nummer : '') . ' denselben Kunden.'];
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Ist der Kunde im Bericht derselbe wie der gewählte? Klein, ohne
+     * Satzzeichen, Rechtsformen und Bindewörter; dann muss der eine Name im
+     * anderen stehen – als ganze Wörter („Muster Events GmbH & Co. KG“ passt
+     * zu „muster events“, „Musterfilm Produktion GmbH“ nicht). Leer passt nie.
+     * Nur für die Rückfrage vor einer Zuordnung, nie für einen Vorschlag.
+     */
+    public static function namePasst(string $imBericht, string $kunde): bool
+    {
+        $a = self::nameKern($imBericht);
+        $b = self::nameKern($kunde);
+        if ($a === '' || $b === '') {
+            return false;
+        }
+        return str_contains(' ' . $a . ' ', ' ' . $b . ' ') || str_contains(' ' . $b . ' ', ' ' . $a . ' ');
+    }
+
+    /**
+     * Für die Karte „Kundenbereich“ am Bericht (nur mit „kunden.view“): wem
+     * er gehört, ob der Kunde ihn jetzt sieht, wann er zuletzt geladen
+     * wurde; mit „kunden.manage“ die Kundenauswahl und ein Vorschlag.
+     * null = keine Karte (ohne Recht, verworfener Bericht).
+     *
+     * @return array<string,mixed>|null
+     */
+    public static function berichtKarte(array $bericht): ?array
+    {
+        if (!Auth::can('kunden.view') || (string) $bericht['status'] === 'verworfen') {
+            return null;
+        }
+        $id = (int) $bericht['id'];
+        $kunde = $bericht['kunde_id'] !== null ? self::find((int) $bericht['kunde_id']) : null;
+        $kundeId = $kunde !== null ? (int) $kunde['id'] : 0;
+        $pflegen = Auth::can('kunden.manage');
+        $sperre = $kunde !== null ? Kundenbereich::kundeSperre($kundeId) : null;
+        $abruf = Abrufe::letzter('bericht', $id);
+        // Hat ihn zuletzt ein anderer Kunde geladen (vor einer Umzuordnung), steht das dabei.
+        $anderer = $abruf !== null && (int) $abruf['kunde_id'] !== $kundeId ? self::find((int) $abruf['kunde_id']) : null;
+        return [
+            'kunde'      => $kunde,
+            'gesperrt'   => $sperre !== null,
+            'zugaenge'   => $kunde !== null ? self::aktiveZugaenge($kundeId) : 0,
+            'beim_kunden' => $kunde !== null && $sperre === null && BerichtService::sichtbarFuerKunde($bericht, $kundeId) && BerichtService::pdfHash($id) !== null,
+            'abruf'      => $abruf,
+            'abruf_anderer' => $anderer !== null ? (string) $anderer['name'] : null,
+            'pflegen'    => $pflegen,
+            'kunden'     => $pflegen ? Database::select('SELECT id, name, kundennummer, aktiv FROM kunden ORDER BY name, id') : [],
+            'vorschlag'  => $kunde === null ? self::vorschlagFuerBericht($bericht) : null,
+            'rueckfrage' => $pflegen ? self::rueckfrage($id) : null,
+        ];
+    }
+
+    /**
+     * Rückfrage merken: die Zuordnung braucht eine Bestätigung (Namen weichen
+     * ab). Nur IDs und der Satz dazu, für genau eine Seite.
+     */
+    public static function rueckfrageMerken(int $berichtId, int $kundeId, string $text, ?int $zurueck): void
+    {
+        Session::put(self::RUECKFRAGE, ['bericht' => $berichtId, 'kunde' => $kundeId, 'text' => mb_substr($text, 0, 600), 'zurueck' => $zurueck]);
+    }
+
+    /**
+     * Die gemerkte Rückfrage zu diesem Bericht (oder, mit $berichtId null,
+     * zu einem Bericht dieses Kunden: Reiter Protokolle) – einmal, dann weg.
+     *
+     * @return array{bericht:int,kunde:int,text:string,zurueck:?int}|null
+     */
+    public static function rueckfrage(?int $berichtId, ?int $zurueck = null): ?array
+    {
+        $r = Session::get(self::RUECKFRAGE);
+        if (!is_array($r) || ($berichtId !== null ? (int) ($r['bericht'] ?? 0) !== $berichtId : (int) ($r['zurueck'] ?? 0) !== (int) $zurueck)) {
+            return null;
+        }
+        Session::forget(self::RUECKFRAGE);
+        return ['bericht' => (int) $r['bericht'], 'kunde' => (int) $r['kunde'], 'text' => (string) $r['text'],
+            'zurueck' => isset($r['zurueck']) ? (int) $r['zurueck'] : null];
+    }
+
     /** Für Prüfskripte und nach Änderungen. */
     public static function vergessen(): void
     {
@@ -599,6 +781,16 @@ final class KundenService
             (int) $z['is_active'] !== 1                    => 'Der Zugang ist deaktiviert – erst wieder aktivieren.',
             default                                        => null,
         };
+    }
+
+    /** Ein Kundenname für den Vergleich: klein, ohne Satzzeichen, Rechtsformen und Bindewörter. */
+    private static function nameKern(string $name): string
+    {
+        $name = mb_strtolower(html_entity_decode($name, ENT_QUOTES | ENT_HTML5, 'UTF-8'));
+        // „e. V.“, „e. K.“, „e. G.“ als ein Wort, bevor die Satzzeichen fallen (auch mit schmalem Leerzeichen).
+        $name = (string) preg_replace('/(?<![\p{L}\p{N}])e[\s\p{Z}]*\.[\s\p{Z}]*([vkg])(?![\p{L}\p{N}])\.?/u', ' e$1 ', $name);
+        $name = (string) preg_replace('/[^\p{L}\p{N}]+/u', ' ', $name);
+        return implode(' ', array_filter(explode(' ', $name), static fn (string $w): bool => $w !== '' && !in_array($w, self::NAME_FUELLWOERTER, true)));
     }
 
     private static function personPruefen(string $name, string $email): ?string

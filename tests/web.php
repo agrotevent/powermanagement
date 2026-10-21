@@ -1103,6 +1103,9 @@ try {
     $r = aufruf($basis, $admin['dose'], 'GET', '/berichte/' . $bId . '/pdf');
     pruefe($pdfAntwort($r, 'T-' . $kennung . '.pdf'), 'PDF: 200, application/pdf, inline mit Nummer, nosniff, no-store, kein Referrer, keine Sandbox-CSP');
     pruefe(str_contains(aufruf($basis, $admin['dose'], 'GET', '/berichte/' . $bId)['text'], 'kein PDF gespeichert'), 'abgeschlossen ohne gespeichertes PDF: Hinweis');
+    $r = aufruf($basis, $admin['dose'], 'GET', '/berichte/' . $bId);
+    pruefe(str_contains($r['text'], 'id="kundenbereich"') && str_contains($r['text'], 'Keinem Kunden zugeordnet') && str_contains($r['text'], 'action="/berichte/' . $bId . '/kundenbereich"'),
+        'abgeschlossener Bericht: Karte „Kundenbereich“ mit Zuordnung (Administration)');
     $r = aufruf($basis, $admin['dose'], 'GET', '/anlagen/' . $bVert);
     pruefe(str_contains($r['text'], 'T-' . $kennung), 'Anlage: „Letzte Prüfung“ nennt den abgeschlossenen Bericht');
     pruefe($pdfAntwort(aufruf($basis, $admin['dose'], 'GET', '/berichte/' . $b2Id . '/pdf'), 'Entwurf-' . $b2Id . '.pdf'), 'Entwurf: PDF-Vorschau');
@@ -1167,6 +1170,7 @@ try {
     $dosen[] = $bkunde['dose'];
     $r = aufruf($basis, $bkunde['dose'], 'GET', '/berichte/' . $bId);
     pruefe($r['status'] === 200 && phpMeldung($r['text']) === null && !str_contains($r['text'], 'data-bericht='), 'Kunde sieht den abgeschlossenen Bericht (nur lesen)');
+    pruefe(!str_contains($r['text'], 'id="kundenbereich"'), 'ohne „kunden.view“: keine Karte „Kundenbereich“');
     gleich(aufruf($basis, $bkunde['dose'], 'GET', '/berichte/' . $b2Id)['status'], 404, 'Kunde sieht keinen Entwurf');
     pruefe($pdfAntwort(aufruf($basis, $bkunde['dose'], 'GET', '/berichte/' . $bId . '/pdf'), 'T-' . $kennung . '.pdf'), 'Kunde lädt das PDF des abgeschlossenen Berichts');
     gleich(aufruf($basis, $bkunde['dose'], 'GET', '/berichte/' . $b2Id . '/pdf')['status'], 404, 'Kunde: kein PDF eines Entwurfs');
@@ -1365,6 +1369,15 @@ try {
     $r = aufruf($basis, $admin['dose'], 'GET', '/berichte/' . $b3 . '/kunde');
     pruefe($r['status'] === 200 && str_contains($r['text'], 'Bitte geben Sie das Gerät an') && str_contains($r['text'], 'Pia Prüferin')
         && str_contains($r['text'], 'action="/berichte/' . $b3 . '/kunde/beenden"'), 'danach: „Gerät zurückgeben“ mit Kennwortfeld');
+    pruefe(!str_contains($r['text'], 'in Ihrem Kundenbereich'), 'ohne Zuordnung kein Hinweis auf den Kundenbereich');
+    // Einem Kunden mit eigenem Zugang zugeordnet: der Hinweis, dass der Bericht dort bereitsteht.
+    Database::update('berichte', $b3, ['kunde_id' => $kundeId]);
+    $kbZugang = Database::insert('users', ['username' => $kennung . '-kb-zugang', 'full_name' => '', 'email' => '', 'password_hash' => password_hash($kennwort, PASSWORD_DEFAULT),
+        'is_active' => 1, 'kunde_id' => $kundeId, 'created_at' => gmdate('c')]);
+    $r = aufruf($basis, $admin['dose'], 'GET', '/berichte/' . $b3 . '/kunde');
+    pruefe(str_contains($r['text'], 'Der Bericht steht ab sofort in Ihrem Kundenbereich bereit.'), 'zugeordnet, Kunde mit Zugang: „steht ab sofort in Ihrem Kundenbereich bereit“');
+    Database::delete('users', $kbZugang);
+    Database::update('berichte', $b3, ['kunde_id' => null]);
     $fehlVorher = (int) Database::scalar('SELECT failed_logins FROM users WHERE id = ?', [$benutzer['admin']]);
     $r = aufruf($basis, $admin['dose'], 'POST', '/berichte/' . $b3 . '/kunde/beenden', ['kennwort' => 'falsch', '_token' => $admin['token']]);
     pruefe($r['status'] === 302 && $r['ziel'] === '/berichte/' . $b3 . '/kunde'

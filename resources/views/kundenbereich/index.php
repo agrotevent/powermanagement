@@ -2,11 +2,12 @@
 /**
  * Übersicht des Kundenbereichs: die Locations, die der Kunde jetzt sieht
  * (mit Veranstaltung und „sichtbar bis“), die kommenden (nur Name und
- * „ab …“), Ansprechpartner und Hilfe.
+ * „ab …“), die letzten fünf Protokolle, Ansprechpartner und Hilfe.
  *
  * @var array<string,mixed> $kunde
  * @var list<array<string,mixed>> $locations KundenSicht::locations()
  * @var list<array{name:string,ab:string}> $kommend KundenSicht::kommend()
+ * @var list<array<string,mixed>> $berichte KundenSicht::berichte()
  * @var array{text:string,telefon:?string} $kontakt KundenEinstellungen::kontakt()
  */
 use App\Kunden\Kundenbereich;
@@ -32,6 +33,21 @@ $title = 'Übersicht';
                 <p class="kb-leer">Derzeit ist keine Location für Sie freigegeben.<?= $kommend !== [] ? ' Was demnächst dazukommt, steht unten.' : '' ?></p>
             <?php else: ?>
                 <?= View::partial('kundenbereich/_orte', ['locations' => $locations]) ?>
+            <?php endif; ?>
+        </div>
+    </section>
+
+    <section class="card kb-breit" aria-labelledby="kb-protokolle-titel">
+        <div class="card-head">
+            <h2 id="kb-protokolle-titel">Ihre Protokolle</h2>
+            <span class="spacer"></span>
+            <?php if (count($berichte) > 5): ?><a href="<?= View::e(Kundenbereich::PFAD . '/protokolle') ?>">Alle <?= count($berichte) ?> ansehen</a><?php endif; ?>
+        </div>
+        <div class="card-body">
+            <?php if ($berichte === []): ?>
+                <p class="kb-leer">Noch kein abgeschlossenes Protokoll. Übergabeberichte erscheinen hier nach dem Abschluss.</p>
+            <?php else: ?>
+                <?= View::partial('kundenbereich/_protokolle', ['berichte' => array_slice($berichte, 0, 5)]) ?>
             <?php endif; ?>
         </div>
     </section>

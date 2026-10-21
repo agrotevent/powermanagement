@@ -5,6 +5,9 @@ namespace App\Berichte;
 
 use App\Auth\Auth;
 use App\Auth\Zugriff;
+use App\Kunden\Kundenbereich;
+use App\Kunden\KundenService;
+use App\Services\Eventworx;
 use App\Services\AnlagenService;
 use App\Services\AufbauService;
 use App\Services\SiteService;
@@ -154,11 +157,21 @@ final class BerichtService
      * eine längst entzogene Freigabe mit dem Löschen wieder auf.
      * Wer am Standort ändern darf und Berichte ausfüllt: alle, auch Entwürfe.
      * Sonst nur abgeschlossene (und ersetzte), und nur mit einer Freigabe für
-     * den Standort, deren Datenzeitraum den Prüftag berührt – ein Kunde sieht
-     * so den Bericht seiner Veranstaltung, nicht den der Woche davor.
+     * den Standort, deren Datenzeitraum den Prüftag berührt – ein Konto mit
+     * der Rolle „kunde“ sieht so den Bericht seiner Veranstaltung, nicht den
+     * der Woche davor.
+     *
+     * Kundenzugänge (Kundenbereich, users.kunde_id) nie: sie sehen Berichte
+     * nur über die ausdrückliche Zuordnung (sichtbarFuerKunde) – nie über
+     * Standort und Datenfenster, denn ein Gelände hat mehrere Veranstalter.
+     * Ohne Rechte wären sie hier ohnehin draußen; die Regel steht trotzdem
+     * zuerst, damit kein späteres Recht und keine Freigabe sie öffnet.
      */
     public static function sichtbar(array $b): bool
     {
+        if (Kundenbereich::istKundenzugang()) {
+            return false;
+        }
         if (!Auth::can('berichte.view') && !Auth::can('berichte.manage')) {
             return false;
         }
@@ -372,14 +385,16 @@ final class BerichtService
         $ewx = trim($ewxVorgang);
         $ewxNeu = null;
         if ($ewx === '-') {
-            $felder += ['ewx_host' => '', 'ewx_id' => '', 'ewx_art' => '', 'ewx_nummer' => '', 'ewx_am' => null];
+            $felder += ['ewx_host' => '', 'ewx_id' => '', 'ewx_art' => '', 'ewx_nummer' => '', 'ewx_am' => null, 'ewx_kunde_ref' => ''];
         } elseif ($ewx !== '') {
             $geladen = self::eventworxGeladen($id)[$ewx] ?? null;
             if ($geladen === null) {
                 $hinweise[] = 'Der Eventworx-Vorgang wurde in dieser Sitzung nicht geladen – Verweis nicht übernommen.';
             } else {
                 $ewxNeu = $geladen;
-                $felder += ['ewx_host' => $geladen['host'], 'ewx_id' => $ewx, 'ewx_art' => $geladen['art'], 'ewx_nummer' => $geladen['nummer'], 'ewx_am' => $geladen['am']];
+                // Die Kunden-Kennung (nur zum Vorschlag im Kundenbereich) kommt mit dem Verweis – nie für sich.
+                $felder += ['ewx_host' => $geladen['host'], 'ewx_id' => $ewx, 'ewx_art' => $geladen['art'], 'ewx_nummer' => $geladen['nummer'], 'ewx_am' => $geladen['am'],
+                    'ewx_kunde_ref' => $geladen['kunde_ref']];
             }
         }
 
@@ -567,7 +582,8 @@ final class BerichtService
         $kunde['quelle'] = 'bericht';
         $verweis = null;
         if ((string) $q['ewx_id'] !== '') {
-            $verweis = ['id' => (string) $q['ewx_id'], 'art' => (string) $q['ewx_art'], 'nummer' => (string) $q['ewx_nummer'], 'host' => (string) $q['ewx_host']];
+            $verweis = ['id' => (string) $q['ewx_id'], 'art' => (string) $q['ewx_art'], 'nummer' => (string) $q['ewx_nummer'], 'host' => (string) $q['ewx_host'],
+                'kunde_ref' => (string) $q['ewx_kunde_ref']];
             self::eventworxMerken($id, $verweis, $q['ewx_am'] !== null ? (string) $q['ewx_am'] : null);
         }
         return [
@@ -602,10 +618,11 @@ final class BerichtService
 
     /**
      * Einen in dieser Sitzung geladenen Eventworx-Vorgang zu einem Bericht
-     * vormerken – nur Kennung, Nummer, Art, Host und Zeit, keine Kundendaten.
-     * Das Autosave übernimmt den Verweis nur, wenn er hier steht.
+     * vormerken – nur Kennung, Nummer, Art, Host, Zeit und die Kennung des
+     * Kunden in Eventworx (nur als ObjectId), keine Kundendaten. Das Autosave
+     * übernimmt den Verweis nur, wenn er hier steht.
      *
-     * @param array{id?:string,nummer?:string,art?:string,host?:string} $verweis
+     * @param array{id?:string,nummer?:string,art?:string,host?:string,kunde_ref?:string} $verweis
      */
     public static function eventworxMerken(int $berichtId, array $verweis, ?string $am = null): void
     {
@@ -622,12 +639,13 @@ final class BerichtService
             'art'    => mb_substr((string) ($verweis['art'] ?? ''), 0, 24),
             'host'   => mb_substr((string) ($verweis['host'] ?? ''), 0, 190),
             'am'     => $am ?? gmdate('c'),
+            'kunde_ref' => self::kundeRef($verweis['kunde_ref'] ?? ''),
         ];
         $alle[$berichtId] = array_slice($je, -self::EWX_HOECHSTENS, self::EWX_HOECHSTENS, true);
         Session::put(self::EWX_SITZUNG, $alle);
     }
 
-    /** @return array<string,array{nummer:string,art:string,host:string,am:string}> */
+    /** @return array<string,array{nummer:string,art:string,host:string,am:string,kunde_ref:string}> */
     public static function eventworxGeladen(int $berichtId): array
     {
         $alle = Session::get(self::EWX_SITZUNG, []);
@@ -636,7 +654,7 @@ final class BerichtService
         foreach ($je as $jobId => $v) {
             if (is_array($v)) {
                 $out[(string) $jobId] = ['nummer' => (string) ($v['nummer'] ?? ''), 'art' => (string) ($v['art'] ?? ''),
-                    'host' => (string) ($v['host'] ?? ''), 'am' => (string) ($v['am'] ?? '')];
+                    'host' => (string) ($v['host'] ?? ''), 'am' => (string) ($v['am'] ?? ''), 'kunde_ref' => self::kundeRef($v['kunde_ref'] ?? '')];
             }
         }
         return $out;
@@ -1316,8 +1334,9 @@ final class BerichtService
         try {
             $neu = self::transaktion(static function () use ($b, $id, $fassung, $grund, $inhalt): int {
                 $jetzt = gmdate('c');
+                // Gleiche Verweise – auch die Zuordnung zum Kunden (Kundenbereich): sie gilt für die ganze Nummer.
                 $spalten = ['jahr', 'laufnr', 'site_id', 'aufbau_id', 'standort_name', 'titel', 'veranstaltung', 'kunde_name', 'pruefdatum',
-                    'ewx_host', 'ewx_id', 'ewx_art', 'ewx_nummer', 'ewx_am'];
+                    'ewx_host', 'ewx_id', 'ewx_art', 'ewx_nummer', 'ewx_am', 'ewx_kunde_ref', 'kunde_id'];
                 $neu = Database::insert('berichte', array_intersect_key($b, array_flip($spalten)) + [
                     'nummer'          => null,
                     'fassung'         => $fassung,
@@ -1690,7 +1709,146 @@ final class BerichtService
         return self::letzte('bo.inventar_id = ?', [$inventarId]);
     }
 
+    // ------------------------------------------------------------ Kundenbereich
+
+    /**
+     * Den Bericht einem Kunden des Kundenbereichs geben – oder ihn dort
+     * herausnehmen ($kundeId null, wirkt sofort). Gilt für die ganze Nummer
+     * (alle Fassungen, jahr/laufnr), ein Entwurf ohne Nummer nur für sich.
+     * Die Spalte liegt außerhalb von inhalt und inhalt_hash: auch ein
+     * eingefrorener Bericht lässt sich so zuordnen und korrigieren, ohne dass
+     * sich Inhalt, Siegel oder PDF ändern. Der Kunde sieht ihn erst
+     * abgeschlossen (sichtbarFuerKunde); zugeordnet wird nie automatisch.
+     *
+     * Passt der Kunde im Bericht nicht zum gewählten (KundenService::namePasst),
+     * erst nach ausdrücklicher Bestätigung: eine Fehlzuordnung gäbe einem
+     * Veranstalter das Protokoll eines anderen. Ereignisse und Audit nur mit IDs.
+     *
+     * @return array{ok:bool,message:string,status:int,bestaetigen?:bool}
+     */
+    public static function kundeZuordnen(int $id, ?int $kundeId, bool $bestaetigt = false): array
+    {
+        $b = self::find($id);
+        if ($b === null || !self::sichtbar($b)) {
+            return self::nichtDa();
+        }
+        if (!Auth::can('kunden.manage')) {
+            return ['ok' => false, 'status' => 403, 'message' => 'Berichte ordnet zu, wer Kunden pflegen darf.'];
+        }
+        if ($b['status'] === 'verworfen') {
+            return ['ok' => false, 'status' => 409, 'message' => 'Ein verworfener Bericht kommt nicht in den Kundenbereich.'];
+        }
+        $kunde = null;
+        if ($kundeId !== null) {
+            $kunde = KundenService::find($kundeId);
+            if ($kunde === null) {
+                return ['ok' => false, 'status' => 404, 'message' => 'Diesen Kunden gibt es nicht.'];
+            }
+        }
+        $zeilen = $b['jahr'] !== null && $b['laufnr'] !== null
+            ? Database::select('SELECT id, kunde_id FROM berichte WHERE jahr = ? AND laufnr = ? ORDER BY fassung', [$b['jahr'], $b['laufnr']])
+            : [['id' => $id, 'kunde_id' => $b['kunde_id']]];
+        $aendern = array_values(array_filter($zeilen, static fn (array $z): bool => ($z['kunde_id'] !== null ? (int) $z['kunde_id'] : null) !== $kundeId));
+        if ($aendern === []) {
+            return ['ok' => true, 'status' => 200, 'message' => $kunde === null ? 'Der Bericht ist keinem Kunden zugeordnet.' : 'Der Bericht ist diesem Kunden schon zugeordnet.'];
+        }
+        if ($kunde !== null && !$bestaetigt && !KundenService::namePasst((string) $b['kunde_name'], (string) $kunde['name'])) {
+            $imBericht = trim((string) $b['kunde_name']);
+            return ['ok' => false, 'status' => 409, 'bestaetigen' => true,
+                'message' => ($imBericht === '' ? 'Im Bericht steht kein Kunde' : 'Im Bericht steht „' . $imBericht . '“') . ', zugeordnet werden soll „'
+                    . $kunde['name'] . '“. Bitte bestätigen, dass es derselbe Kunde ist.'];
+        }
+        $alt = $b['kunde_id'];
+        self::transaktion(static function () use ($aendern, $kundeId): void {
+            foreach ($aendern as $z) {
+                $vorher = $z['kunde_id'] !== null ? (int) $z['kunde_id'] : null;
+                Database::execute('UPDATE berichte SET kunde_id = ? WHERE id = ?', [$kundeId, (int) $z['id']]);
+                self::ereignis((int) $z['id'], $kundeId === null ? 'kunde_entfernt' : 'kunde_zugeordnet',
+                    ['kunde_id' => (string) ($kundeId ?? $vorher)] + ($kundeId !== null && $vorher !== null ? ['vorher' => (string) $vorher] : []));
+            }
+        });
+        KundenService::vergessen();
+        Audit::log('bericht.kunde', 'bericht', (string) $id, ['bericht_id' => $id, 'alt' => $alt, 'neu' => $kundeId]);
+        if ($kunde === null) {
+            return ['ok' => true, 'status' => 200, 'message' => 'Der Bericht steht nicht mehr im Kundenbereich.'];
+        }
+        return ['ok' => true, 'status' => 200, 'message' => 'Dem Kunden „' . $kunde['name'] . '“ zugeordnet – '
+            . (in_array($b['status'], ['abgeschlossen', 'ersetzt'], true) ? 'er sieht den Bericht jetzt im Kundenbereich.' : 'im Kundenbereich erscheint er nach dem Abschluss.')];
+    }
+
+    /**
+     * Die Berichte, die ein Kunde im Kundenbereich sieht – ohne Inhalt,
+     * neueste Prüfung zuerst: nur ihm ausdrücklich zugeordnete (kunde_id),
+     * nur abgeschlossene und ersetzte, mit der Prüfsumme des gespeicherten
+     * PDF (oder null). Unabhängig von Standort, Freigaben und Prüfdatum: ein
+     * Gelände hat mehrere Veranstalter, und das Dokument überdauert die
+     * Location-Freigabe. Ob der Kunde noch aktiv ist, prüft KundenSicht.
+     *
+     * @return list<array<string,mixed>>
+     */
+    public static function fuerKunde(int $kundeId, ?int $siteId = null): array
+    {
+        $sql = "SELECT b.id, b.nummer, b.jahr, b.laufnr, b.fassung, b.vorgaenger_id, b.ersetzt_durch_id, b.status, b.site_id, b.standort_name,
+                       b.titel, b.veranstaltung, b.pruefdatum, b.abgeschlossen_am, b.kunde_id, p.sha256 AS pdf_sha256
+                FROM berichte b LEFT JOIN bericht_pdf p ON p.bericht_id = b.id
+                WHERE b.kunde_id = ? AND b.status IN ('abgeschlossen', 'ersetzt')";
+        $werte = [$kundeId];
+        if ($siteId !== null) {
+            $sql .= ' AND b.site_id = ?';
+            $werte[] = $siteId;
+        }
+        $out = [];
+        foreach (Database::select($sql . ' ORDER BY b.pruefdatum DESC, b.id DESC', $werte) as $b) {
+            $b = self::zeile($b);
+            if (self::sichtbarFuerKunde($b, $kundeId)) {
+                $out[] = $b;
+            }
+        }
+        return $out;
+    }
+
+    /**
+     * Sieht dieser Kunde (Kundenbereich) den Bericht? Genau dann, wenn er
+     * ihm zugeordnet und abgeschlossen oder ersetzt ist – nie über Standort
+     * und Datenfenster (§3 Sichtbarkeit). Das PDF dazu nur, wenn es
+     * gespeichert ist, nie eine Vorschau.
+     */
+    public static function sichtbarFuerKunde(array $b, int $kundeId): bool
+    {
+        return $kundeId > 0 && ($b['kunde_id'] ?? null) !== null && (int) $b['kunde_id'] === $kundeId
+            && in_array((string) ($b['status'] ?? ''), ['abgeschlossen', 'ersetzt'], true);
+    }
+
+    /**
+     * Der Kunde hat das PDF im Kundenbereich geladen – im Lebenslauf ohne
+     * seinen Namen (der Lebenslauf bleibt so lange wie der Bericht), nur mit
+     * der Konto-ID; wer genau, steht in kunden_abrufe (geht mit dem Kunden).
+     */
+    public static function pdfImKundenbereich(int $id, int $userId): void
+    {
+        Database::insert('bericht_ereignisse', [
+            'bericht_id' => $id,
+            'ereignis'   => 'pdf_kunde',
+            'am'         => gmdate('c'),
+            'user_id'    => $userId,
+            'username'   => 'kundenbereich',
+            'details'    => Kanon::json(['user_id' => (string) $userId]),
+        ]);
+    }
+
     // ------------------------------------------------------------ Lösch-Haken
+
+    /**
+     * Ein Kunde des Kundenbereichs wird gelöscht: seine Berichte bleiben
+     * (Aufbewahrung), nur ohne Zuordnung – im Lebenslauf mit der ID.
+     */
+    public static function kundeEntfernt(int $kundeId): void
+    {
+        foreach (Database::select('SELECT id FROM berichte WHERE kunde_id = ?', [$kundeId]) as $row) {
+            self::ereignis((int) $row['id'], 'kunde_entfernt', ['kunde_id' => (string) $kundeId]);
+        }
+        Database::execute('UPDATE berichte SET kunde_id = NULL WHERE kunde_id = ?', [$kundeId]);
+    }
 
     /**
      * Ein Standort wird gelöscht: Entwürfe ohne Nummer gehen mit, alle
@@ -1998,6 +2156,8 @@ final class BerichtService
         foreach (['bericht_unterschriften', 'bericht_pdf', 'bericht_objekte', 'bericht_ereignisse', 'kundenmodus_geraete'] as $tabelle) {
             Database::execute("DELETE FROM {$tabelle} WHERE bericht_id = ?", [$id]);
         }
+        // Die Abrufe im Kundenbereich gehen mit dem Dokument (Audit-Einträge bleiben ihre 400 Tage).
+        Database::execute("DELETE FROM kunden_abrufe WHERE art = 'bericht' AND ziel_id = ?", [$id]);
         Database::delete('berichte', $id);
     }
 
@@ -2006,6 +2166,12 @@ final class BerichtService
     private static function nichtDa(): array
     {
         return ['ok' => false, 'status' => 404, 'message' => 'Diesen Bericht gibt es nicht.'];
+    }
+
+    /** Die Kennung eines Kunden in Eventworx – nur eine ObjectId, sonst ''. */
+    private static function kundeRef(mixed $wert): string
+    {
+        return is_string($wert) && preg_match(Eventworx::OID, $wert) === 1 ? $wert : '';
     }
 
     private static function unterschriftDa(int $id, string $rolle): bool
@@ -2396,7 +2562,7 @@ final class BerichtService
                 $b[$spalte] = (int) $b[$spalte];
             }
         }
-        foreach (['site_id', 'aufbau_id', 'jahr', 'laufnr', 'vorgaenger_id', 'ersetzt_durch_id', 'pruefer_id', 'geaendert_von'] as $spalte) {
+        foreach (['site_id', 'aufbau_id', 'jahr', 'laufnr', 'vorgaenger_id', 'ersetzt_durch_id', 'pruefer_id', 'geaendert_von', 'kunde_id'] as $spalte) {
             if (array_key_exists($spalte, $b)) {
                 $b[$spalte] = $b[$spalte] !== null ? (int) $b[$spalte] : null;
             }

@@ -1,7 +1,7 @@
 <?php
 /**
- * Ein Kunde – Reiter Übersicht, Stammdaten, Zugänge, Freigaben (die beiden
- * letzten nur mit „kunden.manage“).
+ * Ein Kunde – Reiter Übersicht, Stammdaten, Zugänge, Freigaben, Protokolle,
+ * Abrufe (Zugänge, Freigaben und Abrufe nur mit „kunden.manage“).
  *
  * @var array<string,mixed> $kunde
  * @var string $tab
@@ -36,6 +36,7 @@ $id = (int) $kunde['id'];
             echo match ($k) {
                 'zugaenge'  => ' (' . (int) $zahlen['zugaenge'] . ')',
                 'freigaben' => ' (' . (int) $zahlen['freigaben'] . ')',
+                'protokolle' => ' (' . (int) $zahlen['berichte'] . ')',
                 default     => '',
             }; ?></a>
     <?php endforeach; ?>

@@ -5,6 +5,8 @@ namespace App\Controllers;
 
 use App\Auth\Auth;
 use App\Auth\Zugriff;
+use App\Berichte\BerichtService;
+use App\Kunden\Abrufe;
 use App\Kunden\Einrichtung;
 use App\Kunden\KundenEinstellungen;
 use App\Kunden\KundenService;
@@ -29,6 +31,10 @@ use App\Support\View;
  * direkt in der Antwort auf das Anlegen (nicht zwischengespeichert), nie in
  * Flash, Sitzung, Weiterleitung oder Log. Gegen doppeltes Absenden trägt das
  * Formular „Neuer Zugang“ eine Einmal-Marke.
+ *
+ * Übergabeberichte gibt eine Person einem Kunden (berichtZuordnen, am
+ * Bericht oder im Reiter Protokolle) – nie automatisch; weicht der Name im
+ * Bericht ab, erst nach einer Rückfrage.
  */
 final class KundenController extends Controller
 {
@@ -40,6 +46,8 @@ final class KundenController extends Controller
         'stammdaten' => ['Stammdaten', false],
         'zugaenge'   => ['Zugänge', true],
         'freigaben'  => ['Freigaben', true],
+        'protokolle' => ['Protokolle', false],
+        'abrufe'     => ['Abrufe', true],
     ];
 
     /** Zweck der Einmal-Marken (Formular „Neuer Zugang“). */
@@ -113,6 +121,11 @@ final class KundenController extends Controller
             $daten['freigaben'] = KundenService::freigaben($id);
             $daten['darfFreigeben'] = $alles;
             $daten['standorte'] = $alles ? SiteService::all() : [];
+        } elseif ($tab === 'protokolle') {
+            $daten['protokolle'] = KundenService::protokolle($id);
+            $daten['rueckfrage'] = $pflegen ? KundenService::rueckfrage(null, $id) : null;
+        } elseif ($tab === 'abrufe') {
+            $daten['abrufe'] = Abrufe::fuerKunde($id);
         }
         $this->view('kunden/kunde', $daten);
     }
@@ -232,6 +245,40 @@ final class KundenController extends Controller
         $r = KundenService::freigabeLoeschen($id, $fid);
         $r['ok'] ? Flash::success($r['message']) : Flash::error($r['message']);
         $this->redirect(self::ZIEL . '/' . $id . '?tab=freigaben');
+    }
+
+    /**
+     * Bericht ↔ Kunde: kunde_id (leer = aus dem Kundenbereich nehmen),
+     * bestaetigt (bei abweichendem Namen), zurueck (Kunden-ID: zurück zum
+     * Reiter Protokolle dieses Kunden; sonst zum Bericht). Der Bericht muss
+     * für den Fragenden sichtbar sein (BerichtService::sichtbar).
+     */
+    public function berichtZuordnen(Request $request, array $params): void
+    {
+        $id = ctype_digit((string) ($params['id'] ?? '')) ? (int) $params['id'] : 0;
+        $b = $id > 0 ? BerichtService::find($id) : null;
+        if ($b === null || !BerichtService::sichtbar($b)) {
+            Response::notFound('Diesen Bericht gibt es nicht.');
+            return;
+        }
+        $zurueckRoh = $request->str('zurueck');
+        $zurueck = ctype_digit($zurueckRoh) && KundenService::find((int) $zurueckRoh) !== null ? (int) $zurueckRoh : null;
+        $ziel = $zurueck !== null ? self::ZIEL . '/' . $zurueck . '?tab=protokolle' : '/berichte/' . $id . '#kundenbereich';
+        $roh = $request->str('kunde_id');
+        if ($roh !== '' && !ctype_digit($roh)) {
+            Flash::error('Bitte einen Kunden wählen.');
+            $this->redirect($ziel);
+            return;
+        }
+        $kundeId = $roh !== '' && (int) $roh > 0 ? (int) $roh : null;
+        $r = BerichtService::kundeZuordnen($id, $kundeId, $request->bool('bestaetigt'));
+        if (!empty($r['bestaetigen']) && $kundeId !== null) {
+            KundenService::rueckfrageMerken($id, $kundeId, $r['message'], $zurueck);
+            Flash::warning($r['message']);
+        } else {
+            $r['ok'] ? Flash::success($r['message']) : Flash::error($r['message']);
+        }
+        $this->redirect($ziel);
     }
 
     // ------------------------------------------------------------ Hilfen

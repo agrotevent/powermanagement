@@ -12,6 +12,7 @@ use App\Berichte\Grenzwerte;
 use App\Berichte\Kundenmodus;
 use App\Berichte\Pruefgeraete;
 use App\Berichte\Vorbelegung;
+use App\Kunden\KundenService;
 use App\Services\AnlagenService;
 use App\Services\AufbauService;
 use App\Services\Eventworx;
@@ -223,6 +224,8 @@ final class BerichtController extends Controller
                 'vorgaenger'    => $b['vorgaenger_id'] !== null ? BerichtService::find((int) $b['vorgaenger_id']) : null,
                 'pdfHash'       => in_array($b['status'], ['abgeschlossen', 'ersetzt'], true) ? BerichtService::pdfHash((int) $b['id']) : null,
                 'ewxLink'       => (string) $b['ewx_id'] !== '' && Auth::can('berichte.eventworx') ? Eventworx::link((string) $b['ewx_art'], (string) $b['ewx_id']) : '',
+                // Karte „Kundenbereich“: nur mit „kunden.view“ (sonst null).
+                'kundenbereich' => KundenService::berichtKarte($b),
                 'scripts'       => ['/assets/js/bericht-pdf.js'],
             ]);
             return;
@@ -484,6 +487,8 @@ final class BerichtController extends Controller
             // Wer den Kundenmodus gestartet hat – nur mit dessen Kennwort geht es weiter.
             'prueferName'    => $modus['name'],
             'firma'          => (string) ($inhalt['auftragnehmer']['name'] ?? Einstellungen::wert('firma.name')),
+            // Ist der Bericht einem Kunden mit eigenem Zugang zugeordnet, findet er ihn nach dem Abschluss im Kundenbereich.
+            'imKundenbereich' => $b['kunde_id'] !== null && KundenService::aktiveZugaenge((int) $b['kunde_id']) > 0,
             'scripts'        => ['/assets/js/unterschrift.js', '/assets/js/bericht-kunde.js'],
         ], 'layout/kunde');
     }

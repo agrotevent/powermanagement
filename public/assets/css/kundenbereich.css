@@ -106,6 +106,24 @@ a.kb-ort:hover .kb-ort-name, a.kb-ort:focus-visible .kb-ort-name { text-decorati
 .kb-plan-vorschau { flex: 1 1 100%; display: block; }
 .kb-plan-vorschau img { display: block; width: 100%; max-height: 50vh; object-fit: contain; background: #fff; border: 1px solid var(--border); border-radius: 8px; }
 
+/* Protokolle: je Nummer ein Eintrag; die Zeile führt zur Ansicht, PDF daneben. */
+.kb-protokolle { list-style: none; margin: 0; padding: 0; }
+.kb-protokolle > li { display: flex; flex-wrap: wrap; align-items: center; gap: 0 .8rem; }
+.kb-protokolle > li + li { border-top: 1px solid var(--border); }
+.kb-protokolle > li > .kb-ort { flex: 1 1 14rem; min-width: 0; }
+.kb-protokolle .kb-pdf { flex: 0 0 auto; }
+.kb-zustand { display: inline-block; margin-top: .25rem; padding: .05rem .5rem; border-radius: 999px; font-size: .78rem; font-weight: 600;
+    border: 1px solid var(--border); color: var(--text-muted); }
+.kb-zustand-ok { color: var(--success); background: var(--success-light); border-color: transparent; }
+.kb-zustand-alt { color: var(--text-muted); }
+.kb-fruehere { flex: 1 1 100%; margin: 0 0 .6rem; }
+.kb-fruehere summary { min-height: 44px; display: flex; align-items: center; cursor: pointer; color: var(--primary); }
+.kb-fruehere ul { list-style: none; margin: 0; padding: 0 0 0 .8rem; border-left: 2px solid var(--border); }
+.kb-fruehere li { display: flex; flex-wrap: wrap; align-items: center; gap: .2rem .8rem; padding: .35rem 0; }
+.kb-fruehere li .kb-meta { flex: 1 1 12rem; }
+.kb-pruefsumme { overflow-wrap: anywhere; word-break: break-all; }
+.kundenbereich .bericht-ansicht .kv dd { overflow-wrap: anywhere; }
+
 /* Ansprechpartner */
 .kb-kontakt p { overflow-wrap: anywhere; }
 
@@ -122,7 +140,8 @@ a.kb-ort:hover .kb-ort-name, a.kb-ort:focus-visible .kb-ort-name { text-decorati
 /* ------------------------------------------------------------ Druck */
 @media print {
     body.kundenbereich { background: #fff; font-size: 11pt; }
-    .kb-nav, .kb-abmelden, .kb-sprung, .kb-fuss, .kb-zurueck, .demo-flag { display: none !important; }
+    .kb-nav, .kb-abmelden, .kb-sprung, .kb-fuss, .kb-zurueck, .demo-flag, .kb-pdf, .kb-protokoll-pdf .btn { display: none !important; }
+    .kb-fruehere { display: block; }
     .kb-kopf { padding: 0 0 .4rem; border-bottom: 1px solid #000; }
     .kb-inhalt { max-width: none; padding: .6rem 0 0; }
     .kb-karten { display: block; }
