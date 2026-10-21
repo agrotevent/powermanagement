@@ -1333,6 +1333,42 @@ try {
         [$ereignisseVorher, $fehlVorher, $geraetVorher], 'anderes Konto: kein Ereignis am Bericht, kein Fehlversuch, die Sperre am Gerät bleibt');
     $r = aufruf($basis, $geraet, 'POST', '/logout', ['_token' => $aToken]);
     pruefe($r['status'] === 302 && $r['ziel'] === '/login', 'anderes Konto: Abmelden geht (' . (string) $r['ziel'] . ')');
+    // Ein Konto, das selbst übergeben darf („berichte.manage“, „bearbeiten“ am
+    // Standort), startete hier sonst seinen eigenen Kundenmodus: Das löschte
+    // die Sperre des Prüfers am Gerät und ersetzte das Cookie – nach dem
+    // eigenen Entsperren und Abmelden war der Prüfer bei seiner nächsten
+    // Anmeldung nicht mehr gesperrt, und am Bericht stand „kundenmodus_start“
+    // (kein Zurückziehen mehr). Ebenso, wenn vom Prüfer nur das Gerätecookie
+    // übrig ist (Sitzung abgelaufen). Solange die fremde Sperre gilt, startet
+    // an diesem Gerät kein anderer Kundenmodus.
+    $planerFreigabe = ['user', $benutzer['bplaner'], 'site', $bSite];
+    Database::execute('UPDATE freigaben SET darf_bearbeiten = 1 WHERE subject_type = ? AND subject_id = ? AND ziel_art = ? AND ziel_id = ?', $planerFreigabe);
+    $nurGeraet = (string) tempnam(sys_get_temp_dir(), 'pm-web-');
+    $dosen[] = $nurGeraet;
+    file_put_contents($nurGeraet, "# Netscape HTTP Cookie File\n" . implode("\n", array_filter(explode("\n", (string) file_get_contents($geraet)),
+        static fn (string $z): bool => str_contains($z, "\tpm_kundenmodus\t"))) . "\n");
+    $geraeteB3 = static fn (): array => Database::select('SELECT id, bericht_id, user_id, seit FROM kundenmodus_geraete WHERE bericht_id = ? ORDER BY id', [$b3]);
+    $geraetecookie = static fn (string $dose): array => array_values(array_filter(explode("\n", (string) @file_get_contents($dose)),
+        static fn (string $z): bool => str_contains($z, "\tpm_kundenmodus\t")));
+    $vorher = [$geraeteB3(), (int) Database::scalar('SELECT COUNT(*) FROM bericht_ereignisse WHERE bericht_id = ?', [$b3]),
+        (int) Database::scalar('SELECT version FROM berichte WHERE id = ?', [$b3])];
+    foreach (['nach Kennwort-Rücksetzung' => $geraet, 'nur mit dem Gerätecookie' => $nurGeraet] as $fall => $dose) {
+        $cookieVorher = $geraetecookie($dose);
+        $seite = aufruf($basis, $dose, 'GET', '/login');
+        aufruf($basis, $dose, 'POST', '/login', ['username' => $kennung . '-bplaner', 'password' => $kennwort, '_token' => token($seite['text'])]);
+        $pSeite = aufruf($basis, $dose, 'GET', '/berichte/' . $b3);
+        $pStart = aufruf($basis, $dose, 'POST', '/berichte/' . $b3 . '/kundenmodus', ['_token' => token($pSeite['text'])]);
+        $pDanach = aufruf($basis, $dose, 'GET', '/berichte/' . $b3);
+        pruefe($cookieVorher !== [] && $pSeite['status'] === 200 && str_contains($pSeite['text'], 'action="/berichte/' . $b3 . '/kundenmodus"') && $pStart['status'] === 302
+            && $pStart['ziel'] === '/berichte/' . $b3 && $pDanach['status'] === 200 && str_contains($pDanach['text'], 'eines anderen Kontos gesperrt'),
+            'Planer mit „bearbeiten“ (' . $fall . '): kein eigener Kundenmodus über die Sperre des Prüfers – ' . $pStart['status'] . ' ' . (string) $pStart['ziel']);
+        gleich([$geraeteB3(), (int) Database::scalar('SELECT COUNT(*) FROM bericht_ereignisse WHERE bericht_id = ?', [$b3]),
+            (int) Database::scalar('SELECT version FROM berichte WHERE id = ?', [$b3]), $geraetecookie($dose)], [...$vorher, $cookieVorher],
+            'Planer (' . $fall . '): die Sperre des Prüfers am Gerät und das Cookie bleiben, kein Ereignis, keine neue Version');
+        $r = aufruf($basis, $dose, 'POST', '/logout', ['_token' => token($pDanach['text'])]);
+        pruefe($r['status'] === 302 && $r['ziel'] === '/login', 'Planer (' . $fall . '): Abmelden geht (' . (string) $r['ziel'] . ')');
+    }
+    Database::execute('UPDATE freigaben SET darf_bearbeiten = 0 WHERE subject_type = ? AND subject_id = ? AND ziel_art = ? AND ziel_id = ?', $planerFreigabe);
     Database::execute('UPDATE users SET password_hash = ? WHERE id = ?', [$hashVorher, $benutzer['admin']]);
     $seite = aufruf($basis, $geraet, 'GET', '/login');
     aufruf($basis, $geraet, 'POST', '/login', ['username' => $kennung . '-admin', 'password' => $kennwort, '_token' => token($seite['text'])]);

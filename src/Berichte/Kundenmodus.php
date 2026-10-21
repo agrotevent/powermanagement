@@ -23,7 +23,8 @@ use App\Support\Session;
  * dem Konto an – etwa mit dem im Browser gespeicherten Kennwort –, gilt die
  * Sperre gleich wieder. Auf einem anderen Gerät gilt sie nicht, und ein
  * anderes Konto sperrt sie nicht – weder in der Sitzung noch am Gerät
- * (aktiv()).
+ * (aktiv()). Es nimmt sie dem Gerät auch nicht: Solange sie gilt, startet
+ * dort kein anderer Kundenmodus (fremdAmGeraet()).
  *
  * Entsperrt wird mit dem Kennwort dessen, der den Kundenmodus gestartet hat
  * (Auth::kennwortBestaetigen). Falsche Versuche zählen nur in der Sitzung –
@@ -131,12 +132,28 @@ final class Kundenmodus
         return ($methode === 'GET' && $pfad === $bericht . '/kunde') || ($methode === 'POST' && $pfad === $bericht . '/kunde/beenden');
     }
 
+    /**
+     * Hängt an diesem Gerät noch die Sperre eines anderen Kontos? Dann
+     * startet hier kein Kundenmodus (BerichtService::kundenmodusStarten()):
+     * starten() ersetzte das Cookie, und meldete sich das Konto, das die
+     * Sperre gestartet hat, hier wieder an – etwa mit dem gespeicherten
+     * Kennwort –, wäre es nicht mehr gesperrt. Eine abgelaufene Sperre oder
+     * die zu einem gelöschten Bericht hält niemanden auf (wie geraet()); die
+     * eines gelöschten Kontos geht mit ihm (BenutzerService::loeschen()).
+     */
+    public static function fremdAmGeraet(): bool
+    {
+        $userId = Auth::id();
+        $z = $userId === null ? null : self::sperreAmGeraet();
+        return $z !== null && (int) $z['user_id'] !== $userId;
+    }
+
     /** Sperren – in der Sitzung und am Gerät (Cookie). */
     public static function starten(int $berichtId): void
     {
         $user = Auth::user() ?? [];
         $userId = (int) ($user['id'] ?? 0);
-        self::geraetLoeschen();
+        self::geraetLoeschen($userId);
         $token = bin2hex(random_bytes(32));
         $geraet = Database::insert('kundenmodus_geraete', [
             'token_hash' => hash('sha256', $token),
@@ -153,14 +170,15 @@ final class Kundenmodus
         Flash::pull();
     }
 
-    /** Entsperren – Sitzung und Gerät. */
+    /** Entsperren – Sitzung und Gerät, nur die eigene Sperre. */
     public static function beenden(): void
     {
         $m = Session::get(self::SITZUNG);
+        $userId = is_array($m) && (int) ($m['user'] ?? 0) > 0 ? (int) $m['user'] : (int) Auth::id();
         if (is_array($m) && (int) ($m['geraet'] ?? 0) > 0) {
-            Database::execute('DELETE FROM kundenmodus_geraete WHERE id = ?', [(int) $m['geraet']]);
+            Database::execute('DELETE FROM kundenmodus_geraete WHERE id = ? AND user_id = ?', [(int) $m['geraet'], $userId]);
         }
-        self::geraetLoeschen();
+        self::geraetLoeschen($userId);
         Session::forget(self::SITZUNG);
     }
 
@@ -206,29 +224,62 @@ final class Kundenmodus
      */
     private static function geraet(): ?array
     {
-        $token = (string) ($_COOKIE[self::COOKIE] ?? '');
         $userId = Auth::id();
-        if ($userId === null || preg_match('/^[0-9a-f]{64}$/', $token) !== 1) {
+        $token = self::token();
+        if ($userId === null || $token === null) {
             return null;
         }
-        $z = Database::first(
-            'SELECT g.id, g.bericht_id, g.user_id FROM kundenmodus_geraete g JOIN berichte b ON b.id = g.bericht_id
-             WHERE g.token_hash = ? AND g.user_id = ? AND g.seit > ?',
-            [hash('sha256', $token), $userId, gmdate('c', time() - self::GERAET_TAGE * 86400)]
-        );
+        $z = self::sperreAmGeraet();
+        if ($z !== null && (int) $z['user_id'] === $userId) {
+            return $z;
+        }
         if ($z === null && Database::scalar('SELECT id FROM kundenmodus_geraete WHERE token_hash = ?', [hash('sha256', $token)]) === false) {
             // Entsperrt oder abgelaufen: das Cookie hat ausgedient.
             self::cookie('', time() - 42000);
         }
-        return $z;
+        return null;
     }
 
-    /** Die Sperre, auf die das Cookie dieses Geräts zeigt, und das Cookie selbst entfernen. */
-    private static function geraetLoeschen(): void
+    /**
+     * Die Sperre, auf die das Cookie dieses Geräts zeigt – gleich, welches
+     * Konto sie gestartet hat; nur, wenn der Bericht noch da ist und die
+     * Sperre nicht älter als GERAET_TAGE.
+     *
+     * @return array{id:int|string,bericht_id:int|string,user_id:int|string}|null
+     */
+    private static function sperreAmGeraet(): ?array
     {
-        $token = (string) ($_COOKIE[self::COOKIE] ?? '');
-        if (preg_match('/^[0-9a-f]{64}$/', $token) === 1) {
-            Database::execute('DELETE FROM kundenmodus_geraete WHERE token_hash = ?', [hash('sha256', $token)]);
+        $token = self::token();
+        if ($token === null) {
+            return null;
+        }
+        return Database::first(
+            'SELECT g.id, g.bericht_id, g.user_id FROM kundenmodus_geraete g JOIN berichte b ON b.id = g.bericht_id
+             WHERE g.token_hash = ? AND g.seit > ?',
+            [hash('sha256', $token), gmdate('c', time() - self::GERAET_TAGE * 86400)]
+        );
+    }
+
+    /** Der Zufallswert im Cookie dieses Geräts – null, wenn keiner (oder kein gültiger) da ist. */
+    private static function token(): ?string
+    {
+        $token = $_COOKIE[self::COOKIE] ?? '';
+        return is_string($token) && preg_match('/^[0-9a-f]{64}$/', $token) === 1 ? $token : null;
+    }
+
+    /**
+     * Die eigene Sperre, auf die das Cookie dieses Geräts zeigt, und das
+     * Cookie selbst entfernen. Die eines anderen Kontos bleibt – und mit ihr
+     * das Cookie, über das sie gilt.
+     */
+    private static function geraetLoeschen(int $userId): void
+    {
+        $token = self::token();
+        if ($token !== null) {
+            Database::execute('DELETE FROM kundenmodus_geraete WHERE token_hash = ? AND user_id = ?', [hash('sha256', $token), $userId]);
+            if (Database::scalar('SELECT id FROM kundenmodus_geraete WHERE token_hash = ?', [hash('sha256', $token)]) !== false) {
+                return;
+            }
         }
         if (isset($_COOKIE[self::COOKIE])) {
             self::cookie('', time() - 42000);

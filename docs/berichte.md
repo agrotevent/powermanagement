@@ -301,7 +301,9 @@ Kennwort) und meldet sich jemand in diesem Browser wieder mit dem Konto an
 – etwa mit dem dort gespeicherten Kennwort –, ist das Gerät gleich wieder
 gesperrt. Ein anderes Konto sperrt sie nicht: Es kann sie weder entsperren
 noch bremsen, und für das Konto, das sie gestartet hat, bleibt sie am
-Gerät stehen. Auf einem anderen Gerät gilt die Sperre nicht.
+Gerät stehen – einen eigenen Kundenmodus startet ein anderes Konto an
+diesem Gerät erst, wenn sie entsperrt, nach einer Woche abgelaufen oder
+das Konto gelöscht ist. Auf einem anderen Gerät gilt die Sperre nicht.
 
 Endet die Rolle des Prüfers, während das Gerät beim Kunden liegt, zeigt
 die Kundenseite nur noch das Entsperren; danach geht es statt zum Bericht
