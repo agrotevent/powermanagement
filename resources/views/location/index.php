@@ -21,7 +21,7 @@ $statusText = ['neu' => 'noch nicht hier', 'aktuell' => 'aktuell', 'neuer' => 'd
         <p class="small muted mb0">Repository: <span class="mono"><?= View::e($repo !== '' ? $repo : 'nicht eingetragen') ?></span> · Zweig <span class="mono"><?= View::e($zweig) ?></span></p>
     </div>
     <div class="card-footer btn-row">
-        <a class="btn btn-primary btn-sm<?= $hindernis !== null ? ' disabled' : '' ?>" href="/location?holen=1">Repository abfragen</a>
+        <a class="btn btn-primary btn-sm<?= $hindernis !== null ? ' disabled' : '' ?>" href="/location?holen=1" data-laeuft="fragt ab …" data-laeuft-hinweis="Fragt das Repository ab. Über eine langsame Leitung kann das dauern. Bitte nicht noch einmal klicken.">Repository abfragen</a>
         <?php if (View::can('settings.manage') || View::can('inventory.push')): ?><a class="btn btn-sm" href="/system/einstellungen">Einstellungen</a><?php endif; ?>
         <a class="btn btn-sm btn-ghost" href="/verteiler-abgleich">Verteiler-Abgleich</a>
     </div>

@@ -61,13 +61,16 @@ final class Router
         // auch eine unbekannte Adresse, eine verbotene Seite oder eine
         // falsche Methode führt zurück zur Kundenseite statt auf eine
         // Fehlerseite (die früher die ganze Navigation samt „Abmelden“ zeigte).
-        $sperre = Auth::check() ? Kundenmodus::aktiv() : null;
-        if ($sperre !== null && !Kundenmodus::erlaubt($method, $path, $sperre['bericht'])) {
+        // Beginnt er erst, während eine Anfrage ohne Sitzungssperre wartet
+        // (InfluxDB, git, Geräte), prüft Controller::view() vor der Seite
+        // noch einmal.
+        $gesperrt = Kundenmodus::sperrt($method, $path);
+        if ($gesperrt !== null) {
             if (self::willJson()) {
                 Response::json(['ok' => false, 'kundenmodus' => true, 'message' => 'Kundenmodus aktiv – erst mit dem Kennwort des Prüfers entsperren.'], 423);
                 return;
             }
-            Response::redirect('/berichte/' . $sperre['bericht'] . '/kunde');
+            Response::redirect('/berichte/' . $gesperrt . '/kunde');
             return;
         }
 
@@ -138,8 +141,9 @@ final class Router
 
     /**
      * Erwartet die Anfrage JSON? Nur der Accept-Kopf zählt – nicht
-     * X-Requested-With: damit schickt `data-laeuft` in app.js Formulare ab,
-     * und die sollen weiter wie bisher mit Meldung und Weiterleitung enden.
+     * X-Requested-With: Formulare mit `data-laeuft` (app.js) gehen per fetch
+     * hinaus und sollen wie ein gewöhnliches Formular mit Meldung und
+     * Weiterleitung enden. Dieselbe Regel wie Request::wantsJson().
      */
     private static function willJson(): bool
     {

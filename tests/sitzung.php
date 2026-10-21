@@ -48,6 +48,16 @@ declare(strict_types=1);
  * einen durch, der zweite hört sofort mit einer Meldung auf – auch ein
  * „Hochladen“, während der Verteiler-Abgleich das Repository abfragt.
  *
+ * Und was der Browser davon sieht: Formulare mit `data-laeuft` gehen per
+ * fetch hinaus und laden danach neu – der Server muss dann mit Meldung und
+ * Weiterleitung antworten, nicht mit JSON (MQTT-Zugänge, Verteiler-Abgleich).
+ * Beginnt der Kundenmodus, während eine Seite noch auf die InfluxDB wartet,
+ * kommt sie nicht mit Navigation an, sondern führt zur Kundenseite. Und in
+ * app.js und live.js selbst (Node, ohne Browser): kein X-Requested-With,
+ * die Kennwortseite (`data-laeuft-seite`) schickt der Browser ab, der zweite
+ * Klick auf „Repository abfragen“ wird abgefangen, live.js lädt bei 423 im
+ * Kundenmodus neu.
+ *
  * Eigene Instanz (POWERMANAGEMENT_CONFIG, eigene SQLite-Datenbank mit dem
  * Demo-Gelände, dann ohne Demo-Modus) sowie Attrappen für InfluxDB,
  * Eventworx und eine andere Instanz (/api/v1), die jede Abfrage aufhalten.
@@ -301,11 +311,22 @@ function cookies(): CurlShareHandle
 }
 
 /**
+ * Statt $json: so schickt app.js ein Formular mit `data-laeuft` ab – per
+ * fetch, ohne JSON zu verlangen, und bis zu dieser Prüfung mit
+ * X-Requested-With. Darauf antwortete der Server mit JSON statt Meldung und
+ * Weiterleitung, und das Neuladen danach zeigte keine Meldung
+ * (Verteiler-Abgleich, MQTT-Zugänge). Er muss wie auf ein gewöhnliches
+ * Formular antworten – auch auf den Kopf, den eine ältere app.js schickt.
+ */
+const WIE_APP_JS = 'wie app.js';
+
+/**
  * Ein curl-Griff mit den gemeinsamen Cookies; folgt keinen Weiterleitungen.
  * JSON erwarten die Live-Abfragen und die Wege des Berichtsformulars
- * ($json). Die Kopfzeilen der Antwort landen in $kopf.
+ * ($json), WIE_APP_JS ein Formular mit `data-laeuft`. Die Kopfzeilen der
+ * Antwort landen in $kopf.
  */
-function griff(string $url, ?array $felder = null, ?bool $json = null, ?string &$kopf = null): CurlHandle
+function griff(string $url, ?array $felder = null, bool|string|null $json = null, ?string &$kopf = null): CurlHandle
 {
     $json ??= $felder === null && str_contains($url, '/live');
     $kopf = '';
@@ -315,7 +336,8 @@ function griff(string $url, ?array $felder = null, ?bool $json = null, ?string &
         CURLOPT_SHARE          => cookies(),
         CURLOPT_COOKIEFILE     => '',
         CURLOPT_TIMEOUT        => 60,
-        CURLOPT_HTTPHEADER     => ['Accept: ' . ($json ? 'application/json' : 'text/html')],
+        CURLOPT_HTTPHEADER     => $json === WIE_APP_JS ? ['Accept: */*', 'X-Requested-With: XMLHttpRequest']
+            : ['Accept: ' . ($json ? 'application/json' : 'text/html')],
         CURLOPT_HEADERFUNCTION => static function ($c, string $zeile) use (&$kopf): int {
             $kopf .= $zeile;
             return strlen($zeile);
@@ -329,7 +351,7 @@ function griff(string $url, ?array $felder = null, ?bool $json = null, ?string &
 }
 
 /** @return array{status:int,text:string,ziel:string,kopf:string} */
-function holen(string $url, ?array $felder = null, ?bool $json = null): array
+function holen(string $url, ?array $felder = null, bool|string|null $json = null): array
 {
     $c = griff($url, $felder, $json, $kopf);
     $text = (string) curl_exec($c);
@@ -351,12 +373,12 @@ function sitzungsCookie(string $kopf): bool
  * schicken. Gibt die Dauer der zweiten Anfrage und die Antworten der
  * langsamen zurück. Eine langsame Anfrage ist eine Adresse (GET) oder
  * [Adresse, Formularfelder] (POST) bzw. [Adresse, Formularfelder, true]
- * (POST, JSON erwartet).
+ * (POST, JSON erwartet) oder [Adresse, Formularfelder, WIE_APP_JS].
  *
- * @param list<string|array{0:string,1:array<string,mixed>,2?:bool}> $langsam
+ * @param list<string|array{0:string,1:array<string,mixed>,2?:bool|string}> $langsam
  * @return array{dauer:float,antwort:array{status:int,text:string,ziel:string,kopf:string},langsam:list<array{status:int,text:string,json:mixed,kopf:string}>}
  */
-function waehrendLangsam(array $langsam, string $url, ?array $felder = null, ?bool $json = null): array
+function waehrendLangsam(array $langsam, string $url, ?array $felder = null, bool|string|null $json = null): array
 {
     $mehrfach = curl_multi_init();
     $griffe = [];
@@ -785,14 +807,26 @@ foreach (['uebertragen' => 'angelegt', 'eigen' => 'eigen'] as $zweck => $zustand
         VALUES (?, ?, ?, 2, 'pruefung', ?, 0, ?, '', ?, ?)")->execute([$praefix, $praefix, $praefix, $zustand, $jetzt, $jetzt, $jetzt]);
     $zugaenge[$zweck] = (int) $db->lastInsertId();
 }
-$lauf = waehrendLangsam([[$basis . '/datenquellen/mqtt-zugaenge/uebertragen', ['_token' => $token, 'id' => (string) $zugaenge['uebertragen']]]], $basis . '/profil');
+// „Übertragen“ trägt data-laeuft: abgeschickt wie von app.js.
+$lauf = waehrendLangsam([[$basis . '/datenquellen/mqtt-zugaenge/uebertragen', ['_token' => $token, 'id' => (string) $zugaenge['uebertragen']], WIE_APP_JS]], $basis . '/profil');
 gleich($lauf['antwort']['status'], 200, 'MQTT-Zugänge: andere Seite, während „Übertragen“ auf den Broker wartet');
 pruefe($lauf['dauer'] < 1.5, sprintf('MQTT-Zugänge: „Übertragen“ hält die Sitzung nicht (%.1f s)', $lauf['dauer']));
-gleich($lauf['langsam'][0]['status'], 302, 'MQTT-Zugänge: „Übertragen“ leitet nach dem Warten weiter');
+gleich($lauf['langsam'][0]['status'], 302, 'MQTT-Zugänge: „Übertragen“ (abgeschickt wie von app.js) leitet nach dem Warten weiter, statt JSON zu liefern');
 $lauf = waehrendLangsam([$basis . '/datenquellen/mqtt-zugaenge'], $basis . '/profil');
 gleich($lauf['antwort']['status'], 200, 'MQTT-Zugänge: andere Seite, während die Übersicht nach der Schutzliste fragt');
 pruefe($lauf['dauer'] < 1.5, sprintf('MQTT-Zugänge: die Übersicht hält die Sitzung nicht (%.1f s)', $lauf['dauer']));
 gleich($lauf['langsam'][0]['status'], 200, 'MQTT-Zugänge: Übersicht nach dem Warten');
+// „Neues Kennwort“ antwortet mit der Seite selbst (das Kennwort genau
+// einmal) – das Formular schickt der Browser ab (data-laeuft-seite), sonst
+// verwürfe app.js die Antwort beim Neuladen. „Übertragen“ endet mit Meldung.
+$formulare = static fn (string $aktion, string $text): array => [
+    preg_match_all('#<form method="post" action="/datenquellen/mqtt-zugaenge/' . $aktion . '"[^>]*>#', $text, $m) ?: 0,
+    count(array_filter($m[0] ?? [], static fn (string $f): bool => preg_match('/\sdata-laeuft-seite[\s>]/', $f) === 1)),
+];
+[$alle, $seite] = $formulare('erneuern', $lauf['langsam'][0]['text']);
+pruefe($alle >= 2 && $seite === $alle, sprintf('MQTT-Zugänge: „Neues Kennwort“ trägt data-laeuft-seite (%d von %d)', $seite, $alle));
+[$alle, $seite] = $formulare('uebertragen', $lauf['langsam'][0]['text']);
+pruefe($alle >= 1 && $seite === 0, 'MQTT-Zugänge: „Übertragen“ geht per fetch (data-laeuft ohne -seite)');
 // Die Meldung von „Übertragen“ zeigt die erste Seite danach – hier die andere.
 pruefe(str_contains($lauf['antwort']['text'] . $lauf['langsam'][0]['text'], 'MQTT-Broker antwortet nicht auf die Anmeldung'),
     'MQTT-Zugänge: Meldung von „Übertragen“ nach dem Warten auf den Broker kommt an');
@@ -882,13 +916,58 @@ if ($echtesGit === null) {
     pruefe(str_contains($lauf['langsam'][0]['text'] . holen($basis . '/location')['text'], 'wird gerade schon abgeglichen'),
         'Verteiler-Abgleich fragt: „Hochladen“ meldet, dass schon abgeglichen wird');
 
+    // Umgekehrt „Alle hochladen“ im Verteiler-Abgleich, während der
+    // Location-Abgleich fragt – abgeschickt wie von app.js (data-laeuft).
+    // Die Meldung kommt als Meldung an, nicht als JSON, das das Neuladen
+    // danach verwürfe.
+    $lauf = waehrendLangsam([$basis . '/location?holen=1'], $basis . '/verteiler-abgleich/hochladen', ['_token' => $token, 'alle' => '1'], WIE_APP_JS);
+    gleich($lauf['antwort']['status'], 302, 'Location-Abgleich fragt: „Alle hochladen“ im Verteiler-Abgleich (wie von app.js) leitet weiter, statt JSON zu liefern');
+    pruefe($lauf['dauer'] < 1.5, sprintf('Location-Abgleich fragt: „Alle hochladen“ wartet weder auf die Sitzung noch auf die Sperre (%.1f s)', $lauf['dauer']));
+    pruefe(str_contains($lauf['langsam'][0]['text'] . holen($basis . '/verteiler-abgleich')['text'], 'wird gerade schon abgeglichen'),
+        'Location-Abgleich fragt: „Alle hochladen“ im Verteiler-Abgleich meldet, dass schon abgeglichen wird');
+
     // Danach ist nichts mehr gesperrt: „Hochladen“ kommt im Repository an.
     file_put_contents($gitVerzoegerung, '0');
     gleich(holen($basis . '/location/hochladen', ['_token' => $token, 'site_id' => (string) $gitSite])['status'], 302, '„Hochladen“, nachdem der Abgleich fertig ist');
     pruefe(str_contains($imRepo(), 'locations/' . $gitLocation . '/strom.json'), '„Hochladen“ danach ist nicht gesperrt und kommt im Repository an');
     pruefe(!str_contains(holen($basis . '/location')['text'], 'wird gerade schon abgeglichen'), '„Hochladen“ danach meldet kein „schon“');
+
+    // „Alle hochladen“ im Verteiler-Abgleich, wie von app.js: Die Meldung,
+    // was hochgeladen wurde, steht auf der Seite danach.
+    $r = holen($basis . '/verteiler-abgleich/hochladen', ['_token' => $token, 'alle' => '1'], WIE_APP_JS);
+    gleich([$r['status'], parse_url($r['ziel'], PHP_URL_PATH)], [302, '/verteiler-abgleich'], 'Verteiler-Abgleich: „Alle hochladen“ (wie von app.js) leitet weiter, statt JSON zu liefern');
+    pruefe(str_contains($imRepo(), 'verteiler/'), 'Verteiler-Abgleich: „Alle hochladen“ kommt im Repository an');
+    pruefe(str_contains(holen($basis . '/verteiler-abgleich')['text'], ' hochgeladen.'), 'Verteiler-Abgleich: Meldung von „Alle hochladen“ kommt an');
 }
 gleich(holen($basis . '/profil')['status'], 200, 'nach Seiten, Geräten, Clouds und Repository noch angemeldet');
+
+// ------------------------------------------------------------ Kundenmodus, während eine Seite wartet
+// „An Kunden übergeben“ in einem Reiter, während ein anderer noch das
+// Dashboard lädt und dabei ohne Sitzungssperre auf die InfluxDB wartet: Der
+// Kundenmodus beginnt mittendrin. Das Dashboard darf danach nicht mit
+// Navigation ankommen – die Sperre per BroadcastChannel hat diesen Reiter
+// nie erreicht, er lud ja noch –, sondern führt zur Kundenseite.
+$geprueft = (int) ($abfrage("SELECT id FROM berichte WHERE status = 'geprueft' ORDER BY nummer LIMIT 1")[0]['id'] ?? 0);
+pruefe($geprueft > 0, 'Kundenmodus: ein vom Prüfer unterschriebener Bericht im Demo-Gelände');
+if ($geprueft > 0) {
+    $kunde = '/berichte/' . $geprueft . '/kunde';
+    file_put_contents($verzoegerung, '3');
+    $lauf = waehrendLangsam([$basis . '/dashboard'], $basis . '/berichte/' . $geprueft . '/kundenmodus', ['_token' => $token]);
+    file_put_contents($verzoegerung, '0');
+    gleich([$lauf['antwort']['status'], parse_url($lauf['antwort']['ziel'], PHP_URL_PATH)], [302, $kunde],
+        'Kundenmodus: gestartet, während das Dashboard im anderen Reiter auf die InfluxDB wartet');
+    $dashboard = $lauf['langsam'][0];
+    pruefe($dashboard['status'] === 302 && preg_match('#^location:\s*' . preg_quote($kunde, '#') . '\s*$#mi', $dashboard['kopf']) === 1
+        && !str_contains($dashboard['text'], '<nav class="sidebar"'),
+        'Kundenmodus: das vorher angefragte Dashboard führt danach zur Kundenseite statt mit Navigation anzukommen (' . $dashboard['status'] . ')');
+    $live = holen($basis . '/dashboard/live');
+    pruefe($live['status'] === 423 && (json_decode($live['text'], true)['kundenmodus'] ?? false) === true,
+        'Kundenmodus: Live-Abfrage danach 423 mit „kundenmodus“ – darauf lädt live.js neu');
+    // Entsperren mit dem Kennwort des Prüfers – danach geht es weiter wie zuvor.
+    $r = holen($basis . $kunde . '/beenden', ['_token' => $token, 'kennwort' => $neuesKennwort]);
+    gleich([$r['status'], parse_url($r['ziel'], PHP_URL_PATH)], [302, '/berichte/' . $geprueft], 'Kundenmodus: mit dem Kennwort entsperrt');
+    gleich(holen($basis . '/dashboard')['status'], 200, 'Kundenmodus: danach wieder das Dashboard');
+}
 
 // Grundrisse der übernommenen Standorte (andere Instanz, Repository) aus storage/plans.
 foreach ($abfrage('SELECT f.plan_file FROM floors f JOIN sites s ON s.id = f.site_id WHERE s.partner_id = ? OR s.sync_key = ?', [$partnerId, $gitLocation]) as $f) {
@@ -896,6 +975,40 @@ foreach ($abfrage('SELECT f.plan_file FROM floors f JOIN sites s ON s.id = f.sit
     if ((string) $f['plan_file'] !== '' && !in_array($plan, $planeVorher, true)) {
         @unlink($plan);
     }
+}
+
+// ------------------------------------------------------------ im Browser: data-laeuft, Kundenmodus in live.js
+// Was der Server oben richtig macht, muss der Browser auch ankommen lassen.
+// Ohne Browser: DOM, fetch und Ereignisse von Hand (tests/hilfen/laeuft.cjs).
+$node = trim((string) shell_exec('command -v node 2>/dev/null'));
+if ($node === '') {
+    fwrite(STDOUT, "sitzung: app.js und live.js übersprungen – node fehlt\n");
+} else {
+    $js = $wurzel . '/public/assets/js/';
+    $b = json_decode((string) shell_exec(escapeshellarg($node) . ' ' . escapeshellarg(__DIR__ . '/hilfen/laeuft.cjs') . ' '
+        . escapeshellarg($js . 'app.js') . ' ' . escapeshellarg($js . 'live.js')), true) ?? ['fehler' => 'keine Ausgabe'];
+    pruefe(!isset($b['fehler']), 'app.js und live.js ohne Browser ausgeführt' . (isset($b['fehler']) ? ': ' . mb_substr((string) $b['fehler'], 0, 300) : ''));
+    $f = $b['fetch'] ?? [];
+    pruefe(($f['anfragen'] ?? 0) === 1 && ($f['abgefangen'] ?? false) === true && ($f['umleitung'] ?? '') === 'manual' && ($f['neuGeladen'] ?? 0) === 1,
+        'data-laeuft: das Formular geht per fetch hinaus, danach wird neu geladen');
+    pruefe(is_array($f['kopf'] ?? null) && array_filter(array_keys($f['kopf']), static fn ($k): bool => in_array(strtolower((string) $k), ['x-requested-with', 'accept'], true)) === [],
+        'data-laeuft: fetch ohne X-Requested-With und ohne Accept – der Server antwortet wie auf ein Formular, die Meldung kommt nach dem Neuladen an ' . json_encode($f['kopf'] ?? null));
+    $s = $b['seite'] ?? [];
+    pruefe(($s['erstesAbgefangen'] ?? true) === false && ($s['anfragen'] ?? 1) === 0,
+        'data-laeuft-seite (Kennwort genau einmal): der Browser schickt selbst ab, kein fetch – die Seite mit dem Kennwort wird nicht verworfen');
+    pruefe(($s['zweitesAbgefangen'] ?? false) === true && ($s['anderesAbgefangen'] ?? false) === true && ($s['knopfGesperrt'] ?? false) === true && ($s['hinweis'] ?? '') !== '',
+        'data-laeuft-seite: Hinweis, Knopf gesperrt, jedes weitere Absenden abgefangen');
+    $r = $b['rueckfrage'] ?? [];
+    pruefe(($r['abgebrochenAbgefangen'] ?? false) === true && ($r['danachAbgefangen'] ?? true) === false,
+        'data-laeuft-seite: nach abgebrochener Rückfrage ist nichts gesperrt');
+    $l = $b['link'] ?? [];
+    pruefe(($l['ersterAbgefangen'] ?? true) === false && ($l['zweiterAbgefangen'] ?? false) === true,
+        'Link mit data-laeuft („Repository abfragen“): der erste Klick navigiert, der zweite wird abgefangen – sonst zeigte der Browser „schon abgeglichen“ statt der Liste');
+    pruefe(($l['strgAbgefangen'] ?? true) === false && ($l['strgDanachAbgefangen'] ?? true) === false, 'Link mit data-laeuft: Strg-Klick (neuer Reiter) bleibt beim Browser');
+    pruefe(($l['formularDanachAbgefangen'] ?? false) === true && ($l['anfragen'] ?? 1) === 0 && ($l['gesperrt'] ?? '') === 'true' && ($l['hinweis'] ?? '') !== '',
+        'Link mit data-laeuft: Hinweis, gesperrt, kein Formular mit data-laeuft geht dazwischen hinaus');
+    pruefe(($b['live_kundenmodus']['neuGeladen'] ?? 0) === 1, 'live.js: 423 mit „kundenmodus“ → neu laden, also zur Kundenseite');
+    pruefe(($b['live_abgelaufen']['neuGeladen'] ?? 1) === 0 && ($b['live_abgelaufen']['stand'] ?? '') === 'Sitzung abgelaufen', 'live.js: 401 → nur die Meldung, kein Neuladen');
 }
 
 $meldungen = trim((string) @file_get_contents($phpFehler));

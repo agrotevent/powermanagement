@@ -59,6 +59,21 @@ final class Kundenmodus
         return self::form($m);
     }
 
+    /**
+     * Sperrt der Kundenmodus diesen Weg? Dann der Bericht, zu dessen
+     * Kundenseite es stattdessen geht – sonst null (nicht angemeldet, kein
+     * Kundenmodus, oder der Weg ist offen). HEAD gilt wie GET.
+     */
+    public static function sperrt(string $methode, string $pfad): ?int
+    {
+        $sperre = Auth::check() ? self::aktiv() : null;
+        if ($sperre === null) {
+            return null;
+        }
+        $methode = strtoupper($methode) === 'HEAD' ? 'GET' : $methode;
+        return self::erlaubt($methode, $pfad, $sperre['bericht']) ? null : $sperre['bericht'];
+    }
+
     /** Ist dieser Weg im Kundenmodus offen? Nur mit genau der ID des Berichts. */
     public static function erlaubt(string $methode, string $pfad, int $berichtId): bool
     {

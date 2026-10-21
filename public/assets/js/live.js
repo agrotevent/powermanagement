@@ -197,6 +197,14 @@
             fetch(liveQuelle.dataset.liveUrl, { headers: { 'Accept': 'application/json' }, credentials: 'same-origin', signal: abbruch ? abbruch.signal : undefined })
                 .then(function (a) { return a.json(); })
                 .then(function (daten) {
+                    // Kundenmodus, gestartet in einem anderen Reiter, während
+                    // diese Seite noch lud – die Sperre per BroadcastChannel
+                    // hat sie nie gehört. Der Server antwortet 423; neu laden
+                    // führt zur Kundenseite, statt hier weiter Werte zu zeigen.
+                    if (daten && daten.kundenmodus === true) {
+                        window.location.reload();
+                        return;
+                    }
                     // Sitzung abgelaufen: der Server antwortet 401 mit Meldung (JSON).
                     if (daten && daten.ok === false) {
                         liveStand.textContent = daten.message || 'Livewerte gerade nicht erreichbar – neuer Versuch in 5 Sekunden.';

@@ -230,7 +230,46 @@ document.addEventListener('DOMContentLoaded', function () {
      * Seite bleibt stehen und zeigt, dass gearbeitet wird; erst danach
      * wird neu geladen. Ohne JavaScript bleibt es beim gewöhnlichen
      * Formular mit Weiterleitung – langsam, aber nie kaputt.
+     *
+     * Ausnahme `data-laeuft-seite`: Dort antwortet der Server nicht mit
+     * Meldung und Weiterleitung, sondern mit der Seite selbst – ein
+     * Kennwort, das genau einmal angezeigt wird (MQTT-Zugänge: Gen1, „von
+     * Hand“, „Neues Kennwort“). fetch holte sie, das Neuladen danach
+     * verwürfe sie, und das Kennwort wäre weg. Solche Formulare schickt der
+     * Browser selbst ab, wie die Links mit `data-laeuft` weiter unten; bis
+     * die Antwort da ist, bleibt die alte Seite stehen und zeigt den
+     * Hinweis (gemessen in Chromium 141 bei 3 s bis zur Antwort: er kommt
+     * aufs Bild). Jeder weitere Klick auf so ein Formular oder einen
+     * solchen Link wird solange abgefangen – er bräche das erste
+     * Navigieren ab, und gezeigt würde die Antwort des zweiten.
      */
+    var navigiert = false;
+    window.addEventListener('pageshow', function (e) {
+        // Zurück aus dem Verlauf (bfcache): frisch laden statt gesperrt stehen.
+        if (e.persisted && navigiert) { window.location.reload(); }
+    });
+
+    function laeuftAnzeigen(knopf, beschriftung, hinweis) {
+        var anzeige = document.createElement('div');
+        anzeige.className = 'knopf-laeuft';
+
+        var balken = document.createElement('div');
+        balken.className = 'progress gross unbestimmt';
+        balken.setAttribute('role', 'progressbar');
+        balken.setAttribute('aria-label', beschriftung || 'läuft');
+        balken.appendChild(document.createElement('span'));
+
+        var text = document.createElement('div');
+        text.className = 'small muted';
+        text.setAttribute('role', 'status');
+        text.textContent = hinweis || 'Das dauert einen Moment. Bitte nicht noch einmal klicken.';
+
+        anzeige.appendChild(balken);
+        anzeige.appendChild(text);
+        knopf.insertAdjacentElement('afterend', anzeige);
+        return { balken: balken, text: text };
+    }
+
     document.querySelectorAll('form[data-laeuft]').forEach(function (formular) {
         formular.addEventListener('submit', function (ereignis) {
             /*
@@ -240,6 +279,7 @@ document.addEventListener('DOMContentLoaded', function () {
              * hier nachgesehen werden.
              */
             if (ereignis.defaultPrevented) { return; }
+            if (navigiert) { ereignis.preventDefault(); return; }
 
             /*
              * Der gedrückte Knopf – ein Formular kann mehrere haben
@@ -252,44 +292,48 @@ document.addEventListener('DOMContentLoaded', function () {
             var knopf = ereignis.submitter && ereignis.submitter.form === formular ? ereignis.submitter : knoepfe[0];
             if (!knopf || knopf.disabled) { return; }
 
-            ereignis.preventDefault();
-
-            var daten = new FormData(formular);
-            if (knopf.name) { daten.append(knopf.name, knopf.value); }
-            knoepfe.forEach(function (k) { k.disabled = true; });
-            var vorher = knopf.textContent;
-            knopf.textContent = knopf.dataset.laeuft || formular.dataset.laeuft || 'läuft …';
-
-            var anzeige = document.createElement('div');
-            anzeige.className = 'knopf-laeuft';
-
             /*
              * Der Hilfetext daneben erklärt, was der Knopf tut. Während
              * er es tut, sagt der Hinweis darunter dasselbe – zweimal
              * derselbe Satz liest sich wie ein Fehler.
              */
             var hilfe = formular.querySelector('.help');
+            var beschriftung = knopf.dataset.laeuft || formular.dataset.laeuft || 'läuft …';
+
+            if (formular.hasAttribute('data-laeuft-seite')) {
+                // Der Browser schickt ab (kein preventDefault). Gesperrt
+                // wird erst danach – ein gesperrter Knopf fehlte sonst in
+                // den Formulardaten.
+                navigiert = true;
+                knopf.textContent = beschriftung;
+                if (hilfe) { hilfe.hidden = true; }
+                laeuftAnzeigen(knopf, beschriftung, formular.dataset.laeuftHinweis);
+                window.setTimeout(function () { knoepfe.forEach(function (k) { k.disabled = true; }); }, 0);
+                return;
+            }
+
+            ereignis.preventDefault();
+
+            var daten = new FormData(formular);
+            if (knopf.name) { daten.append(knopf.name, knopf.value); }
+            knoepfe.forEach(function (k) { k.disabled = true; });
+            var vorher = knopf.textContent;
+            knopf.textContent = beschriftung;
             if (hilfe) { hilfe.hidden = true; }
-
-            var balken = document.createElement('div');
-            balken.className = 'progress gross unbestimmt';
-            balken.setAttribute('role', 'progressbar');
-            balken.setAttribute('aria-label', formular.dataset.laeuft || 'läuft');
-            balken.appendChild(document.createElement('span'));
-
-            var text = document.createElement('div');
-            text.className = 'small muted';
-            text.setAttribute('role', 'status');
-            text.textContent = formular.dataset.laeuftHinweis
-                || 'Das dauert einen Moment. Bitte nicht noch einmal klicken.';
-
-            anzeige.appendChild(balken);
-            anzeige.appendChild(text);
-            knopf.insertAdjacentElement('afterend', anzeige);
+            var anzeige = laeuftAnzeigen(knopf, beschriftung, formular.dataset.laeuftHinweis);
+            var balken = anzeige.balken;
+            var text = anzeige.text;
 
             fetch(formular.action, {
                 method: (formular.method || 'post').toUpperCase(),
-                headers: { 'X-Requested-With': 'XMLHttpRequest' },
+                /*
+                 * Weder Accept: application/json noch X-Requested-With:
+                 * Der Server soll antworten wie auf ein gewöhnliches
+                 * Formular – Meldung und Weiterleitung. X-Requested-With
+                 * galt früher als JSON-Wunsch; Controller::antwort() gab
+                 * dann JSON ohne Meldung zurück, und das Neuladen zeigte
+                 * nichts – auch keinen Fehler.
+                 */
                 body: daten,
                 /*
                  * Der Umleitung wird hier NICHT gefolgt. Täte sie es,
@@ -318,6 +362,9 @@ document.addEventListener('DOMContentLoaded', function () {
                 if (formular.hasAttribute('data-laeuft-oben') && 'scrollRestoration' in window.history) {
                     window.history.scrollRestoration = 'manual';
                 }
+                // Das Neuladen ist auch ein Navigieren – „Repository
+                // abfragen“ dazwischen bräche es ab.
+                navigiert = true;
                 window.location.reload();
             }).catch(function (fehler) {
                 knoepfe.forEach(function (k) { k.disabled = false; });
@@ -328,6 +375,28 @@ document.addEventListener('DOMContentLoaded', function () {
                 text.textContent = 'Das hat nicht geklappt: ' + (fehler && fehler.message ? fehler.message : fehler)
                     + ' – noch einmal versuchen.';
             });
+        });
+    });
+
+    /*
+     * Links, hinter denen etwas dauert: „Repository abfragen“ wartet auf
+     * git, über eine langsame Leitung Minuten. Die Anfrage hält dabei die
+     * Sitzung nicht mehr – ein zweiter Klick lief also neben dem ersten,
+     * stieß an die Sperre der Arbeitskopie, und der Browser zeigte seine
+     * Antwort: „wird gerade schon abgeglichen“ statt der Liste. Also zählt
+     * der erste Klick; die Seite zeigt bis zur Antwort, dass gefragt wird.
+     * Mit Strg, Umschalt oder Mittelklick (neuer Reiter) bleibt es beim
+     * Browser.
+     */
+    document.querySelectorAll('a[data-laeuft]').forEach(function (link) {
+        link.addEventListener('click', function (ereignis) {
+            if (ereignis.defaultPrevented || ereignis.button !== 0
+                || ereignis.ctrlKey || ereignis.metaKey || ereignis.shiftKey || ereignis.altKey) { return; }
+            if (navigiert) { ereignis.preventDefault(); return; }
+            navigiert = true;
+            link.setAttribute('aria-disabled', 'true');
+            link.textContent = link.dataset.laeuft || 'läuft …';
+            laeuftAnzeigen(link, link.dataset.laeuft, link.dataset.laeuftHinweis);
         });
     });
 
@@ -484,7 +553,7 @@ document.addEventListener('DOMContentLoaded', function () {
     var live = document.querySelector('[data-job-live]');
     if (live) {
         setInterval(function () {
-            fetch(live.dataset.jobLive, { headers: { 'X-Requested-With': 'XMLHttpRequest' } })
+            fetch(live.dataset.jobLive, { headers: { 'Accept': 'application/json' } })
                 .then(function (r) { return r.json(); })
                 .then(function (data) {
                     if (data.job && ['success', 'failed', 'partial', 'cancelled'].indexOf(data.job.status) !== -1) {

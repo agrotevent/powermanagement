@@ -29,7 +29,7 @@ $bereiche = [
             <?= $geholt ? ' · Stand <span class="mono">' . View::e($commit) . '</span>' : '' ?></p>
     </div>
     <div class="card-footer btn-row">
-        <a class="btn btn-sm<?= $geholt ? '' : ' btn-primary' ?><?= $hindernis !== null ? ' disabled' : '' ?>" href="/verteiler-abgleich?holen=1">Repository abfragen</a>
+        <a class="btn btn-sm<?= $geholt ? '' : ' btn-primary' ?><?= $hindernis !== null ? ' disabled' : '' ?>" href="/verteiler-abgleich?holen=1" data-laeuft="fragt ab …" data-laeuft-hinweis="Fragt das Repository ab. Über eine langsame Leitung kann das dauern. Bitte nicht noch einmal klicken.">Repository abfragen</a>
         <?php if ($geholt && $liste['uebernehmen'] > 0 && ($erlaubt['typ'] || $erlaubt['inventar'])): ?>
             <form method="post" action="/verteiler-abgleich/uebernehmen" data-laeuft="übernimmt …" data-confirm="<?= (int) $liste['uebernehmen'] ?> Verteiler aus dem Repository übernehmen (neu oder dort neuer)?">
                 <?= Csrf::field() ?><input type="hidden" name="alle" value="1">
