@@ -17,6 +17,7 @@ require __DIR__ . '/hilfen/pruefung.php';
 require __DIR__ . '/hilfen/grundriss-dateien.php';
 require __DIR__ . '/hilfen/nginx-vorlage.php';
 
+use App\Services\AnlagenService;
 use App\Services\BildPdf;
 use App\Services\LocationBundle;
 use App\Services\PdfRasterService;
@@ -42,6 +43,7 @@ $datei = static function (string $pfad, string $name, int $fehler = UPLOAD_ERR_O
 $planDateien = static fn (): array => array_values(array_filter(scandir(SiteService::planDir()) ?: [], static fn (string $f): bool => is_file(SiteService::planDir() . '/' . $f)));
 
 $siteId = SiteService::saveSite(null, ['name' => $kennung]);
+$tankId = null;
 try {
     // ------------------------------------------------ eine Zahl, überall dieselbe
     gleich(SiteService::MAX_UPLOAD_BYTES, 100 * 1024 * 1024, 'Grenze: 100 MiB');
@@ -294,6 +296,18 @@ try {
             'Zeit im Upload um: Antwort sofort, der Rest im Hintergrund – ' . $r['message']);
         $audit = Database::first("SELECT details FROM audit_log WHERE action = 'plan.upload' AND target_id = ? ORDER BY id DESC LIMIT 1", [(string) $siteId]);
         gleich(json_decode((string) ($audit['details'] ?? ''), true)['im_hintergrund'] ?? null, $neu, 'Audit: welche Etagen im Hintergrund');
+        // Ein Tank und sein Kraftstoffschlauch sind Objekte im Plan wie jede
+        // Anlage: Kacheln im Hintergrund und ein neuer Plan rühren ihre Lage
+        // nicht an (sie steht in Plan-Koordinaten an der Anlage bzw. Leitung).
+        $tankId = (int) (AnlagenService::speichern(null, ['art' => 'tank', 'name' => $kennung . ' Tank', 'fest' => 1, 'floor_id' => $neu[0],
+            'plan_x' => 70, 'plan_y' => 12, 'eigenschaften' => ['inhalt_l' => '1000', 'bauform' => 'Quader']])['id'] ?? 0);
+        $schlauchId = Database::insert('leitungen', ['art' => 'kraftstoff', 'fest' => 0, 'floor_id' => $neu[0], 'name' => $kennung . ' Schlauch',
+            'kabeltyp' => 'DN 25 (1″)', 'anzahl' => 2, 'modell' => '', 'von_objekt_id' => $tankId, 'punkte' => '[[70,12],[72,14]]', 'farbe' => '', 'notizen' => '',
+            'created_at' => gmdate('c'), 'updated_at' => gmdate('c')]);
+        $tankLage = static fn (): array => [Database::first('SELECT art, floor_id, plan_x, plan_y FROM objekte WHERE id = ?', [$tankId]),
+            Database::first('SELECT art, floor_id, von_objekt_id, punkte FROM leitungen WHERE id = ?', [$schlauchId])];
+        $tankVorher = $tankLage();
+        pruefe($tankId > 0 && ($tankVorher[0]['art'] ?? '') === 'tank' && ($tankVorher[1]['art'] ?? '') === 'kraftstoff', 'Tank mit Schlauch auf der Etage, die im Hintergrund rechnet');
         $fertig = false;
         for ($i = 0; $i < 900 && !$fertig; $i++) {
             $fertig = array_filter($neu, static fn (int $id): bool => PlanTileService::meta(SiteService::floor($id)) === null) === [];
@@ -302,6 +316,7 @@ try {
             }
         }
         pruefe($fertig, 'beide Seiten im Hintergrund gekachelt (bin/power plan:kacheln --etage=…)');
+        gleich($tankLage(), $tankVorher, 'Tank und Schlauch nach den Kacheln im Hintergrund unverändert (Art, Etage, Lage)');
         $log = (string) @file_get_contents(dirname(__DIR__) . '/storage/logs/kacheln.log');
         pruefe(str_contains($log, $kennung . ' / Etage (Seite 2): '), 'storage/logs/kacheln.log nennt Standort und Etage');
 
@@ -381,6 +396,7 @@ try {
         pruefe($r['ok'] && !is_file($pdfAlt) && !is_dir(PlanTileService::planDir($seite2)) && !is_file(SiteService::planDir() . '/' . $ersatz1['plan_file'])
             && !is_dir(PlanTileService::planDir($ersatz1)) && PlanTileService::meta(SiteService::floor($neu[0])) !== null,
             'neuer Plan für beide: das PDF und der erste Ersatz samt Kacheln weg, der neue gekachelt');
+        gleich($tankLage(), $tankVorher, 'Tank und Schlauch nach zwei neuen Plänen auf ihrer Etage unverändert (Art, Etage, Lage)');
 
         // Übernommene Pläne (Git, andere Instanz, Vorschlag): In einer
         // Web-Anfrage rechnet kachelnBauen() nicht selbst – das hielte die
@@ -411,6 +427,9 @@ try {
     }
 
 } finally {
+    if ($tankId !== null && $tankId > 0) {
+        AnlagenService::loeschen($tankId);
+    }
     $etagenIds = [];
     foreach (SiteService::floors($siteId) as $f) {
         $etagenIds[] = (string) $f['id'];

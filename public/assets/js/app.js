@@ -232,6 +232,8 @@ document.addEventListener('DOMContentLoaded', function () {
     // Sicherheitsabfragen.
     document.querySelectorAll('[data-confirm]').forEach(function (el) {
         el.addEventListener('submit', function (event) {
+            // Schon angehalten (eine Datei über der Grenze, oben): nichts zu fragen.
+            if (event.defaultPrevented) { return; }
             if (!window.confirm(el.dataset.confirm)) { event.preventDefault(); }
         });
         el.addEventListener('click', function (event) {
