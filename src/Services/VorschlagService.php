@@ -11,6 +11,7 @@ use App\Support\Database;
 use App\Support\Fingerabdruck;
 use App\Support\Logger;
 use App\Support\Zeit;
+use App\Tanks\TankService;
 
 /**
  * Änderungen anderer Instanzen an Standorten von hier (Seite A).
@@ -1107,7 +1108,8 @@ final class VorschlagService
     /**
      * Eine Anlage so, wie sie nach dem Annehmen hier stünde – zum Vergleichen:
      * ohne Messpunkte, die Schaltsperre bleibt (dort ∨ hier), Lage im Plan,
-     * Anschlüsse nach Richtung und Nummer.
+     * Anschlüsse nach Richtung und Nummer. An einem Tank zählt der Inhalt je
+     * mm nicht: den behält ein vorhandener hier (TankService::KENNLINIE_HIER).
      */
     public static function anlageVergleich(array $a, array $hier): string
     {
@@ -1122,6 +1124,7 @@ final class VorschlagService
             $n[$f] = is_numeric($n[$f]) ? max(0.0, min(100.0, (float) $n[$f])) : null;
         }
         $n['eigenschaften'] = (array) ($n['eigenschaften'] ?? []);
+        $n = TankService::ohneKennlinieHier($n);
         $anschluesse = array_values((array) ($n['anschluesse'] ?? []));
         usort($anschluesse, static fn ($x, $y): int => [(string) ($x['richtung'] ?? ''), (int) ($x['nr'] ?? 0)] <=> [(string) ($y['richtung'] ?? ''), (int) ($y['nr'] ?? 0)]);
         $n['anschluesse'] = $anschluesse;

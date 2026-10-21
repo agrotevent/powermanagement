@@ -51,14 +51,16 @@ Hinaus geht genau das, was auch über Git geht:
   Anschlüssen, die **fest verlegten Kabel und Kabelwege** dazwischen und
   die Steckertypen, die sie brauchen – und, wie über Git, **feste Tanks**
   (Bodentank der Location) mit ihren Eigenschaften, ohne Anschlüsse,
-  Schutzorgane und Tanksensor.
+  Schutzorgane und Tanksensor. Den Inhalt je mm nimmt die Gegenseite nur
+  für einen neuen Tank; woher er stammt, geht nicht mit.
 
 **Nie** hinaus gehen Messgeräte und Messpunkte (sie brächten Schaltrechte
 mit), mobile Anlagen, mobile Kabel, Kabelbrücken, Kraftstoffschläuche,
-Kennlinien, Peilungen und Betankungen der Tanks, Bereiche, Aufbau,
-Inventar und Einsätze – und auch nicht die Dosen, Racks und Accesspoints,
-die PowerManagement aus MasterAdmin als graue Orientierung kennt. Die
-gehören MasterAdmin; eine leere Liste würde dort alle Dosen löschen.
+Kennlinien, Peilungen und Betankungen der Tanks (auch nicht als Herkunft
+des Inhalts je mm), Bereiche, Aufbau, Inventar und Einsätze – und auch
+nicht die Dosen, Racks und Accesspoints, die PowerManagement aus
+MasterAdmin als graue Orientierung kennt. Die gehören MasterAdmin; eine
+leere Liste würde dort alle Dosen löschen.
 
 Ein Token sieht nur die Standorte, die ihm freigegeben sind – alle anderen
 gibt es für es nicht (dieselbe Antwort wie für einen unbekannten
@@ -193,7 +195,10 @@ zurückschicken nur, wo es etwas zu schicken gibt.
 Verglichen wird mit dem Stand beim letzten Übernehmen: dem `stand` von A
 und einem Fingerabdruck der verknüpften Etagen hier (Plan, Maßstab,
 Notizen, Georeferenz, Feststrom). Mobile Anlagen und Kabel zählen nicht –
-die Planung der Veranstaltung ist keine Änderung an der Location.
+die Planung der Veranstaltung ist keine Änderung an der Location. Ebenso
+wenig der Inhalt je mm eines Tanks: ihn behält jede Seite, wie er ist
+(siehe unten) – eine Peilung hier oder eine Betankung dort ändert den
+Zustand nicht.
 
 **Übernehmen** holt Plan, Maßstab, Notizen und Georeferenz der Etagen von
 dort – mit dem Kästchen *Feststrom* daneben (vorgewählt, wenn A `feststrom`
@@ -311,6 +316,7 @@ Ein offener Vorschlag zeigt je Etage, was sich ändern würde: neue
 Plandatei (zum Herunterladen, angezeigt wird sie hier erst nach dem
 Annehmen), Maßstab, Notizen, Georeferenz, Feststrom mit `+` neu, `~`
 geändert und `−` fehlt im Vorschlag (bleibt hier) und neue Steckertypen.
+Ein anderer Inhalt je mm an einem Tank ist kein `~` – er bliebe hier.
 Ein anderer Etagenname dort ist nur ein Hinweis – der Name hier bleibt.
 Hat sich hier seit dem Abruf etwas geändert oder ist der Zugang inzwischen
 widerrufen, steht das darüber.
@@ -389,10 +395,11 @@ curl -H "Authorization: Bearer $TOKEN" https://strom.example/api/v1/locations
 ```
 
 `stand` ändert sich mit allem, was das Token zu sehen bekommt (auch mit
-seinen Befugnissen und Freigaben), nicht mit mobiler Planung. Anlagen und
-Kabel, die A aus einer Sendung dieses Tokens neu angelegt hat, tragen im
-Detail `gesendet_als` – den Schlüssel, unter dem das Token sie geschickt
-hat.
+seinen Befugnissen und Freigaben), nicht mit mobiler Planung und nicht mit
+dem Inhalt je mm eines Tanks – den behält ein vorhandener Tank beim
+Übernehmen auf jeder Seite. Anlagen und Kabel, die A aus einer Sendung
+dieses Tokens neu angelegt hat, tragen im Detail `gesendet_als` – den
+Schlüssel, unter dem das Token sie geschickt hat.
 
 **Einreichen:**
 

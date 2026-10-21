@@ -116,6 +116,25 @@ final class TankService
     ];
 
     /**
+     * Eine Anlage aus strom.json ohne das, was die Kennlinie eines Tanks
+     * gelernt hat (KENNLINIE_HIER) – für Stände und Vergleiche über die
+     * Schnittstelle: Übernehmen, Annehmen und Hochladen lassen es an einem
+     * vorhandenen Tank auf jeder Seite, wie es ist. Ändert es sich allein,
+     * ist das wie bei den Messpunkten keine Änderung an der Location – sonst
+     * stünde „geändert“ da, ohne dass ein Abgleich etwas änderte. Elektrische
+     * Anlagen bleiben, wie sie sind.
+     */
+    public static function ohneKennlinieHier(array $anlage): array
+    {
+        if (!AnlagenService::elektrisch((string) ($anlage['art'] ?? '')) && is_array($anlage['eigenschaften'] ?? null)) {
+            foreach (self::KENNLINIE_HIER as $k) {
+                unset($anlage['eigenschaften'][$k]);
+            }
+        }
+        return $anlage;
+    }
+
+    /**
      * Kurzform für Listen, Karte und Katalog: „3.000 l · Diesel · Quader“ –
      * an der Stelle, an der bei einer elektrischen Anlage die Anschlüsse
      * stehen.

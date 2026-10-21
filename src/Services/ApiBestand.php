@@ -6,6 +6,7 @@ namespace App\Services;
 use App\Auth\ApiZugang;
 use App\Support\Database;
 use App\Support\Fingerabdruck;
+use App\Tanks\TankService;
 
 /**
  * Was die Schnittstelle herausgibt – zugeschnitten auf ein Token.
@@ -17,7 +18,10 @@ use App\Support\Fingerabdruck;
  * Steckertypen.
  *
  * Ein fester Tank (Bodentank) gehört wie über Git dazu – ohne Anschlüsse,
- * Schutzorgane und Tanksensor (LocationBundle::stromLesen()).
+ * Schutzorgane und Tanksensor (LocationBundle::stromLesen()). Seinen Inhalt
+ * je mm übernimmt die Gegenseite nur für einen neuen Tank; woher er stammt
+ * (liter_je_mm_herkunft: Zeit und Menge einer Peilung oder Betankung), geht
+ * nie hinaus.
  *
  * Nie hinaus: Messpunkte (sie brächten auf der anderen Seite Schaltrechte
  * mit), mobile Anlagen und Kabel, Kabelbrücken, Kraftstoffschläuche,
@@ -30,7 +34,9 @@ use App\Support\Fingerabdruck;
  *
  * „stand“ ist ein Fingerabdruck über genau das, was das Token bekommt: er
  * ändert sich mit dem Inhalt, mit den Befugnissen und mit „bearbeiten“, nicht
- * mit der Uhrzeit.
+ * mit der Uhrzeit – und nicht mit dem Inhalt je mm eines Tanks: den behält
+ * ein vorhandener Tank auf der Gegenseite ohnehin (TankService::KENNLINIE_HIER),
+ * mit ihm allein stünde dort „geändert“, ohne dass Übernehmen etwas änderte.
  *
  * Hat das Token selbst Anlagen oder Kabel geschickt, die hier neu angelegt
  * wurden (oft unter einem anderen Schlüssel), trägt jeder davon
@@ -135,10 +141,14 @@ final class ApiBestand
         return self::zusammenstellen($siteId, $mitFeststrom, false);
     }
 
-    /** Der Fingerabdruck dessen, was hinausgeht – 16 Hexzeichen. */
+    /** Der Fingerabdruck dessen, was hinausgeht (ohne TankService::ohneKennlinieHier()) – 16 Hexzeichen. */
     public static function stand(array $daten): string
     {
-        return substr(Fingerabdruck::von(['location' => $daten['location'] ?? null, 'strom' => $daten['strom'] ?? null]), 0, 16);
+        $strom = $daten['strom'] ?? null;
+        if (is_array($strom) && is_array($strom['anlagen'] ?? null)) {
+            $strom['anlagen'] = array_map([TankService::class, 'ohneKennlinieHier'], $strom['anlagen']);
+        }
+        return substr(Fingerabdruck::von(['location' => $daten['location'] ?? null, 'strom' => $strom]), 0, 16);
     }
 
     /**
@@ -220,6 +230,12 @@ final class ApiBestand
             $anlagen = [];
             foreach ((array) ($strom['anlagen'] ?? []) as $a) {
                 unset($a['messpunkte']);
+                // Woher der Inhalt je mm eines Tanks stammt, nennt Zeit und
+                // Menge einer Peilung oder Betankung – die bleiben hier. Der
+                // Wert selbst geht mit: ein neuer Tank dort fängt mit ihm an.
+                if (!AnlagenService::elektrisch((string) ($a['art'] ?? '')) && is_array($a['eigenschaften'] ?? null)) {
+                    unset($a['eigenschaften']['liter_je_mm_herkunft']);
+                }
                 if (isset($gesendet['objekte'][(string) $a['schluessel']])) {
                     $a['gesendet_als'] = $gesendet['objekte'][(string) $a['schluessel']];
                 }
