@@ -958,6 +958,14 @@ geringerer Auflösung exportiert werden.
   Karte weiter; schärfer werden sie mit `bin/power plan:kacheln --neu`.
   `--qualitaet=fein` rechnet ein PDF bis 400 Megapixel (der Geländeplan
   mit vollen 360 dpi) – doppelt so lange, doppelt so viel Platte.
+- **Anzeige:** Die Karte holt die Kacheln passend zur Pixeldichte des
+  Bildschirms – am Tablet und Telefon die feinere Stufe, die der Bildschirm
+  auch zeigen kann, statt eine gröbere zu vergrößern – und zeigt jede
+  Kachel ungestreckt. Dafür lädt eine Ansicht am Telefon mehr Kacheln als
+  früher; der Browser behält sie aber, ein zweiter Besuch kommt ohne Server
+  aus. Wird ein Plan neu gerechnet, bekommen seine Kacheln neue Adressen:
+  Nach dem Neuladen zeigt die Karte den neuen Plan, eine Karte, die dabei
+  offen war, zeigt an neuen Stellen Lücken, bis sie neu geladen wird.
 - **Ersetzen:** Ein neuer Plan auf einer Etage ersetzt den alten; wird der
   alte von keiner Etage mehr genutzt, löscht der Server ihn samt Kacheln.
 - **Große Bilder:** PNG und JPEG über 50 Megapixel bereitet der Server mit

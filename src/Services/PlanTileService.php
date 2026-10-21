@@ -1696,11 +1696,47 @@ final class PlanTileService
         return ['pfad' => $pfad, 'mime' => $mime, 'kachel' => false];
     }
 
-    /** Eine einzelne Kachel ausliefern – oder null, wenn sie nicht existiert. */
-    public static function kachel(array $floor, int $z, int $x, int $y): ?array
+    /**
+     * Stand der Kachelpyramide – er steht in der Adresse jeder Kachel
+     * (`?v=`, quelle()).
+     *
+     * Kacheln bleiben ein Jahr im Browser (KarteController::planKachel).
+     * Rechnet der Server einen Plan neu – schärfer, in anderer Größe, mit
+     * mehr Stufen –, bekommt die Pyramide einen neuen Stand und damit neue
+     * Adressen. Ohne ihn holte der Browser unter derselben Adresse weiter
+     * die alte Kachel aus dem Cache, und eine offene Karte setzte Kacheln
+     * der neuen Pyramide an die Stellen der alten: gemessen ein
+     * Flickenteppich aus zwei Maßstäben. `gebaut` ändert sich bei jedem Bau;
+     * die übrigen Felder stehen dabei, damit eine Pyramide aus derselben
+     * Sekunde mit anderer Geometrie nicht denselben Stand bekommt.
+     */
+    public static function stand(array $meta): string
+    {
+        return substr(hash('sha256', implode('|', array_map(
+            static fn (string $feld): string => is_scalar($meta[$feld] ?? null) ? (string) $meta[$feld] : '',
+            ['quelle', 'gebaut', 'breite', 'hoehe', 'max_zoom', 'kachel', 'format', 'fassung', 'qualitaet']
+        ))), 0, 12);
+    }
+
+    /**
+     * Eine einzelne Kachel ausliefern – oder null, wenn sie nicht existiert.
+     *
+     * $stand: der Stand aus der Kacheladresse. Gehört er nicht zur
+     * Pyramide, die jetzt liegt, gibt es die Kachel nicht – die Seite stammt
+     * von vor dem letzten Neuberechnen, und eine Kachel der neuen Pyramide
+     * säße an ihrer Stelle daneben. null: ohne Stand (Seiten von vor dem
+     * Update), dann die Kachel, die gerade liegt.
+     *
+     * @return array{pfad:string,mime:string,stand:string}|null
+     */
+    public static function kachel(array $floor, int $z, int $x, int $y, ?string $stand = null): ?array
     {
         $meta = self::meta($floor);
         if ($meta === null || $z < 0 || $x < 0 || $y < 0 || $z > (int) $meta['max_zoom']) {
+            return null;
+        }
+        $jetzt = self::stand($meta);
+        if ($stand !== null && !hash_equals($jetzt, $stand)) {
             return null;
         }
         $format = (string) ($meta['format'] ?? 'jpg');
@@ -1708,7 +1744,13 @@ final class PlanTileService
         if (!is_file($pfad)) {
             return null;
         }
-        return ['pfad' => $pfad, 'mime' => self::mime($format)];
+        return ['pfad' => $pfad, 'mime' => self::mime($format), 'stand' => $jetzt];
+    }
+
+    /** Adresse der Kacheln für Leaflet ({z}/{x}/{y}), mit dem Stand der Pyramide. */
+    private static function kachelUrl(int $id, array $meta): string
+    {
+        return '/grundriss/' . $id . '/kachel/{z}/{x}/{y}?v=' . self::stand($meta);
     }
 
     public static function aufraeumen(array $floor): void
@@ -1752,7 +1794,8 @@ final class PlanTileService
     /**
      * Alles, was die Karte im Browser über diesen Plan wissen muss.
      *
-     * Bei Kacheln dazu, wie sie gerechnet sind (gerechnet()).
+     * Bei Kacheln dazu, wie sie gerechnet sind (gerechnet()); die
+     * Kacheladresse trägt den Stand der Pyramide (stand()).
      *
      * @return array{art:string,url:string,breite:int,hoehe:int,seite:int,max_zoom:int,zusatz:int,kachel_url:?string,kachel:int,fassung?:int,qualitaet?:string,veraltet?:bool,fein_moeglich?:bool}|null
      */
@@ -1780,7 +1823,7 @@ final class PlanTileService
                     'seite'      => 1,
                     'max_zoom'   => (int) $meta['max_zoom'],
                     'zusatz'     => 2,
-                    'kachel_url' => '/grundriss/' . $id . '/kachel/{z}/{x}/{y}',
+                    'kachel_url' => self::kachelUrl($id, $meta),
                     'kachel'     => (int) ($meta['kachel'] ?? self::KACHEL),
                 ] + self::gerechnet($meta);
             }
@@ -1842,7 +1885,7 @@ final class PlanTileService
                 // Über die Originalauflösung hinaus wird ein Rasterplan nur
                 // unscharf – zwei Stufen zum Heranholen reichen.
                 'zusatz'     => 2,
-                'kachel_url' => '/grundriss/' . $id . '/kachel/{z}/{x}/{y}',
+                'kachel_url' => self::kachelUrl($id, $meta),
                 'kachel'     => (int) ($meta['kachel'] ?? self::KACHEL),
             ] + self::gerechnet($meta);
         }

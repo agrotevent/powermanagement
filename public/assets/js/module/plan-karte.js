@@ -192,7 +192,26 @@ export async function planKarte(el, optionen = {}) {
     map.setMaxBounds(grenzen.pad(0.35));
 
     if (quelle.art === 'kacheln' && quelle.kachelUrl !== '') {
-        new (L.TileLayer.extend(ueberlappen))(quelle.kachelUrl, {
+        /*
+         * Papierweiß unter dem Plan.
+         *
+         * Auf gebrochenen Zoomstufen rundet der Browser die Ränder jeder
+         * Kachel für sich – dazwischen bleibt mitunter eine Haarfuge. Früher
+         * bekam jede Kachel dafür ein Pixel mehr (ueberlappen); dabei wurde
+         * aber jedes Bild von 256 auf 257 Pixel gestreckt und neu abgetastet,
+         * auch auf ganzen Stufen: gemessen blieben auf der Originalstufe 40 %
+         * der Schärfe übrig, Striche rückten bis zu einem Bildpunkt (am
+         * Telefon drei Gerätepixel) aus der Lage. Die Fugen verhinderte das
+         * nicht einmal – auf einem dunklen Plan gemessen 2,5- bis 6,6-mal so
+         * viele helle Fugenpixel wie ohne Streckung. Jetzt bleibt jede Kachel
+         * pixelgenau, und durch eine Fuge scheint Weiß statt Kartengrau – auf
+         * einem Plan auf Papier ist das nicht zu sehen.
+         */
+        map.createPane('planGrund').style.zIndex = '150';
+        L.rectangle(grenzen, {
+            pane: 'planGrund', stroke: false, fillColor: '#ffffff', fillOpacity: 1, interactive: false,
+        }).addTo(map);
+        new (L.TileLayer.extend(geraetepixel))(quelle.kachelUrl, {
             tileSize: quelle.kachel,
             minNativeZoom: 0,
             maxNativeZoom: quelle.maxZoom,
@@ -300,6 +319,10 @@ export async function planKarte(el, optionen = {}) {
  * durch. Jede Kachel bekommt deshalb ein Pixel mehr und überlappt ihre
  * Nachbarin. Leaflet setzt die Größe in _initTile selbst, deshalb muss die
  * Korrektur danach kommen.
+ *
+ * Nur noch für die Kacheln aus dem PDF (pdfKachelLage): Dort wird das
+ * zusätzliche Pixel mitgezeichnet. Ein fertiges Bild vom Server würde
+ * dabei gestreckt und unscharf – darunter liegt stattdessen Papierweiß.
  */
 const ueberlappen = {
     _initTile(kachel) {
@@ -307,6 +330,85 @@ const ueberlappen = {
         const groesse = this.getTileSize();
         kachel.style.width = (groesse.x + 1) + 'px';
         kachel.style.height = (groesse.y + 1) + 'px';
+    },
+};
+
+/**
+ * Welche Stufe der Kachelpyramide zur Zoomstufe passt – gezählt in
+ * Gerätepixeln.
+ *
+ * Leaflet nimmt die Stufe der gerundeten Zoomstufe, gedacht in CSS-Pixeln.
+ * Auf dem Tablet (devicePixelRatio 2) und dem Telefon (3) zog der Browser
+ * damit jede Kachel auf das Zwei- bis Vierfache, obwohl die feinere Stufe
+ * auf dem Server lag; auf gebrochenen Zoomstufen (zoomSnap 0) kam bis zum
+ * 1,41-Fachen dazu. Hier zählt die Stufe in Gerätepixeln und wird
+ * aufgerundet: Eine Kachel wird nie vergrößert, solange es eine feinere
+ * gibt (0,05: eine Spur bis 3,5 % lädt keine ganze Stufe nach), und
+ * höchstens auf die Hälfte verkleinert.
+ */
+export function kachelStufe(zoom, dichte = 1) {
+    return Math.ceil(zoom + Math.log2(Math.max(1, dichte || 1)) - 0.05);
+}
+
+/**
+ * Kachelebene, die ihre Stufe nach kachelStufe() wählt.
+ *
+ * Die Koordinaten bleiben, wie sie sind: Leaflet skaliert jede Stufe auf
+ * die Zoomstufe der Karte (_setZoomTransform); Marker, Kabel, Maßstab und
+ * Georeferenz rechnen weiter in Pixeln der obersten Stufe und wissen von
+ * der Kachelstufe nichts.
+ *
+ * _setView ist die Fassung aus Leaflet 1.9.4 mit einer Änderung: Die Stufe
+ * kommt aus der ungerundeten Zoomstufe. _update fragt _clampZoom mit
+ * derselben Rechnung, sonst hielte es die Stufe für zu weit weg und setzte
+ * die Ansicht immer wieder neu.
+ *
+ * Eine Stelle reicht schon die fertige Stufe weiter: Liegt die geladene
+ * mehr als eine Stufe daneben (animiertes Zoomen über mehrere Stufen),
+ * ruft _update _setView(center, _clampZoom(zoom)). Dort noch einmal
+ * umgerechnet, rückte die Stufe jedes Mal um log2(dichte) weiter weg – am
+ * Telefon rief sich das ohne Ende selbst auf. Aus _update heraus gilt die
+ * Zahl darum schon als Stufe, und die Kacheln werden auf die Zoomstufe der
+ * Karte gesetzt statt auf die Stufe.
+ */
+const geraetepixel = {
+    _clampZoom(zoom) {
+        return L.GridLayer.prototype._clampZoom.call(this, kachelStufe(zoom, window.devicePixelRatio));
+    },
+    _update(center) {
+        this._updateTiefe = (this._updateTiefe || 0) + 1;
+        try {
+            L.GridLayer.prototype._update.call(this, center);
+        } finally {
+            this._updateTiefe--;
+        }
+    },
+    _setView(center, zoom, noPrune, noUpdate) {
+        const ausUpdate = this._updateTiefe > 0;
+        let tileZoom = Math.round(zoom);
+        if ((this.options.maxZoom !== undefined && tileZoom > this.options.maxZoom)
+            || (this.options.minZoom !== undefined && tileZoom < this.options.minZoom)) {
+            tileZoom = undefined;
+        } else {
+            tileZoom = ausUpdate ? zoom : this._clampZoom(zoom);
+        }
+        const neueStufe = this.options.updateWhenZooming && (tileZoom !== this._tileZoom);
+        if (!noUpdate || neueStufe) {
+            this._tileZoom = tileZoom;
+            if (this._abortLoading) {
+                this._abortLoading();
+            }
+            this._updateLevels();
+            this._resetGrid();
+            if (tileZoom !== undefined) {
+                this._update(center);
+            }
+            if (!noPrune) {
+                this._pruneTiles();
+            }
+            this._noPrune = !!noPrune;
+        }
+        this._setZoomTransforms(center, ausUpdate ? this._map.getZoom() : zoom);
     },
 };
 

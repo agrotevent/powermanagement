@@ -284,6 +284,54 @@ try {
     gleich([$r['status'], $r['text']], [404, 'kein Grundriss hinterlegt'], 'Etage ohne Plan: 404 wie bisher');
     gleich(aufruf($basis, $admin['dose'], 'GET', '/grundriss/999999999/datei')['status'], 404, 'Plandatei einer unbekannten Etage: 404');
 
+    // Kacheln: der Stand der Pyramide steht in der Adresse, darunter bleibt
+    // eine Kachel ein Jahr im Browser. session_start() setzt „Pragma:
+    // no-cache“ und ein Ablaufdatum von 1981 – damit hielt Chrome keine
+    // einzige Kachel. Neu gerechnet: neuer Stand, der alte gibt 404.
+    if (extension_loaded('gd')) {
+        $kBild = imagecreatetruecolor(1800, 1200);
+        imagefilledrectangle($kBild, 0, 0, 1799, 1199, 0xFFFFFF);
+        imageline($kBild, 100, 100, 1700, 1100, 0x000000);
+        $kDatei = 'site' . $planSite . '_' . bin2hex(random_bytes(8)) . '.png';
+        imagepng($kBild, \App\Services\SiteService::planDir() . '/' . $kDatei);
+        $kEtage = \App\Services\SiteService::saveFloor(null, ['site_id' => $planSite, 'name' => $kennung . ' Kacheln']);
+        $auditZiele[] = ['floor', $kEtage];
+        Database::update('floors', $kEtage, ['plan_file' => $kDatei, 'plan_type' => 'image', 'plan_original_name' => 'Kacheln.png']);
+        $kMeta = (array) (\App\Services\PlanTileService::bauen(\App\Services\SiteService::floor($kEtage), true)['meta'] ?? []);
+        $kStand = \App\Services\PlanTileService::stand($kMeta);
+        $kPfad = static fn (): string => (string) (\App\Services\PlanTileService::kachel(\App\Services\SiteService::floor($kEtage), 0, 0, 0)['pfad'] ?? '');
+        $kAdresse = '/grundriss/' . $kEtage . '/kachel/0/0/0';
+        $karteSeite = aufruf($basis, $admin['dose'], 'GET', '/karte?etage=' . $kEtage)['text'];
+        pruefe(str_contains($karteSeite, 'data-plan-kachel-url="/grundriss/' . $kEtage . '/kachel/{z}/{x}/{y}?v=' . $kStand . '"'),
+            'Karte: Kacheladresse mit dem Stand der Pyramide (?v=' . $kStand . ')');
+        $r = aufruf($basis, $admin['dose'], 'GET', $kAdresse . '?v=' . $kStand);
+        gleich([$r['status'], $kopf($r, 'Content-Type'), $kopf($r, 'Cache-Control'), $kopf($r, 'Pragma'), $kopf($r, 'Expires'), $kopf($r, 'Set-Cookie'),
+            $r['text'] === (string) file_get_contents($kPfad())],
+            [200, \App\Services\PlanTileService::mime((string) ($kMeta['format'] ?? '')), 'private, max-age=31536000, immutable', '', '', '', true],
+            'Kachel mit Stand: ein Jahr im Browser (immutable), ohne Pragma und Expires, kein neues Sitzungscookie');
+        $r = aufruf($basis, $admin['dose'], 'GET', $kAdresse);
+        gleich([$r['status'], $kopf($r, 'Cache-Control'), $kopf($r, 'Pragma')], [200, 'private, no-cache', ''],
+            'Kachel ohne Stand (Seite von vor dem Update): jedes Mal nachfragen');
+        $r = aufruf($basis, $admin['dose'], 'GET', $kAdresse . '?v=ffffffffffff');
+        gleich([$r['status'], $kopf($r, 'Cache-Control'), $r['text']], [404, 'no-store', ''], 'Kachel eines anderen Stands: 404, nicht im Browser gehalten');
+        for ($i = 0; $i < 40 && gmdate('c') === (string) ($kMeta['gebaut'] ?? ''); $i++) {
+            usleep(50_000);
+        }
+        $kMetaNeu = (array) (\App\Services\PlanTileService::bauen(\App\Services\SiteService::floor($kEtage), true)['meta'] ?? []);
+        $kStandNeu = \App\Services\PlanTileService::stand($kMetaNeu);
+        $alt = aufruf($basis, $admin['dose'], 'GET', $kAdresse . '?v=' . $kStand);
+        $neu = aufruf($basis, $admin['dose'], 'GET', $kAdresse . '?v=' . $kStandNeu);
+        gleich([$kStandNeu !== $kStand, $alt['status'], $kopf($alt, 'Cache-Control'), $neu['status'],
+            str_contains(aufruf($basis, $admin['dose'], 'GET', '/karte?etage=' . $kEtage)['text'], '/kachel/{z}/{x}/{y}?v=' . $kStandNeu . '"')],
+            [true, 404, 'no-store', 200, true], 'neu gerechnet: die Karte nennt den neuen Stand, der alte gibt 404 – keine neue Kachel unter alter Adresse');
+        $planer = anmelden($basis, $kennung . '-planer', $kennwort);
+        $dosen[] = $planer['dose'];
+        $r = aufruf($basis, $planer['dose'], 'GET', $kAdresse . '?v=' . $kStandNeu);
+        $ohne = aufruf($basis, $leer, 'GET', $kAdresse . '?v=' . $kStandNeu);
+        gleich([$r['status'], str_contains($r['text'], "\x89PNG") || str_contains($r['text'], 'WEBP'), $ohne['status'] === 200],
+            [403, false, false], 'Kachel eines Standorts, den man nicht sieht: 403 ohne Bild; ohne Anmeldung keine Kachel');
+    }
+
     // Eventworx-Karte: Token verschlüsselt, an den Host gebunden, nie in der Seite
     $ewxToken = 'tok-' . $kennung . '-' . bin2hex(random_bytes(6));
     $r = aufruf($basis, $admin['dose'], 'POST', '/system/einstellungen/eventworx', ['eventworx_adresse' => $kennung, 'eventworx_token' => $ewxToken, '_token' => $admin['token']]);

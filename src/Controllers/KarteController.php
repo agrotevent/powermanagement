@@ -642,15 +642,34 @@ final class KarteController extends Controller
         if ($etage === null) {
             return;
         }
-        $kachel = PlanTileService::kachel($etage, (int) $params['z'], (int) $params['x'], (int) $params['y']);
+        // Ab hier wird nur gelesen. Eine Ansicht holt Dutzende Kacheln
+        // zugleich, und jede hielte sonst die Sitzungsdatei, bis sie fertig ist.
+        Session::freigeben();
+        // Der Stand der Pyramide aus der Adresse (PlanTileService::stand()).
+        $v = $request->str('v');
+        $stand = $v !== '' ? $v : null;
+        $kachel = PlanTileService::kachel($etage, (int) $params['z'], (int) $params['x'], (int) $params['y'], $stand);
         if ($kachel === null) {
+            // Auch eine Kachel eines älteren Stands: Der Plan wurde inzwischen
+            // neu gerechnet. Lieber eine Lücke in einer offenen Karte als ein
+            // Ausschnitt der neuen Pyramide an der Stelle der alten.
+            header('Cache-Control: no-store');
             http_response_code(404);
             return;
         }
+        /*
+         * session_start() hat „Pragma: no-cache“ und ein Ablaufdatum von 1981
+         * gesetzt. Chrome nimmt Pragma auch neben Cache-Control ernst – es
+         * hielt deshalb keine einzige Kachel, und jede Ansicht lud alles neu.
+         * Mit Stand in der Adresse ändert sich eine Kachel nie mehr: ein Jahr
+         * im Browser. Ohne (eine Seite von vor dem Update) jedes Mal fragen.
+         */
+        header_remove('Pragma');
+        header_remove('Expires');
         header('Content-Type: ' . $kachel['mime']);
         header('Content-Length: ' . (string) filesize($kachel['pfad']));
         header('X-Content-Type-Options: nosniff');
-        header('Cache-Control: private, max-age=86400, immutable');
+        header('Cache-Control: ' . ($stand !== null ? 'private, max-age=31536000, immutable' : 'private, no-cache'));
         readfile($kachel['pfad']);
     }
 }

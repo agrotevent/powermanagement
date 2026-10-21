@@ -316,12 +316,36 @@ try {
             [PlanTileService::mime($fmt), PlanTileService::mime($fmt)], 'Kachel und Vorschau mit dem Mime-Typ des Formats');
         $q = PlanTileService::quelle($linien);
         gleich([$q['fassung'] ?? null, $q['veraltet'] ?? null, $q['qualitaet'] ?? null], [PlanTileService::FASSUNG, false, 'standard'], 'Karte: Fassung, nicht veraltet');
+        // Stand der Pyramide in der Kacheladresse: die Kachel gibt es nur
+        // unter dem Stand, der gerade liegt (ohne Stand: Seiten von vorher).
+        $stand = PlanTileService::stand($meta);
+        $k = PlanTileService::kachel($linien, 1, 0, 0, $stand);
+        gleich([preg_match('/^[0-9a-f]{12}$/', $stand), $q['kachel_url'] ?? null, $k['stand'] ?? null, is_file((string) ($k['pfad'] ?? '')),
+            PlanTileService::kachel($linien, 1, 0, 0, 'ffffffffffff'), PlanTileService::kachel($linien, 1, 0, 0, '../' . $stand),
+            PlanTileService::kachel($linien, 1, 0, 0)['pfad'] ?? null],
+            [1, '/grundriss/' . $linien['id'] . '/kachel/{z}/{x}/{y}?v=' . $stand, $stand, true, null, null, $k['pfad'] ?? ''],
+            'Kacheladresse mit dem Stand der Pyramide; ein anderer Stand: keine Kachel, ohne Stand die, die liegt');
+        // Neu gerechnet (dieselbe Datei, eine Sekunde später): neuer Stand,
+        // der alte findet nichts mehr – kein Bild der neuen Pyramide unter der
+        // Adresse der alten, die der Browser ein Jahr behält.
+        for ($i = 0; $i < 40 && gmdate('c') === (string) ($meta['gebaut'] ?? ''); $i++) {
+            usleep(50_000);
+        }
+        $neu = (array) (PlanTileService::bauen($linien, true)['meta'] ?? []);
+        $standNeu = PlanTileService::stand($neu);
+        gleich([$standNeu !== $stand, PlanTileService::kachel($linien, 1, 0, 0, $stand), PlanTileService::kachel($linien, 1, 0, 0, $standNeu)['stand'] ?? null,
+            PlanTileService::quelle($linien)['kachel_url'] ?? null],
+            [true, null, $standNeu, '/grundriss/' . $linien['id'] . '/kachel/{z}/{x}/{y}?v=' . $standNeu],
+            'neu gerechnet: neuer Stand in der Adresse, unter dem alten keine Kachel mehr');
+        $meta = $neu;
         // Eine Pyramide von vorher (ohne Fassung) bleibt nutzbar, ist aber veraltet.
         $altMeta = $meta;
         unset($altMeta['fassung'], $altMeta['qualitaet']);
         file_put_contents(PlanTileService::metaPfad($linien), json_encode($altMeta));
         $q = PlanTileService::quelle($linien);
         gleich([$q['art'] ?? null, $q['fassung'] ?? null, $q['veraltet'] ?? null], ['kacheln', 1, true], 'Pyramide ohne Fassung: Kacheln wie bisher, als veraltet gemeldet');
+        pruefe(str_ends_with((string) ($q['kachel_url'] ?? ''), '?v=' . PlanTileService::stand($altMeta)) && PlanTileService::stand($altMeta) !== $standNeu,
+            '… auch sie mit Stand in der Adresse');
 
         // Ein JPEG bleibt JPEG – jetzt in Qualität 92 (Fassung 1: 85).
         $foto = imagecreatetruecolor(1800, 1200);
@@ -353,6 +377,38 @@ try {
         $b2 = PlanTileService::bauen($bildEtage($scan, 'png', 'Scan mit Alpha'), true);
         gleich([$b['meta']['format'] ?? null, $b2['meta']['format'] ?? null], ['jpg', PlanTileService::verlustfrei()],
             'Scan als PNG: JPEG-Kacheln; mit Transparenz verlustfrei');
+    }
+
+    // ------------------------------------------------ Anzeige: Kachelstufe nach Gerätepixeln (Node)
+    // Das echte Leaflet und die echte planKarte() auf einem DOM von Hand
+    // (hilfen/plan-kacheln.cjs), ein A0-Plan mit sieben Stufen. Vorher zog
+    // der Browser am Telefon jede Kachel auf das Zwei- bis Vierfache und
+    // streckte jede auf 257 Pixel.
+    $node = trim((string) shell_exec('command -v node 2>/dev/null'));
+    if ($node !== '') {
+        $wurzel = dirname(__DIR__);
+        $js = json_decode((string) shell_exec(escapeshellarg($node) . ' ' . escapeshellarg(__DIR__ . '/hilfen/plan-kacheln.cjs') . ' '
+            . escapeshellarg($wurzel . '/public/assets/vendor/leaflet/leaflet.js') . ' '
+            . escapeshellarg($wurzel . '/public/assets/js/module/plan-karte.js')), true) ?: [];
+        pruefe(!isset($js['abbruch']) && ($js['fehler'] ?? null) === [], 'Karte (Node): ohne Fehler ' . (string) ($js['abbruch'] ?? json_encode($js['fehler'] ?? null)));
+        gleich($js['kachelStufe'] ?? null, [0, 3, 3, 4, 4, 5, 7], 'kachelStufe(): aufgerundet in Gerätepixeln, eine Spur (0,05) Vergrößerung lädt keine Stufe nach');
+        foreach (['1', '1.25', '2', '3'] as $dichte) {
+            $d = $js['dichten'][$dichte] ?? [];
+            gleich([$d['stufeFalsch'] ?? null, $d['vergroessert'] ?? null, $d['zuKlein'] ?? null, $d['ohneKacheln'] ?? null],
+                [0, 0, 0, 0], 'devicePixelRatio ' . $dichte . ': über ' . (int) ($d['ansichten'] ?? 0)
+                . ' Zoomstufen die Stufe nach Gerätepixeln – nie vergrößert, solange es eine feinere gibt, nie unter die Hälfte');
+            gleich([$d['gestreckt'] ?? null, $d['adresseFalsch'] ?? null, $d['versatz'] ?? null, $d['markerAufPunkt'] ?? null, $d['grund'] ?? null],
+                [0, 0, 0, true, ['zIndex' => '150', 'pfade' => ['#ffffff']]],
+                'devicePixelRatio ' . $dichte . ': Kacheln ungestreckt (256 px) mit Stand in der Adresse, Ecken höchstens 1 px neben dem Marker auf demselben Planpunkt ('
+                . (string) ($d['groessterVersatz'] ?? '?') . ' px), Papierweiß darunter');
+        }
+        foreach (['1', '2', '3'] as $dichte) {
+            $a = $js['animiert'][$dichte] ?? ['schritte' => [], 'fehler' => ['fehlt']];
+            pruefe(count($a['schritte']) === 4 && $a['fehler'] === []
+                && array_filter($a['schritte'], static fn (array $s): bool => $s['stufe'] !== $s['erwartet'] || $s['stufenMitKacheln'] !== [$s['erwartet']]) === [],
+                'devicePixelRatio ' . $dichte . ': animiert über mehrere Stufen ohne Fehler, am Ende genau die passende Stufe '
+                . json_encode(array_map(static fn (array $s): array => [$s['zoom'], $s['stufe']], $a['schritte'])));
+        }
     }
 
     // ------------------------------------------------ Wartung: was liegen blieb
