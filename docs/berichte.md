@@ -289,7 +289,9 @@ andere Adresse führt zurück zur Kundenseite. Andere Tabs desselben
 Browsers leeren sich und gehen ebenfalls zur Kundenseite. Nach der
 Unterschrift steht da „Vielen Dank – bitte geben Sie das Gerät an …
 zurück“ – an den, der den Kundenmodus gestartet hat; entsperrt wird mit
-**dessen Kennwort**. Ab fünf falschen Versuchen wird das Entsperren
+**dessen Kennwort**. Ist der Bericht einem Kunden mit eigenem Zugang
+zugeordnet ([kundenbereich.md](kundenbereich.md)), steht dort außerdem
+„Der Bericht steht ab sofort in Ihrem Kundenbereich bereit.“ Ab fünf falschen Versuchen wird das Entsperren
 gebremst (eine Minute, dann jeweils doppelt so lange, höchstens 15
 Minuten); abgemeldet wird nicht, und das Konto selbst wird nicht gesperrt.
 Das Kennwortfeld füllt der Browser nicht von selbst aus – sonst entsperrte
@@ -371,7 +373,11 @@ Berichts heraus (nie über eine vorhandene Datei) und nennt die Prüfsumme.
 - **Verzeichnis der Verarbeitungstätigkeiten (Art. 30):** „Übergabeberichte
   elektrischer Anlagen“ mit Kunden- und Ansprechpartnerdaten, Unterschriften,
   Aufbewahrungsfrist; Eventworx als Quelle (mit AV-Vertrag).
-- **Sehen:** Ein Kunde sieht abgeschlossene Berichte nur mit dem Recht
+- **Sehen:** Im **Kundenbereich** sieht ein Kunde nur Berichte, die ihm
+  ausdrücklich zugeordnet sind, und erst abgeschlossen – mit dem
+  gespeicherten PDF; jeder Download wird festgehalten
+  ([kundenbereich.md](kundenbereich.md#protokolle-zuordnen)). Ein Konto mit
+  Rolle sieht abgeschlossene Berichte nur mit dem Recht
   „Übergabeberichte ansehen“ und einer Freigabe für den Standort; hat sie
   einen Datenzeitraum, nur Berichte mit Prüfdatum darin
   ([rechte.md](rechte.md#übergabeberichte)).
@@ -429,9 +435,13 @@ sudo -u www-data php /opt/powermanagement/bin/power berichte:aufbewahrung --ausf
 
 - **UB-…-0001, abgeschlossen** – Aggregat 1 und „Licht Gelände“, mit
   Messwerten, einer Zeile „Abschaltung durch RCD“ und gespeichertem PDF;
+  Kundendaten aus dem Eventworx-Demo-Auftrag `AU-1042`, dem Demo-Kunden
+  „Muster Events GmbH & Co. KG“ zugeordnet (im Kundenbereich als
+  `muster-events` zu sehen);
 - **UB-…-0002, vom Prüfer unterschrieben** – „Kasse Einlass“, wartet auf
   den Kunden (*An Kunden übergeben* zum Ausprobieren, entsperren mit dem
-  eigenen Kennwort);
+  eigenen Kennwort); ebenfalls Muster Events zugeordnet, im Kundenbereich
+  erst nach der Unterschrift;
 - **Entwurf** – Foodtruck-Verteiler und Catering, halb ausgefüllt, ohne
   Kunde (Eventworx-Suche nach `AU-1042` zum Ausprobieren).
 
@@ -447,3 +457,4 @@ das Konto `technik` mit Prüfer-Qualifikation.
 | `tests/bericht-pdf.php` | PDF-Schreiber und Layout (mit poppler-utils) |
 | `tests/web.php` | Seiten, Autosave, Kundenmodus, Rechte |
 | `tests/eventworx.php` | Eventworx nur lesend |
+| `tests/kundenbereich.php` | Protokolle im Kundenbereich: nur über die Zuordnung, gleiche 404 für Fremdes, PDF und Abrufe |

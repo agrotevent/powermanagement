@@ -763,7 +763,8 @@ try {
     pruefe(Eventworx::verbindungTesten()['ok'] && Eventworx::eingerichtet(), 'Demo: eingerichtet, Verbindungstest ohne Netz');
     pruefe($fehler(static fn () => Eventworx::vorgang('unbekanntervorgang1')) !== null, 'Demo: unbekannter Vorgang');
     $demoDok = Eventworx::dokumente((string) Eventworx::demo()[0]['id']);
-    gleich(array_column($demoDok['dateien'], 'name'), ['DGUV V3 Prüfprotokolle Verteiler und Kabel 2026.pdf'], 'Demo: am Auftrag das hochgeladene Prüfprotokoll, nicht der Beleg');
+    gleich(array_column($demoDok['dateien'], 'name'), ['Prüfprotokoll Kabeltrommeln Nachlieferung.pdf', 'DGUV V3 Prüfprotokolle Verteiler und Kabel 2026.pdf'],
+        'Demo: am Auftrag die beiden hochgeladenen Prüfprotokolle (neueste zuerst), nicht der Beleg');
     $demoPdf = Eventworx::datei((string) ($demoDok['dateien'][0]['id'] ?? ''));
     pruefe(str_starts_with($demoPdf, '%PDF-') && $demoPdf === Eventworx::datei((string) ($demoDok['dateien'][0]['id'] ?? ''))
         && (new finfo(FILEINFO_MIME_TYPE))->buffer($demoPdf) === 'application/pdf', 'Demo: die Datei ist ein PDF, zweimal dieselben Bytes');

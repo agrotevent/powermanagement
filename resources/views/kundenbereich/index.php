@@ -74,7 +74,7 @@ $dringend = array_slice($dringend, 0, 5);
                 <ul class="kb-zahlen">
                     <li><strong><?= (int) $nz['alle'] ?></strong> <?= $nz['alle'] === 1 ? 'Nachweis' : 'Nachweise' ?></li>
                     <?php if ($nz['abgelaufen'] > 0): ?><li class="kb-frist-abgelaufen"><span aria-hidden="true">✗</span> <strong><?= (int) $nz['abgelaufen'] ?></strong> abgelaufen</li><?php endif; ?>
-                    <?php if ($nz['laeuft_ab'] > 0): ?><li class="kb-frist-laeuft_ab"><span aria-hidden="true">!</span> <strong><?= (int) $nz['laeuft_ab'] ?></strong> <?= $nz['laeuft_ab'] === 1 ? 'läuft' : 'laufen' ?> in 30 Tagen ab</li><?php endif; ?>
+                    <?php if ($nz['laeuft_ab'] > 0): ?><li class="kb-frist-laeuft_ab"><span aria-hidden="true">!</span> <strong><?= (int) $nz['laeuft_ab'] ?></strong> <?= $nz['laeuft_ab'] === 1 ? 'läuft' : 'laufen' ?> in den nächsten 30 Tagen ab</li><?php endif; ?>
                     <?php if ($nz['abgelaufen'] + $nz['laeuft_ab'] === 0): ?><li class="kb-frist-gueltig"><span aria-hidden="true">✓</span> keiner läuft in den nächsten 30 Tagen ab</li><?php endif; ?>
                 </ul>
                 <?php if ($dringend !== []): ?>

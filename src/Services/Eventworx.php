@@ -657,23 +657,28 @@ final class Eventworx
     }
 
     /**
-     * Dateien der Demo am Auftrag AU-1042 (Form wie `file/list`): ein
-     * hochgeladenes Prüfprotokoll (ohne metaDocType) und der erzeugte Beleg
-     * des Auftrags (metaDocType order), den dokumente() nie zeigt.
+     * Dateien der Demo am Auftrag AU-1042 (Form wie `file/list`): zwei
+     * hochgeladene Prüfprotokolle (ohne metaDocType) – das Sammelprotokoll
+     * von vor sechs Tagen übernimmt die Demo (DemoSeed), das von gestern
+     * bleibt zum Ausprobieren – und der erzeugte Beleg des Auftrags
+     * (metaDocType order), den dokumente() nie zeigt.
      *
      * @return list<array<string,mixed>>
      */
     public static function demoDateien(): array
     {
         $job = self::demo()[0];
-        $ms = (new \DateTimeImmutable('today', Zeit::zone()))->modify('-6 days')->getTimestamp() * 1000;
+        $ms = static fn (int $tage): int => (new \DateTimeImmutable('today', Zeit::zone()))->modify($tage . ' days')->getTimestamp() * 1000;
         return [
             ['id' => '6650a1f2c9e77a1b00000001', 'documentName' => 'DGUV V3 Prüfprotokolle Verteiler und Kabel 2026.pdf', 'contentType' => 'application/pdf',
-                'timeStamp' => $ms, 'creationDate' => $ms, 'description' => '', 'owner' => 'demo', 'path' => '/job/documents/' . $job['projectNumber'],
+                'timeStamp' => $ms(-6), 'creationDate' => $ms(-6), 'description' => '', 'owner' => 'demo', 'path' => '/job/documents/' . $job['projectNumber'],
                 'ownerDocumentId' => $job['id'], 'projectNumber' => $job['projectNumber']],
             ['id' => '6650a1f2c9e77a1b00000002', 'documentName' => 'Auftrag ' . $job['jobNumber'] . '.pdf', 'contentType' => 'application/pdf',
-                'timeStamp' => $ms, 'creationDate' => $ms, 'description' => '', 'owner' => 'demo', 'path' => self::DATEI_PFAD,
+                'timeStamp' => $ms(-6), 'creationDate' => $ms(-6), 'description' => '', 'owner' => 'demo', 'path' => self::DATEI_PFAD,
                 'ownerDocumentId' => $job['id'], 'metaDocType' => 'order', 'projectNumber' => $job['projectNumber']],
+            ['id' => '6650a1f2c9e77a1b00000003', 'documentName' => 'Prüfprotokoll Kabeltrommeln Nachlieferung.pdf', 'contentType' => 'application/pdf',
+                'timeStamp' => $ms(-1), 'creationDate' => $ms(-1), 'description' => '', 'owner' => 'demo', 'path' => '/job/documents/' . $job['projectNumber'],
+                'ownerDocumentId' => $job['id'], 'projectNumber' => $job['projectNumber']],
         ];
     }
 
@@ -691,7 +696,13 @@ final class Eventworx
         $pdf->seite();
         $pdf->text(20, 30, 'DEMO – Prüfprotokoll, erfundene Werte', 16, true);
         $pdf->text(20, 42, 'Wiederholungsprüfung ortsveränderlicher Betriebsmittel (DGUV Vorschrift 3, DIN EN 50699)', 10);
-        $zeilen = [['Verteiler PD63-07', 'bestanden'], ['Kabeltrommel KT-12', 'bestanden'], ['Verlängerung CEE32 25 m', 'bestanden']];
+        // Andere Geräte als die Prüfnachweise von Hand im Demo-Kundenbereich (DemoSeed).
+        $zeilen = match ($id) {
+            '6650a1f2c9e77a1b00000001' => [['Unterverteiler PD32-15', 'bestanden'], ['Verlängerung CEE 63 A, 25 m (V63-25-01)', 'bestanden'],
+                ['Verlängerung CEE 16 A, 10 m (V16-10-07)', 'bestanden']],
+            '6650a1f2c9e77a1b00000003' => [['Kabeltrommel CEE 32 A, 50 m (KT-31)', 'bestanden'], ['Kabeltrommel Schuko, 25 m (KT-44)', 'bestanden']],
+            default                    => [],
+        };
         foreach ($zeilen as $i => [$geraet, $ergebnis]) {
             $pdf->text(20, 58 + $i * 8, $geraet, 10);
             $pdf->text(120, 58 + $i * 8, $ergebnis, 10);

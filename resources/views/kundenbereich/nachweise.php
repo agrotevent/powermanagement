@@ -25,7 +25,7 @@ $title = 'Prüfnachweise';
     <ul class="kb-zahlen" aria-label="Stand der Prüffristen">
         <li><strong><?= (int) $zahlen['alle'] ?></strong> <?= $zahlen['alle'] === 1 ? 'Nachweis' : 'Nachweise' ?></li>
         <?php if ($zahlen['abgelaufen'] > 0): ?><li class="kb-frist-abgelaufen"><span aria-hidden="true">✗</span> <strong><?= (int) $zahlen['abgelaufen'] ?></strong> abgelaufen</li><?php endif; ?>
-        <?php if ($zahlen['laeuft_ab'] > 0): ?><li class="kb-frist-laeuft_ab"><span aria-hidden="true">!</span> <strong><?= (int) $zahlen['laeuft_ab'] ?></strong> <?= $zahlen['laeuft_ab'] === 1 ? 'läuft' : 'laufen' ?> in 30 Tagen ab</li><?php endif; ?>
+        <?php if ($zahlen['laeuft_ab'] > 0): ?><li class="kb-frist-laeuft_ab"><span aria-hidden="true">!</span> <strong><?= (int) $zahlen['laeuft_ab'] ?></strong> <?= $zahlen['laeuft_ab'] === 1 ? 'läuft' : 'laufen' ?> in den nächsten 30 Tagen ab</li><?php endif; ?>
         <?php if ($zahlen['unbekannt'] > 0): ?><li><span aria-hidden="true">?</span> <strong><?= (int) $zahlen['unbekannt'] ?></strong> ohne Datum der nächsten Prüfung</li><?php endif; ?>
     </ul>
 <?php endif; ?>

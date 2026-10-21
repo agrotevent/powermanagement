@@ -58,7 +58,7 @@ $datum = static fn (string $d): string => preg_match('/^(\d{4})-(\d{2})-(\d{2})$
                     <h3 class="mt">Prüfnachweise</h3>
                     <p class="small"><?= View::e(implode(' · ', array_filter([
                         $nz['abgelaufen'] > 0 ? $nz['abgelaufen'] . ' abgelaufen' : '',
-                        $nz['laeuft_ab'] > 0 ? $nz['laeuft_ab'] . ($nz['laeuft_ab'] === 1 ? ' läuft' : ' laufen') . ' in 30 Tagen ab' : '',
+                        $nz['laeuft_ab'] > 0 ? $nz['laeuft_ab'] . ($nz['laeuft_ab'] === 1 ? ' läuft' : ' laufen') . ' in den nächsten 30 Tagen ab' : '',
                         $nz['unbekannt'] > 0 ? $nz['unbekannt'] . ' ohne Datum der nächsten Prüfung' : '',
                     ])) ?: 'alle gültig') ?> · <a href="/kunden/<?= $id ?>?tab=nachweise">alle Nachweise</a></p>
                 <?php endif; ?>

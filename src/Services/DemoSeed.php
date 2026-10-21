@@ -7,6 +7,8 @@ use App\Auth\Auth;
 use App\Berichte\BerichtService;
 use App\Berichte\Einstellungen;
 use App\Berichte\Pruefgeraete;
+use App\Kunden\KundenService;
+use App\Kunden\Pruefnachweise;
 use App\Messung\Datenquellen;
 use App\Support\Config;
 use App\Support\Database;
@@ -15,8 +17,9 @@ use App\Support\Zeit;
 /**
  * Ein Demo-Festivalgelände: Netzanschluss, Aggregat, Speicher, Verteilungen
  * mit Sicherungen und RCDs, Kabel, Kabelbrücken, Messgeräte, Benutzer mit
- * zeitlich begrenzten Freigaben, Prüfgeräte und drei Übergabeberichte
- * (abgeschlossen, vom Prüfer unterschrieben, Entwurf).
+ * zeitlich begrenzten Freigaben, Prüfgeräte, drei Übergabeberichte
+ * (abgeschlossen, vom Prüfer unterschrieben, Entwurf) und zwei Kunden mit
+ * eigenem Kundenbereich (Locations, Protokolle, Prüfnachweise).
  *
  * Alle Namen, Firmen und Unterschriften sind erfunden.
  *
@@ -29,7 +32,9 @@ final class DemoSeed
     {
         if ($zuruecksetzen) {
             // Mit allen Berichten auch die Nummernzähler: die Demo beginnt wieder bei …-0001.
-            foreach (['bericht_ereignisse', 'bericht_pdf', 'bericht_unterschriften', 'bericht_objekte', 'berichte', 'bericht_nummern', 'kundenmodus_geraete', 'pruefgeraete',
+            // Der Kundenbereich vorneweg: Abrufe, Nachweise mit ihren Dateien, Vorgänge.
+            foreach (['kunden_abrufe', 'pruefnachweise', 'pruefnachweis_dateien', 'kunden_vorgaenge',
+                'bericht_ereignisse', 'bericht_pdf', 'bericht_unterschriften', 'bericht_objekte', 'berichte', 'bericht_nummern', 'kundenmodus_geraete', 'pruefgeraete',
                 'aufbau_posten', 'aufbauten', 'einsaetze', 'inventar_messgeraete', 'inventar', 'bereich_mitglieder', 'bereiche', 'leitungen', 'messpunkte', 'anschluesse', 'schutzorgane', 'objekte', 'datenquellen', 'freigaben', 'floors', 'sites', 'schaltvorgaenge', 'mqtt_zugaenge'] as $tabelle) {
                 Database::execute('DELETE FROM ' . $tabelle);
             }
@@ -37,8 +42,11 @@ final class DemoSeed
             // gehen mit, Vorschläge bleiben – nur ohne Standort.
             Database::execute('DELETE FROM api_token_standorte');
             Database::execute('UPDATE api_vorschlaege SET site_id = NULL WHERE site_id IS NOT NULL');
-            Database::execute("DELETE FROM user_roles WHERE user_id IN (SELECT id FROM users WHERE username IN ('veranstalter', 'technik'))");
-            Database::execute("DELETE FROM users WHERE username IN ('veranstalter', 'technik')");
+            // Die Demo-Konten und alle Kundenzugänge (Konten mit kunde_id) samt ihren Kunden.
+            $konten = "SELECT id FROM users WHERE username IN ('veranstalter', 'technik', 'muster-events', 'stadtmarketing') OR kunde_id IS NOT NULL";
+            Database::execute('DELETE FROM user_roles WHERE user_id IN (' . $konten . ')');
+            Database::execute('DELETE FROM users WHERE id IN (' . $konten . ')');
+            Database::execute('DELETE FROM kunden');
             @unlink(dirname(__DIR__, 2) . '/storage/demo/schalter.json');
         } elseif (Database::first("SELECT id FROM sites WHERE sync_key = 'demo-festival'") !== null) {
             return 'Das Demo-Gelände gibt es schon (mit --reset neu anlegen).';
@@ -313,7 +321,10 @@ final class DemoSeed
         }
 
         // ---- Übergabeberichte
-        self::berichte($siteId, $aufbau, $technik, ['aggregat' => $gen, 'licht' => $licht, 'foodtruck' => $truckV, 'catering' => $catering, 'kasse' => $kasse]);
+        $berichte = self::berichte($siteId, $aufbau, $technik, ['aggregat' => $gen, 'licht' => $licht, 'foodtruck' => $truckV, 'catering' => $catering, 'kasse' => $kasse]);
+
+        // ---- Kundenbereich: zwei Veranstalter auf demselben Gelände
+        self::kundenbereich($siteId, $technik, $pd6307, $berichte);
 
         return 'Demo-Gelände angelegt: ' . (int) Database::scalar('SELECT COUNT(*) FROM objekte WHERE ist_vorlage = 0') . ' Anlagen (davon '
             . (int) Database::scalar('SELECT COUNT(*) FROM objekte WHERE ist_vorlage = 0 AND fest = 1') . ' Feststromanschlüsse), '
@@ -322,8 +333,12 @@ final class DemoSeed
             . (int) Database::scalar('SELECT COUNT(*) FROM inventar') . ' Inventarstücke, '
             . (int) Database::scalar('SELECT COUNT(*) FROM aufbauten') . ' Aufbau, '
             . (int) Database::scalar('SELECT COUNT(*) FROM objekte WHERE ist_vorlage = 1') . ' Katalog-Einträge, '
-            . (int) Database::scalar('SELECT COUNT(*) FROM berichte') . ' Übergabeberichte. '
-            . 'Zugänge: veranstalter / Veranstalter2026! (nur Festivalwoche), technik / Technik2026!! (schaltet nur das Licht, unterschreibt Übergabeberichte als Prüfer).'
+            . (int) Database::scalar('SELECT COUNT(*) FROM berichte') . ' Übergabeberichte, '
+            . (int) Database::scalar('SELECT COUNT(*) FROM kunden') . ' Kunden mit '
+            . (int) Database::scalar('SELECT COUNT(*) FROM pruefnachweise') . ' Prüfnachweisen. '
+            . 'Zugänge: veranstalter / Veranstalter2026! (nur Festivalwoche), technik / Technik2026!! (schaltet nur das Licht, unterschreibt Übergabeberichte als Prüfer); '
+            . 'Kundenbereich: muster-events / Kundenbereich2026! (Sommerfestival: Location, Protokoll, Prüfnachweise), '
+            . 'stadtmarketing / Stadtmarketing2026! (dasselbe Gelände erst in einem Monat).'
             . (Config::isDemo() ? '' : ' Hinweis: app.demo ist aus – ohne InfluxDB bleiben die Messwerte leer.');
     }
 
@@ -334,7 +349,8 @@ final class DemoSeed
      *
      *  1. abgeschlossen: Aggregat 1 und „Licht Gelände“ (am Aggregat), mit
      *     Messwerten, einer Zeile „Abschaltung durch RCD“, Unterschriften
-     *     von Prüfer und Kunde und gespeichertem PDF;
+     *     von Prüfer und Kunde und gespeichertem PDF; Kundendaten aus dem
+     *     Eventworx-Auftrag AU-1042 der Demo (mit Verweis);
      *  2. vom Prüfer unterschrieben: „Kasse Einlass“ – wartet auf den Kunden
      *     (Kundenmodus zum Ausprobieren);
      *  3. Entwurf: Foodtruck-Verteiler und Catering, halb ausgefüllt, ohne
@@ -345,8 +361,9 @@ final class DemoSeed
      * der Kopierschutz.
      *
      * @param array{aggregat:int, licht:int, foodtruck:int, catering:int, kasse:int} $anlagen
+     * @return array{abgeschlossen:int, geprueft:int, entwurf:int} die IDs der drei Berichte
      */
-    private static function berichte(int $siteId, int $aufbauId, int $technik, array $anlagen): void
+    private static function berichte(int $siteId, int $aufbauId, int $technik, array $anlagen): array
     {
         // Erfundene Firmendaten – nur im Demo-Modus und nur, wenn noch keine eingetragen sind.
         if (Config::isDemo() && Einstellungen::wert('firma.name') === '') {
@@ -428,8 +445,8 @@ final class DemoSeed
             }
             return $punkte;
         };
-        $speichern = static function (int $id, array $inhalt): void {
-            $r = BerichtService::speichern($id, (int) BerichtService::find($id)['version'], (string) json_encode($inhalt, JSON_UNESCAPED_UNICODE));
+        $speichern = static function (int $id, array $inhalt, string $ewx = ''): void {
+            $r = BerichtService::speichern($id, (int) BerichtService::find($id)['version'], (string) json_encode($inhalt, JSON_UNESCAPED_UNICODE), $ewx);
             if (!$r['ok']) {
                 throw new \RuntimeException('Demo-Bericht: ' . $r['message']);
             }
@@ -454,13 +471,25 @@ final class DemoSeed
             return (int) $r['id'];
         };
 
+        $ids = [];
         Auth::alsBenutzer($technik);
         try {
-            // ---- 1: abgeschlossen
-            $id = $anlegen([$anlagen['aggregat'], $anlagen['licht']]);
+            // ---- 1: abgeschlossen – Kundendaten aus dem Eventworx-Auftrag AU-1042
+            // (im Demo-Modus ohne Netz), übernommen wie im Formular: Verweis
+            // vorgemerkt, beim Speichern mit Kennung des Kunden in Eventworx.
+            $id = $ids['abgeschlossen'] = $anlegen([$anlagen['aggregat'], $anlagen['licht']]);
             $i = BerichtService::find($id)['inhalt'];
-            $i['kopf']['kunde'] = ['firma' => 'Musterfilm Produktion GmbH', 'anschrift' => "Filmallee 5\n12345 Musterstadt", 'kundennummer' => '',
-                'ansprechpartner' => 'Max Mustermann', 'telefon' => '0123 9876-0', 'email' => 'produktion@example.org', 'quelle' => 'freitext'];
+            $ewx = Eventworx::vorgang((string) Eventworx::demo()[0]['id']);
+            $g = $ewx['gruppen'];
+            $i['kopf']['veranstaltung'] = $g['veranstaltung']['veranstaltung'];
+            $i['kopf']['auftrag_nr'] = $g['veranstaltung']['auftrag_nr'];
+            $i['kopf']['projekt_nr'] = $g['veranstaltung']['projekt_nr'];
+            $i['kopf']['zeitraum'] = $g['zeitraum']['zeitraum'];
+            $i['kopf']['projektleiter_kunde'] = $g['ansprechpartner']['projektleiter_kunde'];
+            $i['kopf']['kunde'] = ['firma' => $g['kunde']['firma'], 'anschrift' => $g['kunde']['anschrift'], 'kundennummer' => $g['kunde']['kundennummer'],
+                'ansprechpartner' => $g['ansprechpartner']['ansprechpartner'], 'telefon' => $g['ansprechpartner']['telefon'], 'email' => $g['ansprechpartner']['email'],
+                'quelle' => 'eventworx'];
+            BerichtService::eventworxMerken($id, $ewx['verweis']);
             $i['kopf']['ort'] = 'Musterstadt';
             $i['kopf']['anlage'] = ['bezeichnung' => 'Aggregat 1 (G-100-07) mit Verteiler „Licht Gelände“ (PD32-12)', 'details' => 'Stromerzeuger 100 kVA, Unterverteilung PD 32/16',
                 'aufstellort' => 'Festivalgelände Nordwiese, Technikfläche'];
@@ -477,7 +506,7 @@ final class DemoSeed
             $i['ergebnis'] = ['entspricht' => 'ja', 'maengelfrei' => 'ja', 'instand_bis' => '', 'plakette' => 'ja', 'plakette_nr' => 'P-2026-0117',
                 'naechste' => \App\Berichte\BerichtSchema::NAECHSTE, 'errichter' => '1'];
             $i['bemerkungen'] = 'Prüfung nach dem Aufbau im Beisein des Kunden. Abgang X1 (Powerlock) nicht belegt.';
-            $speichern($id, $i);
+            $speichern($id, $i, (string) $ewx['verweis']['id']);
             $unterschreiben($id, $striche('pruefer'));
             $r = BerichtService::kundeUnterschreiben($id, ['striche' => $striche('kunde'), 'name' => 'Max Mustermann', 'funktion' => 'Produktionsleitung',
                 'ort' => 'Musterstadt', 'bestaetigungen' => ['erhalten', 'eingewiesen', 'uebernommen'], 'vorbehalte' => '', 'anfrage' => $anfrage(),
@@ -487,7 +516,7 @@ final class DemoSeed
             }
 
             // ---- 2: vom Prüfer unterschrieben, der Kunde fehlt noch
-            $id = $anlegen([$anlagen['kasse']]);
+            $id = $ids['geprueft'] = $anlegen([$anlagen['kasse']]);
             $i = BerichtService::find($id)['inhalt'];
             $i['kopf']['kunde'] = ['firma' => 'Muster Events GmbH & Co. KG', 'anschrift' => "Musterstraße 1\n12345 Musterstadt", 'kundennummer' => 'K-10023',
                 'ansprechpartner' => 'Erika Musterfrau', 'telefon' => '+49 30 1234567', 'email' => 'erika.musterfrau@example.org', 'quelle' => 'freitext'];
@@ -504,7 +533,7 @@ final class DemoSeed
             $unterschreiben($id, $striche('pruefer', 37));
 
             // ---- 3: Entwurf, halb ausgefüllt, ohne Kunde
-            $id = $anlegen([$anlagen['foodtruck'], $anlagen['catering']]);
+            $id = $ids['entwurf'] = $anlegen([$anlagen['foodtruck'], $anlagen['catering']]);
             $i = BerichtService::find($id)['inhalt'];
             $i['kopf']['ort'] = 'Musterstadt';
             $i['kopf']['anlage']['aufstellort'] = 'Foodtruck-Meile und Catering';
@@ -517,6 +546,153 @@ final class DemoSeed
         } finally {
             Auth::alsBenutzer(null);
         }
+        return $ids;
+    }
+
+    /**
+     * Der Kundenbereich: zwei Veranstalter auf demselben Gelände.
+     *
+     *  - Muster Events GmbH & Co. KG (K-10023, Zugang „muster-events“) sieht
+     *    das Festivalgelände während des Sommerfestivals, Messdaten nur der
+     *    Festivalwoche. Ihm zugeordnet: der abgeschlossene Übergabebericht
+     *    (sichtbar) und der vom Prüfer unterschriebene (erscheint erst nach
+     *    dem Abschluss). Mit dem Eventworx-Auftrag AU-1042 verknüpft; daraus
+     *    ein übernommener Prüfnachweis, dazu drei von Hand – zwei
+     *    freigegeben (einer läuft bald ab), einer noch Entwurf.
+     *  - Stadtmarketing Musterstadt e. V. (K-10031, Zugang „stadtmarketing“)
+     *    hat dasselbe Gelände erst für den Herbstmarkt in einem Monat – bis
+     *    dahin steht es nur unter „Demnächst“, und von Muster Events sieht
+     *    er nie etwas.
+     *
+     * Kunden, Zugänge, Freigaben, die Verknüpfung mit dem Vorgang und die
+     * Zuordnung der Berichte legt die Demo direkt an (wie die Konten oben);
+     * in der Oberfläche ist das die Kundenverwaltung mit „Kunden pflegen“.
+     * Die Prüfnachweise hinterlegt „technik“ über Pruefnachweise, wie in der
+     * Oberfläche. Alle Namen und Werte sind erfunden.
+     *
+     * @param array{abgeschlossen:int, geprueft:int, entwurf:int} $berichte
+     */
+    private static function kundenbereich(int $siteId, int $technik, int $pd6307, array $berichte): void
+    {
+        $jetzt = time();
+        $kunde = static function (array $daten): int {
+            $r = KundenService::speichern(null, $daten + ['aktiv' => 1, 'gueltig_bis' => '']);
+            if (!$r['ok']) {
+                throw new \RuntimeException('Demo-Kunde: ' . $r['message']);
+            }
+            return (int) $r['id'];
+        };
+        $muster = $kunde(['name' => 'Muster Events GmbH & Co. KG', 'kundennummer' => 'K-10023',
+            'notizen' => 'Demo: Veranstalter des Sommerfestivals 2026 – nur für das Personal, nie im Kundenbereich.']);
+        $stadt = $kunde(['name' => 'Stadtmarketing Musterstadt e. V.', 'kundennummer' => 'K-10031', 'notizen' => 'Demo: Herbstmarkt auf der Nordwiese.']);
+
+        // Zugänge ohne Rolle, mit bekanntem Kennwort (sonst Einrichtungslink oder vorläufiges Kennwort).
+        KundenService::kontoErzeugen($muster, 'muster-events', 'Erika Musterfrau', 'erika.musterfrau@example.org',
+            password_hash('Kundenbereich2026!', PASSWORD_DEFAULT), false);
+        KundenService::kontoErzeugen($stadt, 'stadtmarketing', 'Max Mustermann', 'maerkte@example.org',
+            password_hash('Stadtmarketing2026!', PASSWORD_DEFAULT), false);
+
+        // Freigaben am Kunden: nur der Standort, mit Ende und Datenzeitraum –
+        // die Datenzeiträume der beiden schneiden sich nicht.
+        $freigabe = static function (int $kundeId, int $ab, int $bis, int $datenBis, string $veranstaltung) use ($siteId): void {
+            Database::insert('freigaben', [
+                'subject_type' => 'kunde', 'subject_id' => $kundeId, 'ziel_art' => 'site', 'ziel_id' => $siteId, 'ziel_kanal' => '',
+                'darf_bearbeiten' => 0, 'darf_steuern' => 0,
+                'gueltig_ab' => Zeit::iso($ab), 'gueltig_bis' => Zeit::iso($bis), 'daten_ab' => Zeit::iso($ab), 'daten_bis' => Zeit::iso($datenBis),
+                'notiz' => $veranstaltung, 'created_by' => 'demo', 'created_at' => gmdate('c'),
+            ]);
+        };
+        $freigabe($muster, $jetzt - 3 * 86400, $jetzt + 10 * 86400, $jetzt + 7 * 86400, 'Sommerfestival 2026');
+        // Wie das Angebot AN-1050-01 in Eventworx (Herbstmarkt in 30 Tagen, zwei Tage).
+        $freigabe($stadt, $jetzt + 29 * 86400, $jetzt + 40 * 86400, $jetzt + 33 * 86400, 'Herbstmarkt Musterstadt');
+
+        // Der Eventworx-Auftrag AU-1042 – wie KundenService::vorgangVerknuepfen
+        // nach der Bestätigung: der Kunde bekommt die Kennung des Kunden in Eventworx.
+        $ewx = Eventworx::vorgang((string) Eventworx::demo()[0]['id']);
+        $verweis = $ewx['verweis'];
+        $tag = static fn (?string $iso): ?string => $iso === null ? null : Zeit::anzeige($iso, 'Y-m-d');
+        $vorgang = Database::insert('kunden_vorgaenge', [
+            'kunde_id' => $muster, 'ewx_host' => (string) $verweis['host'], 'ewx_id' => (string) $verweis['id'],
+            'ewx_art' => (string) $verweis['art'], 'ewx_nummer' => (string) $verweis['nummer'], 'ewx_kunde_ref' => (string) $verweis['kunde_ref'],
+            'titel' => (string) $ewx['gruppen']['veranstaltung']['veranstaltung'],
+            'von' => $tag($ewx['gruppen']['zeitraum']['von']), 'bis' => $tag($ewx['gruppen']['zeitraum']['bis']),
+            'verknuepft_von' => null, 'verknuepft_am' => gmdate('c'),
+        ]);
+        Database::update('kunden', $muster, ['ewx_host' => (string) $verweis['host'], 'ewx_kunde_ref' => (string) $verweis['kunde_ref'],
+            'ewx_kunde_name' => (string) $ewx['gruppen']['kunde']['firma'], 'updated_at' => gmdate('c')]);
+
+        // Die Berichte zum Sommerfestival – wie BerichtService::kundeZuordnen, je
+        // Fassung mit Ereignis. Den vom Prüfer unterschriebenen sieht der Kunde
+        // erst nach seiner Unterschrift (Kundenmodus: „steht ab sofort in Ihrem
+        // Kundenbereich bereit“).
+        foreach ([$berichte['abgeschlossen'], $berichte['geprueft']] as $berichtId) {
+            Database::execute('UPDATE berichte SET kunde_id = ? WHERE id = ?', [$muster, $berichtId]);
+            BerichtService::ereignis($berichtId, 'kunde_zugeordnet', ['kunde_id' => (string) $muster]);
+        }
+
+        // ---- Prüfnachweise (DGUV V3) – als „technik“, über dieselben Wege wie die Oberfläche.
+        $heute = new \DateTimeImmutable('today', Zeit::zone());
+        $datum = static fn (string $wann): string => $heute->modify($wann)->format('Y-m-d');
+        $norm = 'DIN EN 50699 (VDE 0702)';
+        Auth::alsBenutzer($technik);
+        try {
+            $hand = static function (string $datei, array $angaben, bool $freigeben) use ($muster, $siteId, $vorgang, $norm): void {
+                $angaben += ['norm' => $norm, 'ergebnis' => 'bestanden', 'site_id' => (string) $siteId, 'vorgang_id' => (string) $vorgang,
+                    'inventarnummer' => '', 'seriennummer' => '', 'hinweis' => ''];
+                $r = Pruefnachweise::pdfAnlegen($muster, self::nachweisPdf($angaben), $datei, $angaben, $freigeben);
+                if (!$r['ok']) {
+                    throw new \RuntimeException('Demo-Prüfnachweis: ' . $r['message']);
+                }
+            };
+            // Der PD63-07 steht als Foodtruck-Verteiler auf dem Gelände – mit dem Inventarstück (Seriennummer von dort).
+            $hand('Pruefprotokoll PD63-07.pdf', ['bezeichnung' => 'Verteiler PD 63/32/16 (Foodtruck-Verteiler)', 'inventar_id' => (string) $pd6307, 'inventarnummer' => 'PD63-07',
+                'geprueft_am' => $datum('-12 days'), 'naechste_pruefung' => $datum('-12 days +1 year')], true);
+            $hand('Pruefprotokoll KT-12.pdf', ['bezeichnung' => 'Kabeltrommel CEE 16 A, 50 m', 'inventarnummer' => 'KT-12', 'seriennummer' => 'MV-2021-0233',
+                'geprueft_am' => $datum('+20 days -1 year'), 'naechste_pruefung' => $datum('+20 days'),
+                'hinweis' => 'Die Kabeltrommel kommt nach dem Festival zur Wiederholungsprüfung zurück.'], true);
+            $hand('Pruefprotokoll V32-25.pdf', ['bezeichnung' => 'Verlängerung CEE 32 A, 25 m', 'inventarnummer' => 'V32-25-03',
+                'geprueft_am' => $datum('-5 days'), 'naechste_pruefung' => $datum('-5 days +1 year')], false);
+
+            // Aus Eventworx: das Sammelprotokoll am Auftrag – gezeigt, gemerkt,
+            // übernommen. Das zweite Protokoll dort bleibt zum Ausprobieren.
+            $sammel = (string) Eventworx::demoDateien()[0]['id'];
+            $k = Pruefnachweise::eventworxKandidaten($muster, $vorgang);
+            if (!$k['ok'] || !in_array($sammel, array_column($k['dateien'], 'id'), true)) {
+                throw new \RuntimeException('Demo-Prüfnachweis aus Eventworx: ' . ($k['message'] !== '' ? $k['message'] : 'die Datei fehlt am Auftrag'));
+            }
+            Pruefnachweise::dateienMerken($muster, $vorgang, $k['dateien']);
+            $r = Pruefnachweise::eventworxUebernehmen($muster, $vorgang, [$sammel], ['bezeichnung' => '', 'norm' => $norm,
+                'ergebnis' => 'bestanden', 'geprueft_am' => $datum('-6 days'), 'naechste_pruefung' => $datum('-6 days +1 year'), 'site_id' => (string) $siteId,
+                'inventarnummer' => '', 'seriennummer' => '', 'hinweis' => ''], true);
+            if (!$r['ok']) {
+                throw new \RuntimeException('Demo-Prüfnachweis aus Eventworx: ' . $r['message']);
+            }
+        } finally {
+            Auth::alsBenutzer(null);
+        }
+    }
+
+    /** Ein einseitiges Prüfprotokoll zu einem Demo-Nachweis – erfunden und so beschriftet. */
+    private static function nachweisPdf(array $angaben): string
+    {
+        $tag = static fn (string $iso): string => (new \DateTimeImmutable($iso))->format('d.m.Y');
+        $pdf = new \App\Pdf\Schreiber(['Title' => 'DEMO – Prüfprotokoll', 'Author' => 'PowerManagement (Demo)', 'Subject' => 'Erfundene Werte']);
+        $pdf->seite();
+        $pdf->text(20, 30, 'DEMO – Prüfprotokoll, erfundene Werte', 16, true);
+        $pdf->text(20, 42, 'Wiederholungsprüfung ortsveränderlicher Betriebsmittel (DGUV Vorschrift 3, ' . $angaben['norm'] . ')', 10);
+        $zeilen = [
+            ['Betriebsmittel', (string) $angaben['bezeichnung']],
+            ['Inventar-Nr.', (string) $angaben['inventarnummer']],
+            ['geprüft am', $tag((string) $angaben['geprueft_am'])],
+            ['nächste Prüfung', $tag((string) $angaben['naechste_pruefung'])],
+            ['Ergebnis', (string) $angaben['ergebnis']],
+        ];
+        foreach ($zeilen as $n => [$feld, $wert]) {
+            $pdf->text(20, 58 + $n * 8, $feld, 10, true);
+            $pdf->text(70, 58 + $n * 8, $wert, 10);
+        }
+        $pdf->text(20, 110, 'Dieses Dokument ist ein Beispiel der Demo und belegt keine Prüfung.', 9, false, 0.4);
+        return $pdf->ausgabe('2026-01-01T00:00:00+00:00', md5('demo-nachweis-' . $angaben['bezeichnung']));
     }
 
     /** Ein einfaches Festivalgelände als SVG (1600 × 1000). */

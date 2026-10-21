@@ -7,7 +7,8 @@ alle 5 Sekunden, solange die Seite offen ist.
 
 Die Bilder zeigen das Demo-Gelände (`php bin/power demo:seed`): ein
 Festivalgelände mit Netzanschluss, Energiesäulen, Aggregat, Speicher,
-Verteilern, einer Foodtruck-Meile und einem laufenden Aufbau.
+Verteilern, einer Foodtruck-Meile, einem laufenden Aufbau und zwei
+Veranstaltern mit eigenem Kundenbereich.
 
 ## Übersicht
 
@@ -368,6 +369,30 @@ Errichterbestätigung nach DGUV Vorschrift 3 in einem (*Übersicht →
 Alles Weitere – Felder, Grenzwerte, Kundenmodus, Korrektur, Integrität,
 Datenschutz, Aufbewahrung – steht in [berichte.md](berichte.md);
 Kundendaten aus Eventworx in [eventworx.md](eventworx.md).
+
+## Kunden und Kundenbereich
+
+Kunden bekommen einen eigenen Zugang zum **Kundenbereich**: ihre Locations
+im Zeitraum ihrer Veranstaltung (Pläne, feste Stromanschlüsse), ihre
+Protokolle (abgeschlossene Übergabeberichte als PDF) und ihre
+**Prüfnachweise** nach DGUV V3 – nur lesend, am Telefon wie am Rechner.
+Gepflegt wird das unter *Kunden → Kunden & Kundenbereich*:
+
+1. Kunde anlegen, einen **Zugang** einrichten – per Einrichtungslink oder
+   vorläufigem Kennwort, beides genau einmal angezeigt.
+2. Den Standort **freigeben**, mit Ende und Datenzeitraum.
+3. Übergabeberichte am Bericht **zuordnen** (Karte *Kundenbereich*).
+4. **Prüfnachweise** als PDF hinterlegen oder aus einem verknüpften
+   Eventworx-Auftrag übernehmen und freigeben.
+5. Unter *Übersicht* steht, was der Kunde jetzt sieht.
+
+<img src="bilder/kundenbereich-uebersicht-handy.png" alt="Kundenbereich am Telefon" width="260">
+
+![Ein Kunde in der Kundenverwaltung](bilder/kunden-kunde.png)
+
+Alles Weitere – Sichtbarkeit, mehrere Veranstalter auf einem Gelände,
+Prüfnachweise, Abrufe, Datenschutz – steht in
+[kundenbereich.md](kundenbereich.md).
 
 ## Inventar
 
@@ -737,7 +762,9 @@ Katalog bzw. das Inventar pflegen darf. Hochladen und Entfernen braucht
 
 **System → Benutzer & Freigaben**: Konten mit Gültigkeitszeitraum, Rollen
 je Konto mit eigenem Zeitraum, **Freigaben** je Benutzer. Details und
-Beispiele stehen in [rechte.md](rechte.md). Das **Audit-Log** (*System →
+Beispiele stehen in [rechte.md](rechte.md). Kundenzugänge stehen dort
+nicht – sie gehören zu ihrem Kunden ([Kunden und
+Kundenbereich](#kunden-und-kundenbereich)). Das **Audit-Log** (*System →
 Audit-Log*) zeichnet Anmeldungen, Änderungen und Schaltvorgänge auf.
 
 **Anmeldung und Sitzung**

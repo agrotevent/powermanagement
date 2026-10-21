@@ -559,7 +559,7 @@ try {
     pruefe($unsinn['status'] === 200 && str_contains($unsinn['text'], $kennung . ' geändert') && !str_contains($unsinn['text'], $kennung . ' Gelände B'),
         'fremde Location im Filter: alle eigenen, kein fremder Name');
     $start = anfrage($basis, $kunde['dose'], 'GET', '/kundenbereich');
-    pruefe(str_contains($start['text'], 'Ihre Prüfnachweise') && str_contains($start['text'], '1</strong> läuft in 30 Tagen ab') && str_contains($start['text'], 'href="/kundenbereich/pruefnachweise"'),
+    pruefe(str_contains($start['text'], 'Ihre Prüfnachweise') && str_contains($start['text'], '1</strong> läuft in den nächsten 30 Tagen ab') && str_contains($start['text'], 'href="/kundenbereich/pruefnachweise"'),
         'Übersicht: Prüfnachweise mit dem, was bald abläuft');
     $ort = anfrage($basis, $kunde['dose'], 'GET', '/kundenbereich/locations/' . $sites['a']);
     pruefe(str_contains($ort['text'], 'Ihre Prüfnachweise an dieser Location') && str_contains($ort['text'], $kennung . ' geändert')
@@ -638,7 +638,9 @@ try {
         $vDemo = $demoVorgang();
         pruefe($r['status'] === 302 && $vDemo !== null, 'Demo: bestätigt → verknüpft');
         $r = anfrage($basis, $planung['dose'], 'POST', '/kunden/' . $k1 . '/nachweise/eventworx', ['_token' => $token, 'vorgang' => (string) $vDemo]);
-        $dateiId = preg_match('/name="datei\[\]" value="([0-9a-f]{24})"/', $r['text'], $m) === 1 ? $m[1] : '';
+        // Das Sammelprotokoll der Demo (neben ihm liegt ein zweites Prüfprotokoll am Auftrag).
+        $sammel = (string) Eventworx::demoDateien()[0]['id'];
+        $dateiId = str_contains($r['text'], 'name="datei[]" value="' . $sammel . '"') ? $sammel : '';
         pruefe($r['status'] === 200 && kopfzeile($r, 'Cache-Control') === 'no-store' && str_contains($r['text'], 'DGUV V3 Prüfprotokolle Verteiler und Kabel 2026.pdf')
             && !str_contains($r['text'], 'Auftrag AU-1042.pdf') && $dateiId !== '', 'Demo: Dateien am Auftrag zum Auswählen, ohne den Beleg');
         $zahlE = static fn (): int => (int) Database::scalar("SELECT COUNT(*) FROM pruefnachweise WHERE kunde_id = ? AND quelle = 'ewx_vorgang'", [$k1]);
