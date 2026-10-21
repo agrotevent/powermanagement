@@ -1600,6 +1600,13 @@ stream_wrapper_register("langsam", LangsamAttrappe::class);
     pruefe($dauer < 1.5 && !str_contains($aus, 'Warte'), sprintf('wartung_an: ohne laufende Änderung kein Warten (%.1f s)', $dauer));
     $schreiben('wartung', null);
 
+    // Der Update-Dienst ist nach keinem Dienst geordnet, den das Zurückrollen
+    // anhält oder startet: sonst wartete beim Stoppen der Einheit (Abbruch,
+    // Herunterfahren) dessen Anhalten auf ihr eigenes – das Zurückrollen hinge.
+    $einheit = (string) file_get_contents($wurzel . '/deploy/powermanagement-update.service');
+    $geordnet = preg_match_all('/^\s*(?:After|Before)=.*\b(?:nginx|mosquitto|powermanagement-[a-z-]+|php[0-9.]*-fpm)\b/m', $einheit);
+    gleich($geordnet, 0, 'powermanagement-update.service: kein After=/Before= auf Dienste des Zurückrollens (kein Stillstand beim Stoppen)');
+
     // Fehlende Kacheln rechnet das Update nicht unter der Schreibsperre (ein
     // Plan mit 100 MB braucht Minuten, plan:kacheln wartete zudem auf einen
     // Bau im Hintergrund), sondern nach dem Punkt ohne Rückweg eine eigene

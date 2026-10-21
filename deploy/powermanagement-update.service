@@ -16,8 +16,12 @@
 
 [Unit]
 Description=PowerManagement: Update ausführen (Oberfläche, Automatik, Wiederanlauf)
-# Beim Herunterfahren zuerst diesen Dienst beenden (und zurückrollen), dann diese.
-After=nginx.service mosquitto.service powermanagement-sammler.service powermanagement-nodered.service
+# Bewusst ohne After=/Before= auf Dienste, die das Zurückrollen anhält oder startet
+# (Sammler, Node-RED, nginx, mosquitto, PHP-FPM): Wird diese Einheit gestoppt (systemctl
+# stop, Herunterfahren), ordnet systemd das Anhalten eines solchen Dienstes HINTER ihr
+# eigenes Anhalten ein – das aber wartet auf das Zurückrollen, das den Dienst anhält.
+# Das Zurückrollen hinge bis TimeoutStopSec. Beim Herunterfahren startet es nichts
+# (--ohne-dienste) und braucht nur git, Dateien und die Datenbank.
 # Schleifenbremse (anders als beim MQTT-Dienst): bliebe ein Auftrag liegen, startete die
 # Pfad-Einheit sofort neu. Nach 20 Starts in 5 min gibt systemd auf – der Zeitgeber
 # heilt die Pfad-Einheit (update-helfer.sh), die Seite meldet „Auftrag hängt“.
