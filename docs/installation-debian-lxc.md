@@ -311,6 +311,22 @@ Grenzwerte prüfen.
    eventworx:pruefen`. Der Container braucht dafür ausgehend HTTPS zu
    `<mandant>.eventworx.biz`. Details: [eventworx.md](eventworx.md).
 
+**Für den Kundenbereich** ([kundenbereich.md](kundenbereich.md)):
+
+1. **`app.url`** in `config/config.php` auf die Adresse setzen, unter der
+   Kunden die Oberfläche erreichen (etwa `'url' => 'https://strom.example.de'`).
+   Nur daraus entstehen Einrichtungslinks; ohne sie gibt es nur vorläufige
+   Kennwörter. Die Karte *System → Einstellungen → Kundenbereich* zeigt,
+   ob die Adresse fehlt oder unverschlüsselt ist.
+2. In derselben Karte Datenschutzhinweis (Mustertext prüfen) und
+   Ansprechpartner eintragen.
+3. Wer Kunden von außen hereinlässt: Abschnitt 9.
+
+Prüfnachweise liegen als PDF (bis 10 MB) in der Datenbank. SQLite braucht
+dafür nichts; bei MySQL/MariaDB muss `max_allowed_packet` mindestens
+16 MiB sein (die Vorgabe von MariaDB) – eine 10-MB-Datei wird base64 rund
+13,4 MB groß.
+
 Die Schrift für die PDF (Liberation Sans, SIL Open Font License) liegt im
 Repository unter `resources/fonts` – PHP-FPM darf wegen `open_basedir`
 nicht nach `/usr/share/fonts`. Weitere Pakete braucht die PDF nicht.
@@ -781,6 +797,13 @@ nginx auf einem anderen Host), der **getrennt** läuft und auf
    über den Proxy kommen (siehe unten): sie melden sich nur mit ihrem Token.
 4. **MQTT nicht über den Proxy ins Internet** stellen. Entfernte Shellys
    kommen über WireGuard (Abschnitt 7).
+5. **Kundenbereich:** Kunden kommen an einer zusätzlichen Anmeldung des
+   Proxys nicht vorbei. Sollen sie von außen herein, braucht es für sie
+   einen Weg ohne diese Anmeldung – etwa eine eigene Adresse, die nur
+   `/login`, `/logout`, `/kundenbereich`, `/manifest` und
+   `/assets/` durchlässt. Die App bremst Fehlversuche selbst, und ein
+   Kundenzugang erreicht ohnehin nur `/kundenbereich`. `app.url` (siehe
+   unten) ist dann diese Adresse, und sie sollte **https** sein.
 
 Die nginx-Site passt das Update-Skript nie ungefragt an; eigene Zeilen
 bleiben also erhalten.

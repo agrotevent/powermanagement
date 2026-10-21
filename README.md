@@ -79,6 +79,13 @@ Mehr Bilder in der [Bedienungsanleitung](docs/bedienung.md).
   Server, Unterschrift von Prüfer und Kunde am Gerät (nur als Linienzug),
   eingefroren mit Prüfsumme und Siegel, PDF aus eigenem Schreiber.
   Kundendaten als Freitext oder **nur lesend aus Eventworx**.
+- **Kundenbereich**: Kunden melden sich selbst an und sehen nur ihre
+  Locations im Zeitraum ihrer Veranstaltung (Pläne, feste Stromanschlüsse),
+  ihre Protokolle (zugeordnete Übergabeberichte als PDF) und ihre
+  **Prüfnachweise nach DGUV V3** – von Hand hinterlegt oder aus einem
+  Eventworx-Auftrag übernommen, immer durch eine Person freigegeben. Mehrere
+  Veranstalter auf einem Gelände sehen nie etwas voneinander; jeder
+  Download wird festgehalten.
 - **Verteiler-Abgleich** über dasselbe Repository: Standard-Verteiler und
   Inventar (Verteiler und Zwischenstecker mit ihren Shellys), eine Datei je
   Verteiler. Je Verteiler steht, ob er hier, dort oder auf beiden Seiten
@@ -106,7 +113,9 @@ php -S 127.0.0.1:8080 -t public
 → <http://127.0.0.1:8080>, Anmeldung `admin` / `PowerAdmin2026!`. Weitere
 Demo-Konten: `veranstalter` / `Veranstalter2026!` (sieht nur die
 Festivalwoche) und `technik` / `Technik2026!!` (darf nur das Licht schalten,
-unterschreibt Übergabeberichte als Prüfer).
+unterschreibt Übergabeberichte als Prüfer). Den Kundenbereich zeigen
+`muster-events` / `Kundenbereich2026!` und `stadtmarketing` /
+`Stadtmarketing2026!` – zwei Veranstalter auf demselben Gelände.
 
 Voraussetzungen: PHP ≥ 8.2 mit `pdo_sqlite`, `mbstring`, `sodium`, `zlib`,
 `sockets`, `curl` und `gd`. Für PDF-Grundrisse zusätzlich `poppler-utils`.
@@ -132,12 +141,13 @@ Update: **[docs/installation-debian-lxc.md](docs/installation-debian-lxc.md)**.
 | Datei | Inhalt |
 |-------|--------|
 | [docs/installation-debian-lxc.md](docs/installation-debian-lxc.md) | Installation, Update, Sicherung, Fehlersuche |
-| [docs/bedienung.md](docs/bedienung.md) | Übersicht, Karte, Anlagen, Verteilerplan, Aufbau und Abgleich, Übergabeberichte, Inventar, Tanks und Kraftstoff, Auswertung, Bereiche, Materialliste, Schalten, Location- und Verteiler-Abgleich, andere Instanzen |
+| [docs/bedienung.md](docs/bedienung.md) | Übersicht, Karte, Anlagen, Verteilerplan, Aufbau und Abgleich, Übergabeberichte, Kunden, Inventar, Tanks und Kraftstoff, Auswertung, Bereiche, Materialliste, Schalten, Location- und Verteiler-Abgleich, andere Instanzen |
 | [docs/berichte.md](docs/berichte.md) | Übergabeberichte: Ablauf vor Ort, Felder, Vorbelegung, Grenzwerte, Unterschrift und Beweiswert, Kundenmodus, Korrektur, Integrität, Datenschutz, Aufbewahrung |
-| [docs/rechte.md](docs/rechte.md) | Rollen, Freigaben, Zeitfenster, Schaltrechte je Gerät |
+| [docs/kundenbereich.md](docs/kundenbereich.md) | Kundenbereich: Kunden und Zugänge, was Kunden sehen, mehrere Veranstalter je Gelände, Protokolle zuordnen, Prüfnachweise (DGUV V3), Abrufe, Datenschutz |
+| [docs/rechte.md](docs/rechte.md) | Rollen, Freigaben, Zeitfenster, Schaltrechte je Gerät, Kundenzugänge |
 | [docs/schnittstelle.md](docs/schnittstelle.md) | Schnittstelle zu anderen Instanzen (PowerManagement, MasterAdmin): Zugänge, Übernehmen, Vorschläge, direktes Schreiben, Endpunkte |
 | [docs/datenquellen.md](docs/datenquellen.md) | MQTT-Format, InfluxDB-Schema, Shelly, Victron, ComAp, WireGuard, Sammler, Node-RED |
-| [docs/eventworx.md](docs/eventworx.md) | Kundendaten aus Eventworx (nur lesend): Token, was gelesen wird, Fehlermeldungen, Datenschutz |
+| [docs/eventworx.md](docs/eventworx.md) | Eventworx (nur lesend): Kundendaten für Berichte, Vorgänge und Prüfprotokolle für den Kundenbereich, Token, Fehlermeldungen, Datenschutz, Lese-Probe |
 
 ## Kommandozeile
 
@@ -156,6 +166,9 @@ bin/power katalog:import <datei> [--ueberschreiben] [--pruefen]
 bin/power tank:liste --als=<benutzer> [--standort=<id>] [--warnungen]   ·   bin/power tank:rechnen <messpunkt-id> <rohwert>
 bin/power berichte:pruefen [<nummer> [--fassung=N]] [--pdf]   ·   bin/power berichte:pdf <nummer> <ziel.pdf> [--fassung=N]
 bin/power berichte:aufbewahrung [--ausfuehren]   ·   bin/power eventworx:pruefen
+bin/power eventworx:sonde [--job=OID] [--stock=OID] [--serie=…] [--json]
+bin/power kunden:liste   ·   bin/power kunden:zugang <kunde-id> <benutzer> [--kennwort] [--name=…] [--email=…]
+bin/power kunden:aufbewahrung [--ausfuehren]   ·   bin/power kunden:nachweise-pruefen
 bin/power demo:seed [--reset]
 bin/power wartung
 ```
@@ -184,9 +197,11 @@ docs/                     Dokumentation
 public/                   Einstieg index.php, CSS, JS (Leaflet, uPlot, pdf.js mitgeliefert)
 resources/views/          Vorlagen (PHP)
 resources/fonts/          Liberation Sans für die PDF (SIL OFL 1.1)
+resources/hilfe/          Hilfe-Seite des Kundenbereichs (Markdown)
 src/Auth/                 Anmeldung, Rechte, Freigaben/Zeitfenster (Zugriff), Tokens der Schnittstelle (ApiZugang)
 src/Berichte/             Übergabeberichte: Schema, Vorbelegung, Grenzwerte, Unterschrift, Kundenmodus, PDF-Layout
 src/Controllers/          Seiten, Schnittstelle /api/v1 (ApiController)
+src/Kunden/               Kundenbereich: Kunden, Zugänge, Einrichtungslink, was Kunden sehen (KundenSicht), Prüfnachweise, Abrufe
 src/Messung/              InfluxDB, MQTT, Modbus TCP, ComAp, VRM, Sammler, Steuerung, Demo
 src/Pdf/                  eigener PDF-Schreiber (Schrift als Teilmenge, Tabellen)
 src/Services/             Anlagen, Schutzorgane, Leitungen, Messpunkte, Inventar, Aufbau, Live, Bereiche, Material, Standorte, Location- und Verteiler-Abgleich, Schnittstelle, Eventworx

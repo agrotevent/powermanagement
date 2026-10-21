@@ -628,22 +628,12 @@ final class KarteController extends Controller
         if ($etage === null) {
             return;
         }
-        $pfad = SiteService::planPath($etage);
-        if ($pfad === null) {
+        // Dieselbe Auslieferung wie im Kundenbereich – hier mit den Kopfzeilen
+        // des Personals (inline, zehn Minuten im Browser, sandbox).
+        if (!SiteService::planAusliefern($etage)) {
             http_response_code(404);
             echo 'kein Grundriss hinterlegt';
-            return;
         }
-        header('Content-Type: ' . SiteService::planMime($etage));
-        header('Content-Length: ' . (string) filesize($pfad));
-        header('Content-Disposition: inline; filename="' . basename((string) $etage['plan_original_name'] ?: 'grundriss') . '"');
-        header('X-Content-Type-Options: nosniff');
-        header('Cache-Control: private, max-age=600');
-        // Ein Grundriss ist ein Bild und sonst nichts – ein SVG mit Skript
-        // soll beim direkten Aufruf nichts ausführen dürfen.
-        header("Content-Security-Policy: default-src 'none'; style-src 'unsafe-inline'; sandbox");
-        header('Referrer-Policy: no-referrer');
-        readfile($pfad);
     }
 
     public function planKachel(Request $request, array $params): void

@@ -21,7 +21,10 @@ declare(strict_types=1);
  * durch, während Eventworx trödelt, und der geladene Vorgang ist danach
  * trotzdem in der Sitzung vorgemerkt (Session::nachtragen()) – das nächste
  * Autosave übernimmt den Verweis. Wer sich in der Zwischenzeit abmeldet,
- * bekommt keine Kundendaten mehr.
+ * bekommt keine Kundendaten mehr. Und für die Kundenverwaltung (Eventworx
+ * suchen, Vorgang verknüpfen, Dateien am Vorgang): andere Seiten kommen
+ * durch, Treffer und Dateiliste sind danach gemerkt, nach dem Abmelden gibt
+ * es keine Dateiliste.
  *
  * Und für Anfragen an andere Instanzen (bis 60 s, Plandateien bis 180 s,
  * Session::ohneSperre()): Die Seite einer Instanz und „Prüfen“ warten auf
@@ -105,9 +108,10 @@ $influxPort = freierPort();
 hintergrund(['php', '-S', '127.0.0.1:' . $influxPort, $ordner . '/influx.php'], ['PHP_CLI_SERVER_WORKERS' => '8']);
 
 // ------------------------------------------------------------ träges Eventworx
-// Antwortet wie der Mandant (`job` als Liste, `job/<id>` als Datensatz) mit
-// dem Auftrag aus der Demo, nur mit dem richtigen Token, und schreibt jeden
-// Pfad mit – so steht fest, dass wirklich gefragt wurde.
+// Antwortet wie der Mandant (`job` als Liste, `job/<id>` als Datensatz, am
+// Auftrag eine hochgeladene PDF-Datei) mit dem Auftrag aus der Demo, nur mit
+// dem richtigen Token, und schreibt jeden Pfad mit – so steht fest, dass
+// wirklich gefragt wurde.
 $ewxVerzoegerung = $ordner . '/eventworx-verzoegerung';
 file_put_contents($ewxVerzoegerung, '0');
 $ewxToken = 'pruefung-' . bin2hex(random_bytes(12));
@@ -130,6 +134,12 @@ if ($pfad === "/backend/check/ping") {
     echo json_encode(["success" => true, "total" => 1, "data" => [$job]]);
 } elseif ($pfad === "/backend/job/" . $job["id"]) {
     echo json_encode(["success" => true, "data" => $job]);
+} elseif ($pfad === "/backend/file/list") {
+    echo json_encode(["success" => true, "total" => 1, "data" => [["id" => "6650a1f2c9e77a1b000000aa", "documentName" => "Pruefprotokoll Sitzung.pdf",
+        "contentType" => "application/pdf", "path" => "/job/documents/P-1", "ownerDocumentId" => $job["id"]]]]);
+} elseif ($pfad === "/backend/file/6650a1f2c9e77a1b000000aa") {
+    header("Content-Type: application/pdf");
+    echo "%PDF-1.4\n% Sitzung\n1 0 obj\n<< /Type /Catalog >>\nendobj\ntrailer\n<< /Root 1 0 R >>\n%%EOF\n";
 } else {
     http_response_code(404);
     echo json_encode(["success" => false, "errorCode" => "NOT_FOUND"]);
@@ -605,6 +615,68 @@ gleich(holen($basis . '/profil')['status'], 302, 'danach abgemeldet');
 
 // Für die Anfragen an andere Instanzen wieder anmelden.
 gleich($anmelden($kennwort), 302, 'nach dem Abmelden wieder angemeldet');
+
+// ------------------------------------------------------------ Eventworx in der Kundenverwaltung
+// Suche, Verknüpfen und die Dateien am Vorgang warten auf Eventworx – aus
+// einem Formular, die Seite kommt erst danach. Hielten sie die Sitzung,
+// stünde jede andere Seite so lange an. Nach dem Warten merken sie sich
+// Treffer bzw. Dateiliste in der wieder geöffneten Sitzung: Verknüpfen und
+// Übernehmen nehmen nur, was dort steht – gehen sie, hat das Merken geklappt.
+preg_match('/name="_token" value="([^"]+)"/', holen($basis . '/profil')['text'], $m);
+$token = $m[1] ?? '';
+$abfrage("INSERT INTO kunden (name, kundennummer, aktiv, created_at) VALUES (?, '', 1, ?)", ['Sitzung Kunde ' . $kennung, gmdate('c')]);
+$kundeId = (int) ($abfrage('SELECT id FROM kunden WHERE name = ?', ['Sitzung Kunde ' . $kennung])[0]['id'] ?? 0);
+pruefe($kundeId > 0, 'Kunde in der zweiten Instanz angelegt');
+@unlink($ordner . '/eventworx-pfade');
+file_put_contents($ewxVerzoegerung, '3');
+$lauf = waehrendLangsam([[$basis . '/kunden/' . $kundeId . '/eventworx/suche', ['_token' => $token, 'q' => $nummer]]], $basis . '/profil');
+gleich($lauf['antwort']['status'], 200, 'Kundenverwaltung: andere Seite, während die Eventworx-Suche wartet');
+pruefe($lauf['dauer'] < 2.0, sprintf('Eventworx-Suche der Kundenverwaltung hält die Sitzung nicht (%.1f s)', $lauf['dauer']));
+$suche = $lauf['langsam'][0];
+pruefe($suche['status'] === 200 && str_contains($suche['text'], 'id="eventworx-treffer"') && str_contains($suche['text'], $nummer), 'Suche liefert trotzdem ihre Treffer');
+pruefe(!sitzungsCookie($suche['kopf']), 'Suche: die wieder geöffnete Sitzung schickt kein zweites Sitzungscookie');
+$lauf = waehrendLangsam([[$basis . '/kunden/' . $kundeId . '/eventworx/verknuepfen', ['_token' => $token, 'job_id' => (string) $ewxJob['id'], 'bestaetigt' => '1']]],
+    $basis . '/profil');
+pruefe($lauf['dauer'] < 2.0, sprintf('Verknüpfen hält die Sitzung nicht (%.1f s)', $lauf['dauer']));
+$vorgangId = (int) ($abfrage('SELECT id FROM kunden_vorgaenge WHERE kunde_id = ? AND ewx_id = ?', [$kundeId, (string) $ewxJob['id']])[0]['id'] ?? 0);
+pruefe($lauf['langsam'][0]['status'] === 302 && $vorgangId > 0, 'Vorgang verknüpft – die Treffer der Suche waren nach dem Warten gemerkt');
+$lauf = waehrendLangsam([[$basis . '/kunden/' . $kundeId . '/nachweise/eventworx', ['_token' => $token, 'vorgang' => (string) $vorgangId]]], $basis . '/profil');
+pruefe($lauf['dauer'] < 2.0, sprintf('Dateien am Vorgang: hält die Sitzung nicht (%.1f s)', $lauf['dauer']));
+pruefe($lauf['langsam'][0]['status'] === 200 && str_contains($lauf['langsam'][0]['text'], 'Pruefprotokoll Sitzung.pdf'), 'Dateien am Vorgang trotzdem gezeigt');
+// Formulare, die auf Eventworx warten, tragen `data-laeuft-seite`: Der
+// Browser schickt sie selbst ab (die Antwort ist eine Seite – Treffer,
+// Rückfrage, Dateiliste – oder eine Weiterleitung mit Meldung), app.js zeigt,
+// dass gewartet wird, und fängt einen zweiten Klick ab. Der liefe sonst neben
+// dem ersten (die Sitzung hält ihn nicht mehr auf), und gezeigt würde seine
+// Antwort – nach „Übernehmen“ etwa „schon übernommen“.
+$eventworxFormulare = static function (string $html): array {
+    preg_match_all('#<form\b[^>]*\baction="/kunden/\d+/(?:eventworx/(?:suche|verknuepfen)|nachweise/eventworx(?:/uebernehmen)?)"[^>]*>#', $html, $m);
+    return $m[0];
+};
+$formulare = array_merge($eventworxFormulare($suche['text']), $eventworxFormulare($lauf['langsam'][0]['text']),
+    $eventworxFormulare(holen($basis . '/kunden/' . $kundeId . '?tab=vorgaenge')['text']), $eventworxFormulare(holen($basis . '/kunden/' . $kundeId . '?tab=nachweise')['text']));
+$ziele = array_values(array_unique(array_map(static fn (string $f): string => (string) preg_replace('#^.*action="/kunden/\d+/([^"]+)".*$#s', '$1', $f), $formulare)));
+sort($ziele);
+gleich($ziele, ['eventworx/suche', 'eventworx/verknuepfen', 'nachweise/eventworx', 'nachweise/eventworx/uebernehmen'], 'Eventworx-Formulare der Kundenverwaltung gefunden');
+gleich(array_values(array_filter($formulare, static fn (string $f): bool => !str_contains($f, ' data-laeuft-seite') || !str_contains($f, ' data-laeuft="'))), [],
+    'Eventworx-Formulare der Kundenverwaltung tragen data-laeuft-seite – der Browser schickt ab, ein zweiter Klick wird abgefangen');
+file_put_contents($ewxVerzoegerung, '0');
+$r = holen($basis . '/kunden/' . $kundeId . '/nachweise/eventworx/uebernehmen', ['_token' => $token, 'vorgang' => (string) $vorgangId,
+    'datei' => ['6650a1f2c9e77a1b000000aa'], 'geprueft_am' => gmdate('Y-m-d', time() - 2 * 86400)]);
+$uebernommen = $abfrage("SELECT id FROM pruefnachweise WHERE kunde_id = ? AND quelle = 'ewx_vorgang' AND ewx_datei_id = ?", [$kundeId, '6650a1f2c9e77a1b000000aa']);
+pruefe($r['status'] === 302 && count($uebernommen) === 1, 'Datei übernommen – die Dateiliste war nach dem Warten gemerkt');
+$pfade = is_file($ordner . '/eventworx-pfade') ? (file($ordner . '/eventworx-pfade', FILE_IGNORE_NEW_LINES) ?: []) : [];
+pruefe(in_array('/backend/file/list', $pfade, true) && in_array('/backend/file/6650a1f2c9e77a1b000000aa', $pfade, true), 'Liste und Datei gingen an die Eventworx-Attrappe');
+// Abgemeldet, während die Dateien gelesen werden: keine Dateiliste, keine neue Sitzung.
+file_put_contents($ewxVerzoegerung, '2');
+$lauf = waehrendLangsam([[$basis . '/kunden/' . $kundeId . '/nachweise/eventworx', ['_token' => $token, 'vorgang' => (string) $vorgangId]]],
+    $basis . '/logout', ['_token' => $token]);
+$nachAbmelden = $lauf['langsam'][0];
+pruefe($lauf['antwort']['status'] === 302 && $nachAbmelden['status'] === 302 && !str_contains($nachAbmelden['text'], 'Pruefprotokoll Sitzung.pdf')
+    && !sitzungsCookie($nachAbmelden['kopf']), 'Dateien am Vorgang nach dem Abmelden: Weiterleitung ohne Dateiliste, kein neues Sitzungscookie');
+gleich(count(glob($ordner . '/sitzungen/sess_*') ?: []), 0, 'nach dem Abmelden legt die Kundenverwaltung keine Sitzung an');
+file_put_contents($ewxVerzoegerung, '0');
+gleich($anmelden($kennwort), 302, 'wieder angemeldet');
 
 // ------------------------------------------------------------ träge andere Instanz
 // Eine Gegenseite mit /api/v1/info und /api/v1/locations, die – wie die
@@ -1091,6 +1163,35 @@ if ($geprueft > 0) {
     gleich([$seite['status'], $meldungen($seite['text'])], [200, []], 'Kundenmodus: keine Meldung von „Prüfen“ auf der Kundenseite');
     $entsperren('Prüfen');
     pruefe(!str_contains(implode(' ', $meldungen(holen($basis . '/dashboard')['text'])), 'InfluxDB'), 'Kundenmodus: die Meldung von „Prüfen“ kommt auch nach dem Entsperren nicht');
+
+    // Ebenso die Kundenverwaltung: Eventworx-Suche, Dateien am Vorgang und
+    // Übernehmen warten ohne Sitzungssperre (Controller::ohneSitzungssperre()).
+    // Beginnt der Kundenmodus mittendrin, kommen danach weder Treffer noch
+    // Dateiliste an – die Seite führt zur Kundenseite –, und auf der
+    // Kundenseite steht keine Meldung aus der Kundenverwaltung.
+    $nachweiseVorher = count($abfrage("SELECT id FROM pruefnachweise WHERE kunde_id = ? AND quelle = 'ewx_vorgang'", [$kundeId]));
+    foreach ([
+        'die Eventworx-Suche der Kundenverwaltung wartet' => ['/kunden/' . $kundeId . '/eventworx/suche', ['q' => $nummer], $nummer, true],
+        'die Dateien am Vorgang aus Eventworx kommen'     => ['/kunden/' . $kundeId . '/nachweise/eventworx', ['vorgang' => (string) $vorgangId], 'Pruefprotokoll Sitzung.pdf', true],
+        'Übernehmen auf Eventworx wartet'                  => ['/kunden/' . $kundeId . '/nachweise/eventworx/uebernehmen', ['vorgang' => (string) $vorgangId,
+            'datei' => ['6650a1f2c9e77a1b000000aa'], 'geprueft_am' => gmdate('Y-m-d', time() - 86400)], 'Pruefprotokoll Sitzung.pdf', false],
+    ] as $wofuer => [$pfad, $felder, $inhalt, $zurKundenseite]) {
+        file_put_contents($ewxVerzoegerung, '1.5');
+        $lauf = $starten($wofuer, [[$basis . $pfad, ['_token' => $token] + $felder]]);
+        file_put_contents($ewxVerzoegerung, '0');
+        $antwort = $lauf['langsam'][0];
+        $ziel = preg_match('#^location:\s*(\S+)\s*$#mi', $antwort['kopf'], $z) === 1 ? $z[1] : '';
+        // Eine Seite (Treffer, Dateiliste) führt selbst zur Kundenseite; eine
+        // Weiterleitung mit Meldung (Übernehmen) geht wie sonst, die Meldung
+        // schreibt Flash::add() nicht mehr, und die nächste Seite ist die Kundenseite.
+        pruefe($antwort['status'] === 302 && ($zurKundenseite ? $ziel === $kunde : $ziel !== '') && !str_contains($antwort['text'], $inhalt),
+            'Kundenmodus: ' . $wofuer . ' – danach nichts aus Eventworx (' . $antwort['status'] . ' ' . $ziel . ')');
+        $seite = holen($basis . $kunde);
+        gleich([$seite['status'], $meldungen($seite['text'])], [200, []], 'Kundenmodus: keine Meldung auf der Kundenseite, nachdem ' . $wofuer);
+        $entsperren($wofuer);
+    }
+    gleich(count($abfrage("SELECT id FROM pruefnachweise WHERE kunde_id = ? AND quelle = 'ewx_vorgang'", [$kundeId])), $nachweiseVorher,
+        'Kundenmodus: die schon übernommene Datei bleibt einmal da');
 
     // Eine Meldung, die beim Start noch auf ihre Seite wartete (ein Reiter hat
     // abgeschickt und noch nicht neu geladen), steht ebenso nicht dort.

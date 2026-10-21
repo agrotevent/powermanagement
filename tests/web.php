@@ -135,10 +135,11 @@ $eventworxVorher = [];
 foreach ([Eventworx::EINSTELLUNG_HOST, Eventworx::EINSTELLUNG_TOKEN_HOST, Settings::GEHEIM_EVENTWORX_TOKEN] as $s) {
     $eventworxVorher[$s] = Settings::get($s);
 }
-foreach (array_keys(Einstellungen::VORGABEN) as $s) {
+foreach (array_merge(array_keys(Einstellungen::VORGABEN), array_keys(\App\Kunden\KundenEinstellungen::VORGABEN)) as $s) {
     $eventworxVorher[$s] = Settings::get($s);
 }
 $bSite = 0;
+$planSite = 0;
 // Audit-Einträge dieses Laufs zu eigenen Rollen, Standorten, Etagen und Anlagen
 // tragen die Kennung nicht im Text – am Ende über ihr Ziel weg.
 $auditVorher = (int) Database::scalar('SELECT COALESCE(MAX(id), 0) FROM audit_log');
@@ -262,6 +263,27 @@ try {
     gleich(serverMeldungen($serverFehler), [], 'Admin: alle Seiten ohne PHP-Meldung im Fehlerprotokoll des Servers');
     gleich(aufruf($basis, $admin['dose'], 'GET', '/system/freigaben?id=0')['status'], 404, 'Freigaben ohne Benutzer → 404');
 
+    // Plandatei des Personals: dieselben Kopfzeilen wie immer, seit sie über
+    // SiteService::planAusliefern() läuft (das auch der Kundenbereich nutzt).
+    $planSite = \App\Services\SiteService::saveSite(null, ['name' => $kennung . ' Plan']);
+    $auditZiele[] = ['site', $planSite];
+    $planEtage = \App\Services\SiteService::saveFloor(null, ['site_id' => $planSite, 'name' => $kennung . ' EG']);
+    $planOhne = \App\Services\SiteService::saveFloor(null, ['site_id' => $planSite, 'name' => $kennung . ' OG']);
+    array_push($auditZiele, ['floor', $planEtage], ['floor', $planOhne]);
+    $planBytes = (string) base64_decode('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==');
+    $planDatei = 'site' . $planSite . '_' . bin2hex(random_bytes(8)) . '.png';
+    file_put_contents(\App\Services\SiteService::planDir() . '/' . $planDatei, $planBytes);
+    Database::update('floors', $planEtage, ['plan_file' => $planDatei, 'plan_type' => 'image', 'plan_original_name' => 'Hallenplan EG.png']);
+    $r = aufruf($basis, $admin['dose'], 'GET', '/grundriss/' . $planEtage . '/datei');
+    $kopf = static fn (array $r, string $name): string => preg_match('/^' . preg_quote($name, '/') . ':\s*(.+?)\r?$/mi', $r['kopf'], $m) === 1 ? trim($m[1]) : '';
+    gleich([$r['status'], $kopf($r, 'Content-Type'), $kopf($r, 'Content-Disposition'), $kopf($r, 'Content-Length'), $kopf($r, 'X-Content-Type-Options'),
+        $kopf($r, 'Cache-Control'), $kopf($r, 'Content-Security-Policy'), $kopf($r, 'Referrer-Policy'), $r['text'] === $planBytes],
+        [200, 'image/png', 'inline; filename="Hallenplan EG.png"', (string) strlen($planBytes), 'nosniff', 'private, max-age=600',
+            "default-src 'none'; style-src 'unsafe-inline'; sandbox", 'no-referrer', true], 'Plandatei des Personals: Kopfzeilen und Inhalt unverändert');
+    $r = aufruf($basis, $admin['dose'], 'GET', '/grundriss/' . $planOhne . '/datei');
+    gleich([$r['status'], $r['text']], [404, 'kein Grundriss hinterlegt'], 'Etage ohne Plan: 404 wie bisher');
+    gleich(aufruf($basis, $admin['dose'], 'GET', '/grundriss/999999999/datei')['status'], 404, 'Plandatei einer unbekannten Etage: 404');
+
     // Eventworx-Karte: Token verschlüsselt, an den Host gebunden, nie in der Seite
     $ewxToken = 'tok-' . $kennung . '-' . bin2hex(random_bytes(6));
     $r = aufruf($basis, $admin['dose'], 'POST', '/system/einstellungen/eventworx', ['eventworx_adresse' => $kennung, 'eventworx_token' => $ewxToken, '_token' => $admin['token']]);
@@ -285,6 +307,37 @@ try {
     Settings::vergessen();
     pruefe($r['status'] === 302 && !Settings::geheimnisHinterlegt(Settings::GEHEIM_EVENTWORX_TOKEN), 'Eventworx ohne CSRF-Token → abgelehnt');
     gleich((int) Database::scalar('SELECT COUNT(*) FROM audit_log WHERE details LIKE ?', ['%' . $ewxToken . '%']), 0, 'Eventworx-Token nicht im Audit');
+
+    // Kunden & Kundenbereich: Liste, jeder Reiter, Karte in den Einstellungen; ohne „kunden.view“ 403.
+    $kundeId = (int) (\App\Kunden\KundenService::speichern(null, ['name' => $kennung . ' Kunde', 'aktiv' => 1])['id'] ?? 0);
+    $auditZiele[] = ['kunde', $kundeId];
+    $kundenSeiten = ['/kunden', '/kunden?suche=' . $kennung, '/kunden?aktiv=0', '/kunden/' . $kundeId];
+    foreach (array_keys(\App\Controllers\KundenController::REITER) as $tab) {
+        $kundenSeiten[] = '/kunden/' . $kundeId . '?tab=' . $tab;
+    }
+    foreach ($kundenSeiten as $pfad) {
+        $r = aufruf($basis, $admin['dose'], 'GET', $pfad);
+        pruefe($r['status'] === 200 && phpMeldung($r['text']) === null && !str_contains($r['text'], 'onclick=') && !str_contains($r['text'], 'javascript:'),
+            'Admin ' . $pfad . ' → ' . $r['status'] . ', ohne PHP-Meldung und Inline-JavaScript');
+    }
+    pruefe(str_contains(aufruf($basis, $admin['dose'], 'GET', '/kunden')['text'], $kennung . ' Kunde'), 'Kundenliste zeigt den Kunden');
+    $r = aufruf($basis, $admin['dose'], 'GET', '/system/einstellungen');
+    pruefe(str_contains($r['text'], 'id="kundenbereich"') && str_contains($r['text'], 'app.url'), 'Einstellungen: Karte „Kundenbereich“ mit dem Stand von app.url');
+    $r = aufruf($basis, $admin['dose'], 'POST', '/system/einstellungen/kundenbereich', ['_token' => $admin['token'], 'kundenbereich__kontakt' => $kennung . ' Tel. 0',
+        'kundenbereich__einrichtung_stunden' => '48', 'kundenbereich__nachweise_jahre' => '5']);
+    Settings::vergessen();
+    gleich([$r['status'], Settings::get('kundenbereich.kontakt'), Settings::get('kundenbereich.einrichtung_stunden'), Settings::get('kundenbereich.nachweise_jahre')],
+        [302, $kennung . ' Tel. 0', '48', '5'], 'Einstellungen des Kundenbereichs gespeichert');
+    aufruf($basis, $admin['dose'], 'POST', '/system/einstellungen/kundenbereich', ['_token' => $admin['token'], 'kundenbereich__kontakt' => 'anders',
+        'kundenbereich__einrichtung_stunden' => '500']);
+    Settings::vergessen();
+    gleich([Settings::get('kundenbereich.kontakt'), Settings::get('kundenbereich.einrichtung_stunden')], [$kennung . ' Tel. 0', '48'],
+        'ungültige Gültigkeit (500 Stunden): nichts gespeichert');
+    $klein = anmelden($basis, $kennung . '-klein', $kennwort);
+    $dosen[] = $klein['dose'];
+    gleich([aufruf($basis, $klein['dose'], 'GET', '/kunden')['status'], aufruf($basis, $klein['dose'], 'GET', '/kunden/' . $kundeId)['status']], [403, 403],
+        'ohne „kunden.view“: Kundenverwaltung 403');
+    gleich(serverMeldungen($serverFehler), [], 'Kundenverwaltung ohne PHP-Meldung im Fehlerprotokoll des Servers');
 
     // Livewerte der Karte: je Phase Spannung, Strom, Leistung (Detail beim Antippen des Werts)
     if ($etage > 0) {
@@ -1455,6 +1508,9 @@ try {
     $r = aufruf($basis, $admin['dose'], 'GET', '/berichte/' . $bId . '/pdf');
     pruefe($pdfAntwort($r, 'T-' . $kennung . '.pdf'), 'PDF: 200, application/pdf, inline mit Nummer, nosniff, no-store, kein Referrer, keine Sandbox-CSP');
     pruefe(str_contains(aufruf($basis, $admin['dose'], 'GET', '/berichte/' . $bId)['text'], 'kein PDF gespeichert'), 'abgeschlossen ohne gespeichertes PDF: Hinweis');
+    $r = aufruf($basis, $admin['dose'], 'GET', '/berichte/' . $bId);
+    pruefe(str_contains($r['text'], 'id="kundenbereich"') && str_contains($r['text'], 'Keinem Kunden zugeordnet') && str_contains($r['text'], 'action="/berichte/' . $bId . '/kundenbereich"'),
+        'abgeschlossener Bericht: Karte „Kundenbereich“ mit Zuordnung (Administration)');
     $r = aufruf($basis, $admin['dose'], 'GET', '/anlagen/' . $bVert);
     pruefe(str_contains($r['text'], 'T-' . $kennung), 'Anlage: „Letzte Prüfung“ nennt den abgeschlossenen Bericht');
     pruefe($pdfAntwort(aufruf($basis, $admin['dose'], 'GET', '/berichte/' . $b2Id . '/pdf'), 'Entwurf-' . $b2Id . '.pdf'), 'Entwurf: PDF-Vorschau');
@@ -1519,6 +1575,7 @@ try {
     $dosen[] = $bkunde['dose'];
     $r = aufruf($basis, $bkunde['dose'], 'GET', '/berichte/' . $bId);
     pruefe($r['status'] === 200 && phpMeldung($r['text']) === null && !str_contains($r['text'], 'data-bericht='), 'Kunde sieht den abgeschlossenen Bericht (nur lesen)');
+    pruefe(!str_contains($r['text'], 'id="kundenbereich"'), 'ohne „kunden.view“: keine Karte „Kundenbereich“');
     gleich(aufruf($basis, $bkunde['dose'], 'GET', '/berichte/' . $b2Id)['status'], 404, 'Kunde sieht keinen Entwurf');
     pruefe($pdfAntwort(aufruf($basis, $bkunde['dose'], 'GET', '/berichte/' . $bId . '/pdf'), 'T-' . $kennung . '.pdf'), 'Kunde lädt das PDF des abgeschlossenen Berichts');
     gleich(aufruf($basis, $bkunde['dose'], 'GET', '/berichte/' . $b2Id . '/pdf')['status'], 404, 'Kunde: kein PDF eines Entwurfs');
@@ -1723,8 +1780,9 @@ try {
     pruefe($r['status'] === 302 && $r['ziel'] === '/berichte/' . $b3 . '/kunde', 'Kundenmodus am Gerät: nach neuer Anmeldung in diesem Browser weiter gesperrt');
     // Ein anderes Konto im selben Browser: Endet die Sitzung des Prüfers, ohne
     // zerstört zu werden (die Verwaltung setzt sein Kennwort zurück), bleiben
-    // ihre Daten samt Sperre stehen – die Anmeldung vergibt nur eine neue
-    // Kennung. Wer sich dann anmeldete, erbte die fremde Sperre: kein
+    // ihre Daten samt Sperre stehen, bis sich jemand anmeldet (ein anderes
+    // Konto bekommt eine geleerte Sitzung, Auth::attempt()). Wer sich dann
+    // anmeldete, erbte sonst die fremde Sperre: kein
     // Abmelden, Kundenseite und Entsperren ohne das Recht (Kundenmodus::ausweg()),
     // und seine Fehlversuche bremsten das Entsperren für den Prüfer. Die
     // Sperre gilt nur für das Konto, das sie gestartet hat – am Gerät gilt sie
@@ -1852,6 +1910,15 @@ try {
     $r = aufruf($basis, $admin['dose'], 'GET', '/berichte/' . $b3 . '/kunde');
     pruefe($r['status'] === 200 && str_contains($r['text'], 'Bitte geben Sie das Gerät an') && str_contains($r['text'], 'Pia Prüferin')
         && str_contains($r['text'], 'action="/berichte/' . $b3 . '/kunde/beenden"'), 'danach: „Gerät zurückgeben“ mit Kennwortfeld');
+    pruefe(!str_contains($r['text'], 'in Ihrem Kundenbereich'), 'ohne Zuordnung kein Hinweis auf den Kundenbereich');
+    // Einem Kunden mit eigenem Zugang zugeordnet: der Hinweis, dass der Bericht dort bereitsteht.
+    Database::update('berichte', $b3, ['kunde_id' => $kundeId]);
+    $kbZugang = Database::insert('users', ['username' => $kennung . '-kb-zugang', 'full_name' => '', 'email' => '', 'password_hash' => password_hash($kennwort, PASSWORD_DEFAULT),
+        'is_active' => 1, 'kunde_id' => $kundeId, 'created_at' => gmdate('c')]);
+    $r = aufruf($basis, $admin['dose'], 'GET', '/berichte/' . $b3 . '/kunde');
+    pruefe(str_contains($r['text'], 'Der Bericht steht ab sofort in Ihrem Kundenbereich bereit.'), 'zugeordnet, Kunde mit Zugang: „steht ab sofort in Ihrem Kundenbereich bereit“');
+    Database::delete('users', $kbZugang);
+    Database::update('berichte', $b3, ['kunde_id' => null]);
     $fehlVorher = (int) Database::scalar('SELECT failed_logins FROM users WHERE id = ?', [$benutzer['admin']]);
     $r = aufruf($basis, $admin['dose'], 'POST', '/berichte/' . $b3 . '/kunde/beenden', ['kennwort' => 'falsch', '_token' => $admin['token']]);
     pruefe($r['status'] === 302 && $r['ziel'] === '/berichte/' . $b3 . '/kunde'
@@ -1959,6 +2026,7 @@ try {
         $wert === null ? Settings::forget($s) : Settings::put($s, $wert);
     }
     Database::execute('DELETE FROM steckertypen WHERE name LIKE ?', [$kennung . '%']);
+    Database::execute('DELETE FROM kunden WHERE name LIKE ?', [$kennung . '%']);
     foreach (Database::select('SELECT id FROM roles WHERE name LIKE ?', [$kennung . '%']) as $rolle) {
         $auditZiele[] = ['role', (int) $rolle['id']];
         BenutzerService::rolleLoeschen((int) $rolle['id']);
@@ -1996,6 +2064,9 @@ try {
     Database::execute('DELETE FROM pruefgeraete WHERE fabrikat LIKE ?', [$kennung . '%']);
     if ($bSite > 0) {
         \App\Services\SiteService::deleteSite($bSite);
+    }
+    if ($planSite > 0) {
+        \App\Services\SiteService::deleteSite($planSite);   // samt Plandatei
     }
     foreach ($benutzer as $id) {
         Database::execute('DELETE FROM schaltvorgaenge WHERE user_id = ?', [$id]);

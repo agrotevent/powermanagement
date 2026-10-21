@@ -20,6 +20,9 @@
 /* ------------------------------------------------------------ Kleinteile */
 .toolbar-zeile { display: flex; align-items: center; gap: .6rem; flex-wrap: wrap; margin-bottom: 1rem; }
 .toolbar-zeile .spacer { flex: 1; }
+/* Knöpfe einer Tabellenzeile nebeneinander (Formulare darin ohne eigenen Abstand). */
+.aktionen-zeile { display: flex; flex-wrap: wrap; gap: .35rem; justify-content: flex-end; align-items: center; }
+.aktionen-zeile form { margin: 0; }
 .inline-form { display: flex; gap: .4rem; align-items: center; flex-wrap: wrap; margin: 0; }
 .inline-form select, .inline-form input { width: auto; min-width: 10rem; }
 .abschnitt { font-size: .8rem; text-transform: uppercase; letter-spacing: .06em; color: var(--text-muted); margin: 1.4rem 0 .6rem; }
@@ -439,6 +442,7 @@ tr.abweichung-zeile td { background: var(--warning-light); }
     .tabelle-karten td { border: 0; padding: .15rem 0; text-align: left !important; }
     .tabelle-karten td[data-label]::before { content: attr(data-label); display: block; font-size: .66rem; text-transform: uppercase; letter-spacing: .05em; color: var(--text-muted); }
     .tabelle-karten td.right { text-align: left; }
+    .tabelle-karten .aktionen-zeile { justify-content: flex-start; }
     tr.live-zeile td:first-child { box-shadow: none; }
     tr.live-zeile { border-left: 4px solid var(--stufe-keine); }
     tr.live-zeile.stufe-ok { border-left-color: var(--stufe-ok); }

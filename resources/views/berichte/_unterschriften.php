@@ -7,6 +7,7 @@
  * @var array $bericht
  * @var array $inhalt vollständig
  * @var array<string,array<string,mixed>> $unterschriften
+ * @var ?bool $fuerKunde im Kundenbereich: ohne den Benutzernamen dessen, der ohne Kunde abschloss
  */
 use App\Berichte\BerichtService;
 use App\Berichte\Katalog;
@@ -43,7 +44,7 @@ $wann = static fn (array $u): string => trim((string) $u['ort'] . ', ' . Zeit::a
                 <?php elseif ((string) $kunde['art'] !== 'gezeichnet'): ?>
                     <p><strong>Ohne Unterschrift des Kunden:</strong> <?= View::e(BerichtService::OHNE_KUNDE[(string) $kunde['art']] ?? (string) $kunde['art']) ?>
                         – <?= View::e((string) ($kunde['angaben']['grund'] ?? '')) ?></p>
-                    <div class="small muted"><?= View::e(Zeit::anzeige((string) $kunde['unterschrieben_am'])) ?> · <?= View::e((string) $kunde['username']) ?></div>
+                    <div class="small muted"><?= View::e(Zeit::anzeige((string) $kunde['unterschrieben_am'])) ?><?= empty($fuerKunde) ? ' · ' . View::e((string) $kunde['username']) : '' ?></div>
                 <?php else: ?>
                     <?php if (($texte['kunde'] ?? '') !== ''): ?><p class="small muted"><?= View::e((string) $texte['kunde']) ?></p><?php endif; ?>
                     <ul class="liste-schlicht small">

@@ -27,6 +27,7 @@ use App\Berichte\Kundenmodus;
 use App\Berichte\Pruefgeraete;
 use App\Berichte\Unterschrift;
 use App\Berichte\Vorbelegung;
+use App\Kunden\KundenService;
 use App\Services\AnlagenService;
 use App\Services\AufbauService;
 use App\Services\BenutzerService;
@@ -52,6 +53,7 @@ foreach (array_keys(Einstellungen::VORGABEN) as $s) {
     $einstellungenVorher[$s] = Settings::get($s);
 }
 $benutzer = [];
+$kundenIds = [];
 $rollen = [];
 $sites = [];
 $anlagen = [];
@@ -618,7 +620,8 @@ try {
     $speichern($quelle, $qi);
     pruefe(!BerichtService::kundeAusBericht($id, $quelle)['ok'], 'Entwurf taugt nicht als Quelle');
     $abschliessen($quelle, $kennung . '-Q');
-    Database::update('berichte', $quelle, ['ewx_host' => 'firma.eventworx.biz', 'ewx_id' => '64f0c0de00000000000a1042', 'ewx_art' => 'order', 'ewx_nummer' => 'AU-1042', 'ewx_am' => gmdate('c')]);
+    Database::update('berichte', $quelle, ['ewx_host' => 'firma.eventworx.biz', 'ewx_id' => '64f0c0de00000000000a1042', 'ewx_art' => 'order', 'ewx_nummer' => 'AU-1042', 'ewx_am' => gmdate('c'),
+        'ewx_kunde_ref' => '65c3716b43f4c400000a0001']);
     $_SESSION = [];
     $r = BerichtService::kundeAusBericht($id, $quelle);
     pruefe($r['ok'] && $r['kunde']['firma'] === 'Vorkunde ' . $kennung && $r['kunde']['quelle'] === 'bericht' && $r['projektleiter_kunde'] === 'Erika Musterfrau'
@@ -628,11 +631,20 @@ try {
     $r = $speichern($id, BerichtService::find($id)['inhalt'], '64f0c0de00000000000a1042');
     $b = BerichtService::find($id);
     pruefe($r['ok'] && $b['ewx_nummer'] === 'AU-1042' && $b['ewx_host'] === 'firma.eventworx.biz', 'Autosave übernimmt den vorgemerkten Verweis');
+    gleich([BerichtService::eventworxGeladen($id)['64f0c0de00000000000a1042']['kunde_ref'] ?? null, $b['ewx_kunde_ref']],
+        ['65c3716b43f4c400000a0001', '65c3716b43f4c400000a0001'], 'die Kunden-Kennung kommt mit dem Verweis (Merkliste, Spalte ewx_kunde_ref)');
+    $gefaelscht = $b['inhalt'];
+    $gefaelscht['ewx_kunde_ref'] = 'ffffffffffffffffffffffff';
+    $gefaelscht['kopf']['eventworx'] = ['kunde_ref' => 'ffffffffffffffffffffffff'];
+    $speichern($id, $gefaelscht);
+    gleich(BerichtService::find($id)['ewx_kunde_ref'], '65c3716b43f4c400000a0001', 'eine Kunden-Kennung im Inhalt (gefälschtes Feld) wird ignoriert');
+    BerichtService::eventworxMerken($id, ['id' => '64f0c0de00000000000a1050', 'nummer' => 'AN-1050-01', 'art' => 'offer', 'host' => 'firma.eventworx.biz', 'kunde_ref' => 'K-10031']);
+    gleich(BerichtService::eventworxGeladen($id)['64f0c0de00000000000a1050']['kunde_ref'] ?? null, '', 'Merkliste: eine Kunden-Kennung, die keine ObjectId ist, wird leer');
     pruefe(in_array('eventworx_uebernommen', array_column(BerichtService::ereignisse($id), 'ereignis'), true), 'Ereignis „eventworx_uebernommen“');
     $r = $speichern($id, $b['inhalt'], 'AAAAAAAAAAAAAAAAAAAA');
     pruefe($r['ok'] && BerichtService::find($id)['ewx_nummer'] === 'AU-1042' && $r['hinweise'] !== [], 'nicht geladener Vorgang wird nicht übernommen');
     $speichern($id, $b['inhalt'], '-');
-    gleich(BerichtService::find($id)['ewx_id'], '', '„-“ entfernt den Verweis');
+    gleich([BerichtService::find($id)['ewx_id'], BerichtService::find($id)['ewx_kunde_ref']], ['', ''], '„-“ entfernt den Verweis samt Kunden-Kennung');
     $fremdBericht = (int) BerichtService::anlegen(null, null, [])['id'];
     $abschliessen($fremdBericht, $kennung . '-F');
     pruefe(!BerichtService::kundeAusBericht($id, $fremdBericht)['ok'], 'Quelle von einem anderen Standort abgelehnt');
@@ -1239,6 +1251,88 @@ try {
     Database::update('berichte', $k1, ['vorgaenger_id' => $u1]);
     gleich(BerichtService::integritaet($k1)['ok'], true, 'Vorgänger zurück: Integrität ok');
 
+    // ================================================== Kundenbereich: Bericht ↔ Kunde (kunde_id)
+    pruefe(KundenService::namePasst(html_entity_decode('Muster Events GmbH &amp; Co. KG'), 'muster events') && KundenService::namePasst('Muster Events GmbH &amp; Co. KG', 'Muster Events')
+        && !KundenService::namePasst('Musterfilm Produktion GmbH', 'muster events') && !KundenService::namePasst('', 'muster events')
+        && !KundenService::namePasst('GmbH & Co. KG', 'Muster GmbH') && KundenService::namePasst('Stadtmarketing Musterstadt e.' . "\u{202F}" . 'V.', 'stadtmarketing musterstadt e. V.')
+        && !KundenService::namePasst('Muster', 'Musterfilm GmbH'), 'namePasst: ohne Rechtsformen und Satzzeichen, nur ganze Wörter, leer passt nie');
+    $kundeMuster = (int) Database::insert('kunden', ['name' => 'Musterfilm ' . $kennung, 'aktiv' => 1, 'created_at' => gmdate('c')]);
+    $kundeAnders = (int) Database::insert('kunden', ['name' => 'Muster Events ' . $kennung . ' GmbH & Co. KG', 'aktiv' => 1, 'created_at' => gmdate('c')]);
+    array_push($kundenIds, $kundeMuster, $kundeAnders);
+    alsBenutzer($benutzer['technik']);
+    gleich(BerichtService::kundeZuordnen($k1, $kundeMuster)['status'], 403, 'zuordnen ohne „kunden.manage“ → 403');
+    alsBenutzer($benutzer['planer']);
+    gleich(BerichtService::kundeZuordnen($leerId, $kundeMuster)['status'], 404, 'zuordnen eines Berichts, den man nicht sieht → 404');
+    alsBenutzer($benutzer['admin']);
+    gleich([BerichtService::kundeZuordnen($k1, 999999999)['status'], BerichtService::kundeZuordnen(999999999, $kundeMuster)['status']], [404, 404],
+        'unbekannter Kunde, unbekannter Bericht → 404');
+    $r = BerichtService::kundeZuordnen($k1, $kundeAnders);
+    pruefe(!$r['ok'] && ($r['bestaetigen'] ?? false) === true && str_contains($r['message'], $kundeName) && BerichtService::find($k1)['kunde_id'] === null,
+        'anderer Kunde im Bericht: erst die Rückfrage, nichts zugeordnet');
+    $versionVorher = $version($k1);
+    $r = BerichtService::kundeZuordnen($k1, $kundeMuster);
+    pruefe($r['ok'] && str_contains($r['message'], 'sieht den Bericht jetzt'), 'Name passt: zugeordnet – ' . $r['message']);
+    gleich([BerichtService::find($k1)['kunde_id'], BerichtService::find($u1)['kunde_id'], $version($k1)], [$kundeMuster, $kundeMuster, $versionVorher],
+        'gilt für alle Fassungen der Nummer (auch die ersetzte), ohne die Version zu ändern');
+    pruefe(BerichtService::integritaet($k1)['ok'] && BerichtService::integritaet($u1)['ok'] && BerichtService::pdf(BerichtService::find($k1))['gespeichert'],
+        'eingefroren bleibt eingefroren: Integrität und gespeichertes PDF unberührt');
+    $zugeordnet = static fn (int $bid): array => array_values(array_map(static fn (array $e): array => $e['details'],
+        array_filter(BerichtService::ereignisse($bid), static fn (array $e): bool => $e['ereignis'] === 'kunde_zugeordnet')));
+    gleich($zugeordnet($u1), [['kunde_id' => (string) $kundeMuster]], 'Ereignis kunde_zugeordnet nur mit der Kunden-ID');
+    $audit = json_decode((string) Database::scalar("SELECT details FROM audit_log WHERE action = 'bericht.kunde' AND target_id = ? ORDER BY id DESC LIMIT 1", [(string) $k1]), true);
+    gleich($audit, ['bericht_id' => $k1, 'alt' => null, 'neu' => $kundeMuster], 'Audit bericht.kunde {bericht_id, alt, neu}');
+    pruefe(BerichtService::kundeZuordnen($k1, $kundeMuster)['ok'] && count($zugeordnet($k1)) === 1, 'noch einmal derselbe Kunde: nichts zu tun, kein zweites Ereignis');
+    pruefe(BerichtService::kundeZuordnen($u1, $kundeAnders, true)['ok'] && BerichtService::find($k1)['kunde_id'] === $kundeAnders
+        && ($zugeordnet($k1)[1] ?? []) === ['kunde_id' => (string) $kundeAnders, 'vorher' => (string) $kundeMuster], 'mit Bestätigung umgeordnet – über die ersetzte Fassung, mit „vorher“');
+    pruefe(BerichtService::kundeZuordnen($k1, $kundeMuster)['ok'], 'zurück zum passenden Kunden');
+    $ids = static fn (array $liste): array => array_map(static fn (array $b): int => (int) $b['id'], $liste);
+    gleich([$ids(BerichtService::fuerKunde($kundeMuster)), $ids(BerichtService::fuerKunde($kundeMuster, $siteId)), BerichtService::fuerKunde($kundeMuster, $fremdSite),
+        BerichtService::fuerKunde($kundeAnders)], [[$k1, $u1], [$k1, $u1], [], []], 'fuerKunde: abgeschlossene und ersetzte Fassung, je Standort, nicht beim anderen Kunden');
+    pruefe(BerichtService::sichtbarFuerKunde(BerichtService::find($u1), $kundeMuster) && !BerichtService::sichtbarFuerKunde(BerichtService::find($k1), $kundeAnders)
+        && !BerichtService::sichtbarFuerKunde(BerichtService::find($k1), 0), 'sichtbarFuerKunde: nur der zugeordnete Kunde');
+    // Eine Korrektur übernimmt Kunde und Eventworx-Verweis samt Kunden-Kennung; als Entwurf sieht der Kunde sie nicht.
+    Database::update('berichte', $k1, ['ewx_host' => 'firma.eventworx.biz', 'ewx_id' => '64f0c0de00000000000a1042', 'ewx_art' => 'order', 'ewx_nummer' => 'AU-1042',
+        'ewx_kunde_ref' => '65c3716b43f4c400000a0001']);
+    alsBenutzer($benutzer['technik']);
+    $kn = (int) (BerichtService::korrektur($k1, 'Kunde bleibt zugeordnet')['id'] ?? 0);
+    $knb = BerichtService::find($kn) ?? [];
+    gleich([$knb['kunde_id'] ?? null, $knb['ewx_kunde_ref'] ?? null, $knb['ewx_nummer'] ?? null], [$kundeMuster, '65c3716b43f4c400000a0001', 'AU-1042'],
+        'Korrektur übernimmt Kunde und Eventworx-Verweis mit Kunden-Kennung');
+    pruefe(!BerichtService::sichtbarFuerKunde($knb, $kundeMuster) && $ids(BerichtService::fuerKunde($kundeMuster)) === [$k1, $u1], 'die offene Korrektur (Entwurf) sieht der Kunde nicht');
+    alsBenutzer($benutzer['admin']);
+    $r = BerichtService::kundeZuordnen($kn, $kundeAnders, true);
+    pruefe($r['ok'] && str_contains($r['message'], 'nach dem Abschluss'), 'auch ein Entwurf lässt sich zuordnen (erscheint nach dem Abschluss)');
+    gleich([BerichtService::find($kn)['kunde_id'], BerichtService::find($k1)['kunde_id'], BerichtService::find($u1)['kunde_id']], [$kundeAnders, $kundeAnders, $kundeAnders],
+        'über die offene Korrektur: die ganze Nummer');
+    pruefe(BerichtService::loeschen($kn)['ok'], 'offene Korrektur wieder gelöscht');
+    $frisch = (int) BerichtService::anlegen($siteId, null, [])['id'];
+    pruefe(BerichtService::kundeZuordnen($frisch, $kundeMuster, true)['ok'] && BerichtService::find($frisch)['kunde_id'] === $kundeMuster
+        && BerichtService::find($k1)['kunde_id'] === $kundeAnders, 'Entwurf ohne Nummer: nur diese Zeile');
+    pruefe(BerichtService::loeschen($frisch)['ok'], 'frischer Entwurf wieder gelöscht');
+    pruefe(BerichtService::kundeZuordnen($k1, $kundeMuster)['ok'] && BerichtService::find($u1)['kunde_id'] === $kundeMuster, 'Nummer wieder beim passenden Kunden');
+    $verworfen = (int) BerichtService::anlegen($siteId, null, [])['id'];
+    Database::update('berichte', $verworfen, ['status' => 'verworfen', 'nummer' => $kennung . '-V']);
+    gleich(BerichtService::kundeZuordnen($verworfen, $kundeMuster)['status'], 409, 'ein verworfener Bericht kommt nicht in den Kundenbereich');
+    // Ein Kundenzugang sieht Berichte nie über sichtbar() – auch nicht mit einer Rolle, die ihm jemand per SQL gibt.
+    $benutzer['zugang'] = (int) Database::insert('users', ['username' => $kennung . '-zugang', 'full_name' => '', 'email' => '',
+        'password_hash' => password_hash($kennwort, PASSWORD_DEFAULT), 'is_active' => 1, 'kunde_id' => $kundeMuster, 'created_at' => gmdate('c')]);
+    Database::insert('user_roles', ['user_id' => $benutzer['zugang'], 'role_id' => (int) Database::scalar("SELECT id FROM roles WHERE role_key = 'technik'"),
+        'gueltig_ab' => null, 'gueltig_bis' => null]);
+    alsBenutzer($benutzer['zugang']);
+    pruefe(!BerichtService::sichtbar(BerichtService::find($k1)) && !BerichtService::sichtbar(BerichtService::find($u1)) && BerichtService::liste() === []
+        && BerichtService::kundeZuordnen($k1, null)['status'] === 404, 'Kundenzugang (Rolle „technik“ per SQL): sichtbar() nie, Liste leer, zuordnen 404');
+    alsBenutzer($benutzer['admin']);
+    pruefe(!Kundenmodus::erlaubt('POST', '/berichte/41/kundenbereich', 41) && !Kundenmodus::erlaubt('GET', '/berichte/41/kundenbereich', 41),
+        'Kundenmodus: die Zuordnung (/berichte/{id}/kundenbereich) ist kein offener Weg');
+    // Kunde gelöscht: die Berichte bleiben, nur ohne Zuordnung.
+    BerichtService::kundeEntfernt($kundeMuster);
+    gleich([BerichtService::find($k1)['kunde_id'], BerichtService::find($u1)['kunde_id'], BerichtService::fuerKunde($kundeMuster)], [null, null, []],
+        'kundeEntfernt: Berichte bleiben, ohne Kunde');
+    pruefe(in_array('kunde_entfernt', array_column(BerichtService::ereignisse($k1), 'ereignis'), true), 'Ereignis kunde_entfernt');
+    pruefe(BerichtService::kundeZuordnen($k1, $kundeMuster)['ok'] && BerichtService::kundeZuordnen($k1, null)['ok'] && BerichtService::find($u1)['kunde_id'] === null
+        && in_array('kunde_entfernt', array_column(BerichtService::ereignisse($u1), 'ereignis'), true), 'herausnehmen (ohne Kunde): sofort, für alle Fassungen');
+    alsBenutzer($benutzer['technik']);
+
     // ================================================== Aufbewahrung: ganze Nummern, keine Nummer zweimal
     $jahrA = $freiesJahr($jahrU + 1);
     $testJahre[] = $jahrA;
@@ -1275,7 +1369,12 @@ try {
     Database::update('berichte', $kb2, ['vorgaenger_id' => $ka]);
     pruefe(BerichtService::loeschen($kb2)['ok'], 'offene Korrektur gelöscht');
     pruefe(in_array($pa, $faelligIds(), true) && in_array($ka, $faelligIds(), true), 'jetzt ist die ganze Nummer fällig');
+    foreach ([$pa, $ka] as $bid) {
+        Database::insert('kunden_abrufe', ['kunde_id' => $kundeMuster, 'username' => $kennung . '-zugang', 'art' => 'bericht', 'ziel_id' => $bid, 'am' => gmdate('c')]);
+    }
     $weg = BerichtService::aufbewahrungLoeschen($pa);
+    gleich((int) Database::scalar("SELECT COUNT(*) FROM kunden_abrufe WHERE art = 'bericht' AND ziel_id IN (?, ?)", [$pa, $ka]), 0,
+        'Aufbewahrung: die Abrufe im Kundenbereich gehen mit dem Bericht');
     sort($weg);
     gleich([$weg, BerichtService::find($pa), BerichtService::find($ka)], [[$pa, $ka], null, null], 'Aufbewahrung löscht alle Fassungen einer Nummer gemeinsam');
     $pn = $unterschreibenAlt();
@@ -1409,6 +1508,11 @@ try {
     }
     foreach ($benutzer as $uid) {
         Database::execute('DELETE FROM kundenmodus_geraete WHERE user_id = ?', [$uid]);
+    }
+    foreach ($kundenIds as $kid) {
+        Database::execute('DELETE FROM kunden_abrufe WHERE kunde_id = ?', [$kid]);
+        Database::execute('UPDATE berichte SET kunde_id = NULL WHERE kunde_id = ?', [$kid]);
+        Database::delete('kunden', $kid);
     }
     // Die Nummernzähler der Jahre, die nur diese Prüfung benutzt hat.
     foreach ($testJahre as $jahr) {

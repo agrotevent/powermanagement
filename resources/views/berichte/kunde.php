@@ -34,6 +34,9 @@ $datum = static fn (string $d): string => preg_match('/^(\d{4})-(\d{2})-(\d{2})$
                 <h1>Vielen Dank!</h1>
                 <p class="kunde-gross">Bitte geben Sie das Gerät an <strong><?= View::e($zurueckAn) ?></strong> zurück.</p>
                 <p class="small muted">Der Bericht <?= View::e((string) $b['nummer']) ?> ist abgeschlossen. Sie erhalten ihn als PDF.</p>
+                <?php if (!empty($imKundenbereich)): ?>
+                    <p class="notice">Der Bericht steht ab sofort in Ihrem Kundenbereich bereit.</p>
+                <?php endif; ?>
                 <p><a class="btn" href="/berichte/<?= $id ?>/pdf" target="_blank" rel="noopener">Bericht als PDF ansehen</a></p>
             </div>
         </section>

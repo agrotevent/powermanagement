@@ -3,9 +3,19 @@ declare(strict_types=1);
 
 namespace App\Support;
 
+use App\Kunden\Kundenbereich;
+
 final class Response
 {
-    public static function html(string $html, int $status = 200): void
+    /**
+     * Kopfzeilen jeder Seite des Kundenbereichs (auch seiner Fehlerseiten):
+     * nichts zwischenspeichern – ein Firmenrechner wird geteilt –, und keine
+     * Adresse als Referer hinaus.
+     */
+    public const KUNDENBEREICH = ['Cache-Control: private, no-store', 'Referrer-Policy: no-referrer'];
+
+    /** @param list<string> $kopfzeilen ersetzen die Vorgaben gleichen Namens (etwa Referrer-Policy) */
+    public static function html(string $html, int $status = 200, array $kopfzeilen = []): void
     {
         http_response_code($status);
         header('Content-Type: text/html; charset=utf-8');
@@ -13,6 +23,9 @@ final class Response
         header('X-Content-Type-Options: nosniff');
         header('Referrer-Policy: same-origin');
         header('Content-Security-Policy: ' . self::sicherheitsRichtlinie());
+        foreach ($kopfzeilen as $kopf) {
+            header($kopf);
+        }
         echo $html;
     }
 
@@ -82,19 +95,92 @@ final class Response
         return self::sichererPfad($pfad) ?? $ersatz;
     }
 
-    /*
-     * Die Fehlerseite ist schon ein ganzes Dokument – ohne Layout, also auch
-     * ohne Navigation, „Profil“ und „Abmelden“ (und ohne den Zugriff auf
-     * den Benutzer, den es ohne Anmeldung nicht gibt).
-     */
     public static function notFound(string $message = 'Seite nicht gefunden.'): void
     {
-        self::html(View::render('errors/error', ['code' => 404, 'message' => $message], ''), 404);
+        self::fehler(404, $message);
     }
 
     public static function forbidden(string $message = 'Für diese Funktion fehlt dir die Berechtigung.'): void
     {
-        self::html(View::render('errors/error', ['code' => 403, 'message' => $message], ''), 403);
+        self::fehler(403, $message);
+    }
+
+    /** Eine Fehlerseite senden – für Kundenzugänge im Kundenbereich, mit dessen Kopfzeilen. */
+    public static function fehler(int $code, string $message): void
+    {
+        [$html, $kunde] = self::fehlerSeite($code, $message);
+        self::html($html, $code, $kunde ? self::KUNDENBEREICH : []);
+    }
+
+    /**
+     * Die Fehlerseite als HTML, dazu: ist es die des Kundenbereichs?
+     *
+     * Für das Personal ein ganzes Dokument ohne Layout, also auch ohne
+     * Navigation, „Profil“ und „Abmelden“ (und ohne den Zugriff auf den
+     * Benutzer, den es ohne Anmeldung nicht gibt) – so auch im Kundenmodus.
+     *
+     * Ein Kundenzugang sieht nie das Personal-Layout, auch hier nicht: er
+     * bekommt die Fehlerseite im Layout des Kundenbereichs, für 403 und 404
+     * mit demselben Text – ob etwas fehlt oder einem anderen Kunden gehört,
+     * soll man ihr nicht ansehen. Geht dabei etwas schief (der 500-Weg nach
+     * einem Datenbankfehler), bleibt es bei der schlichten Seite.
+     *
+     * @return array{0:string,1:bool}
+     */
+    public static function fehlerSeite(int $code, string $message): array
+    {
+        $ebene = ob_get_level();
+        try {
+            if (Kundenbereich::istKundenzugang()) {
+                // fehlerseite: das Layout markiert keinen Eintrag der Navigation –
+                // sonst sähe man der 404 unter /kundenbereich/locations/… an, wo sie herkam.
+                return [View::render('kundenbereich/fehler', ['code' => $code, 'flashes' => Flash::pull(), 'fehlerseite' => true], 'layout/kundenbereich'), true];
+            }
+        } catch (\Throwable) {
+            // Was die halbe Seite schon gepuffert hat, kommt weg; weiter mit der schlichten.
+            while (ob_get_level() > $ebene) {
+                ob_end_clean();
+            }
+        }
+        return [View::render('errors/error', ['code' => $code, 'message' => $message], ''), false];
+    }
+
+    /**
+     * Ein PDF ausliefern: inline (ansehen) oder als Anhang (speichern).
+     *
+     * Nicht zwischenspeichern, kein Referer hinaus, kein Erraten des Typs.
+     * Der Dateiname nur aus [A-Za-z0-9._-] (höchstens 100 Zeichen) – nie
+     * Kundennamen oder andere Angaben aus dem Inhalt in der Kopfzeile.
+     *
+     * Inline nur eigene PDFs (Übergabeberichte aus App\Pdf): die CSP
+     * „sandbox“ sperrte die PDF-Ansicht von Chrome. Fremde PDFs (Prüfnachweise
+     * aus einer Prüfsoftware) gehen als Anhang und zusätzlich mit „sandbox“ –
+     * öffnete ein Browser sie trotzdem selbst, liefe darin nichts.
+     */
+    public static function pdf(string $name, string $bytes, bool $anhang = false): void
+    {
+        http_response_code(200);
+        header('Content-Type: application/pdf');
+        header('Content-Disposition: ' . ($anhang ? 'attachment' : 'inline') . '; filename="' . self::sichererDateiname($name) . '"');
+        header('Content-Length: ' . strlen($bytes));
+        header('X-Content-Type-Options: nosniff');
+        header('Cache-Control: private, no-store');
+        header('Referrer-Policy: no-referrer');
+        if ($anhang) {
+            header("Content-Security-Policy: default-src 'none'; sandbox");
+        }
+        echo $bytes;
+    }
+
+    /**
+     * Ein Dateiname für Content-Disposition: nur [A-Za-z0-9._-], höchstens
+     * 100 Zeichen, kein Punkt oder Strich am Rand – nie ein Anführungszeichen,
+     * Zeilenumbruch oder Umlaut in der Kopfzeile.
+     */
+    public static function sichererDateiname(string $name, string $ersatz = 'dokument.pdf'): string
+    {
+        $name = substr(trim((string) preg_replace('/[^A-Za-z0-9._-]+/', '-', $name), '-.'), 0, 100);
+        return $name === '' ? $ersatz : $name;
     }
 
     public static function download(string $filename, string $content, string $mime = 'text/plain'): void

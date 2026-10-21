@@ -108,6 +108,8 @@ function phpMeldung(string $text): ?string
 
 $marke = 'pm-api-' . bin2hex(random_bytes(3));
 $kennwort = 'Pruefung-' . bin2hex(random_bytes(6)) . '1';
+$kundeId = 0;
+$kundenzugang = 0;
 $benutzer = [];
 $rollen = [];
 $sites = [];
@@ -135,6 +137,11 @@ try {
     foreach (['inaktiv', 'geloescht', 'abgelaufen', 'gebunden'] as $n) {
         $benutzer[$n] = BenutzerService::anlegen($marke . '-' . $n, $kennwort, 'kunde', false);
     }
+    // Ein Kundenzugang (Kundenbereich): an ihn bindet kein Token.
+    $kundeId = Database::insert('kunden', ['name' => $marke . ' Kunde', 'aktiv' => 1, 'created_at' => gmdate('c')]);
+    $kundenzugang = Database::insert('users', ['username' => $marke . '-kundenzugang', 'full_name' => '', 'email' => '',
+        'password_hash' => password_hash($kennwort, PASSWORD_DEFAULT), 'is_active' => 1, 'must_change_password' => 0,
+        'kunde_id' => $kundeId, 'created_at' => gmdate('c')]);
     alsBenutzer($benutzer['admin']);
 
     $sites['halle'] = SiteService::saveSite(null, ['name' => $marke . ' Halle', 'address' => 'Halle 1', 'notes' => 'Prüfung']);
@@ -247,6 +254,27 @@ try {
     $r = a('GET', '/api/v1/info?token=' . rawurlencode($tVoll), null);
     pruefe($r['status'] === 401 && $r['roh'] === $ohne['roh'], '401: Token in der Adresse zählt nicht');
     gleich(a('GET', '/api/v1/info', $gebunden['gebunden'])['status'], 200, 'gebunden an einen gültigen Benutzer: angenommen');
+
+    // Kundenzugänge: keine Bindung; eine von Hand gesetzte endet mit dem Kunden.
+    $r = ApiZugaenge::anlegen(['name' => $marke . ' an Kundenzugang', 'befugnisse' => ['plaene.lesen'], 'user_id' => $kundenzugang]);
+    gleich([$r['ok'], $r['message']], [false, 'Tokens lassen sich nicht an Kundenzugänge binden.'], 'an einen Kundenzugang bindet kein Token');
+    pruefe(!ApiZugaenge::speichern((int) $lesen['id'], ['name' => $marke . ' lesen', 'befugnisse' => ['plaene.lesen'], 'user_id' => $kundenzugang,
+        'sehen' => [$sites['halle']]])['ok'], 'auch nicht beim Ändern');
+    pruefe(Database::scalar('SELECT user_id FROM api_tokens WHERE id = ?', [(int) $lesen['id']]) === null, '… die Bindung bleibt leer');
+    pruefe(!in_array($kundenzugang, array_map(static fn (array $u): int => (int) $u['id'], BenutzerService::alle()), true),
+        'die Auswahl zum Binden (Benutzerliste) kennt keine Kundenzugänge');
+    $kundeToken = $anlegen(['name' => $marke . ' Kunde gebunden', 'befugnisse' => ['plaene.lesen'], 'sehen' => [$sites['halle']]]);
+    Database::update('api_tokens', (int) $kundeToken['id'], ['user_id' => $kundenzugang]);
+    gleich(a('GET', '/api/v1/info', (string) $kundeToken['token'])['status'], 200, 'von Hand an einen Kundenzugang gebunden: gilt, solange der Kunde aktiv ist');
+    Database::update('kunden', $kundeId, ['aktiv' => 0]);
+    $r = a('GET', '/api/v1/info', (string) $kundeToken['token']);
+    pruefe($r['status'] === 401 && $r['roh'] === $ohne['roh'], 'Kunde beendet: das gebundene Token endet (401 wie immer)');
+    gleich(ApiZugaenge::zustand((array) Database::first('SELECT * FROM api_tokens WHERE id = ?', [(int) $kundeToken['id']])), 'ruht',
+        'Kunde beendet: Zustand „ruht“');
+    $r = ApiZugaenge::speichern((int) $kundeToken['id'], ['name' => $marke . ' Kunde gebunden', 'befugnisse' => ['plaene.lesen'], 'user_id' => 0,
+        'sehen' => [$sites['halle']]]);
+    pruefe($r['ok'] && Database::scalar('SELECT user_id FROM api_tokens WHERE id = ?', [(int) $kundeToken['id']]) === null,
+        'eine Bindung an einen Kundenzugang lässt sich lösen: ' . $r['message']);
     $r = a('GET', '/api/v1/x', null);
     pruefe($r['status'] === 401 && $r['roh'] === $ohne['roh'], 'unbekannte Adresse ohne Token: 401');
     $r = a('GET', '/api/v1/x', $tVoll);
@@ -530,6 +558,13 @@ try {
     Database::execute('DELETE FROM messpunkte WHERE geraet LIKE ?', [$marke . '%']);
     foreach ($benutzer as $id) {
         BenutzerService::loeschen($id);
+    }
+    if ($kundenzugang > 0) {
+        BenutzerService::kontoEntfernen($kundenzugang);
+        $benutzer['kundenzugang'] = $kundenzugang;
+    }
+    if ($kundeId > 0) {
+        Database::delete('kunden', $kundeId);
     }
     foreach ($rollen as $id) {
         BenutzerService::rolleLoeschen($id);

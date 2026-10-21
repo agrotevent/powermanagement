@@ -10,6 +10,7 @@ use App\Services\ApiZugaenge;
 use App\Services\BenutzerService;
 use App\Services\SiteService;
 use App\Support\Config;
+use App\Support\EinmalMarke;
 use App\Support\Flash;
 use App\Support\Request;
 use App\Support\Response;
@@ -34,8 +35,8 @@ final class SchnittstelleController extends Controller
 {
     private const ZIEL = '/system/schnittstelle';
 
-    /** Sitzungsschlüssel der ausgegebenen Einmal-Marken (je Formular eine). */
-    private const EINMAL = 'api_einmal';
+    /** Zweck der Einmal-Marken (Sitzungsschlüssel „api_einmal“, je Formular eine). */
+    private const EINMAL = 'api';
 
     /** Sitzungsschlüssel: Eingaben nach einem Fehler wieder ins Formular (nie ein Token). */
     private const EINGABE = 'api_eingabe';
@@ -54,7 +55,7 @@ final class SchnittstelleController extends Controller
             'benutzer'   => $alles ? self::bindbar() : [],
             'adresse'    => self::adresse() ?? self::adresseAusAnfrage(),
             'vermutet'   => self::adresse() === null,
-            'einmal'     => $alles ? self::einmalAusgeben() : '',
+            'einmal'     => $alles ? EinmalMarke::ausgeben(self::EINMAL) : '',
             'eingabe'    => $eingabe + [
                 'name'       => '',
                 'notiz'      => '',
@@ -74,7 +75,7 @@ final class SchnittstelleController extends Controller
             return;
         }
         $e = self::eingabe($request);
-        if (!self::einmalEinloesen((string) ($_POST['einmal'] ?? ''))) {
+        if (!EinmalMarke::einloesen(self::EINMAL, is_string($_POST['einmal'] ?? null) ? $_POST['einmal'] : '')) {
             Flash::error('Dieser Zugang wurde schon angelegt – das Formular ging ein zweites Mal ab. Ein weiteres Token gibt es mit einem neuen Formular.');
             $this->redirect(self::ZIEL);
             return;
@@ -259,29 +260,5 @@ final class SchnittstelleController extends Controller
         $host = (string) ($_SERVER['HTTP_HOST'] ?? 'localhost');
         $host = preg_match('/^[A-Za-z0-9.:\[\]-]{1,255}$/', $host) === 1 ? $host : 'localhost';
         return (Session::isHttps() ? 'https' : 'http') . '://' . $host . '/api/v1';
-    }
-
-    /** Eine Einmal-Marke für ein Formular „Neuer Zugang“ ausgeben (höchstens zehn offen). */
-    private static function einmalAusgeben(): string
-    {
-        $marke = bin2hex(random_bytes(16));
-        $liste = array_values(array_filter((array) Session::get(self::EINMAL, []), 'is_string'));
-        $liste[] = $marke;
-        Session::put(self::EINMAL, array_slice($liste, -10));
-        return $marke;
-    }
-
-    /** Die Marke einlösen – gilt genau einmal. */
-    private static function einmalEinloesen(string $marke): bool
-    {
-        $liste = array_values(array_filter((array) Session::get(self::EINMAL, []), 'is_string'));
-        foreach ($liste as $i => $offen) {
-            if ($marke !== '' && hash_equals($offen, $marke)) {
-                unset($liste[$i]);
-                Session::put(self::EINMAL, array_values($liste));
-                return true;
-            }
-        }
-        return false;
     }
 }

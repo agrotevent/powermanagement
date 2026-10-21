@@ -21,8 +21,12 @@ return [
         // Demo-Modus: keine InfluxDB, kein MQTT, keine Geräte nötig – die
         // Messwerte werden erzeugt. Zum Ausprobieren und für Screenshots.
         'demo'      => false,
-        // Unter welcher Adresse die Oberfläche erreichbar ist (für Links
-        // in Meldungen). Leer: aus der Anfrage abgeleitet.
+        // Unter welcher Adresse die Oberfläche erreichbar ist, etwa
+        // 'https://strom.example.de'. Daraus – nie aus der
+        // Anfrage – entstehen die Einrichtungslinks des Kundenbereichs;
+        // leer gibt es dort nur vorläufige Kennwörter. Die Schnittstelle
+        // (System → Schnittstelle) nennt daraus ihre Adresse; leer rät sie
+        // sie aus der Anfrage.
         'url'       => '',
     ],
 

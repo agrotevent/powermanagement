@@ -260,6 +260,11 @@ final class ApiZugaenge
 
         $userId = (int) ($e['user_id'] ?? 0);
         $userId = $userId > 0 ? $userId : null;
+        // Kundenzugänge (Kundenbereich) haben mit der Schnittstelle nichts zu
+        // tun – kein Token hängt an ihnen, auch kein bestehendes bleibt es.
+        if ($userId !== null && BenutzerService::istKundenzugang($userId)) {
+            return $fehler('Tokens lassen sich nicht an Kundenzugänge binden.');
+        }
         if ($userId !== null && $userId !== $bisher) {
             if (BenutzerService::find($userId) === null) {
                 return $fehler('Diesen Benutzer gibt es nicht.');
@@ -268,7 +273,10 @@ final class ApiZugaenge
                 return $fehler('An diesen Benutzer lässt sich der Zugang nicht binden – er hat Rechte, die du selbst nicht hast.');
             }
         }
-        if ($bisher !== null && $userId !== $bisher && $bisher !== Auth::id() && !BenutzerService::darfVerwalten($bisher)) {
+        // Eine Bindung an einen Kundenzugang (nur von Hand in der Datenbank
+        // denkbar) darf jeder lösen, der den Zugang hier ändern darf.
+        if ($bisher !== null && $userId !== $bisher && $bisher !== Auth::id() && !BenutzerService::istKundenzugang($bisher)
+            && !BenutzerService::darfVerwalten($bisher)) {
             $name = (string) (BenutzerService::find($bisher)['username'] ?? 'ein gelöschtes Konto');
             return $fehler(sprintf('Die Bindung an „%s“ lösen oder ändern darf nur, wer diesen Benutzer verwalten darf.', $name));
         }

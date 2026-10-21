@@ -56,6 +56,27 @@ abstract class Controller
         $this->redirect(Response::zurueckZiel($fallback));
     }
 
+    /**
+     * Auf etwas warten (Eventworx, eine andere Instanz), ohne die Sitzung zu
+     * halten (Session::ohneSperre()): Andere Anfragen desselben Browsers
+     * kommen währenddessen durch. Danach ist die Sitzung wieder offen – die
+     * Anfrage kann Meldungen und Merklisten schreiben. Zurück kommt das
+     * Ergebnis und ob noch derselbe Benutzer angemeldet ist; hat er sich in
+     * der Zwischenzeit abgemeldet oder das Kennwort geändert, schickt der
+     * Aufrufer zur Anmeldung und zeigt nichts von dem, was er gelesen hat.
+     *
+     * @template T
+     * @param callable():T $arbeit
+     * @return array{0:T,1:bool}
+     */
+    protected function ohneSitzungssperre(callable $arbeit): array
+    {
+        $benutzer = Auth::id();
+        $ergebnis = \App\Support\Session::ohneSperre($arbeit);
+        $noch = $benutzer !== null && (int) \App\Support\Session::get('user_id', 0) === $benutzer;
+        return [$ergebnis, $noch];
+    }
+
     protected function json(mixed $data, int $status = 200): void
     {
         Response::json($data, $status);
