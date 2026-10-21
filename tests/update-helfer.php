@@ -31,6 +31,12 @@ foreach (['bash', 'git', 'flock', 'timeout', 'tail', 'mkfifo'] as $programm) {
     }
 }
 
+// Läuft das Prüfskript selbst unter systemd (etwa als GitHub-Runner), erbte der
+// Helfer dessen INVOCATION_ID und hielte sich für einen Lauf des Dienstes. Hier
+// läuft er ohne systemd; wer eine Kennung braucht, gibt sie ausdrücklich mit.
+putenv('INVOCATION_ID');
+unset($_ENV['INVOCATION_ID'], $_SERVER['INVOCATION_ID']);
+
 const KOPF = "# powermanagement update-auftrag 1\n";
 define('HELFER', dirname(__DIR__) . '/deploy/update-helfer.sh');
 define('ATTRAPPE', __DIR__ . '/hilfen/update-attrappe.sh');

@@ -538,6 +538,11 @@ pruefe_installation() {
         done
         pruefe "powermanagement-update.service nicht gescheitert" \
             bash -c '! systemctl is-failed --quiet powermanagement-update.service'
+        # Diese Prüfung drängt Stunden von Updates in Minuten: jede Phase weckt den
+        # Dienst mehrmals (Pfad-Einheit, update-debian.sh, diese Zeile). Die
+        # Schleifenbremse der Einheit (20 Starts in 5 min) gilt dem Betrieb – ihr
+        # Zähler beginnt hier von vorn; gescheitert ist der Dienst ja nicht (oben).
+        systemctl reset-failed powermanagement-update.service 2>/dev/null || true
         pruefe "Update-Dienst läuft ohne Fehler durch" systemctl start powermanagement-update.service
         pruefe "Update-Dienst meldet sich (ist/helfer)" warte_auf 30 test -s "$IST/helfer"
         pruefe "ist/helfer: Kopf, Oberfläche an, nichts offen" bash -c \
