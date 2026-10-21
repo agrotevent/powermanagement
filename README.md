@@ -129,6 +129,7 @@ bin/power location:liste   ·   bin/power location:uebernehmen <schlüssel>
 bin/power verteiler:liste   ·   bin/power verteiler:uebernehmen|verteiler:hochladen --alle | <typ|inventar> <schlüssel>
 bin/power demo:seed [--reset]
 bin/power wartung
+bin/power update:stand   ·   bin/power update:suchen|update:starten [--warten]   ·   bin/power update:automatik [aus|suchen|einspielen]
 ```
 
 ## Prüfungen

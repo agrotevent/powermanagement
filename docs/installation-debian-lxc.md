@@ -251,7 +251,9 @@ Bei einer vorhandenen **InfluxDB 1.8** mit Anmeldung ist das „Token“
 8. **Dienste:** `powermanagement-nodered`, `powermanagement-sammler`,
    `powermanagement-wartung.timer` (täglich),
    `powermanagement-mqtt-zugaenge.path` und `.timer` (eigene MQTT-Zugänge,
-   nur mit Mosquitto im Container), Logrotate.
+   nur mit Mosquitto im Container), `powermanagement-update.path` und
+   `.timer` sowie `powermanagement-update-zeitplan.timer` (Update aus der
+   Oberfläche und automatisch, Abschnitt 10), Logrotate.
 9. **Prüfung** mit `bin/power pruefen` und eine Zusammenfassung mit allen
    Zugängen.
 
@@ -737,32 +739,84 @@ bleiben also erhalten.
 ## 10 · Update
 
 ```bash
-# Erst ansehen, was sich ändern würde – dabei wird nichts angefasst
+# Erst ansehen, was sich ändern würde – holt per git, ändert sonst nichts
 /opt/powermanagement/deploy/update-debian.sh --pruefen
 
 # Dann aktualisieren
 /opt/powermanagement/deploy/update-debian.sh
 ```
 
-Das Skript
+So geht es als root auf der Konsole. Seit der Fassung mit
+**Update-Funktion** geht es auch ohne root: über **System → Update** in der
+Oberfläche, **automatisch** in einem Zeitfenster oder als Auftrag von der
+Konsole (`bin/power update:starten`) – alle Wege führen zu diesem Skript
+(*Über die Oberfläche*, *Automatische Updates* und *Einmalig über die
+Konsole*, unten). Eine ältere Installation steigt dafür **einmal** auf der
+Konsole um: *Erstes Update auf die Fassung mit Update-Funktion*.
 
-1. sichert `config/config.php` und die Datenbank nach
+### Was das Update-Skript tut
+
+Es läuft in zwei Stufen: Die installierte Fassung prüft, holt, sichert und
+checkt den neuen Stand aus; danach übernimmt die **neue** Fassung des
+Skripts den Rest – so laufen immer die Schritte, die zum neuen Code gehören.
+Die Schritte (die Oberfläche zählt sie mit):
+
+1. **Stand prüfen:** Der ausgecheckte Zweig bleibt (`--zweig=<name>` wählt
+   einen anderen). Lokale Änderungen am Code brechen ab (`--erzwingen`
+   verwirft sie).
+2. **Änderungen holen** (Token aus `/etc/powermanagement/git.conf`; ein
+   hängender Abruf bricht nach zehn Minuten ab). Eingespielt wird nur ein
+   Stand, der **vorwärts** vom installierten liegt – kein Rückschritt, kein
+   umgeschriebener Verlauf (sonst nur mit `--erzwingen`).
+3. **Sicherung:** Es prüft den freien Platz, sperrt die Oberfläche für
+   Änderungen (*Schreibsperre*, unten), hält den Sammler an und sichert
+   `config/config.php` und die Datenbank nach
    `storage/backups/vor-update-<zeit>.tar.gz` (die letzten fünf bleiben;
    die Datenbank als stimmige Kopie per `VACUUM INTO`, auch im laufenden
-   Betrieb),
-2. holt die Änderungen (Token aus `/etc/powermanagement/git.conf`),
-3. führt die Migrationen aus (`bin/power migrate`),
-4. zieht fehlende Pakete nach,
-5. gleicht systemd-Einheiten, PHP-FPM-Pool und Logrotate ab,
-6. gleicht die Mosquitto-Dateien ab: Grundlage der ACL, eigene Zugänge
+   Betrieb). Die eigene Fassung legt es nach
+   `/var/lib/powermanagement/update/alt/` – damit rollt der Update-Dienst
+   ein unterbrochenes Update zurück.
+4. **Quellcode** auf den neuen Stand; ab hier übernimmt die neue Fassung
+   (sie muss vorher `bash -n` bestehen).
+5. **Rechte und Ordner** wie bei der Installation (Code root, `storage/`
+   www-data).
+6. **Migrationen** (`bin/power migrate`).
+7. **Fehlende Pakete** nachziehen – apt wartet, bis eine laufende
+   Paketinstallation (etwa unattended-upgrades) fertig ist, und behält von
+   Hand geänderte Konfigurationsdateien.
+8. **Abgleichen:** systemd-Einheiten, PHP-FPM-Pool, Logrotate, nginx-Site
+   und die Mosquitto-Dateien: Grundlage der ACL, eigene Zugänge
    (`deploy/mqtt-zugaenge.sh` baut die wirksame ACL neu), Konfiguration –
    Mosquitto wird dafür nur neu geladen, die Shellys bleiben verbunden;
-   neu gestartet wird er nur, wenn sich die Konfiguration ändert,
-7. startet die Dienste neu, kachelt die Grundrisse und prüft mit
-   `bin/power pruefen`.
+   neu gestartet wird er nur, wenn sich die Konfiguration ändert.
+9. **Dienste starten:** PHP-FPM nach `php-fpm -t` nur neu laden (die
+   Oberfläche ist kaum weg), nginx nach `nginx -t`, den Sammler neu starten,
+   Node-RED nur, wenn sich Einheit, Einstellungen oder Flows ändern.
+10. **Grundrisse kacheln.**
+11. **Prüfen.** *Pflicht:* Die Anmeldeseite antwortet mit HTTP 200 (wenn
+    sie es vorher tat), PHP-FPM, nginx und alle Dienste, die vorher liefen,
+    laufen (der Sammler ohne Neustarts), und `bin/power pruefen` erreicht
+    die Datenbank. *Wunsch:* `bin/power pruefen` ganz ohne Fehler (InfluxDB,
+    MQTT, Node-RED). Meldet es nach anderthalb Minuten noch Fehler, die es
+    vorher nicht gab, bleibt das Update eingespielt („eingespielt, mit
+    Hinweisen“) – solche Störungen haben meist äußere Gründe, und ein
+    Zurückrollen wäre nur ein weiterer Neustart.
+12. **Fertig:** Schreibsperre aus, `Vorher:`/`Jetzt:`, die Sicherung und
+    die Befehle, mit denen sich das Update von Hand zurücknehmen lässt.
 
-**Geht dabei etwas schief, kommt der alte Stand zurück** – Quellcode und
-Datenbank. Die Befehle zum Zurückrollen von Hand stehen am Ende jedes Laufs.
+**Geht dabei etwas schief, kommt der alte Stand vollständig zurück** –
+Quellcode und Zweig, Datenbank (wenn schon migriert), Einheiten und
+Vorlagen: Was die neue Fassung neu angelegt hat, wird entfernt, dann gleicht
+die **alte** Fassung des Skripts alles wieder ab (`--nur-abgleichen`). Das
+gilt auch bei einem Abbruch: Strg+C, ein abreißendes Terminal,
+`systemctl stop` oder das Herunterfahren beenden den laufenden Schritt, dann
+wird zurückgerollt. Stirbt das Update ganz (Strom weg, `kill -9`,
+`pct stop`), bleibt die Marke `/var/lib/powermanagement/update/offen`
+stehen, und der Update-Dienst rollt selbst zurück – nach einem Neustart
+zwei Minuten danach, sonst spätestens nach 15 Minuten (*Zurückrollen von
+Hand*, unten). Scheitert ein Stand selbst (nicht nur ein Abbruch oder
+Absturz), wird er als gescheitert vermerkt: Die Automatik versucht ihn nie
+wieder.
 
 **Node-RED-Flows:** Hat niemand die Flows im Editor verändert, werden sie
 durch die neue Fassung ersetzt. Wurden sie verändert, bleiben sie, wie sie
@@ -799,16 +853,39 @@ nachgeholt“, richtet Helfer, Einheiten, `storage/mqtt/` und die wirksame ACL
 ein und stellt die Konfiguration auf die gültige Vorlage
 `deploy/mosquitto/broker.conf` um (ein Neustart des Brokers).
 
-Das neue Update-Skript holt fehlende Teile (wirksame ACL, Einheiten,
-`storage/mqtt/`) auch sonst nach, wenn der Code schon aktuell ist.
+Das neue Update-Skript holt fehlende Teile (wirksame ACL, Einheiten – auch
+die der Update-Funktion –, Ordner in `storage/`) auch sonst nach, wenn der
+Code schon aktuell ist; neu gestartet wird dabei nur, was sich geändert hat.
 
 | Option | Wofür |
 |--------|-------|
-| `--pruefen` | nur anzeigen, was sich ändern würde |
+| `--pruefen` | nur anzeigen, was sich ändern würde (holt per git, ändert sonst nichts) |
 | `--flows-ersetzen` | Flows auch dann ersetzen, wenn sie verändert wurden |
-| `--erzwingen` | lokale Änderungen am Quellcode verwerfen statt abzubrechen |
+| `--erzwingen` | lokale Änderungen am Quellcode verwerfen statt abzubrechen – auch auf einen Stand, der nicht vorwärts liegt |
 | `--zweig=<name>` | von einem anderen Zweig aktualisieren |
+| `--bis=<commit>` | genau diesen Stand einspielen (40 Zeichen; nur vorwärts auf der Erst-Eltern-Linie des Zweigs – so wählt auch die Oberfläche) |
 | `--behalten=<n>` | wie viele Sicherungen liegen bleiben (Vorgabe 5) |
+| `--git-zugang=<datei>` | Token-Datei an anderer Stelle |
+| `--nur-abgleichen` | ohne git, Migration und Sicherung: Ordner, Rechte, Einheiten, Vorlagen und Konfiguration zum ausgecheckten Stand abgleichen; neu gestartet wird nur Geändertes |
+| `--nur-abgleichen --ohne-dienste` | dasselbe, aber nichts starten (so rollt das Skript beim Herunterfahren zurück) |
+| `--wiederaufnehmen` | ein unterbrochenes Update zurückrollen (Marke `/var/lib/powermanagement/update/offen`) – das macht der Update-Dienst nach dem Start selbst |
+
+Nur für das Skript selbst und den Update-Dienst: `--stufe=2` (die alte
+Fassung übergibt an die neue), `--ergebnis-datei=` und
+`--fortschritt-datei=` (Ergebnis und Schritt maschinenlesbar). Von Hand
+braucht man sie nicht.
+
+| Exit | heißt |
+|------|-------|
+| 0 | eingespielt, schon aktuell oder (`--pruefen`) nachgesehen |
+| 1 | nichts verändert – etwa lokale Änderungen, kein Netz, kein Zugang, nicht vorwärts, zu wenig Platz oder ein anderes Update läuft gerade |
+| 2 | fehlgeschlagen oder abgebrochen und vollständig zurückgerollt – der alte Stand läuft |
+| 3 | nicht vollständig zurückgerollt – Handarbeit (*Zurückrollen von Hand*, unten) |
+
+Die letzte Zeile jedes Laufs lautet `==> Ergebnis: …` mit dem Ergebnis, dem
+Grund in Klammern und `alt → neu`, etwa
+`==> Ergebnis: eingespielt – 7586d1d → 3b1f0c9` oder
+`==> Ergebnis: nicht_begonnen (lokal_geaendert) – Stand 7586d1d`.
 
 **Node-RED** selbst (innerhalb der Hauptversion 4) und **InfluxDB**
 aktualisieren sich nicht mit – Node-RED von Hand, InfluxDB über apt bzw.
@@ -818,6 +895,353 @@ unattended-upgrades:
 npm install --prefix /opt/node-red --omit=dev node-red@4 && systemctl restart powermanagement-nodered
 apt update && apt install --only-upgrade influxdb2 influxdb2-cli
 ```
+
+### Über die Oberfläche
+
+**System → Update** braucht das Recht *PowerManagement aktualisieren*
+(`system.update`) – von sich aus hat es nur die Rolle Administration
+([rechte.md](rechte.md#update)). Die Seite zeigt den installierten und den
+verfügbaren Stand, was neu ist, Fortschritt, Verlauf und die Befehle für
+die Konsole; ein Abzeichen am Menüeintrag (auf dem Handy in der Kopfleiste)
+meldet neue Stände und Störungen. Bedienung: [bedienung.md](bedienung.md#update).
+
+So läuft es ab:
+
+1. *Jetzt suchen* bzw. *Jetzt aktualisieren* legt nur einen **Auftrag** nach
+   `storage/update/soll/auftrag`: Kennung, Aktion, Auslöser, Ziel – keine
+   Optionen, Zweige oder Pfade. Die Oberfläche startet selbst nichts, kein
+   sudo, kein systemctl.
+2. `powermanagement-update.path` sieht den Auftrag und startet
+   `powermanagement-update.service` (root) mit `deploy/update-helfer.sh`.
+   Der Helfer prüft zuerst, dass sein Code root gehört (`deploy/`,
+   `bin/power`, `.git`, `.git/config`, `.git/hooks`), liest den Auftrag als
+   `www-data` und prüft ihn streng: Form, Alter, Kennung, Abstände,
+   `update.conf`.
+3. Er ruft `update-debian.sh` mit selbst gebauten Optionen auf – zum Suchen
+   `--pruefen`, zum Aktualisieren `--bis=<angezeigter Stand>` –, ohne die
+   Umgebung des Aufrufers und in einer eigenen cgroup: Der Neustart von
+   PHP-FPM trifft ihn nicht.
+4. Lauf, Fortschritt, Protokoll (ohne Farben, Zugangsdaten geschwärzt), Stand
+   und Verlauf schreibt er als `www-data` nach `storage/update/ist/`. Die
+   Seite liest nur diese Dateien, alle zwei Sekunden, solange etwas läuft.
+   Während PHP-FPM neu lädt, zeigt sie „Dienste starten neu …“ und macht
+   danach weiter; Neuladen oder ein anderes Gerät stören das Update nicht.
+
+Eingespielt wird so nur ein Stand **vorwärts** auf dem ausgecheckten Zweig,
+und zwar genau der angezeigte. `--erzwingen`, `--flows-ersetzen`, `--zweig`
+und `--behalten` gibt es nur auf der Konsole. Bei lokalen Änderungen am
+Code, nicht linearem Verlauf oder ohne ausgecheckten Zweig bleibt *Jetzt
+aktualisieren* gesperrt. Läuft ein Aufbau oder wurde in den letzten 30
+Minuten geschaltet, fragt die Seite nach (*Trotzdem jetzt aktualisieren*).
+
+Der Update-Dienst bremst nach: zwischen zwei Updates mindestens zwei
+Minuten („Zu kurz nach dem letzten Update“), ein Auftrag von Hand höchstens
+30 Minuten alt (automatisch zehn), jede Kennung nur einmal. Wer innerhalb
+einer Minute erneut sucht, bekommt den Stand vom letzten Abruf. Abgelehnte
+Aufträge stehen mit Grund im Fortschritt.
+
+**Schreibsperre:** Von der Sicherung bis zur Prüfung nimmt die Oberfläche
+keine Änderungen an – ein Zurückrollen legte die Datenbank von vorher
+zurück, und was jemand eben gespeichert hat, wäre verloren. Formulare melden
+„Gerade läuft ein Update – Änderungen sind in etwa einer Minute wieder
+möglich“, Anfragen mit `Accept: application/json` bekommen 503 mit
+`Retry-After: 30`. An- und Abmelden gehen weiter. Die Sperre endet mit dem
+Update; bleibt sie nach einem Absturz stehen, gilt sie höchstens 60 Minuten
+(länger nur, solange sich der Lauf meldet), und der Update-Dienst räumt
+eine verwaiste Sperre bei seinem nächsten Lauf weg.
+
+**Spur:** Maßgeblich ist, was root aufschreibt:
+`journalctl -a -u powermanagement-update` (das ganze Protokoll),
+`/var/log/powermanagement/update/` (eine Datei je Lauf) und
+`/var/lib/powermanagement/update/verlauf`. Im
+Audit-Log stehen Aufträge (`system.update.anfordern`, auch von der Konsole),
+das Ergebnis jedes Laufs (`system.update.ergebnis`, Benutzer `system`),
+Einstellungen (`system.update.automatik`) und was die Automatik angefordert
+oder verschoben hat (`system.update.automatisch`, `system.update.verschoben`).
+
+**Abschalten** – nur root, die Oberfläche kann es nicht ändern:
+
+```bash
+printf 'OBERFLAECHE=nein\n' > /etc/powermanagement/update.conf   # keine Aufträge mehr (Oberfläche, Automatik, bin/power update:*)
+printf 'AUTOMATIK=nein\n'   > /etc/powermanagement/update.conf   # nur das automatische Einspielen aus
+rm /etc/powermanagement/update.conf                              # wieder an
+```
+
+Der Update-Dienst liest die Datei bei jedem Lauf (nie per `source`); die
+Seite zeigt den neuen Stand nach seinem nächsten Lauf, spätestens nach 15
+Minuten. Die Datei muss root gehören; lässt sie sich nicht sicher lesen oder
+steht dort etwas anderes als `ja` oder `nein`, gilt „nein“.
+`update-debian.sh` von Hand geht immer.
+
+| Datei | Inhalt |
+|-------|--------|
+| `/opt/powermanagement/storage/update/soll/auftrag` | der Auftrag der Oberfläche (www-data) |
+| `/opt/powermanagement/storage/update/ist/` | `helfer` (Lebenszeichen), `stand`, `lauf`, `protokoll`, `verlauf`, `wartung` (Schreibsperre) – schreibt der Update-Dienst als www-data |
+| `/opt/powermanagement/storage/update/zeitplan` | Lebenszeichen des Zeitplans (Änderungszeit) |
+| `/opt/powermanagement/deploy/update-helfer.sh` | der Update-Dienst (root): prüft den Auftrag und ruft `update-debian.sh` |
+| `/etc/systemd/system/powermanagement-update.{path,service,timer}` | Auftrag beobachten und ausführen; der Zeitgeber weckt den Dienst zwei Minuten nach dem Start und 15 Minuten nach jedem Lauf (Lebenszeichen, Stand, Wiederanlauf, liegengebliebene Aufträge) |
+| `/etc/systemd/system/powermanagement-update-zeitplan.{service,timer}` | Automatik: alle fünf Minuten `bin/power update:zeitplan` als www-data |
+| `/etc/powermanagement/update.conf` | Notschalter (optional, root) |
+| `/etc/powermanagement/update.lock`, `update-helfer.lock` | Sperren: nie zwei Updates – oder Update und Installation – zugleich |
+| `/var/lib/powermanagement/update/` | nur root: Marke `offen`, alte Fassung des Skripts, Verlauf, gescheiterte Stände, bekannte Kennungen |
+| `/var/log/powermanagement/update/` | nur root: Protokoll je Lauf (die letzten 30) und Protokolle des Zurückrollens |
+
+### Automatische Updates
+
+Karte *Automatische Updates* auf **System → Update** – oder
+`bin/power update:automatik` (unten):
+
+| Modus | was passiert |
+|-------|--------------|
+| *Aus* | nichts automatisch; gesucht wird nur mit *Jetzt suchen* |
+| *Nur suchen und anzeigen* (Vorgabe) | etwa alle sechs Stunden suchen; neue Stände zeigt das Abzeichen im Menü, eingespielt wird nur von Hand |
+| *Automatisch einspielen* | dazu im Zeitfenster von selbst einspielen – mit Sicherung und Zurückrollen wie von Hand |
+
+Entschieden wird alle fünf Minuten von `powermanagement-update-zeitplan.timer`
+(`bin/power update:zeitplan` als www-data – nur die Anwendung sieht Aufbau
+und Schaltvorgänge). Heraus kommt ein gewöhnlicher Auftrag, den der
+Update-Dienst prüft wie jeden anderen; root liest nie die Datenbank.
+
+- **Zeitfenster:** Wochentage, Beginn (Uhrzeit der Installation, Vorgabe
+  04:00 – nicht 02–03 wegen der Zeitumstellung, nicht 06–07 wegen
+  apt-daily-upgrade) und Dauer (1, 2 oder 4 Stunden). Begonnen wird bis 15
+  Minuten vor dem Ende und je Installation um einen festen, zufälligen
+  Versatz später – nicht alle Container holen zugleich. Ein Fenster über
+  Mitternacht gehört zum Tag, an dem es beginnt.
+- **Höchstens ein Update je Tag**, vorher wird frisch gesucht (der Stand
+  darf höchstens 30 Minuten alt sein). Schlägt eine Suche fehl (kein Netz),
+  sucht der Zeitplan frühestens nach 30 Minuten wieder; ein Abzeichen gibt
+  es dafür nicht – Container auf Veranstaltungen sind oft ohne Netz.
+- **Karenzzeit** (sofort, 6 Stunden, 24 Stunden – Vorgabe –, 3 Tage):
+  eingespielt wird der neueste Stand, dessen Commit mindestens so alt ist.
+  Ein fehlerhafter Stand kann so noch ersetzt werden.
+- **Veranstaltungsschutz** über alle Standorte: Läuft ein Aufbau oder Betrieb
+  (nicht *beendet*) oder wurde in den letzten 30 Minuten geschaltet, wird
+  **verschoben** und im Fenster erneut geprüft. Ebenso bei *Pausieren bis*
+  (einschließlich dieses Tages, höchstens 90 Tage voraus), lokalen
+  Änderungen am Code, nicht linearem Verlauf, `AUTOMATIK=nein` und einem
+  noch nicht zurückgerollten Update. Ins Audit-Log kommt das höchstens
+  einmal je Tag und Grund; nach 14 Tagen Verschieben zeigen Abzeichen und
+  Seite es an (oft ein vergessener, nie beendeter Aufbau).
+- **Gescheiterte Stände** versucht die Automatik nie wieder – erst einen
+  neueren Stand oder *Jetzt aktualisieren* von Hand. Der Update-Dienst
+  prüft das nach und lässt automatisch höchstens alle 20 Stunden ein Update
+  zu.
+- Erweitert ein Update die Datenbank und ist sie nicht SQLite, spielt die
+  Automatik es nicht ein – zurück ginge es nur mit einer eigenen Sicherung.
+
+Auf der Konsole (als Anwendungsbenutzer; nicht genannte Werte bleiben):
+
+```bash
+cd /opt/powermanagement
+runuser -u www-data -- php bin/power update:automatik              # anzeigen
+runuser -u www-data -- php bin/power update:automatik einspielen --tage=1,2,3,4,5 --beginn=04:00 --dauer=120 --karenz=24
+runuser -u www-data -- php bin/power update:automatik einspielen --pause-bis=JJJJ-MM-TT   # --pause-bis= hebt die Pause auf
+runuser -u www-data -- php bin/power update:automatik suchen
+```
+
+`--tage` als Wochentage 1 (Montag) bis 7 (Sonntag), `--dauer` in Minuten
+(60, 120, 240), `--karenz` in Stunden (0, 6, 24, 72). Läuft der Zeitplan
+nicht (die Karte meldet es), hilft
+`systemctl status powermanagement-update-zeitplan.timer powermanagement-update-zeitplan.service`
+weiter; mit `226/NAMESPACE` fehlt dem Container „nesting“ (Abschnitt 12).
+
+### Einmalig über die Konsole
+
+Empfohlen ist derselbe Weg wie in der Oberfläche: ein Auftrag an den
+Update-Dienst, der Fortschritt im Terminal. Strg+C oder ein
+Verbindungsabbruch beenden nur die Anzeige – das Update läuft im Dienst
+weiter.
+
+```bash
+cd /opt/powermanagement && runuser -u www-data -- php bin/power update:starten --warten
+```
+
+- Ist der bekannte Stand älter als eine Minute, sucht der Befehl zuerst und
+  spielt dann genau den gefundenen Stand ein (`--ziel=<commit>`: einen
+  bestimmten, 40 Zeichen, vorwärts auf dem Zweig).
+- Laufen gerade ein Aufbau oder Schaltvorgänge, lehnt er ab und nennt sie.
+  Bewusst trotzdem: `--trotz-betrieb`.
+- Exit wie `update-debian.sh`: 0 = eingespielt bzw. schon aktuell, 1 =
+  nichts verändert, 2 = zurückgerollt, 3 = Handarbeit. Bei einem Fehler
+  folgen die letzten 40 Zeilen des Protokolls.
+
+Nachsehen und mitlesen:
+
+```bash
+cd /opt/powermanagement && runuser -u www-data -- php bin/power update:stand          # Einrichtung, Stand, letzter Lauf, Automatik
+cd /opt/powermanagement && runuser -u www-data -- php bin/power update:suchen --warten
+/opt/powermanagement/deploy/update-debian.sh --pruefen      # als root, ohne den Update-Dienst
+journalctl -a -f -u powermanagement-update                  # mitlesen
+journalctl -a -u powermanagement-update -I                  # letzter Lauf (systemd 257, Debian 13)
+```
+
+`bin/power` nie als root aufrufen – es legte root-eigene Dateien in
+`storage/` an; die Befehle `update:suchen`, `update:starten` und
+`update:automatik` lehnen das ab. Immer `runuser -u www-data -- php bin/power …`.
+
+**Direkt mit dem Skript** – für Optionen, die die Oberfläche nicht kennt
+(`--erzwingen`, `--flows-ersetzen`, `--zweig=<name>`, `--bis=<commit>`).
+Am besten als eigene Einheit, damit ein Verbindungsabbruch nicht stört:
+
+```bash
+systemd-run --unit=pm-update --collect -p KillMode=mixed -p TimeoutStopSec=20min \
+  /opt/powermanagement/deploy/update-debian.sh --flows-ersetzen
+journalctl -a -f -u pm-update
+```
+
+Im Terminal geht es auch: Strg+C oder ein abreißendes Terminal rollen sauber
+zurück. Am Ende stößt das Skript den Update-Dienst an, damit Stand und
+Verlauf in der Oberfläche stimmen. Läuft schon ein Update, bricht es mit
+„Ein anderes Update läuft gerade.“ ab.
+
+### Erstes Update auf die Fassung mit Update-Funktion
+
+Eine Installation von vor der Update-Funktion hat noch das alte
+Update-Skript. Es holt den neuen Stand zwar, arbeitet danach aber seine
+alten Schritte ab und kennt die Update-Funktion noch nicht. Deshalb läuft
+das Update **zweimal hintereinander**: Lauf 1 (altes Skript) holt und
+spielt den neuen Stand ein, Lauf 2 (jetzt das neue Skript) richtet die
+Update-Funktion ein. Beides als eigene systemd-Einheit – so stört ein
+Abbruch der SSH-Verbindung oder ein versehentliches Strg+C nicht, und
+`HOME` ist gesetzt (ohne bricht das alte Skript ab). Am besten außerhalb
+einer Veranstaltung: Messung und Schalten sind dabei 1–3 Minuten
+unterbrochen.
+
+```bash
+# 1 · Als root in den Container – vom Proxmox-Host aus:
+pct enter <CTID>
+#     (oder: ssh root@<container>)
+
+# 2 · Optional: nachsehen, was kommt (holt nur per git, ändert sonst nichts)
+HOME=/root /opt/powermanagement/deploy/update-debian.sh --pruefen
+
+# 3 · Umstieg starten (beide Zeilen zusammen einfügen):
+systemd-run --unit=pm-umstieg --collect --setenv=HOME=/root \
+  /bin/bash -c '/opt/powermanagement/deploy/update-debian.sh && /opt/powermanagement/deploy/update-debian.sh'
+
+# 4 · Zusehen (Strg+C beendet nur das Zusehen – das Update läuft weiter):
+journalctl -a -f -u pm-umstieg
+```
+
+Was zu sehen sein sollte (meist 2–5 Minuten):
+
+- **Lauf 1:** `==> Stand prüfen`, `Neu: <hash> <Betreff>` mit der Liste der
+  Änderungen, `==> Sicherung anlegen` (Pfad
+  `…/storage/backups/vor-update-<zeit>.tar.gz`),
+  `==> Migrationen ausführen`,
+  `==> Dienste und Konfiguration abgleichen`, `==> Dienste starten`,
+  `==> Prüfen`, `==> Fertig` mit `Vorher:`/`Jetzt:`.
+- **Lauf 2:** `Bereits auf dem neuesten Stand (…)`, dann
+  `Einrichtung unvollständig (Update-Funktion, Einheiten oder storage/-Ordner) – wird nachgeholt.`,
+  einige Zeilen `powermanagement-update… aktualisiert` und am Ende
+  `==> Ergebnis: aktuell – Update-Funktion eingerichtet`. Lauf 2 startet
+  nur die neuen Update-Einheiten, keinen der bestehenden Dienste neu.
+- Zum Schluss meldet systemd
+  `pm-umstieg.service: Deactivated successfully.` – dann Strg+C.
+
+Prüfen:
+
+```bash
+systemctl is-active powermanagement-update.path powermanagement-update.timer powermanagement-update-zeitplan.timer
+#   → dreimal: active
+cd /opt/powermanagement && runuser -u www-data -- php bin/power update:stand
+#   → „Update-Funktion: eingerichtet …“, „Installiert: <hash> vom …“
+git -C /opt/powermanagement log -1 --format='%h %ci %s'
+#   → der neue Stand
+```
+
+Danach in der Oberfläche **System → Update** öffnen (nur mit der Rolle
+Administration): Dort stehen der installierte Stand, *Jetzt suchen*, *Jetzt
+aktualisieren* und die Karte *Automatische Updates* (Vorgabe: *Nur suchen
+und anzeigen*; *Automatisch einspielen* lässt sich dort einschalten – mit
+Wochentagen, Uhrzeit und Karenzzeit, nie während eines Aufbaus).
+
+Wenn etwas nicht klappt:
+
+- *Verbindung abgerissen:* wieder anmelden. Läuft es noch?
+  `systemctl is-active pm-umstieg` (`activating` = läuft). Protokoll:
+  `journalctl -a -u pm-umstieg -n 200 --no-pager`. Die Einheit **nicht**
+  stoppen – das alte Skript rollt bei einem Abbruch nicht zurück.
+- *„In /opt/powermanagement gibt es lokale Änderungen“* (Lauf 1 bricht ab,
+  Lauf 2 startet dann nicht): `git -C /opt/powermanagement status --short`
+  ansehen. Sind sie entbehrlich, Schritt 3 mit `--erzwingen` beim **ersten**
+  Aufruf wiederholen:
+  `systemd-run --unit=pm-umstieg --collect --setenv=HOME=/root /bin/bash -c '/opt/powermanagement/deploy/update-debian.sh --erzwingen && /opt/powermanagement/deploy/update-debian.sh'`
+- *„Die Änderungen ließen sich nicht holen“* (privates Repository, Token
+  abgelaufen): Token eintragen
+  `printf 'GITHUB_TOKEN=%s\n' '<token>' > /etc/powermanagement/git.conf; chmod 600 /etc/powermanagement/git.conf`,
+  dann Schritt 3 wiederholen.
+- *Lauf 1 „fehlgeschlagen – der alte Stand wird wiederhergestellt“:* Der
+  alte Stand läuft weiter. Die Ursache steht im Protokoll; nach der
+  Behebung Schritt 3 wiederholen.
+- *Schon umgestellt?* Der Befehl schadet nicht – beide Läufe melden dann
+  „aktuell“.
+- *Anderer Ort als /opt/powermanagement:* steht in
+  `/etc/powermanagement/installation.conf` (`ZIEL=`).
+- *Ohne systemd-run* (nur bei stabiler Verbindung, etwa direkt an der
+  Proxmox-Konsole, und ohne Strg+C):
+  `HOME=/root /opt/powermanagement/deploy/update-debian.sh && HOME=/root /opt/powermanagement/deploy/update-debian.sh`
+
+### Zurückrollen von Hand
+
+**„Nicht vollständig zurückgerollt – Handarbeit nötig“** (Exit 3,
+`unvollstaendig`) heißt: Beim Zurückrollen ließ sich ein Teil nicht
+wiederherstellen (git, Datenbank, Abgleich oder die Anmeldeseite danach).
+Die Marke `/var/lib/powermanagement/update/offen` bleibt, Updates aus der
+Oberfläche sind gesperrt, und die Seite zeigt es rot. Ein unterbrochenes
+Update versucht der Update-Dienst höchstens zweimal zurückzurollen, danach
+gibt er auf („aufgegeben“) und meldet es einmal.
+
+```bash
+cat /var/lib/powermanagement/update/offen                   # alt, alt_zweig, neu, Sicherung, Schnappschuss, migriert, neu_angelegt, Phase
+ls -t /var/log/powermanagement/update/ | head               # Protokolle, darunter …-zurueckrollen.log
+journalctl -a -u powermanagement-update -n 200 --no-pager
+# Ursache beheben (Platte voll, Paketquelle, Rechte …), dann erneut:
+/opt/powermanagement/deploy/update-debian.sh --wiederaufnehmen   # Exit 2 = zurück, 3 = noch nicht
+```
+
+Geht es so nicht, die Schritte des Zurückrollens von Hand – mit den Werten
+aus der Marke:
+
+```bash
+systemctl stop powermanagement-sammler php8.4-fpm
+git -C /opt/powermanagement checkout -q -f -B <alt_zweig> <alt>     # alt_zweig „-“: checkout -q -f --detach <alt>
+# nur bei „migriert ja“ – die Datenbank aus dem Schnappschuss (oder aus der Sicherung, wie unten):
+install -o www-data -g www-data -m 640 <schnappschuss> /opt/powermanagement/storage/database.sqlite
+rm -f /opt/powermanagement/storage/database.sqlite-wal /opt/powermanagement/storage/database.sqlite-shm
+# je Zeile „neu_angelegt <datei>“: Einheiten erst ausschalten (systemctl disable --now <name>), dann rm <datei>
+rm /var/lib/powermanagement/update/offen
+/opt/powermanagement/deploy/update-debian.sh --nur-abgleichen
+systemctl start php8.4-fpm powermanagement-sammler
+runuser -u www-data -- rm -f /opt/powermanagement/storage/update/ist/wartung
+systemctl start powermanagement-update.service                       # Stand und Verlauf für die Oberfläche
+```
+
+**Ein erfolgreiches Update zurücknehmen** geht nur auf der Konsole –
+Migrationen laufen nur vorwärts, zurück kommt die Datenbank nur aus der
+Sicherung (was seitdem gespeichert wurde, ist dann weg). Die Befehle mit den
+echten Werten stehen am Ende jedes Laufs, etwa:
+
+```bash
+systemctl stop powermanagement-sammler php8.4-fpm
+git -C /opt/powermanagement checkout -q -f -B <zweig> <vorher>
+install -d -m 700 /root/pm-zurueck && tar xzf /opt/powermanagement/storage/backups/vor-update-<zeit>.tar.gz -C /root/pm-zurueck
+install -o www-data -g www-data -m 640 /root/pm-zurueck/database.sqlite /opt/powermanagement/storage/database.sqlite
+rm -f /opt/powermanagement/storage/database.sqlite-wal /opt/powermanagement/storage/database.sqlite-shm
+/opt/powermanagement/deploy/update-debian.sh --nur-abgleichen
+systemctl start php8.4-fpm powermanagement-sammler
+rm -rf /root/pm-zurueck                           # darin steckt config.php mit app.key
+systemctl start powermanagement-update.service    # Stand und Verlauf für die Oberfläche
+```
+
+Danach zeigt die Oberfläche den zurückgenommenen Stand wieder als
+verfügbar. Steht die Automatik auf *Automatisch einspielen*, vorher auf
+*Nur suchen und anzeigen* stellen – sonst spielt sie ihn im nächsten Fenster
+wieder ein. Ein Stand von vor der Update-Funktion kennt `--nur-abgleichen`
+noch nicht: Dort die Zeile weglassen und die Einheiten der Update-Funktion
+ausschalten
+(`systemctl disable --now powermanagement-update.path powermanagement-update.timer powermanagement-update-zeitplan.timer`).
 
 ## 11 · Sicherung
 
@@ -899,6 +1323,7 @@ systemctl status powermanagement-nodered powermanagement-sammler mosquitto influ
 journalctl -u powermanagement-nodered -f      # Node-RED: Verbindung, Warnungen der Flows
 journalctl -u powermanagement-sammler -f      # Modbus, Cloud
 journalctl -u powermanagement-mqtt-zugaenge   # eigene MQTT-Zugänge: eine Zeile je Lauf
+journalctl -a -u powermanagement-update -I    # letztes Update aus Oberfläche/Automatik
 tail -f /opt/powermanagement/storage/logs/app.log
 tail -f /var/log/mosquitto/mosquitto.log
 
@@ -946,6 +1371,16 @@ printf 'Authorization: Token %s\n' "$T" | curl -sG -H @- http://127.0.0.1:8086/q
 | „Welcome to nginx“ statt Anmeldung | `rm -f /etc/nginx/sites-enabled/default && systemctl reload nginx` |
 | Update bricht mit „could not read Username“ ab | Privates Repository ohne Token – `/etc/powermanagement/git.conf` anlegen (Abschnitt 3). |
 | Update meldet „lokale Änderungen“ | Jemand hat Dateien in `/opt/powermanagement` geändert. Sichern, dann `--erzwingen`. |
+| System → Update: „Die Update-Funktion ist … noch nicht eingerichtet“ (`update:stand`: „nicht eingerichtet“) | Noch das alte Update-Skript – einmal umsteigen (Abschnitt 10, *Erstes Update auf die Fassung mit Update-Funktion*). Sonst hat sich der Update-Dienst nie gemeldet: `systemctl status powermanagement-update.path powermanagement-update.timer`, `journalctl -a -u powermanagement-update -n 50`. Steht dort „Code nicht root-eigen …“, hat jemand in `/opt/powermanagement` Besitz oder Rechte geändert – `update-debian.sh --nur-abgleichen` setzt sie zurück. Fehlende Einheiten und Ordner holt `update-debian.sh` (ohne Option) nach. |
+| „Der Auftrag wird nicht übernommen“ | Die Pfad-Einheit hat nach zu vielen Starts aufgegeben (`start-limit-hit`) oder läuft nicht. Der Zeitgeber heilt das nach spätestens 15 Minuten; sofort: `systemctl reset-failed powermanagement-update.service powermanagement-update.path && systemctl restart powermanagement-update.path`. Steht in `storage/update/ist/helfer` die Zeile `pfad soll_ungueltig`, ist `storage/update/soll` kein gewöhnlicher Ordner – als www-data entfernen, dann legt `update-debian.sh --nur-abgleichen` ihn neu an. |
+| „Der Update-Dienst meldet sich seit … nicht“ | Der Zeitgeber weckt ihn sonst alle 15 Minuten: `systemctl status powermanagement-update.path powermanagement-update.timer`; ausgeschaltet? `systemctl enable --now powermanagement-update.path powermanagement-update.timer`. |
+| „Der Zeitplan läuft nicht“, `powermanagement-update-zeitplan.service` scheitert mit `status=226/NAMESPACE` | Nesting ist am Container aus – `pct set <id> --features nesting=1`, Container neu starten. Ohne nesting gehen Updates aus der Oberfläche und von der Konsole trotzdem, nur die Automatik nicht. Gemeldet wird nach 15 Minuten ohne Lebenszeichen; lief der Zeitplan noch nie, zählt die Zeit ab der Einrichtung. |
+| „Automatische Updates werden seit … verschoben“ | Der Grund steht auf der Seite. Meist ein Aufbau, der nie beendet wurde (Standort → Aufbau → beenden), sonst eine vergessene Pause, lokale Änderungen oder `AUTOMATIK=nein`. |
+| „Zu kurz nach dem letzten Update“ | Zwischen zwei Updates liegen mindestens zwei Minuten, automatisch 20 Stunden – kurz warten. |
+| „Suche fehlgeschlagen“ | `kein_zugang`: Token in `/etc/powermanagement/git.conf` abgelaufen oder ohne Leserecht (Abschnitt 3). `abruf`: GitHub nicht erreichbar – auf Veranstaltungen oft ohne Netz; es wird später wieder gesucht. Genaueres: `journalctl -a -u powermanagement-update -I`. |
+| „Ein früheres Update wurde unterbrochen“ (`update-debian.sh` oder `install-debian.sh` brechen ab, die Seite sperrt Updates) | Die Marke `/var/lib/powermanagement/update/offen` steht – Strom weg oder `kill -9` mitten im Update. Der Update-Dienst rollt zwei Minuten nach dem Start selbst zurück; von Hand: `/opt/powermanagement/deploy/update-debian.sh --wiederaufnehmen`, dann den Aufruf wiederholen. |
+| „Nicht vollständig zurückgerollt – Handarbeit nötig“ (Exit 3, `unvollstaendig`, „aufgegeben“) | Abschnitt 10, *Zurückrollen von Hand*. Bis dahin bleiben Updates aus der Oberfläche gesperrt. |
+| „Gerade läuft ein Update – Änderungen sind … wieder möglich“, obwohl keins läuft | Die Schreibsperre `storage/update/ist/wartung` blieb stehen (ein Update starb vor der Marke). Ohne Marke und ohne laufendes Update räumt der Update-Dienst sie ab zehn Minuten Alter bei seinem nächsten Lauf weg – sofort: `systemctl start powermanagement-update.service`. Steht die Marke, erst zurückrollen (Zeile oben). |
 
 ## 13 · Grafana daneben
 

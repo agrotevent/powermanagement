@@ -43,6 +43,28 @@ keine Build-Schritte. JS-Bibliotheken liegen fertig unter `public/assets/vendor`
 - **Geheimnisse** (Tokens, Kennwörter, Cloud-Zugänge) verschlüsselt ablegen
   (`Crypto`, `Settings::geheimnisSetzen`, `Datenquellen::zugang`). Sie
   gehören nie in Logs, Audit oder Antworten.
+- **Updates nur als Auftrag.** Die App startet nie selbst ein Update (kein
+  exec, sudo, systemctl): `UpdateService::anfordern()` legt
+  `storage/update/soll/auftrag` an (Kennung, Aktion, Auslöser, Ziel – keine
+  Optionen, Zweige, Pfade); `deploy/update-helfer.sh` (root, gestartet von
+  `powermanagement-update.path`) liest ihn als App-Benutzer, prüft ihn und
+  ruft `update-debian.sh` mit selbst gebautem argv. root liest nie die
+  Datenbank und arbeitet in `storage/` nur als App-Benutzer; Lauf, Stand,
+  Protokoll und Verlauf schreibt er nach `storage/update/ist`. Formate mit
+  Kopfzeile, nur additiv – neuer Code liest die Dateien des alten und
+  umgekehrt; Codes fest, Sätze nur in PHP (`UpdateService::grundText()`).
+  `update-debian.sh` hat eine stabile Schnittstelle
+  (`# update-debian-schnittstelle: 1`: `--stufe=2` mit Marke,
+  `--nur-abgleichen [--ohne-dienste]`, `--wiederaufnehmen`); jede Datei, die
+  es außerhalb von git schreibt, gehört in `abgleichen` – eine neue trägt
+  Stufe 2 als `neu_angelegt` in die Marke ein, eine neue Einheit kommt in
+  `einheiten()` und in `DIENSTE` von `install-debian.sh`. Es stoppt
+  `powermanagement-update.service` nie und startet ihn nie neu. Während der
+  Schreibsperre (`storage/update/ist/wartung`) nimmt die App keine POSTs an
+  (`UpdateService::wartungsSperre()` vor `dispatch()`); wer an Router und
+  Sitzung vorbei schreibt, fragt `UpdateService::wartungAktiv()`.
+  `bin/power update:*` nie als root. Hinweise für Betreiber stehen als
+  Commit-Trailer `Update-Hinweis: …` – System → Update zeigt sie.
 - **Broker-Zugänge der Shellys** nur über `MqttZugaenge` (Soll-Datei in
   `storage/mqtt/soll` → root-Helfer `deploy/mqtt-zugaenge.sh`); `/etc/mosquitto`
   schreibt außer dem Installationsskript nur dieser Helfer. Shelly-RPC nur
@@ -70,7 +92,7 @@ bash tests/installation-debian.sh   # nur mit Docker – sonst übernimmt das di
 
 # Syntax
 find . -name '*.php' -not -path './.git/*' -print0 | xargs -0 -n1 php -l > /dev/null
-bash -n deploy/*.sh tests/*.sh && shellcheck -S warning -e SC2016,SC1111 deploy/*.sh tests/*.sh
+bash -n deploy/*.sh tests/*.sh tests/hilfen/*.sh && shellcheck -S warning -e SC2016,SC1111 deploy/*.sh tests/*.sh tests/hilfen/*.sh
 ```
 
 | Prüfskript | prüft |
@@ -94,6 +116,9 @@ bash -n deploy/*.sh tests/*.sh && shellcheck -S warning -e SC2016,SC1111 deploy/
 | `tests/sicherheit.php` | Rechte vergeben, Anmelde-Bremse ohne Kontoerkennung, Geräte zuordnen, Kanal-Freigaben beim Schalten, Schlüssel aus dem Repository, Line Protocol, CSV, Adressen, app.key, PDF-Werkzeuge |
 | `tests/nodered-funktionen.mjs` | Node-RED-Funktionen, `flows.json` passt zu den Quellen |
 | `tests/installation-debian.sh` | `deploy/install-debian.sh` auf frischem Debian 13 mit systemd (Docker): Erstinstallation, zweiter Lauf (Kennwörter, app.key bleiben), Update mit neuem Ordner in `storage/`; Rechte (Code root, `storage/` www-data), Dienste, Anmeldung, Broker, `bin/power pruefen` |
+| `tests/installation-debian.sh` (Update) | Phasen 3b–8: Update ohne HOME und Terminal (systemd-run), über die Oberfläche mit Selbst-Update, kaputte Migration und Prüfung nach dem Neustart (vollständig zurück, auch Einheiten und Vorlagen), Abbruch und SIGKILL mit Wiederanlauf, Automatik mit Veranstaltungsschutz, Aufträge als App-Benutzer und untergeschobene Aufträge; `--umstieg=<commit>`: einmaliger Umstieg von einer Fassung ohne Update-Funktion genau wie in der Anleitung, danach das erste Update über die Oberfläche (eigener CI-Job „Umstieg“) |
+| `tests/update-helfer.php` | Update-Helfer ohne root: Auftrag übernehmen und prüfen (Verweis, FIFO, Ordner, Größe, Zeichen, Kennung, Alter, Abstände, gescheiterte Stände, `update.conf`), argv und Umgebung, Sperre, Signale als TERM, Wiederanlauf (höchstens zweimal, dann aufgegeben), Nachlauf, Protokoll bereinigt und ohne Token, Stand aus git (Kandidaten auch von einem Seitenzweig aus, linear, lokal), Abgleich mit `UpdateService::auftragText()`; als root zusätzlich Code-Prüfung und setpriv (Attrappe `tests/hilfen/update-attrappe.sh`, Temp-Repository) |
+| `tests/update.php` | Update in der App: Parser der Helfer-Dateien, Zustände über die Zeit, installierter Stand ohne git-Prozess, Auftrag (Format, Sperrgründe, Hindernisse), Abzeichen, Audit idempotent, Automatik (Einstellungen, Fenster mit Zeitumstellung und über Mitternacht, Versatz, Karenz, Hindernisse, einmal je Tag, Zeitplan mit Dateien und Audit), Kommandozeile `update:*`, HTTP (Seite, Rechte, CSRF, Schreibsperre 503/Meldung, Status-JSON ohne Sitzungssperre), `update.js` ohne HTML aus Daten (eigene Instanz) |
 
 Prüfskripte legen eigene Daten mit eindeutiger Kennung an und löschen sie am
 Ende. Sie wählen Datensätze über Eigenschaften, nie über die kleinste ID.

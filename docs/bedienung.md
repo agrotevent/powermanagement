@@ -608,3 +608,61 @@ Audit-Log*) zeichnet Anmeldungen, Änderungen und Schaltvorgänge auf.
   weiter als bis zum Profil.
 - Steht ein TLS-Proxy davor, der kein `X-Forwarded-Proto` schickt, erzwingt
   `security.cookie_secure => true` das Sitzungs-Cookie nur über HTTPS.
+
+## Update
+
+**System → Update** bringt PowerManagement auf den neuesten Stand – ohne
+Konsole. Die Seite braucht das Recht *PowerManagement aktualisieren*, das
+von sich aus nur die Administration hat ([rechte.md](rechte.md#update)).
+Gibt es Neues, steht am Menüeintrag *Update* eine Zahl; ein gelbes oder
+rotes **!** meldet eine Störung (Update gescheitert, Update-Dienst still,
+Auftrag hängt). Auf dem Handy, wo die Seitenleiste zu ist, steht dasselbe
+Zeichen oben in der Kopfleiste.
+
+| Karte | zeigt |
+|-------|-------|
+| **Stand** | installierter Stand (Datum, Kurz-Hash, Betreff, Zweig), verfügbar: *Aktuell*, *n Änderungen*, *Suche fehlgeschlagen*, *Lokale Änderungen*, *Verlauf nicht linear*; wann zuletzt gesucht wurde. **Jetzt suchen** fragt das Repository. |
+| **Was neu ist** | die neuen Stände mit Datum und Betreff (verlinkt, wenn das Repository auf GitHub liegt), dazu Kennzeichen: Datenbank wird erweitert, Einrichtung ändert sich, Node-RED-Flows ändern sich, und Hinweise zu diesem Update (aus den Commits, Zeile `Update-Hinweis:`) |
+| **Aktualisieren** | was passiert, wie lange das letzte Update dauerte, und **Jetzt aktualisieren** – genau auf den angezeigten Stand |
+| **Fortschritt** | Schritt *n von 12* mit Namen, Laufzeit und die letzten Zeilen des Protokolls; danach das Ergebnis mit Grund und das ganze Protokoll. Solange etwas läuft oder bis eine Stunde danach steht die Karte oben. |
+| **Automatische Updates** | Modus, Zeitfenster, Karenzzeit, *Pausieren bis*, nächstes Fenster, was zuletzt automatisch geschah |
+| **Verlauf** | die letzten Updates: Zeit, Auslöser (von Hand mit Namen, automatisch, Konsole, Update-Dienst), Ergebnis, Stand vorher → nachher, Dauer |
+| **Auf der Konsole** | die Befehle für ein Update auf der Konsole, mit den Pfaden dieser Installation |
+
+**Aktualisieren.** Vorher werden Datenbank und Konfiguration gesichert.
+Messung und Schalten sind etwa 1–3 Minuten unterbrochen, die Shellys kurz
+getrennt, die Oberfläche ist einen Moment nicht erreichbar (die Seite
+meldet „Dienste starten neu …“ und macht von selbst weiter). Solange das
+Update läuft, nimmt die Oberfläche keine Änderungen an: Speichern meldet
+„Gerade läuft ein Update – Änderungen sind in etwa einer Minute wieder
+möglich“. Geht etwas schief, kommt der alte Stand von selbst zurück –
+Code, Datenbank und Einrichtung. Läuft gerade ein Aufbau oder wurde in den
+letzten 30 Minuten geschaltet, nennt die Seite das und verlangt das
+Kästchen **Trotzdem jetzt aktualisieren**. Ist der Knopf gesperrt, steht
+der Grund darunter (lokale Änderungen im Code, Verlauf nicht linear, ein
+Update läuft schon …) – solche Fälle gehen nur über die Konsole.
+
+**Automatische Updates.** Drei Modi:
+
+- *Aus* – gesucht wird nur auf Knopfdruck.
+- *Nur suchen und anzeigen* (Vorgabe) – etwa alle sechs Stunden nachsehen;
+  neue Stände zeigt das Abzeichen, eingespielt wird nur von Hand.
+- *Automatisch einspielen* – dazu im **Zeitfenster** von selbst
+  aktualisieren: an den gewählten Wochentagen ab *Beginn* für die gewählte
+  *Dauer* (Vorgabe 04:00, zwei Stunden), höchstens einmal am Tag.
+
+Die **Karenzzeit** (Vorgabe 24 Stunden) lässt nur Stände zu, die schon so
+lange veröffentlicht sind – ein fehlerhafter Stand kann bis dahin noch
+ersetzt werden. Nie während eines Aufbaus oder Betriebs an irgendeinem
+Standort und nicht, wenn in den letzten 30 Minuten geschaltet wurde: Dann
+wird verschoben und im Fenster erneut geprüft. **Pausieren bis** hält die
+Automatik bis einschließlich des gewählten Tages an, etwa über ein
+Veranstaltungswochenende. Ein Stand, der zurückgerollt werden musste, wird
+nicht automatisch wiederholt – erst ein neuerer oder *Jetzt aktualisieren*.
+Wird 14 Tage lang nur verschoben, meldet die Seite das (oft ein Aufbau, der
+nie beendet wurde).
+
+Auf der Konsole geht dasselbe mit
+`runuser -u www-data -- php bin/power update:starten --warten`; Einzelheiten,
+Abschalten und Notfälle stehen in der
+[Installationsanleitung, Abschnitt 10](installation-debian-lxc.md#10--update).

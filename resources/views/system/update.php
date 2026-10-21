@@ -397,14 +397,30 @@ $letzterAuto = $automatik['letzter'];
     <summary class="card-head"><h2>Auf der Konsole</h2></summary>
     <div class="card-body">
         <?php if ($z === 'nicht_eingerichtet'): ?>
-            <p>Einmal umsteigen auf die Fassung mit Update-Funktion (als root im Container):</p>
+            <p>Einmal umsteigen auf die Fassung mit Update-Funktion (als root im Container). Das Update läuft zweimal hintereinander – das alte
+                Skript holt den neuen Stand, das neue richtet die Update-Funktion ein; meist 2–5 Minuten, Strg+C beendet nur das Zusehen:</p>
             <pre class="update-befehl mono"><?= View::e($befehlUmstieg) ?></pre>
         <?php endif; ?>
         <p>Derselbe Weg wie hier – ein Auftrag an den Update-Dienst, Fortschritt im Terminal. Strg+C oder ein Verbindungsabbruch beenden nur die Anzeige:</p>
         <pre class="update-befehl mono"><?= View::e('cd ' . $wurzel . ' && runuser -u ' . $benutzer . ' -- php bin/power update:starten --warten') ?></pre>
+        <p class="small">Laufen gerade ein Aufbau oder Schaltvorgänge, lehnt der Befehl ab und nennt sie – bewusst trotzdem mit
+            <span class="mono">--trotz-betrieb</span>. Exit: 0 eingespielt bzw. schon aktuell, 1 nichts verändert, 2 zurückgerollt, 3 Handarbeit.</p>
         <p>Nachsehen, mitlesen, letzten Lauf ansehen:</p>
         <pre class="update-befehl mono"><?= View::e('cd ' . $wurzel . ' && runuser -u ' . $benutzer . " -- php bin/power update:stand\n"
+            . $wurzel . "/deploy/update-debian.sh --pruefen\n"
             . "journalctl -a -f -u powermanagement-update\njournalctl -a -u powermanagement-update -I") ?></pre>
-        <p class="small muted"><span class="mono">bin/power</span> nie als root aufrufen – immer als Anwendungsbenutzer (<span class="mono">runuser -u <?= View::e($benutzer) ?> -- …</span>).</p>
+        <p>Direkt mit dem Skript (als root) – für Optionen, die es hier nicht gibt (<span class="mono">--erzwingen</span>,
+            <span class="mono">--flows-ersetzen</span>, <span class="mono">--zweig=…</span>, <span class="mono">--bis=…</span>); als eigene Einheit,
+            damit ein Verbindungsabbruch nicht stört:</p>
+        <pre class="update-befehl mono"><?= View::e("systemd-run --unit=pm-update --collect -p KillMode=mixed -p TimeoutStopSec=20min \\\n  "
+            . $wurzel . "/deploy/update-debian.sh --flows-ersetzen\njournalctl -a -f -u pm-update") ?></pre>
+        <p>Ein unterbrochenes Update (Strom weg) rollt der Update-Dienst zwei Minuten nach dem Start selbst zurück – von Hand:</p>
+        <pre class="update-befehl mono"><?= View::e("cat /var/lib/powermanagement/update/offen\n" . $wurzel . '/deploy/update-debian.sh --wiederaufnehmen') ?></pre>
+        <p>Updates aus der Oberfläche ganz abschalten – oder nur das automatische Einspielen:</p>
+        <pre class="update-befehl mono"><?= View::e("printf 'OBERFLAECHE=nein\\n' > /etc/powermanagement/update.conf   # entweder: ganz\n"
+            . "printf 'AUTOMATIK=nein\\n'   > /etc/powermanagement/update.conf   # oder: nur das Einspielen\n"
+            . 'rm /etc/powermanagement/update.conf                              # wieder an') ?></pre>
+        <p class="small muted"><span class="mono">bin/power</span> nie als root aufrufen – immer als Anwendungsbenutzer (<span class="mono">runuser -u <?= View::e($benutzer) ?> -- …</span>).
+            Alles Weitere: <span class="mono">docs/installation-debian-lxc.md</span>, Abschnitt 10.</p>
     </div>
 </details>
