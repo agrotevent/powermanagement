@@ -248,10 +248,13 @@ Bei einer vorhandenen **InfluxDB 1.8** mit Anmeldung ist das „Token“
    Adresse nur fünf Anmeldeversuche in der Minute durch.
 7. **Oberfläche:** PHP-FPM-Pool, nginx-Site (mit Bremse für die
    Schnittstelle `/api/`, Abschnitt 9), Datenbank, Administrator,
-   InfluxDB- und MQTT-Zugang (verschlüsselt in der Datenbank).
+   InfluxDB- und MQTT-Zugang (verschlüsselt in der Datenbank). Grundrisse
+   dürfen bis **100 MB** groß sein – die Grenzen dafür stehen unten unter
+   *Größe der Uploads*.
 8. **Dienste:** `powermanagement-nodered`, `powermanagement-sammler`,
-   `powermanagement-wartung.timer` (täglich; räumt Protokolle auf und meldet
-   Übergabeberichte über der Aufbewahrungsfrist – gelöscht wird nur mit
+   `powermanagement-wartung.timer` (täglich; räumt Protokolle auf, rechnet
+   fehlende Kacheln von Grundrissen nach und meldet Übergabeberichte über
+   der Aufbewahrungsfrist – gelöscht wird nur mit
    `bin/power berichte:aufbewahrung --ausfuehren`),
    `powermanagement-mqtt-zugaenge.path` und `.timer` (eigene MQTT-Zugänge,
    nur mit Mosquitto im Container), Logrotate.
@@ -761,6 +764,60 @@ nginx auf einem anderen Host), der **getrennt** läuft und auf
 Die nginx-Site passt das Update-Skript nie ungefragt an; eigene Zeilen
 bleiben also erhalten.
 
+### Größe der Uploads
+
+Grundrisse (PDF, PNG, JPEG, SVG) lassen sich bis **100 MB** hochladen
+(`SiteService::MAX_UPLOAD_BYTES`, gerechnet in MiB). Damit das durchgeht,
+muss jede Stufe davor mindestens so viel annehmen:
+
+| Stufe | Einstellung | Vorlage |
+|-------|-------------|---------|
+| PHP-FPM-Pool | `upload_max_filesize` / `post_max_size` | `100M` / `105M` (der Rest für die übrigen Formularfelder) |
+| nginx, `location = /standorte/grundriss` | `client_max_body_size` | `105m` |
+| nginx, alles andere | `client_max_body_size` | `16m` (Formulare, Katalog-Import bis 5 MB), `/api/` `50m` |
+| Proxy oder Tunnel davor | seine eigene Grenze | siehe unten |
+
+Den Pool schreibt jedes Update neu, die nginx-Site nur, solange sie niemand
+verändert hat. Fehlt einer von Hand veränderten Site der Block für
+`/standorte/grundriss`, sagt das Update es und legt die neue Fassung
+daneben – dann den Block von dort übernehmen. Ohne ihn gilt die Grenze der
+Site, und nginx lehnt größere Pläne ab. Das Formular nennt die Grenze, die
+PHP tatsächlich annimmt, und der Browser prüft die Größe **vor** dem
+Hochladen – eine zu große Datei geht gar nicht erst über die Leitung.
+
+Zeiten: Das Hochladen selbst puffert nginx; `client_body_timeout` (60 s)
+gilt je Lesevorgang, nicht für die ganze Datei – auch eine langsame Leitung
+kommt durch, solange Daten fließen. PHP bekommt den Körper erst danach
+(`max_input_time` 120 s reicht für das Lesen über den Socket). Danach
+kachelt der Upload höchstens rund 30 Sekunden selbst und antwortet; was
+dann noch fehlt (ein Vektorplan mit 100 MB braucht gemessen gut vier
+Minuten, ein PDF mit 60 Seiten länger), rechnet ein eigener Prozess
+(`bin/power plan:kacheln --etage=…`, Protokoll in
+`storage/logs/kacheln.log`). Bricht der ab – etwa weil php-fpm beim Update
+neu startet –, holt die nächtliche Wartung es nach.
+
+**Hinter einem Proxy oder Tunnel** gilt zusätzlich dessen Grenze, und die
+kommt zuerst:
+
+- **nginx** als Proxy: im `location`- oder `server`-Block
+  `client_max_body_size 105m;` (Vorgabe sind 1 MB), dazu
+  `proxy_read_timeout 300s;` – der Upload antwortet erst nach dem Kacheln.
+- **Traefik** (auch unter Pangolin) begrenzt Körper von sich aus nicht; nur
+  eine `buffering`-Middleware mit `maxRequestBodyBytes` tut es.
+- **Cloudflare** (auch Tunnel) nimmt bei Free und Pro höchstens 100 MB
+  (dezimal) je Anfrage an – das sind 95,4 MiB. Pläne darüber scheitern dort
+  mit 413, nicht hier.
+- **Apache** als Proxy: `LimitRequestBody` (seit 2.4.53 Vorgabe 1 GB).
+
+Ein 413 mit der Seite „Datei zu groß – Grundrisse lassen sich bis 100 MB
+hochladen“ kommt von dieser nginx-Site; ein anderes 413 vom Proxy davor.
+
+Bei einer frischen Debian-13-Installation liegt `/tmp` im Arbeitsspeicher
+(tmpfs). Dort legt PHP eine
+hochgeladene Datei ab, bis sie nach `storage/plans` wandert – je
+gleichzeitigem Upload also bis zu 100 MB RAM. Bei einem Container mit 2 GB
+ist das kein Problem; wer sehr knapp bemessen ist, sieht es hier.
+
 ### Schnittstelle für andere Instanzen
 
 Andere PowerManagement- oder MasterAdmin-Instanzen holen Standorte über
@@ -1040,6 +1097,8 @@ printf 'Authorization: Token %s\n' "$T" | curl -sG -H @- http://127.0.0.1:8086/q
 | Sammler erreicht GX/ComAp nicht | Route bzw. Tunnel: `ip route get 192.168.50.10`, `wg show`, `nc -vz 192.168.50.10 502`. Modbus TCP am GX eingeschaltet? |
 | Speichern auf einer Anlagen-Seite mit Livewerten hängt bis zum Timeout, im Audit-Log steht nichts | Ältere Fassungen: jede Live-Abfrage hielt die Sitzung, bis die InfluxDB antwortete – bei einer trägen InfluxDB stauten sie sich, und alles Weitere aus demselben Browser wartete. Neuen Stand einspielen (Abschnitt 10). Wie schnell die InfluxDB antwortet: `grep 'InfluxDB antwortet langsam' /opt/powermanagement/storage/logs/app.log`, `systemctl status influxdb`. |
 | `502 Bad Gateway` | PHP-FPM läuft nicht: `systemctl status php8.4-fpm`, Socket `/run/php/powermanagement.sock`. |
+| Grundriss-Upload: englisches „413 Request Entity Too Large“, „Die Anfrage ist für den Webserver zu groß“ oder Abbruch ohne Meldung | Ein Proxy davor oder eine von Hand veränderte nginx-Site begrenzt die Größe – Abschnitt 9, *Größe der Uploads*. Die Meldung „größer, als der Server annimmt“ kommt von PHP: Pool prüfen (`grep -e upload_max -e post_max /etc/php/8.4/fpm/pool.d/powermanagement.conf`). |
+| Großer Grundriss hochgeladen, die Karte zeichnet ihn unscharf und langsam | Die Kacheln rechnen noch im Hintergrund – `tail /opt/powermanagement/storage/logs/kacheln.log`. Von Hand: `cd /opt/powermanagement && runuser -u www-data -- php bin/power plan:kacheln`. |
 | „Welcome to nginx“ statt Anmeldung | `rm -f /etc/nginx/sites-enabled/default && systemctl reload nginx` |
 | Andere Instanz: „Das Token wird dort nicht (mehr) angenommen“, obwohl es stimmt | Ein Proxy (oder Apache ohne `CGIPassAuth On`) verschluckt den Kopf `Authorization` – Abschnitt 9, *Schnittstelle für andere Instanzen*. Sonst ist es widerrufen oder abgelaufen: bei der Gegenseite unter *System → Schnittstelle (API)* nachsehen. |
 | Andere Instanz: „Zu viele Anfragen“ | Die Bremse in nginx (zehn je Sekunde und Adresse). Stehen alle Instanzen hinter demselben Proxy ohne `set_real_ip_from`, teilen sie sich die Bremse. |

@@ -23,7 +23,9 @@ declare(strict_types=1);
  *   bin/power user:add <name> <rolle> [passwort]
  *   bin/power user:password <name> <passwort>
  *   bin/power titel "Titel" [untertitel] [kürzel]
- *   bin/power plan:kacheln [--neu]  Kacheln aller Grundrisse berechnen
+ *   bin/power plan:kacheln [--neu] [--etage=<id>,…]
+ *                                   Kacheln aller (oder dieser) Grundrisse berechnen – so
+ *                                   rechnet auch der Upload große Pläne im Hintergrund weiter
  *   bin/power location:liste        Locations im gemeinsamen Repository anzeigen
  *   bin/power location:uebernehmen <schlüssel>
  *   bin/power verteiler:liste       Verteiler hier und im Repository mit ihrem Stand
@@ -64,7 +66,8 @@ declare(strict_types=1);
  *                                   zurücksetzen, alte Import-Vorschauen löschen, fällige
  *                                   Übergabeberichte melden, entschiedene Änderungsvorschläge
  *                                   (älter als 400 Tage) und verwaiste Vorschlags- und
- *                                   Temp-Ordner entfernen (täglich per Timer)
+ *                                   Temp-Ordner entfernen, fehlende Kacheln von Grundrissen
+ *                                   nachrechnen (täglich per Timer)
  */
 
 require dirname(__DIR__) . '/src/bootstrap.php';
@@ -98,7 +101,7 @@ $befehl = array_shift($argumente) ?? 'hilfe';
 $optionen = [];
 $werte = [];
 // Optionen mit Wert gehen als --name=wert oder --name wert.
-$mitWert = ['fassung'];
+$mitWert = ['fassung', 'etage'];
 for ($i = 0; $i < count($argumente); $i++) {
     $a = $argumente[$i];
     if (str_starts_with($a, '--')) {
@@ -337,12 +340,23 @@ switch ($befehl) {
         break;
 
     case 'plan:kacheln':
+        // --etage=3,4: nur diese – so startet der Upload den Rest im Hintergrund
+        // (PlanTileService::imHintergrund), mit Zeitstempel fürs Protokoll.
+        $nur = null;
+        if (isset($optionen['etage'])) {
+            $nur = array_values(array_filter(array_map('intval', explode(',', (string) $optionen['etage'])), static fn (int $id): bool => $id > 0));
+            if ($nur === []) {
+                $fehler('--etage braucht eine oder mehrere Nummern, z. B. --etage=3,4.');
+            }
+        }
         foreach (SiteService::allFloors() as $etage) {
-            if ((string) $etage['plan_file'] === '') {
+            if ((string) $etage['plan_file'] === '' || ($nur !== null && !in_array((int) $etage['id'], $nur, true))) {
                 continue;
             }
+            $start = microtime(true);
             $ergebnis = PlanTileService::bauen($etage, isset($optionen['neu']));
-            $aus($etage['site_name'] . ' / ' . $etage['name'] . ': ' . $ergebnis['message']);
+            $aus(($nur !== null ? gmdate('Y-m-d\TH:i:s\Z') . ' ' : '') . $etage['site_name'] . ' / ' . $etage['name'] . ': ' . $ergebnis['message']
+                . ($nur !== null ? sprintf(' (%.0f s)', microtime(true) - $start) : ''));
         }
         break;
 
@@ -650,6 +664,9 @@ switch ($befehl) {
         }
         // Übergabeberichte nur melden – gelöscht wird mit berichte:aufbewahrung.
         foreach (BerichtService::wartungHinweise() as $meldung) {
+            $aus($meldung);
+        }
+        foreach (PlanTileService::fehlendeNachrechnen() as $meldung) {
             $aus($meldung);
         }
         break;

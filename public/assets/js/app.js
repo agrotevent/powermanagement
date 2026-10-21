@@ -231,6 +231,43 @@ document.addEventListener('DOMContentLoaded', function () {
      * wird neu geladen. Ohne JavaScript bleibt es beim gewöhnlichen
      * Formular mit Weiterleitung – langsam, aber nie kaputt.
      */
+    /*
+     * Dateifelder mit Größengrenze: `data-max-bytes` (und `data-max-text`
+     * für die Meldung) – beim Grundriss die Grenze, die der Server
+     * wirklich annimmt (SiteService::uploadGrenze). Geprüft wird beim
+     * Auswählen, also bevor 100 MB über eine langsame Leitung gehen, um
+     * dann abgewiesen zu werden. Die Meldung steht unter dem Feld, und
+     * setCustomValidity hält das Formular an.
+     */
+    var groesse = function (bytes) {
+        if (bytes % 1048576 === 0) { return String(bytes / 1048576) + ' MB'; }
+        // aufgerundet – sonst stünde bei einem Byte zu viel „100,0 MB“ da
+        return (Math.ceil(bytes / 104857.6) / 10).toFixed(1).replace('.', ',') + ' MB';
+    };
+    document.querySelectorAll('input[type=file][data-max-bytes]').forEach(function (feld) {
+        var grenze = Number(feld.dataset.maxBytes);
+        var meldung = document.createElement('div');
+        meldung.className = 'small datei-meldung';
+        meldung.setAttribute('role', 'alert');
+        meldung.hidden = true;
+        feld.insertAdjacentElement('afterend', meldung);
+        var pruefen = function () {
+            var satz = '';
+            Array.prototype.forEach.call(feld.files || [], function (datei) {
+                if (satz === '' && grenze > 0 && datei.size > grenze) {
+                    satz = '„' + datei.name + '“ ist ' + groesse(datei.size) + ' groß – hochladen lassen sich höchstens '
+                        + (feld.dataset.maxText || groesse(grenze)) + '. Ein PDF wird meist deutlich kleiner, wenn eingebettete Bilder'
+                        + ' mit geringerer Auflösung exportiert werden.';
+                }
+            });
+            feld.setCustomValidity(satz);
+            meldung.textContent = satz;
+            meldung.hidden = satz === '';
+        };
+        feld.addEventListener('change', pruefen);
+        pruefen();
+    });
+
     document.querySelectorAll('form[data-laeuft]').forEach(function (formular) {
         formular.addEventListener('submit', function (ereignis) {
             /*
@@ -307,6 +344,14 @@ document.addEventListener('DOMContentLoaded', function () {
                 // zurück – das ist der Normalfall und kein Fehler.
                 if (!antwort.ok && antwort.status >= 500) {
                     throw new Error('HTTP ' + antwort.status);
+                }
+                /*
+                 * 413 kommt von nginx (oder einem Proxy davor), nicht von der
+                 * App – es gibt keine Meldung, die das Neuladen zeigen könnte.
+                 */
+                if (antwort.status === 413) {
+                    throw new Error('Die Anfrage ist für den Webserver zu groß (HTTP 413) – client_max_body_size in nginx'
+                        + ' bzw. die Grenze eines Proxys davor ist kleiner als die der Anwendung');
                 }
                 /*
                  * Neu laden stellt die Scrollposition wieder her. Steht

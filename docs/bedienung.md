@@ -618,7 +618,25 @@ er nutzt. Was dazu am Broker passiert, steht in
 ## Standorte und Location-Abgleich
 
 **Standorte** verwaltet Standorte, Etagen und Grundrisse. Pläne kommen als
-PDF (wird serverseitig gerastert und gekachelt), PNG/JPG oder SVG.
+PDF (wird serverseitig gerastert und gekachelt), PNG/JPG oder SVG – **bis
+100 MB** je Datei. Das Formular nennt die Grenze, und der Browser meldet
+eine zu große Datei schon beim Auswählen, bevor sie über die Leitung geht.
+Größere PDFs werden meist deutlich kleiner, wenn eingebettete Bilder mit
+geringerer Auflösung exportiert werden.
+
+- **Aufbereiten:** Der Server rechnet jeden Plan einmal in Kacheln (höchstens
+  50 Megapixel, also etwa 7 000 × 7 000 Pixel). Ein gewöhnlicher Plan ist
+  beim Hochladen gleich fertig. Bei großen Plänen antwortet der Upload nach
+  rund einer halben Minute und rechnet im Hintergrund weiter – gemessen
+  ein bis vier Minuten für eine Seite mit 100 MB, länger für viele Seiten.
+  Bis dahin zeichnet der Browser den Plan selbst (langsamer, weniger
+  scharf); danach die Karte neu laden.
+- **Große Bilder:** PNG und JPEG über 50 Megapixel rechnet der Server mit
+  poppler herunter, ohne sie ganz in den Speicher zu laden. Dafür muss ein
+  JPEG *nicht progressiv* und in RGB oder Graustufen gespeichert sein, ein
+  PNG ohne Transparenz und ohne Zeilensprung (interlaced); über 400
+  Megapixel nimmt der Upload kein Bild an. Was nicht passt, lehnt der Upload
+  mit dem Grund ab – anders speichern, verkleinern oder als PDF hochladen.
 
 **Location-Abgleich** arbeitet mit demselben Git-Repository wie MasterAdmin
 (`locations/<schlüssel>/location.json` und `plaene/`):

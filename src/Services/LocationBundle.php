@@ -352,15 +352,32 @@ final class LocationBundle
     /**
      * Kacheln für übernommene Pläne bauen (ohne auf einen laufenden Bau zu warten).
      *
+     * In einer Anfrage höchstens so lange wie beim Hochladen
+     * (SiteService::KACHELZEIT_IM_UPLOAD) – ein Plan mit 100 MB aus dem
+     * Repository oder von einer anderen Instanz braucht Minuten; der Rest
+     * geht in den Hintergrund. Auf der Kommandozeile ohne Frist.
+     *
      * @param list<int> $etagenIds
      */
     public static function kachelnBauen(array $etagenIds): void
     {
+        $bis = PHP_SAPI === 'cli' ? null : microtime(true) + SiteService::KACHELZEIT_IM_UPLOAD;
+        $spaeter = [];
         foreach (array_unique(array_map('intval', $etagenIds)) as $etageId) {
             $etage = SiteService::floor($etageId);
-            if ($etage !== null && PlanTileService::lohnt((string) SiteService::planPath($etage))) {
-                PlanTileService::bauen($etage, true, false);
+            if ($etage === null || !PlanTileService::lohnt((string) SiteService::planPath($etage))) {
+                continue;
             }
+            if ($bis !== null && microtime(true) > $bis) {
+                $spaeter[] = $etageId;
+                continue;
+            }
+            if (!empty(PlanTileService::bauen($etage, true, false, $bis)['abgebrochen'])) {
+                $spaeter[] = $etageId;
+            }
+        }
+        if ($spaeter !== []) {
+            PlanTileService::imHintergrund($spaeter);
         }
     }
 

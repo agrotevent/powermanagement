@@ -116,6 +116,25 @@ final class Request
     }
 
     /**
+     * Hat PHP den Körper verworfen, weil er größer war als post_max_size?
+     *
+     * Dann sind $_POST und $_FILES leer – samt CSRF-Token. Die Länge in
+     * Bytes, sonst null.
+     */
+    public function koerperVerworfen(): ?int
+    {
+        if ($this->method() !== 'POST' || $_POST !== [] || $_FILES !== []) {
+            return null;
+        }
+        $laenge = $this->kopf('Content-Length');
+        $grenze = (int) @ini_parse_quantity((string) ini_get('post_max_size'));
+        if (!ctype_digit($laenge) || strlen($laenge) > 18 || $grenze <= 0) {
+            return null;
+        }
+        return (int) $laenge > $grenze ? (int) $laenge : null;
+    }
+
+    /**
      * Der Körper der Anfrage (etwa JSON) – höchstens $max Bytes.
      *
      * null, wenn er größer ist: schon angekündigt (Content-Length) oder beim

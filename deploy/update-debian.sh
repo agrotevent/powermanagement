@@ -653,7 +653,13 @@ if [[ -f "$SITE" ]]; then
     case "$VORLAGE_ERGEBNIS" in
         ersetzt)  echo "    nginx-Site aktualisiert" ;;
         behalten) hinweis "Die nginx-Site ist von Hand verändert und bleibt so. Neue Fassung:"
-                  hinweis "  /etc/nginx/powermanagement.powermanagement-neu (diff -u $SITE /etc/nginx/powermanagement.powermanagement-neu)" ;;
+                  hinweis "  /etc/nginx/powermanagement.powermanagement-neu (diff -u $SITE /etc/nginx/powermanagement.powermanagement-neu)"
+                  # Grundrisse bis 100 MB brauchen den eigenen Block – ohne ihn
+                  # weist nginx sie mit der Grenze der Site ab (früher 64m).
+                  if ! grep -q 'location = /standorte/grundriss' "$SITE"; then
+                      hinweis "  Darin fehlt der Block für Grundrisse bis 100 MB (location = /standorte/grundriss,"
+                      hinweis "  client_max_body_size 105m) – von dort übernehmen, sonst lehnt nginx große Pläne ab."
+                  fi ;;
     esac
     nginx -t 2>&1 | sed 's/^/    /'
 fi
