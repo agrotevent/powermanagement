@@ -41,11 +41,16 @@ final class VerteilerAbgleichController extends Controller
         $hindernis = LocationSync::hindernis();
         if ($request->bool('holen') && $hindernis === null) {
             // Nur auf Klick: das kostet einen Zugriff auf das Repository.
-            $holen = LocationSync::holen();
+            // Holen und Lesen unter der Sperre der Arbeitskopie – sonst
+            // setzte ein Abgleich im anderen Reiter sie dazwischen zurück.
+            $holen = LocationSync::gesperrt(static function (): array {
+                $holen = LocationSync::holen();
+                return $holen['ok'] ? $holen + ['dort' => VerteilerSync::dort(), 'hinweis' => trim(LocationSync::zweigHinweis())] : $holen;
+            });
             if ($holen['ok']) {
-                $dort = VerteilerSync::dort();
+                $dort = $holen['dort'];
                 $commit = $holen['commit'];
-                $hinweis = trim(LocationSync::zweigHinweis());
+                $hinweis = $holen['hinweis'];
             } else {
                 Flash::error($holen['message']);
             }

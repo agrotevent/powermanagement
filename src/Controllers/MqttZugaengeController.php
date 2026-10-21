@@ -9,6 +9,7 @@ use App\Messung\MqttZugaenge;
 use App\Support\Config;
 use App\Support\Request;
 use App\Support\Response;
+use App\Support\Session;
 
 /**
  * Eigene MQTT-Zugänge der Shellys – Übersicht und Umstellung Gerät für Gerät.
@@ -37,10 +38,11 @@ final class MqttZugaengeController extends Controller
             $filter = '';
         }
         // Bestätigt Node-RED die Schutzliste? Nur fragen, wenn es etwas zu
-        // schützen gibt – das kostet einen Blick auf den Broker.
+        // schützen gibt – das kostet einen Blick auf den Broker (bis 1,5 s,
+        // ohne die Sitzung zu halten).
         $schutz = null;
         if (!Config::isDemo() && $zaehler['eigen'] > 0) {
-            $schutz = MqttZugaenge::schutzStatus();
+            $schutz = Session::ohneSperre(static fn (): ?array => MqttZugaenge::schutzStatus());
         }
         $this->view('mqtt-zugaenge/index', [
             'schutz'    => $schutz,
@@ -81,44 +83,56 @@ final class MqttZugaengeController extends Controller
         if (!$this->erlaubt()) {
             return;
         }
-        $ergebnis = MqttZugaenge::einrichten($request->str('praefix'), $request->int('generation') === 1 ? 1 : 2, $request->bool('von_hand'));
-        $this->ergebnis($request, $ergebnis);
+        $this->ergebnis($request, static fn (): array => MqttZugaenge::einrichten($request->str('praefix'), $request->int('generation') === 1 ? 1 : 2, $request->bool('von_hand')));
     }
 
     public function uebertragen(Request $request): void
     {
         if ($this->erlaubt()) {
-            $this->ergebnis($request, MqttZugaenge::uebertragen($request->int('id')));
+            $this->ergebnis($request, static fn (): array => MqttZugaenge::uebertragen($request->int('id')));
         }
     }
 
     public function pruefen(Request $request): void
     {
         if ($this->erlaubt()) {
-            $this->ergebnis($request, MqttZugaenge::pruefen($request->int('id'), $request->bool('erzwingen')));
+            $this->ergebnis($request, static fn (): array => MqttZugaenge::pruefen($request->int('id'), $request->bool('erzwingen')));
         }
     }
 
     public function erneuern(Request $request): void
     {
         if ($this->erlaubt()) {
-            $this->ergebnis($request, MqttZugaenge::kennwortErneuern($request->int('id')));
+            $this->ergebnis($request, static fn (): array => MqttZugaenge::kennwortErneuern($request->int('id')));
         }
     }
 
     public function entfernen(Request $request): void
     {
         if ($this->erlaubt()) {
-            $this->ergebnis($request, MqttZugaenge::entfernen($request->int('id'), $request->bool('erzwingen')));
+            $this->ergebnis($request, static fn (): array => MqttZugaenge::entfernen($request->int('id'), $request->bool('erzwingen')));
         }
     }
 
     /**
+     * $ablauf ausführen und sein Ergebnis zeigen.
+     *
+     * Die Abläufe warten auf Gerät und Broker – eine Prüfung bis zu einer
+     * halben Minute. Das geschieht ohne Sitzungssperre (Session::ohneSperre()),
+     * sonst stünden alle anderen Anfragen desselben Browsers so lange an.
+     * Zwei Abläufe nebeneinander (Doppelklick, zweiter Reiter) gab es schon
+     * zwischen zwei Bedienern; dafür ändert jeder einen Zugang nur aus dem
+     * Zustand, in dem er ihn gelesen hat (setzen()), und ein Kennwort gilt
+     * erst, wenn der Broker es bei der Kontoprobe annimmt.
+     *
      * Ein Kennwort (Gen1) wird genau einmal gezeigt: direkt in der Antwort,
      * nie in Flash, Sitzung oder Weiterleitung.
+     *
+     * @param callable():array<string,mixed> $ablauf
      */
-    private function ergebnis(Request $request, array $ergebnis): void
+    private function ergebnis(Request $request, callable $ablauf): void
     {
+        $ergebnis = Session::ohneSperre($ablauf);
         if (isset($ergebnis['kennwort'])) {
             $this->view('mqtt-zugaenge/einmalig', [
                 'benutzer' => (string) ($ergebnis['benutzer'] ?? ''),

@@ -45,7 +45,8 @@ $statusText = ['neu' => 'noch nicht hier', 'aktuell' => 'aktuell', 'neuer' => 'd
                     <td data-label="Hier"><span class="badge <?= $l['status'] === 'aktuell' ? 'ok' : ($l['status'] === 'neuer' ? 'warn' : '') ?>"><?= View::e($statusText[$l['status']] ?? $l['status']) ?></span>
                         <?= $l['synced_at'] !== '' ? '<div class="small muted">' . View::e(Zeit::anzeige($l['synced_at'])) . '</div>' : '' ?></td>
                     <td class="right">
-                        <form method="post" action="/location/uebernehmen"><?= Csrf::field() ?><input type="hidden" name="schluessel" value="<?= View::e($l['schluessel']) ?>">
+                        <form method="post" action="/location/uebernehmen" data-laeuft="übernimmt …"
+                              data-laeuft-hinweis="Holt die Location aus dem Repository. Mit Grundrissen kann das einige Minuten dauern. Bitte nicht noch einmal klicken."><?= Csrf::field() ?><input type="hidden" name="schluessel" value="<?= View::e($l['schluessel']) ?>">
                             <button class="btn btn-sm<?= $l['status'] !== 'aktuell' ? ' btn-primary' : '' ?>" type="submit">Übernehmen</button></form>
                     </td>
                 </tr>
@@ -73,7 +74,7 @@ $statusText = ['neu' => 'noch nicht hier', 'aktuell' => 'aktuell', 'neuer' => 'd
                             ? '<div class="muted">' . (int) ($n['mobil'] ?? 0) . ' mobile Anlagen und ' . (int) ($n['mobil_leitungen'] ?? 0) . ' mobile Leitungen bleiben hier</div>' : '' ?></td>
                     <td data-label="Zuletzt" class="small"><?= View::e(Zeit::anzeige($s['synced_at'])) ?></td>
                     <td class="right">
-                        <form method="post" action="/location/hochladen" data-confirm="Feststromanschlüsse von „<?= View::e($s['name']) ?>“ ins gemeinsame Repository hochladen?">
+                        <form method="post" action="/location/hochladen" data-laeuft="lädt hoch …" data-confirm="Feststromanschlüsse von „<?= View::e($s['name']) ?>“ ins gemeinsame Repository hochladen?">
                             <?= Csrf::field() ?><input type="hidden" name="site_id" value="<?= (int) $s['id'] ?>">
                             <button class="btn btn-sm" type="submit"<?= $hindernis !== null ? ' disabled' : '' ?>>Hochladen</button>
                         </form>

@@ -31,13 +31,13 @@ $bereiche = [
     <div class="card-footer btn-row">
         <a class="btn btn-sm<?= $geholt ? '' : ' btn-primary' ?><?= $hindernis !== null ? ' disabled' : '' ?>" href="/verteiler-abgleich?holen=1">Repository abfragen</a>
         <?php if ($geholt && $liste['uebernehmen'] > 0 && ($erlaubt['typ'] || $erlaubt['inventar'])): ?>
-            <form method="post" action="/verteiler-abgleich/uebernehmen" data-confirm="<?= (int) $liste['uebernehmen'] ?> Verteiler aus dem Repository übernehmen (neu oder dort neuer)?">
+            <form method="post" action="/verteiler-abgleich/uebernehmen" data-laeuft="übernimmt …" data-confirm="<?= (int) $liste['uebernehmen'] ?> Verteiler aus dem Repository übernehmen (neu oder dort neuer)?">
                 <?= Csrf::field() ?><input type="hidden" name="alle" value="1">
                 <button class="btn btn-primary btn-sm" type="submit">Alle übernehmen (<?= (int) $liste['uebernehmen'] ?>)</button>
             </form>
         <?php endif; ?>
         <?php if ($geholt && $darfHoch && $liste['hochladen'] > 0): ?>
-            <form method="post" action="/verteiler-abgleich/hochladen" data-confirm="<?= (int) $liste['hochladen'] ?> Verteiler ins Repository hochladen (nur hier oder hier geändert)?">
+            <form method="post" action="/verteiler-abgleich/hochladen" data-laeuft="lädt hoch …" data-confirm="<?= (int) $liste['hochladen'] ?> Verteiler ins Repository hochladen (nur hier oder hier geändert)?">
                 <?= Csrf::field() ?><input type="hidden" name="alle" value="1">
                 <button class="btn btn-primary btn-sm" type="submit">Alle hochladen (<?= (int) $liste['hochladen'] ?>)</button>
             </form>
@@ -81,7 +81,7 @@ $bereiche = [
                         <?php if ($geholt): ?>
                         <div class="btn-row">
                             <?php if (in_array($e['status'], ['neu', 'dort_neuer', 'beide'], true) && $erlaubt[$bereich]): ?>
-                                <form method="post" action="/verteiler-abgleich/uebernehmen"<?= $e['status'] === 'beide' ? ' data-confirm="„' . View::e($e['titel']) . '“ aus dem Repository übernehmen? Was hier geändert wurde, geht verloren."' : '' ?>>
+                                <form method="post" action="/verteiler-abgleich/uebernehmen" data-laeuft="übernimmt …"<?= $e['status'] === 'beide' ? ' data-confirm="„' . View::e($e['titel']) . '“ aus dem Repository übernehmen? Was hier geändert wurde, geht verloren."' : '' ?>>
                                     <?= Csrf::field() ?><input type="hidden" name="bereich" value="<?= View::e($bereich) ?>"><input type="hidden" name="schluessel" value="<?= View::e($e['schluessel']) ?>">
                                     <button class="btn btn-sm<?= $e['status'] !== 'beide' ? ' btn-primary' : '' ?>" type="submit">Übernehmen</button>
                                 </form>
@@ -92,13 +92,13 @@ $bereiche = [
                                     'dort_entfernt' => '„' . $e['titel'] . '“ wurde aus dem Repository entfernt. Wieder hochladen?',
                                     default         => '',
                                 }; ?>
-                                <form method="post" action="/verteiler-abgleich/hochladen"<?= $frage !== '' ? ' data-confirm="' . View::e($frage) . '"' : '' ?>>
+                                <form method="post" action="/verteiler-abgleich/hochladen" data-laeuft="lädt hoch …"<?= $frage !== '' ? ' data-confirm="' . View::e($frage) . '"' : '' ?>>
                                     <?= Csrf::field() ?><input type="hidden" name="bereich" value="<?= View::e($bereich) ?>"><input type="hidden" name="schluessel" value="<?= View::e($e['schluessel']) ?>">
                                     <button class="btn btn-sm<?= in_array($e['status'], ['nur_hier', 'hier_neuer'], true) ? ' btn-primary' : '' ?>" type="submit">Hochladen</button>
                                 </form>
                             <?php endif; ?>
                             <?php if (in_array($e['status'], $dortDa, true) && $darfHoch): ?>
-                                <form method="post" action="/verteiler-abgleich/entfernen" data-confirm="„<?= View::e($e['titel']) ?>“ aus dem Repository entfernen? Hier bleibt es stehen; die anderen Installationen behalten ihre Kopie.">
+                                <form method="post" action="/verteiler-abgleich/entfernen" data-laeuft="entfernt …" data-confirm="„<?= View::e($e['titel']) ?>“ aus dem Repository entfernen? Hier bleibt es stehen; die anderen Installationen behalten ihre Kopie.">
                                     <?= Csrf::field() ?><input type="hidden" name="bereich" value="<?= View::e($bereich) ?>"><input type="hidden" name="schluessel" value="<?= View::e($e['schluessel']) ?>">
                                     <button class="btn btn-sm btn-ghost" type="submit" title="Aus dem Repository entfernen">Entfernen</button>
                                 </form>
