@@ -17,8 +17,10 @@ require __DIR__ . '/hilfen/pruefung.php';
 require __DIR__ . '/hilfen/grundriss-dateien.php';
 require __DIR__ . '/hilfen/nginx-vorlage.php';
 
+use App\Kunden\Pruefnachweise;
 use App\Services\AnlagenService;
 use App\Services\BildPdf;
+use App\Services\KatalogImport;
 use App\Services\LocationBundle;
 use App\Services\PdfRasterService;
 use App\Services\PlanTileService;
@@ -67,6 +69,13 @@ try {
         && !str_contains($block('~ ^/index\\.php$'), 'client_max_body_size') && $block('~ ^/index\\.php$') !== ''
         && preg_match('#\n    client_max_body_size 16m;#', $site) === 1,
         'nginx-Vorlage: Grundriss (105m) und Schnittstelle (50m) mit eigenem FastCGI-Block, index.php mit der Grenze der Site (16m)');
+    // Die übrigen Uploads (Prüfnachweise des Kundenbereichs, Katalog-Import)
+    // bleiben mit Rand für die Formularfelder unter der Grenze der Site –
+    // sonst käme statt der Meldung der App die 413-Seite von nginx.
+    $siteGrenze = preg_match('#\n    client_max_body_size (\d+)m;#', $site, $m) === 1 ? (int) $m[1] * 1024 * 1024 : 0;
+    pruefe(Pruefnachweise::MAX_BYTES + 1024 * 1024 <= $siteGrenze && KatalogImport::GROESSE + 1024 * 1024 <= $siteGrenze,
+        sprintf('Prüfnachweise (%s) und Katalog-Import (%s) unter der Grenze der Site (%s)', SiteService::mb(Pruefnachweise::MAX_BYTES),
+            SiteService::mb(KatalogImport::GROESSE), SiteService::mb($siteGrenze)));
 
     // ------------------------------------------------ Prüfung beim Hochladen
     $vorher = $planDateien();
@@ -151,6 +160,8 @@ try {
     $ng = pruefNginxGrenzen(dirname(__DIR__) . '/deploy/nginx-powermanagement.conf', $tmp, [
         'login'         => ['/login', 17 * $mib, false],
         'login-stuecke' => ['/login', 17 * $mib, true],
+        'nachweis-11'   => ['/kunden/1/nachweise/hochladen', 11 * $mib, true],
+        'nachweis-17'   => ['/kunden/1/nachweise/hochladen', 17 * $mib, false],
         'api-stuecke'   => ['/api/v1/locations/x/vorschlaege', 51 * $mib, true],
         'api-20'        => ['/api/v1/locations/x/vorschlaege', 20 * $mib, true],
         'plan-100'      => ['/standorte/grundriss', 100 * $mib, true],
@@ -159,8 +170,10 @@ try {
     if ($ng === null) {
         fwrite(STDOUT, "  (ohne nginx: Grenzen der Vorlage im Betrieb übersprungen – das prüft tests/installation-debian.sh)\n");
     } elseif ($ng !== []) {
-        gleich(array_map(static fn (array $r): int => $r[0], $ng), ['login' => 413, 'login-stuecke' => 413, 'api-stuecke' => 413, 'api-20' => 502, 'plan-100' => 502, 'plan-106' => 413],
-            'nginx mit der Vorlage (502 = an PHP weitergereicht): 16m für /login, 50m für /api/, 105m nur für den Grundriss – auch in Stücken (chunked)');
+        gleich(array_map(static fn (array $r): int => $r[0], $ng), ['login' => 413, 'login-stuecke' => 413, 'nachweis-11' => 502, 'nachweis-17' => 413,
+            'api-stuecke' => 413, 'api-20' => 502, 'plan-100' => 502, 'plan-106' => 413],
+            'nginx mit der Vorlage (502 = an PHP weitergereicht): 16m für /login und Prüfnachweise (11 MB durch, die App meldet die Größe), 50m für /api/, '
+            . '105m nur für den Grundriss – auch in Stücken (chunked)');
         pruefe(str_contains($ng['api-stuecke'][1], '"ok":false') && str_contains($ng['plan-106'][1], 'Grundrisse lassen sich bis 100 MB hochladen'),
             'nginx: 413 in Stücken mit der eigenen Antwort (JSON für /api/, Seite für den Grundriss)');
     }

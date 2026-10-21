@@ -180,10 +180,12 @@ document.addEventListener('DOMContentLoaded', function () {
     /*
      * Dateifelder mit Größengrenze: `data-max-bytes` (und `data-max-text`
      * für die Meldung) – beim Grundriss die Grenze, die der Server
-     * wirklich annimmt (SiteService::uploadGrenze). Geprüft wird beim
-     * Auswählen, also bevor 100 MB über eine langsame Leitung gehen, um
-     * dann abgewiesen zu werden. Die Meldung steht unter dem Feld, und
-     * setCustomValidity hält das Formular an.
+     * wirklich annimmt (SiteService::uploadGrenze), beim Prüfnachweis
+     * Pruefnachweise::MAX_BYTES (über 16 MB stünde sonst die englische
+     * 413-Seite von nginx da). Geprüft wird beim Auswählen, also bevor
+     * 100 MB über eine langsame Leitung gehen, um dann abgewiesen zu
+     * werden. Die Meldung steht unter dem Feld, und setCustomValidity hält
+     * das Formular an.
      *
      * Steht vor `data-confirm` und `data-laeuft` (weiter unten): Ihre
      * submit-Zuhörer hängen am selben Formular und laufen in der

@@ -819,7 +819,7 @@ muss jede Stufe davor mindestens so viel annehmen:
 | PHP-FPM-Pool | `upload_max_filesize` / `post_max_size` | `100M` / `105M` (der Rest für die übrigen Formularfelder) |
 | nginx, `location = /standorte/grundriss` | `client_max_body_size` | `105m` |
 | nginx, `location ^~ /api/` | `client_max_body_size` | `50m` (die App nimmt höchstens 48 MiB an) |
-| nginx, alles andere | `client_max_body_size` | `16m` (Formulare, Katalog-Import bis 5 MB) |
+| nginx, alles andere | `client_max_body_size` | `16m` (Formulare, Katalog-Import bis 5 MB, Prüfnachweise bis 10 MB) |
 | Proxy oder Tunnel davor | seine eigene Grenze | siehe unten |
 
 Die beiden Blöcke für `/standorte/grundriss` und `/api/` reichen die
