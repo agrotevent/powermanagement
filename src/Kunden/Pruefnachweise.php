@@ -457,6 +457,12 @@ final class Pruefnachweise
      * Jede Datei sagt, ob sie schon übernommen ist (für diesen oder einen
      * anderen Kunden).
      *
+     * Update: dokumente_am wird ohne neue Frage nach der Schreibsperre
+     * geschrieben. Davor wartet es höchstens 42 s auf Eventworx (job/<id>
+     * zweimal – Nachlesen bei data:null –, dann file/list, je bis 12 s und
+     * bis 2 s Drossel). So lange wartet ein Update allemal auf die Anfrage,
+     * die sich an der Tür angemeldet hat (wartung_an, 150 s).
+     *
      * @return array{ok:bool,message:string,vorgang?:array<string,mixed>,dateien:list<array<string,mixed>>,mehr:bool}
      */
     public static function eventworxKandidaten(int $kundeId, int $vorgangId): array

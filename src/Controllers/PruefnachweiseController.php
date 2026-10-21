@@ -34,9 +34,12 @@ use App\Support\Session;
  * inzwischen begonnen, steht die Liste mit Auswahl und Angaben wieder da.
  * Hochladen fragt nicht noch einmal: Die Datei kommt bei nginx an, bevor
  * PHP startet (fastcgi_request_buffering), die Tür prüft danach, und
- * gespeichert ist sie gleich darauf – ohne Warten dazwischen. Die Suche und
- * die Dateiliste schreiben nur in die Sitzung, die ein Zurückrollen nicht
- * anfasst.
+ * gespeichert ist sie gleich darauf – ohne Warten dazwischen. Die Dateiliste
+ * (eventworx) fragt auch nicht noch einmal: Sie merkt sich die Dateien nur in
+ * der Sitzung, schreibt aber nach dem Warten auf Eventworx
+ * kunden_vorgaenge.dokumente_am – nach höchstens 42 s (job/<id> zweimal,
+ * file/list, je bis 12 s und 2 s Drossel). So lange wartet das Update
+ * allemal (150 s; nachgerechnet in tests/pruefnachweise.php).
  */
 final class PruefnachweiseController extends Controller
 {
