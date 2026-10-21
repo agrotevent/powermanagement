@@ -14,11 +14,13 @@ declare(strict_types=1);
  * Zustände (dort/hier/beide geändert, verknüpft – noch nicht übernommen),
  * Zuordnen auf einen vorhandenen Standort (Namen, Schaltsperre, Messpunkte,
  * Einsätze, mobile Kabel und Georeferenz hier bleiben, nichts wandert von
- * einem anderen Standort herüber), die Rechte in B, Lösen, Widerrufen und
- * neues Token, die Meldungen bei Verbindungsfehlern und MasterAdmin als A
- * (Http-Attrappe mit dem Format von dort). Dazu die Oberfläche in B mit
- * Anmeldung und CSRF-Token, und welche Wege zurück sie je nach Befugnis
- * anbietet.
+ * einem anderen Standort herüber), ein fester Tank (der Inhalt je mm nur für
+ * einen neuen, ohne Herkunft; auf einer Seite gelernt, ändert er keinen
+ * Zustand und ist im Vorschlag kein „geändert“), die Rechte in B, Lösen,
+ * Widerrufen und neues Token, die Meldungen bei Verbindungsfehlern und
+ * MasterAdmin als A (Http-Attrappe mit dem Format von dort). Dazu die
+ * Oberfläche in B mit Anmeldung und CSRF-Token, und welche Wege zurück sie
+ * je nach Befugnis anbietet.
  */
 
 require __DIR__ . '/hilfen/pruefung.php';
@@ -844,6 +846,64 @@ try {
         PHP, ['unbenutzt' => $unbenutzt, 'pid' => $pid, 'key' => $halleKey]);
     pruefe($r[0]['ok'] && $r[1] === 0, 'B übernimmt eine Steckertyp-Liste mit einem unbenutzten Typ: er landet nicht im Katalog – ' . $r[0]['message']);
 
+    // ================================================= Tanks: was die Kennlinie gelernt hat, bleibt auf jeder Seite
+    // Ein fester Tank geht mit „feststrom“ hinüber, der Inhalt je mm nur als
+    // Anfangswert für einen neuen Tank dort – seine Herkunft (Zeit und Menge
+    // einer Peilung oder Betankung) nie. Lernt eine Seite ihn neu, ist das
+    // keine Änderung an der Location: Übernehmen, Annehmen und Hochladen
+    // ließen ihn ohnehin, wie er ist (TankService::KENNLINIE_HIER).
+    $tankA = (int) AnlagenService::speichern(null, ['art' => 'tank', 'fest' => 1, 'name' => $marke . ' Bodentank', 'floor_id' => $f1, 'plan_x' => 66, 'plan_y' => 20,
+        'eigenschaften' => ['inhalt_l' => '5000', 'bauform' => 'Quader', 'liter_je_mm' => '4,2', 'liter_je_mm_herkunft' => 'Betankung 20.10.2026 06:00 (528 l)']])['id'];
+    $tankKey = LocationBundle::schluesselSichern('objekte', $tankA, $marke . ' Bodentank');
+    $tankDetail = static function () use ($basisA, $halleKey, $token, $tankKey): ?array {
+        $anlagen = (array) (api($basisA, 'GET', '/api/v1/locations/' . $halleKey, $token)['json']['strom']['anlagen'] ?? []);
+        return array_values(array_filter($anlagen, static fn (array $x): bool => ($x['schluessel'] ?? '') === $tankKey))[0] ?? null;
+    };
+    $tankHinaus = $tankDetail();
+    pruefe($tankHinaus !== null && $tankHinaus['art'] === 'tank' && (float) ($tankHinaus['eigenschaften']['liter_je_mm'] ?? 0) === 4.2
+        && !array_key_exists('liter_je_mm_herkunft', (array) $tankHinaus['eigenschaften']),
+        'Schnittstelle: der feste Tank geht mit dem Inhalt je mm hinaus, ohne seine Herkunft (Betankung)');
+    $bTankLesen = static fn (): ?array => inBAls(null, 'return Database::first("SELECT id, art, eigenschaften FROM objekte WHERE site_id = ? AND partner_schluessel = ?", [$s, $k]);',
+        ['s' => $bHalle, 'k' => $tankKey]);
+    inBAls($bAdmin, 'return PartnerAbgleich::uebernehmen(PartnerService::find($pid), $key, null, null, true);', ['pid' => $pid, 'key' => $halleKey]);
+    $bTank = $bTankLesen();
+    $bEig = json_decode((string) ($bTank['eigenschaften'] ?? ''), true) ?: [];
+    pruefe($bTank !== null && $bTank['art'] === 'tank' && (float) ($bEig['liter_je_mm'] ?? 0) === 4.2 && !array_key_exists('liter_je_mm_herkunft', $bEig),
+        'B übernimmt: neuer Tank mit dem Inhalt je mm von dort, ohne die Herkunft von dort');
+    gleich($zustand($halleKey), 'aktuell', '… danach aktuell');
+    $bTankId = (int) ($bTank['id'] ?? 0);
+    inBAls(null, 'return AnlagenService::eigenschaftSetzen($id, ["liter_je_mm" => 3.9, "liter_je_mm_herkunft" => "Peilung 21.10.2026 10:00 (Peilstab 650 mm)"], true);',
+        ['id' => $bTankId]);
+    gleich($zustand($halleKey), 'aktuell', 'B lernt aus einer Peilung einen anderen Inhalt je mm → weiter aktuell (zurückschicken änderte ihn dort nicht)');
+    AnlagenService::eigenschaftSetzen($tankA, ['liter_je_mm' => 4.4, 'liter_je_mm_herkunft' => 'Betankung 21.10.2026 06:00 (612 l)'], true);
+    gleich($zustand($halleKey), 'aktuell', 'A lernt aus einer Betankung einen anderen Inhalt je mm → weiter aktuell (übernehmen änderte ihn hier nicht)');
+    $eigA = (array) AnlagenService::find($tankA)['eigenschaften'];
+    AnlagenService::eigenschaftSetzen($tankA, ['inhalt_l' => 5200], true);
+    gleich($zustand($halleKey), 'dort', 'A ändert das Nennvolumen → dort geändert');
+    inBAls($bAdmin, 'return PartnerAbgleich::uebernehmen(PartnerService::find($pid), $key, null, null, true);', ['pid' => $pid, 'key' => $halleKey]);
+    $bEig = json_decode((string) ($bTankLesen()['eigenschaften'] ?? ''), true) ?: [];
+    gleich([(float) ($bEig['inhalt_l'] ?? 0), (float) ($bEig['liter_je_mm'] ?? 0), $bEig['liter_je_mm_herkunft'] ?? null, $zustand($halleKey)],
+        [5200.0, 3.9, 'Peilung 21.10.2026 10:00 (Peilstab 650 mm)', 'aktuell'], 'B übernimmt: Nennvolumen von dort, der Inhalt je mm von hier samt Herkunft bleibt, aktuell');
+    // Zurückschicken: der Tank geht ohne Herkunft mit, A sieht an ihm keine Änderung, Annehmen lässt A seinen Wert
+    $mitBefugnis(['plaene.vorschlagen', 'feststrom']);
+    $r = inBAls($bAdmin, 'return PartnerAbgleich::zurueckschicken($halle, "Tank gepeilt", false, "vorschlag");', ['halle' => $bHalle]);
+    $v = \App\Services\VorschlagService::find((int) ($r['id'] ?? 0));
+    $tankVorschlag = array_values(array_filter((array) ($v['daten']['strom']['anlagen'] ?? []), static fn (array $x): bool => ($x['schluessel'] ?? '') === $tankKey))[0] ?? null;
+    pruefe($r['ok'] && $tankVorschlag !== null && (float) ($tankVorschlag['eigenschaften']['liter_je_mm'] ?? 0) === 3.9
+        && !array_key_exists('liter_je_mm_herkunft', (array) $tankVorschlag['eigenschaften']),
+        'zurückgeschickt: der Tank mit dem Inhalt je mm von B, ohne seine Herkunft (Peilung) – ' . $r['message']);
+    $u = $v !== null ? \App\Services\VorschlagService::unterschiede($v) : [];
+    $uF1 = array_values(array_filter((array) ($u['etagen'] ?? []), static fn (array $e): bool => $e['schluessel'] === $f1Key))[0] ?? [];
+    pruefe(is_array($uF1['anlagen'] ?? null) && !in_array($marke . ' Bodentank', array_merge($uF1['anlagen']['geaendert'], $uF1['anlagen']['neu']), true),
+        'A: im Vorschlag ist der Tank nicht „geändert“ – nur der Inhalt je mm weicht ab, und der bliebe hier');
+    $standVorher = $standA($halleKey, $token);
+    $a = \App\Services\VorschlagService::annehmen((int) ($r['id'] ?? 0), [$f1Key], ['feststrom']);
+    $eigNach = (array) AnlagenService::find($tankA)['eigenschaften'];
+    gleich([$a['ok'], (float) ($eigNach['liter_je_mm'] ?? 0), $eigNach['liter_je_mm_herkunft'] ?? null, (float) ($eigNach['inhalt_l'] ?? 0)],
+        [true, (float) $eigA['liter_je_mm'], $eigA['liter_je_mm_herkunft'], 5200.0], 'A nimmt an: Inhalt je mm und Herkunft von A bleiben');
+    gleich($standA($halleKey, $token), $standVorher, '… und der Stand dort ändert sich nicht');
+    $mitBefugnis(['plaene.schreiben', 'feststrom']);
+
     // Schlüssel, wie ältere Fassungen sie vergaben: „-“ am Ende, „-2“ hinter 64 Zeichen
     $altSite = substr(str_replace('-', '', $marke) . str_repeat('s', 70), 0, 63) . '-';
     $altEtage = substr(str_replace('-', '', $marke) . str_repeat('e', 70), 0, 64) . '-2';
@@ -888,8 +948,8 @@ try {
     pruefe($r['l']['ok'] && !$r['nochmal']['ok'], 'Lösen: ' . $r['l']['message']);
     gleich($r['site'], ['partner_id' => null, 'partner_schluessel' => '', 'partner_stand' => '', 'partner_hash' => '', 'partner_at' => null], 'Lösen leert die Verknüpfung am Standort');
     pruefe(array_unique(array_merge($r['floors'], $r['objekte'], $r['leitungen'])) === [''], '… an Etagen, Anlagen und Kabeln');
-    // Hausanschluss, Säule, die drei Anlagen, die B selbst dazugelegt hat, und die mobil gemachte
-    pruefe($r['zahl'][0] === $r['zahl'][1] && $r['zahl'][0] === 6, '… die Daten bleiben');
+    // Hausanschluss, Säule, Bodentank, die drei Anlagen, die B selbst dazugelegt hat, und die mobil gemachte
+    pruefe($r['zahl'][0] === $r['zahl'][1] && $r['zahl'][0] === 7, '… die Daten bleiben');
     gleich($r['zustand'], 'passt', 'danach passt die Location wieder zum Standort (gleicher Name)');
 
     ApiZugaenge::widerrufen($tokenIds[0]);

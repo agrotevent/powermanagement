@@ -9,6 +9,7 @@ use App\Support\Audit;
 use App\Support\Database;
 use App\Support\Session;
 use App\Support\Zeit;
+use App\Tanks\TankService;
 
 /**
  * Messgeräte in Anlagen.
@@ -22,6 +23,11 @@ use App\Support\Zeit;
  * Die „Auswertung“ ist eine Auswahl von Messpunkten, die in der Sitzung
  * liegt: ein Klick auf ein Messgerät in Karte oder Verteilerplan nimmt es
  * auf, die Statistikseite zeigt alles Aufgenommene nebeneinander.
+ *
+ * Den Füllstand eines Tanks misst ein Tanksensor aus dem Inventar (Rolle
+ * „fuellstand“, entsteht beim Einsetzen). Von Hand gibt es diese Rolle
+ * nicht, und am Tank keinen Messpunkt von Hand – sonst rechnete ein
+ * Messpunkt ohne Kennlinie mit.
  */
 final class MesspunktService
 {
@@ -31,7 +37,11 @@ final class MesspunktService
         'verbrauch'   => 'Verbraucher',
         'erzeugung'   => 'Erzeugung',
         'batterie'    => 'Batterie',
+        'fuellstand'  => 'Füllstand (Tank)',
     ];
+
+    /** Rollen, die nur über das Inventar entstehen (Tanksensor) – nie von Hand, nie aus einer Datei. */
+    public const NUR_INVENTAR = ['fuellstand'];
 
     public const SITZUNG = 'auswertung';
 
@@ -122,6 +132,13 @@ final class MesspunktService
         if ($geraet === '') {
             return ['ok' => false, 'message' => 'Bitte ein Gerät wählen.'];
         }
+        $art = Database::scalar('SELECT art FROM objekte WHERE id = ?', [$objektId]);
+        if ($art !== false && $art !== null && !AnlagenService::elektrisch((string) $art)) {
+            return ['ok' => false, 'message' => 'Am Tank misst ein Tanksensor aus dem Inventar.'];
+        }
+        if (in_array((string) ($daten['rolle'] ?? ''), self::NUR_INVENTAR, true)) {
+            return ['ok' => false, 'message' => 'Einen Füllstand misst ein Tanksensor aus dem Inventar – dort anlegen und in den Tank einsetzen.'];
+        }
         // Gerät und Kanal landen in MQTT-Themen und InfluxDB-Abfragen.
         if (!self::kennungGueltig($geraet) || ($kanal !== '' && !self::kennungGueltig($kanal))) {
             return ['ok' => false, 'message' => 'Gerät und Kanal: keine Leer-, Steuer- oder Sonderzeichen wie + # < > " \'.'];
@@ -175,6 +192,7 @@ final class MesspunktService
     {
         if (Database::execute('DELETE FROM messpunkte WHERE id = ? AND objekt_id = ?', [$id, $objektId]) > 0) {
             BereichService::messpunktEntfernt($id);
+            TankService::messpunktEntfernt($id);
         }
         self::ausAuswertung($id);
         Zugriff::vergessen();
@@ -182,9 +200,10 @@ final class MesspunktService
         return ['ok' => true, 'message' => 'Messgerät entfernt.'];
     }
 
-    /** Der Messpunkt, der für die ganze Anlage steht (Einspeisung bzw. Erzeugung). */
+    /** Der Messpunkt, der für die ganze Anlage steht (Einspeisung bzw. Erzeugung) – ein Füllstand nie. */
     public static function haupt(array $messpunkte): ?array
     {
+        $messpunkte = array_values(array_filter($messpunkte, static fn (array $m): bool => !in_array($m['rolle'] ?? '', self::NUR_INVENTAR, true)));
         foreach (['einspeisung', 'erzeugung', 'batterie', 'verbrauch', 'abgang'] as $rolle) {
             foreach ($messpunkte as $m) {
                 if ($m['rolle'] === $rolle && $m['anschluss_id'] === null) {
@@ -252,7 +271,9 @@ final class MesspunktService
 
     /**
      * Livewerte für eine Liste von Messpunkten – nur, wo der Benutzer jetzt
-     * Daten sehen darf.
+     * Daten sehen darf. Ein Füllstand gehört nicht dazu: Sein Rohwert hat
+     * erst mit der Kennlinie eine Bedeutung, und Gen2 meldet ihn nur bei
+     * Änderung – das 15-Minuten-Fenster hier passt nicht.
      *
      * @param list<array<string,mixed>> $messpunkte
      * @param array<int,array<string,mixed>> $objekte objekt_id => Objekt (für das Datenfenster)
@@ -262,6 +283,9 @@ final class MesspunktService
     {
         $erlaubt = [];
         foreach ($messpunkte as $m) {
+            if (in_array($m['rolle'] ?? '', self::NUR_INVENTAR, true)) {
+                continue;
+            }
             $objekt = $objekte[(int) $m['objekt_id']] ?? null;
             if ($objekt !== null && Zugriff::liveErlaubt(Zugriff::datenFenster($objekt))) {
                 $erlaubt[] = $m;

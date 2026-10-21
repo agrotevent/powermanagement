@@ -563,6 +563,122 @@ pruefe('Shelly Gen2 Geräteinfo nach einem Neustart: Thema im Baum ordnet zu, al
     assert.equal(flow.get('gen2_rpc'), undefined, 'Antwort ohne Anfrage hat den Kontext verändert');
 });
 
+// Zustands-Zeilen einer Gen2+-Meldung (ohne den Geräteeintrag beim ersten
+// Sehen)
+function gen2Zustand(gen2, thema, nutzlast) {
+    const [aus] = gen2.lauf({ topic: thema, payload: JSON.stringify(nutzlast) });
+    return zeilenAus(aus).filter((z) => !z.startsWith('geraet,'));
+}
+
+pruefe('Shelly Gen2 voltmeter:100 ergibt u, x und sensorfehler=0', () => {
+    const gen2 = funktion('Shelly Gen2+ übersetzen');
+    const thema = 'shellyplusuni-a0b1c2/status/voltmeter:100';
+    const g = 'zustand,geraet=shellyplusuni-a0b1c2,kanal=voltmeter:100,typ=shelly';
+    assert.deepEqual(gen2Zustand(gen2, thema, { id: 100, voltage: 4.321, xvoltage: 12.34 }),
+        [`${g} u=4.321,x=12.34,sensorfehler=0 ${T()}`]);
+    // ohne Ausdruck am Gerät (xvoltage null) nur u; 0 V ist ein Messwert,
+    // kein Fehler – ob 0 V „leer“ oder „Leitungsbruch“ heißt, sagt die Kennlinie
+    assert.deepEqual(gen2Zustand(gen2, thema, { id: 100, voltage: 2.0, xvoltage: null }),
+        [`${g} u=2,sensorfehler=0 ${T()}`]);
+    assert.deepEqual(gen2Zustand(gen2, thema, { id: 100, voltage: 0 }), [`${g} u=0,sensorfehler=0 ${T()}`]);
+    // auch unter shelly/<name>
+    assert.deepEqual(gen2Zustand(gen2, 'shelly/tank-1/status/voltmeter:100', { id: 100, voltage: 6 }),
+        [`zustand,geraet=tank-1,kanal=voltmeter:100,typ=shelly u=6,sensorfehler=0 ${T()}`]);
+});
+
+pruefe('Shelly Gen2 voltmeter mit errors oder voltage null: nur sensorfehler=1', () => {
+    const gen2 = funktion('Shelly Gen2+ übersetzen');
+    const thema = 'shellyplusuni-a0b1c2/status/voltmeter:100';
+    const g = 'zustand,geraet=shellyplusuni-a0b1c2,kanal=voltmeter:100,typ=shelly';
+    for (const nutzlast of [
+        { id: 100, voltage: null, errors: ['out_of_range'] },
+        { id: 100, voltage: null },
+        { id: 100, voltage: null, xvoltage: null },
+        // ein Wert neben errors gilt nicht – kein Schein-Messwert
+        { id: 100, voltage: 12.5, xvoltage: 3, errors: ['out_of_range'] },
+        { id: 100, voltage: '6.4' },
+        { id: 100 },
+    ]) {
+        assert.deepEqual(gen2Zustand(gen2, thema, nutzlast), [`${g} sensorfehler=1 ${T()}`], JSON.stringify(nutzlast));
+    }
+    // leere Fehlerliste ist kein Fehler; die nächste gute Meldung setzt
+    // sensorfehler wieder auf 0 (kein „klebender“ Fehler)
+    assert.deepEqual(gen2Zustand(gen2, thema, { id: 100, voltage: 6.02, errors: [] }), [`${g} u=6.02,sensorfehler=0 ${T()}`]);
+});
+
+pruefe('Shelly Gen2 input:100 analog: eingang, x, sensorfehler=0', () => {
+    const gen2 = funktion('Shelly Gen2+ übersetzen');
+    const thema = 'shellyplus1-a0b1c2/status/input:100';
+    const g = 'zustand,geraet=shellyplus1-a0b1c2,kanal=input:100,typ=shelly';
+    assert.deepEqual(gen2Zustand(gen2, thema, { id: 100, percent: 89, xpercent: 8.9 }),
+        [`${g} eingang=89,x=8.9,sensorfehler=0 ${T()}`]);
+    assert.deepEqual(gen2Zustand(gen2, thema, { id: 100, percent: 0, xpercent: null }),
+        [`${g} eingang=0,sensorfehler=0 ${T()}`]);
+});
+
+pruefe('Shelly Gen2 input:100 analog percent null: sensorfehler=1', () => {
+    const gen2 = funktion('Shelly Gen2+ übersetzen');
+    const thema = 'shellyplus1-a0b1c2/status/input:100';
+    const g = 'zustand,geraet=shellyplus1-a0b1c2,kanal=input:100,typ=shelly';
+    for (const nutzlast of [
+        { id: 100, percent: null },
+        { id: 100, percent: null, xpercent: null, errors: ['out_of_range'] },
+        { id: 100, percent: 64.2, xpercent: 6.4, errors: ['read'] },
+        { id: 100, errors: ['read'] },
+    ]) {
+        assert.deepEqual(gen2Zustand(gen2, thema, nutzlast), [`${g} sensorfehler=1 ${T()}`], JSON.stringify(nutzlast));
+    }
+    assert.deepEqual(gen2Zustand(gen2, thema, { id: 100, percent: 64.2 }), [`${g} eingang=64.2,sensorfehler=0 ${T()}`]);
+});
+
+pruefe('Shelly Gen2 input:0 digital bleibt bei eingang 1/0', () => {
+    const gen2 = funktion('Shelly Gen2+ übersetzen');
+    const thema = 'shellyplusi4-a0b1c2/status/input:0';
+    const g = 'zustand,geraet=shellyplusi4-a0b1c2,kanal=input:0,typ=shelly';
+    assert.deepEqual(gen2Zustand(gen2, thema, { id: 0, state: true }), [`${g} eingang=1 ${T()}`]);
+    assert.deepEqual(gen2Zustand(gen2, thema, { id: 0, state: false }), [`${g} eingang=0 ${T()}`]);
+    // Digitaleingang am Add-on (input:100) ebenso, ohne sensorfehler
+    assert.deepEqual(gen2Zustand(gen2, 'shellyplus1-a0b1c2/status/input:100', { id: 100, state: true }),
+        [`zustand,geraet=shellyplus1-a0b1c2,kanal=input:100,typ=shelly eingang=1 ${T()}`]);
+});
+
+pruefe('Shelly Gen2 input als Taster oder Zähler: keine Zeile, kein Sensorfehler', () => {
+    // Taster (state null) und Zählereingang (Plus Uni input:2) gehören nicht
+    // zu den Tanksensoren – sie bekommen weder eingang noch einen
+    // Schein-Sensorfehler.
+    const gen2 = funktion('Shelly Gen2+ übersetzen');
+    assert.deepEqual(gen2Zustand(gen2, 'shellyplusi4-a0b1c2/status/input:1', { id: 1, state: null }), []);
+    assert.deepEqual(gen2Zustand(gen2, 'shellyplusuni-a0b1c2/status/input:2',
+        { id: 2, counts: { total: 56174, xtotal: 561.74 }, freq: 208.0, xfreq: 6.11 }), []);
+    assert.deepEqual(gen2Zustand(gen2, 'shellyplusuni-a0b1c2/status/input:2',
+        { id: 2, counts: { total: 56174 }, errors: ['read'] }), []);
+});
+
+pruefe('Shelly Gen2 temperature:100 ergibt temperatur', () => {
+    const gen2 = funktion('Shelly Gen2+ übersetzen');
+    assert.deepEqual(gen2Zustand(gen2, 'shellyplusuni-a0b1c2/status/temperature:100', { id: 100, tC: 4.5, tF: 40.1 }),
+        [`zustand,geraet=shellyplusuni-a0b1c2,kanal=temperature:100,typ=shelly temperatur=4.5 ${T()}`]);
+    assert.deepEqual(gen2Zustand(gen2, 'shellyplusuni-a0b1c2/status/temperature:100', { id: 100, tC: null, tF: null }), []);
+});
+
+pruefe('Shelly Gen2 voltmeter: Doppelgänger eines geschützten Geräts verworfen', () => {
+    const global = speicher();
+    global.set('mqtt_geschuetzt', { 'shellyplusuni-a0b1c2': 'shellyplusuni-a0b1c2' });
+    const gen2 = funktion('Shelly Gen2+ übersetzen', { global });
+    const nutzlast = JSON.stringify({ id: 100, voltage: 0.5 });
+    // Präfixe, die denselben Gerätenamen ergeben, und ein fremder Baum
+    for (const thema of [
+        'shelly/shellyplusuni-a0b1c2/status/voltmeter:100',
+        'SHELLYPLUSUNI-A0B1C2/status/voltmeter:100',
+        'fremd/shellyplusuni-a0b1c2/status/voltmeter:100',
+    ]) {
+        assert.deepEqual(gen2.lauf({ topic: thema, payload: nutzlast }), [[], []], thema);
+    }
+    // das eigene Präfix geht durch
+    assert.deepEqual(gen2Zustand(gen2, 'shellyplusuni-a0b1c2/status/voltmeter:100', { id: 100, voltage: 6 }),
+        [`zustand,geraet=shellyplusuni-a0b1c2,kanal=voltmeter:100,typ=shelly u=6,sensorfehler=0 ${T()}`]);
+});
+
 pruefe('Shelly Gen1: Relais – energy in Wattminuten wird zu Wh, Schaltzustand 1/0', () => {
     const gen1 = funktion('Shelly Gen1 übersetzen');
     const zeilen = [
@@ -622,6 +738,26 @@ pruefe('Shelly Gen1: announce ergibt einen Geräteeintrag mit generation=1', () 
     assert.deepEqual(zeilenAus(aus), [
         `geraet,geraet=shellyem3-a1b2c3,typ=shelly generation=1,praefix="shellies/shellyem3-A1B2C3",modell="SHEM-3",firmware="20230913-114244/v1.14.0-gcb84623",mac="A0B1C2A1B2C3",ip="192.168.10.23" ${T()}`,
     ]);
+});
+
+pruefe('Shelly Gen1 Uni: adc/0 ergibt Kanal adc:0 mit u', () => {
+    const gen1 = funktion('Shelly Gen1 übersetzen');
+    const zustand = (thema, text) => zeilenAus(gen1.lauf({ topic: thema, payload: text })[0])
+        .filter((z) => z.startsWith('zustand,'));
+    assert.deepEqual(zustand('shellies/shellyuni-a1b2c3/adc/0', '6.42'),
+        [`zustand,geraet=shellyuni-a1b2c3,kanal=adc:0,typ=shelly u=6.42 ${T()}`]);
+    assert.deepEqual(zustand('shellies/shellyuni-a1b2c3/adc/0', ' 0 '),
+        [`zustand,geraet=shellyuni-a1b2c3,kanal=adc:0,typ=shelly u=0 ${T()}`]);
+    // keine Zahl, falsche Nummer oder tieferes Thema: keine Messzeile
+    for (const [thema, text] of [
+        ['shellies/shellyuni-a1b2c3/adc/0', 'abc'],
+        ['shellies/shellyuni-a1b2c3/adc/0', ''],
+        ['shellies/shellyuni-a1b2c3/adc/a', '6.42'],
+        ['shellies/shellyuni-a1b2c3/adc', '6.42'],
+        ['shellies/shellyuni-a1b2c3/adc/0/x', '6.42'],
+    ]) {
+        assert.deepEqual(zustand(thema, text), [], thema + ' ' + JSON.stringify(text));
+    }
 });
 
 pruefe('Shelly Gen1: Prüf-Themen pm-… im Baum übergangen, announce im Baum des Geräts', () => {
@@ -956,6 +1092,23 @@ pruefe('Float-Regel: kein i-Suffix, Wahrheitswerte 1/0, null/NaN/Infinity entfal
     for (const z of zeilen) {
         assert.ok(!/=-?\d+(\.\d+)?i[, ]/.test(z), 'Integer-Feld in: ' + z);
     }
+});
+
+pruefe('Line Protocol: sensorfehler als Float', () => {
+    // 0 ist ein Wert und entfällt nicht; ohne i-Suffix, ohne Anführungszeichen
+    const g = 'zustand,geraet=shellyplusuni-a0b1c2,kanal=voltmeter:100,typ=shelly';
+    assert.deepEqual(zeilenAus([
+        { topic: 'pm/messwert/shellyplusuni-a0b1c2/voltmeter:100', payload: { ts: 1760612400000, typ: 'shelly', zustand: { sensorfehler: 0 } } },
+        { topic: 'pm/messwert/shellyplusuni-a0b1c2/voltmeter:100', payload: { ts: 1760612460000, typ: 'shelly', zustand: { sensorfehler: 1 } } },
+        // über den generischen Eingang als JSON (Sammler, eigene Geräte)
+        { topic: 'pm/messwert/shellyplusuni-a0b1c2/voltmeter:100', payload: '{"ts":1760612400000,"typ":"shelly","zustand":{"u":7.5,"x":12.34,"sensorfehler":0}}' },
+        { topic: 'pm/messwert/modbus-ai/ai:0', payload: '{"ts":1760612400000,"typ":"modbus","zustand":{"i_ma":12,"sensorfehler":0}}' },
+    ]), [
+        `${g} sensorfehler=0 1760612400000`,
+        `${g} sensorfehler=1 1760612460000`,
+        `${g} u=7.5,x=12.34,sensorfehler=0 1760612400000`,
+        'zustand,geraet=modbus-ai,kanal=ai:0,typ=modbus i_ma=12,sensorfehler=0 1760612400000',
+    ]);
 });
 
 pruefe('Generischer Eingang pm/messwert: Beispiel aus der Schnittstelle, Zeit in Sekunden', () => {

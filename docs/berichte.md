@@ -26,8 +26,8 @@ Bewertet wird auf dem Server, nicht im Browser.
    (Karte „Übergabeberichte“) oder an einer Anlage (*Übergabebericht*). Auf
    der Seite „Neuer Bericht“ wird der Standort gewählt und dann, **welche
    Anlagen der Bericht prüft**: Generatoren, Feststromanschlüsse,
-   Wechselrichter, Verteiler. Aus einem Aufbau sind dessen mobile Anlagen
-   vorausgewählt. Ein **leerer Bericht** ohne Standort geht auch – dann ist
+   Wechselrichter, Verteiler – Tanks nicht, sie haben keine Stromkreise.
+   Aus einem Aufbau sind dessen mobile Anlagen vorausgewählt. Ein **leerer Bericht** ohne Standort geht auch – dann ist
    alles Freitext.
 2. **Kopf und Kunde.** Veranstaltung, Zeitraum, Prüfdatum und Ort sind
    vorbelegt. Die Kundendaten kommen auf einem von drei Wegen:

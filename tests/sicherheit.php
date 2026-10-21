@@ -8,10 +8,14 @@ declare(strict_types=1);
  * Bremse je Adresse; Geräte nur zuordnen, wo man bearbeiten darf, und dann
  * ohne fremde Vorgeschichte; Schalt-Freigaben für einen Kanal gelten nur für
  * ihn; am Standort ändern braucht „bearbeiten“; Schlüssel aus dem Repository
- * werden keine Pfade; Namen brechen kein Line Protocol; CSV ohne Formeln;
- * nur http(s); Umleitungen nehmen keine Kopfzeilen (Tokens) mit, auf
+ * werden keine Pfade; Namen brechen kein Line Protocol; CSV ohne Formeln
+ * (auch die des Tanks, sein Protokoll mit Lieferscheinen und der Verbrauch
+ * je Tag); nur http(s); Umleitungen nehmen keine Kopfzeilen (Tokens) mit, auf
  * beiden Wegen von Http; kein öffentlicher Schlüssel; PDF-Werkzeuge hängen
- * nicht.
+ * nicht; Tankverlauf und Verbrauch je Tag verraten die Abfrage an die
+ * InfluxDB nur der Messtechnik; eine Kennlinie von
+ * Hand nimmt nur Anker und Steigung als endliche Zahlen; Tankwerte auf der
+ * Kommandozeile (tank:liste) nur mit --als und nur, was dieses Konto sieht.
  *
  * Schnittstelle: Befugnisse und Standorte eines Tokens vergibt nur, wer die
  * Rechte dazu hat; ein verfälschtes Token wird nie angezeigt, ein fremdes
@@ -32,6 +36,7 @@ use App\Auth\Auth;
 use App\Auth\Permissions;
 use App\Auth\Zugriff;
 use App\Controllers\StatistikController;
+use App\Controllers\TankController;
 use App\Kunden\Einrichtung;
 use App\Kunden\KundenEinstellungen;
 use App\Messung\Datenquellen;
@@ -47,9 +52,13 @@ use App\Services\SiteService;
 use App\Support\Config;
 use App\Support\Crypto;
 use App\Support\Database;
+use App\Support\Request;
 use App\Support\Response;
 use App\Support\Settings;
 use App\Support\View;
+use App\Support\Zeit;
+use App\Tanks\TankRechnung;
+use App\Tanks\TankService;
 
 $k = 'pm-sich-' . bin2hex(random_bytes(3));
 $ip = '198.51.100.' . random_int(1, 254);
@@ -523,6 +532,82 @@ try {
     pruefe($geworfen, 'mit dem Platzhalter als app.key wird nichts verschlüsselt');
     Config::set('app.key', $alterSchluessel);
     gleich(Crypto::decrypt(Crypto::encrypt('geheim')), 'geheim', 'mit eigenem Schlüssel wie gewohnt');
+
+    // ------------------------------------------------ Tank: CSV ohne Formeln, Fehler der InfluxDB nur für die Messtechnik
+    alsBenutzer($benutzer['admin']);
+    $tankSite = SiteService::saveSite(null, ['name' => 'Prüfung ' . $k . ' Tank']);
+    $sites[] = $tankSite;
+    $tankFloor = SiteService::saveFloor(null, ['site_id' => $tankSite, 'name' => 'Wiese']);
+    $tank = (int) AnlagenService::speichern(null, ['art' => 'tank', 'name' => $k . ' Tank', 'floor_id' => $tankFloor,
+        'eigenschaften' => ['inhalt_l' => '3000', 'kraftstoff' => 'HVO', 'liter_je_mm' => '2,78']])['id'];
+    $mp = Database::insert('messpunkte', ['objekt_id' => $tank, 'geraet' => 'shellyplusuni-tank1', 'kanal' => 'voltmeter:100', 'rolle' => 'fuellstand',
+        'bezeichnung' => '=SUMME(A1:A9)', 'gueltig_ab' => Zeit::iso(time() - 3 * 3600), 'created_at' => gmdate('c')]);
+    $rechnung = TankRechnung::rechnung(['prinzip' => 'hydrostatisch', 'feld' => 'u', 'signal' => '4-20mA', 'buerde_ohm' => 500, 'bereich_von' => 0,
+        'bereich_bis' => 100, 'bereich_einheit' => 'mbar'], ['offset_mm' => 20], AnlagenService::find($tank)['eigenschaften'], [])['rechnung'];
+    TankService::fassungAnlegen(Database::first('SELECT * FROM messpunkte WHERE id = ?', [$mp]), $rechnung, 'einsatz', Zeit::iso(time() - 3 * 3600), false);
+    $aufruf = static function (string $methode, array $get) use ($tank): string {
+        $_GET = $get;
+        ob_start();
+        (new TankController())->$methode(new Request(), ['id' => $tank]);
+        return (string) ob_get_clean();
+    };
+    $demoVorher = Config::get('app.demo');
+    Config::set('app.demo', true);
+    $csv = $aufruf('csv', ['zeitraum' => '6h']);
+    pruefe(str_contains($csv, '"\'=SUMME(A1:A9)"') && !str_contains($csv, ';"=SUMME') && substr_count($csv, "\r\n") > 10,
+        'Tank-CSV: der Name des Sensors als Text, keine Formel');
+    $e = TankService::betankungSpeichern(AnlagenService::find($tank), ['liter' => '500', 'lieferschein' => '=SUMME(B1:B9)', 'notizen' => '@HYPERLINK("x")', 'kalibrieren' => false]);
+    $csv = $aufruf('csv', ['inhalt' => 'protokoll']);
+    pruefe($e['ok'] && str_contains($csv, '"\'=SUMME(B1:B9)"') && str_contains($csv, '"\'@HYPERLINK(""x"")"') && !str_contains($csv, ';"=SUMME') && !str_contains($csv, ';"@'),
+        'Protokoll-CSV: Lieferschein und Notiz als Text, keine Formel');
+    $csv = $aufruf('csv', ['inhalt' => 'tage', 'zeitraum' => '24h']);
+    pruefe(str_contains($csv, '"Tag";"Verbrauch [l]"') && str_contains($csv, '=SUMME(B1:B9)') && !str_contains($csv, ';"=') && !str_contains($csv, ';"@'),
+        'Tage-CSV: Lieferschein in den Betankungen des Tags, keine Formel');
+    // Kennlinie von Hand: nur Anker und Steigung, nur endliche Zahlen
+    $fassungenVorher = (int) Database::scalar('SELECT COUNT(*) FROM tank_kennlinien WHERE objekt_id = ?', [$tank]);
+    foreach ([['roh_anker' => '2', 'mm_anker' => '20', 'mm_je_roh' => '150', 'roh_max' => '99'], ['roh_anker' => '2', 'mm_anker' => '20', 'mm_je_roh' => '1e999'],
+        ['roh_anker' => ['2'], 'mm_anker' => '20', 'mm_je_roh' => '150'], ['roh_anker' => 'NAN', 'mm_anker' => '20', 'mm_je_roh' => '150']] as $hand) {
+        $e = TankService::sensorVonHand(AnlagenService::find($tank), ['messpunkt' => $mp, 'sensor' => $hand], false);
+        pruefe(!$e['ok'], 'Kennlinie von Hand abgelehnt: ' . json_encode($hand) . ' – ' . $e['message']);
+    }
+    gleich((int) Database::scalar('SELECT COUNT(*) FROM tank_kennlinien WHERE objekt_id = ?', [$tank]), $fassungenVorher, '… keine Fassung daraus');
+    $urlVorher = Config::get('influx.url');
+    Config::set('app.demo', false);
+    Config::set('influx.url', 'http://127.0.0.1:' . freierPort());
+    $antwort = json_decode($aufruf('verlauf', ['zeitraum' => '6h']), true);
+    pruefe(($antwort['ok'] ?? true) === false && str_contains((string) ($antwort['message'] ?? ''), 'InfluxDB'), 'Tankverlauf: die Messtechnik sieht den Fehler der InfluxDB');
+    $leser = (int) BenutzerService::rolleSpeichern(null, $k . ' leser', '', ['anlagen.view', 'anlagen.scope.all', 'statistik.view'])['id'];
+    $rollen['leser'] = $leser;
+    $benutzer['leser'] = BenutzerService::anlegen($k . '-leser', 'Pruefung2026!!', $rolleKey($leser), false);
+    alsBenutzer($benutzer['leser']);
+    $antwort = json_decode($aufruf('verlauf', ['zeitraum' => '6h']), true);
+    gleich([$antwort['ok'] ?? null, $antwort['message'] ?? null], [false, 'Die Messdaten ließen sich gerade nicht abfragen.'],
+        'Tankverlauf: ohne „datenquellen.manage“ kein Text der InfluxDB (Aufbau der Abfrage)');
+    $antwort = json_decode($aufruf('tage', ['zeitraum' => '24h']), true);
+    gleich([$antwort['ok'] ?? null, $antwort['message'] ?? null, str_contains(json_encode($antwort), 'InfluxDB')], [false, 'Die Messdaten ließen sich gerade nicht abfragen.', false],
+        'Verbrauch je Tag: ohne „datenquellen.manage“ kein Text der InfluxDB');
+    Config::set('influx.url', $urlVorher);
+    Config::set('app.demo', $demoVorher);
+    $_GET = [];
+    alsBenutzer(null);
+
+    // ------------------------------------------------ Tankwerte auf der Kommandozeile nur aus Sicht eines Kontos
+    $power = static function (array $argumente): array {
+        $p = proc_open(array_merge(['php', dirname(__DIR__) . '/bin/power'], $argumente), [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $rohre, dirname(__DIR__));
+        $aus = (string) stream_get_contents($rohre[1]);
+        $err = (string) stream_get_contents($rohre[2]);
+        fclose($rohre[1]);
+        fclose($rohre[2]);
+        return [proc_close($p), $aus, $err];
+    };
+    [$rc, $aus, $err] = $power(['tank:liste']);
+    pruefe($rc !== 0 && !str_contains($aus, $k . ' Tank') && str_contains($err, '--als=<benutzer>'), 'tank:liste ohne --als: Abbruch mit Meldung, kein Tank');
+    [$rc, $aus, $err] = $power(['tank:liste', '--als=' . $k . '-klein']);
+    pruefe($rc !== 0 && !str_contains($aus, $k . ' Tank') && str_contains($err, 'keine Anlagen'), 'tank:liste als Konto ohne „anlagen.view“: abgelehnt');
+    [$rc, $aus] = $power(['tank:liste', '--als=' . $k . '-technik']);
+    pruefe($rc === 0 && !str_contains($aus, $k . ' Tank'), 'tank:liste als Technik ohne Freigabe: der Tank fehlt');
+    [$rc, $aus] = $power(['tank:liste', '--als=' . $k . '-admin', '--standort=' . $tankSite]);
+    pruefe($rc === 0 && str_contains($aus, $k . ' Tank'), 'tank:liste als Administration: der Tank steht da');
 
     $starten = new ReflectionMethod(\App\Services\PdfRasterService::class, 'starten');
     $zeit = microtime(true);

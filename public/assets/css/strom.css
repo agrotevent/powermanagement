@@ -11,6 +11,8 @@
     --stufe-bad: #dc2626;
     --stufe-stumm: #94a3b8;
     --stufe-keine: #e2e8f0;
+    --tank-pegel: #0d9488;
+    --schlauch: #92400e;
 }
 
 .sidebar .brand .logo { background: linear-gradient(135deg, #b45309, #f59e0b); }
@@ -103,6 +105,19 @@ input.kurz { width: 6rem; }
 .phase-wert { text-align: right; }
 .live-zustand { margin-top: .35rem; }
 .live-hinweis:empty { display: none; }
+
+/* Tanks: Inhalt groß, Füllstand als Balken (Pegelfarbe), Rand = Stufe */
+.tank-stand { display: flex; align-items: baseline; gap: .6rem; margin: .45rem 0 .3rem; }
+.tank-zahl { font-size: 1.55rem; font-weight: 700; letter-spacing: -.02em; font-variant-numeric: tabular-nums; }
+.tank-prozent { font-weight: 650; color: var(--text-muted); font-variant-numeric: tabular-nums; }
+.stufe-warn .tank-prozent { color: var(--stufe-warn); }
+.stufe-bad .tank-prozent { color: var(--stufe-bad); }
+.tank-balken { height: 10px; background: var(--surface-alt); border-radius: 999px; overflow: hidden; border: 1px solid var(--border); margin-bottom: .3rem; }
+.tank-balken span { display: block; height: 100%; width: 0; background: var(--tank-pegel); border-radius: 999px; transition: width .4s ease; }
+.stufe-warn .tank-balken span { background: var(--stufe-warn); }
+.stufe-bad .tank-balken span { background: var(--stufe-bad); }
+.tank-details { margin: .5rem 0 .2rem; }
+.seite-werte .tank-balken-voll { grid-column: 1 / -1; margin: 0; }
 
 /* In Tabellen: nur ein Streifen links */
 tr.live-zeile td:first-child { box-shadow: inset 4px 0 0 var(--stufe-keine); }
@@ -220,8 +235,10 @@ tr.live-zeile.stufe-stumm td:first-child { box-shadow: inset 4px 0 0 var(--stufe
 .legende-punkt { display: inline-block; width: 12px; height: 12px; border-radius: 4px; border: 3px solid var(--stufe-keine); background: #fff; }
 .legende-form { display: inline-block; width: 11px; height: 11px; margin-left: .45rem; vertical-align: -1px; background: #64748b; border-radius: 4px; }
 .legende-form.fest { border-radius: 1px; box-shadow: 0 0 0 1.5px #fff, 0 0 0 3px #0f172a; }
+.legende-form.tank { border-radius: 2px 2px 4px 4px; background: linear-gradient(to top, var(--tank-pegel) 60%, #57534e 0); }
 .legende-linie { display: inline-block; width: 22px; height: 4px; margin-left: .45rem; vertical-align: 2px; background: #94a3b8; border-radius: 2px; }
 .legende-linie.fest { box-shadow: 0 0 0 2px #0f172a; }
+.legende-linie.schlauch { background: repeating-linear-gradient(to right, var(--schlauch) 0 6px, transparent 6px 10px); }
 .legende-punkt.stufe-ok { border-color: var(--stufe-ok); }
 .legende-punkt.stufe-warn { border-color: var(--stufe-warn); }
 .legende-punkt.stufe-bad { border-color: var(--stufe-bad); }
@@ -243,6 +260,12 @@ tr.live-zeile.stufe-stumm td:first-child { box-shadow: inset 4px 0 0 var(--stufe
     border: 4px solid var(--stufe-keine); box-shadow: 0 1px 4px rgba(15, 23, 42, .45);
 }
 .pm-anlage.art-generator .pm-symbol, .pm-anlage.art-anschluss .pm-symbol { border-radius: 50%; }
+/* Tanks: eckig mit gerundetem Boden; von unten füllt sie der Pegel
+   (--fuellstand in %), der Rand bleibt die Stufe. */
+.pm-anlage.art-tank .pm-symbol {
+    border-radius: 3px 3px 8px 8px;
+    background: linear-gradient(to top, var(--tank-pegel) calc(var(--fuellstand, 0) * 1%), var(--art-farbe, #57534e) 0);
+}
 /* Feststromanschlüsse: eckig mit dunklem Außenrahmen – sie gehören zum
    Gelände. Mobile Anlagen bleiben rund bzw. abgerundet. */
 .pm-anlage.fest .pm-symbol { border-radius: 3px; box-shadow: 0 0 0 2px #fff, 0 0 0 4px #0f172a, 0 1px 5px rgba(15, 23, 42, .5); }
@@ -278,6 +301,9 @@ tr.live-zeile.stufe-stumm td:first-child { box-shadow: inset 4px 0 0 var(--stufe
 .pm-fremd.dose .plabel { display: none; }
 
 .pm-kabel.hinweis { stroke-dasharray: 14 5; filter: drop-shadow(0 0 3px rgba(245, 158, 11, .95)); }
+/* Kraftstoffschlauch: gestrichelt in Kraftstoffbraun, mit Hinweis gelb umleuchtet */
+.pm-schlauch { stroke: var(--schlauch); }
+.pm-schlauch.hinweis { filter: drop-shadow(0 0 3px rgba(245, 158, 11, .95)); }
 
 /* Seitenleiste der Karte */
 .seite-kopf { display: flex; align-items: center; gap: .6rem; }
@@ -490,6 +516,19 @@ tr.abweichung-zeile td { background: var(--warning-light); }
 .karte-seite .pm-phasen { font-size: .74rem; }
 .karte-seite .pm-phasen th, .karte-seite .pm-phasen td { padding: .15rem .25rem; }
 .pm-phasen th { text-transform: none; letter-spacing: normal; }
+
+/* Tank: Restlaufzeit und „nachbestellen bis“ unter dem Balken */
+.tank-rest { font-weight: 600; font-variant-numeric: tabular-nums; }
+.tank-rest:empty { display: none; }
+.stufe-warn .tank-rest { color: var(--stufe-warn); }
+.stufe-bad .tank-rest { color: var(--stufe-bad); }
+.schlaeuche li { padding: .3rem 0; border-bottom: 1px dashed var(--border); }
+
+/* Tank: Verbrauch je Tag – erkannte Betankungen mit „Als Betankung eintragen“ */
+.tank-erkannt li { padding: .4rem 0; border-bottom: 1px dashed var(--border); }
+.tank-eintragen { margin-top: .25rem; }
+.tank-eintragen summary { cursor: pointer; color: var(--primary, #2563eb); }
+.tank-eintragen form { margin-top: .4rem; }
 
 /* Schnittstelle (API): Token zum Kopieren, „Anzeigen“ mit Kennwort,
    Standort-Freigaben eines Zugangs. */

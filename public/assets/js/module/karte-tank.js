@@ -1,0 +1,394 @@
+/**
+ * Tanks auf der Karte – ein Modul neben karte.js.
+ *
+ *   tankMarkerSetzen(knoten, l, name)   Pegel im Zeichen (--fuellstand), der
+ *                                       Wert daneben, Stand mit Alter als Titel.
+ *   tankPanel(seite, o, aktionen)       Seitenleiste: Füllstand, Tanksensor mit
+ *                                       Ein- und Ausbau, letzte Peilungen und
+ *                                       Betankungen, Tankseite.
+ *   tankPanelLive(seite, l)             die Werte darin neu setzen (alle 5 s).
+ *   einsetzenFormular(ziel, frei, id, aktionen)
+ *                                       Tanksensor mit Einbaumaß einsetzen –
+ *                                       im Panel und im Aufbau-Modus. Gepeilt
+ *                                       wird danach, sobald der Sensor meldet.
+ *   peilungFormular(ziel, o, aktionen)  Peilung: Anzeige %, Inhalt l oder
+ *                                       Peilstab mm – Zeit jetzt, den Rohwert
+ *                                       nimmt der Server.
+ *   betankungFormular(ziel, o, aktionen)
+ *                                       Betankung: Liter, Lieferschein, Ende
+ *                                       jetzt oder Uhrzeit.
+ *   schlauchPanel(seite, d, aktionen)   Kraftstoffschlauch Tank → Generator:
+ *                                       Schlauchtyp, Kupplung, Anzahl (Vor- und
+ *                                       Rücklauf), Länge, fest/mobil.
+ *
+ * Alles aus Antworten des Servers kommt per textContent ins Dokument, nie
+ * als HTML. Was jemand darf, sagt der Server (o.darf, o.tank.darf); er
+ * prüft es beim Schreiben ohnehin noch einmal.
+ */
+
+const PM = window.PM;
+
+/** Ein Element mit Attributen und Kindern (Text wird zu Textknoten). */
+function el(tag, attribute = {}, ...kinder) {
+    const e = document.createElement(tag);
+    Object.entries(attribute).forEach(([k, v]) => {
+        if (v === null || v === undefined || v === false) { return; }
+        if (k === 'klasse') { e.className = v; } else { e.setAttribute(k, v === true ? '' : String(v)); }
+    });
+    kinder.flat().forEach((k) => {
+        if (k !== null && k !== undefined && k !== false && k !== '') { e.append(k instanceof Node ? k : document.createTextNode(String(k))); }
+    });
+    return e;
+}
+
+const da = (w) => w !== null && w !== undefined;
+const ganz = (w, einheit) => (da(w) ? PM.format(w, einheit, 0) : '');
+const kurz = (w, einheit) => w.toLocaleString('de-DE', { maximumFractionDigits: 3 }) + (einheit ? ' ' + einheit : '');
+
+/** Restlaufzeit kurz: „40 min“, „19 h“, „6 Tage“. */
+export function restKurz(stunden) {
+    if (!da(stunden)) { return ''; }
+    if (stunden < 1) { return Math.round(Math.max(0, stunden) * 60) + ' min'; }
+    return stunden < 48 ? Math.round(stunden) + ' h' : Math.round(stunden / 24) + ' Tage';
+}
+
+/** „80 % · 2.390 l · 19 h“, ohne Kalibrierung „860 mm“, bei einem Fehler „Fehler“. */
+export function tankWertText(t) {
+    if (!t || !t.sensor) { return ''; }
+    if (t.fehler) { return 'Fehler'; }
+    const teile = [];
+    if (da(t.prozent)) { teile.push(Math.round(t.prozent) + ' %'); }
+    if (da(t.liter)) { teile.push(ganz(t.liter, 'l')); }
+    if (!teile.length && da(t.hoehe_mm)) { teile.push(ganz(t.hoehe_mm, 'mm')); }
+    if (!teile.length && da(t.roh)) { teile.push(kurz(t.roh, t.roh_einheit)); }
+    if (teile.length && da(t.restlaufzeit_h)) { teile.push(restKurz(t.restlaufzeit_h)); }
+    return teile.join(' · ');
+}
+
+/** Pegel und Wert am Zeichen; die Stufe (Rand) setzt karte.js. */
+export function tankMarkerSetzen(knoten, l, name) {
+    const t = l && l.tank ? l.tank : null;
+    const pegel = t && da(t.prozent) && !t.fehler ? Math.max(0, Math.min(100, t.prozent)) : 0;
+    knoten.style.setProperty('--fuellstand', String(pegel));
+    const wert = knoten.querySelector('[data-wert]');
+    if (wert) {
+        wert.textContent = tankWertText(t);
+        wert.title = 'Antippen: Füllstand';
+    }
+    const text = name + (l && l.hinweis ? ' – ' + l.hinweis : '');
+    knoten.title = text;
+    knoten.setAttribute('aria-label', text);
+}
+
+/** Die Werte im Panel: Balken, Inhalt, Füllstand, Rohwert mit Alter, Hinweis. */
+export function tankPanelLive(seite, l) {
+    const ziel = seite.querySelector('[data-tank-live]');
+    if (!ziel || !l) { return; }
+    const t = l.tank || {};
+    const zelle = (beschriftung, wert) => el('div', {}, el('span', { klasse: 'label' }, beschriftung), el('strong', {}, wert || '–'));
+    const kinder = [];
+    if (t.sensor) {
+        const balken = el('span');
+        balken.style.width = Math.max(0, Math.min(100, da(t.prozent) && !t.fehler ? t.prozent : 0)) + '%';
+        kinder.push(el('div', { klasse: 'seite-werte tank-werte stufe-' + (l.stufe || 'keine') },
+            el('div', { klasse: 'tank-balken tank-balken-voll', 'aria-hidden': 'true' }, balken),
+            zelle('Inhalt', ganz(t.liter, 'l')),
+            zelle('Füllstand', da(t.prozent) ? Math.round(t.prozent) + ' %' : ''),
+            zelle('Nutzbar', ganz(t.nutzbar_l, 'l')),
+            zelle('Füllhöhe', ganz(t.hoehe_mm, 'mm')),
+            zelle('Rohwert', da(t.roh) ? kurz(t.roh, t.roh_einheit) + (t.stand ? ' · ' + t.stand : '') : ''),
+            zelle('Gerät', t.online === true ? 'online' : (t.online === false ? 'offline' : '')),
+            // Versorgung über den Kraftstoffschlauch
+            t.verbrauch_text ? zelle('Verbrauch', t.verbrauch_text) : null,
+            da(t.restlaufzeit_h) ? zelle('Restlaufzeit', t.restlaufzeit_text) : null,
+            t.leer_um_text ? zelle('Leer um', t.leer_um_text) : null,
+            t.nachbestellen_text ? zelle('Nachbestellen bis', t.nachbestellen_text) : null,
+        ));
+        kinder.push(el('div', { klasse: 'small' }, 'Kennlinie: ', t.kennlinie || '–'));
+        if (t.generatoren && t.generatoren.length) {
+            kinder.push(el('div', { klasse: 'small' }, 'Am Schlauch: ',
+                t.generatoren.map((g) => g.name + (g.laeuft ? ' (läuft)' : ' (steht)')).join(', '),
+                t.vorrat_tanks > 1 ? ' · Vorrat aus ' + t.vorrat_tanks + ' Tanks: ' + ganz(t.vorrat_l, 'l') : '',
+                da(t.intern_l) ? ' · dazu intern ≈ ' + ganz(t.intern_l, 'l') : ''));
+        }
+    } else {
+        kinder.push(el('div', { klasse: 'seite-werte tank-werte stufe-' + (l.stufe || 'keine') }, zelle('Füllstand', '')));
+    }
+    // Die Restlaufzeit steht oben schon in einer eigenen Zelle – der Hinweis ohne sie.
+    const hinweis = typeof t.hinweis_kurz === 'string' ? t.hinweis_kurz : l.hinweis;
+    if (hinweis) { kinder.push(el('div', { klasse: 'small muted' }, hinweis)); }
+    ziel.replaceChildren(...kinder);
+}
+
+/**
+ * Tanksensor einsetzen: Sensor wählen, Einbaumaß – bei Ultraschall die Höhe
+ * der Sensorfläche (Pflicht), sonst die der Sondenspitze (leer = 20 mm).
+ *
+ * @param aktionen { nachher: async () => {} } – nach erfolgreichem Einsetzen
+ */
+export function einsetzenFormular(ziel, frei, objektId, aktionen) {
+    const auswahl = el('select', { id: 'tank-stueck', required: true }, el('option', { value: '' }, '– Tanksensor wählen –'),
+        frei.map((i) => el('option', { value: i.id, 'data-prinzip': i.prinzip || '' },
+            i.kennung + ' – ' + i.typ + (i.woanders ? ' (jetzt: ' + i.woanders + ')' : ''))));
+    const offset = el('input', { id: 'tank-offset', inputmode: 'decimal', placeholder: '20' });
+    const dLeer = el('input', { id: 'tank-dleer', inputmode: 'decimal', placeholder: 'z. B. 1300' });
+    const offsetFeld = el('div', { klasse: 'field' }, el('label', { for: 'tank-offset' }, 'Sondenspitze über dem Boden (mm)'), offset);
+    const dLeerFeld = el('div', { klasse: 'field', hidden: true }, el('label', { for: 'tank-dleer' }, 'Sensorfläche über dem Boden (mm)'), dLeer);
+    const knopf = el('button', { type: 'submit', klasse: 'btn btn-sm btn-primary' }, 'Einsetzen');
+    const form = el('form', { klasse: 'tank-einsetzen' },
+        el('div', { klasse: 'field' }, el('label', { for: 'tank-stueck' }, 'Welcher Tanksensor?'), auswahl),
+        offsetFeld, dLeerFeld, knopf,
+        el('p', { klasse: 'help' }, 'Ein Sensor, der schon im Tank steckt, wird ersetzt. Erst einsetzen, dann die Sonde einhängen, dann peilen,'
+            + ' sobald der Sensor meldet – die Einbautiefe ändert sich mit jedem Einbau.'));
+    auswahl.addEventListener('change', () => {
+        const opt = auswahl.selectedOptions[0];
+        const ultraschall = !!opt && opt.dataset.prinzip === 'ultraschall';
+        dLeerFeld.hidden = !ultraschall;
+        dLeer.required = ultraschall;
+        offsetFeld.hidden = ultraschall;
+    });
+    form.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        if (!auswahl.value) { return; }
+        knopf.disabled = true;
+        try {
+            const erg = await PM.post(`/anlagen/${objektId}/einsetzen`, {
+                inventar_id: auswahl.value,
+                'einbau[offset_mm]': offsetFeld.hidden ? '' : offset.value,
+                'einbau[d_leer_mm]': dLeerFeld.hidden ? '' : dLeer.value,
+            });
+            PM.melden(erg.message || (erg.ok ? 'Eingesetzt.' : 'Nicht möglich.'), !!erg.ok);
+            if (erg.ok) { await aktionen.nachher(); }
+        } finally {
+            knopf.disabled = false;
+        }
+    });
+    ziel.replaceChildren(form);
+}
+
+/** Ein Formular im Panel abschicken: Knopf sperren, Meldung zeigen, danach neu laden. */
+async function senden(knopf, url, daten, aktionen) {
+    knopf.disabled = true;
+    try {
+        const erg = await PM.post(url, daten);
+        PM.melden(erg.message || (erg.ok ? 'Eingetragen.' : 'Nicht möglich.'), !!erg.ok && !erg.warnung);
+        if (erg.ok) { await aktionen.nachher(); }
+    } catch {
+        PM.melden('Keine Verbindung zum Server.', false);
+    } finally {
+        knopf.disabled = false;
+    }
+}
+
+/**
+ * Peilung: was abgelesen wurde (Anzeige am Tank in %, Inhalt in l, Peilstab in
+ * mm) und der Wert. Zeit ist jetzt; den Rohwert nimmt der Server.
+ *
+ * @param o        Antwort von /karte/objekt/{id} (o.tank.nenn_l: ohne Nennvolumen keine %)
+ * @param aktionen { nachher: async () => {} }
+ */
+export function peilungFormular(ziel, o, aktionen) {
+    const mitProzent = da(o.tank && o.tank.nenn_l);
+    const arten = [['prozent', 'Anzeige am Tank (%)', '%'], ['liter', 'Inhalt (l)', 'l'], ['hoehe_mm', 'Peilstab (mm)', 'mm']]
+        .filter(([art]) => art !== 'prozent' || mitProzent);
+    const auswahl = el('select', { id: 'tank-peilart' }, arten.map(([art, text, einheit]) => el('option', { value: art, 'data-einheit': einheit }, text)));
+    const einheit = el('span', {}, '(' + arten[0][2] + ')');
+    const wert = el('input', { id: 'tank-peilwert', inputmode: 'decimal', autocomplete: 'off', required: true });
+    auswahl.addEventListener('change', () => { einheit.textContent = '(' + auswahl.selectedOptions[0].dataset.einheit + ')'; });
+    const knopf = el('button', { type: 'submit', klasse: 'btn btn-sm btn-primary' }, 'Peilung eintragen');
+    const form = el('form', { klasse: 'tank-peilung' },
+        el('div', { klasse: 'field' }, el('label', { for: 'tank-peilart' }, 'Abgelesen'), auswahl),
+        el('div', { klasse: 'field' }, el('label', { for: 'tank-peilwert' }, 'Wert ', einheit), wert),
+        knopf,
+        el('p', { klasse: 'help' }, 'Zeit: jetzt. Der Peilstab setzt den Nullpunkt; Anzeige oder Inhalt bestimmen beim ersten Mal den Inhalt je mm.'));
+    form.addEventListener('submit', (e) => {
+        e.preventDefault();
+        senden(knopf, `/anlagen/${o.id}/tank/peilung`, { art: auswahl.value, wert: wert.value }, aktionen);
+    });
+    ziel.replaceChildren(form);
+    wert.focus();
+}
+
+/**
+ * Betankung: geliefert in Litern, Lieferschein, Ende des Tankens (leer =
+ * jetzt, sonst Uhrzeit). Liegt das Ende 30 min zurück, kalibriert der Server
+ * gleich daraus.
+ *
+ * @param aktionen { nachher: async () => {} }
+ */
+export function betankungFormular(ziel, o, aktionen) {
+    const liter = el('input', { id: 'tank-liter', inputmode: 'decimal', autocomplete: 'off', required: true });
+    const ende = el('input', { id: 'tank-ende', type: 'time' });
+    const schein = el('input', { id: 'tank-lieferschein', maxlength: '64', autocomplete: 'off' });
+    const knopf = el('button', { type: 'submit', klasse: 'btn btn-sm btn-primary' }, 'Betankung eintragen');
+    const form = el('form', { klasse: 'tank-betankung' },
+        el('div', { klasse: 'field' }, el('label', { for: 'tank-liter' }, 'Geliefert (l)'), liter),
+        el('div', { klasse: 'field' }, el('label', { for: 'tank-ende' }, 'Ende des Tankens (leer = jetzt)'), ende),
+        el('div', { klasse: 'field' }, el('label', { for: 'tank-lieferschein' }, 'Lieferschein'), schein),
+        knopf,
+        el('p', { klasse: 'help' }, 'Kalibriert wird aus dem Sprung in den Messwerten – frühestens 30 min nach dem Tanken, sonst später im Protokoll der Tankseite.'));
+    form.addEventListener('submit', (e) => {
+        e.preventDefault();
+        senden(knopf, `/anlagen/${o.id}/tank/betankung`, { liter: liter.value, zeit: ende.value, lieferschein: schein.value }, aktionen);
+    });
+    ziel.replaceChildren(form);
+    liter.focus();
+}
+
+/**
+ * Das Fenster eines Kraftstoffschlauchs – neu (aktionen.neu aus dem Entwurf)
+ * oder vorhanden (d aus /karte/leitung/{id}). Anzahl 2 = Vor- und Rücklauf;
+ * die Kupplung schlägt der Server aus dem Tank vor, wenn sie leer bleibt.
+ *
+ * @param d        null (neu) oder { leitung, darf }
+ * @param aktionen { neu: {von, zu, von_name, zu_name, laenge_plan}, festMoeglich, darf, schlauchtypen, kupplung, meter,
+ *                   speichern: async (felder) => {}, verwerfen: () => {}, loeschen: (id) => {} }
+ */
+export function schlauchPanel(seite, d, aktionen) {
+    const neu = d === null;
+    const l = neu ? Object.assign({ id: 0, name: '', kabeltyp: aktionen.schlauchtypen[0] || '', modell: '', anzahl: 2, laenge_m: null, notizen: '', fest: false, hinweise: [] }, aktionen.neu)
+        : d.leitung;
+    const darf = aktionen.darf;
+    const feld = (beschriftung, id, eingabe) => el('div', { klasse: 'field' }, el('label', { for: id }, beschriftung), eingabe);
+    const aus = darf ? null : true;
+    const typ = el('input', { id: 'schlauch-typ', name: 'kabeltyp', list: 'schlauchtypen', value: l.kabeltyp || '', disabled: aus });
+    const kupplung = el('input', { id: 'schlauch-kupplung', name: 'modell', value: l.modell || '', placeholder: 'leer: aus dem Tank, sonst ' + aktionen.kupplung, disabled: aus });
+    const anzahl = el('select', { id: 'schlauch-anzahl', name: 'anzahl', disabled: aus },
+        el('option', { value: '2', selected: Number(l.anzahl) !== 1 }, '2 – Vor- und Rücklauf'),
+        el('option', { value: '1', selected: Number(l.anzahl) === 1 }, '1 – nur Vorlauf'));
+    const planLaenge = l.laenge_plan;
+    const laenge = el('input', { id: 'schlauch-laenge', name: 'laenge_m', inputmode: 'decimal', disabled: aus,
+        value: da(l.laenge_m) ? String(l.laenge_m).replace('.', ',') : '', placeholder: da(planLaenge) ? 'Plan: ' + aktionen.meter(planLaenge) : 'kein Maßstab' });
+    const name = el('input', { id: 'schlauch-name', name: 'name', value: l.name || '', placeholder: 'z. B. Tank 1 → Aggregat 1', disabled: aus });
+    const notiz = el('input', { id: 'schlauch-notiz', name: 'notizen', value: l.notizen || '', disabled: aus });
+    // Neu zwischen zwei fest installierten Anlagen: von Haus aus fest (wie beim Kabel).
+    const fest = el('input', { type: 'checkbox', id: 'schlauch-fest', name: 'fest', value: '1', checked: neu ? !!aktionen.festMoeglich : !!l.fest, disabled: darf && (aktionen.festMoeglich || l.fest) ? null : true });
+    const datalist = el('datalist', { id: 'schlauchtypen' }, aktionen.schlauchtypen.map((s) => el('option', { value: s })));
+    const knoepfe = el('div', { klasse: 'btn-row' });
+    const form = el('form', { klasse: 'schlauch-form' },
+        feld('Schlauchtyp', 'schlauch-typ', typ),
+        el('div', { klasse: 'field-row' }, feld('Kupplung', 'schlauch-kupplung', kupplung), feld('Stränge', 'schlauch-anzahl', anzahl)),
+        el('div', { klasse: 'field-row' }, feld('Länge (m)', 'schlauch-laenge', laenge), feld('Name', 'schlauch-name', name)),
+        el('div', { klasse: 'check' }, fest, el('label', { for: 'schlauch-fest' }, el('strong', {}, 'Fest verlegt'),
+            ' – gehört zur Location (feste Kraftstoffleitung).', aktionen.festMoeglich ? '' : el('span', { klasse: 'muted' }, ' Nur zwischen fest installierten Anlagen.'))),
+        feld('Notiz', 'schlauch-notiz', notiz),
+        datalist,
+        darf ? knoepfe : null);
+    if (darf) {
+        const speichern = el('button', { type: 'submit', klasse: 'btn btn-primary btn-sm' }, 'Speichern');
+        knoepfe.append(speichern);
+        const weg = el('button', { type: 'button', klasse: neu ? 'btn btn-sm btn-ghost' : 'btn btn-sm btn-danger' }, neu ? 'Verwerfen' : 'Löschen');
+        weg.addEventListener('click', () => (neu ? aktionen.verwerfen() : aktionen.loeschen(l.id)));
+        knoepfe.append(weg);
+        form.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            speichern.disabled = true;
+            try {
+                await aktionen.speichern({ kabeltyp: typ.value, modell: kupplung.value, anzahl: anzahl.value, laenge_m: laenge.value,
+                    name: name.value, notizen: notiz.value, fest: fest.checked ? '1' : '0' });
+            } finally {
+                speichern.disabled = false;
+            }
+        });
+    }
+    seite.replaceChildren(
+        el('h2', {}, neu ? 'Neuer Kraftstoffschlauch' : (l.name || 'Kraftstoffschlauch')),
+        el('p', { klasse: 'small' }, el('strong', {}, l.von_name || '?'), ' → ', el('strong', {}, l.zu_name || '?')),
+        ...(l.hinweise || []).map((h) => el('div', { klasse: 'notice warn small' }, h)),
+        form,
+        el('p', { klasse: 'help' }, 'Der Generator am Ende bestimmt Verbrauch und Restlaufzeit des Tanks (Kennlinie × Last). Je Strang zählt die Materialliste einen Schlauch mit zwei Kupplungen.'));
+}
+
+/**
+ * Die Seitenleiste eines Tanks.
+ *
+ * @param o        Antwort von /karte/objekt/{id} (mit o.tank, o.live, o.inventar_frei)
+ * @param aktionen { art: {name, kuerzel, farbe}, neuLaden: async () => {}, ausPlan: async () => {}, koordinate: (x) => '' }
+ */
+export function tankPanel(seite, o, aktionen) {
+    const tank = o.tank || { sensor: null, ereignisse: [], darf: {} };
+    const art = aktionen.art;
+    const zeichen = el('span', { klasse: 'art-zeichen' }, art.kuerzel);
+    zeichen.style.setProperty('--art-farbe', art.farbe);
+    const kopf = el('div', { klasse: 'seite-kopf' }, zeichen,
+        el('div', {}, el('h2', {}, o.name), el('div', { klasse: 'small muted' }, [o.art_name, o.kennung, o.status].filter(Boolean).join(' · '))));
+    const teile = [kopf];
+    if (o.modell) { teile.push(el('div', { klasse: 'small muted' }, o.modell)); }
+    if (o.geo) {
+        teile.push(el('div', { klasse: 'small anlage-lage' }, 'Lage ' + aktionen.koordinate(o.geo.lat) + ', ' + aktionen.koordinate(o.geo.lon) + ' · ',
+            el('a', { href: o.geo.link, target: '_blank', rel: 'noopener' }, 'in der Karte öffnen')));
+    }
+    teile.push(el('div', { 'data-tank-live': true }));
+    // Vor Ort: peilen und betanken – je ein Formular unter den Knöpfen, immer nur eins offen.
+    const formZiel = el('div', { klasse: 'mt tank-formular', hidden: true });
+    if (tank.darf.peilen || tank.darf.betanken) {
+        const vorOrt = el('div', { klasse: 'btn-row mt' });
+        const oeffnen = (bauen) => () => {
+            bauen(formZiel, o, { nachher: aktionen.neuLaden });
+            formZiel.hidden = false;
+        };
+        if (tank.darf.peilen) {
+            const k = el('button', { type: 'button', klasse: 'btn btn-sm' }, 'Peilung …');
+            k.addEventListener('click', oeffnen(peilungFormular));
+            vorOrt.append(k);
+        }
+        if (tank.darf.betanken) {
+            const k = el('button', { type: 'button', klasse: 'btn btn-sm' }, 'Betankung …');
+            k.addEventListener('click', oeffnen(betankungFormular));
+            vorOrt.append(k);
+        }
+        teile.push(vorOrt, formZiel);
+    }
+
+    // Nennvolumen, Kraftstoff, Bauform – „Inhalt“ heißt oben schon, was jetzt drin ist.
+    teile.push(el('h3', { klasse: 'mt' }, 'Tank'), el('p', { klasse: 'small' }, o.kurz));
+
+    teile.push(el('h3', { klasse: 'mt' }, 'Tanksensor'));
+    teile.push(el('p', { klasse: 'small' }, tank.sensor
+        ? [el('strong', {}, tank.sensor.kennung), ' ', tank.sensor.kurz]
+        : 'Kein Tanksensor eingebaut.'));
+    const einsetzenZiel = el('div', { klasse: 'mt', hidden: true });
+    const knoepfe = el('div', { klasse: 'btn-row' });
+    const frei = o.inventar_frei || [];
+    if (tank.darf.einsetzen && frei.length) {
+        const knopf = el('button', { type: 'button', klasse: 'btn btn-sm' }, tank.sensor ? 'Anderen Tanksensor einsetzen …' : 'Tanksensor einsetzen …');
+        knopf.addEventListener('click', () => {
+            einsetzenFormular(einsetzenZiel, frei, o.id, { nachher: aktionen.neuLaden });
+            einsetzenZiel.hidden = false;
+            knopf.hidden = true;
+            const erstes = einsetzenZiel.querySelector('select');
+            if (erstes) { erstes.focus(); }
+        });
+        knoepfe.append(knopf);
+    } else if (tank.darf.einsetzen && !tank.sensor) {
+        teile.push(el('p', { klasse: 'small muted' }, 'Kein freier Tanksensor im Inventar.'));
+    }
+    if (tank.sensor && tank.sensor.einsatz_id) {
+        const abbau = el('button', { type: 'button', klasse: 'btn btn-sm btn-ghost' }, 'Ausbauen');
+        abbau.addEventListener('click', async () => {
+            if (!window.confirm(tank.sensor.kennung + ' ausbauen? Der Sensor misst dann nicht mehr hier.')) { return; }
+            const erg = await PM.post(`/einsatz/${tank.sensor.einsatz_id}/beenden`, {});
+            PM.melden(erg.message || (erg.ok ? 'Ausgebaut.' : 'Nicht möglich.'), !!erg.ok);
+            if (erg.ok) { await aktionen.neuLaden(); }
+        });
+        knoepfe.append(abbau);
+    }
+    if (knoepfe.childElementCount) { teile.push(knoepfe); }
+    teile.push(einsetzenZiel);
+
+    if (tank.ereignisse && tank.ereignisse.length) {
+        teile.push(el('h3', { klasse: 'mt' }, 'Zuletzt'));
+        teile.push(el('ul', { klasse: 'liste-schlicht small' }, tank.ereignisse.map((e) => el('li', {}, el('span', { klasse: 'muted' }, e.zeit), ' ', e.text))));
+    }
+
+    const unten = el('div', { klasse: 'btn-row mt' }, el('a', { klasse: 'btn btn-sm btn-primary', href: `/anlagen/${o.id}` }, 'Tankseite'));
+    if (o.darf) {
+        unten.append(el('a', { klasse: 'btn btn-sm', href: `/anlagen/${o.id}/bearbeiten` }, 'Bearbeiten'));
+        const aus = el('button', { type: 'button', klasse: 'btn btn-sm btn-ghost' }, 'Aus dem Plan nehmen');
+        aus.addEventListener('click', aktionen.ausPlan);
+        unten.append(aus);
+    }
+    teile.push(unten);
+    seite.replaceChildren(...teile);
+    tankPanelLive(seite, o.live);
+}

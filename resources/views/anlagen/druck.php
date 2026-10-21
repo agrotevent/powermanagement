@@ -3,6 +3,7 @@ use App\Services\AnlagenService;
 use App\Services\MesspunktService;
 use App\Support\View;
 use App\Support\Zeit;
+use App\Tanks\TankService;
 
 $title = $objekt['name'];
 $art = AnlagenService::ARTEN[$objekt['art']];
@@ -22,6 +23,21 @@ $eingaenge = array_values(array_filter($anschluesse, static fn ($a) => $a['richt
         </div>
     </header>
 
+    <?php if (!AnlagenService::elektrisch((string) $objekt['art'])): ?>
+        <?php /* Ein Tank hat keine Einspeisung, Schutzorgane und Abgänge – nur seine Daten. */ ?>
+        <h2>Daten</h2>
+        <table>
+            <tbody>
+            <?php foreach (AnlagenService::feldGruppen((string) $objekt['art']) as $schluesselListe): ?>
+                <?php foreach ($schluesselListe as $k): ?>
+                    <?php if (!isset($objekt['eigenschaften'][$k])) { continue; } ?>
+                    <?php [$beschriftung, $typ, $zusatz] = AnlagenService::FELDER[$objekt['art']][$k]; $wert = $objekt['eigenschaften'][$k]; $einheit = AnlagenService::einheit($typ, $zusatz, $wert); ?>
+                    <tr><th><?= View::e(TankService::beschriftung($beschriftung)) ?></th><td><?= View::e(is_float($wert) ? TankService::zahl($wert) : (string) $wert) ?><?= $einheit !== '' ? ' ' . View::e($einheit) : '' ?></td></tr>
+                <?php endforeach; ?>
+            <?php endforeach; ?>
+            </tbody>
+        </table>
+    <?php else: ?>
     <h2>Einspeisung</h2>
     <table>
         <thead><tr><th>Eingang</th><th>Stecker</th><th>gespeist von</th></tr></thead>
@@ -65,6 +81,8 @@ $eingaenge = array_values(array_filter($anschluesse, static fn ($a) => $a['richt
         <?php if ($abgaenge === []): ?><tr><td colspan="5">–</td></tr><?php endif; ?>
         </tbody>
     </table>
+
+    <?php endif; ?>
 
     <?php if ($messpunkte !== []): ?>
         <h2>Messgeräte</h2>

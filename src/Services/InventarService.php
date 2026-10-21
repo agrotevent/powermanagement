@@ -10,9 +10,12 @@ use App\Kunden\Pruefnachweise;
 use App\Support\Audit;
 use App\Support\Database;
 use App\Support\Zeit;
+use App\Tanks\TankRechnung;
+use App\Tanks\TankService;
 
 /**
- * Inventar: Verteiler und Zwischenstecker aus dem Lager, mit ihren Shellys.
+ * Inventar: Verteiler, Zwischenstecker und Tanksensoren aus dem Lager, mit
+ * ihren Shellys.
  *
  * Ein Inventarstück ist ein bestimmtes Gerät (Aufkleber PD63-07). Seine
  * Shellys sind ihm fest zugeordnet – an der Einspeisung, an einzelnen
@@ -23,12 +26,21 @@ use App\Support\Zeit;
  * Nach dem Abbau bleiben die Messpunkte als frühere stehen; Statistik und
  * Bereiche rechnen die Zeit richtig zu, auch wenn der Verteiler längst
  * woanders steht.
+ *
+ * Ein **Tanksensor** (Füllstandsonde mit ihrem Shelly) hat genau einen
+ * Messkanal und keine Anschlüsse; was die Sonde misst und wie (Prinzip,
+ * Signal, Bürde oder Wandler, Messbereich), steht in seinen Sensordaten
+ * (`eigenschaften`, TankRechnung::sensorPruefen). Er geht nur in einen Tank
+ * und wird dort zum Messpunkt „Füllstand“; mit dem Einbau entsteht seine
+ * erste Kennlinie (TankService::einsatzKalibrieren). Ein neuer Sensor im
+ * selben Tank ersetzt den alten.
  */
 final class InventarService
 {
     public const ARTEN = [
         'verteilung'      => 'Verteiler',
         'zwischenstecker' => 'Zwischenstecker',
+        'tanksensor'      => 'Tanksensor',
     ];
 
     // ------------------------------------------------------------ Lesen
@@ -114,9 +126,12 @@ final class InventarService
     private static function aufbereiten(array $i): array
     {
         $i['art_name'] = self::ARTEN[$i['art']] ?? $i['art'];
-        $i['typ'] = $i['art'] === 'verteilung'
-            ? (string) ($i['vorlage_modell'] ?: $i['vorlage_name'] ?: 'ohne Typ')
-            : (string) ($i['stecker_name'] ?? 'ohne Stecker');
+        $i['eigenschaften'] = TankService::sensordaten($i['eigenschaften'] ?? null);
+        $i['typ'] = match ($i['art']) {
+            'verteilung' => (string) ($i['vorlage_modell'] ?: $i['vorlage_name'] ?: 'ohne Typ'),
+            'tanksensor' => $i['eigenschaften'] !== [] ? TankRechnung::sensorKurz($i['eigenschaften']) : 'ohne Sensordaten',
+            default      => (string) ($i['stecker_name'] ?? 'ohne Stecker'),
+        };
         $i['titel'] = $i['kennung'] . ($i['name'] !== '' ? ' · ' . $i['name'] : '');
         $i['zustand'] = (int) $i['defekt'] === 1 ? 'defekt' : ($i['einsatz'] !== null ? 'im_einsatz' : 'lager');
         return $i;
@@ -137,6 +152,9 @@ final class InventarService
     {
         if ($item['art'] === 'zwischenstecker') {
             return ['durchgang' => 'Durchgang'];
+        }
+        if ($item['art'] === 'tanksensor') {
+            return ['fuellstand' => 'Füllstand'];
         }
         $out = ['einspeisung' => 'Einspeisung'];
         if (!empty($item['vorlage_id'])) {
@@ -185,7 +203,8 @@ final class InventarService
 
     /**
      * @param array{art?:string,kennung?:string,name?:string,vorlage_id?:mixed,steckertyp_id?:mixed,seriennummer?:string,defekt?:mixed,notizen?:string,
-     *              messgeraete?:list<array{geraet?:string,kanal?:string,stelle?:string,bezeichnung?:string}>} $daten
+     *              messgeraete?:list<array{geraet?:string,kanal?:string,stelle?:string,bezeichnung?:string}>,eigenschaften?:array<string,mixed>} $daten
+     *        eigenschaften: Sensordaten eines Tanksensors (TankRechnung::sensorPruefen)
      * @return array{ok:bool,message:string,id?:int}
      */
     public static function speichern(?int $id, array $daten): array
@@ -198,6 +217,11 @@ final class InventarService
         if (!isset(self::ARTEN[$art])) {
             return ['ok' => false, 'message' => 'Unbekannte Art.'];
         }
+        // Ein Tanksensor misst einen Füllstand, kein Verteiler – sonst stünde
+        // im Tank ein Verteiler-Messpunkt oder in der Verteilung ein Füllstand.
+        if ($alt !== null && ($alt['art'] === 'tanksensor') !== ($art === 'tanksensor')) {
+            return ['ok' => false, 'message' => 'Aus einem Tanksensor wird kein Verteiler oder Zwischenstecker (und umgekehrt) – bitte neu anlegen.'];
+        }
         $kennung = trim((string) ($daten['kennung'] ?? ''));
         if ($kennung === '') {
             return ['ok' => false, 'message' => 'Das Stück braucht eine Inventarnummer (den Aufkleber).'];
@@ -208,11 +232,21 @@ final class InventarService
         }
         $vorlageId = (int) ($daten['vorlage_id'] ?? 0);
         $steckerId = (int) ($daten['steckertyp_id'] ?? 0);
+        $sensordaten = null;
         if ($art === 'verteilung') {
             if ($vorlageId > 0 && Database::first("SELECT id FROM objekte WHERE id = ? AND ist_vorlage = 1 AND art = 'verteilung'", [$vorlageId]) === null) {
                 return ['ok' => false, 'message' => 'Diesen Verteiler-Typ gibt es im Katalog nicht.'];
             }
             $steckerId = 0;
+        } elseif ($art === 'tanksensor') {
+            // Kein Typ, kein Stecker – dafür die Sensordaten.
+            $roh = TankService::sensordaten((array) ($daten['eigenschaften'] ?? []));
+            $fehler = TankRechnung::sensorPruefen($roh);
+            if ($fehler !== null) {
+                return ['ok' => false, 'message' => $fehler];
+            }
+            $sensordaten = TankRechnung::sensorNormal($roh);
+            $vorlageId = $steckerId = 0;
         } else {
             if ($steckerId <= 0 || Database::first('SELECT id FROM steckertypen WHERE id = ?', [$steckerId]) === null) {
                 return ['ok' => false, 'message' => 'Bitte den Steckverbinder des Zwischensteckers wählen.'];
@@ -235,7 +269,7 @@ final class InventarService
             }
             $stelle = (string) ($g['stelle'] ?? '');
             if (!isset($stellen[$stelle])) {
-                $stelle = $art === 'zwischenstecker' ? 'durchgang' : 'einspeisung';
+                $stelle = (string) array_key_first($stellen);    // Einspeisung, Durchgang bzw. Füllstand
             }
             $schluessel = $geraet . '|' . $kanal;
             if (isset($geraete[$schluessel])) {
@@ -253,14 +287,20 @@ final class InventarService
                 'bezeichnung' => mb_substr(trim((string) ($g['bezeichnung'] ?? '')), 0, 190),
             ];
         }
+        if ($art === 'tanksensor' && count($geraete) !== 1) {
+            return ['ok' => false, 'message' => 'Ein Tanksensor hat genau einen Messkanal.'];
+        }
 
         $felder = [
             'art' => $art, 'kennung' => mb_substr($kennung, 0, 64), 'name' => mb_substr(trim((string) ($daten['name'] ?? '')), 0, 190),
             'vorlage_id' => $vorlageId ?: null, 'steckertyp_id' => $steckerId ?: null,
             'seriennummer' => mb_substr(trim((string) ($daten['seriennummer'] ?? '')), 0, 190),
-            'defekt' => !empty($daten['defekt']) ? 1 : 0, 'notizen' => (string) ($daten['notizen'] ?? ''), 'updated_at' => gmdate('c'),
+            'defekt' => !empty($daten['defekt']) ? 1 : 0, 'notizen' => (string) ($daten['notizen'] ?? ''),
+            'eigenschaften' => $sensordaten !== null ? json_encode($sensordaten, JSON_UNESCAPED_UNICODE | JSON_PRESERVE_ZERO_FRACTION) : null,
+            'updated_at' => gmdate('c'),
         ];
         $vorherGeraete = $id !== null ? self::geraeteSchluessel($id) : [];
+        $vorherSensor = $alt !== null ? $alt['eigenschaften'] : [];
         if ($id !== null) {
             Database::update('inventar', $id, $felder);
             Audit::log('inventar.update', 'inventar', (string) $id, ['kennung' => $kennung]);
@@ -276,15 +316,24 @@ final class InventarService
 
         // Steckt das Stück gerade irgendwo und hat sich an den Shellys etwas
         // geändert (etwa einer getauscht), gilt ab jetzt die neue Bestückung.
+        // Ein Tanksensor rechnet dort mit seiner Kennlinie weiter; haben sich
+        // seine Sensordaten geändert, ab jetzt mit den neuen.
         $einsatz = self::aktuellerEinsatz($id);
-        $hinweis = '';
+        $hinweise = [];
         if ($einsatz !== null && self::geraeteSchluessel($id) !== $vorherGeraete) {
             $jetzt = gmdate('c');
             Database::execute('UPDATE messpunkte SET gueltig_bis = ? WHERE einsatz_id = ? AND gueltig_bis IS NULL', [$jetzt, (int) $einsatz['id']]);
-            $hinweis = ' ' . self::messpunkteAnlegen(self::find($id), $einsatz, $jetzt);
+            $hinweise[] = self::messpunkteAnlegen(self::find($id), $einsatz, $jetzt);
+            if ($art === 'tanksensor') {
+                TankService::geraetGetauscht((int) $einsatz['id'], $jetzt);
+            }
             Zugriff::vergessen();
         }
-        return ['ok' => true, 'message' => self::ARTEN[$art] . ' ' . $kennung . ' gespeichert (' . count($geraete) . ' Messkanäle).' . rtrim($hinweis), 'id' => $id];
+        if ($einsatz !== null && $art === 'tanksensor' && $sensordaten != $vorherSensor) {
+            $hinweise[] = TankService::sensorGeaendert($id, (array) $vorherSensor);
+        }
+        $hinweis = implode(' ', array_filter($hinweise, static fn (string $h): bool => $h !== ''));
+        return ['ok' => true, 'message' => trim(self::ARTEN[$art] . ' ' . $kennung . ' gespeichert (' . (count($geraete) === 1 ? '1 Messkanal' : count($geraete) . ' Messkanäle') . '). ' . $hinweis), 'id' => $id];
     }
 
     /** @return list<string> */
@@ -317,13 +366,15 @@ final class InventarService
     /**
      * Ein Stück in eine Anlage einsetzen: „der PD63-07 steht jetzt als
      * Foodtruck-Verteiler“, „der Zwischenstecker ZS-63-02 steckt am Abgang X3
-     * des Aggregats“. Steckt das Stück noch woanders, endet der alte Einsatz.
-     * Was vorher an derselben Stelle steckte, ebenso.
+     * des Aggregats“, „TS-01 misst jetzt im Tank Aggregat 1“. Steckt das
+     * Stück noch woanders, endet der alte Einsatz. Was vorher an derselben
+     * Stelle steckte, ebenso.
      *
      * @param bool $typUebernehmen Verteiler: die Anlage auf den Typ des Stücks umstellen, wenn er abweicht
+     * @param array{offset_mm?:mixed,d_leer_mm?:mixed} $einbau Tanksensor: Sondenspitze bzw. Sensorfläche über dem Boden (mm)
      * @return array{ok:bool,message:string,einsatz_id?:int}
      */
-    public static function einsetzen(int $inventarId, int $objektId, ?int $anschlussId = null, bool $typUebernehmen = true): array
+    public static function einsetzen(int $inventarId, int $objektId, ?int $anschlussId = null, bool $typUebernehmen = true, array $einbau = []): array
     {
         $item = self::find($inventarId);
         $objekt = AnlagenService::find($objektId);
@@ -339,6 +390,18 @@ final class InventarService
                 return ['ok' => false, 'message' => 'Ein Verteiler aus dem Inventar gehört in eine Verteilung, nicht in „' . $objekt['art_name'] . '“.'];
             }
             $anschlussId = null;
+        } elseif ($item['art'] === 'tanksensor') {
+            if ($objekt['art'] !== 'tank') {
+                return ['ok' => false, 'message' => 'Ein Tanksensor gehört in einen Tank.'];
+            }
+            $einbau = array_intersect_key(TankService::sensordaten($einbau), ['offset_mm' => true, 'd_leer_mm' => true]);
+            $fehler = TankRechnung::einbauPruefen($einbau);
+            if ($fehler !== null) {
+                return ['ok' => false, 'message' => $fehler];
+            }
+            $anschlussId = null;
+        } elseif (!AnlagenService::elektrisch((string) $objekt['art'])) {
+            return ['ok' => false, 'message' => 'In einen ' . $objekt['art_name'] . ' gehört kein ' . (self::ARTEN[$item['art']] ?? 'Inventarstück') . '.'];
         } elseif ($anschlussId !== null) {
             $anschluss = Database::first('SELECT a.*, t.name AS typ_name FROM anschluesse a JOIN steckertypen t ON t.id = a.steckertyp_id WHERE a.id = ? AND a.objekt_id = ?', [$anschlussId, $objektId]);
             if ($anschluss === null) {
@@ -354,9 +417,11 @@ final class InventarService
         }
         // Was bisher an derselben Stelle steckte, ist jetzt draußen.
         foreach (self::einsaetzeAnObjekt($objektId) as $e) {
-            $gleicheStelle = $item['art'] === 'verteilung'
-                ? $e['inventar_art'] === 'verteilung'
-                : $e['inventar_art'] === 'zwischenstecker' && (int) ($e['anschluss_id'] ?? 0) === (int) ($anschlussId ?? 0);
+            $gleicheStelle = match ($item['art']) {
+                'verteilung' => $e['inventar_art'] === 'verteilung',
+                'tanksensor' => $e['inventar_art'] === 'tanksensor',    // ein Sensor je Tank: der neue ersetzt den alten
+                default      => $e['inventar_art'] === 'zwischenstecker' && (int) ($e['anschluss_id'] ?? 0) === (int) ($anschlussId ?? 0),
+            };
             if ($gleicheStelle) {
                 self::beenden((int) $e['id'], $jetzt);
                 $meldungen[] = $e['kennung'] . ' ersetzt.';
@@ -389,6 +454,12 @@ final class InventarService
         if ($hinweis !== '') {
             $meldungen[] = $hinweis;
         }
+        if ($item['art'] === 'tanksensor') {
+            $messpunkt = Database::first("SELECT * FROM messpunkte WHERE einsatz_id = ? AND rolle = 'fuellstand' ORDER BY id LIMIT 1", [$einsatzId]);
+            $meldungen[] = $messpunkt !== null
+                ? TankService::einsatzKalibrieren($messpunkt, $item, $objekt, $einbau)
+                : 'Ohne Messkanal misst der Sensor nichts.';
+        }
         Zugriff::vergessen();
         Audit::log('inventar.einsatz', 'objekt', (string) $objektId, ['inventar' => $item['kennung'], 'anschluss' => $anschlussId]);
         $wo = '„' . $objekt['name'] . '“' . ($anschluss !== null ? ', ' . ($anschluss['richtung'] === 'abgang' ? 'Abgang ' : 'Eingang ') . $anschluss['bezeichnung'] : '');
@@ -411,7 +482,10 @@ final class InventarService
         foreach (self::messgeraete((int) $item['id']) as $g) {
             $anschlussId = null;
             $rolle = 'einspeisung';
-            if ($g['stelle'] === 'durchgang') {
+            if ($g['stelle'] === 'fuellstand') {
+                // Tanksensor: misst den Füllstand des Tanks, an keinem Anschluss.
+                $rolle = 'fuellstand';
+            } elseif ($g['stelle'] === 'durchgang') {
                 // Zwischenstecker: misst, wo er steckt – am Abgang oder an der Einspeisung.
                 $anschlussId = $einsatz['anschluss_id'] !== null ? (int) $einsatz['anschluss_id'] : null;
                 $richtung = $anschlussId !== null ? (string) Database::scalar('SELECT richtung FROM anschluesse WHERE id = ?', [$anschlussId]) : 'eingang';
@@ -431,7 +505,7 @@ final class InventarService
             Database::insert('messpunkte', [
                 'objekt_id' => $objektId, 'anschluss_id' => $anschlussId, 'schutzorgan_id' => null,
                 'geraet' => $g['geraet'], 'kanal' => $g['kanal'], 'rolle' => $rolle,
-                'bezeichnung' => $g['bezeichnung'] !== '' ? $g['bezeichnung'] : ($item['art'] === 'zwischenstecker' ? $item['kennung'] : ''),
+                'bezeichnung' => $g['bezeichnung'] !== '' ? $g['bezeichnung'] : (in_array($item['art'], ['zwischenstecker', 'tanksensor'], true) ? $item['kennung'] : ''),
                 'einsatz_id' => (int) $einsatz['id'], 'gueltig_ab' => $ab, 'gueltig_bis' => null, 'created_at' => $ab,
             ]);
         }

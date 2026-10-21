@@ -165,7 +165,11 @@ echo json_encode(['format' => 1, 'art' => 'verteiler-typen', 'quelle' => 'BSS St
 {
     const { ctx, page } = await sitzung(DESKTOP);
     await oeffnen(page, '/dashboard', 1200);
-    await foto(page, 'uebersicht');
+    // bis einschließlich der Tanks
+    await oben(page, 'uebersicht', await page.evaluate(() => {
+        const h = [...document.querySelectorAll('h2')].find((e) => e.textContent.trim() === 'Schalten');
+        return h ? Math.round(h.getBoundingClientRect().top + window.scrollY) - 24 : 820;
+    }));
 
     await oeffnen(page, '/karte', 1800);
     await foto(page, 'karte');
@@ -179,6 +183,11 @@ echo json_encode(['format' => 1, 'art' => 'verteiler-typen', 'quelle' => 'BSS St
     await page.locator('.pm-anlage', { hasText: 'Foodtruck-Verteiler' }).locator('.pm-symbol').click();
     await page.waitForTimeout(900);
     await foto(page, 'karte-anlage');
+    // Den Tank des Aggregats antippen: Füllstand, Verbrauch, Restlaufzeit, Peilung und Betankung
+    await oeffnen(page, '/karte', 1500);
+    await page.locator('.pm-anlage', { hasText: 'Tank Aggregat 1' }).locator('.pm-symbol').click();
+    await page.waitForTimeout(1200);
+    await foto(page, 'karte-tank');
     // Georeferenz
     await page.click('[data-modus="geo"]');
     await page.waitForTimeout(500);
@@ -189,6 +198,9 @@ echo json_encode(['format' => 1, 'art' => 'verteiler-typen', 'quelle' => 'BSS St
     await oeffnen(page, hv, 1200);
     await foto(page, 'anlage');
     await element(page, page.locator('.card', { has: page.locator('h2', { hasText: 'Verteilerplan' }) }), 'verteilerplan');
+    await oeffnen(page, '/anlagen?art=tank');
+    await oeffnen(page, await link(page, 'Tank Aggregat 1'), 2200);
+    await oben(page, 'tank', 1900);
     await oeffnen(page, '/anlagen/katalog');
     await foto(page, 'katalog');
     // Katalog-Import: Vorschau eines Beispielpakets aus dem Demo-Katalog –
@@ -223,6 +235,9 @@ echo json_encode(['format' => 1, 'art' => 'verteiler-typen', 'quelle' => 'BSS St
     await foto(page, 'inventar');
     await oeffnen(page, await link(page, 'PD63-07'));
     await foto(page, 'inventar-stueck');
+    await oeffnen(page, '/inventar');
+    await oeffnen(page, await link(page, 'TS-01'));
+    await foto(page, 'inventar-tanksensor');
     await oeffnen(page, '/anlagen');
     await oeffnen(page, (await link(page, 'Foodtruck-Verteiler')) + '?reiter=messung', 800);
     await foto(page, 'einsetzen');
