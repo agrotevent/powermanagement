@@ -140,8 +140,10 @@ final class Router
             // Profil führte zur Kundenseite, die zum Profil, im Kreis, und
             // entsperren ließe sich nie. Erst entsperren (mit dem vorläufigen
             // Kennwort), danach geht es zum Profil. Kundenzugänge haben keinen
-            // Kundenmodus (Kundenmodus::aktiv() ist für sie null).
-            if (Auth::check() && (int) (Auth::user()['must_change_password'] ?? 0) === 1
+            // Kundenmodus (Kundenmodus::aktiv() ist für sie null). Eine
+            // Sitzung über SSO braucht kein Kennwort von hier – sie kennt es
+            // nicht und hat es nicht benutzt.
+            if (Auth::check() && (int) (Auth::user()['must_change_password'] ?? 0) === 1 && Auth::anmeldeweg() !== 'sso'
                 && !in_array($path, self::OHNE_NEUES_KENNWORT, true)
                 && ($kundenzugang || Kundenmodus::aktiv() === null)) {
                 // Das Konto im Kundenbereich sagt es selbst (ein Hinweis, nicht zwei).

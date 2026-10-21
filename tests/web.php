@@ -1187,6 +1187,35 @@ try {
         pruefe($r['status'] === 302 && preg_match('#^/[A-Za-z]#', (string) $r['ziel']) === 1, 'next=' . json_encode($next) . ' führt nicht hinaus: ' . $r['ziel']);
         aufruf($basis, $dose, 'POST', '/logout', ['_token' => token(aufruf($basis, $dose, 'GET', '/profil')['text'])]);
     }
+    // Anmeldung über SSO, solange sie aus ist: Start und Rückruf führen zur
+    // Anmeldung mit Meldung (no-store, no-referrer), HEAD verbraucht nichts,
+    // /abgemeldet ohne Hinweis führt zur Anmeldung. „Abgemeldet.“ kommt an
+    // (neue Sitzung nach dem Abmelden).
+    $ohneSso = tempnam(sys_get_temp_dir(), 'pm-web-');
+    $dosen[] = $ohneSso;
+    $r = aufruf($basis, $ohneSso, 'GET', '/login/sso?next=/karte');
+    pruefe($r['status'] === 302 && $r['ziel'] === '/login' && preg_match('/^Cache-Control:\s*no-store/mi', $r['kopf']) === 1
+        && preg_match('/^Referrer-Policy:\s*no-referrer/mi', $r['kopf']) === 1, 'SSO aus: /login/sso → /login, no-store, no-referrer');
+    pruefe(str_contains(aufruf($basis, $ohneSso, 'GET', '/login')['text'], 'nicht eingerichtet'), 'SSO aus: Meldung „nicht eingerichtet“');
+    $r = aufruf($basis, $ohneSso, 'GET', '/login/sso/rueckruf?state=' . str_repeat('a', 43) . '&code=x');
+    pruefe($r['status'] === 302 && $r['ziel'] === '/login' && str_contains(aufruf($basis, $ohneSso, 'GET', '/login')['text'], 'abgelaufen oder wurde schon benutzt'),
+        'Rückruf ohne Vorgang → /login mit Meldung');
+    $c = curl_init($basis . '/login/sso/rueckruf?state=' . str_repeat('b', 43));
+    curl_setopt_array($c, [CURLOPT_NOBODY => true, CURLOPT_RETURNTRANSFER => true, CURLOPT_HEADER => true, CURLOPT_TIMEOUT => 30]);
+    $kopfHead = (string) curl_exec($c);
+    pruefe((int) curl_getinfo($c, CURLINFO_RESPONSE_CODE) === 302 && preg_match('#^Location:\s*/login\s*$#mi', $kopfHead) === 1, 'HEAD auf den Rückruf → /login');
+    curl_close($c);
+    $r = aufruf($basis, $ohneSso, 'GET', '/abgemeldet');
+    pruefe($r['status'] === 302 && $r['ziel'] === '/login', '/abgemeldet ohne Sitzung → /login');
+    $seite = aufruf($basis, $ohneSso, 'GET', '/login');
+    aufruf($basis, $ohneSso, 'POST', '/login', ['username' => $kennung . '-zwei', 'password' => $kennwort, '_token' => token($seite['text'])]);
+    $r = aufruf($basis, $ohneSso, 'POST', '/logout', ['_token' => token(aufruf($basis, $ohneSso, 'GET', '/profil')['text'])]);
+    pruefe($r['status'] === 302 && $r['ziel'] === '/login' && preg_match('/^Set-Cookie:\s*pm_sso_neu=/mi', $r['kopf']) !== 1,
+        'Abmelden (Kennwort) → /login, ohne pm_sso_neu');
+    $seite = aufruf($basis, $ohneSso, 'GET', '/login');
+    pruefe(str_contains($seite['text'], 'Abgemeldet.'), '„Abgemeldet.“ steht nach dem Abmelden auf der Anmeldeseite');
+    pruefe(aufruf($basis, $ohneSso, 'GET', '/profil')['status'] === 302, 'nach dem Abmelden nicht mehr angemeldet');
+
     // Das Token zählt nur aus dem Formular; ein fremder Referer wird nicht angesteuert
     $vorher = (int) Database::scalar('SELECT COUNT(*) FROM steckertypen');
     $r = aufruf($basis, $admin['dose'], 'POST', '/stecker/speichern?_token=' . rawurlencode($admin['token']), ['name' => $kennung . '-stecker'], ['Referer: https://evil.example/x']);

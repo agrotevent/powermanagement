@@ -5,6 +5,8 @@ namespace App\Services;
 
 use App\Auth\Auth;
 use App\Auth\Permissions;
+use App\Auth\Sso\Einstellungen;
+use App\Auth\Sso\Schutz;
 use App\Auth\Zugriff;
 use App\Kunden\Kundenbereich;
 use App\Support\Audit;
@@ -196,6 +198,8 @@ final class BenutzerService
         Database::execute('DELETE FROM role_permissions WHERE role_id = ?', [$id]);
         Database::execute('DELETE FROM user_roles WHERE role_id = ?', [$id]);
         Database::execute("DELETE FROM freigaben WHERE subject_type = 'role' AND subject_id = ?", [$id]);
+        // Gruppen beim Anmeldedienst, die auf diese Rolle zeigten (SSO).
+        Database::execute("DELETE FROM sso_zuordnungen WHERE art = 'rolle' AND ziel_id = ?", [$id]);
         Database::delete('roles', $id);
         Audit::log('rolle.loeschen', 'role', (string) $id);
         return ['ok' => true, 'message' => 'Rolle gelöscht.'];
@@ -207,13 +211,22 @@ final class BenutzerService
     public static function alle(): array
     {
         $benutzer = Database::select('SELECT * FROM users WHERE kunde_id IS NULL ORDER BY username');
+        $sso = [];
+        foreach (Database::select('SELECT user_id, aussteller, weg, name_dort, zuletzt_am FROM sso_identitaeten ORDER BY id') as $i) {
+            $sso[(int) $i['user_id']] ??= $i;
+        }
         foreach ($benutzer as &$b) {
+            // quelle: hand (hier vergeben) oder sso (aus einer Gruppe beim Anmeldedienst, bis Ende jener Sitzung)
             $b['rollen'] = Database::select(
-                'SELECT r.id, r.name, ur.gueltig_ab, ur.gueltig_bis FROM user_roles ur JOIN roles r ON r.id = ur.role_id WHERE ur.user_id = ? ORDER BY r.name',
+                'SELECT r.id, r.name, ur.gueltig_ab, ur.gueltig_bis, ur.quelle FROM user_roles ur JOIN roles r ON r.id = ur.role_id WHERE ur.user_id = ? ORDER BY r.name',
                 [(int) $b['id']]
             );
             $b['freigaben'] = (int) Database::scalar("SELECT COUNT(*) FROM freigaben WHERE subject_type = 'user' AND subject_id = ?", [(int) $b['id']]);
             $b['zeitraum_hinweis'] = Auth::kontoZeitraum($b);
+            // Verknüpfung mit dem Anmeldedienst (Weg, Name dort, zuletzt) – ohne iss/sub.
+            $i = $sso[(int) $b['id']] ?? null;
+            $b['sso'] = $i === null ? null : ['weg' => (string) $i['weg'], 'name_dort' => (string) $i['name_dort'], 'zuletzt_am' => $i['zuletzt_am'],
+                'anderer_aussteller' => !hash_equals(Einstellungen::aussteller(), (string) $i['aussteller'])];
         }
         return $benutzer;
     }
@@ -230,12 +243,26 @@ final class BenutzerService
     }
 
     /**
+     * Ein Konto des Personals anlegen oder ändern – mit seinen Rollen von Hand.
+     *
+     * Rollen aus Gruppen (user_roles.quelle = 'sso') bleiben stehen; eine
+     * hier angehakte Rolle ersetzt die Zeile aus der Gruppe. „Nur über SSO“
+     * (nur_sso, im Formular mit dem Feld nur_sso_feld; fehlt beides, bleibt
+     * der bisherige Wert): ein neues Konto dann ohne Kennwort, ein
+     * eingetragenes Kennwort gilt nicht; ausschalten nur mit neuem Kennwort;
+     * das eigene Konto nur in einer SSO-Sitzung einschalten. Den letzten
+     * Notzugang (bei „nur SSO“) nimmt keine Änderung.
+     *
      * @param array<int|string,array{aktiv?:mixed,ab?:string,bis?:string}> $rollen role_id => Zuweisung
      */
     public static function speichern(?int $id, array $daten, array $rollen): array
     {
         if ($id && self::istKundenzugang($id)) {
             return ['ok' => false, 'message' => self::KUNDENZUGANG];
+        }
+        $vorher = $id ? self::find($id) : null;
+        if ($id && $vorher === null) {
+            return ['ok' => false, 'message' => 'Diesen Benutzer gibt es nicht.'];
         }
         $username = trim((string) ($daten['username'] ?? ''));
         if ($username === '' || preg_match('/^[A-Za-z0-9._@-]{2,64}$/', $username) !== 1) {
@@ -266,6 +293,22 @@ final class BenutzerService
             $felder['pruefer_qualifikation'] = mb_substr(trim((string) preg_replace('/\s+/u', ' ', (string) $daten['pruefer_qualifikation'])), 0, 120);
         }
         $kennwort = (string) ($daten['password'] ?? '');
+        $hinweise = [];
+        $nurSsoVorher = $vorher !== null && (int) ($vorher['nur_sso'] ?? 0) === 1;
+        $nurSso = array_key_exists('nur_sso', $daten) || !empty($daten['nur_sso_feld']) ? !empty($daten['nur_sso']) : $nurSsoVorher;
+        if ($nurSso) {
+            if ($kennwort !== '') {
+                $hinweise[] = 'Das eingetragene Kennwort gilt nicht – das Konto meldet sich nur über ' . Einstellungen::name() . ' an.';
+                $kennwort = '';
+            }
+            if (!$nurSsoVorher && $id !== null && $id === Auth::id() && Auth::anmeldeweg() !== 'sso') {
+                return ['ok' => false, 'message' => 'Das eigene Konto stellst du nur in einer Sitzung über ' . Einstellungen::name()
+                    . ' auf „nur über SSO“ – sonst sperrst du dich womöglich aus.'];
+            }
+        } elseif ($nurSsoVorher && $kennwort === '') {
+            return ['ok' => false, 'message' => 'Ohne „nur über SSO“ braucht das Konto ein neues Kennwort.'];
+        }
+        $felder['nur_sso'] = $nurSso ? 1 : 0;
         if ($kennwort !== '') {
             $fehler = Auth::validatePassword($kennwort);
             if ($fehler !== null) {
@@ -273,11 +316,30 @@ final class BenutzerService
             }
             $felder['password_hash'] = password_hash($kennwort, PASSWORD_DEFAULT);
             $felder['must_change_password'] = !empty($daten['must_change_password']) ? 1 : 0;
+        } elseif (!$id && $nurSso) {
+            // Niemand kennt dieses Kennwort – angemeldet wird nur über SSO.
+            $felder['password_hash'] = password_hash(bin2hex(random_bytes(32)), PASSWORD_DEFAULT);
+            $felder['must_change_password'] = 0;
         } elseif (!$id) {
             return ['ok' => false, 'message' => 'Ein neues Konto braucht ein Kennwort.'];
         }
         if ($id && $id === Auth::id() && $felder['is_active'] === 0) {
             return ['ok' => false, 'message' => 'Das eigene Konto lässt sich nicht deaktivieren.'];
+        }
+        // Nur SSO: den letzten Notzugang nicht deaktivieren, nicht auf nur_sso
+        // stellen, ihm nicht den Zeitraum und nicht „*“ nehmen.
+        if ($id && Schutz::letzterNotzugang($id)) {
+            $danach = array_merge($vorher, $felder);
+            $stern = false;
+            foreach ($rollen as $rolleId => $zuweisung) {
+                if (is_array($zuweisung) && !empty($zuweisung['aktiv']) && in_array('*', self::rollenRechte((int) $rolleId), true)
+                    && Zeit::imFenster(time(), Zeit::ausEingabe((string) ($zuweisung['ab'] ?? '')), Zeit::ausEingabe((string) ($zuweisung['bis'] ?? ''), true))) {
+                    $stern = true;
+                }
+            }
+            if ((int) $danach['is_active'] !== 1 || (int) $danach['nur_sso'] === 1 || Auth::zugangSperre($danach) !== null || !$stern) {
+                return ['ok' => false, 'message' => Schutz::T_LETZTER_NOTZUGANG];
+            }
         }
 
         // Wer wen zum Prüfer gemacht hat, steht im Audit.
@@ -294,16 +356,24 @@ final class BenutzerService
         $eigeneAdminrolle = $id === Auth::id()
             ? Database::first("SELECT ur.id FROM user_roles ur JOIN roles r ON r.id = ur.role_id WHERE ur.user_id = ? AND r.is_system = 1", [$id])
             : null;
-        Database::execute('DELETE FROM user_roles WHERE user_id = ?', [$id]);
+        // Die Rollen von Hand neu; Rollen aus Gruppen (SSO) bleiben – außer
+        // eine davon ist hier angehakt, dann gilt sie ab jetzt von Hand.
+        $angehakt = [];
         foreach ($rollen as $rolleId => $zuweisung) {
-            if (empty($zuweisung['aktiv'])) {
-                continue;
+            if (is_array($zuweisung) && !empty($zuweisung['aktiv'])) {
+                $angehakt[(int) $rolleId] = $zuweisung;
             }
+        }
+        Database::execute("DELETE FROM user_roles WHERE user_id = ? AND (quelle = 'hand'"
+            . ($angehakt === [] ? ')' : ' OR role_id IN (' . implode(',', array_fill(0, count($angehakt), '?')) . '))'),
+            array_merge([$id], array_keys($angehakt)));
+        foreach ($angehakt as $rolleId => $zuweisung) {
             Database::insert('user_roles', [
                 'user_id'     => $id,
-                'role_id'     => (int) $rolleId,
+                'role_id'     => $rolleId,
                 'gueltig_ab'  => Zeit::ausEingabe((string) ($zuweisung['ab'] ?? '')),
                 'gueltig_bis' => Zeit::ausEingabe((string) ($zuweisung['bis'] ?? ''), true),
+                'quelle'      => 'hand',
             ]);
         }
         if ($eigeneAdminrolle !== null && Database::first(
@@ -315,9 +385,11 @@ final class BenutzerService
             Database::insert('user_roles', ['user_id' => $id, 'role_id' => (int) $admin['id'], 'gueltig_ab' => null, 'gueltig_bis' => null]);
         }
         Zugriff::vergessen();
+        Auth::rechteVergessen();
         Audit::log('benutzer.speichern', 'user', (string) $id, ['username' => $username]
-            + ($qualiNeu ? ['pruefer_qualifikation' => $felder['pruefer_qualifikation']] : []));
-        return ['ok' => true, 'message' => 'Benutzer „' . $username . '“ gespeichert.', 'id' => $id];
+            + ($qualiNeu ? ['pruefer_qualifikation' => $felder['pruefer_qualifikation']] : [])
+            + ($nurSso !== $nurSsoVorher ? ['nur_sso' => $nurSso] : []));
+        return ['ok' => true, 'message' => implode(' ', array_merge(['Benutzer „' . $username . '“ gespeichert.'], $hinweise)), 'id' => $id];
     }
 
     public static function loeschen(int $id): array
@@ -328,19 +400,24 @@ final class BenutzerService
         if (self::istKundenzugang($id)) {
             return ['ok' => false, 'message' => self::KUNDENZUGANG];
         }
+        if (Schutz::letzterNotzugang($id)) {
+            return ['ok' => false, 'message' => Schutz::T_LETZTER_NOTZUGANG];
+        }
         self::kontoEntfernen($id);
         Audit::log('benutzer.loeschen', 'user', (string) $id);
         return ['ok' => true, 'message' => 'Benutzer gelöscht.'];
     }
 
     /**
-     * Ein Konto mit seinen Rollenzuweisungen, Freigaben am Konto und Sperren
-     * des Kundenmodus am Gerät entfernen – ohne Prüfung und ohne Audit: das
-     * tut, wer ruft (loeschen() hier, die Kundenverwaltung für Kundenzugänge).
+     * Ein Konto mit seinen Rollenzuweisungen, Freigaben am Konto, Sperren
+     * des Kundenmodus am Gerät und Verknüpfungen mit dem Anmeldedienst (SSO)
+     * entfernen – ohne Prüfung und ohne Audit: das tut, wer ruft (loeschen()
+     * hier, die Kundenverwaltung für Kundenzugänge).
      */
     public static function kontoEntfernen(int $id): void
     {
         Database::execute('DELETE FROM user_roles WHERE user_id = ?', [$id]);
+        Database::execute('DELETE FROM sso_identitaeten WHERE user_id = ?', [$id]);
         Database::execute("DELETE FROM freigaben WHERE subject_type = 'user' AND subject_id = ?", [$id]);
         // Eine Sperre des Kundenmodus am Gerät gälte für dieses Konto nie
         // mehr – sie hielte dort nur andere Konten vom eigenen Kundenmodus ab

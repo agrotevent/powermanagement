@@ -33,7 +33,9 @@ declare(strict_types=1);
  *   discovery (Felder überschreiben, null entfernt), discovery_404, umleiten, gross
  *   (true = alle JSON-Endpunkte, sonst discovery|jwks|token|userinfo oder eine Liste davon);
  *   schluessel_wechseln (neue Schlüssel rsa-2/ec-2, die alten fallen weg), prompt_ignorieren,
- *   iss_param, kennung (steht in Codes und Access-Tokens – für die Suche nach Geheimnissen).
+ *   iss_param, kennung (steht in Codes und Access-Tokens – für die Suche nach Geheimnissen),
+ *   verzoegerung (Sekunden, die jede Anfrage außer authorize wartet – ein träger Anmeldedienst;
+ *   gewartet wird vor der Sperre des Zustands).
  */
 final class OidcAttrappe
 {
@@ -180,6 +182,10 @@ final class OidcAttrappe
         $methode = strtoupper($methode);
         $kopf = array_change_key_case($kopf, CASE_LOWER);
         $basis = '/application/o/';
+        $warten = (float) ($this->lesen()['steuern']['verzoegerung'] ?? 0);
+        if ($warten > 0 && $pfad !== $basis . 'authorize/') {
+            usleep((int) ($warten * 1000000));
+        }
         return match (true) {
             $pfad === $basis . self::SLUG . '/.well-known/openid-configuration' => $this->discovery(),
             $pfad === $basis . 'authorize/'                                      => $this->authorize($query),

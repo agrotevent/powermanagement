@@ -3,11 +3,14 @@ declare(strict_types=1);
 
 namespace App\Auth;
 
+use App\Auth\Sso\Einstellungen;
+use App\Auth\Sso\Schutz;
 use App\Kunden\Kundenbereich;
 use App\Support\Audit;
 use App\Support\Config;
 use App\Support\Csrf;
 use App\Support\Database;
+use App\Support\Logger;
 use App\Support\Session;
 use App\Support\Zeit;
 
@@ -18,6 +21,12 @@ use App\Support\Zeit;
  * Rollenzuweisungen haben einen Gültigkeitszeitraum. Geprüft wird bei
  * **jeder** Anfrage, nicht nur bei der Anmeldung – ein Zugang, der um
  * Mitternacht endet, endet um Mitternacht, auch in einer offenen Sitzung.
+ *
+ * Zwei Wege hinein, ein Abschluss (sitzungStarten()): Benutzername und
+ * Kennwort (attempt()) oder die Anmeldung über SSO (Sso\Anmeldung). Der Weg
+ * steht in der Sitzung (anmeldeweg(): kennwort | sso | notzugang); eine
+ * SSO-Sitzung prüft user() bei jeder Anfrage gegen Sso\Schutz::sitzungGilt(),
+ * eine Kennwort-Sitzung gegen Sso\Schutz::kennwortVerboten() („nur SSO“).
  */
 final class Auth
 {
@@ -99,32 +108,89 @@ final class Auth
             self::logFailure($username, $ip, 'Kunde nicht aktiv');
             return ['ok' => false, 'message' => $kunde];
         }
+        // „Nur SSO“ – auch erst nach dem Kennwort, sonst erkennte man an der
+        // Meldung verknüpfte Konten.
+        $nurSso = Schutz::kennwortVerboten($user);
+        if ($nurSso !== null) {
+            self::logFailure($username, $ip, 'nur SSO');
+            return ['ok' => false, 'message' => $nurSso];
+        }
 
         $hash = (string) $user['password_hash'];
         if (password_needs_rehash($hash, PASSWORD_DEFAULT)) {
             $hash = password_hash($password, PASSWORD_DEFAULT);
             Database::update('users', (int) $user['id'], ['password_hash' => $hash]);
+            $user['password_hash'] = $hash;
         }
 
-        Database::update('users', (int) $user['id'], [
+        // Rollen aus Gruppen gelten nur für eine SSO-Sitzung; mit Kennwort
+        // hat das Konto nur, was ihm von Hand zugewiesen ist.
+        Database::execute("DELETE FROM user_roles WHERE user_id = ? AND quelle = 'sso'", [(int) $user['id']]);
+        Zugriff::vergessen();
+        $weg = Einstellungen::schalter(Einstellungen::NUR_SSO) && Einstellungen::aktiv() && Schutz::notzugangWirksam($user)
+            ? 'notzugang' : 'kennwort';
+        self::sitzungStarten($user, $ip, $weg);
+
+        return ['ok' => true, 'user' => $user, 'must_change_password' => (int) $user['must_change_password'] === 1];
+    }
+
+    /**
+     * Der gemeinsame Abschluss jeder Anmeldung – mit Kennwort (attempt()),
+     * über den Notzugang oder über SSO (Sso\Anmeldung): Zähler und Sperre
+     * der Kennwort-Bremse zurück (auch bei SSO, damit keine Altsperre stehen
+     * bleibt), bei einem Kontowechsel die Sitzung leeren, neue Sitzungs-ID,
+     * Weg und bei SSO die Angaben dazu (Identität, Marke, auth_time, Name,
+     * zweiter Faktor) in die Sitzung, Bindung ans Kennwort, neues CSRF-Token.
+     *
+     * $weg: kennwort | notzugang | sso. Der Notzugang meldet sich laut an:
+     * Audit und Fehlerprotokoll.
+     *
+     * @param array<string,mixed> $sso nur bei $weg = 'sso'
+     */
+    public static function sitzungStarten(array $user, string $ip, string $weg, array $sso = []): void
+    {
+        $id = (int) $user['id'];
+        Database::update('users', $id, [
             'failed_logins' => 0,
             'locked_until'  => null,
             'last_login_at' => gmdate('c'),
             'last_login_ip' => $ip,
         ]);
-
-        self::sitzungUebernehmen((int) $user['id']);
+        self::sitzungUebernehmen($id);
         Session::regenerate();
-        Session::put('user_id', (int) $user['id']);
-        Session::put(self::KONTO, (int) $user['id']);
+        Session::put('user_id', $id);
+        Session::put(self::KONTO, $id);
         Session::put('angemeldet', time());
-        self::sitzungBinden($hash);
+        Session::put('anmeldeweg', $weg);
+        // Was zu einer früheren SSO-Sitzung gehörte, gilt für diese nicht.
+        foreach (['sso', 'sso_hinweis', 'sso_bestaetigt', 'sso_abgemeldet'] as $schluessel) {
+            Session::forget($schluessel);
+        }
+        if ($weg === 'sso') {
+            Session::put('sso', $sso);
+        }
+        self::sitzungBinden((string) $user['password_hash']);
         Csrf::erneuern();
         self::$user = null;
         self::$permissions = null;
-        Audit::log('auth.login', 'user', (string) $user['id'], ['ip' => $ip]);
+        Zugriff::vergessen();
+        Audit::log('auth.login', 'user', (string) $id, ['ip' => $ip, 'weg' => $weg]);
+        if ($weg === 'notzugang') {
+            Logger::error('auth', ['notzugang' => (string) $user['username'], 'ip' => $ip]);
+        }
+    }
 
-        return ['ok' => true, 'user' => $user, 'must_change_password' => (int) $user['must_change_password'] === 1];
+    /**
+     * Wie die Sitzung angemeldet wurde: kennwort | sso | notzugang – '' ohne
+     * Anmeldung. Sitzungen von vor SSO haben keinen Eintrag: kennwort.
+     */
+    public static function anmeldeweg(): string
+    {
+        if (!self::check()) {
+            return '';
+        }
+        $weg = Session::get('anmeldeweg', 'kennwort');
+        return in_array($weg, ['kennwort', 'sso', 'notzugang'], true) ? $weg : 'kennwort';
     }
 
     /**
@@ -264,7 +330,7 @@ final class Auth
     public static function logout(): void
     {
         if (self::check()) {
-            Audit::log('auth.logout');
+            Audit::log('auth.logout', '', '', ['sso' => self::anmeldeweg() === 'sso']);
         }
         Session::destroy();
         self::$user = null;
@@ -303,6 +369,17 @@ final class Auth
         // Abgelaufen, während die Sitzung offen war – oder der Kunde eines
         // Kundenzugangs ist beendet: dann ist sie zu Ende.
         if (self::zugangSperre($user) !== null) {
+            self::sitzungBeenden();
+            return null;
+        }
+        // SSO-Sitzung: SSO noch an, dieselbe Einrichtung, Identität noch da,
+        // nicht „Sitzungen beendet“, Schranken erfüllt, nicht zu alt.
+        // Kennwort-Sitzung: endet, sobald das Konto nur noch per SSO darf.
+        $weg = Session::get('anmeldeweg', 'kennwort');
+        $aus = $weg === 'sso'
+            ? !Schutz::sitzungGilt($user, (array) Session::get('sso', []), (int) Session::get('angemeldet', 0))
+            : Schutz::kennwortVerboten($user) !== null;
+        if ($aus) {
             self::sitzungBeenden();
             return null;
         }
@@ -349,20 +426,52 @@ final class Auth
         if (Kundenbereich::istKundenzugang($user)) {
             return self::$permissions = [];
         }
+        return self::$permissions = self::rechteAusRollen((int) $user['id'], time());
+    }
+
+    /**
+     * Die Rechte eines beliebigen Kontos aus seinen jetzt (bzw. zu $jetzt)
+     * gültigen Rollenzuweisungen – von Hand und aus SSO-Gruppen. Ein
+     * Kundenzugang hat keine. Ohne Sitzung und ohne Zwischenspeicher: für
+     * die Schranken der SSO-Anmeldung (Sso\Schutz), die in user() laufen und
+     * darum nie can() fragen dürfen.
+     *
+     * @return list<string>
+     */
+    public static function rechteVon(int $userId, ?int $jetzt = null): array
+    {
+        $konto = Database::first('SELECT id, kunde_id FROM users WHERE id = ?', [$userId]);
+        if ($konto === null || Kundenbereich::istKundenzugang($konto)) {
+            return [];
+        }
+        return self::rechteAusRollen($userId, $jetzt ?? time());
+    }
+
+    /** @return list<string> */
+    private static function rechteAusRollen(int $userId, int $jetzt): array
+    {
         $rows = Database::select(
             'SELECT rp.permission, ur.gueltig_ab, ur.gueltig_bis FROM role_permissions rp
              JOIN user_roles ur ON ur.role_id = rp.role_id
              WHERE ur.user_id = ?',
-            [(int) $user['id']]
+            [$userId]
         );
-        $jetzt = time();
         $perms = [];
         foreach ($rows as $row) {
             if (Zeit::imFenster($jetzt, $row['gueltig_ab'], $row['gueltig_bis'])) {
                 $perms[(string) $row['permission']] = true;
             }
         }
-        return self::$permissions = array_keys($perms);
+        return array_keys($perms);
+    }
+
+    /**
+     * Nach einer Änderung an Rollenzuweisungen (Rollen aus Gruppen, Lösen,
+     * SSO aus): die Rechte dieser Anfrage neu lesen – die Anmeldung bleibt.
+     */
+    public static function rechteVergessen(): void
+    {
+        self::$permissions = null;
     }
 
     public static function can(string $permission): bool
@@ -389,7 +498,7 @@ final class Auth
             return [];
         }
         return Database::select(
-            'SELECT r.*, ur.gueltig_ab, ur.gueltig_bis FROM roles r JOIN user_roles ur ON ur.role_id = r.id
+            'SELECT r.*, ur.gueltig_ab, ur.gueltig_bis, ur.quelle FROM roles r JOIN user_roles ur ON ur.role_id = r.id
              WHERE ur.user_id = ? ORDER BY r.name',
             [(int) $user['id']]
         );

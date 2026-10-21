@@ -4,12 +4,16 @@ declare(strict_types=1);
 namespace App\Controllers;
 
 use App\Auth\Auth;
+use App\Auth\Sso\Anmeldung;
+use App\Auth\Sso\Einstellungen;
+use App\Auth\Sso\Schutz;
 use App\Auth\Zugriff;
 use App\Kunden\Kundenbereich;
 use App\Services\BenutzerService;
 use App\Support\Flash;
 use App\Support\Request;
 use App\Support\Response;
+use App\Support\Session;
 
 final class AuthController extends Controller
 {
@@ -50,9 +54,27 @@ final class AuthController extends Controller
         $this->redirect($next);
     }
 
+    /**
+     * Abmelden – hier. Danach eine neue, leere Sitzung: In der zerstörten
+     * ginge „Abgemeldet.“ verloren. War es eine Sitzung über SSO, verlangt
+     * die nächste SSO-Anmeldung in diesem Browser eine neue Anmeldung beim
+     * Anmeldedienst (geteilte Tablets), und /abgemeldet bietet einmal den
+     * Link zum Abmelden dort an – wenn er es anbietet.
+     */
     public function logout(Request $request): void
     {
+        $sso = Auth::anmeldeweg() === 'sso';
+        $hinweis = $sso ? Session::get(Anmeldung::HINWEIS) : null;
         Auth::logout();
+        Session::neu();
+        if ($sso) {
+            Anmeldung::cookieNeuSetzen();
+        }
+        if (is_string($hinweis) && $hinweis !== '') {
+            Session::put('sso_abgemeldet', ['hinweis' => $hinweis, 'bis' => time() + 600]);
+            $this->redirect('/abgemeldet');
+            return;
+        }
         Flash::info('Abgemeldet.');
         $this->redirect('/login');
     }
@@ -78,6 +100,12 @@ final class AuthController extends Controller
     {
         if (!Auth::check()) {
             $this->redirect('/login');
+            return;
+        }
+        // Wer sich nur über SSO anmeldet, hat hier kein Kennwort, das gälte.
+        if (Schutz::nurSso((array) Auth::user())) {
+            Flash::error('Dieses Konto meldet sich nur über ' . Einstellungen::name() . ' an.');
+            $this->redirect('/profil');
             return;
         }
         // Andere Sitzungen mit dem alten Kennwort enden (Auth::user()); diese

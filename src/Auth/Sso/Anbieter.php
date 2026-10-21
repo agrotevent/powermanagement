@@ -56,6 +56,21 @@ final class Anbieter
     }
 
     /**
+     * Die Discovery aus dem Zwischenspeicher, wenn sie höchstens 24 h alt ist –
+     * ohne Netz, wirft nie; sonst null. So weiß der Aufrufer, ob discovery()
+     * warten würde (und gibt dann vorher die Sitzung frei).
+     */
+    public static function discoveryGespeichert(): ?array
+    {
+        try {
+            $c = self::discoveryCache();
+            return $c !== null && Einstellungen::jetzt() - $c['am'] <= self::CACHE ? $c : null;
+        } catch (\Throwable) {
+            return null;
+        }
+    }
+
+    /**
      * Reine Prüfung einer Discovery-Antwort – wirft SsoFehler('discovery', …).
      *
      * @return array{issuer:string,authorization_endpoint:string,token_endpoint:string,userinfo_endpoint:?string,jwks_uri:string,end_session_endpoint:?string,algs:list<string>,auth_methode:'basic'|'post',s256:?bool}

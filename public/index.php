@@ -26,6 +26,7 @@ use App\Controllers\ManifestController;
 use App\Controllers\PruefgeraeteController;
 use App\Controllers\MqttZugaengeController;
 use App\Controllers\SchnittstelleController;
+use App\Controllers\SsoController;
 use App\Controllers\StandortController;
 use App\Controllers\StatistikController;
 use App\Controllers\SteckerController;
@@ -60,6 +61,20 @@ $router->post('/login', [AuthController::class, 'login']);
 $router->post('/logout', [AuthController::class, 'logout']);
 $router->get('/profil', [AuthController::class, 'profile']);
 $router->post('/profil/passwort', [AuthController::class, 'changePassword']);
+
+// ---------------------------------------------------------------- Anmeldung über SSO (OpenID Connect)
+/*
+ * Optional. Der Start ist ein Link (GET), kein Formular: CSP form-action
+ * 'self' gälte in Chromium sonst auch für die Weiterleitung zum Anbieter.
+ * Der Rückruf kommt als GET (response_mode=query, das Sitzungs-Cookie ist
+ * SameSite=Lax) und ist durch state (Sitzung, einmalig), PKCE und nonce
+ * geschützt – ein CSRF-Token gibt es dort nicht. Ziele außerhalb dieser
+ * Seite kommen nur aus der geprüften Discovery. Ohne Recht an der Route:
+ * Start und Rückruf gehen ohne Anmeldung, /abgemeldet nur abgemeldet.
+ */
+$router->get('/login/sso', [SsoController::class, 'start']);
+$router->get('/login/sso/rueckruf', [SsoController::class, 'rueckruf']);
+$router->get('/abgemeldet', [SsoController::class, 'abgemeldet']);
 
 // ---------------------------------------------------------------- Kundenbereich
 /*

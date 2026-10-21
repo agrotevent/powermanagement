@@ -3,6 +3,7 @@ declare(strict_types=1);
 
 namespace App\Auth\Sso;
 
+use App\Auth\Auth;
 use App\Auth\Zugriff;
 use App\Support\Audit;
 use App\Support\Config;
@@ -561,6 +562,7 @@ final class Einstellungen
         self::markeErneuern();
         $rollen = Database::execute("DELETE FROM user_roles WHERE quelle = 'sso'");
         Zugriff::vergessen();
+        Auth::rechteVergessen();
         Audit::log('einstellungen.sso', 'settings', '', ['aktiv' => false, 'sso_rollen' => $rollen]);
         return ['ok' => true, 'message' => 'Die Anmeldung über ' . self::name() . ' ist aus; laufende SSO-Sitzungen enden, Rollen aus Gruppen sind entfernt.'];
     }

@@ -237,8 +237,35 @@ final class Session
         session_destroy();
     }
 
+    /**
+     * Nach destroy() gleich eine neue, leere Sitzung – mit neuer Kennung.
+     * Was nach dem Abmelden noch kommt (die Meldung „Abgemeldet.“, der
+     * Hinweis zum Abmelden beim Anmeldedienst), stünde sonst in einer
+     * zerstörten Sitzung und ginge verloren. Ist die alte noch offen, wird
+     * sie zuerst zerstört. Auf der Kommandozeile (Prüfskripte) ist
+     * $_SESSION nur eine Liste – dort wird sie nur geleert.
+     */
+    public static function neu(): void
+    {
+        if (PHP_SAPI !== 'cli' && !headers_sent()) {
+            if (session_status() === PHP_SESSION_ACTIVE) {
+                self::destroy();
+            }
+            session_id(session_create_id());
+            session_start();
+        }
+        $_SESSION = ['last_activity' => time()];
+    }
+
+    /**
+     * Neue Kennung für dieselbe Sitzung (nach der Anmeldung, nach dem
+     * Entsperren); die alte Datei wird gelöscht. Ohne offene Sitzung
+     * (Kommandozeile, Prüfskripte) gibt es nichts zu erneuern.
+     */
     public static function regenerate(): void
     {
-        session_regenerate_id(true);
+        if (session_status() === PHP_SESSION_ACTIVE) {
+            session_regenerate_id(true);
+        }
     }
 }

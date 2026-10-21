@@ -10,7 +10,10 @@ namespace App\Auth\Sso;
  * `discovery`, `token` …), getMessage() der Text für den Menschen – beides
  * ohne Geheimnis, Code oder Token. $anfrage: nach dem Rollback eine
  * Anmeldeanfrage merken. $nameDort: der Name beim Anmeldedienst für den
- * Akteur im Audit, nur aus geprüften Claims.
+ * Akteur im Audit, nur aus geprüften Claims. $vermerke: Audit-Einträge, die
+ * auch nach dem Rollback bleiben sollen ([Aktion, Zieltyp, Ziel-ID, Details]),
+ * etwa sso.kunde_abweichend. $fehler: der `error` des Anmeldedienstes beim
+ * Abbruch (geprüft, nur [a-z_]) fürs Audit.
  */
 final class SsoFehler extends \RuntimeException
 {
@@ -19,6 +22,8 @@ final class SsoFehler extends \RuntimeException
         string $text,
         public readonly bool $anfrage = false,
         public readonly string $nameDort = '',
+        public readonly array $vermerke = [],
+        public readonly string $fehler = '',
     ) {
         parent::__construct($text);
     }

@@ -54,6 +54,14 @@ declare(strict_types=1);
  * einen durch, der zweite hört sofort mit einer Meldung auf – auch ein
  * „Hochladen“, während der Verteiler-Abgleich das Repository abfragt.
  *
+ * Und für die Anmeldung über SSO (OIDC-Attrappe als eigener Server, der
+ * auf Wunsch trödelt): Der Rückruf wartet auf den Anmeldedienst (Code
+ * einlösen), der Start auf eine veraltete Discovery – eine andere Seite
+ * kommt währenddessen durch, und danach ist man trotzdem angemeldet (neue
+ * Sitzungs-ID). Meldet sich in der Zwischenzeit in einem anderen Reiter
+ * jemand mit Kennwort an, schreibt der Rückruf nichts – angemeldet bleibt,
+ * wer sich dort angemeldet hat (Audit: Grund „sitzung“).
+ *
  * Und was der Browser davon sieht: Formulare mit `data-laeuft` gehen per
  * fetch hinaus und laden danach neu – der Server muss dann mit Meldung und
  * Weiterleitung antworten, nicht mit JSON (MQTT-Zugänge, Verteiler-Abgleich).
@@ -243,10 +251,14 @@ if ($echtesGit !== null) {
 
 // ------------------------------------------------------------ eigene Instanz
 $vorlage = is_file($wurzel . '/config/config.php') ? $wurzel . '/config/config.php' : $wurzel . '/config/config.example.php';
-$konfig = static function (bool $demo) use ($vorlage, $ordner, $influxPort, $ewxBasis, $mqttPort): string {
+$port = freierPort();
+$konfig = static function (bool $demo) use ($vorlage, $ordner, $influxPort, $ewxBasis, $mqttPort, $port): string {
     return '<?php
 $c = require ' . var_export($vorlage, true) . ';
 $c["app"]["demo"] = ' . var_export($demo, true) . ';
+// Für die Anmeldung über SSO (Rückruf-Adresse, Anmeldedienst-Attrappe auf 127.0.0.1).
+$c["app"]["url"] = "http://127.0.0.1:' . $port . '";
+$c["sso"]["lokal_http"] = true;
 $c["database"]["driver"] = "sqlite";
 $c["database"]["path"] = ' . var_export($ordner . '/datenbank.sqlite', true) . ';
 $c["influx"]["url"] = "http://127.0.0.1:' . $influxPort . '";
@@ -292,7 +304,6 @@ if ($generator === null || $anschluss === null) {
 }
 $id = (int) $generator['id'];
 
-$port = freierPort();
 // PHP-Meldungen der Instanz (etwa beim Wiederöffnen der Sitzung) in eine eigene Datei.
 $phpFehler = $ordner . '/php-fehler.log';
 hintergrund(['php', '-d', 'session.save_path=' . $ordner . '/sitzungen', '-d', 'log_errors=1', '-d', 'error_log=' . $phpFehler,
@@ -380,6 +391,25 @@ function holen(string $url, ?array $felder = null, bool|string|null $json = null
 function sitzungsCookie(string $kopf): bool
 {
     return preg_match('/^set-cookie:\s*' . preg_quote((string) App\Support\Config::get('security.session_name', 'pm_session'), '/') . '=/mi', $kopf) === 1;
+}
+
+/**
+ * Nach dem Abmelden gibt es genau eine Sitzung: die neue, leere, die das
+ * Abmelden selbst anlegt (Session::neu – für „Abgemeldet.“), ohne
+ * Anmeldung. Eine Anfrage, die währenddessen wartete, legt keine dazu an.
+ */
+function nurSitzungDesAbmeldens(string $ordner, string $kopfAbmelden): bool
+{
+    $name = preg_quote((string) App\Support\Config::get('security.session_name', 'pm_session'), '/');
+    preg_match_all('/^set-cookie:\s*' . $name . '=([^;\r\n]*)/mi', $kopfAbmelden, $m);
+    $werte = array_values(array_filter($m[1], static fn (string $w): bool => $w !== '' && $w !== 'deleted'));
+    $neu = $werte === [] ? null : end($werte);
+    $dateien = array_map('basename', glob($ordner . '/sitzungen/sess_*') ?: []);
+    if ($neu === null || $dateien !== ['sess_' . $neu]) {
+        return false;
+    }
+    $inhalt = (string) file_get_contents($ordner . '/sitzungen/sess_' . $neu);
+    return str_contains($inhalt, 'Abgemeldet.') && !str_contains($inhalt, 'user_id');
 }
 
 /**
@@ -608,7 +638,7 @@ $nachAbmelden = $lauf['langsam'][0];
 pruefe($nachAbmelden['status'] === 401 && ($nachAbmelden['json']['anmelden'] ?? false) === true && !isset($nachAbmelden['json']['gruppen']),
     'Vorgang nach dem Abmelden: 401 ohne Kundendaten (' . $nachAbmelden['status'] . ')');
 pruefe(!sitzungsCookie($nachAbmelden['kopf']), 'Vorgang nach dem Abmelden: kein Cookie für eine neue, leere Sitzung');
-gleich(count(glob($ordner . '/sitzungen/sess_*') ?: []), 0, 'nach dem Abmelden legt der Vorgang keine Sitzung an');
+pruefe(nurSitzungDesAbmeldens($ordner, $lauf['antwort']['kopf']), 'nach dem Abmelden nur die leere Sitzung des Abmeldens („Abgemeldet.“) – der Vorgang legt keine an');
 gleich(holen($basis . '/profil')['status'], 302, 'danach abgemeldet');
 
 // Für die Anfragen an andere Instanzen wieder anmelden.
@@ -672,7 +702,7 @@ $lauf = waehrendLangsam([[$basis . '/kunden/' . $kundeId . '/nachweise/eventworx
 $nachAbmelden = $lauf['langsam'][0];
 pruefe($lauf['antwort']['status'] === 302 && $nachAbmelden['status'] === 302 && !str_contains($nachAbmelden['text'], 'Pruefprotokoll Sitzung.pdf')
     && !sitzungsCookie($nachAbmelden['kopf']), 'Dateien am Vorgang nach dem Abmelden: Weiterleitung ohne Dateiliste, kein neues Sitzungscookie');
-gleich(count(glob($ordner . '/sitzungen/sess_*') ?: []), 0, 'nach dem Abmelden legt die Kundenverwaltung keine Sitzung an');
+pruefe(nurSitzungDesAbmeldens($ordner, $lauf['antwort']['kopf']), 'nach dem Abmelden nur die leere Sitzung des Abmeldens – die Kundenverwaltung legt keine an');
 file_put_contents($ewxVerzoegerung, '0');
 gleich($anmelden($kennwort), 302, 'wieder angemeldet');
 
@@ -827,7 +857,7 @@ gleich($lauf['antwort']['status'], 302, 'zweiter Reiter: abmelden, während „P
 gleich($lauf['langsam'][0]['status'], 302, '„Prüfen“ leitet nach dem Abmelden weiter');
 pruefe(!sitzungsCookie($lauf['langsam'][0]['kopf']), '„Prüfen“ nach dem Abmelden: kein Cookie für eine neue, leere Sitzung');
 file_put_contents($partnerVerzoegerung, '0');
-gleich(count(glob($ordner . '/sitzungen/sess_*') ?: []), 0, 'nach dem Abmelden legt „Prüfen“ keine neue Sitzung an');
+pruefe(nurSitzungDesAbmeldens($ordner, $lauf['antwort']['kopf']), 'nach dem Abmelden nur die leere Sitzung des Abmeldens – „Prüfen“ legt keine an');
 $anmeldeseite = holen($basis . '/login');
 gleich($anmeldeseite['status'], 200, 'Anmeldeseite nach dem Abmelden');
 pruefe(!str_contains($anmeldeseite['text'], 'Die Verbindung steht'), 'Meldung von „Prüfen“ landet nicht auf der Anmeldeseite');
@@ -1260,6 +1290,97 @@ if ($node === '') {
     pruefe(($b['live_kundenmodus']['neuGeladen'] ?? 0) === 1, 'live.js: 423 mit „kundenmodus“ → neu laden, also zur Kundenseite');
     pruefe(($b['live_abgelaufen']['neuGeladen'] ?? 1) === 0 && ($b['live_abgelaufen']['stand'] ?? '') === 'Sitzung abgelaufen', 'live.js: 401 → nur die Meldung, kein Neuladen');
 }
+
+// ------------------------------------------------------------ Anmeldung über SSO
+// Der Rückruf wartet auf den Anmeldedienst (Code einlösen, Schlüssel,
+// Userinfo – je bis 8 s), der Start auf die Discovery: beides ohne
+// Sitzungssperre. Danach schreibt der Rückruf die Anmeldung trotzdem in die
+// Sitzung (neue Kennung). Meldet sich währenddessen in einem anderen Reiter
+// jemand mit Kennwort an, schreibt der Rückruf nichts – angemeldet bleibt,
+// wer sich in dem Reiter angemeldet hat.
+require_once __DIR__ . '/hilfen/oidc-attrappe.php';
+$oidcPort = freierPort();
+$oidcOrdner = $ordner . '/oidc';
+$idp = OidcAttrappe::einrichten($oidcOrdner, 'http://127.0.0.1:' . $oidcPort, [$basis . '/login/sso/rueckruf'], [$basis . '/login']);
+hintergrund(['php', '-S', '127.0.0.1:' . $oidcPort, $wurzel . '/tests/hilfen/oidc-attrappe.php'],
+    ['OIDC_ATTRAPPE' => $oidcOrdner, 'PHP_CLI_SERVER_WORKERS' => '4']);
+for ($i = 0; $i < 50 && !erreichbar('127.0.0.1', $oidcPort); $i++) {
+    usleep(100_000);
+}
+$ssoSub = 'sub-' . $kennung;
+$idp->benutzer(['sub' => $ssoSub, 'preferred_username' => 'pruefer-dort', 'name' => 'Prüfer', 'email' => 'pruefer@example.com',
+    'email_verified' => true, 'groups' => [], 'amr' => ['pwd', 'mfa']]);
+$zweitName = 'zweit-' . $kennung;
+$einrichtung = inB($ordner . '/config.php', 'use App\\Auth\\Sso\\Einstellungen; use App\\Auth\\Sso\\Konten; use App\\Services\\BenutzerService; use App\\Support\\Database; use App\\Support\\Settings;
+$v = Einstellungen::verbindungSpeichern(' . var_export($idp->aussteller(), true) . ', ' . var_export($idp->client()['id'], true) . ', '
+    . var_export($idp->client()['secret'], true) . ', "Authentik");
+// Das Konto „pruefer“ hat alle Rechte – per SSO also nur mit „Verwaltung per SSO“.
+Settings::put(Einstellungen::ADMINS, "1");
+$e = Einstellungen::einschalten();
+Konten::verknuepfen((int) Database::scalar("SELECT id FROM users WHERE username = ?", ["pruefer"]), ' . var_export($idp->aussteller(), true) . ', '
+    . var_export($ssoSub, true) . ', "cli", "pruefer-dort", []);
+BenutzerService::anlegen(' . var_export($zweitName, true) . ', ' . var_export($kennwort, true) . ', "kunde", false);
+return [$v["ok"], $e["ok"], $e["message"]];');
+pruefe(($einrichtung[0] ?? false) && ($einrichtung[1] ?? false), 'SSO in der Instanz eingerichtet und eingeschaltet (' . (string) ($einrichtung[2] ?? '') . ')');
+$ortAus = static fn (string $kopf): string => preg_match('/^location:\s*(\S+)/mi', $kopf, $m) === 1 ? $m[1] : '';
+$ssoStart = static function () use ($basis, $oidcPort): array {
+    $r = holen($basis . '/login/sso?next=/profil');
+    $a = str_starts_with($r['ziel'], 'http://127.0.0.1:' . $oidcPort . '/') ? holen($r['ziel']) : ['status' => 0, 'ziel' => ''];
+    return [$r, $a];
+};
+
+// Erst abmelden (die Abschnitte davor enden angemeldet).
+$profil = holen($basis . '/profil');
+if ($profil['status'] === 200 && preg_match('/name="_token" value="([^"]+)"/', $profil['text'], $m) === 1) {
+    holen($basis . '/logout', ['_token' => $m[1]]);
+}
+gleich(holen($basis . '/profil')['status'], 302, 'SSO: vorher abgemeldet');
+[$start, $authorize] = $ssoStart();
+pruefe($start['status'] === 302 && str_starts_with($start['ziel'], 'http://127.0.0.1:' . $oidcPort . '/application/o/authorize/?')
+    && $authorize['status'] === 302 && str_starts_with($authorize['ziel'], $basis . '/login/sso/rueckruf?'), 'SSO: Start → Anmeldedienst → Rückruf-Adresse');
+$idp->steuern(['verzoegerung' => 3]);
+$lauf = waehrendLangsam([$authorize['ziel']], $basis . '/login');
+$idp->steuern(['verzoegerung' => null]);
+pruefe($lauf['antwort']['status'] === 200 && $lauf['dauer'] < 1.5,
+    sprintf('SSO: eine andere Seite kommt durch, während der Rückruf auf den Anmeldedienst wartet (%.1f s)', $lauf['dauer']));
+$rueckruf = $lauf['langsam'][0];
+pruefe($rueckruf['status'] === 302 && $ortAus($rueckruf['kopf']) === '/profil' && sitzungsCookie($rueckruf['kopf'])
+    && preg_match('/^cache-control:\s*no-store/mi', $rueckruf['kopf']) === 1 && preg_match('/^referrer-policy:\s*no-referrer/mi', $rueckruf['kopf']) === 1,
+    'SSO: danach angemeldet (neue Sitzungs-ID), weiter zum Ziel, no-store und no-referrer');
+$profil = holen($basis . '/profil');
+pruefe($profil['status'] === 200 && str_contains($profil['text'], 'pruefer'), 'SSO: angemeldet als das verknüpfte Konto');
+gleich(count(glob($ordner . '/sitzungen/sess_*') ?: []), 1, 'SSO: genau eine Sitzung');
+preg_match('/name="_token" value="([^"]+)"/', $profil['text'], $m);
+holen($basis . '/logout', ['_token' => $m[1] ?? '']);
+
+// In einem anderen Reiter mit Kennwort angemeldet, während der Rückruf wartet.
+$loginSeite = holen($basis . '/login');
+preg_match('/name="_token" value="([^"]+)"/', $loginSeite['text'], $m);
+[$start, $authorize] = $ssoStart();
+$idp->steuern(['verzoegerung' => 3]);
+$lauf = waehrendLangsam([$authorize['ziel']], $basis . '/login', ['_token' => $m[1] ?? '', 'username' => $zweitName, 'password' => $kennwort]);
+$idp->steuern(['verzoegerung' => null]);
+$rueckruf = $lauf['langsam'][0];
+pruefe($lauf['antwort']['status'] === 302 && $lauf['dauer'] < 1.5, sprintf('SSO: Kennwort-Anmeldung im anderen Reiter kommt durch (%.1f s)', $lauf['dauer']));
+pruefe($rueckruf['status'] === 302 && $ortAus($rueckruf['kopf']) === '/login' && !sitzungsCookie($rueckruf['kopf']),
+    'SSO: der Rückruf danach meldet niemanden an und schickt kein Sitzungscookie');
+$profil = holen($basis . '/profil');
+pruefe($profil['status'] === 200 && str_contains($profil['text'], $zweitName) && !str_contains($profil['text'], 'pruefer-dort'),
+    'SSO: angemeldet bleibt, wer sich im anderen Reiter angemeldet hat');
+$grund = $abfrage("SELECT details FROM audit_log WHERE action = 'auth.sso_fehlgeschlagen' ORDER BY id DESC LIMIT 1")[0]['details'] ?? '';
+gleich(json_decode((string) $grund, true)['grund'] ?? null, 'sitzung', 'SSO: im Audit mit Grund „sitzung“');
+preg_match('/name="_token" value="([^"]+)"/', $profil['text'], $m);
+holen($basis . '/logout', ['_token' => $m[1] ?? '']);
+
+// Der Start holt eine veraltete Discovery – ebenfalls ohne Sitzungssperre.
+$abfrage("DELETE FROM settings WHERE setting_key = 'sso.discovery_am'");
+$idp->steuern(['verzoegerung' => 3]);
+$lauf = waehrendLangsam([$basis . '/login/sso'], $basis . '/login');
+$idp->steuern(['verzoegerung' => null]);
+pruefe($lauf['antwort']['status'] === 200 && $lauf['dauer'] < 1.5,
+    sprintf('SSO: eine andere Seite kommt durch, während der Start die Discovery holt (%.1f s)', $lauf['dauer']));
+pruefe($lauf['langsam'][0]['status'] === 302 && str_starts_with($ortAus($lauf['langsam'][0]['kopf']), 'http://127.0.0.1:' . $oidcPort . '/application/o/authorize/?'),
+    'SSO: der Start leitet danach zum Anmeldedienst');
 
 $meldungen = trim((string) @file_get_contents($phpFehler));
 pruefe($meldungen === '', 'keine PHP-Meldung der Instanz' . ($meldungen !== '' ? ': ' . mb_substr($meldungen, 0, 300) : ''));
