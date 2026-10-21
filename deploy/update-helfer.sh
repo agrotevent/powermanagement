@@ -425,7 +425,10 @@ pfad_heilen() {
     [[ "$PFAD_ZUSTAND" == "ok" && "$OHNE_SYSTEMD" == "nein" ]] || return 0
     if systemctl is-failed --quiet powermanagement-update.path 2>/dev/null; then
         systemctl reset-failed powermanagement-update.path powermanagement-update.service >/dev/null 2>&1 || true
-        if systemctl restart powermanagement-update.path >/dev/null 2>&1; then
+        # --no-block: die Pfad-Einheit ist vor diesem Dienst geordnet. Wird er
+        # gerade gestoppt (Abbruch), hielte systemd den Neustart bis zum Ende
+        # des Stopps zurück – und der wartet auf diesen Lauf.
+        if systemctl --no-block restart powermanagement-update.path >/dev/null 2>&1; then
             PFAD_ZUSTAND="repariert"
             echo "update-helfer.sh: powermanagement-update.path war ausgefallen – wieder gestartet."
         fi
