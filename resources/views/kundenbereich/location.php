@@ -3,8 +3,8 @@
  * Eine Location, wie der Kunde sie sieht: Anschrift, Freigabe(n) mit
  * Veranstaltung, „sichtbar bis“ und Messzeitraum, Pläne der Etagen (Bild im
  * Browser, PDF als Datei), die festen Stromanschlüsse, Ihre Protokolle und
- * Ihre Prüfnachweise an dieser Location. Nie Notizen, mobile Anlagen, Kabel
- * oder Messgeräte (KundenSicht::location()).
+ * Ihre Prüfnachweise an dieser Location. Nie Notizen, mobile Anlagen, Kabel,
+ * Messgeräte oder Tanks (KundenSicht::location()).
  *
  * @var array<string,mixed> $kunde
  * @var array{site:array{id:int,name:string,address:string},freigaben:list<array<string,mixed>>,etagen:list<array{id:int,name:string,plan:string,seite:int,vorschau:bool}>,feststrom:list<array<string,string>>} $location

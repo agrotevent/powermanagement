@@ -212,6 +212,9 @@ try {
     $v2 = $vorgang($kunden['k2'], 'AU-' . random_int(1000, 9999));
     $inventar['pd'] = Database::insert('inventar', ['art' => 'verteilung', 'kennung' => $kennung . '-PD', 'name' => 'Verteiler', 'seriennummer' => 'INV-SN-1',
         'created_at' => gmdate('c')]);
+    // Ein Tanksensor – Kunden sehen keine Tanks, also auch keinen Prüfnachweis dazu.
+    $inventar['ts'] = Database::insert('inventar', ['art' => 'tanksensor', 'kennung' => $kennung . '-TS', 'name' => 'Sonde', 'seriennummer' => 'INV-SN-TS',
+        'created_at' => gmdate('c')]);
     $nachweis = static fn (int $id): ?array => Database::first('SELECT * FROM pruefnachweise WHERE id = ?', [$id]);
     $dateiZahl = static fn (string $bytes): int => (int) Database::scalar('SELECT COUNT(*) FROM pruefnachweis_dateien WHERE sha256 = ?', [hash('sha256', $bytes)]);
     alsBenutzer($personal['planung']);
@@ -272,6 +275,7 @@ try {
         'Vorgang eines anderen Kunden'     => ['vorgang_id' => (string) $v2],
         'Vorgang kaputt'                   => ['vorgang_id' => 'abc'],
         'Inventar, das es nicht gibt'      => ['inventar_id' => '999999999'],
+        'Tanksensor'                       => ['inventar_id' => (string) $inventar['ts']],
         'Hinweis über 500 Zeichen'         => ['hinweis' => str_repeat('x', 501)],
         'Inventarnummer über 80 Zeichen'   => ['inventarnummer' => str_repeat('1', 81)],
     ];
@@ -289,6 +293,8 @@ try {
         $z['einsatz_von'] ?? '', $z['einsatz_bis'] ?? '', (int) ($z['inventar_id'] ?? 0), $z['inventarnummer'] ?? '', $z['seriennummer'] ?? '', $z['hinweis'] ?? '', $z['aufbewahren_bis'] ?? ''],
         ['2026-03-12', '2026-03-12', 'bestanden', $sites['c'], $v1, $tagIn(-5), $tagIn(5), $inventar['pd'], $kennung . '-PD', 'INV-SN-1', 'Zeile 1 Zeile 2', '2029-12-31'],
         'TT.MM.JJJJ gelesen, nächste = Prüfdatum erlaubt, abgelaufene Location des Kunden, Mietzeit aus dem Vorgang, Nummern aus dem Inventar, Aufbewahrung neu');
+    $auswahl = array_map(static fn (array $i): int => (int) $i['id'], Pruefnachweise::inventar());
+    pruefe(in_array($inventar['pd'], $auswahl, true) && !in_array($inventar['ts'], $auswahl, true), 'Inventar-Auswahl: der Verteiler, kein Tanksensor');
     alsBenutzer($personal['ohneinventar']);
     $r = Pruefnachweise::speichern($kunden['k1'], $n2, $angaben(['bezeichnung' => $kennung . ' Kabeltrommel KT-12', 'geprueft_am' => '2026-03-12', 'inventar_id' => '',
         'site_id' => (string) $sites['c'], 'vorgang_id' => (string) $v1]));

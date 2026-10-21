@@ -23,7 +23,10 @@ declare(strict_types=1);
  * aus wirksamen Freigaben am Kunden (mehrere Veranstalter auf einem Gelände),
  * kommende nur mit Name und „ab …“, je Location nur Etagen mit Plan und feste
  * Anschlüsse – nie Notizen, Fremdbestand, mobile Anlagen oder Vorlagen –,
- * jede Etage einzeln gegen die Location geprüft.
+ * jede Etage einzeln gegen die Location geprüft. Tanks nie: kein fester
+ * Bodentank unter den Anschlüssen, für Kundenzugänge deckt Zugriff keinen
+ * Tank, die Tank-Routen sind im Durchlauf des Tors (auch mit echten IDs),
+ * tank:liste mit einem Kundenzugang bricht ab.
  *
  * Über HTTP (eigener PHP-Server): das Tor über alle Routen aus
  * public/index.php – GET und POST mit gültigem Token führen zurück in den
@@ -258,6 +261,24 @@ try {
         'fest' => 0, 'created_at' => gmdate('c')]);
     Database::insert('objekte', ['art' => 'anschluss', 'name' => $kennung . ' Vorlage VA', 'site_id' => $sites['a'], 'fest' => 1, 'ist_vorlage' => 1,
         'created_at' => gmdate('c')]);
+    // Tanks auf A: ein fester Bodentank TA und ein mobiler Tank TM, dazwischen ein Kraftstoffschlauch, am Bodentank eine
+    // Peilung und eine Betankung mit Lieferschein, ein Tanksensor im Inventar – nichts davon sieht ein Kunde.
+    $tankMarken = [$kennung . ' Bodentank TA', $kennung . ' Tank TM', $kennung . ' Schlauch TS', $kennung . '-LS-4711', $kennung . '-TS-01', $kennung . '-peilung'];
+    $tankAnlegen = static fn (string $name, int $fest): int => (int) Database::insert('objekte', ['art' => 'tank', 'name' => $name, 'site_id' => $sites['a'],
+        'floor_id' => $a1, 'fest' => $fest, 'plan_x' => 10.0, 'plan_y' => 20.0, 'created_at' => gmdate('c'),
+        'eigenschaften' => json_encode(['inhalt_l' => 5000, 'kraftstoff' => 'Diesel', 'bauform' => 'Zylinder liegend', 'liter_je_mm' => 2.5])]);
+    $tankFest = $tankAnlegen($tankMarken[0], 1);
+    $tankMobil = $tankAnlegen($tankMarken[1], 0);
+    $schlauch = (int) Database::insert('leitungen', ['art' => 'kraftstoff', 'floor_id' => $a1, 'name' => $tankMarken[2], 'von_objekt_id' => $tankFest,
+        'zu_objekt_id' => $tankMobil, 'kabeltyp' => 'DN 10', 'anzahl' => 2, 'punkte' => json_encode([[10.0, 20.0], [12.0, 22.0]]), 'created_at' => gmdate('c')]);
+    $tankEreignisse = [
+        (int) Database::insert('tank_ereignisse', ['objekt_id' => $tankFest, 'art' => 'peilung', 'zeit' => gmdate('c', $jetzt - 3600), 'prozent' => 61.0,
+            'liter' => 3050.0, 'von' => $kennung . '-technik', 'notizen' => $tankMarken[5], 'created_at' => gmdate('c')]),
+        (int) Database::insert('tank_ereignisse', ['objekt_id' => $tankFest, 'art' => 'betankung', 'zeit' => gmdate('c', $jetzt - 7200), 'liter' => 1200.0,
+            'lieferschein' => $tankMarken[3], 'von' => $kennung . '-technik', 'created_at' => gmdate('c')]),
+    ];
+    $tankSensor = (int) Database::insert('inventar', ['art' => 'tanksensor', 'kennung' => $tankMarken[4], 'name' => 'Sonde', 'created_at' => gmdate('c'),
+        'eigenschaften' => json_encode(['prinzip' => 'hydrostatisch', 'feld' => 'u', 'signal' => '4-20mA', 'buerde_ohm' => 500])]);
     $kunden['k1'] = $kundeAnlegen('Muster Events');
     $kunden['k2'] = $kundeAnlegen('Stadtmarketing');
     $kunden['k3'] = $kundeAnlegen('Beendet', 0);
@@ -459,6 +480,14 @@ try {
     pruefe(Zugriff::siehtStandort($sites['a']), 'z1 sieht A');
     pruefe(!Zugriff::siehtStandort($sites['b']), 'z1 sieht B nicht – trotz Freigabe am Konto und an der Rolle „kunde“');
     pruefe(!Zugriff::siehtObjekt(['id' => $objekt, 'site_id' => $sites['b']]), 'z1 sieht die Anlage auf B nicht');
+    // Tanks: keine Freigabe am Kunden deckt einen Tank – auch nicht auf der sichtbaren Location A (dritte Tür nach Tor und Rechten).
+    $zeileVon = static fn (int $id): array => Database::first('SELECT * FROM objekte WHERE id = ?', [$id]) ?? [];
+    pruefe(Zugriff::siehtObjekt($zeileVon($fa)) && !Zugriff::siehtObjekt($zeileVon($tankFest)) && !Zugriff::siehtObjekt($zeileVon($tankMobil)),
+        'z1 sieht den Feststromanschluss auf A, keinen der Tanks dort');
+    pruefe(!Zugriff::siehtObjekt(['id' => $tankFest, 'site_id' => $sites['a']]), '… auch nicht ohne „art“ im Datensatz (die gespeicherte zählt)');
+    gleich([Zugriff::datenFenster($zeileVon($tankFest)), Zugriff::datenFenster($zeileVon($tankMobil))], [[], []], 'Datenfenster der Tanks für z1: leer');
+    gleich(array_map(static fn (array $o): int => (int) $o['id'], Zugriff::filtern([$zeileVon($fa), $zeileVon($tankFest), $zeileVon($tankMobil)])), [$fa],
+        'Zugriff::filtern() für z1: ohne Tanks');
     gleich(Zugriff::datenFensterStandort($sites['a']), [[Zeit::ts(Zeit::ausEingabe($eingabe($jetzt - 3 * $tag))),
         Zeit::ts(Zeit::ausEingabe($eingabe($jetzt + 7 * $tag), true))]], 'Datenfenster auf A = das der Kunden-Freigabe');
     alsBenutzer($zugaenge['z1b']);
@@ -476,6 +505,7 @@ try {
     gleich(Zugriff::begrenzen($fenster, $jetzt - 365 * $tag, $jetzt + 365 * $tag), [], '… und kein Zeitraum lässt sich abfragen');
     alsBenutzer($personal['alt']);
     pruefe(Zugriff::siehtStandort($sites['a']) && !Zugriff::siehtStandort($sites['c']), 'Konto mit Rolle „kunde“ (ohne kunde_id): wie bisher über Konto-Freigaben');
+    pruefe(Zugriff::siehtObjekt($zeileVon($tankFest)), '… und sieht den Tank auf A wie jede Anlage (die Sperre gilt nur Kundenzugängen)');
     gleich(Auth::landingPath(), '/dashboard', 'Konto mit Rolle „kunde“: Startseite wie bisher');
     pruefe(Response::fehlerSeite(404, 'Seite nicht gefunden.')[1] === false, 'Fehlerseite des Personals: die schlichte');
     alsBenutzer($personal['admin']);
@@ -550,6 +580,10 @@ try {
     $durch = array_filter(array_merge($marken, [$kennung . '-anlagennotiz', $kennung . '-netz', 'Mobilverteiler', 'Vorlage VA', 'Hallenplan', '"plan_file"']),
         static fn (string $m): bool => str_contains($json, $m));
     gleich(array_values($durch), [], 'location() ohne Notizen, Fremdbestand, Netzbetreiber, mobile Anlagen, Vorlagen, Dateinamen');
+    $durch = array_filter(array_merge($tankMarken, ['Tank', 'Diesel', 'liter', 'Schlauch', 'Peilung', 'Betankung']), static fn (string $m): bool => str_contains($json, $m));
+    gleich(array_values($durch), [], 'location() ohne Tanks: kein fester Bodentank unter den Anschlüssen, kein Füllstand, Schlauch, Lieferschein, Sensor');
+    $json = (string) json_encode(KundenSicht::zusammenfassung($kunden['k1']), JSON_UNESCAPED_UNICODE);
+    gleich(array_values(array_filter($tankMarken, static fn (string $m): bool => str_contains($json, $m))), [], 'zusammenfassung() ohne Tanks');
     gleich(KundenSicht::location($kunden['k4'], $sites['a'])['freigaben'][0]['daten'] ?? '', 'keine Messdaten freigegeben',
         'Freigabe ohne Datenenden (per SQL): „keine Messdaten freigegeben“');
     gleich((KundenSicht::etage($kunden['k1'], $sites['a'], $a1) ?? [])['id'] ?? null, $a1, 'etage(K1, A, A1): da');
@@ -1021,6 +1055,55 @@ try {
     gleich($falsch, [], 'Tor: jede Route außerhalb des Kundenbereichs führt zurück (302), mit JSON 403');
     pruefe($offen >= 4, 'offen nur Kundenbereich, Anmelden, Abmelden, Manifest (' . $offen . ' Routen)');
     gleich($zaehlen(), $bestand, 'Tor: nichts geändert (Schaltvorgänge, Konten, Freigaben, Berichte, Kunden)');
+    // Die Tank-Routen sind im Durchlauf – und auch mit den IDs der Tanks auf der sichtbaren Location A kommt nichts davon heraus.
+    $gelesen = array_map(static fn (array $r): string => $r[0] . ' ' . $r[1], $routen);
+    $tankRouten = ['GET /anlagen/1/tank/verlauf', 'GET /anlagen/1/tank/tage', 'GET /anlagen/1/tank/csv', 'POST /anlagen/1/tank/peilung',
+        'POST /anlagen/1/tank/betankung', 'POST /anlagen/1/tank/betankung/auswerten', 'POST /anlagen/1/tank/ereignis/loeschen',
+        'POST /anlagen/1/tank/kennlinie', 'POST /anlagen/1/tank/steigung'];
+    gleich(array_values(array_diff($tankRouten, $gelesen)), [], 'Tor: die Tank-Routen aus public/index.php sind im Durchlauf');
+    pruefe(count(array_filter($gelesen, static fn (string $r): bool => str_contains($r, '/tank'))) >= count($tankRouten), '… alle mit „/tank“ im Pfad');
+    $tankZaehlen = static fn (): array => [(int) Database::scalar('SELECT COUNT(*) FROM tank_ereignisse WHERE objekt_id IN (?, ?)', [$tankFest, $tankMobil]),
+        (int) Database::scalar('SELECT COUNT(*) FROM tank_kennlinien WHERE objekt_id IN (?, ?)', [$tankFest, $tankMobil]),
+        (string) Database::scalar('SELECT eigenschaften FROM objekte WHERE id = ?', [$tankFest])];
+    $tankVorher = $tankZaehlen();
+    $falsch = [];
+    $mitTank = [];
+    $tankWege = [];
+    foreach ([$tankFest, $tankMobil] as $t) {
+        foreach (['', '/live', '/druck', '/bearbeiten', '/tank/verlauf?von=0', '/tank/tage', '/tank/csv'] as $rest) {
+            $tankWege[] = ['GET', '/anlagen/' . $t . $rest, []];
+        }
+        $tankWege[] = ['GET', '/karte/objekt/' . $t, []];
+        foreach (['peilung' => ['prozent' => '10'], 'betankung' => ['liter' => '100'], 'betankung/auswerten' => ['ereignis_id' => (string) $tankEreignisse[1]],
+            'ereignis/loeschen' => ['ereignis_id' => (string) $tankEreignisse[0]], 'kennlinie' => ['liter_je_mm' => '9'], 'steigung' => ['ereignis_id' => (string) $tankEreignisse[0]]] as $aktion => $felder) {
+            $tankWege[] = ['POST', '/anlagen/' . $t . '/tank/' . $aktion, $felder];
+        }
+        $tankWege[] = ['POST', '/anlagen/' . $t . '/einsetzen', ['inventar_id' => (string) $tankSensor]];
+        $tankWege[] = ['POST', '/anlagen/' . $t . '/loeschen', []];
+    }
+    foreach (['/karte/' . $sites['a'] . '/live', '/karte/' . $sites['a'] . '/stand', '/karte/' . $sites['a'] . '/geojson', '/karte/' . $sites['a'] . '/material',
+        '/karte/' . $a1 . '/live', '/karte/' . $a1 . '/stand', '/karte/leitung/' . $schlauch, '/karte?site=' . $sites['a'], '/anlagen?art=tank',
+        '/inventar/' . $tankSensor, '/statistik?objekt=' . $tankFest, '/dashboard'] as $pfad) {
+        $tankWege[] = ['GET', $pfad, []];
+    }
+    foreach ($tankWege as [$methode, $pfad, $felder]) {
+        foreach ([[], ['Accept: application/json']] as $kopf) {
+            $r = anfrage($basis, $z1['dose'], $methode, $pfad, $methode === 'POST' ? $felder + ['_token' => $token] : [], $kopf);
+            $soll = $kopf === [] ? [302, '/kundenbereich'] : [403, null];
+            if ([$r['status'], $r['ziel']] !== $soll) {
+                $falsch[] = $methode . ' ' . $pfad . ($kopf === [] ? '' : ' (JSON)') . ' → ' . $r['status'] . ' ' . (string) $r['ziel'];
+            }
+            foreach (array_merge($tankMarken, ['Bodentank', '"liter"', '"prozent"', 'Füllstand']) as $m) {
+                if (str_contains($r['kopf'] . $r['text'], $m)) {
+                    $mitTank[] = $methode . ' ' . $pfad . ': ' . $m;
+                }
+            }
+        }
+    }
+    gleich($falsch, [], 'Tor: Tankseite, Verlauf, Tage, CSV, Peilung, Betankung, Kennlinie, Einbau, Karte, Schlauch und Tanksensor mit echten IDs → zurück, mit JSON 403');
+    gleich($mitTank, [], '… und keine Antwort nennt einen Tank, einen Füllstand oder einen Lieferschein');
+    gleich($tankZaehlen(), $tankVorher, '… und an den Tanks hat sich nichts geändert (Peilungen, Betankungen, Kennlinien, Inhalt je mm)');
+    gleich((int) Database::scalar('SELECT COUNT(*) FROM objekte WHERE id IN (?, ?)', [$tankFest, $tankMobil]), 2, '… beide Tanks noch da');
     gleich(meldungenDesServers($serverFehler), [], 'Tor ohne PHP-Meldung');
     $r = anfrage($basis, $z1['dose'], 'GET', '/kundenbereich/../system/benutzer', [], [], true);
     pruefe($r['status'] === 404 && !str_contains($r['text'], 'Benutzer &amp; Freigaben') && !str_contains($r['text'], 'Datenquellen'),
@@ -1041,6 +1124,13 @@ try {
     gleich([$r['status'], $r['ziel']], [302, '/kundenbereich'], 'angemeldet /login → Kundenbereich');
     gleich(meldungenDesServers($serverFehler), [], 'Fehlerseiten ohne PHP-Meldung');
 
+    // tank:liste nur mit --als – ein Kundenzugang hat keine Rechte, also auch keine Tankwerte.
+    $ausgabe = [];
+    exec(escapeshellarg(PHP_BINARY) . ' ' . escapeshellarg(dirname(__DIR__) . '/bin/power') . ' tank:liste --als=' . escapeshellarg($kennung . '-z1') . ' 2>&1', $ausgabe, $rc);
+    $ausgabe = implode("\n", $ausgabe);
+    pruefe($rc === 2 && str_contains($ausgabe, 'darf keine Anlagen sehen')
+        && array_filter($tankMarken, static fn (string $m): bool => str_contains($ausgabe, $m)) === [], 'tank:liste --als=<Kundenzugang>: abgelehnt (2), kein Tank in der Ausgabe');
+
     // Übersicht, Locations, Location, Hilfe, Konto: was drinsteht – und was nie.
     $plan = static fn (int $site, int $etage): string => '/kundenbereich/locations/' . $site . '/plan/' . $etage;
     pruefe(str_contains($start['text'], $kennung . ' Gelände A (geteilt)') && str_contains($start['text'], 'href="/kundenbereich/locations/' . $sites['a'] . '"')
@@ -1055,6 +1145,10 @@ try {
     $durch = array_filter(array_merge($marken, [$kennung . '-anlagennotiz', $kennung . '-netz', 'Mobilverteiler', 'Vorlage VA', 'Hallenplan', '/grundriss/', '/karte']),
         static fn (string $m): bool => str_contains($ort, $m));
     gleich(array_values($durch), [], 'Location-Seite ohne Notizen, Fremdbestand, mobile Anlagen, Vorlagen, Dateinamen, Karte');
+    $alleSeiten = implode("\n", array_map(static fn (array $r): string => $r['text'], $seiten));
+    $durch = array_filter(array_merge($tankMarken, ['Bodentank', 'Füllstand', 'Kraftstoff', 'Peilung', 'Betankung', 'Tanksensor', '/tank/']),
+        static fn (string $m): bool => str_contains($alleSeiten, $m));
+    gleich(array_values($durch), [], 'Seiten des Kundenbereichs ohne Tanks (Namen, Füllstand, Schlauch, Lieferschein, Sensor, Tank-Adressen)');
     $hilfe = $seiten['/kundenbereich/hilfe']['text'];
     pruefe(str_contains($hilfe, 'DIN EN 50699') && str_contains($hilfe, 'BetrSichV § 14 Abs. 7') && str_contains($hilfe, 'id="datenschutz"')
         && str_contains($hilfe, 'Keine Rechtsberatung') && str_contains($hilfe, 'Art. 6 Abs. 1 lit. b und c DSGVO'), 'Hilfe: Prüfnachweis ≠ Übergabebericht, Datenschutzhinweis, keine Rechtsberatung');
@@ -1629,6 +1723,11 @@ try {
         Database::execute("DELETE FROM freigaben WHERE subject_type = 'role' AND subject_id = ? AND notiz = ?", [$rolleKunde, $kennung]);
     }
     Database::execute('DELETE FROM anschluesse WHERE objekt_id IN (SELECT id FROM objekte WHERE name LIKE ?)', [$kennung . '%']);
+    foreach (['tank_ereignisse', 'tank_kennlinien'] as $tabelle) {
+        Database::execute('DELETE FROM ' . $tabelle . ' WHERE objekt_id IN (SELECT id FROM objekte WHERE name LIKE ?)', [$kennung . '%']);
+    }
+    Database::execute('DELETE FROM leitungen WHERE name LIKE ?', [$kennung . '%']);
+    Database::execute('DELETE FROM inventar WHERE kennung LIKE ?', [$kennung . '%']);
     Database::execute('DELETE FROM objekte WHERE name LIKE ?', [$kennung . '%']);
     foreach ($sites as $id) {
         SiteService::deleteSite($id);   // samt Etagen und Plandateien

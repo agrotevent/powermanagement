@@ -34,6 +34,7 @@ use App\Support\Zeit;
  * Kundenzugänge (users.kunde_id) haben nur die Freigaben ihres Kunden
  * (Kundenbereich::freigaben – nur Standorte, nur sehen, nie ohne
  * Datengrenze); Freigaben am Konto oder an Rollen zählen für sie nicht.
+ * Einen Tank deckt für sie keine Freigabe (tankFuerKunden).
  */
 final class Zugriff
 {
@@ -112,6 +113,23 @@ final class Zugriff
 
     // ------------------------------------------------------------ Abdeckung
 
+    /**
+     * Ein Tank, und angemeldet ist ein Kundenzugang? Kunden sehen keine
+     * Tanks – weder den Tank noch Füllstand, Kennlinie, Peilung, Betankung,
+     * Schlauch oder Sensor (docs/kundenbereich.md, „Tanks“). Das Tor im
+     * Router und die fehlenden Rechte halten sie schon fern; dies ist die
+     * dritte Tür für jeden Weg über Zugriff (auch Messdaten). Fehlt die Art
+     * im übergebenen Datensatz, gilt die gespeicherte.
+     */
+    private static function tankFuerKunden(array $objekt): bool
+    {
+        if (!Kundenbereich::istKundenzugang()) {
+            return false;
+        }
+        $art = $objekt['art'] ?? (isset($objekt['id']) ? Database::scalar('SELECT art FROM objekte WHERE id = ?', [(int) $objekt['id']]) : null);
+        return !AnlagenService::elektrisch((string) $art);
+    }
+
     /** Deckt die Freigabe diese Anlage ab? (Gerätefreigaben tun das nicht.) */
     private static function decktObjekt(array $freigabe, array $objekt): bool
     {
@@ -149,6 +167,9 @@ final class Zugriff
     {
         if (self::alles()) {
             return true;
+        }
+        if (self::tankFuerKunden($objekt)) {
+            return false;
         }
         foreach (self::freigaben() as $freigabe) {
             if (self::decktObjekt($freigabe, $objekt)) {
@@ -430,6 +451,9 @@ final class Zugriff
     {
         if (self::alles()) {
             return null;
+        }
+        if (self::tankFuerKunden($objekt)) {
+            return [];
         }
         $fenster = [];
         foreach (self::freigaben() as $freigabe) {

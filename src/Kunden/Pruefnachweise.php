@@ -422,9 +422,13 @@ final class Pruefnachweise
             $invRoh = is_scalar($angaben['inventar_id']) ? (string) $angaben['inventar_id'] : '';
             $inventar = null;
             if ($invRoh !== '' && $invRoh !== '0') {
-                $inventar = ctype_digit($invRoh) ? Database::first('SELECT id, kennung, seriennummer FROM inventar WHERE id = ?', [(int) $invRoh]) : null;
+                $inventar = ctype_digit($invRoh) ? Database::first('SELECT id, art, kennung, seriennummer FROM inventar WHERE id = ?', [(int) $invRoh]) : null;
                 if ($inventar === null) {
                     return $fehler('Dieses Inventarstück gibt es nicht.');
+                }
+                // Kunden sehen keine Tanks – auch keinen Tanksensor (docs/kundenbereich.md, „Tanks“).
+                if ($inventar['art'] === 'tanksensor') {
+                    return $fehler('Ein Tanksensor gehört in keinen Prüfnachweis für Kunden.');
                 }
             }
             $felder['inventar_id'] = $inventar !== null ? (int) $inventar['id'] : null;
@@ -1057,10 +1061,11 @@ final class Pruefnachweise
         return Database::select('SELECT id, ewx_nummer, ewx_art, titel, von, bis FROM kunden_vorgaenge WHERE kunde_id = ? ORDER BY von DESC, id DESC', [$kundeId]);
     }
 
-    /** @return list<array<string,mixed>> Inventar zur Auswahl – nur mit „Datenquellen ansehen“ */
+    /** @return list<array<string,mixed>> Inventar zur Auswahl – nur mit „Datenquellen ansehen“, nie Tanksensoren */
     public static function inventar(): array
     {
-        return Auth::can('datenquellen.view') ? Database::select('SELECT id, kennung, name FROM inventar ORDER BY kennung, id') : [];
+        return Auth::can('datenquellen.view')
+            ? Database::select("SELECT id, kennung, name FROM inventar WHERE art <> 'tanksensor' ORDER BY kennung, id") : [];
     }
 
     /** Woher ein Nachweis stammt – als Satzteil für Kunde und Personal. */

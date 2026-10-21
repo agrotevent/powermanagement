@@ -45,11 +45,11 @@ Für einen angemeldeten Kundenzugang eines Kunden K:
 | eine **Location** | K hat eine Freigabe für den Standort, und *jetzt* liegt in ihrem Gültigkeitszeitraum | Freigaben am Konto oder an Rollen, Freigaben für einzelne Anlagen |
 | eine kommende Location | wie oben, aber die Freigabe beginnt erst – dann nur Name und „ab …“ | – |
 | Etage und Plan | Location sichtbar, die Etage gehört zum Standort und hat einen Plan | – |
-| ein fester Stromanschluss | Location sichtbar, Anlage dort mit Merkmal „Feststromanschluss“ | mobile Anlagen |
+| ein fester Stromanschluss | Location sichtbar, elektrische Anlage dort mit Merkmal „Feststromanschluss“ – nie ein Tank, auch kein fester | mobile Anlagen |
 | ein **Protokoll** | der Bericht ist K zugeordnet und abgeschlossen (oder durch eine Korrektur ersetzt) | Standort, Freigaben, Prüfdatum |
 | das Protokoll-PDF | Protokoll sichtbar und sein PDF beim Abschluss gespeichert – nie eine Vorschau | – |
 | ein **Prüfnachweis** | er gehört K, ist freigegeben, und seine Datei ist unversehrt | Freigaben |
-| **nie** | Notizen an Standort, Etage, Anlage und Kunde, Fremdbestand, Netzbetreiber, mobile Anlagen, Kabel, Messgeräte, Katalog, Aufbauten, Einsätze, Audit-Log, andere Zugänge und andere Kunden | – |
+| **nie** | Notizen an Standort, Etage, Anlage und Kunde, Fremdbestand, Netzbetreiber, mobile Anlagen, Kabel, Messgeräte, Katalog, Aufbauten, Einsätze, **Tanks** (siehe [unten](#tanks)), Audit-Log, andere Zugänge und andere Kunden | – |
 
 Was ein Kunde nicht sieht, gibt es für ihn nicht: Ein fremdes, nicht
 freigegebenes oder nicht vorhandenes Protokoll, eine fremde Location oder ein
@@ -60,6 +60,71 @@ erreicht ein Kundenzugang gar nicht – jede Adresse außerhalb von
 Protokolle und Prüfnachweise **überdauern die Location-Freigabe**: Ist die
 Veranstaltung vorbei und die Location verschwunden, bleiben die Dokumente
 im Kundenbereich – bis der Kunde beendet wird oder ihre Aufbewahrung endet.
+
+### Tanks
+
+**Entscheidung: Kunden sehen nichts von Tanks.** Kein Tank – auch kein
+fester Bodentank – steht unter den festen Stromanschlüssen einer Location,
+und es gibt keine Füllstände, Verläufe, Verbrauch je Tag, Restlaufzeiten,
+Kennlinien, Peilungen, Betankungen (Lieferscheine), Kraftstoffschläuche,
+Tanksensoren und keine Tank-Marker. Pläne und ihre Vorschau sind nur die
+hochgeladene Plandatei bzw. deren Kachel – eingezeichnet ist darin nichts;
+eine Karte hat der Kundenbereich nicht.
+
+Warum:
+
+- Füllstand, Verbrauch und Betankungen sind **Betriebsdaten des
+  Dienstleisters** (Laufzeit und Last der Aggregate, Liefermengen,
+  Lieferscheine, wer gepeilt hat) – nichts, was ein Veranstalter für die
+  Übergabe braucht. Nachbestellen ist Sache des Personals.
+- Ein fester Tank versorgt oft **mehrere Veranstalter** auf demselben
+  Gelände; sein Pegel verriete, was die anderen verbraucht haben.
+- Der Kundenbereich zeigt **keine Messwerte** (siehe [Grenzen](#grenzen)) –
+  Tankwerte wären die ersten. Auch die Übergabeberichte, also die
+  Protokolle, enthalten keinen Tank (`BerichtService::objektePruefen`).
+- Ein Tank ist **kein Stromanschluss**; unter „Feste Stromanschlüsse“ wäre
+  er falsch.
+
+So ist es durchgesetzt – jede Tür für sich:
+
+1. **Tor im Router**: Jede Tank-Route (`/anlagen/{id}`, `…/live`,
+   `…/tank/verlauf`, `…/tank/tage`, `…/tank/csv`, Peilung, Betankung,
+   Kennlinie, Einbau des Sensors), die Karte mit Tank-Panel und Schlauch,
+   Statistik und Inventar liegen außerhalb von `/kundenbereich` – ein
+   Kundenzugang landet wieder in der Übersicht, JSON bekommt 403. Der
+   Durchlauf über alle Routen aus `public/index.php` in
+   `tests/kundenbereich.php` schließt die Tank-Routen ein und ruft sie
+   zusätzlich mit den echten IDs eines festen und eines mobilen Tanks auf
+   der sichtbaren Location auf: keine Antwort nennt einen Tank, an den
+   Tanks ändert sich nichts.
+2. **Keine Rechte**: Verlauf, Tage und CSV brauchen „Statistik ansehen“ bzw.
+   „exportieren“, die Tankseite „Anlagen ansehen“, Eintragen „Anlagen
+   ändern“ – Kundenzugänge haben keines davon. `bin/power tank:liste
+   --als=<Kundenzugang>` bricht deshalb ab.
+3. **Zugriff**: Für einen Kundenzugang deckt keine Freigabe einen Tank –
+   `Zugriff::siehtObjekt()` ist falsch, das Datenfenster leer, auch auf der
+   sichtbaren Location. Ein künftiger Weg über `Zugriff` oder `Messdaten`
+   brächte also auch nichts.
+4. **KundenSicht** nimmt unter die festen Anschlüsse nur elektrische
+   Anlagen (`AnlagenService::elektrisch()`).
+5. **Prüfnachweise**: Ein Tanksensor steht nicht zur Auswahl als
+   Inventarstück und wird abgelehnt.
+
+Auch über eine Schnittstelle erreicht kein Tankwert einen Kunden: Tokens
+der Plan-API lassen sich nicht an Kundenzugänge binden; was ein fester Tank
+dort mitbringt (Eigenschaften wie Bauform, Inhalt und Inhalt je mm – nie
+Messwerte, Kennlinien, Peilungen oder Betankungen), geht an andere Instanzen
+des Personals, nicht an Kunden.
+
+Konten mit der älteren Rolle *Kunde / Veranstalter* (siehe
+[Übergang](#übergang-konten-mit-der-rolle-kunde--veranstalter)) sehen Tanks
+dagegen wie jede Anlage ihres freigegebenen Standorts (im Datenfenster
+ihrer Freigabe, ohne Knöpfe) – ein Grund mehr, auf Kundenzugänge
+umzustellen.
+
+Sollen Kunden später doch etwas sehen (etwa „versorgt aus Tank“ ohne
+Werte), gehört das als ausdrücklich genanntes Feld in `KundenSicht` – mit
+eigener Prüfung, nie über Freigaben oder die Karte.
 
 ## Einrichten
 
@@ -205,7 +270,8 @@ Person ihn **freigibt** – und nur mit unversehrter Datei.
   Norm, **Ergebnis** (nur, wenn es im Protokoll steht), Location (nur eine
   aus den Freigaben dieses Kunden), Eventworx-Vorgang des Kunden,
   Mietzeit (ohne eigene die des Vorgangs), Inventarstück (füllt leere
-  Nummern) und ein Hinweis für den Kunden.
+  Nummern; nie ein Tanksensor, siehe [Tanks](#tanks)) und ein Hinweis für
+  den Kunden.
 - Eine **Sammel-PDF** für mehrere Geräte nur, wenn sie **ausschließlich
   Geräte dieses Kunden** enthält – sonst liest ein Kunde die Geräte eines
   anderen mit.
@@ -385,8 +451,8 @@ einen fremden Nachweis bekommen:
 
 - Keine Zwei-Faktor-Anmeldung, kein Mailversand, keine Selbstbedienung
   beim Kennwort.
-- Keine Karte, keine Statistik, keine Messwerte, keine mobile Planung, kein
-  Aufbau – auch wenn ein Datenzeitraum freigegeben ist.
+- Keine Karte, keine Statistik, keine Messwerte, keine Tanks, keine mobile
+  Planung, kein Aufbau – auch wenn ein Datenzeitraum freigegeben ist.
 - Kundenzugänge melden sich nie über SSO an.
 - Keine ZIP aller Nachweise und keine Übernahme von Prüfdaten aus einer
   Prüfsoftware oder aus *Werkstatt → Prüfungen* in Eventworx.
@@ -439,8 +505,8 @@ gefragt.
 
 | Skript | prüft |
 |---|---|
-| `tests/kundenbereich.php` | Kundenzugänge ohne Rechte, Tor über alle Routen, Freigaben nur am Kunden, mehrere Veranstalter je Gelände, Locations und Pläne, Protokolle nur über die Zuordnung, gleiche 404 für Fremdes, PDF-Kopfzeilen und Abrufe (auch der Leseansicht), Einrichtungslink, Zugänge nur von dem, der alles sieht, Kundenmodus neben dem Kundenbereich (Kundenzugänge nie im Kundenmodus), Kontowechsel im selben Browser, Kunde beendet, Benutzer- und Kundenverwaltung |
-| `tests/pruefnachweise.php` | Upload nur PDF, Dubletten, Angaben, Sichtbarkeit, Gültigkeit in der Mietzeit, Aufbewahrung, Integrität (auch Heilen und Datensätze ohne Kunden), Übernahme aus Eventworx (auch mit gleichzeitigem Löschen) |
+| `tests/kundenbereich.php` | Kundenzugänge ohne Rechte, Tor über alle Routen (auch die Tank-Routen, dazu mit echten Tank-IDs), keine Tanks (nicht unter den festen Anschlüssen, nicht über `Zugriff`, nicht auf den Seiten, `tank:liste` abgelehnt), Freigaben nur am Kunden, mehrere Veranstalter je Gelände, Locations und Pläne, Protokolle nur über die Zuordnung, gleiche 404 für Fremdes, PDF-Kopfzeilen und Abrufe (auch der Leseansicht), Einrichtungslink, Zugänge nur von dem, der alles sieht, Kundenmodus neben dem Kundenbereich (Kundenzugänge nie im Kundenmodus), Kontowechsel im selben Browser, Kunde beendet, Benutzer- und Kundenverwaltung |
+| `tests/pruefnachweise.php` | Upload nur PDF, Dubletten, Angaben (kein Tanksensor), Sichtbarkeit, Gültigkeit in der Mietzeit, Aufbewahrung, Integrität (auch Heilen und Datensätze ohne Kunden), Übernahme aus Eventworx (auch mit gleichzeitigem Löschen) |
 | `tests/eventworx.php` | Dateien am Vorgang, Verknüpfen, Lese-Probe |
 | `tests/sitzung.php` | Suche, Verknüpfen und Dateiliste halten die Sitzung nicht; Kundenmodus während des Wartens; Formulare mit `data-laeuft-seite` |
 | `tests/web.php`, `tests/sicherheit.php`, `tests/berichte.php`, `tests/zeitfenster.php`, `tests/schnittstelle.php` | Seiten der Kundenverwaltung, Rechte, Zuordnung am Bericht, Freigaben am Kunden, keine Tokens für Kundenzugänge |

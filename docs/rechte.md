@@ -241,8 +241,8 @@ Freigabe sieht, ändern, wer „Anlagen ändern“ und eine Freigabe mit
   des Datenfensters sieht niemand. Verlauf und Tage brauchen „Statistik
   ansehen“, die CSV „Statistik exportieren“ (im Audit).
 - **Peilen, betanken, kalibrieren, löschen, Tanksensor ein- und ausbauen**:
-  „Anlagen ändern“ und *bearbeiten* am Tank. Wer das nicht hat (etwa ein
-  Kunde), sieht die Knöpfe nicht. Ein eigenes Recht „nur betanken“ gibt es
+  „Anlagen ändern“ und *bearbeiten* am Tank. Wer das nicht hat (etwa die
+  Rolle *Kunde / Veranstalter*), sieht die Knöpfe nicht. Ein eigenes Recht „nur betanken“ gibt es
   nicht.
 - **Eintragen nur im eigenen Datenfenster**: Peilen, betanken, kalibrieren,
   löschen und einen Tanksensor einbauen geht nur, solange das Datenfenster
@@ -269,6 +269,11 @@ Freigabe sieht, ändern, wer „Anlagen ändern“ und eine Freigabe mit
 - **Kommandozeile**: `bin/power tank:liste` braucht `--als=<benutzer>` und
   zeigt genau, was dieses Konto sähe; ein gesperrtes oder abgelaufenes Konto
   wird abgelehnt. `tank:rechnen` zeigt nur die Kennlinie, keine Messwerte.
+- **Kundenzugänge** (Kundenbereich) sehen keinen Tank – auch keinen festen
+  auf ihrer Location, keinen Schlauch, keinen Sensor und keinen Wert daraus.
+  Für sie deckt keine Freigabe am Kunden einen Tank (`Zugriff`), dazu Tor
+  und fehlende Rechte; Begründung in
+  [kundenbereich.md](kundenbereich.md#tanks).
 
 ## Übergabeberichte
 
@@ -316,7 +321,7 @@ dorthin zurück (JSON-Anfragen bekommen 403), noch bevor eine Route oder ein
 Recht geprüft wird. Kundenzugänge stehen nicht in *Benutzer & Freigaben*,
 bekommen dort keine Freigaben und lassen sich dort nicht ändern; sie werden
 in der Kundenverwaltung gepflegt. An Tokens der Schnittstelle lassen sie
-sich nicht binden.
+sich nicht binden. Tanks sehen sie nie ([Tanks](#tanks)).
 
 Drei Rechte für das Personal:
 

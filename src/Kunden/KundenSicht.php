@@ -39,6 +39,11 @@ use App\Support\Zeit;
  * Herausgegeben werden nur ausdrücklich genannte Felder – nie sites.notes,
  * floors.notes, floors.fremdbestand, kunden.notizen, mobile Anlagen,
  * Kabel, Messgeräte oder Einsätze. Eventworx wird von hier aus nie gefragt.
+ *
+ * Tanks gibt es für Kunden nicht: kein Tank (auch kein fester) unter den
+ * festen Anschlüssen, keine Füllstände, Kennlinien, Peilungen, Betankungen,
+ * Kraftstoffschläuche oder Tanksensoren. Pläne und Vorschauen sind nur die
+ * hochgeladene Datei bzw. ihre Kachel – ohne eingezeichnete Anlagen.
  */
 final class KundenSicht
 {
@@ -101,10 +106,11 @@ final class KundenSicht
      * Eine Location, wie der Kunde sie sieht – oder null (nicht freigegeben,
      * nicht vorhanden, Kunde beendet: dasselbe).
      *
-     * etagen: nur Etagen mit Plan; feststrom: nur fest installierte Anlagen
-     * dieses Standorts (keine Vorlagen, nie mobile); berichte: die Protokolle
-     * des Kunden an diesem Standort (berichte()); nachweise: seine
-     * Prüfnachweise, die diesem Standort zugeordnet sind (nachweise()).
+     * etagen: nur Etagen mit Plan; feststrom: nur fest installierte
+     * elektrische Anlagen dieses Standorts (keine Vorlagen, nie mobile, nie
+     * ein Tank); berichte: die Protokolle des Kunden an diesem Standort
+     * (berichte()); nachweise: seine Prüfnachweise, die diesem Standort
+     * zugeordnet sind (nachweise()).
      *
      * @return array{site:array{id:int,name:string,address:string},freigaben:list<array<string,mixed>>,etagen:list<array{id:int,name:string,plan:string,seite:int,vorschau:bool}>,feststrom:list<array{name:string,art:string,etage:string,anschluss:string,vorsicherung:string}>,berichte:list<array<string,mixed>>,nachweise:list<array<string,mixed>>}|null
      */
@@ -134,6 +140,11 @@ final class KundenSicht
         }
         $feststrom = [];
         foreach (AnlagenService::liste(['site_id' => $siteId, 'fest' => true]) as $o) {
+            // Ein fester Tank (Bodentank) ist kein Stromanschluss – und Kunden
+            // sehen keine Tanks (docs/kundenbereich.md, „Tanks“).
+            if (!AnlagenService::elektrisch((string) $o['art'])) {
+                continue;
+            }
             $e = $o['eigenschaften'];
             $art = $o['art'] === 'anschluss' && is_string($e['anschlussart'] ?? null) && $e['anschlussart'] !== ''
                 ? (string) $e['anschlussart'] : (string) $o['art_anzeige'];
