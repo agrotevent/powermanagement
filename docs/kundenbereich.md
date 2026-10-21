@@ -250,6 +250,12 @@ lassen sie sich übernehmen statt erneut hochzuladen
    *Gewählte übernehmen* – höchstens fünf je Durchgang. Eine Datei aus
    Eventworx gibt es hier nur einmal, auch nie für zwei Kunden.
 
+Solange Eventworx antwortet, zeigt die Seite, dass gewartet wird; ein
+zweiter Klick zählt nicht. Andere Reiter desselben Browsers lassen sich
+währenddessen bedienen – die Anfrage hält die Sitzung nicht. Beginnt in
+einem davon der Kundenmodus, kommt die Antwort nicht mehr an: Der Reiter
+führt zur Kundenseite.
+
 ![Dateien am Eventworx-Auftrag AU-1042 der Demo: eine schon übernommen, eine zur Auswahl, darunter die Angaben aus dem Prüfprotokoll](bilder/kunden-nachweise-eventworx.png)
 
 Prüfberichte aus *Werkstatt → Prüfungen* (am einzelnen Gerät) sind über
@@ -433,8 +439,8 @@ gefragt.
 
 | Skript | prüft |
 |---|---|
-| `tests/kundenbereich.php` | Kundenzugänge ohne Rechte, Tor über alle Routen, Freigaben nur am Kunden, mehrere Veranstalter je Gelände, Locations und Pläne, Protokolle nur über die Zuordnung, gleiche 404 für Fremdes, PDF-Kopfzeilen und Abrufe (auch der Leseansicht), Einrichtungslink, Zugänge nur von dem, der alles sieht, Kundenmodus neben dem Kundenbereich, Kunde beendet, Benutzer- und Kundenverwaltung |
+| `tests/kundenbereich.php` | Kundenzugänge ohne Rechte, Tor über alle Routen, Freigaben nur am Kunden, mehrere Veranstalter je Gelände, Locations und Pläne, Protokolle nur über die Zuordnung, gleiche 404 für Fremdes, PDF-Kopfzeilen und Abrufe (auch der Leseansicht), Einrichtungslink, Zugänge nur von dem, der alles sieht, Kundenmodus neben dem Kundenbereich (Kundenzugänge nie im Kundenmodus), Kontowechsel im selben Browser, Kunde beendet, Benutzer- und Kundenverwaltung |
 | `tests/pruefnachweise.php` | Upload nur PDF, Dubletten, Angaben, Sichtbarkeit, Gültigkeit in der Mietzeit, Aufbewahrung, Integrität (auch Heilen und Datensätze ohne Kunden), Übernahme aus Eventworx (auch mit gleichzeitigem Löschen) |
 | `tests/eventworx.php` | Dateien am Vorgang, Verknüpfen, Lese-Probe |
-| `tests/sitzung.php` | Suche, Verknüpfen und Dateiliste halten die Sitzung nicht |
+| `tests/sitzung.php` | Suche, Verknüpfen und Dateiliste halten die Sitzung nicht; Kundenmodus während des Wartens; Formulare mit `data-laeuft-seite` |
 | `tests/web.php`, `tests/sicherheit.php`, `tests/berichte.php`, `tests/zeitfenster.php`, `tests/schnittstelle.php` | Seiten der Kundenverwaltung, Rechte, Zuordnung am Bericht, Freigaben am Kunden, keine Tokens für Kundenzugänge |
