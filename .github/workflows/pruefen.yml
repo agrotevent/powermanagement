@@ -59,12 +59,13 @@ jobs:
           node tests/nodered-funktionen.mjs
 
   # Das Installationsskript einmal wirklich laufen lassen: frisches Debian 13
-  # mit systemd (Docker, wie ein Proxmox-LXC), dann ein zweiter Lauf und ein
-  # Update. Holt Pakete aus Debian, InfluxData und npm.
+  # mit systemd (Docker, wie ein Proxmox-LXC), dann ein zweiter Lauf und
+  # Updates – auch solche, die zurückrollen, abgebrochen werden oder abstürzen.
+  # Holt Pakete aus Debian, InfluxData und npm.
   installation:
     name: Installation (Debian 13)
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
 

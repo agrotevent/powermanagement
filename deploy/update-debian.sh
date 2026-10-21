@@ -1,17 +1,33 @@
 #!/usr/bin/env bash
+# update-debian-schnittstelle: 1
+# (Stabil: jede neue Fassung nimmt „--stufe=2“ mit Marke Format 1 von jeder älteren Stufe 1 an,
+#  ebenso „--nur-abgleichen [--ohne-dienste]“, „--wiederaufnehmen“, „--ergebnis-datei=“, „--fortschritt-datei=“.)
 #
 # PowerManagement auf den Stand aus dem Git-Repository bringen.
 #
 # Das Skript sichert vorher Datenbank und Konfiguration, holt die
 # Änderungen, führt die Migrationen aus, zieht fehlende Pakete nach und
 # startet die Dienste neu. Geht dabei etwas schief, kommt der alte Stand
-# zurück – Quellcode und Datenbank. Die Anwendung bleibt also nicht halb
-# aktualisiert stehen.
+# vollständig zurück: Quellcode und Zweig, Datenbank, Einheiten und
+# Vorlagen. Die Anwendung bleibt also nicht halb aktualisiert stehen.
+#
+# Zwei Stufen: Stufe 1 ist die laufende (alte) Fassung. Sie holt, prüft
+# „nur vorwärts“, sichert, legt die Marke „offen“ an und checkt den neuen
+# Stand aus. Danach übernimmt per exec Stufe 2 der *neuen* Fassung (Rechte,
+# Migrationen, Pakete, Abgleich, Dienste, Prüfung) – so laufen immer die
+# Schritte, die zum neuen Code gehören. Stirbt der Lauf (Strom weg, SIGKILL),
+# bleibt die Marke stehen; --wiederaufnehmen rollt dann zurück (das macht
+# der Update-Dienst nach dem Start selbst).
 #
 # Beispiele:
 #   ./deploy/update-debian.sh                   aktualisieren
-#   ./deploy/update-debian.sh --pruefen         nur zeigen, was sich ändern würde
+#   ./deploy/update-debian.sh --pruefen         nur zeigen, was sich ändern würde (holt per git, ändert sonst nichts)
 #   ./deploy/update-debian.sh --flows-ersetzen  auch veränderte Node-RED-Flows ersetzen
+#   ./deploy/update-debian.sh --nur-abgleichen  Einheiten und Vorlagen zum ausgecheckten Stand abgleichen
+#   ./deploy/update-debian.sh --wiederaufnehmen ein unterbrochenes Update zurückrollen
+#
+# Exit: 0 eingespielt, aktuell oder geprüft · 1 nichts verändert ·
+#       2 zurückgerollt · 3 unvollständig zurückgerollt (Handarbeit, die Marke bleibt)
 #
 # Unverändert bleiben: config/config.php, storage/ (Datenbank, Grundrisse,
 # Protokolle), eigene Änderungen an den Node-RED-Flows, an settings.js, an
@@ -20,6 +36,12 @@
 # (…powermanagement-neu…) und sagt Bescheid. Die eigenen MQTT-Zugänge der
 # Shellys (Block in der Kennwortdatei, wirksame ACL) gleicht
 # deploy/mqtt-zugaenge.sh ab.
+#
+# Regel für neue Dateien außerhalb von git: jede gehört in abgleichen(), und
+# eine Datei, die es vorher nicht gab, trägt neu_merken() vor dem Schreiben
+# als neu_angelegt in die Marke ein – das Zurückrollen entfernt sie wieder.
+# Dieses Skript startet oder stoppt nie powermanagement-update.service (das
+# wäre ein SIGTERM an den eigenen Dienst).
 
 # -E: der ERR-Trap muss auch greifen, wenn ein Kommando in einer Funktion
 # scheitert – sonst bliebe ein halb eingespieltes Update stehen.
@@ -38,32 +60,76 @@ export GIT_TERMINAL_PROMPT=0 GIT_HTTP_LOW_SPEED_LIMIT=1000 GIT_HTTP_LOW_SPEED_TI
 ETC="/etc/powermanagement"
 INSTALLATION_CONF="$ETC/installation.conf"
 VORLAGEN="/var/lib/powermanagement/vorlagen"
+# Nur root (700): Marke „offen“, Kopie der alten Fassung, Verlauf, gescheiterte Stände
+ZUSTAND="/var/lib/powermanagement/update"
+# Nur root (700): Protokolle des Update-Dienstes und des Zurückrollens
+PROTOKOLLE="/var/log/powermanagement/update"
+MARKE="$ZUSTAND/offen"
+SITE="/etc/nginx/sites-available/powermanagement"
+MOSQUITTO_CONF="/etc/mosquitto/conf.d/powermanagement.conf"
+SCHNITTSTELLE_MUSTER='^# update-debian-schnittstelle:.*(^| )1( |$)'
+# Feste Schritte (Fortschritt für die Oberfläche):
+#   1 Stand prüfen · 2 Änderungen holen · 3 Sicherung · 4 Quellcode · 5 Rechte und Ordner ·
+#   6 Migrationen · 7 Pakete · 8 Abgleichen · 9 Dienste starten · 10 Kacheln · 11 Prüfen · 12 Fertig
+GESAMT=12
+# Ordner in storage/, die der Anwendung gehören (750). mqtt/: Soll und
+# Ergebnis der eigenen MQTT-Zugänge; update/: Aufträge an den Update-Dienst
+# (soll) und dessen Rückmeldungen (ist).
+APP_ORDNER=(logs plans demo cache inventar sessions backups mqtt mqtt/soll mqtt/ist update update/soll update/ist)
+# Gründe, die einen Stand als gescheitert vermerken (ein Signal ist kein Urteil über den Commit)
+GESCHEITERT_GRUENDE=" checkout neue_fassung migration pakete einrichtung nginx dienste pruefung zeitueberschreitung "
 
-# Vorgaben – überschrieben von dem, was die Installation festgehalten hat.
-ZIEL="/opt/powermanagement"
-APP_USER="www-data"
-MIT_INFLUX="ja"
-MIT_NODERED="ja"
-MIT_MOSQUITTO="ja"
-NODERED_APP="/opt/node-red"
-NODERED_DIR="/var/lib/powermanagement/node-red"
+# ================================================================ Grundlagen
 
-if [[ -r "$INSTALLATION_CONF" ]]; then
+vorgaben() {
+    # Vorgaben – überschrieben von dem, was die Installation festgehalten hat.
+    ZIEL="/opt/powermanagement"
+    APP_USER="www-data"
+    MIT_INFLUX="ja"
+    MIT_NODERED="ja"
+    MIT_MOSQUITTO="ja"
+    NODERED_APP="/opt/node-red"
+    NODERED_DIR="/var/lib/powermanagement/node-red"
+
+    ZWEIG=""
+    FLOWS_ERSETZEN="nein"
+    ERZWINGEN="nein"
+    NUR_ZEIGEN="nein"
+    BEHALTEN=5
+    GIT_CRED_FILE=""
+    BIS=""
+    MODUS="update"
+    OHNE_DIENSTE="nein"
+    ERGEBNIS_DATEI=""
+    FORTSCHRITT_DATEI=""
+
+    # Zustand des Laufs
+    BEGINN="$(date +%s)"
+    AKTION="aktualisieren"
+    SPERRE_GEHALTEN="nein"
+    ALT=""; ALT_ZWEIG="-"; ZWEIG_REF_VORHER="-"; NEU=""
+    SICHERUNG="-"; SCHNAPPSCHUSS="-"; MIGRIERT="nein"; PHASE="-"
+    LOGIN_VORHER="-"; PRUEFUNG_VORHER="-"; AKTIV_VORHER=(); LOGIN_CODE="000"
+    PRUEF_HOST="127.0.0.1"; PRUEF_PORT="80"; PRUEF_NAME="powermanagement.lan"
+    SAMMLER_ANGEHALTEN="nein"; NEU_MERKEN="nein"; ABGLEICH_BEGONNEN="nein"
+    WARNUNGEN=(); PRUEFUNG="-"; PRUEF_RC=1; PRUEF_AUSGABE=""
+    SCHRITT_NR=0; SCHRITT_NAME="Start"; SCHRITT_GRUND="intern"
+    SIGNAL=""; ZURUECK=""; ABBRUCH=""; ARBEIT=""
+    KENNUNG="-"; AUSLOESER="konsole"; VON="root"
+    FPM_VERSION=""
+}
+
+installation_lesen() {
+    local schluessel wert
+    [[ -r "$INSTALLATION_CONF" ]] || return 0
     # Nicht per „source": nur bekannte Schlüssel übernehmen, nichts ausführen.
     while IFS='=' read -r schluessel wert; do
         case "$schluessel" in
             ZIEL|APP_USER|MIT_INFLUX|MIT_NODERED|MIT_MOSQUITTO|NODERED_APP|NODERED_DIR)
                 printf -v "$schluessel" '%s' "$wert" ;;
         esac
-    done < <(grep -E '^[A-Z_]+=' "$INSTALLATION_CONF")
-fi
-
-ZWEIG=""
-FLOWS_ERSETZEN="nein"
-ERZWINGEN="nein"
-NUR_ZEIGEN="nein"
-BEHALTEN=5
-GIT_CRED_FILE=""
+    done < <(grep -E '^[A-Z_]+=' "$INSTALLATION_CONF" || true)
+}
 
 hilfe() {
     cat <<HILFE
@@ -71,78 +137,200 @@ Aufruf: $0 [Optionen]
 
   --ziel=<pfad>          Installationsverzeichnis   (Vorgabe: $ZIEL)
   --zweig=<name>         Zweig                      (Vorgabe: der ausgecheckte)
+  --bis=<commit>         genau diesen Commit einspielen (40 Zeichen; nur vorwärts,
+                         auf der Erst-Eltern-Linie des Zweigs)
   --git-zugang=<datei>   Token für ein privates Repository
                          (Vorgabe: /etc/powermanagement/git.conf, Inhalt GITHUB_TOKEN=…)
   --flows-ersetzen       Node-RED-Flows auch dann ersetzen, wenn sie im Editor
                          verändert wurden (die alten werden gesichert)
-  --erzwingen            lokale Änderungen am Quellcode verwerfen statt abzubrechen
+  --erzwingen            lokale Änderungen am Quellcode verwerfen statt abzubrechen,
+                         auch auf einen Stand, der nicht vorwärts liegt
   --behalten=<anzahl>    so viele Sicherungen bleiben liegen (Vorgabe: $BEHALTEN)
-  --pruefen              nur zeigen, was sich ändern würde – nichts anfassen
+  --pruefen              nur zeigen, was sich ändern würde – holt per git, ändert sonst nichts
+  --nur-abgleichen       Ordner, Einheiten, Vorlagen und Konfiguration zum ausgecheckten
+                         Stand abgleichen und nur Geändertes neu starten (kein git,
+                         keine Migration, keine Sicherung)
+  --ohne-dienste         mit --nur-abgleichen: gar nichts starten
+  --wiederaufnehmen      ein unterbrochenes Update (Marke $MARKE) zurückrollen
+  --ergebnis-datei=<f>   Ergebnis maschinenlesbar ablegen (Ordner: root, nur für root schreibbar)
+  --fortschritt-datei=<f> aktuellen Schritt ablegen (ebenso)
   -h, --hilfe            diese Hilfe
+
+Exit: 0 eingespielt/aktuell/geprüft · 1 nichts verändert · 2 zurückgerollt ·
+      3 unvollständig (Handarbeit, siehe docs/installation-debian-lxc.md)
 HILFE
 }
 
-while [[ $# -gt 0 ]]; do
-    opt="$1"
-    shift
-    wert=""
-    hat_wert="nein"
-    if [[ "$opt" == --*=* ]]; then
-        wert="${opt#*=}"
-        opt="${opt%%=*}"
-        hat_wert="ja"
+optionsfehler() {
+    echo "$1" >&2
+    ergebnis nicht_begonnen intern
+    exit 1
+}
+
+# Ergebnis- und Fortschrittsdatei: absolut, nur [A-Za-z0-9._/-], der Ordner
+# gehört root und ist für niemanden sonst schreibbar – root legt dort Dateien
+# an und benennt sie um.
+ausgabe_pfad_ok() {
+    local pfad="$1" ordner modus
+    [[ "$pfad" =~ ^/[A-Za-z0-9._/-]+$ && "$pfad" != */ && "$pfad" != */. && "$pfad" != */.. ]] || return 1
+    ordner="${pfad%/*}"
+    [[ -n "$ordner" ]] || ordner="/"
+    [[ -d "$ordner" ]] || return 1
+    [[ "$(stat -L -c %u -- "$ordner" 2>/dev/null)" == 0 ]] || return 1
+    modus="$(stat -L -c %a -- "$ordner" 2>/dev/null)" || return 1
+    (( (8#$modus & 8#022) == 0 ))
+}
+
+# Zweignamen: nur, was auch in Marke und Ergebnis passt
+zweig_ok() {
+    [[ "$1" =~ ^[A-Za-z0-9._/+-]{1,200}$ ]] && git check-ref-format --branch "$1" >/dev/null 2>&1
+}
+
+optionen() {
+    local opt wert hat_wert stufe="" wieder="nein" nur="nein"
+    while [[ $# -gt 0 ]]; do
+        opt="$1"
+        shift
+        wert=""
+        hat_wert="nein"
+        if [[ "$opt" == --*=* ]]; then
+            wert="${opt#*=}"
+            opt="${opt%%=*}"
+            hat_wert="ja"
+        fi
+        case "$opt" in
+            --ziel|--zweig|--git-zugang|--behalten|--bis|--ergebnis-datei|--fortschritt-datei|--stufe)
+                if [[ "$hat_wert" == "nein" ]]; then
+                    [[ $# -gt 0 ]] || optionsfehler "Die Option $opt braucht einen Wert."
+                    wert="$1"
+                    shift
+                fi ;;
+            *)
+                [[ "$hat_wert" == "nein" ]] || optionsfehler "Die Option $opt nimmt keinen Wert." ;;
+        esac
+        case "$opt" in
+            --ziel)            ZIEL="${wert%/}" ;;
+            --zweig)           ZWEIG="$wert" ;;
+            --git-zugang)      GIT_CRED_FILE="$wert" ;;
+            --behalten)        BEHALTEN="$wert" ;;
+            --bis)             BIS="$wert" ;;
+            --flows-ersetzen)  FLOWS_ERSETZEN="ja" ;;
+            --erzwingen)       ERZWINGEN="ja" ;;
+            --pruefen)         NUR_ZEIGEN="ja" ;;
+            --nur-abgleichen)  nur="ja" ;;
+            --ohne-dienste)    OHNE_DIENSTE="ja" ;;
+            --wiederaufnehmen) wieder="ja" ;;
+            --ergebnis-datei)
+                ausgabe_pfad_ok "$wert" || optionsfehler "--ergebnis-datei: Pfad absolut, Ordner gehört root und ist nur für root schreibbar."
+                ERGEBNIS_DATEI="$wert" ;;
+            --fortschritt-datei)
+                ausgabe_pfad_ok "$wert" || optionsfehler "--fortschritt-datei: Pfad absolut, Ordner gehört root und ist nur für root schreibbar."
+                FORTSCHRITT_DATEI="$wert" ;;
+            --stufe)           stufe="$wert" ;;
+            -h|--hilfe|--help) hilfe; exit 0 ;;
+            *) echo "Unbekannte Option: $opt" >&2; hilfe >&2; optionsfehler "Abbruch." ;;
+        esac
+    done
+
+    if [[ -n "$stufe" ]]; then
+        [[ "$stufe" == 2 ]] || optionsfehler "--stufe kennt nur 2."
+        MODUS="stufe2"
     fi
-    case "$opt" in
-        --ziel|--zweig|--git-zugang|--behalten)
-            if [[ "$hat_wert" == "nein" ]]; then
-                if [[ $# -eq 0 ]]; then
-                    echo "Die Option $opt braucht einen Wert." >&2
-                    exit 1
-                fi
-                wert="$1"
-                shift
-            fi ;;
-        *)
-            if [[ "$hat_wert" == "ja" ]]; then
-                echo "Die Option $opt nimmt keinen Wert." >&2
-                exit 1
-            fi ;;
-    esac
-    case "$opt" in
-        --ziel)            ZIEL="${wert%/}" ;;
-        --zweig)           ZWEIG="$wert" ;;
-        --git-zugang)      GIT_CRED_FILE="$wert" ;;
-        --behalten)        BEHALTEN="$wert" ;;
-        --flows-ersetzen)  FLOWS_ERSETZEN="ja" ;;
-        --erzwingen)       ERZWINGEN="ja" ;;
-        --pruefen)         NUR_ZEIGEN="ja" ;;
-        -h|--hilfe|--help) hilfe; exit 0 ;;
-        *) echo "Unbekannte Option: $opt" >&2; hilfe >&2; exit 1 ;;
-    esac
-done
+    [[ "$nur" == "ja" ]] && MODUS="nur_abgleichen"
+    [[ "$wieder" == "ja" ]] && MODUS="wiederaufnehmen"
+    local modi=0
+    [[ -n "$stufe" ]] && modi=$((modi + 1))
+    [[ "$nur" == "ja" ]] && modi=$((modi + 1))
+    [[ "$wieder" == "ja" ]] && modi=$((modi + 1))
+    [[ "$NUR_ZEIGEN" == "ja" ]] && modi=$((modi + 1))
+    (( modi <= 1 )) || optionsfehler "--pruefen, --nur-abgleichen, --wiederaufnehmen und --stufe schließen sich aus."
+    if [[ "$OHNE_DIENSTE" == "ja" && "$MODUS" != "nur_abgleichen" ]]; then
+        optionsfehler "--ohne-dienste gilt nur mit --nur-abgleichen."
+    fi
+    if [[ -n "$BIS" ]]; then
+        [[ "$MODUS" == "update" ]] || optionsfehler "--bis gilt nur für ein Update."
+        [[ "$BIS" =~ ^[0-9a-f]{40}$ ]] || optionsfehler "--bis erwartet einen vollständigen Commit (40 Zeichen 0-9a-f)."
+    fi
+    [[ "$ZIEL" == /* ]] || optionsfehler "--ziel erwartet einen absoluten Pfad."
+    if [[ -n "$ZWEIG" ]] && ! zweig_ok "$ZWEIG"; then
+        optionsfehler "--zweig: kein gültiger Zweigname (erlaubt: A–Z a–z 0–9 . _ / + -)."
+    fi
+    [[ "$BEHALTEN" =~ ^[1-9][0-9]*$ ]] || optionsfehler "--behalten erwartet eine Zahl ab 1."
+    [[ "$NUR_ZEIGEN" == "ja" ]] && AKTION="pruefen"
+    [[ "$MODUS" == "wiederaufnehmen" ]] && AKTION="wiederaufnehmen"
+    return 0
+}
 
-if [[ $EUID -ne 0 ]]; then
-    echo "Bitte als root ausführen (oder mit sudo)." >&2
-    exit 1
-fi
-if [[ ! "$BEHALTEN" =~ ^[1-9][0-9]*$ ]]; then
-    echo "--behalten erwartet eine Zahl ab 1." >&2
-    exit 1
-fi
-if [[ ! -d /run/systemd/system ]] || ! command -v systemctl >/dev/null 2>&1; then
-    echo "Hier läuft kein systemd – PowerManagement braucht es." >&2
-    exit 1
-fi
+umgebung_pruefen() {
+    if [[ $EUID -ne 0 ]]; then
+        echo "Bitte als root ausführen (oder mit sudo)." >&2
+        ergebnis nicht_begonnen intern
+        exit 1
+    fi
+    if [[ ! -d /run/systemd/system ]] || ! command -v systemctl >/dev/null 2>&1; then
+        echo "Hier läuft kein systemd – PowerManagement braucht es." >&2
+        ergebnis nicht_begonnen intern
+        exit 1
+    fi
+}
 
-# Farben nur am Terminal – im Journal und in Protokolldateien stünden sonst
-# Steuerzeichen (journalctl zeigt solche Zeilen ohne -a als „blob data“).
-if [[ -t 1 && -z "${NO_COLOR:-}" ]]; then
-    F_S=$'\033[1;34m'; F_H=$'\033[1;33m'; F_0=$'\033[0m'
-else
-    F_S=""; F_H=""; F_0=""
-fi
-schritt() { printf '\n%s==> %s%s\n' "$F_S" "$1" "$F_0"; }
+# Wer hat den Lauf ausgelöst? Der Update-Dienst gibt es in der Umgebung mit
+# (env -i, nur diese Werte); von der Konsole: konsole und der Benutzer hinter
+# sudo. Nur zur Anzeige und für den Verlauf – nie in einer Entscheidung.
+herkunft_lesen() {
+    local v
+    KENNUNG="-"
+    AUSLOESER="konsole"
+    if [[ "${PM_UPDATE_KENNUNG:-}" =~ ^[0-9a-f]{32}$ ]]; then
+        KENNUNG="$PM_UPDATE_KENNUNG"
+    fi
+    case "${PM_UPDATE_AUSLOESER:-}" in
+        hand|automatik|konsole|system) AUSLOESER="$PM_UPDATE_AUSLOESER" ;;
+    esac
+    v="${PM_UPDATE_VON:-${SUDO_USER:-root}}"
+    v="$(printf '%s' "$v" | LC_ALL=C tr -cd 'A-Za-z0-9._@-' | cut -c1-64)"
+    VON="${v:-root}"
+}
+
+farben() {
+    # Farben nur am Terminal – im Journal und in Protokolldateien stünden
+    # sonst Steuerzeichen (journalctl zeigt solche Zeilen ohne -a als „blob data“).
+    if [[ -t 1 && -z "${NO_COLOR:-}" ]]; then
+        F_S=$'\033[1;34m'; F_H=$'\033[1;33m'; F_0=$'\033[0m'
+    else
+        F_S=""; F_H=""; F_0=""
+    fi
+}
+
+# schritt <nr> <name> [<grund-code>]: Überschrift, Fortschritt für die
+# Oberfläche, und der Grund, unter dem ein Fehler in diesem Schritt läuft.
+schritt() {
+    SCHRITT_NR="$1"
+    SCHRITT_NAME="$2"
+    SCHRITT_GRUND="${3:-intern}"
+    printf '\n%s==> %s%s\n' "$F_S" "$2" "$F_0"
+    fortschritt_schreiben
+}
 hinweis() { printf '%s    %s%s\n' "$F_H" "$1" "$F_0" >&2; }
+
+# Nie ein Fehler: der Fortschritt ist nur Anzeige.
+fortschritt_schreiben() {
+    local t
+    [[ -n "$FORTSCHRITT_DATEI" ]] || return 0
+    t="$(mktemp "${FORTSCHRITT_DATEI%/*}/.fortschritt.XXXXXX" 2>/dev/null)" || return 0
+    if printf 'schritt %s %s %s\n' "$SCHRITT_NR" "$GESAMT" "$SCHRITT_NAME" > "$t" 2>/dev/null; then
+        mv -f -- "$t" "$FORTSCHRITT_DATEI" 2>/dev/null || rm -f -- "$t"
+    else
+        rm -f -- "$t"
+    fi
+    return 0
+}
+
+# Die Sperren (fd 8, fd 9) bekommt der Anwendungsbenutzer nicht mit: ein
+# Prozess, der den Deskriptor erbt und weiterläuft, hielte sie fest.
+as_app() {
+    (cd "$ZIEL" && runuser -u "$APP_USER" -- "$@") 8>&- 9>&-
+}
 
 # Ein Verzeichnis in storage/ anlegen – als Anwendungsbenutzer, nicht als
 # root (siehe install-debian.sh: ein Verweis in storage/ soll root nicht dazu
@@ -152,10 +340,13 @@ app_verzeichnis() {
     as_app chmod "${2:-750}" -- "$1"
 }
 
-# Die Sperren (fd 8, fd 9) bekommt der Anwendungsbenutzer nicht mit: ein
-# Prozess, der den Deskriptor erbt und weiterläuft, hielte sie fest.
-as_app() {
-    (cd "$ZIEL" && runuser -u "$APP_USER" -- "$@") 8>&- 9>&-
+# Eine Datei als Anwendungsbenutzer schreiben (Inhalt von stdin): Temp-Datei
+# im selben Ordner, dann umbenennen – nie halb geschrieben, und root folgt
+# dort keinem Verweis.
+als_app_schreiben() {
+    as_app /bin/sh -c 'umask 027; t="$(mktemp "${1%/*}/.neu.XXXXXX")" || exit 1
+        if cat > "$t" && chmod 640 "$t" && mv -f -- "$t" "$1"; then exit 0; fi
+        rm -f -- "$t"; exit 1' sh "$1"
 }
 
 # git als root im Checkout: safe.directory gilt nur für diesen Aufruf (keine
@@ -168,6 +359,23 @@ g() {
 # Ausgaben von git ohne Benutzerteil in Adressen – stünden Zugangsdaten in
 # einer Remote-Adresse, kämen sie sonst ins Protokoll.
 ohne_zugangsdaten() { sed -E 's#(://)[^/@[:space:]]+@#\1#g'; }
+
+# Trägt die Datei die Schnittstellenzeile (in den ersten zehn Zeilen)?
+hat_schnittstelle() {
+    local zeile n=0
+    [[ -f "$1" ]] || return 1
+    while IFS= read -r zeile && (( ++n <= 10 )); do
+        [[ "$zeile" =~ $SCHNITTSTELLE_MUSTER ]] && return 0
+    done < "$1"
+    return 1
+}
+
+kurz() { if [[ "$1" =~ ^[0-9a-f]{7} ]]; then printf '%s' "${1:0:7}"; else printf '%s' "-"; fi; }
+
+fpm_version() {
+    find /etc/php -mindepth 2 -maxdepth 2 -type d -name fpm 2>/dev/null \
+        | awk -F/ '{print $4}' | sort -V | tail -1 || true
+}
 
 # apt unbeaufsichtigt: auf die dpkg-Sperre warten (apt-daily und
 # unattended-upgrades laufen im Hintergrund), bei geänderten Conffiles nie
@@ -186,57 +394,322 @@ apt_holen() {
     done
 }
 
-# Zwei Läufe gleichzeitig (etwa von Hand und aus einem Zeitplan) würden
+# Arbeitsordner für Temp-Dateien (root 700) – nicht in /tmp, und weg, wenn
+# der Lauf endet (Befund 23).
+arbeit_anlegen() {
+    [[ -n "$ARBEIT" && -d "$ARBEIT" ]] && return 0
+    install -d -m 700 "$ZUSTAND"
+    ARBEIT="$(mktemp -d "$ZUSTAND/.arbeit.XXXXXX")"
+    trap 'arbeit_aufraeumen' EXIT
+}
+arbeit_aufraeumen() {
+    if [[ -n "$ARBEIT" && "$ARBEIT" == "$ZUSTAND/.arbeit."* ]]; then
+        rm -rf -- "$ARBEIT"
+    fi
+    ARBEIT=""
+    return 0
+}
+
+# ================================================================ Sperre
+# Zwei Läufe gleichzeitig (etwa von Hand und aus dem Update-Dienst) würden
 # sich gegenseitig die Datenbank zurückrollen. Die Sperrdatei liegt in
 # /etc/powermanagement (nur root), nicht im für alle beschreibbaren
 # /run/lock: Dort könnte ein anderer Benutzer vorher einen Verweis unter
 # diesem Namen anlegen, dessen Ziel root dann beim Öffnen leert. Dieselbe
-# Sperre nimmt deploy/install-debian.sh.
-install -d -m 750 "$ETC"
-exec 9>>"$ETC/update.lock"
-chmod 600 "$ETC/update.lock"
-if ! flock -n 9; then
-    echo "Ein anderes Update läuft gerade." >&2
-    exit 1
-fi
-
-# ------------------------------------------------ mitgelieferte Vorlagen
-# Gleiche Logik wie im Installationsskript: ersetzt wird nur, was seit der
-# letzten Auslieferung niemand verändert hat; sonst kommt die neue Fassung
-# daneben. Ergebnis in VORLAGE_ERGEBNIS: neu | gleich | ersetzt | behalten
-VORLAGE_ERGEBNIS=""
-vorlage_uebernehmen() {
-    local quelle="$1" ziel="$2" besitzer="$3" modus="$4" neu="$5" erzwingen="${6:-nein}"
-    local merk
-    merk="$VORLAGEN/$(printf '%s' "$ziel" | tr '/' '_')"
-    install -d -m 700 "$VORLAGEN"
-
-    if [[ ! -e "$ziel" ]]; then
-        VORLAGE_ERGEBNIS="neu"
-    elif cmp -s "$quelle" "$ziel"; then
-        VORLAGE_ERGEBNIS="gleich"
-    elif [[ "$erzwingen" == "ja" ]]; then
-        # Umbenennen statt „cp -p“: cp folgte als root einem Verweis, den der
-        # Besitzer des Ordners (nodered) unter dem Namen der Sicherung angelegt
-        # hat, und überschriebe dessen Ziel (Befund 8). rename folgt keinem
-        # Verweis; install legt die Datei unten neu an.
-        mv -fT -- "$ziel" "$ziel.vor-$(date +%Y%m%d-%H%M%S)"
-        VORLAGE_ERGEBNIS="ersetzt"
-    elif [[ -f "$merk" ]] && cmp -s "$merk" "$ziel"; then
-        VORLAGE_ERGEBNIS="ersetzt"
+# Sperre nimmt deploy/install-debian.sh. Mit PM_UPDATE_SPERRE=geerbt hält
+# sie schon der Aufrufer (fd 9 über exec bzw. an das Kind vererbt): dann den
+# Deskriptor nicht neu öffnen – das gäbe sie kurz frei.
+sperre_nehmen() {
+    install -d -m 750 "$ETC"
+    if [[ "${PM_UPDATE_SPERRE:-}" == "geerbt" ]]; then
+        flock -n 9 2>/dev/null || return 1
     else
-        install -o "${besitzer%%:*}" -g "${besitzer##*:}" -m "$modus" "$quelle" "$neu"
-        VORLAGE_ERGEBNIS="behalten"
-        return 0
+        exec 9>>"$ETC/update.lock"
+        chmod 600 "$ETC/update.lock"
+        flock -n 9 || return 1
     fi
-    if [[ "$VORLAGE_ERGEBNIS" != "gleich" ]]; then
-        install -o "${besitzer%%:*}" -g "${besitzer##*:}" -m "$modus" "$quelle" "$ziel"
-    fi
-    cp "$quelle" "$merk"
-    rm -f "$neu"
+    SPERRE_GEHALTEN="ja"
 }
 
-# ------------------------------------------------- Zugangsdaten für git
+besetzt() {
+    echo "Ein anderes Update läuft gerade." >&2
+    ergebnis nicht_begonnen besetzt
+    exit 1
+}
+
+# ================================================================ Ergebnis und Verlauf
+
+# ergebnis <ergebnis> <grund|-> [<satz>]: Ergebnisdatei (falls verlangt),
+# Zeile im Verlauf (nicht bei --pruefen) und die letzte Zeile des Laufs.
+ergebnis() {
+    local erg="$1" grund="${2:--}" satz="${3:-}" neu_jetzt="-" teil
+    case "$erg" in
+        eingespielt|eingespielt_mit_warnung) neu_jetzt="${NEU:--}" ;;
+    esac
+    ergebnis_datei_schreiben "$erg" "$grund" "$neu_jetzt"
+    verlauf_schreiben "$erg" "$grund" "$neu_jetzt"
+    teil="$erg"
+    [[ "$grund" != "-" ]] && teil="$teil ($grund)"
+    # alt → neu, sobald es ein anderes Ziel gab; sonst der Stand (oder nur der Satz)
+    if [[ -n "$ALT" && -n "$NEU" && "$NEU" != "$ALT" ]]; then
+        teil="$teil – $(kurz "$ALT") → $(kurz "$NEU")"
+    elif [[ -z "$satz" && -n "$ALT" ]]; then
+        satz="Stand $(kurz "$ALT")"
+    fi
+    [[ -n "$satz" ]] && teil="$teil – $satz"
+    printf '\n==> Ergebnis: %s\n' "$teil"
+    return 0
+}
+
+ergebnis_datei_schreiben() {
+    local erg="$1" grund="$2" neu_jetzt="$3" t w zweig="-" sicherung="-"
+    [[ -n "$ERGEBNIS_DATEI" ]] || return 0
+    [[ -n "$ZWEIG" ]] && zweig_ok "$ZWEIG" && zweig="$ZWEIG"
+    [[ "$SICHERUNG" != "-" ]] && sicherung="${SICHERUNG##*/}"
+    t="$(mktemp "${ERGEBNIS_DATEI%/*}/.ergebnis.XXXXXX" 2>/dev/null)" || return 0
+    {
+        echo "# powermanagement update-ergebnis 1"
+        echo "ergebnis $erg"
+        echo "grund $grund"
+        echo "alt ${ALT:--}"
+        echo "neu $neu_jetzt"
+        echo "zweig $zweig"
+        echo "sicherung $sicherung"
+        echo "pruefung $PRUEFUNG"
+        for w in ${WARNUNGEN[@]+"${WARNUNGEN[@]}"}; do
+            echo "warnung $w"
+        done
+    } > "$t" 2>/dev/null || { rm -f -- "$t"; return 0; }
+    chmod 600 "$t" 2>/dev/null
+    mv -f -- "$t" "$ERGEBNIS_DATEI" 2>/dev/null || rm -f -- "$t"
+    return 0
+}
+
+# Jeder echte Lauf (auch von der Konsole) kommt in den Verlauf – reine
+# Suchen nicht, und nur, wer die Sperre hält, schreibt hinein.
+verlauf_schreiben() {
+    local erg="$1" grund="$2" neu_jetzt="$3" t sicherung="-" verlauf="$ZUSTAND/verlauf"
+    [[ "$SPERRE_GEHALTEN" == "ja" && "$AKTION" != "pruefen" && "$MODUS" != "nur_abgleichen" ]] || return 0
+    [[ "$SICHERUNG" != "-" ]] && sicherung="${SICHERUNG##*/}"
+    install -d -m 700 "$ZUSTAND" 2>/dev/null || return 0
+    t="$(mktemp "$ZUSTAND/.verlauf.XXXXXX" 2>/dev/null)" || return 0
+    {
+        [[ -f "$verlauf" ]] && tail -n 499 -- "$verlauf"
+        printf 'eintrag %s %s %s %s %s %s %s %s %s %s %s\n' "$BEGINN" "$(date +%s)" "$KENNUNG" "$AUSLOESER" "$VON" \
+            "$AKTION" "$erg" "$grund" "${ALT:--}" "$neu_jetzt" "$sicherung"
+    } > "$t" 2>/dev/null || { rm -f -- "$t"; return 0; }
+    chmod 600 "$t" 2>/dev/null
+    mv -f -- "$t" "$verlauf" 2>/dev/null || rm -f -- "$t"
+    return 0
+}
+
+# gescheitert_merken <sha40> <grund>: die Automatik versucht diesen Stand nie wieder
+gescheitert_merken() {
+    local sha="$1" grund="$2" t datei="$ZUSTAND/gescheitert"
+    [[ "$sha" =~ ^[0-9a-f]{40}$ && "$GESCHEITERT_GRUENDE" == *" $grund "* ]] || return 0
+    install -d -m 700 "$ZUSTAND" 2>/dev/null || return 0
+    t="$(mktemp "$ZUSTAND/.gescheitert.XXXXXX" 2>/dev/null)" || return 0
+    {
+        [[ -f "$datei" ]] && tail -n 19 -- "$datei"
+        printf '%s %s %s\n' "$sha" "$(date +%s)" "$grund"
+    } > "$t" 2>/dev/null || { rm -f -- "$t"; return 0; }
+    chmod 600 "$t" 2>/dev/null
+    mv -f -- "$t" "$datei" 2>/dev/null || rm -f -- "$t"
+    return 0
+}
+
+# ================================================================ Marke „offen“
+# Zugleich die Schnittstelle Stufe 1 → Stufe 2 (Format 1). Gelesen wird nur
+# über eine Liste bekannter Schlüssel, jeder Wert gegen ein Muster, nie per
+# source. Unbekannte Schlüssel (einer neueren Fassung) werden überlesen.
+
+marke_schreiben() {
+    local t
+    install -d -m 700 "$ZUSTAND"
+    t="$(mktemp "$ZUSTAND/.offen.XXXXXX")"
+    {
+        echo "# powermanagement update-offen 1"
+        echo "phase stufe1"
+        echo "zeit $BEGINN"
+        echo "kennung $KENNUNG"
+        echo "ausloeser $AUSLOESER"
+        echo "von $VON"
+        echo "alt $ALT"
+        echo "alt_zweig $ALT_ZWEIG"
+        echo "zweig $ZWEIG"
+        echo "zweig_ref_vorher $ZWEIG_REF_VORHER"
+        echo "neu $NEU"
+        echo "alt_skript $ZUSTAND/alt/update-debian.sh"
+        echo "sicherung $SICHERUNG"
+        echo "schnappschuss $SCHNAPPSCHUSS"
+        echo "migriert nein"
+        echo "login_vorher $LOGIN_VORHER"
+        echo "pruefung_vorher $PRUEFUNG_VORHER"
+        if [[ ${#AKTIV_VORHER[@]} -gt 0 ]]; then echo "aktiv_vorher ${AKTIV_VORHER[*]}"; else echo "aktiv_vorher -"; fi
+        echo "flows_ersetzen $FLOWS_ERSETZEN"
+        echo "ergebnis_datei ${ERGEBNIS_DATEI:--}"
+        echo "fortschritt_datei ${FORTSCHRITT_DATEI:--}"
+    } > "$t"
+    chmod 600 "$t"
+    mv -f -- "$t" "$MARKE"
+    PHASE="stufe1"
+}
+
+# marke_setzen <schlüssel> <wert>: einen Wert ersetzen (tmp + mv)
+marke_setzen() {
+    local schluessel="$1" wert="$2" t zeile gesetzt="nein"
+    t="$(mktemp "$ZUSTAND/.offen.XXXXXX")" || return 1
+    while IFS= read -r zeile || [[ -n "$zeile" ]]; do
+        if [[ "$zeile" == "$schluessel "* ]]; then
+            [[ "$gesetzt" == "nein" ]] && printf '%s %s\n' "$schluessel" "$wert"
+            gesetzt="ja"
+        else
+            printf '%s\n' "$zeile"
+        fi
+    done < "$MARKE" > "$t" || { rm -f -- "$t"; return 1; }
+    [[ "$gesetzt" == "ja" ]] || printf '%s %s\n' "$schluessel" "$wert" >> "$t"
+    chmod 600 "$t"
+    mv -f -- "$t" "$MARKE"
+    [[ "$schluessel" == "phase" ]] && PHASE="$wert"
+    return 0
+}
+
+# marke_hinzufuegen <schlüssel> <wert>: eine weitere Zeile (neu_angelegt)
+marke_hinzufuegen() {
+    local t
+    t="$(mktemp "$ZUSTAND/.offen.XXXXXX")" || return 1
+    { cat -- "$MARKE" && printf '%s %s\n' "$1" "$2"; } > "$t" || { rm -f -- "$t"; return 1; }
+    chmod 600 "$t"
+    mv -f -- "$t" "$MARKE"
+}
+
+marke_loeschen() { rm -f -- "$MARKE"; }
+
+# Was das Zurückrollen entfernen darf: nur Dateien der Anwendung, nie die
+# Einheiten des Update-Dienstes selbst (disable --now stoppte den eigenen Dienst).
+neu_angelegt_erlaubt() {
+    local p="$1"
+    if [[ "$p" =~ ^/etc/systemd/system/powermanagement-[a-z0-9-]+\.(service|timer|path)$ \
+          && "$p" != /etc/systemd/system/powermanagement-update.* ]]; then
+        return 0
+    fi
+    [[ "$p" =~ ^/etc/logrotate\.d/powermanagement[a-z0-9-]*$ ]] && return 0
+    [[ "$p" =~ ^/etc/(nginx|mosquitto|php)/[^[:space:]]*powermanagement[^/[:space:]]*$ ]] && return 0
+    return 1
+}
+
+# neu_merken <pfad>: in Stufe 2 eine Datei, die es vor dem Update nicht gab,
+# vor dem Schreiben in die Marke – die alte Fassung kennt sie nicht und
+# entfernte sie beim Abgleich nie.
+neu_merken() {
+    [[ "$NEU_MERKEN" == "ja" && -f "$MARKE" ]] || return 0
+    [[ -e "$1" || -L "$1" ]] && return 0
+    neu_angelegt_erlaubt "$1" || return 0
+    marke_hinzufuegen neu_angelegt "$1"
+}
+
+# marke_lesen: setzt M_*; rc 1, wenn Kopf, Form oder ein Wert nicht passt
+marke_lesen() {
+    local zeile schluessel wert n=0
+    M_PHASE=""; M_ZEIT=""; M_KENNUNG="-"; M_AUSLOESER="konsole"; M_VON="root"
+    M_ALT=""; M_ALT_ZWEIG=""; M_ZWEIG=""; M_ZWEIG_REF_VORHER="-"; M_NEU=""
+    M_SICHERUNG="-"; M_SCHNAPPSCHUSS="-"; M_MIGRIERT="nein"
+    M_LOGIN_VORHER="-"; M_PRUEFUNG_VORHER="-"; M_AKTIV_VORHER="-"; M_FLOWS_ERSETZEN="nein"
+    M_ERGEBNIS_DATEI="-"; M_FORTSCHRITT_DATEI="-"; M_NEU_ANGELEGT=()
+    [[ -f "$MARKE" && ! -L "$MARKE" ]] || return 1
+    while IFS= read -r zeile || [[ -n "$zeile" ]]; do
+        n=$((n + 1))
+        if (( n == 1 )); then
+            [[ "$zeile" == "# powermanagement update-offen 1" ]] || return 1
+            continue
+        fi
+        [[ "$zeile" =~ ^([a-z_]+)\ (.+)$ ]] || return 1
+        schluessel="${BASH_REMATCH[1]}"
+        wert="${BASH_REMATCH[2]}"
+        case "$schluessel" in
+            phase)            [[ "$wert" =~ ^(stufe1|checkout|stufe2|zurueck)$ ]] || return 1; M_PHASE="$wert" ;;
+            zeit)             [[ "$wert" =~ ^[0-9]{1,12}$ ]] || return 1; M_ZEIT="$wert" ;;
+            kennung)          [[ "$wert" =~ ^([0-9a-f]{32}|-)$ ]] || return 1; M_KENNUNG="$wert" ;;
+            ausloeser)        [[ "$wert" =~ ^(hand|automatik|konsole|system)$ ]] || return 1; M_AUSLOESER="$wert" ;;
+            von)              [[ "$wert" =~ ^[A-Za-z0-9._@-]{1,64}$ ]] || return 1; M_VON="$wert" ;;
+            alt)              [[ "$wert" =~ ^[0-9a-f]{40}$ ]] || return 1; M_ALT="$wert" ;;
+            neu)              [[ "$wert" =~ ^[0-9a-f]{40}$ ]] || return 1; M_NEU="$wert" ;;
+            alt_zweig)        [[ "$wert" == "-" ]] || zweig_ok "$wert" || return 1; M_ALT_ZWEIG="$wert" ;;
+            zweig)            zweig_ok "$wert" || return 1; M_ZWEIG="$wert" ;;
+            zweig_ref_vorher) [[ "$wert" =~ ^([0-9a-f]{40}|-)$ ]] || return 1; M_ZWEIG_REF_VORHER="$wert" ;;
+            alt_skript)       # wählt der Update-Dienst fürs Wiederaufnehmen – hier nur geprüft
+                [[ "$wert" == "-" || "$wert" =~ ^/var/lib/powermanagement/update/alt/[A-Za-z0-9._-]+$ ]] || return 1 ;;
+            sicherung)
+                [[ "$wert" == "-" || ( "$wert" == "$ZIEL/storage/backups/"* \
+                    && "${wert#"$ZIEL/storage/backups/"}" =~ ^vor-update-[0-9-]+\.tar\.gz$ ) ]] || return 1
+                M_SICHERUNG="$wert" ;;
+            schnappschuss)
+                [[ "$wert" == "-" || ( "$wert" == "$ZIEL/storage/backups/"* \
+                    && "${wert#"$ZIEL/storage/backups/"}" =~ ^\.schnappschuss-[0-9-]+/database\.sqlite$ ) ]] || return 1
+                M_SCHNAPPSCHUSS="$wert" ;;
+            migriert)         [[ "$wert" =~ ^(ja|nein)$ ]] || return 1; M_MIGRIERT="$wert" ;;
+            login_vorher)     [[ "$wert" =~ ^([0-9]{3}|-)$ ]] || return 1; M_LOGIN_VORHER="$wert" ;;
+            pruefung_vorher)  [[ "$wert" =~ ^(ok|fehler|-)$ ]] || return 1; M_PRUEFUNG_VORHER="$wert" ;;
+            aktiv_vorher)     [[ "$wert" =~ ^(-|[a-z0-9@._-]+( [a-z0-9@._-]+)*)$ ]] || return 1; M_AKTIV_VORHER="$wert" ;;
+            flows_ersetzen)   [[ "$wert" =~ ^(ja|nein)$ ]] || return 1; M_FLOWS_ERSETZEN="$wert" ;;
+            # Nur die Form: nach einem Absturz gibt es den Ordner in /run nicht
+            # mehr – die Marke muss trotzdem lesbar bleiben. Ob der Ordner noch
+            # root allein gehört, prüft stufe2_eintritt beim Übernehmen.
+            ergebnis_datei)   [[ "$wert" =~ ^(-|/[A-Za-z0-9._/-]+)$ ]] || return 1; M_ERGEBNIS_DATEI="$wert" ;;
+            fortschritt_datei) [[ "$wert" =~ ^(-|/[A-Za-z0-9._/-]+)$ ]] || return 1; M_FORTSCHRITT_DATEI="$wert" ;;
+            neu_angelegt)     neu_angelegt_erlaubt "$wert" || return 1; M_NEU_ANGELEGT+=("$wert") ;;
+            *) ;;   # unbekannt: von einer neueren Fassung – überlesen
+        esac
+    done < "$MARKE"
+    # Was eine ältere Stufe 1 nicht schreibt, bekommt eine Vorgabe.
+    [[ -n "$M_ALT_ZWEIG" ]] || M_ALT_ZWEIG="$M_ZWEIG"
+    [[ -n "$M_PHASE" && -n "$M_ZEIT" && -n "$M_ALT" && -n "$M_NEU" && -n "$M_ZWEIG" ]]
+}
+
+# Werte der Marke in den Lauf übernehmen (Stufe 2, --wiederaufnehmen)
+marke_uebernehmen() {
+    PHASE="$M_PHASE"; BEGINN="$M_ZEIT"
+    KENNUNG="$M_KENNUNG"
+    ALT="$M_ALT"; ALT_ZWEIG="$M_ALT_ZWEIG"; ZWEIG="$M_ZWEIG"; ZWEIG_REF_VORHER="$M_ZWEIG_REF_VORHER"; NEU="$M_NEU"
+    SICHERUNG="$M_SICHERUNG"; SCHNAPPSCHUSS="$M_SCHNAPPSCHUSS"; MIGRIERT="$M_MIGRIERT"
+    LOGIN_VORHER="$M_LOGIN_VORHER"; PRUEFUNG_VORHER="$M_PRUEFUNG_VORHER"; FLOWS_ERSETZEN="$M_FLOWS_ERSETZEN"
+    AKTIV_VORHER=()
+    if [[ "$M_AKTIV_VORHER" != "-" ]]; then
+        read -r -a AKTIV_VORHER <<< "$M_AKTIV_VORHER"
+    fi
+}
+
+# ================================================================ Schreibsperre
+# Solange storage/update/ist/wartung steht, nimmt die Oberfläche keine
+# Änderungen an – was zwischen Sicherung und Zurückrollen geschrieben würde,
+# ginge sonst verloren (N10).
+wartung_an() {
+    if ! as_app test -d "$ZIEL/storage/update/ist"; then
+        hinweis "storage/update/ist fehlt – die Oberfläche bleibt während dieses Updates beschreibbar (wird jetzt eingerichtet)."
+        return 0
+    fi
+    printf '# powermanagement update-wartung 1\nseit %s\nkennung %s\n' "$(date +%s)" "$KENNUNG" \
+        | als_app_schreiben "$ZIEL/storage/update/ist/wartung"
+    echo "    Schreibsperre der Oberfläche an"
+    sleep 2   # laufende Anfragen enden lassen
+}
+wartung_aus() {
+    if as_app test -e "$ZIEL/storage/update/ist/wartung" 2>/dev/null; then
+        as_app rm -f -- "$ZIEL/storage/update/ist/wartung" && echo "    Schreibsperre der Oberfläche aus"
+    fi
+    return 0
+}
+
+schnappschuss_loeschen() {
+    local ordner
+    [[ -n "$SCHNAPPSCHUSS" && "$SCHNAPPSCHUSS" != "-" ]] || return 0
+    ordner="${SCHNAPPSCHUSS%/database.sqlite}"
+    [[ "$ordner" == "$ZIEL/storage/backups/.schnappschuss-"* ]] || return 0
+    as_app rm -rf -- "$ordner" || true
+    return 0
+}
+
+# ================================================================ Zugangsdaten für git
 # Wie im Installationsskript: Token aus /etc/powermanagement/git.conf, von
 # git über /etc/powermanagement/git-credentials gelesen – nie in der
 # Kommandozeile, nie in .git/config, nie in der Adresse des Remotes.
@@ -272,6 +745,7 @@ zugangsdaten_lesen() {
     local datei="$1" zeile schluessel wert
     if [[ ! -r "$datei" ]]; then
         echo "Die Zugangsdatei $datei lässt sich nicht lesen." >&2
+        ergebnis nicht_begonnen kein_zugang
         exit 1
     fi
     while IFS= read -r zeile || [[ -n "$zeile" ]]; do
@@ -300,6 +774,8 @@ zugangsdaten_lesen() {
     done < "$datei"
 }
 
+# Geschrieben wird nur, was abweicht – auch --pruefen ruft das auf und soll
+# sonst nichts verändern (N1).
 git_zugang_ablegen() {
     local repo="${1:-}" schema="https" host="github.com" benutzer zeile
     if [[ "$repo" == git@* || "$repo" == ssh://* ]]; then
@@ -307,6 +783,7 @@ git_zugang_ablegen() {
     fi
     if [[ -z "$GIT_CRED_LINE" && -z "$GIT_TOKEN" ]]; then
         echo "In $GIT_CRED_FILE steht kein Token (erwartet: GITHUB_TOKEN=...)." >&2
+        ergebnis nicht_begonnen kein_zugang
         exit 1
     fi
     if [[ -n "$GIT_CRED_LINE" ]]; then
@@ -319,306 +796,1241 @@ git_zugang_ablegen() {
         benutzer="${GIT_TOKEN_USER:-x-access-token}"
         zeile="$schema://$(urlenc "$benutzer"):$(urlenc "$GIT_TOKEN")@$host"
     fi
-    install -m 600 /dev/null "$GIT_STORE"
-    printf '%s\n' "$zeile" > "$GIT_STORE"
-    chmod 600 "$GIT_CRED_FILE" 2>/dev/null || true
+    if [[ ! -f "$GIT_STORE" || -L "$GIT_STORE" || "$(stat -c %a -- "$GIT_STORE")" != 600 ]] \
+        || [[ "$(cat -- "$GIT_STORE")" != "$zeile" ]]; then
+        install -m 600 /dev/null "$GIT_STORE"
+        printf '%s\n' "$zeile" > "$GIT_STORE"
+    fi
+    if [[ "$(stat -c %a -- "$GIT_CRED_FILE" 2>/dev/null || true)" != 600 ]]; then
+        chmod 600 "$GIT_CRED_FILE" 2>/dev/null || true
+    fi
 }
 
-# ================================================================ Stand
-if [[ ! -d "$ZIEL/.git" ]]; then
-    echo "In $ZIEL liegt kein Git-Arbeitsverzeichnis." >&2
-    echo "Dieses Skript aktualisiert nur Installationen, die per git geholt wurden." >&2
-    exit 1
-fi
-if [[ ! -f "$ZIEL/bin/power" ]]; then
-    echo "In $ZIEL steckt keine PowerManagement-Installation." >&2
-    exit 1
-fi
-
-AKTUELLER_ZWEIG="$(g rev-parse --abbrev-ref HEAD)"
-[[ -z "$ZWEIG" ]] && ZWEIG="$AKTUELLER_ZWEIG"
-ALT="$(g rev-parse HEAD)"
-
-schritt "Stand prüfen"
-echo "    Verzeichnis: $ZIEL"
-echo "    Zweig:       $ZWEIG"
-echo "    Aktuell:     $(g log -1 --format='%h %s')"
-
-LOKAL="$(g status --porcelain --untracked-files=no)"
-if [[ -n "$LOKAL" ]]; then
-    hinweis "In $ZIEL gibt es lokale Änderungen:"
-    printf '%s\n' "$LOKAL" | sed 's/^/      /' >&2
-    if [[ "$ERZWINGEN" != "ja" ]]; then
-        hinweis "Abbruch. Mit --erzwingen werden sie verworfen – sonst vorher sichern."
-        exit 1
+git_helper_setzen() {
+    [[ -f "$GIT_STORE" ]] || return 0
+    if [[ "$(g config --get credential.helper 2>/dev/null || true)" != "store --file=$GIT_STORE" ]]; then
+        g config credential.helper "store --file=$GIT_STORE"
     fi
-    hinweis "--erzwingen: die Änderungen werden verworfen."
-fi
+}
 
-schritt "Änderungen holen"
-if [[ -z "$GIT_CRED_FILE" ]]; then
-    GIT_CRED_FILE="$(zugangsdatei_finden || true)"
-fi
-if [[ -n "$GIT_CRED_FILE" ]]; then
-    zugangsdaten_lesen "$GIT_CRED_FILE"
-    git_zugang_ablegen "$(g remote get-url origin 2>/dev/null || true)"
-fi
-if [[ -f "$GIT_STORE" ]]; then
-    g config credential.helper "store --file=$GIT_STORE"
-fi
-
-# GIT_TERMINAL_PROMPT=0 (oben): ohne gültiges Token mit einer Meldung
-# abbrechen, statt auf eine Eingabe zu warten, die niemand tippt. timeout:
-# ein hängender Abruf hielte sonst die Sperre (und den Update-Dienst) fest.
-# Ausgegeben wird ohne Benutzerteil in Adressen (ohne_zugangsdaten).
-ABRUF_RC=0
-ABRUF_MELDUNG="$(LC_ALL=C timeout 600 git -c safe.directory="$ZIEL" -c core.hooksPath=/dev/null -C "$ZIEL" \
-    fetch --quiet origin "$ZWEIG" 2>&1 >/dev/null)" || ABRUF_RC=$?
-if [[ "$ABRUF_RC" -ne 0 ]]; then
-    if [[ -n "$ABRUF_MELDUNG" ]]; then
-        printf '%s\n' "$ABRUF_MELDUNG" | ohne_zugangsdaten | sed 's/^/      /' >&2
-    fi
-    [[ "$ABRUF_RC" -eq 124 ]] && hinweis "Der Abruf brach nach 600 s ab."
-    REMOTE_URL="$(g remote get-url origin 2>/dev/null | ohne_zugangsdaten || echo '?')"
-    hinweis "Die Änderungen ließen sich nicht holen (Remote: ${REMOTE_URL:-?})."
-    if [[ "$REMOTE_URL" == http* ]]; then
-        if [[ -f "$GIT_STORE" ]]; then
-            hinweis "Ein Token liegt vor – es passt offenbar nicht mehr (abgelaufen, ohne Leserecht?)."
-            hinweis "Neues Token in ${GIT_CRED_FILE:-$ETC/git.conf} eintragen (GITHUB_TOKEN=…)."
-        else
-            hinweis "Ist das Repository privat? Dann ein Token hinterlegen:"
-            hinweis "  install -d -m 750 $ETC"
-            hinweis "  printf 'GITHUB_TOKEN=%s\\n' '<token>' > $ETC/git.conf; chmod 600 $ETC/git.conf"
-        fi
-    fi
-    hinweis "Verändert wurde nichts."
-    exit 1
-fi
-NEU="$(g rev-parse "origin/$ZWEIG")"
+# ================================================================ Nachholen
 
 # Eigene MQTT-Zugänge noch nicht eingerichtet (wirksame ACL oder Einheiten
 # fehlen)? Das kommt vor, wenn der Code schon neu ist, aber ein älteres
-# Update-Skript ihn geholt hat – das kannte diese Schritte noch nicht. Dann
-# auch ohne neuen Code abgleichen.
-MQTT_NACHHOLEN="nein"
-if [[ "$MIT_MOSQUITTO" == "ja" && -f "$ZIEL/deploy/mqtt-zugaenge.sh" ]] \
-    && { [[ ! -f /etc/mosquitto/powermanagement-wirksam.acl ]] \
-         || [[ ! -f /etc/systemd/system/powermanagement-mqtt-zugaenge.path ]]; }; then
-    MQTT_NACHHOLEN="ja"
-fi
-# Ebenso, wenn Mosquitto noch die Übergangsfassung liest: die installierte
+# Update-Skript ihn geholt hat – das kannte diese Schritte noch nicht. Ebenso,
+# wenn Mosquitto noch die Übergangsfassung liest: die installierte
 # Konfiguration ist unverändert die zuletzt ausgelieferte (gemerkte Vorlage),
 # aber nicht broker.conf – etwa nach einem zurückgerollten Update.
-MQTT_KONF="/etc/mosquitto/conf.d/powermanagement.conf"
-MQTT_KONF_MERK="$VORLAGEN/$(printf '%s' "$MQTT_KONF" | tr '/' '_')"
-if [[ "$MIT_MOSQUITTO" == "ja" && -f "$ZIEL/deploy/mosquitto/broker.conf" && -f "$MQTT_KONF_MERK" && -f "$MQTT_KONF" ]] \
-    && cmp -s "$MQTT_KONF_MERK" "$MQTT_KONF" && ! cmp -s "$ZIEL/deploy/mosquitto/broker.conf" "$MQTT_KONF"; then
-    MQTT_NACHHOLEN="ja"
-fi
+mqtt_nachholen_pruefen() {
+    local merk
+    MQTT_NACHHOLEN="nein"
+    [[ "$MIT_MOSQUITTO" == "ja" ]] || return 0
+    if [[ -f "$ZIEL/deploy/mqtt-zugaenge.sh" ]] \
+        && { [[ ! -f /etc/mosquitto/powermanagement-wirksam.acl ]] \
+             || [[ ! -f /etc/systemd/system/powermanagement-mqtt-zugaenge.path ]]; }; then
+        MQTT_NACHHOLEN="ja"
+    fi
+    merk="$VORLAGEN/$(printf '%s' "$MOSQUITTO_CONF" | tr '/' '_')"
+    if [[ -f "$ZIEL/deploy/mosquitto/broker.conf" && -f "$merk" && -f "$MOSQUITTO_CONF" ]] \
+        && cmp -s "$merk" "$MOSQUITTO_CONF" && ! cmp -s "$ZIEL/deploy/mosquitto/broker.conf" "$MOSQUITTO_CONF"; then
+        MQTT_NACHHOLEN="ja"
+    fi
+    return 0
+}
 
-CODE_NEU="ja"
-if [[ "$ALT" == "$NEU" ]]; then
-    CODE_NEU="nein"
-    echo "    Bereits auf dem neuesten Stand ($(g log -1 --format='%h %s'))."
-    if [[ "$FLOWS_ERSETZEN" != "ja" && "$MQTT_NACHHOLEN" != "ja" ]]; then
-        exit 0
+# Einrichtung unvollständig (N3): eine Einheit der Liste liegt in deploy/,
+# fehlt aber in /etc/systemd/system, oder ein Ordner fehlt. Das kommt vor,
+# wenn ein älteres Update-Skript den neuen Stand geholt hat – es kannte die
+# neuen Schritte nicht. Dann richtet dieser Lauf sie auch ohne neuen Code ein.
+einrichtung_nachholen_pruefen() {
+    local e d
+    EINRICHTUNG_NACHHOLEN="nein"
+    while IFS= read -r e; do
+        if [[ -f "$ZIEL/deploy/$e" && ! -f "/etc/systemd/system/$e" ]]; then
+            EINRICHTUNG_NACHHOLEN="ja"
+        fi
+    done < <(einheiten)
+    for d in "$ZIEL/storage/update" "$ZIEL/storage/update/soll" "$ZIEL/storage/update/ist" "$ZUSTAND" "$PROTOKOLLE"; do
+        if [[ ! -d "$d" ]]; then
+            EINRICHTUNG_NACHHOLEN="ja"
+        fi
+    done
+    return 0
+}
+
+# ================================================================ Rechte und Ordner
+
+ordner_anlegen() {
+    local d
+    for d in "${APP_ORDNER[@]}"; do
+        app_verzeichnis "$ZIEL/storage/$d"
+    done
+    install -d -m 750 /var/log/powermanagement
+    install -d -m 700 "$PROTOKOLLE" "$ZUSTAND"
+}
+
+# Rechte wie bei der Installation: Code gehört root, storage/ der
+# Anwendung. storage/ und config.php bleiben dabei außen vor – die
+# Oberfläche läuft weiter und soll nicht kurz ihre Dateien verlieren.
+rechte_setzen() {
+    find "$ZIEL" -path "$ZIEL/storage" -prune -o ! -path "$ZIEL/config/config.php" \
+        -exec chown root:root {} + -exec chmod go+rX,go-w {} +
+    # Was git eben als root in storage/ angelegt hat (neue .gitkeep-Ordner),
+    # erst der Anwendung übereignen – sonst darf sie dort keine Rechte setzen.
+    chown -R -P "$APP_USER:$APP_USER" "$ZIEL/storage"
+    ordner_anlegen
+    if [[ -f "$ZIEL/config/config.php" ]]; then
+        chown "root:$APP_USER" "$ZIEL/config/config.php"
+        chmod 640 "$ZIEL/config/config.php"
     fi
-    if [[ "$FLOWS_ERSETZEN" == "ja" ]]; then
-        echo "    --flows-ersetzen: nur die Node-RED-Flows werden neu eingespielt."
+}
+
+# ================================================================ mitgelieferte Vorlagen
+# Gleiche Logik wie im Installationsskript: ersetzt wird nur, was seit der
+# letzten Auslieferung niemand verändert hat; sonst kommt die neue Fassung
+# daneben. Ergebnis in VORLAGE_ERGEBNIS: neu | gleich | ersetzt | behalten
+VORLAGE_ERGEBNIS=""
+vorlage_uebernehmen() {
+    local quelle="$1" ziel="$2" besitzer="$3" modus="$4" neu="$5" erzwingen="${6:-nein}"
+    local merk
+    merk="$VORLAGEN/$(printf '%s' "$ziel" | tr '/' '_')"
+    install -d -m 700 "$VORLAGEN"
+
+    if [[ ! -e "$ziel" ]]; then
+        VORLAGE_ERGEBNIS="neu"
+        neu_merken "$ziel"
+    elif cmp -s "$quelle" "$ziel"; then
+        VORLAGE_ERGEBNIS="gleich"
+    elif [[ "$erzwingen" == "ja" ]]; then
+        # Umbenennen statt „cp -p“: cp folgte als root einem Verweis, den der
+        # Besitzer des Ordners (nodered) unter dem Namen der Sicherung angelegt
+        # hat, und überschriebe dessen Ziel (Befund 8). rename folgt keinem
+        # Verweis; install legt die Datei unten neu an.
+        mv -fT -- "$ziel" "$ziel.vor-$(date +%Y%m%d-%H%M%S)"
+        VORLAGE_ERGEBNIS="ersetzt"
+    elif [[ -f "$merk" ]] && cmp -s "$merk" "$ziel"; then
+        VORLAGE_ERGEBNIS="ersetzt"
+    else
+        neu_merken "$neu"
+        install -o "${besitzer%%:*}" -g "${besitzer##*:}" -m "$modus" "$quelle" "$neu"
+        VORLAGE_ERGEBNIS="behalten"
+        return 0
     fi
-    if [[ "$MQTT_NACHHOLEN" == "ja" ]]; then
-        echo "    Eigene MQTT-Zugänge sind noch nicht eingerichtet – wird nachgeholt."
+    if [[ "$VORLAGE_ERGEBNIS" != "gleich" ]]; then
+        install -o "${besitzer%%:*}" -g "${besitzer##*:}" -m "$modus" "$quelle" "$ziel"
     fi
-else
+    cp "$quelle" "$merk"
+    rm -f "$neu"
+}
+
+# ================================================================ Abgleich
+
+# Die systemd-Einheiten der Anwendung – eine Liste für Update, Nachholen und
+# --nur-abgleichen. Eine Einheit je Zeile (zusammenführbar).
+einheiten() {
+    local e=(
+        powermanagement-sammler.service
+        powermanagement-wartung.service
+        powermanagement-wartung.timer
+    )
+    [[ "$MIT_NODERED" == "ja" ]] && e+=(powermanagement-nodered.service)
+    [[ "$MIT_MOSQUITTO" == "ja" ]] && e+=(
+        powermanagement-mqtt-zugaenge.service
+        powermanagement-mqtt-zugaenge.path
+        powermanagement-mqtt-zugaenge.timer
+    )
+    printf '%s\n' "${e[@]}"
+}
+
+rendern() {
+    sed -e "s|__APP_USER__|$APP_USER|g" -e "s|__APP_DIR__|$ZIEL|g" \
+        -e "s|__NODERED_APP__|$NODERED_APP|g" -e "s|__NODERED_DIR__|$NODERED_DIR|g" "$1"
+}
+
+# datei_abgleichen <inhalt> <ziel>: schreibt nur bei Änderung (rc 0), sonst rc 1
+datei_abgleichen() {
+    local inhalt="$1" ziel="$2"
+    if [[ -f "$ziel" ]] && [[ "$inhalt" == "$(cat -- "$ziel")" ]]; then
+        return 1
+    fi
+    neu_merken "$ziel"
+    printf '%s\n' "$inhalt" > "$ziel"
+    return 0
+}
+
+# abgleichen: Einheiten, Logrotate, Pool, Site, Mosquitto, Node-RED für den
+# ausgecheckten Stand. Merkt, was sich geändert hat (für die Neustarts).
+abgleichen() {
+    local einheit gerendert inhalt site_neu listen_zeile s_listen s_port s_name helfer_rc helfer_ausgabe helfer_meldung
+    ABGLEICH_BEGONNEN="ja"
+    FPM_VERSION="$(fpm_version)"
+    NODERED_NEUSTART="nein"
+    MOSQUITTO_NEUSTART="nein"
+    MOSQUITTO_NEULADEN="nein"
+    POOL_GEAENDERT="nein"
+    SITE_GEAENDERT="nein"
+    GEAENDERT_EINHEITEN=()
+    mqtt_nachholen_pruefen
+    arbeit_anlegen
+
+    # systemd-Einheiten: gehören der Anwendung, werden immer abgeglichen.
+    while IFS= read -r einheit; do
+        [[ -f "$ZIEL/deploy/$einheit" ]] || continue
+        gerendert="$(rendern "$ZIEL/deploy/$einheit")"
+        if datei_abgleichen "$gerendert" "/etc/systemd/system/$einheit"; then
+            echo "    $einheit aktualisiert"
+            GEAENDERT_EINHEITEN+=("$einheit")
+            [[ "$einheit" == powermanagement-nodered.service ]] && NODERED_NEUSTART="ja"
+        fi
+    done < <(einheiten)
+    # --ohne-dienste (Herunterfahren): systemd lehnt dann manches ab. Die
+    # Dateien stimmen trotzdem – der nächste Start lädt sie.
+    if [[ ${#GEAENDERT_EINHEITEN[@]} -gt 0 ]]; then
+        systemctl daemon-reload || [[ "$OHNE_DIENSTE" == "ja" ]]
+    fi
+    # Einschalten *und* starten, bei jedem Lauf: „enable" allein wirkt erst
+    # beim nächsten Neustart des Containers – und der kommt im LXC selten.
+    # --ohne-dienste: nur einschalten, nichts starten.
+    local jetzt=(--now)
+    [[ "$OHNE_DIENSTE" == "ja" ]] && jetzt=()
+    systemctl enable --quiet powermanagement-sammler.service || [[ "$OHNE_DIENSTE" == "ja" ]]
+    systemctl enable --quiet ${jetzt[@]+"${jetzt[@]}"} powermanagement-wartung.timer || [[ "$OHNE_DIENSTE" == "ja" ]]
+    if [[ "$MIT_NODERED" == "ja" ]]; then
+        systemctl enable --quiet powermanagement-nodered.service || [[ "$OHNE_DIENSTE" == "ja" ]]
+    fi
+    if [[ "$MIT_MOSQUITTO" == "ja" && -f /etc/systemd/system/powermanagement-mqtt-zugaenge.path ]]; then
+        systemctl enable --quiet ${jetzt[@]+"${jetzt[@]}"} powermanagement-mqtt-zugaenge.path powermanagement-mqtt-zugaenge.timer \
+            || [[ "$OHNE_DIENSTE" == "ja" ]]
+    fi
+    # Geänderte Pfad- und Zeitgeber-Einheiten greifen erst nach einem Neustart –
+    # nur, wenn sie laufen (try-restart startet nichts, was aus ist). Nie der
+    # Update-Dienst selbst: der steht nicht in dieser Liste.
+    if [[ "$OHNE_DIENSTE" == "nein" ]]; then
+        for einheit in ${GEAENDERT_EINHEITEN[@]+"${GEAENDERT_EINHEITEN[@]}"}; do
+            case "$einheit" in
+                *.path|*.timer) systemctl try-restart "$einheit" ;;
+            esac
+        done
+    fi
+
+    # Logrotate und PHP-FPM-Pool (Upload-Grenzen, open_basedir): gehören der
+    # Anwendung – erst rendern, dann vergleichen, nur bei Änderung schreiben.
+    inhalt="$(rendern "$ZIEL/deploy/powermanagement.logrotate")"
+    if datei_abgleichen "$inhalt" /etc/logrotate.d/powermanagement; then
+        echo "    Logrotate aktualisiert"
+    fi
+    if [[ -n "$FPM_VERSION" ]]; then
+        inhalt="$(rendern "$ZIEL/deploy/php-fpm-pool.conf")"
+        if datei_abgleichen "$inhalt" "/etc/php/$FPM_VERSION/fpm/pool.d/powermanagement.conf"; then
+            echo "    PHP-FPM-Pool aktualisiert"
+            POOL_GEAENDERT="ja"
+        fi
+    fi
+
+    # nginx-Site: nur ersetzen, wenn niemand sie verändert hat. Port, Adresse
+    # und Servername stehen in der vorhandenen Site – daraus neu erzeugen.
+    if [[ -f "$SITE" ]]; then
+        listen_zeile="$(grep -m1 -E '^\s*listen\s+[^[]' "$SITE" | sed -E 's/^\s*listen\s+([^ ;]+).*/\1/' || true)"
+        if [[ "$listen_zeile" == *:* ]]; then
+            s_listen="${listen_zeile%:*}"
+            s_port="${listen_zeile##*:}"
+        else
+            s_listen="0.0.0.0"
+            s_port="$listen_zeile"
+        fi
+        s_name="$(grep -m1 -E '^\s*server_name\s' "$SITE" | sed -E 's/^\s*server_name\s+([^;]+);.*/\1/' || true)"
+        site_neu="$ARBEIT/site"
+        sed -e "s|__APP_DIR__|$ZIEL|g" \
+            -e "s|__FPM_SOCKET__|/run/php/powermanagement.sock|g" \
+            -e "s|__SERVER_NAME__|${s_name:-powermanagement.lan}|g" \
+            -e "s|__LISTEN__|${s_listen:-0.0.0.0}|g" \
+            -e "s|__PORT__|${s_port:-80}|g" \
+            "$ZIEL/deploy/nginx-powermanagement.conf" > "$site_neu"
+        # Ohne default_server betrieben (Zusammenstoß mit einer anderen Seite)?
+        # Dann auch die neue Fassung ohne.
+        if ! grep -qE '^\s*listen\s.*default_server' "$SITE"; then
+            sed -i -E 's/^(\s*listen\s+[^[;]+) default_server;/\1;/' "$site_neu"
+        fi
+        vorlage_uebernehmen "$site_neu" "$SITE" root:root 644 /etc/nginx/powermanagement.powermanagement-neu
+        rm -f "$site_neu"
+        case "$VORLAGE_ERGEBNIS" in
+            ersetzt|neu)
+                echo "    nginx-Site aktualisiert"
+                SITE_GEAENDERT="ja" ;;
+            behalten)
+                hinweis "Die nginx-Site ist von Hand verändert und bleibt so. Neue Fassung:"
+                hinweis "  /etc/nginx/powermanagement.powermanagement-neu (diff -u $SITE /etc/nginx/powermanagement.powermanagement-neu)"
+                WARNUNGEN+=(site_behalten) ;;
+        esac
+    fi
+
+    if [[ "$MIT_MOSQUITTO" == "ja" ]]; then
+        # Auch ohne neuen Code (MQTT_NACHHOLEN): das Verzeichnis für Soll und
+        # Ergebnis der eigenen MQTT-Zugänge muss da sein.
+        app_verzeichnis "$ZIEL/storage/mqtt"
+        app_verzeichnis "$ZIEL/storage/mqtt/soll"
+        app_verzeichnis "$ZIEL/storage/mqtt/ist"
+
+        # 1. Grundlage der ACL. Mosquitto liest sie nicht direkt, sondern die
+        #    wirksame Fassung, die der Helfer daraus baut – ein Neuladen genügt.
+        vorlage_uebernehmen "$ZIEL/deploy/mosquitto/powermanagement.acl" \
+            /etc/mosquitto/powermanagement.acl mosquitto:mosquitto 600 \
+            /etc/mosquitto/powermanagement.acl.powermanagement-neu
+        [[ "$VORLAGE_ERGEBNIS" == "ersetzt" || "$VORLAGE_ERGEBNIS" == "neu" ]] && MOSQUITTO_NEULADEN="ja"
+        if [[ "$VORLAGE_ERGEBNIS" == "behalten" ]]; then
+            hinweis "Mosquitto-ACL verändert – neue Fassung: /etc/mosquitto/powermanagement.acl.powermanagement-neu"
+            hinweis "Für eigene Zugänge je Shelly die pattern-Zeilen von dort übernehmen (Änderungen von Hand nur"
+            hinweis "in /etc/mosquitto/powermanagement.acl, nie in der wirksamen Datei)."
+            WARNUNGEN+=(acl_behalten)
+        fi
+
+        # 2. Eigene Zugänge je Shelly: wirksame ACL aus Grundlage und Block der
+        #    Kennwortdatei bauen. Neu geladen wird unten, einmal für alles.
+        if [[ -f "$ZIEL/deploy/mqtt-zugaenge.sh" && -f /etc/mosquitto/powermanagement.passwd ]]; then
+            helfer_rc=0
+            helfer_meldung="$ARBEIT/mqtt-helfer"
+            helfer_ausgabe="$(bash "$ZIEL/deploy/mqtt-zugaenge.sh" --ziel="$ZIEL" --app-benutzer="$APP_USER" \
+                --neu-laden=nein 2>"$helfer_meldung")" || helfer_rc=$?
+            sed 's/^/    /' "$helfer_meldung"
+            rm -f "$helfer_meldung"
+            if [[ "${helfer_ausgabe##*$'\n'}" == "geaendert" ]]; then
+                MOSQUITTO_NEULADEN="ja"
+            fi
+            if [[ "$helfer_rc" -ne 0 ]]; then
+                hinweis "deploy/mqtt-zugaenge.sh endete mit $helfer_rc (siehe oben; journalctl -u powermanagement-mqtt-zugaenge)."
+                WARNUNGEN+=(mqtt_helfer)
+            fi
+        fi
+        # Nachholen: ein älteres Update-Skript hat womöglich schon die neue
+        # Konfiguration eingespielt und den Broker ohne wirksame ACL neu
+        # gestartet – dann steht er. Unten auf jeden Fall (neu) starten.
+        [[ "$MQTT_NACHHOLEN" == "ja" ]] && MOSQUITTO_NEULADEN="ja"
+        if [[ ! -f /etc/mosquitto/powermanagement-wirksam.acl ]]; then
+            # Ohne wirksame ACL startet der Broker mit der neuen Konfiguration
+            # nicht – dann wenigstens die Grundlage (ohne Sperren).
+            neu_merken /etc/mosquitto/powermanagement-wirksam.acl
+            install -o mosquitto -g mosquitto -m 600 /etc/mosquitto/powermanagement.acl \
+                /etc/mosquitto/powermanagement-wirksam.acl
+            MOSQUITTO_NEULADEN="ja"
+        fi
+
+        # 3. Konfiguration: der Wechsel auf die wirksame Datei braucht einmal
+        #    einen Neustart.
+        vorlage_uebernehmen "$ZIEL/deploy/mosquitto/broker.conf" \
+            "$MOSQUITTO_CONF" root:root 644 \
+            /etc/mosquitto/powermanagement.conf.powermanagement-neu
+        if [[ "$VORLAGE_ERGEBNIS" == "ersetzt" || "$VORLAGE_ERGEBNIS" == "neu" ]]; then
+            MOSQUITTO_NEUSTART="ja"
+        fi
+        if [[ "$VORLAGE_ERGEBNIS" == "behalten" ]]; then
+            hinweis "Mosquitto-Konfiguration verändert – neue Fassung: /etc/mosquitto/powermanagement.conf.powermanagement-neu"
+            hinweis "Eigene Zugänge je Shelly brauchen dort: acl_file /etc/mosquitto/powermanagement-wirksam.acl"
+        fi
+    fi
+
+    if [[ "$MIT_NODERED" == "ja" && -d "$NODERED_DIR" ]]; then
+        vorlage_uebernehmen "$ZIEL/deploy/node-red/settings.js" "$NODERED_DIR/settings.js" nodered:nodered 640 \
+            "$NODERED_DIR/settings.powermanagement-neu.js"
+        [[ "$VORLAGE_ERGEBNIS" == "ersetzt" || "$VORLAGE_ERGEBNIS" == "neu" ]] && NODERED_NEUSTART="ja"
+        [[ "$VORLAGE_ERGEBNIS" == "behalten" ]] && hinweis "settings.js ist verändert – neue Fassung: $NODERED_DIR/settings.powermanagement-neu.js"
+
+        # Flows: eigene Änderungen gehen vor. Nur wenn seit der letzten
+        # Auslieferung niemand im Editor etwas geändert (und bereitgestellt)
+        # hat, wird ersetzt – sonst liegt die neue Fassung daneben.
+        vorlage_uebernehmen "$ZIEL/deploy/node-red/flows.json" "$NODERED_DIR/flows.json" nodered:nodered 640 \
+            "$NODERED_DIR/flows.powermanagement-neu.json" "$FLOWS_ERSETZEN"
+        case "$VORLAGE_ERGEBNIS" in
+            neu|ersetzt)
+                echo "    Node-RED-Flows auf die mitgelieferte Fassung gebracht"
+                NODERED_NEUSTART="ja" ;;
+            behalten)
+                hinweis "Die Node-RED-Flows wurden im Editor verändert und bleiben, wie sie sind."
+                hinweis "Die neue Fassung liegt unter $NODERED_DIR/flows.powermanagement-neu.json –"
+                hinweis "im Editor über Menü → Importieren übernehmen, oder: $0 --flows-ersetzen"
+                hinweis "Eigene MQTT-Zugänge der Shellys brauchen die neuen Flows (Schutzliste pm/status/mqtt-zugaenge,"
+                hinweis "Antworten unter <präfix>/pm-nodered/rpc) – sonst meldet die Seite „MQTT-Zugänge“, dass Node-RED sie nicht bestätigt."
+                WARNUNGEN+=(flows_behalten) ;;
+        esac
+    fi
+    return 0
+}
+
+# ================================================================ Dienste
+
+fpm_testen() {
+    local bin
+    bin="$(command -v "php-fpm$FPM_VERSION" 2>/dev/null || true)"
+    [[ -n "$bin" ]] || return 0
+    "$bin" -t 2>&1 | sed 's/^/    /'
+}
+
+# dienste_starten voll|geaendert: im vollen Update PHP-FPM, nginx und Sammler
+# immer; beim Nachholen und mit --nur-abgleichen nur, was sich geändert hat.
+dienste_starten() {
+    local art="$1" einheit sammler_neu="nein"
+    if [[ "$OHNE_DIENSTE" == "ja" ]]; then
+        echo "    --ohne-dienste: es wird nichts gestartet."
+        return 0
+    fi
+    for einheit in ${GEAENDERT_EINHEITEN[@]+"${GEAENDERT_EINHEITEN[@]}"}; do
+        [[ "$einheit" == powermanagement-sammler.service ]] && sammler_neu="ja"
+    done
+    if [[ -n "$FPM_VERSION" ]] && [[ "$art" == "voll" || "$POOL_GEAENDERT" == "ja" ]]; then
+        # Erst die Konfiguration prüfen, dann neu laden: Master und Socket
+        # bleiben, die Oberfläche zeigt kaum 502, der OPcache wird geleert.
+        SCHRITT_GRUND="dienste"
+        fpm_testen
+        systemctl reload-or-restart "php$FPM_VERSION-fpm"
+        echo "    PHP-FPM neu geladen"
+    fi
+    if [[ "$art" == "voll" || "$SITE_GEAENDERT" == "ja" ]]; then
+        SCHRITT_GRUND="nginx"
+        nginx -t 2>&1 | sed 's/^/    /'
+        SCHRITT_GRUND="dienste"
+        systemctl reload nginx || systemctl restart nginx
+    fi
+    SCHRITT_GRUND="dienste"
+    if [[ "$MOSQUITTO_NEUSTART" == "ja" ]]; then
+        systemctl restart mosquitto
+        echo "    mosquitto neu gestartet"
+    elif [[ "$MOSQUITTO_NEULADEN" == "ja" ]]; then
+        # Neu laden (SIGHUP): bestehende Verbindungen der Shellys bleiben. Läuft
+        # der Broker gerade nicht, wird er gestartet.
+        systemctl reload-or-restart mosquitto
+        echo "    mosquitto neu geladen"
+    fi
+    if [[ "$MIT_MOSQUITTO" == "ja" && -f /etc/systemd/system/powermanagement-mqtt-zugaenge.service ]] \
+        && [[ "$art" == "voll" || "$MOSQUITTO_NEUSTART" == "ja" || "$MOSQUITTO_NEULADEN" == "ja" ]]; then
+        # Ergebnis für die Oberfläche auffrischen – der Lauf oben sah die neue
+        # Broker-Konfiguration noch nicht.
+        systemctl start --no-block powermanagement-mqtt-zugaenge.service || true
+    fi
+    if [[ "$MIT_NODERED" == "ja" && "$NODERED_NEUSTART" == "ja" ]]; then
+        systemctl restart powermanagement-nodered.service
+        echo "    Node-RED neu gestartet"
+    fi
+    if [[ "$art" == "voll" || "$sammler_neu" == "ja" ]]; then
+        systemctl restart powermanagement-sammler.service
+        echo "    Sammler läuft wieder"
+    fi
+    return 0
+}
+
+# Adresse für die Prüfung der Anmeldeseite: Listen und Servername aus der
+# Site; lauscht nginx nur auf einer Adresse, ist 127.0.0.1 dort nicht erreichbar.
+pruef_adresse() {
+    local l n
+    PRUEF_HOST="127.0.0.1"
+    PRUEF_PORT="80"
+    PRUEF_NAME="powermanagement.lan"
+    [[ -f "$SITE" ]] || return 0
+    l="$(grep -m1 -E '^\s*listen\s+[^[]' "$SITE" | sed -E 's/^\s*listen\s+([^ ;]+).*/\1/' || true)"
+    if [[ "$l" == *:* ]]; then
+        PRUEF_HOST="${l%:*}"
+        PRUEF_PORT="${l##*:}"
+    elif [[ -n "$l" ]]; then
+        PRUEF_PORT="$l"
+    fi
+    [[ "$PRUEF_HOST" == "0.0.0.0" || "$PRUEF_HOST" == "*" || ! "$PRUEF_HOST" =~ ^[0-9.]+$ ]] && PRUEF_HOST="127.0.0.1"
+    [[ "$PRUEF_PORT" =~ ^[0-9]{1,5}$ ]] || PRUEF_PORT="80"
+    n="$(grep -m1 -E '^\s*server_name\s' "$SITE" | sed -E 's/^\s*server_name\s+([^; ]+).*/\1/' || true)"
+    [[ "$n" =~ ^[A-Za-z0-9._-]+$ ]] && PRUEF_NAME="$n"
+    return 0
+}
+
+login_code() {
+    local code
+    # curl schreibt „000" auch selbst, wenn keine Verbindung zustande kommt.
+    code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 -H "Host: $PRUEF_NAME" \
+        "http://$PRUEF_HOST:$PRUEF_PORT/login" 2>/dev/null)" || true
+    printf '%s' "${code:-000}"
+}
+
+# Die Anmeldeseite antwortet mit 200 – zehn Versuche im Abstand von 2 s
+login_200() {
+    local i
+    for i in 1 2 3 4 5 6 7 8 9 10; do
+        LOGIN_CODE="$(login_code)"
+        [[ "$LOGIN_CODE" == 200 ]] && return 0
+        [[ "$i" -lt 10 ]] && sleep 2
+    done
+    return 1
+}
+
+# Pflichtprüfung: scheitert ein Punkt, wird zurückgerollt.
+pflichtpruefung() {
+    local ok="ja" einheit vorher nachher
+    pruef_adresse
+    if [[ "$LOGIN_VORHER" == 200 ]]; then
+        if login_200; then
+            echo "    Anmeldeseite: HTTP 200"
+        else
+            hinweis "Die Anmeldeseite antwortet mit HTTP $LOGIN_CODE statt 200."
+            ok="nein"
+        fi
+    else
+        echo "    Anmeldeseite: schon vor dem Update HTTP $LOGIN_VORHER – keine Pflicht"
+    fi
+    for einheit in ${FPM_VERSION:+"php$FPM_VERSION-fpm"} nginx ${AKTIV_VORHER[@]+"${AKTIV_VORHER[@]}"}; do
+        if ! systemctl is-active --quiet "$einheit"; then
+            hinweis "$einheit läuft nicht."
+            ok="nein"
+        fi
+    done
+    if [[ " ${AKTIV_VORHER[*]} " == *" powermanagement-sammler "* ]]; then
+        # Ein Sammler, der gleich wieder abstürzt, wäre eben noch „active“.
+        vorher="$(systemctl show -p NRestarts --value powermanagement-sammler.service 2>/dev/null || true)"
+        sleep 10
+        nachher="$(systemctl show -p NRestarts --value powermanagement-sammler.service 2>/dev/null || true)"
+        if ! systemctl is-active --quiet powermanagement-sammler.service || [[ "$vorher" != "$nachher" ]]; then
+            hinweis "Der Sammler läuft nicht stabil (Neustarts: ${vorher:-?} → ${nachher:-?})."
+            ok="nein"
+        else
+            echo "    Sammler läuft stabil"
+        fi
+    fi
+    # Die Anwendung startet, und das Schema antwortet (Zeile „Datenbank:“).
+    # InfluxDB und MQTT entscheiden hier nicht – das ist die Wunschprüfung.
+    PRUEF_RC=0
+    PRUEF_AUSGABE="$(as_app timeout 60 php "$ZIEL/bin/power" pruefen 2>&1)" || PRUEF_RC=$?
+    printf '%s\n' "$PRUEF_AUSGABE" | sed 's/^/    /'
+    if ! grep -q '^Datenbank:' <<< "$PRUEF_AUSGABE" || grep -q '^Schlüssel:' <<< "$PRUEF_AUSGABE"; then
+        hinweis "bin/power pruefen: die Anwendung startet nicht, das Schema antwortet nicht oder der Schlüssel fehlt."
+        ok="nein"
+    fi
+    [[ "$ok" == "ja" ]]
+}
+
+# Wunschprüfung: bin/power pruefen ohne Fehler (InfluxDB, MQTT, Node-RED).
+# Scheitert sie, bleibt das Update eingespielt – solche Störungen haben meist
+# äußere Gründe, und ein Zurückrollen wäre ein weiterer Neustart.
+wunschpruefung() {
+    local i
+    if [[ "$PRUEF_RC" -eq 0 ]]; then
+        PRUEFUNG="ok"
+        return 0
+    fi
+    if [[ "$PRUEFUNG_VORHER" != "ok" ]]; then
+        PRUEFUNG="warnung"
+        hinweis "bin/power pruefen meldet Fehler (siehe oben) – schon vor dem Update; das Update ist eingespielt."
+        return 0
+    fi
+    # Node-RED braucht nach einem Neustart eine Weile bis zum ersten Herzschlag.
+    for i in 1 2 3 4 5 6 7 8 9; do
+        sleep 10
+        PRUEF_RC=0
+        PRUEF_AUSGABE="$(as_app timeout 60 php "$ZIEL/bin/power" pruefen 2>&1)" || PRUEF_RC=$?
+        if [[ "$PRUEF_RC" -eq 0 ]]; then
+            echo "    bin/power pruefen ohne Fehler (nach $((i * 10)) s)"
+            PRUEFUNG="ok"
+            return 0
+        fi
+    done
+    printf '%s\n' "$PRUEF_AUSGABE" | sed 's/^/    /'
+    hinweis "bin/power pruefen meldet weiter Fehler (vor dem Update nicht) – das Update selbst ist eingespielt."
+    PRUEFUNG="warnung"
+    WARNUNGEN+=(pruefung)
+    return 0
+}
+
+# Ohne den Update-Dienst gestartet (Konsole): ihn einmal anstoßen, damit
+# Stand und Verlauf für die Oberfläche stimmen. --no-block: nie warten, und
+# aus dem Dienst selbst heraus wird das nie aufgerufen.
+dienst_anstossen() {
+    if [[ -z "${PM_UPDATE_AUSLOESER:-}" && -f /etc/systemd/system/powermanagement-update.service ]]; then
+        systemctl start --no-block powermanagement-update.service >/dev/null 2>&1 || true
+    fi
+    return 0
+}
+
+# ================================================================ Abbrechen und Zurückrollen
+
+zurueck_protokoll() {
+    install -d -m 750 /var/log/powermanagement 2>/dev/null
+    install -d -m 700 "$PROTOKOLLE" 2>/dev/null
+    printf '%s' "$PROTOKOLLE/$(date -u +%Y%m%d-%H%M%S)-zurueckrollen.log"
+}
+
+# Vor der Marke ist außerhalb von storage/backups nichts verändert: nur
+# aufräumen (Schnappschuss, Sammler, Schreibsperre). PHP-FPM wird nicht
+# neu gestartet (N11). Bei einem Fehler im Abgleich ohne neuen Code
+# (Nachholen) gilt dasselbe – ein zweiter Lauf holt ihn nach.
+# Nur über die Traps erreichbar:
+# shellcheck disable=SC2317
+abbrechen() {   # abbrechen <grund> [<zeile>]
+    [[ "$BASHPID" == "$$" ]] || exit 1
+    [[ -n "$ABBRUCH" ]] && return 0
+    ABBRUCH=1
+    set +e
+    trap - ERR
+    trap '' INT TERM HUP
+    local grund="$1"
+    [[ "$SIGNAL" == "HUP" ]] && exec >>"$(zurueck_protokoll)" 2>&1 </dev/null
+    if [[ -n "$SIGNAL" ]]; then
+        hinweis "Abgebrochen ($SIGNAL)."
+    else
+        hinweis "Fehler (Zeile ${2:-?}, Schritt „$SCHRITT_NAME“)."
+    fi
+    schnappschuss_loeschen
+    if [[ "$SAMMLER_ANGEHALTEN" == "ja" ]]; then
+        systemctl start powermanagement-sammler.service
+    fi
+    wartung_aus
+    if [[ "$ABGLEICH_BEGONNEN" == "ja" ]]; then
+        hinweis "Der Abgleich blieb unvollständig – derselbe Aufruf holt ihn nach. Der Code ist unverändert."
+    else
+        hinweis "Das Update wurde nicht begonnen – verändert wurde nichts."
+    fi
+    ergebnis nicht_begonnen "$grund"
+    exit 1
+}
+
+# Zurückrollen (B17–B20, B22, B23, N11): nach der Marke in Stufe 1, in Stufe 2
+# und bei --wiederaufnehmen. Nichts unterbricht es (set +e, Signale aus).
+# Bis zur Phase „checkout“ ist außerhalb von git nichts angefasst – dann nur
+# git zurück. Sonst vollständig: Code und Zweig, Rechte, Datenbank (nur wenn
+# migriert), neu angelegte Dateien weg, dann die ALTE Fassung mit
+# --nur-abgleichen: sie rollt ihre Einheiten, Pool, Logrotate, Site,
+# Mosquitto und Node-RED neu aus (Datei = Merker → „ersetzt“ → Datei und
+# Merker wieder alt, B18/B19).
+zurueckrollen() {   # zurueckrollen <grund> [<zeile>]
+    [[ "$BASHPID" == "$$" ]] || exit 1
+    [[ -n "$ZURUECK" ]] && return 0
+    ZURUECK=1
+    set +e
+    trap - ERR
+    trap '' INT TERM HUP
+    local grund="$1" luecke="nein" herunter="nein" phase="$PHASE" f opt=()
+    # Terminal weg: EIO träfe sonst jeden Schritt.
+    [[ "$SIGNAL" == "HUP" ]] && exec >>"$(zurueck_protokoll)" 2>&1 </dev/null
+    case "$grund" in
+        abgebrochen) hinweis "Abgebrochen (${SIGNAL:-Signal}) – der alte Stand wird wiederhergestellt." ;;
+        unterbrochen) hinweis "Ein früheres Update wurde unterbrochen – der alte Stand wird wiederhergestellt." ;;
+        *) hinweis "Das Update ist fehlgeschlagen ($grund${2:+, Zeile $2}) – der alte Stand wird wiederhergestellt." ;;
+    esac
+    SCHRITT_NAME="Zurückrollen"
+    fortschritt_schreiben
+    [[ "$(systemctl is-system-running 2>/dev/null)" == "stopping" ]] && herunter="ja"
+    marke_setzen phase zurueck
+    systemctl stop powermanagement-sammler.service
+
+    # Git: Commit UND Zweig (B22)
+    if [[ "$ALT_ZWEIG" == "-" ]]; then
+        g checkout -q -f --detach "$ALT" || luecke="ja"
+    else
+        g checkout -q -f -B "$ALT_ZWEIG" "$ALT" || luecke="ja"
+    fi
+    if [[ "$ZWEIG" != "$ALT_ZWEIG" ]]; then
+        if [[ "$ZWEIG_REF_VORHER" == "-" ]]; then
+            g branch -q -D -- "$ZWEIG" || luecke="ja"
+        else
+            g update-ref "refs/heads/$ZWEIG" "$ZWEIG_REF_VORHER" || luecke="ja"
+        fi
+    fi
+    [[ "$(g rev-parse HEAD 2>/dev/null)" == "$ALT" ]] || luecke="ja"
+
+    if [[ "$phase" == "stufe1" || "$phase" == "checkout" ]]; then
+        # Außerhalb von git noch nichts angefasst (etwa die neue Fassung
+        # besteht bash -n nicht): kein Neustart von PHP-FPM (N11).
+        [[ "$herunter" == "nein" ]] && systemctl start powermanagement-sammler.service
+        wartung_aus
+        case "$grund" in abgebrochen|unterbrochen) ;; *) gescheitert_merken "$NEU" "$grund" ;; esac
+        if [[ "$luecke" == "nein" ]]; then
+            schnappschuss_loeschen
+            marke_loeschen
+            rm -f -- "$ZUSTAND/alt/update-debian.sh"
+            hinweis "Zurückgerollt auf $(g log -1 --format='%h %s')."
+            ergebnis zurueckgerollt "$grund"
+            exit 2
+        fi
+        hinweis "Git ließ sich nicht zurücksetzen – Handarbeit nötig (docs/installation-debian-lxc.md, Zurückrollen von Hand)."
+        ergebnis unvollstaendig "$grund" "Handarbeit nötig"
+        exit 3
+    fi
+
+    rechte_setzen
+    FPM_VERSION="$(fpm_version)"
+    local fpm_angehalten="nein"
+    if [[ "$MIGRIERT" == "ja" ]]; then
+        if [[ "$SCHNAPPSCHUSS" != "-" && -f "$SCHNAPPSCHUSS" ]]; then
+            # PHP-FPM dafür anhalten: offene SQLite-Verbindungen (WAL)
+            # schrieben sonst in die ersetzte Datei.
+            if [[ -n "$FPM_VERSION" ]]; then
+                systemctl stop "php$FPM_VERSION-fpm"
+                fpm_angehalten="ja"
+            fi
+            if as_app cp -- "$SCHNAPPSCHUSS" "$DB.zurueck" && as_app mv -f -- "$DB.zurueck" "$DB" \
+                && as_app rm -f -- "$DB-wal" "$DB-shm"; then
+                echo "    Datenbank auf den Stand vor dem Update zurückgesetzt"
+            else
+                luecke="ja"
+                hinweis "Datenbank ließ sich nicht zurücklegen – Kopie von vorher: $SCHNAPPSCHUSS"
+            fi
+        elif ! g diff --quiet "$ALT" "$NEU" -- database/migrations 2>/dev/null; then
+            luecke="ja"
+            hinweis "Die Datenbank ist migriert, aber es gibt keine Kopie zum Zurücklegen (kein SQLite?) – von Hand aus der Sicherung."
+        fi
+    fi
+
+    # Von der neuen Fassung neu angelegte Dateien (die alte kennt sie nicht)
+    local neu_angelegt=()
+    mapfile -t neu_angelegt < <(marke_neu_angelegt)
+    for f in ${neu_angelegt[@]+"${neu_angelegt[@]}"}; do
+        neu_angelegt_erlaubt "$f" || continue
+        if [[ "$f" == /etc/systemd/system/* ]]; then
+            systemctl disable --now --quiet -- "${f##*/}" 2>/dev/null
+        fi
+        rm -f -- "$f" && echo "    entfernt: $f"
+    done
+    systemctl daemon-reload
+
+    if hat_schnittstelle "$ZIEL/deploy/update-debian.sh"; then
+        # Die ALTE Fassung gleicht ab; sie erbt die Sperre (fd 9) und die
+        # ignorierten Signale. Beim Herunterfahren nichts starten.
+        [[ "$herunter" == "ja" ]] && opt=(--ohne-dienste)
+        echo
+        echo "    Abgleich mit der alten Fassung:"
+        env -u PM_UPDATE_STUFE PM_UPDATE_SPERRE=geerbt /bin/bash "$ZIEL/deploy/update-debian.sh" \
+            --ziel="$ZIEL" --nur-abgleichen ${opt[@]+"${opt[@]}"} || luecke="ja"
+    else
+        luecke="ja"
+        hinweis "Die alte Fassung kennt --nur-abgleichen nicht – Einheiten und Vorlagen von Hand prüfen."
+    fi
+
+    if [[ "$herunter" == "nein" ]]; then
+        if [[ -n "$FPM_VERSION" ]]; then
+            # Den alten Code laden (OPcache) bzw. nach dem Zurücklegen starten
+            if [[ "$fpm_angehalten" == "ja" ]]; then
+                systemctl start "php$FPM_VERSION-fpm" || luecke="ja"
+            else
+                systemctl reload-or-restart "php$FPM_VERSION-fpm" || luecke="ja"
+            fi
+        fi
+        systemctl start powermanagement-sammler.service
+        if [[ "$LOGIN_VORHER" == 200 ]]; then
+            pruef_adresse
+            if ! login_200; then
+                luecke="ja"
+                hinweis "Die Anmeldeseite antwortet auch nach dem Zurückrollen mit HTTP $LOGIN_CODE."
+            fi
+        fi
+    fi
+    wartung_aus
+    case "$grund" in abgebrochen|unterbrochen) ;; *) gescheitert_merken "$NEU" "$grund" ;; esac
+    if [[ "$luecke" == "nein" ]]; then
+        schnappschuss_loeschen   # B23
+        marke_loeschen
+        rm -f -- "$ZUSTAND/alt/update-debian.sh"
+        hinweis "Zurückgerollt auf $(g log -1 --format='%h %s')."
+        [[ "$SICHERUNG" != "-" ]] && hinweis "Sicherung: $SICHERUNG"
+        ergebnis zurueckgerollt "$grund"
+        exit 2
+    fi
+    hinweis "Handarbeit nötig – docs/installation-debian-lxc.md (Zurückrollen von Hand). Die Marke bleibt: $MARKE"
+    [[ "$SICHERUNG" != "-" ]] && hinweis "Sicherung: $SICHERUNG"
+    ergebnis unvollstaendig "$grund" "Handarbeit nötig"
+    exit 3
+}
+
+# Die Einträge neu_angelegt der Marke, so wie sie jetzt ist
+marke_neu_angelegt() {
+    local zeile
+    [[ -f "$MARKE" ]] || return 0
+    while IFS= read -r zeile; do
+        if [[ "$zeile" == "neu_angelegt "* ]]; then
+            printf '%s\n' "${zeile#neu_angelegt }"
+        fi
+    done < "$MARKE"
+    return 0
+}
+
+traps_vor_marke() {
+    trap 'abbrechen "$SCHRITT_GRUND" "$LINENO"' ERR
+    trap 'SIGNAL=INT; abbrechen abgebrochen' INT
+    trap 'SIGNAL=TERM; abbrechen abgebrochen' TERM
+    trap 'SIGNAL=HUP; abbrechen abgebrochen' HUP
+}
+# bash führt den Trap erst nach dem laufenden Vordergrundbefehl aus (apt,
+# Migration) – gewollt: der Schritt endet, dann wird zurückgerollt.
+traps_nach_marke() {
+    trap 'zurueckrollen "$SCHRITT_GRUND" "$LINENO"' ERR
+    trap 'SIGNAL=INT; zurueckrollen abgebrochen' INT
+    trap 'SIGNAL=TERM; zurueckrollen abgebrochen' TERM
+    trap 'SIGNAL=HUP; zurueckrollen abgebrochen' HUP
+}
+
+# ================================================================ Stufe 1 (die laufende Fassung)
+
+stufe1() {
+    local lokal abruf_rc abruf_meldung remote_url migrationen anzahl linear="ja" backup_dir stempel treiber kandidaten
+    local zum_sichern alte datei frei db_groesse noetig einheit
+    herkunft_lesen
+    sperre_nehmen || besetzt
+    traps_vor_marke
+
+    if [[ -f "$MARKE" && "$NUR_ZEIGEN" == "nein" ]]; then
+        hinweis "Ein früheres Update wurde unterbrochen: erst zurückrollen mit"
+        hinweis "  $ZIEL/deploy/update-debian.sh --wiederaufnehmen"
+        hinweis "(der Update-Dienst macht das nach dem Start selbst)."
+        ergebnis nicht_begonnen offen
+        exit 1
+    fi
+    [[ -f "$MARKE" ]] && hinweis "Ein früheres Update wurde unterbrochen ($MARKE) – nur nachsehen geht trotzdem."
+
+    if [[ ! -d "$ZIEL/.git" ]]; then
+        echo "In $ZIEL liegt kein Git-Arbeitsverzeichnis." >&2
+        echo "Dieses Skript aktualisiert nur Installationen, die per git geholt wurden." >&2
+        ergebnis nicht_begonnen intern
+        exit 1
+    fi
+    if [[ ! -f "$ZIEL/bin/power" ]]; then
+        echo "In $ZIEL steckt keine PowerManagement-Installation." >&2
+        ergebnis nicht_begonnen intern
+        exit 1
+    fi
+
+    ALT="$(g rev-parse HEAD)"
+    ALT_ZWEIG="$(g symbolic-ref -q --short HEAD || echo -)"
+    if [[ -z "$ZWEIG" ]]; then
+        if [[ "$ALT_ZWEIG" == "-" ]]; then
+            hinweis "In $ZIEL ist kein Zweig ausgecheckt (abgetrennter Stand) – nichts verändert."
+            hinweis "Mit --zweig=<name> einen Zweig wählen."
+            ergebnis nicht_begonnen kein_zweig
+            exit 1
+        fi
+        if ! zweig_ok "$ALT_ZWEIG"; then
+            hinweis "Der ausgecheckte Zweig hat einen Namen, den das Update nicht verarbeitet – mit --zweig=<name> wählen."
+            ergebnis nicht_begonnen kein_zweig
+            exit 1
+        fi
+        ZWEIG="$ALT_ZWEIG"
+    fi
+    ZWEIG_REF_VORHER="$(g rev-parse -q --verify "refs/heads/$ZWEIG" || echo -)"
+
+    schritt 1 "Stand prüfen" intern
+    echo "    Verzeichnis: $ZIEL"
+    echo "    Zweig:       $ZWEIG"
+    echo "    Aktuell:     $(g log -1 --format='%h %s')"
+
+    # --no-optional-locks: status schriebe sonst den Index neu (--pruefen ändert nichts)
+    lokal="$(g --no-optional-locks status --porcelain --untracked-files=no)"
+    if [[ -n "$lokal" ]]; then
+        hinweis "In $ZIEL gibt es lokale Änderungen:"
+        printf '%s\n' "$lokal" | sed 's/^/      /' >&2
+        if [[ "$NUR_ZEIGEN" == "ja" ]]; then
+            hinweis "(--pruefen: nur angezeigt – ein Update bräche ohne --erzwingen hier ab.)"
+        elif [[ "$ERZWINGEN" != "ja" ]]; then
+            hinweis "Abbruch. Mit --erzwingen werden sie verworfen – sonst vorher sichern."
+            ergebnis nicht_begonnen lokal_geaendert
+            exit 1
+        else
+            hinweis "--erzwingen: die Änderungen werden verworfen."
+        fi
+    fi
+
+    schritt 2 "Änderungen holen" abruf
+    if [[ -z "$GIT_CRED_FILE" ]]; then
+        GIT_CRED_FILE="$(zugangsdatei_finden || true)"
+    fi
+    if [[ -n "$GIT_CRED_FILE" ]]; then
+        zugangsdaten_lesen "$GIT_CRED_FILE"
+        git_zugang_ablegen "$(g remote get-url origin 2>/dev/null || true)"
+    fi
+    git_helper_setzen
+
+    # GIT_TERMINAL_PROMPT=0 (oben): ohne gültiges Token mit einer Meldung
+    # abbrechen, statt auf eine Eingabe zu warten, die niemand tippt. timeout:
+    # ein hängender Abruf hielte sonst die Sperre (und den Update-Dienst) fest.
+    # Ausgegeben wird ohne Benutzerteil in Adressen (ohne_zugangsdaten).
+    abruf_rc=0
+    abruf_meldung="$(LC_ALL=C timeout 600 git -c safe.directory="$ZIEL" -c core.hooksPath=/dev/null -C "$ZIEL" \
+        fetch --quiet origin "$ZWEIG" 2>&1 >/dev/null)" || abruf_rc=$?
+    if [[ "$abruf_rc" -ne 0 ]]; then
+        if [[ -n "$abruf_meldung" ]]; then
+            printf '%s\n' "$abruf_meldung" | ohne_zugangsdaten | sed 's/^/      /' >&2
+        fi
+        [[ "$abruf_rc" -eq 124 ]] && hinweis "Der Abruf brach nach 600 s ab."
+        remote_url="$(g remote get-url origin 2>/dev/null | ohne_zugangsdaten || echo '?')"
+        hinweis "Die Änderungen ließen sich nicht holen (Remote: ${remote_url:-?})."
+        if [[ "$remote_url" == http* ]]; then
+            if [[ -f "$GIT_STORE" ]]; then
+                hinweis "Ein Token liegt vor – es passt offenbar nicht mehr (abgelaufen, ohne Leserecht?)."
+                hinweis "Neues Token in ${GIT_CRED_FILE:-$ETC/git.conf} eintragen (GITHUB_TOKEN=…)."
+            else
+                hinweis "Ist das Repository privat? Dann ein Token hinterlegen:"
+                hinweis "  install -d -m 750 $ETC"
+                hinweis "  printf 'GITHUB_TOKEN=%s\\n' '<token>' > $ETC/git.conf; chmod 600 $ETC/git.conf"
+            fi
+        fi
+        hinweis "Verändert wurde nichts."
+        if grep -qiE 'authentication failed|could not read (username|password)|returned error: 40[13]|repository not found' \
+            <<< "$abruf_meldung"; then
+            ergebnis nicht_begonnen kein_zugang
+        else
+            ergebnis nicht_begonnen abruf
+        fi
+        exit 1
+    fi
+
+    # Ziel: die Spitze des Zweigs oder genau --bis. Nur vorwärts (N2): der
+    # installierte Stand muss Vorfahre des Ziels sein – sonst wäre es ein
+    # Rückschritt, ein umgeschriebener Verlauf oder ein eigener Commit.
+    if [[ -n "$BIS" ]]; then
+        if ! g rev-parse -q --verify --end-of-options "$BIS^{commit}" >/dev/null \
+            || ! g merge-base --is-ancestor "$BIS" "origin/$ZWEIG"; then
+            hinweis "--bis=$BIS liegt nicht auf origin/$ZWEIG – nichts verändert."
+            ergebnis nicht_begonnen ziel_ungueltig
+            exit 1
+        fi
+        # Nur Nachfahren auf der Erst-Eltern-Linie: ein Commit mitten aus
+        # einem zusammengeführten Zweig ist so nicht wählbar.
+        kandidaten="$(g rev-list --first-parent --ancestry-path "$ALT..origin/$ZWEIG")"
+        if [[ "$ERZWINGEN" != "ja" && "$BIS" != "$ALT" ]] && ! grep -qx "$BIS" <<< "$kandidaten"; then
+            hinweis "--bis=$BIS liegt nicht auf der Erst-Eltern-Linie zwischen dem installierten Stand und origin/$ZWEIG – nichts verändert."
+            ergebnis nicht_begonnen ziel_ungueltig
+            exit 1
+        fi
+        NEU="$BIS"
+    else
+        NEU="$(g rev-parse "origin/$ZWEIG^{commit}")"
+    fi
+    g merge-base --is-ancestor "$ALT" "$NEU" || linear="nein"
+
+    mqtt_nachholen_pruefen
+    einrichtung_nachholen_pruefen
+
+    if [[ "$ALT" == "$NEU" ]]; then
+        echo "    Bereits auf dem neuesten Stand ($(g log -1 --format='%h %s'))."
+        nachholen_ohne_neuen_code
+    fi
+
     echo "    Neu:         $(g log -1 --format='%h %s' "$NEU")"
-    echo
-    g log --oneline --no-decorate "$ALT..$NEU" | sed 's/^/      /'
-    MIGRATIONEN="$(g diff --name-only "$ALT" "$NEU" -- database/migrations || true)"
-    if [[ -n "$MIGRATIONEN" ]]; then
+    echo "    Linear:      $linear"
+    if [[ "$linear" == "ja" ]]; then
+        echo
+        g log --oneline --no-decorate "$ALT..$NEU" | sed 's/^/      /'
+    fi
+    migrationen="$(g diff --name-only "$ALT" "$NEU" -- database/migrations || true)"
+    if [[ -n "$migrationen" ]]; then
         echo
         echo "    Neue Migrationen:"
-        printf '%s\n' "$MIGRATIONEN" | sed 's/^/      /'
+        printf '%s\n' "$migrationen" | sed 's/^/      /'
     fi
     if ! g diff --quiet "$ALT" "$NEU" -- deploy/node-red/flows.json; then
         echo
         echo "    Die Node-RED-Flows haben sich geändert."
     fi
-fi
 
-if [[ "$NUR_ZEIGEN" == "ja" ]]; then
-    echo
-    echo "    --pruefen: es wurde nichts verändert."
-    exit 0
-fi
+    if [[ "$linear" == "nein" ]]; then
+        hinweis "Der Stand im Repository liegt nicht vorwärts vom installierten (umgeschriebener Verlauf,"
+        hinweis "eigener Commit oder anderer Zweig)."
+        if [[ "$NUR_ZEIGEN" == "nein" && "$ERZWINGEN" != "ja" ]]; then
+            hinweis "Nichts verändert. Mit --erzwingen ginge es trotzdem."
+            ergebnis nicht_begonnen nicht_linear
+            exit 1
+        fi
+    fi
 
-# ================================================================ Sicherung
-SICHERUNG=""
-DB="$ZIEL/storage/database.sqlite"
-if [[ "$CODE_NEU" == "ja" ]]; then
-    schritt "Sicherung anlegen"
-    BACKUP_DIR="$ZIEL/storage/backups"
-    STEMPEL="$(date +%Y%m%d-%H%M%S)"
-    app_verzeichnis "$BACKUP_DIR"
-    TREIBER="$(as_app php -r '$c = require $argv[1]; echo $c["database"]["driver"] ?? "sqlite";' "$ZIEL/config/config.php" 2>/dev/null || echo sqlite)"
+    if [[ "$NUR_ZEIGEN" == "ja" ]]; then
+        echo
+        echo "    --pruefen: holt per git, ändert sonst nichts."
+        anzahl="$(g rev-list --count --no-merges "$ALT..$NEU" 2>/dev/null || echo 0)"
+        ergebnis geprueft - "$anzahl neue Commits"
+        exit 0
+    fi
 
-    ZUM_SICHERN=()
-    if [[ "$TREIBER" == "sqlite" && -f "$DB" ]]; then
-        # VACUUM INTO liefert eine in sich stimmige Kopie, auch während
-        # Oberfläche und Sammler auf die Datenbank zugreifen (WAL-Modus) –
-        # ein einfaches cp könnte eine halb geschriebene Seite erwischen.
-        SCHNAPPSCHUSS_DIR="$BACKUP_DIR/.schnappschuss-$STEMPEL"
-        SCHNAPPSCHUSS="$SCHNAPPSCHUSS_DIR/database.sqlite"
-        app_verzeichnis "$SCHNAPPSCHUSS_DIR" 700
+    # ------------------------------------------------ Vorbereitung
+    schritt 3 "Sicherung anlegen" sicherung
+    backup_dir="$ZIEL/storage/backups"
+    app_verzeichnis "$backup_dir"
+    # Schnappschüsse früherer Läufe (abgebrochen, zurückgerollt) – keine
+    # Marke steht, also gehört keiner mehr zu einem Update (Befund 23).
+    as_app find "$backup_dir" -mindepth 1 -maxdepth 1 -type d -name '.schnappschuss-*' -exec rm -rf -- {} +
+    db_groesse=0
+    [[ -f "$DB" ]] && db_groesse="$(stat -c %s -- "$DB")"
+    frei="$(df -B1 --output=avail -- "$ZIEL/storage" | tail -n 1 | tr -dc '0-9')"
+    noetig=$(( 2 * db_groesse + 200 * 1024 * 1024 ))
+    if (( ${frei:-0} < noetig )); then
+        hinweis "In $ZIEL/storage sind $(( ${frei:-0} / 1024 / 1024 )) MiB frei, gebraucht werden $(( noetig / 1024 / 1024 )) MiB – nichts verändert."
+        ergebnis nicht_begonnen platz
+        exit 1
+    fi
+    treiber="$(as_app php -r '$c = require $argv[1]; echo $c["database"]["driver"] ?? "sqlite";' "$ZIEL/config/config.php" 2>/dev/null || echo sqlite)"
+    if [[ "$treiber" != "sqlite" && -n "$migrationen" ]]; then
+        hinweis "Datenbank ist $treiber – ein Zurückrollen kann sie nicht zurücklegen (vorher selbst sichern)."
+    fi
+
+    # Vorher: was lief, und wie antwortete die Oberfläche? Danach muss
+    # mindestens dasselbe gelten.
+    pruef_adresse
+    LOGIN_VORHER="$(login_code)"
+    PRUEFUNG_VORHER="fehler"
+    if as_app timeout 60 php "$ZIEL/bin/power" pruefen >/dev/null 2>&1; then
+        PRUEFUNG_VORHER="ok"
+    fi
+    AKTIV_VORHER=()
+    for einheit in powermanagement-sammler powermanagement-nodered mosquitto; do
+        if systemctl is-active --quiet "$einheit.service"; then
+            AKTIV_VORHER+=("$einheit")
+        fi
+    done
+    echo "    Vorher: Anmeldeseite HTTP $LOGIN_VORHER, bin/power pruefen $PRUEFUNG_VORHER, aktiv: ${AKTIV_VORHER[*]:-–}"
+
+    wartung_an
+    # Der Sammler schreibt Zustände der Datenquellen in die Datenbank – vor
+    # der Sicherung anhalten, sonst fehlte beim Zurücklegen, was er danach schrieb.
+    if systemctl is-active --quiet powermanagement-sammler.service; then
+        SAMMLER_ANGEHALTEN="ja"
+    fi
+    systemctl stop powermanagement-sammler.service >/dev/null 2>&1 || true
+
+    stempel="$(date +%Y%m%d-%H%M%S)"
+    zum_sichern=()
+    if [[ "$treiber" == "sqlite" && -f "$DB" ]]; then
+        # VACUUM INTO liefert eine in sich stimmige Kopie, auch während die
+        # Oberfläche auf die Datenbank zugreift (WAL-Modus) – ein einfaches
+        # cp könnte eine halb geschriebene Seite erwischen.
+        app_verzeichnis "$backup_dir/.schnappschuss-$stempel" 700
+        SCHNAPPSCHUSS="$backup_dir/.schnappschuss-$stempel/database.sqlite"
         as_app php -r '
             $pdo = new PDO("sqlite:" . $argv[1]);
             $pdo->exec("VACUUM INTO " . $pdo->quote($argv[2]));
         ' "$DB" "$SCHNAPPSCHUSS"
-        ZUM_SICHERN+=(-C "$SCHNAPPSCHUSS_DIR" database.sqlite)
-    elif [[ "$TREIBER" != "sqlite" ]]; then
-        hinweis "Datenbank ist $TREIBER – die sichert dieses Skript nicht mit (mysqldump o. Ä. vorher selbst)."
+        zum_sichern+=(-C "$backup_dir/.schnappschuss-$stempel" database.sqlite)
+    elif [[ "$treiber" != "sqlite" ]]; then
+        hinweis "Datenbank ist $treiber – die sichert dieses Skript nicht mit (mysqldump o. Ä. vorher selbst)."
     fi
-    SICHERUNG="$BACKUP_DIR/vor-update-$STEMPEL.tar.gz"
-    as_app tar czf "$SICHERUNG" -C "$ZIEL" config/config.php ${ZUM_SICHERN[@]+"${ZUM_SICHERN[@]}"}
+    SICHERUNG="$backup_dir/vor-update-$stempel.tar.gz"
+    as_app tar czf "$SICHERUNG" -C "$ZIEL" config/config.php ${zum_sichern[@]+"${zum_sichern[@]}"}
     as_app chmod 600 -- "$SICHERUNG"
     echo "    $SICHERUNG ($(du -h "$SICHERUNG" | cut -f1))"
 
     # Ältere Sicherungen aufräumen
     # Die Namen erzeugt dieses Skript selbst (nur Ziffern und -), ls ist hier sicher.
     # shellcheck disable=SC2012
-    mapfile -t ALTE < <(ls -1t "$BACKUP_DIR"/vor-update-*.tar.gz 2>/dev/null | tail -n "+$((BEHALTEN + 1))" || true)
-    for datei in ${ALTE[@]+"${ALTE[@]}"}; do
-        [[ -n "$datei" ]] && rm -f "$datei"
+    mapfile -t alte < <(ls -1t "$backup_dir"/vor-update-*.tar.gz 2>/dev/null | tail -n "+$((BEHALTEN + 1))" || true)
+    for datei in ${alte[@]+"${alte[@]}"}; do
+        [[ -n "$datei" ]] && as_app rm -f -- "$datei"
     done
-fi
 
-# ================================================================ Zurückrollen
-MIGRIERT="nein"
-SITE="/etc/nginx/sites-available/powermanagement"
-SITE_SICHERUNG="$(mktemp)"
-[[ -f "$SITE" ]] && cp -p "$SITE" "$SITE_SICHERUNG"
-# Die Mosquitto-Konfiguration ebenso: Mit der neuen Fassung liest der Broker
-# die wirksame ACL – der alte Code samt alter Konfiguration muss nach einem
-# Fehlschlag wieder zusammenpassen.
-MOSQUITTO_CONF="/etc/mosquitto/conf.d/powermanagement.conf"
-MOSQUITTO_CONF_SICHERUNG="$(mktemp)"
-MOSQUITTO_CONF_GEAENDERT="nein"
-HELFER_GEAENDERT="nein"
-[[ -f "$MOSQUITTO_CONF" ]] && cp -p "$MOSQUITTO_CONF" "$MOSQUITTO_CONF_SICHERUNG"
-# Mit ihr die gemerkte Vorlage (siehe vorlage_uebernehmen) – sonst hielte das
-# nächste Update die zurückgelegte Konfiguration für „von Hand verändert“
-# und ließe sie stehen.
-MOSQUITTO_CONF_MERK="$VORLAGEN/$(printf '%s' "$MOSQUITTO_CONF" | tr '/' '_')"
-MOSQUITTO_MERK_SICHERUNG="$(mktemp)"
-MOSQUITTO_MERK_DA="nein"
-if [[ -f "$MOSQUITTO_CONF_MERK" ]]; then
-    cp -p "$MOSQUITTO_CONF_MERK" "$MOSQUITTO_MERK_SICHERUNG"
-    MOSQUITTO_MERK_DA="ja"
-fi
+    # Die eigene Fassung (Stand ALT, nicht BASH_SOURCE – die Datei ersetzt
+    # gleich der Checkout): mit ihr rollt der Update-Dienst ein unterbrochenes
+    # Update zurück.
+    install -d -m 700 "$ZUSTAND" "$ZUSTAND/alt"
+    datei="$(mktemp "$ZUSTAND/alt/.update-debian.XXXXXX")"
+    g show "$ALT:deploy/update-debian.sh" > "$datei"
+    chmod 700 "$datei"
+    mv -f -- "$datei" "$ZUSTAND/alt/update-debian.sh"
 
-zurueckrollen() {
-    # set -E vererbt den Trap auch in Subshells (as_app). Zurückrollen soll
-    # nur der Hauptprozess, und zwar einmal – die Subshell meldet nur den
-    # Fehler nach oben.
-    if [[ "$BASHPID" != "$$" ]]; then
-        exit 1
-    fi
-    trap - ERR
-    hinweis "Das Update ist fehlgeschlagen – der alte Stand wird wiederhergestellt."
-    systemctl stop powermanagement-sammler.service >/dev/null 2>&1 || true
-    g reset --hard --quiet "$ALT" || true
-    if [[ "$MIGRIERT" == "ja" && -n "${SCHNAPPSCHUSS:-}" && -f "$SCHNAPPSCHUSS" ]]; then
-        # Migrationen haben die Datenbank womöglich halb umgebaut – die
-        # Kopie von vorher zurücklegen.
-        if as_app cp "$SCHNAPPSCHUSS" "$DB.zurueck" && mv "$DB.zurueck" "$DB"; then
-            rm -f "$DB-wal" "$DB-shm"
-            hinweis "Datenbank auf den Stand vor dem Update zurückgesetzt."
-        else
-            hinweis "Datenbank ließ sich nicht zurücklegen – Kopie von vorher: $SCHNAPPSCHUSS"
-        fi
-    fi
-    if [[ -s "$SITE_SICHERUNG" ]]; then
-        cp -p "$SITE_SICHERUNG" "$SITE"
-        systemctl reload nginx >/dev/null 2>&1 || true
-    fi
-    if [[ "$MOSQUITTO_CONF_GEAENDERT" == "ja" && -s "$MOSQUITTO_CONF_SICHERUNG" ]]; then
-        cp -p "$MOSQUITTO_CONF_SICHERUNG" "$MOSQUITTO_CONF"
-        if [[ "$MOSQUITTO_MERK_DA" == "ja" ]]; then
-            cp -p "$MOSQUITTO_MERK_SICHERUNG" "$MOSQUITTO_CONF_MERK" || true
-        else
-            rm -f "$MOSQUITTO_CONF_MERK"
-        fi
-        systemctl restart mosquitto >/dev/null 2>&1 || true
-        hinweis "Mosquitto-Konfiguration auf den Stand vor dem Update zurückgesetzt."
-    elif [[ "${HELFER_GEAENDERT:-nein}" == "ja" ]]; then
-        # Der Helfer hat Kennwortdatei oder wirksame ACL geändert, der Broker
-        # hat sie aber noch nicht geladen – jetzt, damit Dateien, Ergebnis
-        # und Broker wieder zusammenpassen.
-        systemctl try-reload-or-restart mosquitto >/dev/null 2>&1 || true
-    fi
-    FPM="$(find /etc/php -mindepth 2 -maxdepth 2 -type d -name fpm 2>/dev/null | awk -F/ '{print $4}' | sort -V | tail -1)"
-    if [[ -n "$FPM" ]]; then
-        systemctl restart "php$FPM-fpm" >/dev/null 2>&1 || true
-    fi
-    systemctl start powermanagement-sammler.service >/dev/null 2>&1 || true
-    hinweis "Wiederhergestellt auf $(g log -1 --format='%h %s')."
-    [[ -n "$SICHERUNG" ]] && hinweis "Sicherung: $SICHERUNG"
-    exit 1
-}
-trap zurueckrollen ERR
+    # Erst die Traps, dann die Marke: ab hier rollt jeder Abbruch zurück
+    # (bis zum Checkout nur git, also nichts).
+    PHASE="stufe1"
+    traps_nach_marke
+    marke_schreiben
 
-if [[ "$CODE_NEU" == "ja" ]]; then
-    # ============================================================ Quellcode
-    schritt "Sammler anhalten und Quellcode aktualisieren"
-    systemctl stop powermanagement-sammler.service >/dev/null 2>&1 || true
+    # ------------------------------------------------ Quellcode
+    schritt 4 "Quellcode aktualisieren" checkout
     if [[ "$ERZWINGEN" == "ja" ]]; then
         g reset --hard --quiet
-        g checkout --quiet -B "$ZWEIG" "origin/$ZWEIG"
+        if [[ "$NEU" == "$(g rev-parse "origin/$ZWEIG^{commit}")" ]]; then
+            g checkout --quiet -B "$ZWEIG" "origin/$ZWEIG"
+        else
+            g checkout --quiet -B "$ZWEIG" "$NEU"
+        fi
+    elif [[ "$ZWEIG_REF_VORHER" == "-" ]]; then
+        # Neuer lokaler Zweig: genau auf das Ziel, mit origin als Gegenstück
+        g checkout --quiet -b "$ZWEIG" "$NEU"
+        g branch --quiet --set-upstream-to="origin/$ZWEIG" "$ZWEIG"
     else
         g checkout --quiet "$ZWEIG"
-        g merge --ff-only --quiet "origin/$ZWEIG"
+        g merge --ff-only --quiet "$NEU"
+    fi
+    if [[ "$(g rev-parse HEAD)" != "$NEU" ]]; then
+        hinweis "Nach dem Auschecken steht $ZWEIG auf $(g rev-parse --short HEAD), nicht auf $(kurz "$NEU")."
+        false
     fi
     echo "    Jetzt auf $(g log -1 --format='%h %s')"
+    marke_setzen phase checkout
 
-    # Rechte wie bei der Installation: Code gehört root, storage/ der
-    # Anwendung. storage/ und config.php bleiben dabei außen vor – die
-    # Oberfläche läuft weiter und soll nicht kurz ihre Dateien verlieren.
-    find "$ZIEL" -path "$ZIEL/storage" -prune -o ! -path "$ZIEL/config/config.php" \
-        -exec chown root:root {} + -exec chmod go+rX,go-w {} +
-    # Was git eben als root in storage/ angelegt hat (neue .gitkeep-Ordner),
-    # erst der Anwendung übereignen – sonst darf sie dort keine Rechte setzen.
-    chown -R -P "$APP_USER:$APP_USER" "$ZIEL/storage"
-    # mqtt/: Soll und Ergebnis der eigenen MQTT-Zugänge (deploy/mqtt-zugaenge.sh)
-    for d in logs plans demo cache inventar sessions backups mqtt mqtt/soll mqtt/ist; do
-        app_verzeichnis "$ZIEL/storage/$d"
-    done
-    chown "root:$APP_USER" "$ZIEL/config/config.php"
-    chmod 640 "$ZIEL/config/config.php"
+    # ------------------------------------------------ neue Fassung übernimmt
+    # bash liest ein laufendes Skript Stück für Stück – der Checkout hat
+    # diese Datei eben ersetzt. Die Schritte ab hier gehören zum neuen Code:
+    # dessen Fassung übernimmt per exec (Befund 21). Sperre (fd 9), stdout
+    # und stderr gehen mit; die Marke trägt alles Weitere.
+    if hat_schnittstelle "$ZIEL/deploy/update-debian.sh"; then
+        if ! bash -n "$ZIEL/deploy/update-debian.sh"; then
+            hinweis "Die neue Fassung von deploy/update-debian.sh ist fehlerhaft (bash -n)."
+            zurueckrollen neue_fassung
+        fi
+        echo "    Die neue Fassung des Update-Skripts übernimmt."
+        arbeit_aufraeumen
+        trap - EXIT
+        shopt -s execfail
+        # shellcheck disable=SC2093  # execfail: scheitert exec, geht es unten weiter
+        exec env PM_UPDATE_STUFE=2 PM_UPDATE_SPERRE=geerbt /bin/bash "$ZIEL/deploy/update-debian.sh" \
+            --ziel="$ZIEL" --stufe=2
+        hinweis "Die neue Fassung ließ sich nicht starten."
+        zurueckrollen neue_fassung
+    fi
+    # Ohne Schnittstelle (nur nach --erzwingen auf einen alten Stand möglich):
+    # Stufe 2 in diesem Prozess.
+    stufe2
+}
 
-    # ============================================================ Datenbank
-    schritt "Migrationen ausführen"
+# ALT == NEU: nichts Neues. Fehlt aber Einrichtung (Update-Funktion,
+# Einheiten, Ordner – ein älteres Skript hat den Code geholt) oder sollen die
+# Flows ersetzt werden, wird im selben Prozess abgeglichen, ohne Sicherung
+# und Migration; neu gestartet wird nur Geändertes.
+nachholen_ohne_neuen_code() {
+    local satz=""
+    if [[ "$NUR_ZEIGEN" == "ja" ]]; then
+        if [[ "$EINRICHTUNG_NACHHOLEN" == "ja" || "$MQTT_NACHHOLEN" == "ja" ]]; then
+            echo "    Einrichtung unvollständig – ein Lauf ohne --pruefen holt sie nach."
+        fi
+        echo
+        echo "    --pruefen: holt per git, ändert sonst nichts."
+        ergebnis geprueft - "keine neuen Commits"
+        exit 0
+    fi
+    if [[ "$FLOWS_ERSETZEN" != "ja" && "$MQTT_NACHHOLEN" != "ja" && "$EINRICHTUNG_NACHHOLEN" != "ja" ]]; then
+        ergebnis aktuell -
+        exit 0
+    fi
+    if [[ "$FLOWS_ERSETZEN" == "ja" ]]; then
+        echo "    --flows-ersetzen: nur die Node-RED-Flows werden neu eingespielt."
+        satz="Node-RED-Flows neu eingespielt"
+    fi
+    if [[ "$MQTT_NACHHOLEN" == "ja" ]]; then
+        echo "    Eigene MQTT-Zugänge sind noch nicht eingerichtet – wird nachgeholt."
+        satz="MQTT-Zugänge eingerichtet"
+        WARNUNGEN+=(nachgeholt)
+    fi
+    if [[ "$EINRICHTUNG_NACHHOLEN" == "ja" ]]; then
+        echo "    Einrichtung unvollständig (Update-Funktion, Einheiten oder storage/-Ordner) – wird nachgeholt."
+        satz="Update-Funktion eingerichtet"
+        WARNUNGEN+=(nachgeholt)
+    fi
+    schritt 8 "Dienste und Konfiguration abgleichen" einrichtung
+    ABGLEICH_BEGONNEN="ja"
+    ordner_anlegen
+    abgleichen
+    schritt 9 "Dienste starten" dienste
+    dienste_starten geaendert
+    set +e
+    trap - ERR
+    trap '' INT TERM HUP
+    dienst_anstossen
+    ergebnis aktuell - "$satz"
+    exit 0
+}
+
+# ================================================================ Stufe 2 (die neue Fassung)
+
+# Eintritt per exec aus Stufe 1: nur mit PM_UPDATE_STUFE=2 und der geerbten
+# Sperre, und nur mit einer lesbaren Marke in Phase „checkout“.
+stufe2_eintritt() {
+    local sperre_fehlte="nein"
+    if [[ "${PM_UPDATE_STUFE:-}" != 2 || "${PM_UPDATE_SPERRE:-}" != "geerbt" ]]; then
+        echo "--stufe=2 ist intern: nur die vorige Stufe ruft es per exec auf." >&2
+        exit 1
+    fi
+    if flock -n 9 2>/dev/null; then
+        SPERRE_GEHALTEN="ja"
+    else
+        # Die Sperre kam nicht mit. Hält sie ein anderer, läuft dort ein
+        # Update – dann nichts anfassen. Sonst ist die Marke verwaist.
+        sperre_fehlte="ja"
+        unset PM_UPDATE_SPERRE
+        sperre_nehmen || besetzt
+    fi
+    if ! marke_lesen; then
+        hinweis "Die Marke $MARKE fehlt oder ist unlesbar – Stufe 2 kann nicht weiter."
+        ergebnis unvollstaendig intern "Handarbeit nötig"
+        exit 3
+    fi
+    marke_uebernehmen
+    AUSLOESER="$M_AUSLOESER"
+    VON="$M_VON"
+    if [[ "$M_ERGEBNIS_DATEI" != "-" ]] && ausgabe_pfad_ok "$M_ERGEBNIS_DATEI"; then
+        ERGEBNIS_DATEI="$M_ERGEBNIS_DATEI"
+    fi
+    if [[ "$M_FORTSCHRITT_DATEI" != "-" ]] && ausgabe_pfad_ok "$M_FORTSCHRITT_DATEI"; then
+        FORTSCHRITT_DATEI="$M_FORTSCHRITT_DATEI"
+    fi
+    if [[ "$sperre_fehlte" == "ja" || "$PHASE" != "checkout" ]]; then
+        hinweis "Stufe 2 ohne geerbte Sperre oder in Phase „$PHASE“."
+        zurueckrollen intern
+    fi
+    stufe2
+}
+
+stufe2() {
+    # exec hat die Traps gelöscht – neu setzen, dann zählt die Marke als Stufe 2.
+    traps_nach_marke
+    marke_setzen phase stufe2
+    NEU_MERKEN="ja"
+
+    schritt 5 "Rechte und Ordner" einrichtung
+    rechte_setzen
+
+    schritt 6 "Migrationen ausführen" migration
+    marke_setzen migriert ja
     MIGRIERT="ja"
     as_app php "$ZIEL/bin/power" migrate
+    local treiber
+    treiber="$(as_app php -r '$c = require $argv[1]; echo $c["database"]["driver"] ?? "sqlite";' "$ZIEL/config/config.php" 2>/dev/null || echo sqlite)"
+    if [[ "$treiber" != "sqlite" ]] && ! g diff --quiet "$ALT" "$NEU" -- database/migrations; then
+        WARNUNGEN+=(treiber)
+    fi
 
-    # ============================================================ Pakete
-    schritt "Fehlende Pakete nachziehen"
+    schritt 7 "Fehlende Pakete nachziehen" pakete
+    pakete_nachziehen
+
+    schritt 8 "Dienste und Konfiguration abgleichen" einrichtung
+    abgleichen
+
+    schritt 9 "Dienste starten" dienste
+    dienste_starten voll
+
+    # Das Kacheln großer Grundrisse dauert – ein Fehler ist nur eine Warnung.
+    schritt 10 "Grundrisse kacheln" intern
+    if ! as_app php "$ZIEL/bin/power" plan:kacheln; then
+        hinweis "Kacheln ließen sich nicht berechnen – die Oberfläche holt das beim ersten Aufruf nach."
+        WARNUNGEN+=(kacheln)
+    fi
+
+    schritt 11 "Prüfen" pruefung
+    if ! pflichtpruefung; then
+        PRUEFUNG="fehler"
+        zurueckrollen pruefung
+    fi
+    wartung_aus
+    wunschpruefung
+
+    schritt 12 "Fertig" intern
+    erfolg
+}
+
+pakete_nachziehen() {
+    local gebraucht fehlt p
     # Neuere Stände brauchen womöglich Pakete, die ältere Installationen
     # nicht haben. Nachinstalliert wird nur, was fehlt – Aktualisierungen
     # vorhandener Pakete bleiben apt bzw. unattended-upgrades überlassen.
-    GEBRAUCHT=(nginx php-fpm php-cli php-sqlite3 php-gd php-curl php-mbstring php-xml
+    gebraucht=(nginx php-fpm php-cli php-sqlite3 php-gd php-curl php-mbstring php-xml
                poppler-utils git curl ca-certificates gnupg openssl logrotate
                wireguard-tools mosquitto-clients)
-    [[ "$MIT_MOSQUITTO" == "ja" ]] && GEBRAUCHT+=(mosquitto)
-    [[ "$MIT_NODERED" == "ja" ]] && GEBRAUCHT+=(nodejs npm)
-    [[ "$MIT_INFLUX" == "ja" ]] && GEBRAUCHT+=(influxdb2 influxdb2-cli)
-    FEHLT=()
-    for p in "${GEBRAUCHT[@]}"; do
-        dpkg-query -W -f='${Status}' "$p" 2>/dev/null | grep -q "install ok installed" || FEHLT+=("$p")
+    [[ "$MIT_MOSQUITTO" == "ja" ]] && gebraucht+=(mosquitto)
+    [[ "$MIT_NODERED" == "ja" ]] && gebraucht+=(nodejs npm)
+    [[ "$MIT_INFLUX" == "ja" ]] && gebraucht+=(influxdb2 influxdb2-cli)
+    fehlt=()
+    for p in "${gebraucht[@]}"; do
+        [[ "$(dpkg-query -W -f='${Status}' "$p" 2>/dev/null || true)" == *"install ok installed"* ]] || fehlt+=("$p")
     done
-    if [[ ${#FEHLT[@]} -gt 0 ]]; then
-        echo "    Nachinstallieren: ${FEHLT[*]}"
-        export DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=l NEEDRESTART_SUSPEND=1
+    if [[ ${#fehlt[@]} -gt 0 ]]; then
+        echo "    Nachinstallieren: ${fehlt[*]}"
+        export DEBIAN_FRONTEND=noninteractive APT_LISTCHANGES_FRONTEND=none NEEDRESTART_MODE=l NEEDRESTART_SUSPEND=1
         apt_holen
-        "${APT[@]}" install -y --no-install-recommends "${FEHLT[@]}" >/dev/null
+        "${APT[@]}" install -y --no-install-recommends "${fehlt[@]}" >/dev/null
     else
         echo "    Alles vorhanden."
     fi
@@ -627,246 +2039,124 @@ if [[ "$CODE_NEU" == "ja" ]]; then
         install -d -m 755 "$NODERED_APP"
         npm install --prefix "$NODERED_APP" --omit=dev --no-audit --no-fund --loglevel=error "node-red@4" >/dev/null
     fi
-fi
+    return 0
+}
 
-# ================================================================ Dienste und Vorlagen
-schritt "Dienste und Konfiguration abgleichen"
-FPM_VERSION="$(find /etc/php -mindepth 2 -maxdepth 2 -type d -name fpm 2>/dev/null \
-    | awk -F/ '{print $4}' | sort -V | tail -1)"
-NODERED_NEUSTART="nein"
-MOSQUITTO_NEUSTART="nein"
-MOSQUITTO_NEULADEN="nein"
-EINHEITEN_NEU="nein"
+erfolg() {
+    local erg="eingespielt" zweig_befehl
+    # Ab hier ist das Update eingespielt – nichts rollt mehr zurück, und ein
+    # Signal unterbricht das Aufräumen nicht.
+    set +e
+    trap - ERR
+    trap '' INT TERM HUP
+    schnappschuss_loeschen
+    marke_loeschen
+    rm -f -- "$ZUSTAND/alt/update-debian.sh"
+    [[ ${#WARNUNGEN[@]} -gt 0 ]] && erg="eingespielt_mit_warnung"
 
-if [[ "$MIT_MOSQUITTO" == "ja" ]]; then
-    # Auch ohne neuen Code (MQTT_NACHHOLEN): das Verzeichnis für Soll und
-    # Ergebnis der eigenen MQTT-Zugänge muss da sein.
-    for d in mqtt mqtt/soll mqtt/ist; do
-        app_verzeichnis "$ZIEL/storage/$d"
-    done
-fi
-
-# systemd-Einheiten: gehören der Anwendung, werden immer abgeglichen.
-EINHEITEN=(powermanagement-sammler.service powermanagement-wartung.service powermanagement-wartung.timer)
-[[ "$MIT_NODERED" == "ja" ]] && EINHEITEN+=(powermanagement-nodered.service)
-[[ "$MIT_MOSQUITTO" == "ja" ]] && EINHEITEN+=(powermanagement-mqtt-zugaenge.service
-    powermanagement-mqtt-zugaenge.path powermanagement-mqtt-zugaenge.timer)
-for einheit in "${EINHEITEN[@]}"; do
-    [[ -f "$ZIEL/deploy/$einheit" ]] || continue
-    gerendert="$(sed -e "s|__APP_USER__|$APP_USER|g" -e "s|__APP_DIR__|$ZIEL|g" \
-        -e "s|__NODERED_APP__|$NODERED_APP|g" -e "s|__NODERED_DIR__|$NODERED_DIR|g" "$ZIEL/deploy/$einheit")"
-    ziel="/etc/systemd/system/$einheit"
-    if [[ ! -f "$ziel" ]] || [[ "$gerendert" != "$(cat "$ziel")" ]]; then
-        printf '%s\n' "$gerendert" > "$ziel"
-        echo "    $einheit aktualisiert"
-        EINHEITEN_NEU="ja"
-        [[ "$einheit" == powermanagement-nodered.service ]] && NODERED_NEUSTART="ja"
-    fi
-done
-if [[ "$EINHEITEN_NEU" == "ja" ]]; then
-    systemctl daemon-reload
-fi
-# Einschalten *und* starten, bei jedem Lauf: „enable" allein wirkt erst
-# beim nächsten Neustart des Containers – und der kommt im LXC selten.
-systemctl enable --quiet powermanagement-sammler.service
-systemctl enable --quiet --now powermanagement-wartung.timer
-[[ "$MIT_NODERED" == "ja" ]] && systemctl enable --quiet powermanagement-nodered.service
-if [[ "$MIT_MOSQUITTO" == "ja" && -f /etc/systemd/system/powermanagement-mqtt-zugaenge.path ]]; then
-    systemctl enable --quiet --now powermanagement-mqtt-zugaenge.path powermanagement-mqtt-zugaenge.timer
-fi
-
-sed -e "s|__APP_USER__|$APP_USER|g" -e "s|__APP_DIR__|$ZIEL|g" \
-    "$ZIEL/deploy/powermanagement.logrotate" > /etc/logrotate.d/powermanagement
-
-# PHP-FPM-Pool: gehört der Anwendung (Upload-Grenzen, open_basedir).
-if [[ -n "$FPM_VERSION" ]]; then
-    sed -e "s|__APP_USER__|$APP_USER|g" -e "s|__APP_DIR__|$ZIEL|g" \
-        "$ZIEL/deploy/php-fpm-pool.conf" > "/etc/php/$FPM_VERSION/fpm/pool.d/powermanagement.conf"
-fi
-
-# nginx-Site: nur ersetzen, wenn niemand sie verändert hat. Port, Adresse
-# und Servername stehen in der vorhandenen Site – daraus neu erzeugen.
-if [[ -f "$SITE" ]]; then
-    LISTEN_ZEILE="$(grep -m1 -E '^\s*listen\s+[^[]' "$SITE" | sed -E 's/^\s*listen\s+([^ ;]+).*/\1/' || true)"
-    if [[ "$LISTEN_ZEILE" == *:* ]]; then
-        S_LISTEN="${LISTEN_ZEILE%:*}"
-        S_PORT="${LISTEN_ZEILE##*:}"
+    if [[ "$ALT_ZWEIG" == "-" ]]; then
+        zweig_befehl="git -C $ZIEL checkout -q -f --detach $ALT"
     else
-        S_LISTEN="0.0.0.0"
-        S_PORT="$LISTEN_ZEILE"
+        zweig_befehl="git -C $ZIEL checkout -q -f -B $ALT_ZWEIG $ALT"
     fi
-    S_NAME="$(grep -m1 -E '^\s*server_name\s' "$SITE" | sed -E 's/^\s*server_name\s+([^;]+);.*/\1/' || true)"
-    SITE_NEU="$(mktemp)"
-    sed -e "s|__APP_DIR__|$ZIEL|g" \
-        -e "s|__FPM_SOCKET__|/run/php/powermanagement.sock|g" \
-        -e "s|__SERVER_NAME__|${S_NAME:-powermanagement.lan}|g" \
-        -e "s|__LISTEN__|${S_LISTEN:-0.0.0.0}|g" \
-        -e "s|__PORT__|${S_PORT:-80}|g" \
-        "$ZIEL/deploy/nginx-powermanagement.conf" > "$SITE_NEU"
-    # Ohne default_server betrieben (Zusammenstoß mit einer anderen Seite)?
-    # Dann auch die neue Fassung ohne.
-    if ! grep -qE '^\s*listen\s.*default_server' "$SITE"; then
-        sed -i -E 's/^(\s*listen\s+[^[;]+) default_server;/\1;/' "$SITE_NEU"
-    fi
-    vorlage_uebernehmen "$SITE_NEU" "$SITE" root:root 644 /etc/nginx/powermanagement.powermanagement-neu
-    rm -f "$SITE_NEU"
-    case "$VORLAGE_ERGEBNIS" in
-        ersetzt)  echo "    nginx-Site aktualisiert" ;;
-        behalten) hinweis "Die nginx-Site ist von Hand verändert und bleibt so. Neue Fassung:"
-                  hinweis "  /etc/nginx/powermanagement.powermanagement-neu (diff -u $SITE /etc/nginx/powermanagement.powermanagement-neu)" ;;
-    esac
-    nginx -t 2>&1 | sed 's/^/    /'
-fi
-
-if [[ "$MIT_MOSQUITTO" == "ja" ]]; then
-    # 1. Grundlage der ACL. Mosquitto liest sie nicht direkt, sondern die
-    #    wirksame Fassung, die der Helfer daraus baut – ein Neuladen genügt.
-    vorlage_uebernehmen "$ZIEL/deploy/mosquitto/powermanagement.acl" \
-        /etc/mosquitto/powermanagement.acl mosquitto:mosquitto 600 \
-        /etc/mosquitto/powermanagement.acl.powermanagement-neu
-    [[ "$VORLAGE_ERGEBNIS" == "ersetzt" || "$VORLAGE_ERGEBNIS" == "neu" ]] && MOSQUITTO_NEULADEN="ja"
-    if [[ "$VORLAGE_ERGEBNIS" == "behalten" ]]; then
-        hinweis "Mosquitto-ACL verändert – neue Fassung: /etc/mosquitto/powermanagement.acl.powermanagement-neu"
-        hinweis "Für eigene Zugänge je Shelly die pattern-Zeilen von dort übernehmen (Änderungen von Hand nur"
-        hinweis "in /etc/mosquitto/powermanagement.acl, nie in der wirksamen Datei)."
-    fi
-
-    # 2. Eigene Zugänge je Shelly: wirksame ACL aus Grundlage und Block der
-    #    Kennwortdatei bauen. Neu geladen wird unten, einmal für alles.
-    if [[ -f "$ZIEL/deploy/mqtt-zugaenge.sh" && -f /etc/mosquitto/powermanagement.passwd ]]; then
-        HELFER_RC=0
-        HELFER_MELDUNG="$(mktemp)"
-        HELFER_AUSGABE="$(bash "$ZIEL/deploy/mqtt-zugaenge.sh" --ziel="$ZIEL" --app-benutzer="$APP_USER" \
-            --neu-laden=nein 2>"$HELFER_MELDUNG")" || HELFER_RC=$?
-        sed 's/^/    /' "$HELFER_MELDUNG"
-        rm -f "$HELFER_MELDUNG"
-        if [[ "${HELFER_AUSGABE##*$'\n'}" == "geaendert" ]]; then
-            MOSQUITTO_NEULADEN="ja"
-            HELFER_GEAENDERT="ja"
-        fi
-        if [[ "$HELFER_RC" -ne 0 ]]; then
-            hinweis "deploy/mqtt-zugaenge.sh endete mit $HELFER_RC (siehe oben; journalctl -u powermanagement-mqtt-zugaenge)."
-        fi
-    fi
-    # Nachholen: ein älteres Update-Skript hat womöglich schon die neue
-    # Konfiguration eingespielt und den Broker ohne wirksame ACL neu
-    # gestartet – dann steht er. Unten auf jeden Fall (neu) starten.
-    [[ "$MQTT_NACHHOLEN" == "ja" ]] && MOSQUITTO_NEULADEN="ja"
-    if [[ ! -f /etc/mosquitto/powermanagement-wirksam.acl ]]; then
-        # Ohne wirksame ACL startet der Broker mit der neuen Konfiguration
-        # nicht – dann wenigstens die Grundlage (ohne Sperren).
-        install -o mosquitto -g mosquitto -m 600 /etc/mosquitto/powermanagement.acl \
-            /etc/mosquitto/powermanagement-wirksam.acl
-        MOSQUITTO_NEULADEN="ja"
-    fi
-
-    # 3. Konfiguration: der Wechsel auf die wirksame Datei braucht einmal
-    #    einen Neustart.
-    vorlage_uebernehmen "$ZIEL/deploy/mosquitto/broker.conf" \
-        "$MOSQUITTO_CONF" root:root 644 \
-        /etc/mosquitto/powermanagement.conf.powermanagement-neu
-    if [[ "$VORLAGE_ERGEBNIS" == "ersetzt" || "$VORLAGE_ERGEBNIS" == "neu" ]]; then
-        MOSQUITTO_NEUSTART="ja"
-        MOSQUITTO_CONF_GEAENDERT="ja"
-    fi
-    if [[ "$VORLAGE_ERGEBNIS" == "behalten" ]]; then
-        hinweis "Mosquitto-Konfiguration verändert – neue Fassung: /etc/mosquitto/powermanagement.conf.powermanagement-neu"
-        hinweis "Eigene Zugänge je Shelly brauchen dort: acl_file /etc/mosquitto/powermanagement-wirksam.acl"
-    fi
-fi
-
-if [[ "$MIT_NODERED" == "ja" && -d "$NODERED_DIR" ]]; then
-    vorlage_uebernehmen "$ZIEL/deploy/node-red/settings.js" "$NODERED_DIR/settings.js" nodered:nodered 640 \
-        "$NODERED_DIR/settings.powermanagement-neu.js"
-    [[ "$VORLAGE_ERGEBNIS" == "ersetzt" || "$VORLAGE_ERGEBNIS" == "neu" ]] && NODERED_NEUSTART="ja"
-    [[ "$VORLAGE_ERGEBNIS" == "behalten" ]] && hinweis "settings.js ist verändert – neue Fassung: $NODERED_DIR/settings.powermanagement-neu.js"
-
-    # Flows: eigene Änderungen gehen vor. Nur wenn seit der letzten
-    # Auslieferung niemand im Editor etwas geändert (und bereitgestellt)
-    # hat, wird ersetzt – sonst liegt die neue Fassung daneben.
-    vorlage_uebernehmen "$ZIEL/deploy/node-red/flows.json" "$NODERED_DIR/flows.json" nodered:nodered 640 \
-        "$NODERED_DIR/flows.powermanagement-neu.json" "$FLOWS_ERSETZEN"
-    case "$VORLAGE_ERGEBNIS" in
-        neu|ersetzt)
-            echo "    Node-RED-Flows auf die mitgelieferte Fassung gebracht"
-            NODERED_NEUSTART="ja" ;;
-        behalten)
-            hinweis "Die Node-RED-Flows wurden im Editor verändert und bleiben, wie sie sind."
-            hinweis "Die neue Fassung liegt unter $NODERED_DIR/flows.powermanagement-neu.json –"
-            hinweis "im Editor über Menü → Importieren übernehmen, oder: $0 --flows-ersetzen"
-            hinweis "Eigene MQTT-Zugänge der Shellys brauchen die neuen Flows (Schutzliste pm/status/mqtt-zugaenge,"
-            hinweis "Antworten unter <präfix>/pm-nodered/rpc) – sonst meldet die Seite „MQTT-Zugänge“, dass Node-RED sie nicht bestätigt." ;;
-    esac
-fi
-
-# ================================================================ Neustart
-schritt "Dienste starten"
-if [[ -n "$FPM_VERSION" ]]; then
-    systemctl restart "php$FPM_VERSION-fpm"
-fi
-systemctl reload nginx || systemctl restart nginx
-if [[ "$MOSQUITTO_NEUSTART" == "ja" ]]; then
-    systemctl restart mosquitto
-    echo "    mosquitto neu gestartet"
-elif [[ "$MOSQUITTO_NEULADEN" == "ja" ]]; then
-    # Neu laden (SIGHUP): bestehende Verbindungen der Shellys bleiben. Läuft
-    # der Broker gerade nicht, wird er gestartet.
-    systemctl reload-or-restart mosquitto
-    echo "    mosquitto neu geladen"
-fi
-if [[ "$MIT_MOSQUITTO" == "ja" && -f /etc/systemd/system/powermanagement-mqtt-zugaenge.service ]]; then
-    # Ergebnis für die Oberfläche auffrischen – der Lauf oben sah die neue
-    # Broker-Konfiguration noch nicht.
-    systemctl start --no-block powermanagement-mqtt-zugaenge.service || true
-fi
-if [[ "$MIT_NODERED" == "ja" && "$NODERED_NEUSTART" == "ja" ]]; then
-    systemctl restart powermanagement-nodered.service
-    echo "    Node-RED neu gestartet"
-fi
-systemctl restart powermanagement-sammler.service
-echo "    Sammler läuft wieder"
-
-# Ab hier ist das Update eingespielt – was jetzt noch scheitert, rollt es
-# nicht mehr zurück.
-trap - ERR
-rm -f "$SITE_SICHERUNG" "$MOSQUITTO_CONF_SICHERUNG" "$MOSQUITTO_MERK_SICHERUNG"
-[[ -n "${SCHNAPPSCHUSS_DIR:-}" ]] && rm -rf "$SCHNAPPSCHUSS_DIR"
-
-if [[ "$CODE_NEU" == "ja" ]]; then
-    # Bewusst am Ende: das Kacheln großer Grundrisse dauert, und alles
-    # andere läuft da schon wieder.
-    schritt "Grundrisse kacheln"
-    if ! as_app php "$ZIEL/bin/power" plan:kacheln; then
-        hinweis "Kacheln ließen sich nicht berechnen – die Oberfläche holt das beim ersten Aufruf nach."
-    fi
-fi
-
-schritt "Prüfen"
-sleep 3
-PRUEF_RC=0
-as_app php "$ZIEL/bin/power" pruefen 2>&1 | sed 's/^/    /' || PRUEF_RC=$?
-if [[ "$PRUEF_RC" -ne 0 ]]; then
-    hinweis "bin/power pruefen meldet Fehler (siehe oben) – das Update selbst ist eingespielt."
-fi
-
-schritt "Fertig"
-cat <<ZUSAMMENFASSUNG
+    cat <<ZUSAMMENFASSUNG
 
   Vorher:    $(g log -1 --format='%h' "$ALT")
   Jetzt:     $(g log -1 --format='%h %s')
 ZUSAMMENFASSUNG
-if [[ -n "$SICHERUNG" ]]; then
-    cat <<ZUSAMMENFASSUNG
+    [[ ${#WARNUNGEN[@]} -gt 0 ]] && echo "  Hinweise:  ${WARNUNGEN[*]}"
+    if [[ "$SICHERUNG" != "-" ]]; then
+        cat <<ZUSAMMENFASSUNG
   Sicherung: $SICHERUNG
 
   Zurückrollen, falls nötig (die Sicherung enthält config/config.php und
   database.sqlite – mit app.key, also nicht nach /tmp auspacken):
-    systemctl stop powermanagement-sammler
-    git -C $ZIEL reset --hard $ALT
+    systemctl stop powermanagement-sammler ${FPM_VERSION:+php$FPM_VERSION-fpm}
+    $zweig_befehl
     install -d -m 700 /root/pm-zurueck && tar xzf $SICHERUNG -C /root/pm-zurueck
     install -o $APP_USER -g $APP_USER -m 640 /root/pm-zurueck/database.sqlite $DB
     rm -f $DB-wal $DB-shm
-    systemctl start powermanagement-sammler
+    $ZIEL/deploy/update-debian.sh --nur-abgleichen
+    systemctl start ${FPM_VERSION:+php$FPM_VERSION-fpm} powermanagement-sammler
 
 ZUSAMMENFASSUNG
-fi
+    fi
+    dienst_anstossen
+    ergebnis "$erg" -
+    exit 0
+}
+
+# ================================================================ --nur-abgleichen
+# Für die Konsole und für das Zurückrollen (als Kind der neueren Fassung,
+# mit geerbter Sperre): kein git, keine Migration, keine Sicherung, keine
+# Marke, kein eigenes Zurückrollen – ein Fehler endet mit rc ≠ 0.
+nur_abgleichen() {
+    sperre_nehmen || besetzt
+    if [[ -f "$MARKE" && "${PM_UPDATE_SPERRE:-}" != "geerbt" ]]; then
+        hinweis "Ein früheres Update wurde unterbrochen: erst $ZIEL/deploy/update-debian.sh --wiederaufnehmen"
+        exit 1
+    fi
+    if [[ ! -f "$ZIEL/bin/power" ]]; then
+        echo "In $ZIEL steckt keine PowerManagement-Installation." >&2
+        exit 1
+    fi
+    trap 'hinweis "Der Abgleich brach ab (Zeile $LINENO, Schritt „$SCHRITT_NAME“)."; exit 1' ERR
+    trap 'hinweis "Abgebrochen."; exit 1' INT TERM HUP
+    schritt 8 "Dienste und Konfiguration abgleichen" einrichtung
+    rechte_setzen
+    abgleichen
+    schritt 9 "Dienste starten" dienste
+    dienste_starten geaendert
+    trap - ERR INT TERM HUP
+    echo "    Abgeglichen: $(g log -1 --format='%h %s' 2>/dev/null || echo "$ZIEL")"
+    exit 0
+}
+
+# ================================================================ --wiederaufnehmen
+# Ein Update, das ohne Zurückrollen endete (SIGKILL, Strom weg): mit den
+# Werten der Marke zurückrollen. Ergebnis- und Fortschrittsdatei gelten aus
+# der Kommandozeile, nicht aus der Marke.
+wiederaufnehmen() {
+    herkunft_lesen
+    sperre_nehmen || besetzt
+    if [[ ! -f "$MARKE" ]]; then
+        echo "    Kein unterbrochenes Update – nichts zu tun."
+        ergebnis aktuell - "nichts zu tun"
+        exit 0
+    fi
+    if ! marke_lesen; then
+        hinweis "Die Marke $MARKE ist unlesbar – von Hand zurückrollen (docs/installation-debian-lxc.md)."
+        ergebnis unvollstaendig intern "Handarbeit nötig"
+        exit 3
+    fi
+    marke_uebernehmen
+    echo "    Unterbrochen in Phase „$PHASE“: $(kurz "$ALT") → $(kurz "$NEU") (Zweig $ZWEIG)"
+    trap 'zurueckrollen unterbrochen "$LINENO"' ERR
+    trap 'SIGNAL=INT; zurueckrollen unterbrochen' INT
+    trap 'SIGNAL=TERM; zurueckrollen unterbrochen' TERM
+    trap 'SIGNAL=HUP; zurueckrollen unterbrochen' HUP
+    # Ein abgerissenes apt/dpkg zuerst zu Ende bringen
+    if [[ -n "$(dpkg --audit 2>/dev/null || true)" ]]; then
+        echo "    dpkg war mitten in einer Installation – wird abgeschlossen"
+        DEBIAN_FRONTEND=noninteractive dpkg --configure -a --force-confdef --force-confold || true
+    fi
+    zurueckrollen unterbrochen
+}
+
+# ================================================================ main
+
+main() {
+    vorgaben
+    installation_lesen
+    farben
+    optionen "$@"
+    DB="$ZIEL/storage/database.sqlite"
+    umgebung_pruefen
+    case "$MODUS" in
+        stufe2)          stufe2_eintritt ;;
+        nur_abgleichen)  nur_abgleichen ;;
+        wiederaufnehmen) wiederaufnehmen ;;
+        *)               stufe1 ;;
+    esac
+}
+main "$@"; exit $?

@@ -266,6 +266,14 @@ else
         fi
     fi
 fi
+# Ein unterbrochenes Update (Marke von deploy/update-debian.sh) rollt der
+# Update-Dienst noch zurück – auf den Stand von damals, samt Datenbank. Was
+# diese Installation jetzt einspielte, ginge dabei verloren: erst zurückrollen.
+if [[ -e /var/lib/powermanagement/update/offen ]]; then
+    echo "Ein früheres Update wurde unterbrochen und ist noch nicht zurückgerollt." >&2
+    echo "Erst: $ZIEL/deploy/update-debian.sh --wiederaufnehmen – dann diesen Aufruf wiederholen." >&2
+    exit 1
+fi
 
 # Sammler, Wartung, Node-RED und der MQTT-Helfer laufen gehärtet (PrivateTmp,
 # ProtectSystem) und brauchen dafür eigene Mount-Namensräume. Ein LXC ohne
@@ -758,10 +766,15 @@ install -d -o "$APP_USER" -g "$APP_USER" -m 750 "$ZIEL/storage"
 # die Rechte daran nicht setzen. -R folgt keinen Verweisen (-P ist die
 # Vorgabe) und ändert nur die Einträge selbst.
 chown -R -P "$APP_USER:$APP_USER" "$ZIEL/storage"
-# mqtt/: Soll und Ergebnis der eigenen MQTT-Zugänge (deploy/mqtt-zugaenge.sh)
-for d in logs plans demo cache inventar sessions backups mqtt mqtt/soll mqtt/ist; do
+# mqtt/: Soll und Ergebnis der eigenen MQTT-Zugänge (deploy/mqtt-zugaenge.sh);
+# update/: Aufträge an den Update-Dienst (soll) und dessen Rückmeldungen (ist)
+for d in logs plans demo cache inventar sessions backups mqtt mqtt/soll mqtt/ist update update/soll update/ist; do
     app_verzeichnis "$ZIEL/storage/$d"
 done
+# Nur für root: Marke eines laufenden Updates, Kopie der alten Fassung,
+# Verlauf (/var/lib/…) und die Protokolle der Updates (/var/log/…)
+install -d -m 750 /var/log/powermanagement
+install -d -m 700 /var/log/powermanagement/update /var/lib/powermanagement/update
 
 HOST_IP="$(primary_ip)"
 if [[ "$PORT" == "80" ]]; then

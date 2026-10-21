@@ -19,6 +19,15 @@
 #      danach ein Update ohne Neues
 #   3b. Update ohne HOME und ohne Terminal (systemd-run, wie ein Dienst):
 #      läuft durch, Ausgabe ohne Farben, kein globales safe.directory
+#   4. Selbst-Update über die Konsole: die neue Fassung des Update-Skripts
+#      übernimmt im selben Lauf (Stufe 2); --pruefen ändert nichts
+#   5a. kaputte Migration: vollständig zurück (rc 2) – Code, Zweig, Schema,
+#      Einheiten und Vorlagen wie vorher, der Stand gilt als gescheitert
+#   5b. Prüfung scheitert erst nach Abgleich und Neustart (Anmeldeseite 500):
+#      auch neue Einheit, Logrotate, Pool, Site samt Merker kommen zurück
+#   6. Abbruch (systemctl stop) und Absturz (SIGKILL) mitten im Update:
+#      Zurückrollen bzw. --wiederaufnehmen von Hand; ein zweiter Lauf
+#      wartet nicht, sondern meldet „besetzt“
 #
 # Aufruf:  tests/installation-debian.sh
 #          PM_BEHALTEN=1 tests/installation-debian.sh   Container bleibt stehen
@@ -67,7 +76,9 @@ DOCKERFILE
                          powermanagement-mqtt-zugaenge powermanagement-wartung; do
                     echo "--- journalctl -u $u"; journalctl -u "$u" --no-pager -n 30 2>/dev/null
                 done
-                for f in /var/log/nginx/powermanagement.error.log /opt/powermanagement/storage/logs/*.log; do
+                for f in /var/log/nginx/powermanagement.error.log /opt/powermanagement/storage/logs/*.log \
+                         /var/lib/powermanagement/update/offen /var/lib/powermanagement/update/verlauf \
+                         /var/log/powermanagement/update/*.log; do
                     [ -f "$f" ] && { echo "--- $f"; tail -n 30 "$f"; }
                 done
                 echo "--- storage/"; ls -la /opt/powermanagement/storage 2>/dev/null' || true
@@ -105,7 +116,11 @@ REMOTE=/srv/pm.git      # spielt GitHub: daraus klonen und aktualisieren
 ZUGAENGE=/etc/powermanagement/zugaenge.txt
 LAUF=/root/lauf.log
 APP_VERZEICHNISSE=(storage storage/logs storage/plans storage/demo storage/cache storage/inventar
-                   storage/sessions storage/backups storage/mqtt storage/mqtt/soll storage/mqtt/ist)
+                   storage/sessions storage/backups storage/mqtt storage/mqtt/soll storage/mqtt/ist
+                   storage/update storage/update/soll storage/update/ist)
+MARKE_OFFEN=/var/lib/powermanagement/update/offen
+GESCHEITERT=/var/lib/powermanagement/update/gescheitert
+WARTUNG="$ZIEL/storage/update/ist/wartung"
 FEHLER=0
 
 schritt() { printf '\n\033[1;35m### %s\033[0m\n' "$1"; }
@@ -136,6 +151,47 @@ neuer_stand() {
     git -C "$QUELLE" rev-parse HEAD
 }
 ohne_esc() { ! grep -q $'\033' "$1"; }
+kopf()     { git -C "$ZIEL" rev-parse HEAD; }
+zweig()    { git -C "$ZIEL" symbolic-ref --short -q HEAD || echo -; }
+enthaelt() { grep -qF -- "$2" "$1"; }
+# update_lauf [optionen]: update-debian.sh direkt, Ausgabe nach $LAUF, rc in RC
+update_lauf() {
+    RC=0
+    "$ZIEL/deploy/update-debian.sh" "$@" > "$LAUF" 2>&1 < /dev/null || RC=$?
+    sed 's/^/  | /' "$LAUF"
+}
+# Alles, was ein Zurückrollen wiederherstellen muss: Einheiten, Logrotate,
+# Pool, Site, Mosquitto, die gemerkten Vorlagen, das Schema, der Zweig.
+pruefsummen() {
+    sha256sum /etc/systemd/system/powermanagement-* /etc/logrotate.d/powermanagement \
+        /etc/php/*/fpm/pool.d/powermanagement.conf /etc/nginx/sites-available/powermanagement \
+        /etc/mosquitto/powermanagement.acl /etc/mosquitto/conf.d/powermanagement.conf \
+        /var/lib/powermanagement/vorlagen/* 2>&1
+    runuser -u www-data -- php -r '$p = new PDO("sqlite:" . $argv[1]);
+        foreach ($p->query("SELECT name, sql FROM sqlite_master ORDER BY name") as $r) { echo $r[0], "|", $r[1], "\n"; }' \
+        "$ZIEL/storage/database.sqlite" | sha256sum
+    git -C "$ZIEL" symbolic-ref HEAD
+}
+# fortschritt_abwarten <datei> <schritt>: bis der Fortschritt mindestens dort steht (≤ 300 s)
+fortschritt_abwarten() {
+    local n=0
+    for _ in $(seq 1 300); do
+        n="$(awk '{print $2}' "$1" 2>/dev/null || true)"
+        [[ "${n:-0}" =~ ^[0-9]+$ && "${n:-0}" -ge "$2" ]] && return 0
+        sleep 1
+    done
+    return 1
+}
+# einheit_abwarten <einheit>: bis sie nicht mehr läuft (≤ 1200 s)
+einheit_abwarten() {
+    for _ in $(seq 1 1200); do
+        case "$(systemctl is-active "$1" 2>/dev/null || true)" in
+            active|activating|deactivating|reloading) sleep 1 ;;
+            *) return 0 ;;
+        esac
+    done
+    return 1
+}
 
 # Erst den Stand der Anwendung abwarten, dann prüfen, was ein Betreiber
 # nach der Installation vorfinden muss.
@@ -167,6 +223,12 @@ pruefe_installation() {
         test "$(stat -c '%U:%G %a' "$ZIEL/config/config.php")" = "root:www-data 640"
     pruefe "nichts für alle beschreibbar" leer "$(find "$ZIEL" ! -type l -perm -o+w -print)"
     pruefe "zugaenge.txt nur für root" test "$(stat -c '%U %a' "$ZUGAENGE")" = "root 600"
+    # Zustand und Protokolle der Updates nur für root; kein Update offen
+    for d in /var/lib/powermanagement/update /var/log/powermanagement/update; do
+        pruefe "$d: root 700" test "$(stat -c '%U %a' "$d" 2>/dev/null)" = "root 700"
+    done
+    pruefe "keine Marke eines unterbrochenen Updates" test ! -e "$MARKE_OFFEN"
+    pruefe "keine Schreibsperre der Oberfläche" test ! -e "$WARTUNG"
 
     # Oberfläche über nginx und PHP-FPM
     code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 -H 'Host: powermanagement.lan' \
@@ -322,8 +384,160 @@ pruefe "auf dem neuen Stand" test "$(git -C "$ZIEL" rev-parse HEAD)" = "$NEU"
 pruefe "Ausgabe ohne Farben (kein Terminal)" ohne_esc "$LAUF"
 pruefe "kein globales safe.directory (git config --global)" \
     bash -c '! git config --global --get-all safe.directory >/dev/null'
+pruefe "Ergebnis eingespielt" enthaelt "$LAUF" "==> Ergebnis: eingespielt"
 pruefe_installation
 abschluss "Update ohne HOME"
 
+# ------------------------------------------------------------ 4
+schritt "4 · Selbst-Update über die Konsole: die neue Fassung übernimmt im selben Lauf"
+ALT="$(kopf)"
+# Nur die neue Fassung gibt diese Zeile aus – Stufe 1 (die laufende, alte
+# Fassung) kennt sie nicht. Erscheint sie, hat Stufe 2 der neuen übernommen.
+PRUEFZEILE="Prüfung: Stufe 2 der neuen Fassung"
+NEU="$(neuer_stand "Neue Fassung des Update-Skripts" \
+    "sed -i '/^stufe2() {\$/a\\    echo \"    $PRUEFZEILE\"' deploy/update-debian.sh; grep -qF '$PRUEFZEILE' deploy/update-debian.sh")"
+INDEX_VORHER="$(stat -c %Y "$ZIEL/.git/index")"
+update_lauf --pruefen
+pruefe "--pruefen endet mit 0 (kam: $RC)" test "$RC" = 0
+pruefe "--pruefen: Stand unverändert" test "$(kopf)" = "$ALT"
+pruefe "--pruefen: nur vorwärts (Linear: ja)" enthaelt "$LAUF" "Linear:      ja"
+pruefe "--pruefen: .git/index unverändert" test "$(stat -c %Y "$ZIEL/.git/index")" = "$INDEX_VORHER"
+update_lauf
+pruefe "Update endet mit 0 (kam: $RC)" test "$RC" = 0
+pruefe "auf dem neuen Stand" test "$(kopf)" = "$NEU"
+pruefe "die neue Fassung übernimmt" enthaelt "$LAUF" "Die neue Fassung des Update-Skripts übernimmt."
+pruefe "Prüfzeile der neuen Fassung genau einmal" test "$(grep -cF "$PRUEFZEILE" "$LAUF")" = 1
+pruefe "Ergebnis eingespielt" enthaelt "$LAUF" "==> Ergebnis: eingespielt"
+pruefe "Verlauf: eingespielt" bash -c "tail -n 1 /var/lib/powermanagement/update/verlauf | grep -q ' aktualisieren eingespielt'"
+pruefe "Kopie der alten Fassung aufgeräumt" test ! -e /var/lib/powermanagement/update/alt/update-debian.sh
+pruefe "kein Schnappschuss übrig" leer "$(find "$ZIEL/storage/backups" -maxdepth 1 -name '.schnappschuss-*' -print)"
+pruefe_installation
+abschluss "Selbst-Update"
+
+# ------------------------------------------------------------ 5a
+schritt "5a · Kaputte Migration: vollständig zurück"
+ALT="$(kopf)"
+SUMMEN="$(pruefsummen)"
+NEU="$(neuer_stand "Kaputte Migration" "printf 'SELEKT kaputt;\n' > database/migrations/099_pruefung_kaputt.sql")"
+update_lauf
+pruefe "Update endet mit 2 – zurückgerollt (kam: $RC)" test "$RC" = 2
+pruefe "Ergebnis zurueckgerollt (migration)" enthaelt "$LAUF" "==> Ergebnis: zurueckgerollt (migration)"
+pruefe "Stand wie vorher" test "$(kopf)" = "$ALT"
+pruefe "Zweig bleibt main" test "$(zweig)" = main
+pruefe "Einheiten, Vorlagen und Schema wie vorher" test "$(pruefsummen)" = "$SUMMEN"
+[[ "$(pruefsummen)" == "$SUMMEN" ]] || diff <(printf '%s\n' "$SUMMEN") <(pruefsummen) | sed 's/^/            /'
+pruefe "der Stand gilt als gescheitert" grep -q "^$NEU [0-9]* migration\$" "$GESCHEITERT"
+pruefe_installation
+abschluss "kaputte Migration"
+NEU="$(neuer_stand "Kaputte Migration entfernt" "git rm -q database/migrations/099_pruefung_kaputt.sql")"
+update_lauf
+pruefe "danach: Update endet mit 0 (kam: $RC)" test "$RC" = 0
+pruefe "danach: auf dem neuen Stand" test "$(kopf)" = "$NEU"
+abschluss "kaputte Migration"
+
+# ------------------------------------------------------------ 5b
+schritt "5b · Prüfung scheitert nach Abgleich und Neustart: auch Einheiten und Vorlagen zurück"
+ALT="$(kopf)"
+SUMMEN="$(pruefsummen)"
+# Eine Migration, die gelingt; geänderte Vorlagen (Logrotate, Pool, Site);
+# eine neue Einheit; und eine Anmeldeseite, die erst mit dem neuen Code
+# (nach dem Neuladen von PHP-FPM) mit 500 antwortet.
+NEU="$(neuer_stand "Anmeldeseite kaputt" '
+    printf "CREATE TABLE pruefung_update (id INTEGER);\n" > database/migrations/099_pruefung_tabelle.sql
+    printf "# Prüfung\n" >> deploy/powermanagement.logrotate
+    printf "; Prüfung\n" >> deploy/php-fpm-pool.conf
+    printf "# Prüfung\n" >> deploy/nginx-powermanagement.conf
+    printf "[Unit]\nDescription=Prüfung\n\n[Timer]\nOnCalendar=yearly\nUnit=powermanagement-wartung.service\n" \
+        > deploy/powermanagement-pruefung.timer
+    sed -i "/^        powermanagement-wartung.timer\$/a\\        powermanagement-pruefung.timer" deploy/update-debian.sh
+    grep -q "powermanagement-pruefung.timer" deploy/update-debian.sh
+    sed -i "/^declare(strict_types=1);\$/a if ((\$_SERVER[\"REQUEST_URI\"] ?? \"\") === \"/login\") { http_response_code(500); exit; }" public/index.php
+    grep -q "http_response_code(500)" public/index.php')"
+update_lauf
+pruefe "Update endet mit 2 – zurückgerollt (kam: $RC)" test "$RC" = 2
+pruefe "Ergebnis zurueckgerollt (pruefung)" enthaelt "$LAUF" "==> Ergebnis: zurueckgerollt (pruefung)"
+pruefe "Anmeldeseite scheiterte erst mit dem neuen Code" enthaelt "$LAUF" "antwortet mit HTTP 500 statt 200"
+pruefe "Abgleich mit der alten Fassung" enthaelt "$LAUF" "Abgleich mit der alten Fassung:"
+pruefe "Stand wie vorher" test "$(kopf)" = "$ALT"
+pruefe "Zweig bleibt main" test "$(zweig)" = main
+pruefe "Einheiten, Logrotate, Pool, Site samt Merker und Schema wie vorher" test "$(pruefsummen)" = "$SUMMEN"
+[[ "$(pruefsummen)" == "$SUMMEN" ]] || diff <(printf '%s\n' "$SUMMEN") <(pruefsummen) | sed 's/^/            /'
+pruefe "neue Einheit entfernt" test ! -e /etc/systemd/system/powermanagement-pruefung.timer
+pruefe "neue Einheit nicht aktiv" bash -c '! systemctl is-active --quiet powermanagement-pruefung.timer'
+pruefe "der Stand gilt als gescheitert" grep -q "^$NEU [0-9]* pruefung\$" "$GESCHEITERT"
+pruefe_installation
+abschluss "Prüfung scheitert"
+NEU="$(neuer_stand "Anmeldeseite wieder heil" "sed -i '/http_response_code(500)/d' public/index.php")"
+update_lauf
+pruefe "danach: Update endet mit 0 (kam: $RC)" test "$RC" = 0
+pruefe "danach: auf dem neuen Stand" test "$(kopf)" = "$NEU"
+pruefe "danach: Site ersetzt, nicht „von Hand verändert“" \
+    bash -c 'grep -qF "nginx-Site aktualisiert" "$1" && ! grep -qF "von Hand verändert" "$1"' _ "$LAUF"
+pruefe "danach: Merker passt zur Site" \
+    cmp -s /etc/nginx/sites-available/powermanagement /var/lib/powermanagement/vorlagen/_etc_nginx_sites-available_powermanagement
+pruefe "danach: neue Einheit da" test -f /etc/systemd/system/powermanagement-pruefung.timer
+pruefe_installation
+abschluss "Prüfung scheitert"
+
+# ------------------------------------------------------------ 6
+schritt "6 · Abbruch (systemctl stop) und Absturz (SIGKILL) mitten im Update"
+ALT="$(kopf)"
+GESCHEITERT_VORHER="$(cat "$GESCHEITERT" 2>/dev/null || true)"
+# Stufe 2 wartet nach dem Abgleich 30 s – Zeit, um dazwischenzugehen.
+NEU="$(neuer_stand "Langsames Update" \
+    "sed -i '/^stufe2() {\$/,/^}\$/ s/^    schritt 9 \"Dienste starten\" dienste\$/    sleep 30\n&/' deploy/update-debian.sh; grep -q '^    sleep 30\$' deploy/update-debian.sh")"
+FORTSCHRITT=/run/pm-pruefung/fortschritt
+ERGEBNIS=/run/pm-pruefung/ergebnis
+install -d -m 700 /run/pm-pruefung
+rm -f /run/pm-pruefung/fortschritt /run/pm-pruefung/ergebnis
+# Wie §19.2 der Anleitung: eigene Einheit, KillMode=mixed – systemctl stop
+# schickt TERM nur an das Skript; es beendet den laufenden Schritt und rollt zurück.
+systemd-run --quiet --collect --unit=pm-pruefung-abbruch -p KillMode=mixed -p TimeoutStopSec=20min \
+    "$ZIEL/deploy/update-debian.sh" --fortschritt-datei="$FORTSCHRITT" --ergebnis-datei="$ERGEBNIS"
+pruefe "Fortschritt erreicht den Abgleich" fortschritt_abwarten "$FORTSCHRITT" 8
+pruefe "Schreibsperre der Oberfläche steht" test -e "$WARTUNG"
+update_lauf
+pruefe "ein zweiter Lauf endet sofort mit 1 (kam: $RC)" test "$RC" = 1
+pruefe "ein zweiter Lauf meldet „Ein anderes Update läuft gerade.“" enthaelt "$LAUF" "Ein anderes Update läuft gerade."
+systemctl stop pm-pruefung-abbruch
+journalctl --sync 2>/dev/null || true
+journalctl -a -u pm-pruefung-abbruch --no-pager -o cat > "$LAUF" 2>&1 || true
+sed 's/^/  | /' "$LAUF"
+pruefe "Ergebnis zurueckgerollt (abgebrochen)" \
+    bash -c 'grep -qx "ergebnis zurueckgerollt" "$1" && grep -qx "grund abgebrochen" "$1"' _ "$ERGEBNIS"
+pruefe "Stand wie vorher" test "$(kopf)" = "$ALT"
+pruefe "Zweig bleibt main" test "$(zweig)" = main
+pruefe "ein Abbruch zählt nicht als gescheitert" test "$(cat "$GESCHEITERT" 2>/dev/null || true)" = "$GESCHEITERT_VORHER"
+pruefe_installation
+abschluss "Abbruch"
+
+rm -f /run/pm-pruefung/fortschritt /run/pm-pruefung/ergebnis
+systemd-run --quiet --collect --unit=pm-pruefung-absturz -p KillMode=mixed -p TimeoutStopSec=20min \
+    "$ZIEL/deploy/update-debian.sh" --fortschritt-datei="$FORTSCHRITT"
+pruefe "Fortschritt erreicht den Abgleich" fortschritt_abwarten "$FORTSCHRITT" 8
+systemctl kill -s KILL pm-pruefung-absturz
+pruefe "Einheit nach SIGKILL beendet" einheit_abwarten pm-pruefung-absturz
+pruefe "Marke „offen“ bleibt" test -e "$MARKE_OFFEN"
+pruefe "Schreibsperre bleibt" test -e "$WARTUNG"
+update_lauf
+pruefe "ein neues Update lehnt ab (kam: $RC)" test "$RC" = 1
+pruefe "ein neues Update nennt --wiederaufnehmen" enthaelt "$LAUF" "--wiederaufnehmen"
+update_lauf --wiederaufnehmen
+pruefe "--wiederaufnehmen endet mit 2 – zurückgerollt (kam: $RC)" test "$RC" = 2
+pruefe "Ergebnis zurueckgerollt (unterbrochen)" enthaelt "$LAUF" "==> Ergebnis: zurueckgerollt (unterbrochen)"
+pruefe "Stand wie vorher" test "$(kopf)" = "$ALT"
+pruefe "Zweig bleibt main" test "$(zweig)" = main
+pruefe "ein Absturz zählt nicht als gescheitert" test "$(cat "$GESCHEITERT" 2>/dev/null || true)" = "$GESCHEITERT_VORHER"
+pruefe_installation
+abschluss "Absturz"
+
+NEU="$(neuer_stand "Wieder schnell" "sed -i '/^    sleep 30\$/d' deploy/update-debian.sh")"
+update_lauf
+pruefe "danach: Update endet mit 0 (kam: $RC)" test "$RC" = 0
+pruefe "danach: auf dem neuen Stand" test "$(kopf)" = "$NEU"
+pruefe_installation
+abschluss "Absturz"
+
 echo
-echo "Installation, zweiter Lauf, Update und Update ohne HOME in Ordnung."
+echo "Installation, zweiter Lauf, Updates (ohne HOME, Selbst-Update), Zurückrollen, Abbruch"
+echo "und Absturz in Ordnung."
