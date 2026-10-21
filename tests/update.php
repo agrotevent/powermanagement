@@ -1606,6 +1606,24 @@ stream_wrapper_register("langsam", LangsamAttrappe::class);
     $einheit = (string) file_get_contents($wurzel . '/deploy/powermanagement-update.service');
     $geordnet = preg_match_all('/^\s*(?:After|Before)=.*\b(?:nginx|mosquitto|powermanagement-[a-z-]+|php[0-9.]*-fpm)\b/m', $einheit);
     gleich($geordnet, 0, 'powermanagement-update.service: kein After=/Before= auf Dienste des Zurückrollens (kein Stillstand beim Stoppen)');
+    // Pfad-Einheit und Zeitgeber aber sind vor ihm geordnet (Before=, setzt
+    // systemd selbst): Startet der Abgleich im Zurückrollen sie wartend, hält
+    // systemd den Auftrag bis zum Ende des Stopps zurück – also nie wartend.
+    $wartend = [];
+    $angestossen = 0;
+    foreach (preg_split('/\R/', (string) file_get_contents($wurzel . '/deploy/update-debian.sh')) ?: [] as $nr => $zeile) {
+        if (preg_match('/^\s*#/', $zeile) === 1 || !str_contains($zeile, 'systemctl ')
+            || preg_match('/powermanagement-update\.(?:path|timer)\b|\*\.path\|\*\.timer\)/', $zeile) !== 1) {
+            continue;
+        }
+        if (str_contains($zeile, '--no-block')) {
+            $angestossen++;
+        } else {
+            $wartend[] = ($nr + 1) . ': ' . trim($zeile);
+        }
+    }
+    gleich($wartend, [], 'update-debian.sh: Pfad-Einheit und Zeitgeber nur mit --no-block starten (kein Stillstand beim Stoppen)');
+    pruefe($angestossen >= 2, "update-debian.sh: enable --now und try-restart der Pfad-Einheiten und Zeitgeber gefunden ($angestossen)");
 
     // Fehlende Kacheln rechnet das Update nicht unter der Schreibsperre (ein
     // Plan mit 100 MB braucht Minuten, plan:kacheln wartete zudem auf einen

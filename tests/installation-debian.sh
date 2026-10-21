@@ -416,14 +416,18 @@ update_starten() {
     sed 's/^/  | /' "$LAUF"
 }
 # abstand_abwarten [konsole]: der Update-Dienst nimmt ein Aktualisieren erst
-# 120 s nach dem letzten an („zu_oft“); update:starten sucht nur, wenn der
-# letzte Abruf älter als 60 s ist – mit „konsole“ auch darauf warten.
+# 120 s nach dem letzten an („zu_oft“) und holt bei einer Suche erst 60 s nach
+# der letzten neu (sonst Stand aus den Refs, ohne Netz – auch das Ende jedes
+# Updates zählt als Suche); update:starten sucht nur, wenn der letzte Abruf
+# älter als 60 s ist – mit „konsole“ auch darauf warten.
 abstand_abwarten() {
     local bis=0 t jetzt
     # Vor dem ersten Aktualisieren über den Dienst gibt es zeiten noch nicht –
     # sed endet dann mit 2, und set -o pipefail bräche das ganze Skript ab.
     t="$(sed -n 's/^aktualisieren \([0-9][0-9]*\).*/\1/p' /var/lib/powermanagement/update/zeiten 2>/dev/null | head -n 1 || true)"
     [[ -n "$t" ]] && bis=$((t + 125))
+    t="$(sed -n 's/^pruefen \([0-9][0-9]*\).*/\1/p' /var/lib/powermanagement/update/zeiten 2>/dev/null | head -n 1 || true)"
+    [[ -n "$t" ]] && (( t + 65 > bis )) && bis=$((t + 65))
     if [[ "${1:-}" == konsole ]]; then
         t="$(stat -c %Y "$ZIEL/.git/FETCH_HEAD" 2>/dev/null || echo 0)"
         (( t + 65 > bis )) && bis=$((t + 65))
@@ -1142,7 +1146,8 @@ pruefe "Protokoll: Ergebnis zurueckgerollt (migration)" enthaelt "$IST/protokoll
 pruefe "Stand wie vorher" test "$(kopf)" = "$ALT"
 pruefe "Zweig bleibt main" test "$(zweig)" = main
 pruefe "Einheiten, Vorlagen und Schema wie vorher" test "$(pruefsummen)" = "$SUMMEN"
-[[ "$(pruefsummen)" == "$SUMMEN" ]] || diff <(printf '%s\n' "$SUMMEN") <(pruefsummen) | sed 's/^/            /'
+# diff endet bei Unterschieden mit 1 – mit pipefail bräche das das Skript ab.
+[[ "$(pruefsummen)" == "$SUMMEN" ]] || diff <(printf '%s\n' "$SUMMEN") <(pruefsummen) | sed 's/^/            /' || true
 pruefe "der Stand gilt als gescheitert" grep -q "^$NEU [0-9]* migration\$" "$GESCHEITERT"
 pruefe_installation
 abschluss "kaputte Migration"
@@ -1183,7 +1188,7 @@ pruefe "Abgleich mit der alten Fassung" enthaelt "$IST/protokoll" "Abgleich mit 
 pruefe "Stand wie vorher" test "$(kopf)" = "$ALT"
 pruefe "Zweig bleibt main" test "$(zweig)" = main
 pruefe "Einheiten, Logrotate, Pool, Site, Flows samt Merker und Schema wie vorher" test "$(pruefsummen)" = "$SUMMEN"
-[[ "$(pruefsummen)" == "$SUMMEN" ]] || diff <(printf '%s\n' "$SUMMEN") <(pruefsummen) | sed 's/^/            /'
+[[ "$(pruefsummen)" == "$SUMMEN" ]] || diff <(printf '%s\n' "$SUMMEN") <(pruefsummen) | sed 's/^/            /' || true
 pruefe "neue Einheit entfernt" test ! -e /etc/systemd/system/powermanagement-pruefung.timer
 pruefe "neue Einheit nicht aktiv" bash -c '! systemctl is-active --quiet powermanagement-pruefung.timer'
 pruefe "der Stand gilt als gescheitert" grep -q "^$NEU [0-9]* pruefung\$" "$GESCHEITERT"
@@ -1225,8 +1230,10 @@ update_lauf
 pruefe "ein zweiter Lauf endet sofort mit 1 (kam: $RC)" test "$RC" = 1
 pruefe "ein zweiter Lauf meldet „Ein anderes Update läuft gerade.“" enthaelt "$LAUF" "Ein anderes Update läuft gerade."
 # KillMode=mixed: TERM nur an den Helfer, er reicht es weiter; das Update
-# beendet den laufenden Schritt und rollt zurück.
-systemctl stop powermanagement-update.service
+# beendet den laufenden Schritt und rollt zurück. systemctl stop kehrt erst
+# danach zurück – wartete das Zurückrollen auf einen Auftrag, den systemd bis
+# zum Ende des Stopps zurückhält (etwa an der Pfad-Einheit), nie.
+pruefe "Abbruch: systemctl stop kehrt nach dem Zurückrollen zurück" timeout 300 systemctl stop powermanagement-update.service
 pruefe "Oberfläche: zurueckgerollt (abgebrochen)" oberflaeche_abwarten 120
 pruefe "Oberfläche: aktualisieren zurueckgerollt abgebrochen (kam: $ERGEBNIS_UI)" \
     test "$ERGEBNIS_UI" = "aktualisieren zurueckgerollt abgebrochen"
@@ -1309,6 +1316,11 @@ pruefe "ein weiterer Zeitplan-Lauf stellt keinen Auftrag" ruhe_abwarten 60
 pruefe "ein weiterer Zeitplan-Lauf: kein neuer Lauf" test "$(ist_wert lauf kennung)" = "$LAUF_VORHER"
 abschluss "Automatik"
 
+# Das Update eben hat beim Abgleich auch den Zeitgeber des Zeitplans wieder
+# gestartet (enable --now). Käme er vor der Suche unten, hielte er für heute
+# „nichts Neues“ fest (der neue Stand ist noch nicht geholt) – danach wäre der
+# Tag erledigt, nichts mehr verschoben oder eingespielt. Bis zum Ende von 7 anhalten.
+systemctl stop powermanagement-update-zeitplan.timer
 # Ein späterer Tag: das Update eben gilt als früher (zwei Tage – auch wenn das
 # Fenster über Mitternacht reicht), ebenso für root (dessen 20-Stunden-Abstand).
 # Und ein Aufbau läuft.
@@ -1345,6 +1357,10 @@ abschluss "Automatik"
 schritt "8a · Update-Dienst: Aufträge als App-Benutzer (Suchen, Aktualisieren)"
 ALT="$(kopf)"
 NEU="$(neuer_stand "Stand für den Update-Dienst" "printf '\n' >> README.md")"
+# Das automatische Update aus 7 zählt eben erst als Suche – ohne Abstand holte
+# der Dienst nichts, sondern meldete den Stand aus den Refs. Das Aktualisieren
+# danach muss nicht mehr warten: eine Suche zählt nicht als Update.
+abstand_abwarten
 auftrag_legen pruefen
 pruefe "Suchen: der Dienst meldet den Auftrag fertig" lauf_abwarten "$AUFTRAG_KENNUNG" 120
 pruefe "Suchen: fertig geprueft (kam: $(ist_wert lauf zustand) $(ist_wert lauf ergebnis))" \
@@ -1352,7 +1368,6 @@ pruefe "Suchen: fertig geprueft (kam: $(ist_wert lauf zustand) $(ist_wert lauf e
 pruefe "Suchen: Stand unverändert" test "$(kopf)" = "$ALT"
 pruefe "Suchen: ist/stand nennt den neuen Stand als verfügbar und als Kandidaten" \
     bash -c 'grep -qE "^verfuegbar $2 [0-9]+$" "$1/stand" && grep -qE "^ziel_kandidat $2 [0-9]+$" "$1/stand" && grep -qx "neu 1" "$1/stand" && grep -qx "linear ja" "$1/stand"' _ "$IST" "$NEU"
-abstand_abwarten
 auftrag_legen aktualisieren "$NEU"
 pruefe "Aktualisieren: der Dienst meldet den Auftrag fertig" lauf_abwarten "$AUFTRAG_KENNUNG" 900
 journalctl --sync 2>/dev/null || true

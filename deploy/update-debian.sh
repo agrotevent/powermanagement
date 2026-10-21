@@ -1100,9 +1100,13 @@ abgleichen() {
     fi
     # Update-Dienst: Pfad-Einheit (Aufträge der Oberfläche) und Zeitgeber
     # (Lebenszeichen, Wiederanlauf). Den Dienst selbst startet dieses Skript
-    # nie – es läuft womöglich gerade in ihm.
+    # nie – es läuft womöglich gerade in ihm. Beide sind vor ihm geordnet
+    # (Before=, das setzt systemd für jede auslösende Einheit selbst): Wird er
+    # gerade gestoppt (Abbruch → Zurückrollen in ihm, mit dem Abgleich der alten
+    # Fassung), hält systemd jeden Auftrag an ihnen bis zum Ende des Stopps
+    # zurück – und der wartet auf dieses Skript. Darum nicht warten (--no-block).
     if [[ -f /etc/systemd/system/powermanagement-update.path && -f /etc/systemd/system/powermanagement-update.timer ]]; then
-        systemctl enable --quiet ${jetzt[@]+"${jetzt[@]}"} powermanagement-update.path powermanagement-update.timer \
+        systemctl enable --quiet --no-block ${jetzt[@]+"${jetzt[@]}"} powermanagement-update.path powermanagement-update.timer \
             || [[ "$OHNE_DIENSTE" == "ja" ]]
     fi
     # Update-Zeitplan (automatische Updates, als Anwendungsbenutzer): nur der
@@ -1113,11 +1117,12 @@ abgleichen() {
     fi
     # Geänderte Pfad- und Zeitgeber-Einheiten greifen erst nach einem Neustart –
     # nur, wenn sie laufen (try-restart startet nichts, was aus ist). Nie der
-    # Update-Dienst selbst: der steht nicht in dieser Liste.
+    # Update-Dienst selbst: der steht nicht in dieser Liste. --no-block wie oben
+    # (Pfad-Einheit und Zeitgeber des Update-Dienstes).
     if [[ "$OHNE_DIENSTE" == "nein" ]]; then
         for einheit in ${GEAENDERT_EINHEITEN[@]+"${GEAENDERT_EINHEITEN[@]}"}; do
             case "$einheit" in
-                *.path|*.timer) systemctl try-restart "$einheit" ;;
+                *.path|*.timer) systemctl try-restart --no-block "$einheit" ;;
             esac
         done
     fi
