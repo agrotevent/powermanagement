@@ -951,6 +951,11 @@ sind; die neue Fassung liegt dann unter
 `/var/lib/powermanagement/node-red/flows.powermanagement-neu.json` und kann
 im Editor über *Menü → Importieren* übernommen werden – oder mit
 `--flows-ersetzen` (die alten werden als `flows.json.vor-<zeit>` gesichert).
+Was neu in den Flows ist, kommt dann nicht an – etwa die Analogeingänge der
+Tanksensoren (ohne sie keine Rohwerte, die Tankseite bleibt leer) oder die
+Schutzliste der eigenen MQTT-Zugänge. Das Update sagt es deshalb am Ende
+noch einmal (`Node-RED:  Flows im Editor verändert und behalten …`, Hinweis
+`flows_behalten`, in der Oberfläche unter dem Ergebnis).
 Dasselbe gilt für `settings.js`, die nginx-Site und die Mosquitto-Dateien.
 
 **Mosquitto-Rechte von Hand ändern** nur in der Grundlage
@@ -1271,8 +1276,10 @@ Was zu sehen sein sollte (meist 2–5 Minuten):
   Änderungen, `==> Sicherung anlegen` (Pfad
   `…/storage/backups/vor-update-<zeit>.tar.gz`),
   `==> Migrationen ausführen`,
-  `==> Dienste und Konfiguration abgleichen`, `==> Dienste starten`,
-  `==> Prüfen`, `==> Fertig` mit `Vorher:`/`Jetzt:`.
+  `==> Dienste und Konfiguration abgleichen` (bringt der neue Stand neue
+  Node-RED-Flows mit, etwa für Tanksensoren:
+  `Node-RED-Flows auf die mitgelieferte Fassung gebracht`),
+  `==> Dienste starten`, `==> Prüfen`, `==> Fertig` mit `Vorher:`/`Jetzt:`.
 - **Lauf 2:** `Bereits auf dem neuesten Stand (…)`, dann
   `Einrichtung unvollständig (Update-Funktion, Einheiten oder storage/-Ordner) – wird nachgeholt.`,
   einige Zeilen `powermanagement-update… aktualisiert` und am Ende
@@ -1316,6 +1323,17 @@ Wenn etwas nicht klappt:
 - *Lauf 1 „fehlgeschlagen – der alte Stand wird wiederhergestellt“:* Der
   alte Stand läuft weiter. Die Ursache steht im Protokoll; nach der
   Behebung Schritt 3 wiederholen.
+- *„Die Node-RED-Flows wurden im Editor verändert und bleiben, wie sie
+  sind.“* (am Ende von Lauf 2 noch einmal als `Node-RED:  Flows im Editor
+  verändert und behalten …`): Was neu in den Flows ist, kommt dann nicht
+  an – Tanksensoren liefern keine Rohwerte, eigenen MQTT-Zugängen fehlt die
+  Schutzliste. Die neue Fassung liegt unter
+  `/var/lib/powermanagement/node-red/flows.powermanagement-neu.json`: im
+  Node-RED-Editor über *Menü → Importieren* übernehmen – oder, wenn die
+  eigenen Änderungen entbehrlich sind (sie bleiben als `flows.json.vor-<zeit>`
+  liegen):
+  `systemd-run --unit=pm-update --collect -p KillMode=mixed -p TimeoutStopSec=20min /opt/powermanagement/deploy/update-debian.sh --flows-ersetzen`
+  (zusehen mit `journalctl -a -f -u pm-update`).
 - *Schon umgestellt?* Der Befehl schadet nicht – beide Läufe melden dann
   „aktuell“.
 - *Anderer Ort als /opt/powermanagement:* steht in

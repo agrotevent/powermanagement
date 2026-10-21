@@ -1320,7 +1320,7 @@ final class UpdateService
         return match ($code) {
             'kacheln'        => 'Die Grundrisse ließen sich nicht alle kacheln.',
             'pruefung'       => 'bin/power pruefen meldet Fehler (InfluxDB, MQTT oder Node-RED) – das Update selbst ist eingespielt.',
-            'flows_behalten' => 'Im Editor geänderte Node-RED-Flows bleiben; die neue Fassung liegt daneben.',
+            'flows_behalten' => 'Im Editor geänderte Node-RED-Flows bleiben; die neue Fassung liegt daneben (flows.powermanagement-neu.json). Tanksensoren und eigene MQTT-Zugänge brauchen sie – im Editor importieren oder auf der Konsole update-debian.sh --flows-ersetzen.',
             'site_behalten'  => 'Die von Hand veränderte nginx-Site bleibt; die neue Fassung liegt daneben.',
             'acl_behalten'   => 'Die von Hand veränderte Mosquitto-ACL bleibt; die neue Fassung liegt daneben.',
             'mqtt_helfer'    => 'Der Abgleich der MQTT-Zugänge meldete Fehler.',

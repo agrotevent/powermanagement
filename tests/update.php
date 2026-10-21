@@ -34,11 +34,13 @@ use App\Services\BenutzerService;
 use App\Services\LocationBundle;
 use App\Services\LocationUebertrag;
 use App\Services\PartnerService;
+use App\Services\SiteService;
 use App\Services\UpdateAutomatik;
 use App\Services\UpdateService;
 use App\Support\Config;
 use App\Support\Database;
 use App\Support\Settings;
+use App\Tanks\TankRechnung;
 
 $alsRoot = function_exists('posix_geteuid') && posix_geteuid() === 0;
 
@@ -70,13 +72,28 @@ set_error_handler(static function (int $nr, string $text, string $datei, int $ze
     return true;
 });
 
+// ------------------------------------------------------------ träge InfluxDB
+// Wie in tests/sitzung.php: Wie lange jede Abfrage dauert, steht in einer
+// Datei. Eine Peilung am Tank wartet auf den Rohwert – ohne Sitzungssperre.
+$influxVerzoegerung = $ordner . '/influx-verzoegerung';
+file_put_contents($influxVerzoegerung, '0');
+file_put_contents($ordner . '/influx.php', '<?php
+usleep((int) ((float) @file_get_contents(' . var_export($influxVerzoegerung, true) . ') * 1000000));
+header("Content-Type: application/json");
+echo json_encode(["results" => [["statement_id" => 0], ["statement_id" => 1], ["statement_id" => 2], ["statement_id" => 3]]]);
+');
+$influxPort = freierPort();
+hintergrund(['php', '-S', '127.0.0.1:' . $influxPort, $ordner . '/influx.php'], ['PHP_CLI_SERVER_WORKERS' => '4']);
+
 // ------------------------------------------------------------ Instanz
 $vorlage = is_file($wurzel . '/config/config.php') ? $wurzel . '/config/config.php' : $wurzel . '/config/config.example.php';
-$konfig = static function (bool $demo, string $verzeichnis) use ($vorlage, $ordner, $git): string {
+$konfig = static function (bool $demo, string $verzeichnis) use ($vorlage, $ordner, $git, $influxPort): string {
     return '<?php
 $c = require ' . var_export($vorlage, true) . ';
 $c["app"]["demo"] = ' . var_export($demo, true) . ';
 $c["app"]["debug"] = true;
+$c["influx"]["url"] = "http://127.0.0.1:' . $influxPort . '";
+$c["influx"]["timeout"] = 8;
 $c["database"]["driver"] = "sqlite";
 $c["database"]["path"] = ' . var_export($ordner . '/datenbank.sqlite', true) . ';
 $c["update"]["verzeichnis"] = ' . var_export($verzeichnis, true) . ';
@@ -1585,6 +1602,77 @@ echo json_encode($antwort, JSON_UNESCAPED_UNICODE);
     $aufruf($port, $a['dose'], 'GET', '/profil');   // Meldung von „Prüfen“ abholen
     Database::execute('DELETE FROM api_partner WHERE id = ?', [$partnerId]);
 
+    // Tank: Peilung, Betankung, Kennlinie & Co. sind POSTs der Oberfläche –
+    // während der Schreibsperre 503 (Kartenpanel, JSON) bzw. Meldung und
+    // zurück (Tankseite), eingetragen wird nichts; lesen geht. Eine Peilung
+    // wartet ohne Sitzungssperre auf den Rohwert aus der InfluxDB. Kam sie
+    // vor der Sperre herein, ist sie angemeldet: wartung_an wartet, bis sie
+    // eingetragen hat – vor der Sicherung, ein Zurückrollen verliert sie nicht.
+    $tankStandort = SiteService::saveSite(null, ['name' => $kennung . ' Tanklager']);
+    $tankEtage = SiteService::saveFloor(null, ['site_id' => $tankStandort, 'name' => 'Wiese']);
+    $jetztIso = gmdate('c');
+    $tank = Database::insert('objekte', ['art' => 'tank', 'name' => $kennung . ' Tank', 'site_id' => $tankStandort, 'floor_id' => $tankEtage,
+        'plan_x' => 50, 'plan_y' => 50, 'eigenschaften' => '{"inhalt_l":3000.0,"liter_je_mm":2.78}', 'created_at' => $jetztIso]);
+    $tankSensor = Database::insert('messpunkte', ['objekt_id' => $tank, 'geraet' => $kennung . '-uni', 'kanal' => 'voltmeter:100',
+        'rolle' => 'fuellstand', 'bezeichnung' => 'TS', 'gueltig_ab' => gmdate('c', time() - 86400), 'created_at' => $jetztIso]);
+    $rechnung = TankRechnung::rechnung(['prinzip' => 'hydrostatisch', 'feld' => 'u', 'signal' => '4-20mA', 'buerde_ohm' => 500,
+        'bereich_von' => 0, 'bereich_bis' => 100, 'bereich_einheit' => 'mbar'], ['offset_mm' => 20], ['inhalt_l' => 3000, 'liter_je_mm' => 2.78], [])['rechnung'];
+    Database::insert('tank_kennlinien', ['messpunkt_id' => $tankSensor, 'objekt_id' => $tank, 'ab' => gmdate('c', time() - 86400),
+        'rechnung' => json_encode($rechnung), 'anlass' => 'einsatz', 'geprueft' => 0, 'von' => 'pruefung', 'created_at' => $jetztIso]);
+    $tankEreignisse = static fn (): int => (int) Database::scalar('SELECT COUNT(*) FROM tank_ereignisse WHERE objekt_id = ?', [$tank]);
+    $tankFassungen = static fn (): int => (int) Database::scalar('SELECT COUNT(*) FROM tank_kennlinien WHERE objekt_id = ?', [$tank]);
+    $tankPfad = '/anlagen/' . $tank . '/tank/';
+    $schreiben('wartung', UpdateService::KOPF_WARTUNG . "\nseit " . time() . "\nkennung -\n");
+    $r = $aufruf($port, $a['dose'], 'POST', $tankPfad . 'peilung', ['_token' => $a['token'], 'art' => 'hoehe_mm', 'wert' => '650'],
+        ['Accept: application/json', 'X-Requested-With: XMLHttpRequest']);
+    $j = json_decode($r['text'], true);
+    pruefe($r['status'] === 503 && ($j['wartung'] ?? false) === true && ($j['ok'] ?? true) === false && preg_match('/^Retry-After: 30\r?$/mi', $r['kopf']) === 1,
+        'Tank + Schreibsperre: Peilung aus dem Kartenpanel (JSON) → 503 mit wartung und Retry-After (' . $r['status'] . ')');
+    foreach ([
+        'Betankung'   => ['betankung', ['liter' => '500', 'zeit' => '', 'lieferschein' => 'LS-1', 'kalibrieren' => '0']],
+        'Auswerten'   => ['betankung/auswerten', ['ereignis_id' => '1']],
+        'Kennlinie'   => ['kennlinie', ['messpunkt' => (string) $tankSensor, 'sensor' => ['anker_roh' => '4', 'anker_mm' => '0']]],
+        'Steigung'    => ['steigung', ['ereignis_id' => '1', 'uebernehmen' => '1']],
+        'Löschen'     => ['ereignis/loeschen', ['ereignis_id' => '1']],
+    ] as $name => [$teil, $felder]) {
+        $r = $aufruf($port, $a['dose'], 'POST', $tankPfad . $teil, ['_token' => $a['token']] + $felder, ['X-Requested-With: XMLHttpRequest']);
+        pruefe($r['status'] === 302 && str_contains($aufruf($port, $a['dose'], 'GET', '/profil')['text'], 'Gerade läuft ein Update'),
+            'Tank + Schreibsperre: ' . $name . ' von der Tankseite (data-laeuft) → Meldung und zurück (' . $r['status'] . ')');
+    }
+    // Tanksensor einsetzen und ausbauen, Kraftstoffschlauch – aus dem Kartenpanel (JSON)
+    foreach (['/anlagen/' . $tank . '/einsetzen' => ['inventar_id' => '1'], '/einsatz/1/beenden' => [],
+        '/karte/leitung/speichern' => ['art' => 'kraftstoff'], '/karte/leitung/loeschen' => ['id' => '1']] as $pfad => $felder) {
+        $r = $aufruf($port, $a['dose'], 'POST', $pfad, ['_token' => $a['token']] + $felder, ['Accept: application/json']);
+        pruefe($r['status'] === 503 && (json_decode($r['text'], true)['wartung'] ?? false) === true, 'Tank + Schreibsperre: ' . $pfad . ' → 503 (' . $r['status'] . ')');
+    }
+    gleich([$tankEreignisse(), $tankFassungen()], [0, 1], 'Tank + Schreibsperre: weder Peilung, Betankung noch Fassung eingetragen');
+    $r = $aufruf($port, $a['dose'], 'GET', $tankPfad . 'tage?zeitraum=7d', [], ['Accept: application/json']);
+    pruefe($r['status'] === 200 && is_array(json_decode($r['text'], true)), 'Tank + Schreibsperre: Verbrauch je Tag lesen geht');
+    gleich($aufruf($port, $a['dose'], 'GET', '/anlagen/' . $tank)['status'], 200, 'Tank + Schreibsperre: Tankseite geht');
+    $schreiben('wartung', null);
+
+    // Die Peilung wartet 2 s auf die InfluxDB; nach 0,7 s beginnt das Update.
+    file_put_contents($influxVerzoegerung, '2');
+    $r = $waehrendWartungAn($tankPfad . 'peilung', ['art' => 'hoehe_mm', 'wert' => '650'], 0.7, 150);
+    file_put_contents($influxVerzoegerung, '0');
+    pruefe($r['belegt'] === true, 'Peilung wartet auf die InfluxDB: angemeldet – darauf wartet das Update');
+    pruefe($r['status'] === 302 && $r['rc'] === 0, 'Peilung und wartung_an enden (' . $r['status'] . ', rc ' . var_export($r['rc'], true) . ')');
+    pruefe($r['skript'] !== null && $r['post'] !== null && $r['skript'] >= $r['post'] && $r['skript'] - $r['skript_start'] >= 1.0,
+        sprintf('wartung_an wartet, bis die Peilung eingetragen hat (Sperre %.1f–%.1f s, Peilung bis %.1f s)', $r['skript_start'] ?? -1, $r['skript'] ?? -1, $r['post'] ?? -1));
+    pruefe(str_contains($r['ausgabe'], 'Laufende Änderungen sind fertig') && !str_contains($r['ausgabe'], 'HINWEIS'),
+        'wartung_an: wartet auf die Peilung und meldet ihr Ende – ' . trim($r['ausgabe']));
+    gleich((int) Database::scalar("SELECT COUNT(*) FROM tank_ereignisse WHERE objekt_id = ? AND art = 'peilung' AND hoehe_mm = 650", [$tank]), 1,
+        'Peilung von vor der Schreibsperre: eingetragen, bevor das Update sichert');
+    $schreiben('wartung', null);
+    pruefe(str_contains($aufruf($port, $a['dose'], 'GET', '/anlagen/' . $tank)['text'], 'Peilstab 650 mm eingetragen'),
+        'Peilung von vor der Schreibsperre: meldet „eingetragen“');
+    foreach (['tank_ereignisse', 'tank_kennlinien', 'messpunkte'] as $tabelle) {
+        Database::execute('DELETE FROM ' . $tabelle . ' WHERE objekt_id = ?', [$tank]);
+    }
+    Database::execute('DELETE FROM objekte WHERE id = ?', [$tank]);
+    Database::execute('DELETE FROM floors WHERE id = ?', [$tankEtage]);
+    Database::execute('DELETE FROM sites WHERE id = ?', [$tankStandort]);
+
     // Demo-Modus: Seite mit Hinweis, kein Abzeichen
     $d = $anmelden($demoPort, $kennung . '-admin');
     $r = $aufruf($demoPort, $d['dose'], 'GET', '/system/update');
@@ -1665,5 +1753,23 @@ foreach (['bericht.js' => $bericht, 'bericht-kunde.js' => $kundeJs] as $datei =>
 pruefe(preg_match('/if \(r\.status === 503 && erg\.wartung\) \{(?:(?!\n        if \(r\.status).)*?planen\(WARTUNG_PAUSE\)/s', $bericht) === 1
     && preg_match('/if \(r\.status === 503 && erg\.wartung\) \{(?:(?!\n        if \(r\.status).)*?gestoppt = true/s', $bericht) === 0,
     'bericht.js: Autosave hält bei 503 nicht an (kein gestoppt), plant neu');
+
+// Tankseite: Der Verbrauch je Tag (tank.js, GET) nimmt 502–504 während eines
+// Updates als „gleich noch einmal“ – ohne Browser (Node) durchgespielt.
+$node = trim((string) shell_exec('command -v node 2>/dev/null'));
+if ($node === '') {
+    fwrite(STDOUT, "update: tank.js übersprungen – node fehlt\n");
+} else {
+    $tankLauf = static fn (string $art): array => json_decode((string) shell_exec(escapeshellarg($node) . ' ' . escapeshellarg(__DIR__ . '/hilfen/tank-tage.cjs')
+        . ' ' . escapeshellarg($wurzel . '/public/assets/js/tank.js') . ' ' . $art), true) ?? ['fehler' => 'keine Ausgabe'];
+    $t = $tankLauf('einmal');
+    pruefe(!isset($t['fehler']), 'tank.js ohne Browser ausgeführt' . (isset($t['fehler']) ? ': ' . mb_substr((string) $t['fehler'], 0, 300) : ''));
+    pruefe(($t['abrufe'] ?? 0) === 2 && ($t['pausen'] ?? []) === [30000] && ($t['zeilen'] ?? 0) === 1 && ($t['summe'] ?? '') === '120 l in 1 Tag'
+        && ($t['statusVersteckt'] ?? false) === true, 'tank.js: 503 ohne JSON → nach Retry-After (30 s) noch einmal, dann die Tage');
+    pruefe(str_contains((string) (($t['meldungen'] ?? [''])[0] ?? ''), 'Gerade läuft wohl ein Update'), 'tank.js: meldet dazwischen das Update');
+    $t = $tankLauf('immer');
+    pruefe(($t['abrufe'] ?? 0) === 11 && count($t['pausen'] ?? []) === 10 && ($t['pausen'][0] ?? 0) === 15000
+        && ($t['status'] ?? '') === 'Der Verbrauch je Tag ließ sich nicht laden.', 'tank.js: nur 502 – nach zehn Versuchen die Fehlermeldung');
+}
 
 ende('update');

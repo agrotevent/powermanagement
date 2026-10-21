@@ -22,6 +22,10 @@
 #      danach ein Update ohne Neues
 #   3b. Update ohne HOME und ohne Terminal (systemd-run, wie ein Dienst):
 #      läuft durch, Ausgabe ohne Farben, kein globales safe.directory
+#   3c. Node-RED-Flows: neue Flows ersetzen unveränderte (wie die
+#      Analogeingänge der Tanksensoren); im Editor veränderte bleiben, die neue
+#      Fassung liegt daneben, Hinweis und Zusammenfassung sagen es;
+#      --flows-ersetzen sichert die eigene Fassung und spielt die neue ein
 #   4. Update über die Oberfläche (System → Update: anmelden, suchen,
 #      aktualisieren, Status abfragen über Neustarts hinweg) mit Selbst-Update:
 #      die neue Fassung des Update-Skripts übernimmt im selben Lauf (Stufe 2);
@@ -30,8 +34,8 @@
 #      zurück (rc 2) – Code, Zweig, Schema, Einheiten und Vorlagen wie vorher,
 #      der Stand gilt als gescheitert
 #   5b. Prüfung scheitert erst nach Abgleich und Neustart (Anmeldeseite 500,
-#      update:starten --warten): auch neue Einheit, Logrotate, Pool, Site
-#      samt Merker kommen zurück
+#      update:starten --warten): auch neue Einheit, Logrotate, Pool, Site,
+#      Node-RED-Flows samt Merker kommen zurück
 #   6. Abbruch (systemctl stop) und Absturz (SIGKILL) mitten in einem Update
 #      aus der Oberfläche: Zurückrollen bzw. Nachlauf und Wiederanlauf über
 #      den Update-Dienst; ein zweiter Lauf wartet nicht, sondern meldet „besetzt“
@@ -46,7 +50,8 @@
 # Mit --umstieg=<commit> stattdessen der einmalige Umstieg von einer Fassung
 # ohne Update-Funktion (Job „Umstieg“): U1 Erstinstallation dieses Stands,
 # U2 genau der Befehl aus der Anleitung (zwei Läufe in einer Einheit) –
-# danach ist die Update-Funktion eingerichtet; U3 ein Update über die
+# danach ist die Update-Funktion eingerichtet, die Flows sind neu und alle
+# Migrationen (auch 018, Tanks) eingespielt; U3 ein Update über die
 # Oberfläche.
 #
 # Aufruf:  tests/installation-debian.sh
@@ -165,6 +170,9 @@ IST="$ZIEL/storage/update/ist"
 UPDATE_EINHEITEN=(powermanagement-update.service powermanagement-update.path powermanagement-update.timer
                   powermanagement-update-zeitplan.service powermanagement-update-zeitplan.timer)
 WARTUNG="$ZIEL/storage/update/ist/wartung"
+# Node-RED-Flows der Installation und die neue Fassung daneben (behaltene Flows)
+NR_FLOWS=/var/lib/powermanagement/node-red/flows.json
+NR_NEU=/var/lib/powermanagement/node-red/flows.powermanagement-neu.json
 FEHLER=0
 
 schritt() { printf '\n\033[1;35m### %s\033[0m\n' "$1"; }
@@ -205,12 +213,13 @@ update_lauf() {
     sed 's/^/  | /' "$LAUF"
 }
 # Alles, was ein Zurückrollen wiederherstellen muss: Einheiten, Logrotate,
-# Pool, Site, Mosquitto, die gemerkten Vorlagen, das Schema, der Zweig.
+# Pool, Site, Mosquitto, Node-RED-Flows, die gemerkten Vorlagen, das Schema,
+# der Zweig.
 pruefsummen() {
     sha256sum /etc/systemd/system/powermanagement-* /etc/logrotate.d/powermanagement \
         /etc/php/*/fpm/pool.d/powermanagement.conf /etc/nginx/sites-available/powermanagement \
         /etc/mosquitto/powermanagement.acl /etc/mosquitto/conf.d/powermanagement.conf \
-        /var/lib/powermanagement/vorlagen/* 2>&1
+        "$NR_FLOWS" /var/lib/powermanagement/vorlagen/* 2>&1
     runuser -u www-data -- php -r '$p = new PDO("sqlite:" . $argv[1]);
         foreach ($p->query("SELECT name, sql FROM sqlite_master ORDER BY name") as $r) { echo $r[0], "|", $r[1], "\n"; }' \
         "$ZIEL/storage/database.sqlite" | sha256sum
@@ -663,6 +672,12 @@ if [[ -n "$UMSTIEG" ]]; then
         pruefe "$einheit eingerichtet" test -f "/etc/systemd/system/$einheit"
     done
     pruefe "ist/stand: installiert = neuer Stand" warte_auf 30 grep -qE "^installiert $NEU [0-9]+$" "$IST/stand"
+    # Neuere Flows (etwa die Analogeingänge der Tanksensoren) bringt schon Lauf 1
+    # mit dem alten Skript – niemand hat sie im Editor geändert.
+    pruefe "Node-RED-Flows auf dem neuen Stand" cmp -s "$ZIEL/deploy/node-red/flows.json" "$NR_FLOWS"
+    pruefe "keine behaltenen Flows" bash -c '[[ ! -e "$1" ]] && ! grep -qF "im Editor verändert" "$2"' _ "$NR_NEU" "$LAUF"
+    pruefe "alle Migrationen eingespielt (auch 018, Tanks)" app_php '$da = array_column(\App\Support\Database::select("SELECT name FROM migrations"), "name");
+        $fehlt = array_diff(array_map("basename", glob("database/migrations/*.sql")), $da); exit($fehlt === [] && in_array("018_tanks.sql", $da, true) ? 0 : 1);'
     pruefe_installation
     abschluss "Umstieg U2"
 
@@ -853,6 +868,44 @@ pruefe "Ergebnis eingespielt" enthaelt "$LAUF" "==> Ergebnis: eingespielt"
 pruefe_installation
 abschluss "Update ohne HOME"
 
+# ------------------------------------------------------------ 3c
+schritt "3c · Node-RED-Flows: unverändert ersetzt, im Editor verändert behalten (mit Hinweis), --flows-ersetzen"
+# Neue Flows (wie die Analogeingänge der Tanksensoren) – an der Installation hat niemand etwas geändert.
+NEU="$(neuer_stand "Neue Fassung der Flows" \
+    "sed -i 's/\"name\": \"Shelly Gen1\",/\"name\": \"Shelly Gen1 · 3c\",/' deploy/node-red/flows.json; grep -qF 'Shelly Gen1 · 3c' deploy/node-red/flows.json")"
+update_lauf
+pruefe "unveränderte Flows: Update endet mit 0 (kam: $RC)" test "$RC" = 0
+pruefe "unveränderte Flows: durch die neue Fassung ersetzt" cmp -s "$ZIEL/deploy/node-red/flows.json" "$NR_FLOWS"
+pruefe "unveränderte Flows: Meldung im Protokoll" enthaelt "$LAUF" "Node-RED-Flows auf die mitgelieferte Fassung gebracht"
+pruefe "unveränderte Flows: keine Datei daneben, kein Hinweis" \
+    bash -c '[[ ! -e "$1" ]] && ! grep -qF flows_behalten "$2" && grep -qF "==> Ergebnis: eingespielt –" "$2"' _ "$NR_NEU" "$LAUF"
+pruefe "Flows gehören nodered (640)" test "$(stat -c %U:%G:%a "$NR_FLOWS")" = nodered:nodered:640
+pruefe "Node-RED läuft mit den neuen Flows" warte_auf 60 systemctl is-active --quiet powermanagement-nodered.service
+# Im Editor verändert und bereitgestellt – hier: eine Zeile in flows.json.
+sed -i 's/"name": "Shelly Gen1 · 3c",/"name": "Shelly Gen1 · eigene Fassung",/' "$NR_FLOWS"
+chown nodered:nodered "$NR_FLOWS"
+chmod 640 "$NR_FLOWS"
+EIGENE="$(sha256sum < "$NR_FLOWS")"
+NEU="$(neuer_stand "Noch eine Fassung der Flows" \
+    "sed -i 's/Shelly Gen1 · 3c/Shelly Gen1 · 3c, zweite/' deploy/node-red/flows.json; grep -qF 'Shelly Gen1 · 3c, zweite' deploy/node-red/flows.json")"
+update_lauf
+pruefe "veränderte Flows: Update endet mit 0 (kam: $RC)" test "$RC" = 0
+pruefe "veränderte Flows: bleiben, wie sie sind" test "$(sha256sum < "$NR_FLOWS")" = "$EIGENE"
+pruefe "veränderte Flows: die neue Fassung liegt daneben" cmp -s "$ZIEL/deploy/node-red/flows.json" "$NR_NEU"
+pruefe "veränderte Flows: Hinweis nennt die Tanksensoren" enthaelt "$LAUF" "Tanksensoren brauchen die neuen Flows"
+pruefe "veränderte Flows: Ergebnis mit Hinweis flows_behalten" \
+    bash -c 'grep -qF "==> Ergebnis: eingespielt_mit_warnung" "$1" && grep -qF "Hinweise:  flows_behalten" "$1"' _ "$LAUF"
+pruefe "veränderte Flows: die Zusammenfassung sagt es noch einmal" enthaelt "$LAUF" "Node-RED:  Flows im Editor verändert und behalten"
+update_lauf --flows-ersetzen
+pruefe "--flows-ersetzen endet mit 0 (kam: $RC)" test "$RC" = 0
+pruefe "--flows-ersetzen: die mitgelieferte Fassung" cmp -s "$ZIEL/deploy/node-red/flows.json" "$NR_FLOWS"
+pruefe "--flows-ersetzen: die eigene Fassung als flows.json.vor-<zeit>" \
+    bash -c 'for f in "$1".vor-*; do [[ -f "$f" && "$(sha256sum < "$f")" == "$2" ]] && exit 0; done; exit 1' _ "$NR_FLOWS" "$EIGENE"
+pruefe "--flows-ersetzen: keine Datei mehr daneben" test ! -e "$NR_NEU"
+pruefe "--flows-ersetzen: Ergebnis aktuell" enthaelt "$LAUF" "==> Ergebnis: aktuell – Node-RED-Flows neu eingespielt"
+pruefe_installation
+abschluss "Node-RED-Flows"
+
 # ------------------------------------------------------------ 4
 schritt "4 · Update über die Oberfläche mit Selbst-Update: die neue Fassung übernimmt im selben Lauf"
 ALT="$(kopf)"
@@ -936,6 +989,8 @@ NEU="$(neuer_stand "Anmeldeseite kaputt" '
     printf "# Prüfung\n" >> deploy/powermanagement.logrotate
     printf "; Prüfung\n" >> deploy/php-fpm-pool.conf
     printf "# Prüfung\n" >> deploy/nginx-powermanagement.conf
+    sed -i "s/\"name\": \"Line Protocol und InfluxDB\",/\"name\": \"Line Protocol und InfluxDB · 5b\",/" deploy/node-red/flows.json
+    grep -q "InfluxDB · 5b" deploy/node-red/flows.json
     printf "[Unit]\nDescription=Prüfung\n\n[Timer]\nOnCalendar=yearly\nUnit=powermanagement-wartung.service\n" \
         > deploy/powermanagement-pruefung.timer
     sed -i "/^        powermanagement-wartung.timer\$/a\\        powermanagement-pruefung.timer" deploy/update-debian.sh
@@ -952,7 +1007,7 @@ pruefe "Anmeldeseite scheiterte erst mit dem neuen Code" enthaelt "$IST/protokol
 pruefe "Abgleich mit der alten Fassung" enthaelt "$IST/protokoll" "Abgleich mit der alten Fassung:"
 pruefe "Stand wie vorher" test "$(kopf)" = "$ALT"
 pruefe "Zweig bleibt main" test "$(zweig)" = main
-pruefe "Einheiten, Logrotate, Pool, Site samt Merker und Schema wie vorher" test "$(pruefsummen)" = "$SUMMEN"
+pruefe "Einheiten, Logrotate, Pool, Site, Flows samt Merker und Schema wie vorher" test "$(pruefsummen)" = "$SUMMEN"
 [[ "$(pruefsummen)" == "$SUMMEN" ]] || diff <(printf '%s\n' "$SUMMEN") <(pruefsummen) | sed 's/^/            /'
 pruefe "neue Einheit entfernt" test ! -e /etc/systemd/system/powermanagement-pruefung.timer
 pruefe "neue Einheit nicht aktiv" bash -c '! systemctl is-active --quiet powermanagement-pruefung.timer'

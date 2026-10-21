@@ -1247,11 +1247,27 @@ abgleichen() {
                 hinweis "Die Node-RED-Flows wurden im Editor verändert und bleiben, wie sie sind."
                 hinweis "Die neue Fassung liegt unter $NODERED_DIR/flows.powermanagement-neu.json –"
                 hinweis "im Editor über Menü → Importieren übernehmen, oder: $0 --flows-ersetzen"
-                hinweis "Eigene MQTT-Zugänge der Shellys brauchen die neuen Flows (Schutzliste pm/status/mqtt-zugaenge,"
+                hinweis "Tanksensoren brauchen die neuen Flows (Analogeingänge: Voltmeter, Analog-Input, Uni-ADC) – sonst"
+                hinweis "kommen von ihnen keine Rohwerte an. Eigene MQTT-Zugänge der Shellys ebenso (Schutzliste pm/status/mqtt-zugaenge,"
                 hinweis "Antworten unter <präfix>/pm-nodered/rpc) – sonst meldet die Seite „MQTT-Zugänge“, dass Node-RED sie nicht bestätigt."
                 WARNUNGEN+=(flows_behalten) ;;
         esac
     fi
+    return 0
+}
+
+# Am Ende eines Laufs (Zusammenfassung, Nachholen) noch einmal, wenn die
+# Flows blieben: was neu in den Flows ist, kommt dann nicht an – die
+# Hinweise oben stehen weit vor dem Ergebnis.
+flows_behalten_melden() {
+    local w
+    for w in ${WARNUNGEN[@]+"${WARNUNGEN[@]}"}; do
+        [[ "$w" == flows_behalten ]] || continue
+        echo "  Node-RED:  Flows im Editor verändert und behalten – die neue Fassung liegt unter"
+        echo "             $NODERED_DIR/flows.powermanagement-neu.json. Tanksensoren und eigene MQTT-Zugänge"
+        echo "             brauchen sie: im Editor Menü → Importieren, oder $ZIEL/deploy/update-debian.sh --flows-ersetzen"
+        return 0
+    done
     return 0
 }
 
@@ -2093,6 +2109,7 @@ nachholen_ohne_neuen_code() {
     trap - ERR
     trap '' INT TERM HUP
     dienst_anstossen
+    flows_behalten_melden
     ergebnis aktuell - "$satz"
     exit 0
 }
@@ -2255,6 +2272,7 @@ erfolg() {
   Jetzt:     $(g log -1 --format='%h %s')
 ZUSAMMENFASSUNG
     [[ ${#WARNUNGEN[@]} -gt 0 ]] && echo "  Hinweise:  ${WARNUNGEN[*]}"
+    flows_behalten_melden
     if [[ "$SICHERUNG" != "-" ]]; then
         cat <<ZUSAMMENFASSUNG
   Sicherung: $SICHERUNG

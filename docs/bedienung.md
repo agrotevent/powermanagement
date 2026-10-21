@@ -1088,7 +1088,11 @@ meldet „Dienste starten neu …“ und macht von selbst weiter). Solange das
 Update läuft, nimmt die Oberfläche keine Änderungen an: Speichern meldet
 „Gerade läuft ein Update – Änderungen sind in etwa einer Minute wieder
 möglich“. Übergabeberichte speichern danach von selbst noch einmal, die
-Eingaben bleiben solange auf dem Gerät. Andere Instanzen bekommen über die
+Eingaben bleiben solange auf dem Gerät. Eine Peilung oder Betankung, die
+beim Start des Updates schon auf den Rohwert des Sensors wartete, trägt
+das Update noch ein, bevor es sichert; im Kartenpanel bleibt eine
+abgewiesene Eingabe stehen und lässt sich nach einer Minute noch einmal
+abschicken. Andere Instanzen bekommen über die
 Schnittstelle dieselbe Antwort (HTTP 503) – wer dort sendet, schickt es nach
 einer Minute noch einmal. Geht etwas schief, kommt der alte Stand von selbst zurück –
 Code, Datenbank und Einrichtung. Läuft gerade ein Aufbau oder wurde in den
