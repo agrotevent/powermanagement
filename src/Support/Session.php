@@ -34,12 +34,32 @@ final class Session
         $_SESSION['last_activity'] = time();
     }
 
+    /*
+     * Warten, ohne die Sitzung zu halten.
+     *
+     * PHP sperrt die Sitzungsdatei, solange sie offen ist – für die ganze
+     * Anfrage. Wartet eine Anfrage dabei (InfluxDB, Eventworx, eine andere
+     * Instanz), steht jede weitere desselben Browsers so lange an: andere
+     * Reiter, Live-Abfragen, das Speichern eines Formulars. Drei Wege:
+     *
+     *   freigeben()   schließen; danach wird nur noch gelesen.
+     *   nachtragen()  nach freigeben() kurz wieder öffnen, um etwas
+     *                 Kleines nachzutragen (der Eventworx-Vorgang), und
+     *                 gleich wieder schließen.
+     *   ohneSperre()  nur für das Warten schließen und danach wieder öffnen:
+     *                 die Anfrage schreibt danach weiter (Meldungen, Eingaben)
+     *                 und leitet weiter – Anfragen an andere Instanzen.
+     *
+     * Wiedergeöffnet wird über wiederOeffnen(): dieselbe Kennung, ohne
+     * zweites Set-Cookie und nur, wenn es noch dieselbe Sitzung desselben
+     * Benutzers ist. Was eine andere Anfrage in der Zwischenzeit geschrieben
+     * hat, gilt – sie hat unseren Stand gelesen und ihren dazugeschrieben.
+     */
+
     /**
      * Die Sitzung schließen, bevor eine Anfrage auf etwas wartet – Livewerte
-     * aus der InfluxDB etwa. PHP sperrt die Sitzungsdatei, solange sie offen
-     * ist: Jede weitere Anfrage desselben Browsers stünde so lange an, auch
-     * das Speichern eines Formulars. Danach wird nur noch gelesen; was noch in
-     * $_SESSION geschrieben würde, bliebe nicht erhalten.
+     * aus der InfluxDB etwa. Danach wird nur noch gelesen; was noch in
+     * $_SESSION geschrieben würde, bliebe nicht erhalten (dafür nachtragen()).
      */
     public static function freigeben(): void
     {
@@ -49,33 +69,43 @@ final class Session
     }
 
     /**
+     * Nach freigeben() doch noch etwas in die Sitzung schreiben, wenn das
+     * Warten vorbei ist: Die Sitzung wird kurz wieder geöffnet (wiederOeffnen()),
+     * $aenderung schreibt in $_SESSION, dann wird sie wieder freigegeben. Ist
+     * es inzwischen eine andere Sitzung oder ein anderer Benutzer (abgemeldet,
+     * Kennwort geändert, abgelaufen), wird nichts geschrieben: false – der
+     * Aufrufer antwortet dann wie ohne Anmeldung. Ist die Sitzung noch offen,
+     * läuft $aenderung einfach so.
+     */
+    public static function nachtragen(callable $aenderung): bool
+    {
+        if (session_status() === PHP_SESSION_ACTIVE) {
+            $aenderung();
+            return true;
+        }
+        if (!self::wiederOeffnen(self::kennung(), $_SESSION['user_id'] ?? null)) {
+            return false;
+        }
+        $aenderung();
+        session_write_close();
+        return true;
+    }
+
+    /**
      * $arbeit ohne Sitzungssperre ausführen – das Warten auf eine andere
      * Instanz etwa, bei einer Plandatei bis zu Minuten – und die Sitzung
-     * danach wieder öffnen.
+     * danach wieder öffnen (wiederOeffnen()). Anders als nach freigeben() ist
+     * sie dann wieder offen: Die Anfrage kann noch Meldungen (Flash) schreiben
+     * und weiterleiten. $arbeit selbst schreibt nichts in $_SESSION, es ginge
+     * verloren. Wiedergeöffnet wird nur, solange noch nichts ausgegeben ist –
+     * also vor der Ansicht aufrufen. Ohne offene Sitzung (Kommandozeile, /api,
+     * schon freigegeben) läuft $arbeit einfach so, und die Sitzung bleibt zu.
      *
-     * PHP sperrt die Sitzungsdatei für die ganze Anfrage. Wer dabei wartet,
-     * hält jede weitere Anfrage desselben Browsers auf: andere Reiter,
-     * Live-Abfragen, das Speichern eines Formulars. Anders als nach
-     * freigeben() ist die Sitzung danach wieder offen – die Anfrage kann noch
-     * Meldungen (Flash) schreiben und weiterleiten.
-     *
-     * Beim Schließen wird geschrieben, was bis dahin in $_SESSION steht. Beim
-     * Wiederöffnen kommt $_SESSION neu aus der Ablage: Was eine andere
-     * Anfrage in der Zwischenzeit geschrieben hat, gilt – sie hat unseren
-     * Stand gelesen und ihren dazugeschrieben. $arbeit selbst schreibt
-     * deshalb nichts in $_SESSION, es ginge verloren. Wiedergeöffnet wird
-     * nur, solange noch nichts ausgegeben ist – also vor der Ansicht
-     * aufrufen. Ohne offene Sitzung (Kommandozeile, /api) läuft $arbeit
-     * einfach so.
-     *
-     * Gibt es die Sitzung danach nicht mehr, bleibt sie zu: Ein anderer
-     * Reiter hat sich abgemeldet oder das Kennwort geändert (neue ID, die
-     * alte Datei gelöscht). Wegen strict_mode legte PHP sonst eine neue,
-     * leere Sitzung an und schickte ihr Cookie – das überschriebe im Browser
-     * das aus dem Kennwortwechsel (abgemeldet, „Passwort geändert.“ weg),
-     * oder nach dem Abmelden landeten Meldung und Eingaben dieser Anfrage in
-     * einer anonymen Sitzung und überdauerten die nächste Anmeldung. Was die
-     * Anfrage dann noch in $_SESSION schreibt, geht verloren.
+     * Gibt es die Sitzung danach nicht mehr – ein anderer Reiter hat sich
+     * abgemeldet oder das Kennwort geändert (neue ID, die alte Datei
+     * gelöscht) –, bleibt sie zu. Was die Anfrage dann noch in $_SESSION
+     * schreibt, geht verloren; $_SESSION ist leer, die Anfrage gilt als
+     * abgemeldet.
      *
      * @template T
      * @param callable():T $arbeit
@@ -86,35 +116,79 @@ final class Session
         if (session_status() !== PHP_SESSION_ACTIVE) {
             return $arbeit();
         }
-        $id = session_id();
+        $id = self::kennung();
+        $benutzer = $_SESSION['user_id'] ?? null;
         session_write_close();
         try {
             return $arbeit();
         } finally {
-            // Name, Cookie-Parameter und strict_mode stehen noch von start().
-            // Die Kopfzeilen gegen Zwischenspeichern hat der erste Start
-            // gesetzt – nicht noch einmal, sie überschrieben sonst, was die
-            // Anfrage seitdem selbst gesetzt hat.
-            if (session_status() !== PHP_SESSION_ACTIVE && !headers_sent()) {
-                session_start(['cache_limiter' => '']);
-                if (session_id() !== $id) {
-                    // Die neue, leere Sitzung wieder weg – samt ihrem Cookie.
-                    $_SESSION = [];
-                    session_destroy();
-                    self::sitzungsCookieZuruecknehmen();
-                }
-            }
+            self::wiederOeffnen($id, $benutzer);
         }
     }
 
-    /** Das Set-Cookie der Sitzung aus der Antwort nehmen; andere Cookies bleiben. */
-    private static function sitzungsCookieZuruecknehmen(): void
+    /** Die Kennung der Sitzung – auch nach session_write_close() noch die alte. */
+    private static function kennung(): string
     {
-        $sitzung = '/^set-cookie:\s*' . preg_quote(session_name(), '/') . '=/i';
-        $andere = array_filter(headers_list(), static fn (string $kopf): bool
-            => preg_match('/^set-cookie:/i', $kopf) === 1 && preg_match($sitzung, $kopf) !== 1);
+        $id = session_id();
+        return is_string($id) ? $id : '';
+    }
+
+    /**
+     * Die Sitzung $id nach session_write_close() wieder öffnen. true nur,
+     * wenn es noch sie ist und sie noch $benutzer gehört; sonst bleibt sie zu.
+     *
+     * Name, Cookie-Parameter und strict_mode stehen noch von start(). Die
+     * Kopfzeilen gegen Zwischenspeichern hat der erste Start gesetzt – nicht
+     * noch einmal, sie überschrieben sonst, was die Anfrage seitdem selbst
+     * gesetzt hat. Und PHP schickt beim Wiederöffnen das Sitzungscookie noch
+     * einmal: Die Set-Cookie-Zeilen stehen danach wieder genau so wie davor.
+     *
+     * Hat ein anderer Reiter die Sitzung inzwischen beendet (Abmelden,
+     * Kennwortwechsel: neue ID, die alte Datei gelöscht), legte PHP wegen
+     * strict_mode eine neue, leere an und schickte ihr Cookie. Das
+     * überschriebe im Browser das aus dem Kennwortwechsel (abgemeldet,
+     * „Passwort geändert.“ weg), oder nach dem Abmelden landeten Meldung und
+     * Eingaben dieser Anfrage in einer anonymen Sitzung und überdauerten die
+     * nächste Anmeldung. Die neue Sitzung kommt also gleich wieder weg –
+     * samt Datei und Cookie.
+     */
+    private static function wiederOeffnen(string $id, mixed $benutzer): bool
+    {
+        if ($id === '' || session_status() !== PHP_SESSION_NONE || headers_sent()) {
+            return false;
+        }
+        $cookies = self::setCookieZeilen();
+        $offen = session_start(['cache_limiter' => '']);
+        self::setCookieZeilenSetzen($cookies);
+        if (!$offen) {
+            return false;
+        }
+        if (session_id() !== $id) {
+            $_SESSION = [];
+            session_destroy();
+            return false;
+        }
+        if (($_SESSION['user_id'] ?? null) !== $benutzer) {
+            // Dieselbe Sitzung, aber ein anderer Benutzer: nichts schreiben
+            // und mit ihren Daten auch nicht weiterarbeiten.
+            session_abort();
+            $_SESSION = [];
+            return false;
+        }
+        return true;
+    }
+
+    /** @return list<string> alle Set-Cookie-Zeilen, die die Antwort bisher hat */
+    private static function setCookieZeilen(): array
+    {
+        return array_values(array_filter(headers_list(), static fn (string $kopf): bool => preg_match('/^set-cookie:/i', $kopf) === 1));
+    }
+
+    /** @param list<string> $zeilen genau diese Set-Cookie-Zeilen, keine anderen */
+    private static function setCookieZeilenSetzen(array $zeilen): void
+    {
         header_remove('Set-Cookie');
-        foreach ($andere as $kopf) {
+        foreach ($zeilen as $kopf) {
             header($kopf, false);
         }
     }

@@ -5,6 +5,7 @@ namespace App\Controllers;
 
 use App\Auth\Auth;
 use App\Auth\Zugriff;
+use App\Berichte\BerichtService;
 use App\Messung\Messdaten;
 use App\Services\AnlagenService;
 use App\Services\InventarService;
@@ -55,6 +56,7 @@ final class InventarController extends Controller
             'stellen'     => InventarService::stellen($item),
             'geschichte'  => $geschichte,
             'darf'        => Auth::can('inventar.manage'),
+            'letztePruefung' => Auth::can('berichte.view') ? BerichtService::letzteAnInventar((int) $item['id']) : null,
         ]);
     }
 

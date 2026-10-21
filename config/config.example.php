@@ -102,4 +102,18 @@ return [
         'repo_url' => '',
         'branch'   => 'main',
     ],
+
+    /*
+     * Eventworx – Kundendaten für Übergabeberichte, nur lesend. Mandant und
+     * API-Token werden unter System → Einstellungen eingetragen (das Token
+     * verschlüsselt, nie aus dieser Datei). Erlaubt ist dort nur
+     * https://<mandant>.eventworx.biz.
+     *
+     * basis: nur für eine Test- oder eigene Installation, z. B.
+     * 'https://eventworx.intern.example'. Gilt nur, wenn in der Oberfläche
+     * genau diese Adresse eingetragen wird. Sonst leer lassen.
+     */
+    'eventworx' => [
+        'basis' => '',
+    ],
 ];

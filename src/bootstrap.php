@@ -79,7 +79,7 @@ set_exception_handler(static function (\Throwable $e) use ($schnittstelleAntwort
         echo '<pre>' . htmlspecialchars((string) $e, ENT_QUOTES) . '</pre>';
         return;
     }
-    echo View::render('errors/error', ['code' => 500, 'message' => 'Unerwarteter Fehler. Details stehen im Log.']);
+    echo View::render('errors/error', ['code' => 500, 'message' => 'Unerwarteter Fehler. Details stehen im Log.'], '');
 });
 
 // Fatale Fehler (Zeitlimit, Speichergrenze) erreichen den Handler oben
@@ -98,7 +98,7 @@ register_shutdown_function(static function () use ($schnittstelleAntwortet): voi
         if ($schnittstelleAntwortet()) {
             return;
         }
-        echo View::render('errors/error', ['code' => 500, 'message' => 'Unerwarteter Fehler. Details stehen im Log.']);
+        echo View::render('errors/error', ['code' => 500, 'message' => 'Unerwarteter Fehler. Details stehen im Log.'], '');
     }
 });
 unset($schnittstelleAntwortet);

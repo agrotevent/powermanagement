@@ -5,6 +5,7 @@ namespace App\Controllers;
 
 use App\Auth\Auth;
 use App\Auth\Zugriff;
+use App\Berichte\BerichtService;
 use App\Messung\Messdaten;
 use App\Services\AnlagenService;
 use App\Services\InventarService;
@@ -213,6 +214,9 @@ final class AnlagenController extends Controller
                 : [],
             'auswertung'   => MesspunktService::auswertung(),
             'reiter'       => $request->str('reiter', 'uebersicht'),
+            'letztePruefung' => (int) $objekt['ist_vorlage'] === 0 && Auth::can('berichte.view') ? BerichtService::letzteAnObjekt($id) : null,
+            'berichtNeu'   => (int) $objekt['ist_vorlage'] === 0 && $objekt['site_id'] !== null && Auth::can('berichte.manage')
+                && Zugriff::darfStandortAendern((int) $objekt['site_id']),
             'scripts'      => ['/assets/js/live.js'],
         ]);
     }

@@ -78,12 +78,14 @@ function erreichbar(string $host, int $port): bool
  * $umgebung ergänzt die Umgebung dieses Skripts oder überschreibt einzelne
  * Werte – etwa POWERMANAGEMENT_CONFIG für eine zweite Instanz oder
  * PHP_CLI_SERVER_WORKERS, damit der eingebaute Server sich selbst aufrufen kann.
+ * $fehlerDatei nimmt die Standardfehlerausgabe auf – beim eingebauten Server
+ * stehen dort die PHP-Warnungen (display_errors ist ohne app.debug aus).
  *
  * @param array<string,string>|null $umgebung
  */
-function hintergrund(array $befehl, ?array $umgebung = null): mixed
+function hintergrund(array $befehl, ?array $umgebung = null, ?string $fehlerDatei = null): mixed
 {
-    $p = proc_open($befehl, [1 => ['file', '/dev/null', 'w'], 2 => ['file', '/dev/null', 'w']], $rohre, null,
+    $p = proc_open($befehl, [1 => ['file', '/dev/null', 'w'], 2 => ['file', $fehlerDatei ?? '/dev/null', 'a']], $rohre, null,
         $umgebung === null ? null : $umgebung + getenv());
     register_shutdown_function(static function () use ($p): void {
         if (is_resource($p)) {

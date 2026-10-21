@@ -485,3 +485,339 @@ tr.abweichung-zeile td { background: var(--warning-light); }
 .vorschlag-etagen .badge + .badge { margin-left: .25rem; }
 .vorschlag-art { font-weight: 600; margin-top: .15rem; }
 .vorschlag-namen { margin: .1rem 0 .3rem; padding-left: 1rem; overflow-wrap: anywhere; }
+
+/* ------------------------------------------------------------ Übergabeberichte
+ *
+ * Ausgefüllt wird am Tablet und am Telefon, draußen, oft mit Handschuhen:
+ * Ziele mindestens 48 px (Touch 56 px), Eingaben mit 16–18 px (iOS zoomt
+ * sonst), Bewertungen immer mit Symbol und Wort, nie nur über die Farbe.
+ */
+.bericht { --ziel: 48px; --kopf-hoehe: 3.6rem; }
+@media (pointer: coarse) { .bericht { --ziel: 56px; } }
+.bericht input:not([type=checkbox]):not([type=radio]), .bericht select, .bericht textarea { font-size: 16px; min-height: 44px; }
+@media (pointer: coarse) {
+    .bericht input:not([type=checkbox]):not([type=radio]), .bericht select, .bericht textarea { font-size: 18px; min-height: var(--ziel); }
+    .bericht .btn { min-height: 48px; }
+    .bericht .btn-sm { min-height: 44px; }
+}
+.bericht textarea { font-family: inherit; min-height: 0; line-height: 1.4; }
+.bericht .field { margin-bottom: .7rem; }
+/* Formelzeichen und Einheiten nicht in Großbuchstaben: IΔn, R_iso, mA (nicht MA). */
+.bericht .field label, .bericht .form-label, .bericht-ansicht th, .bericht-ansicht .tabelle-karten td[data-label]::before { text-transform: none; letter-spacing: .01em; }
+.bericht .field label, .bericht .form-label { font-size: .8rem; }
+.bericht .field label.check { display: flex; text-transform: none; letter-spacing: 0; font-size: .88rem; font-weight: 500; color: var(--text); min-height: 44px; align-items: center; }
+.bericht .check input[type=checkbox] { width: 22px; height: 22px; flex: 0 0 22px; margin: 0; }
+.bericht label.check { gap: .55rem; }
+.bericht h3 { font-size: .82rem; text-transform: uppercase; letter-spacing: .05em; color: var(--text-muted); }
+.bericht-abschnitt { scroll-margin-top: calc(var(--kopf-hoehe) + 3.8rem); }
+[data-feld-ziel] { scroll-margin-top: calc(var(--kopf-hoehe) + 4.5rem); }
+[data-feld-ziel]:focus { outline: none; }
+.feld-markiert { box-shadow: 0 0 0 3px var(--danger) !important; border-radius: 8px; transition: box-shadow .2s ease; }
+.feld-raster { display: grid; gap: 0 .9rem; grid-template-columns: repeat(auto-fill, minmax(min(100%, 14rem), 1fr)); }
+.feld-raster .breit { grid-column: 1 / -1; }
+.mit-einheit { display: flex; align-items: center; gap: .4rem; }
+.mit-einheit input { flex: 1; min-width: 0; }
+.einheit { color: var(--text-muted); font-size: .78rem; text-transform: none; letter-spacing: 0; font-weight: 500; }
+.abgeleitet {
+    display: inline-block; margin-left: .3rem; padding: 0 .35rem; border-radius: 4px; background: #fef3c7; color: #92400e;
+    font-size: .62rem; font-weight: 700; text-transform: none; letter-spacing: 0; vertical-align: 1px;
+}
+
+/* Leiste mit den Abschnitten und dem Speicherstand – bleibt oben stehen. */
+.bericht-leiste {
+    position: sticky; top: var(--kopf-hoehe); z-index: 15; display: flex; align-items: center; gap: .5rem;
+    margin: 0 -.2rem .8rem; padding: .4rem .2rem; background: var(--bg); border-bottom: 1px solid var(--border);
+}
+.abschnittsleiste { display: flex; gap: .35rem; flex: 1; min-width: 0; overflow-x: auto; scrollbar-width: none; -webkit-overflow-scrolling: touch; }
+.abschnittsleiste::-webkit-scrollbar { display: none; }
+.abschnittsleiste a {
+    display: inline-flex; align-items: center; gap: .35rem; flex: 0 0 auto; min-height: 40px; padding: .35rem .75rem;
+    border: 1px solid var(--border); border-radius: 999px; background: var(--surface); color: var(--text); font-size: .82rem; font-weight: 550;
+}
+.abschnittsleiste a:hover { text-decoration: none; border-color: var(--primary); }
+.abschnittsleiste a.aktiv { border-color: var(--primary); background: var(--primary-light); color: var(--primary-dark); }
+.stand { font-size: .7rem; font-weight: 750; padding: .02rem .4rem; border-radius: 999px; background: var(--warning-light); color: var(--warning); }
+.stand.ok { background: var(--success-light); color: var(--success); }
+.stand.mangel { background: var(--danger-light); color: var(--danger); }
+.speicherstand {
+    flex: 0 0 auto; padding: .3rem .65rem; border-radius: 999px; font-size: .74rem; font-weight: 650; white-space: nowrap;
+    background: var(--surface-alt); color: var(--text-muted); border: 1px solid var(--border);
+}
+.speicherstand.ok { background: var(--success-light); color: var(--success); border-color: transparent; }
+.speicherstand.ok::before { content: '✓ '; }
+.speicherstand.laeuft { background: var(--info-light); color: var(--info); border-color: transparent; }
+.speicherstand.warn { background: var(--warning-light); color: var(--warning); border-color: transparent; }
+.speicherstand.fehler { background: var(--danger); color: #fff; border-color: transparent; }
+.speicherstand.warn::before, .speicherstand.fehler::before { content: '! '; }
+.speicher-meldung, .lokal-leiste {
+    display: flex; flex-wrap: wrap; align-items: center; gap: .5rem .8rem; margin-bottom: .8rem;
+}
+.speicher-meldung { padding: .6rem .8rem; border-radius: 8px; background: var(--danger-light); color: #7f1d1d; font-size: .85rem; }
+.lokal-leiste { justify-content: space-between; }
+
+/* Segmentschalter: i.O. / n.i.O. / entfällt, ja / nein, Netzform */
+.dreiwahl { display: inline-flex; flex-wrap: wrap; border: 1px solid #cbd5e1; border-radius: 10px; overflow: hidden; background: var(--surface); max-width: 100%; }
+.dreiwahl label { position: relative; display: inline-flex; margin: 0; }
+.dreiwahl input { position: absolute; opacity: 0; width: 1px; height: 1px; pointer-events: none; }
+.dreiwahl span {
+    display: inline-flex; align-items: center; justify-content: center; min-width: 4.1rem; min-height: var(--ziel); padding: 0 .75rem;
+    border-left: 1px solid #cbd5e1; color: var(--text-muted); font-weight: 650; font-size: .86rem; cursor: pointer; user-select: none; -webkit-user-select: none;
+}
+.dreiwahl label:first-child span { border-left: 0; }
+.dreiwahl input:focus-visible + span { outline: 3px solid var(--primary); outline-offset: -3px; }
+.dreiwahl input:checked + span { background: #475569; color: #fff; }
+.dreiwahl .wahl-io input:checked + span, .dreiwahl .wahl-ja input:checked + span { background: var(--success); }
+.dreiwahl .wahl-nio input:checked + span, .dreiwahl .wahl-nein input:checked + span { background: var(--danger); }
+.dreiwahl .wahl-io input:checked + span::before, .dreiwahl .wahl-ja input:checked + span::before { content: '✓ '; white-space: pre; }
+.dreiwahl .wahl-nio input:checked + span::before, .dreiwahl .wahl-nein input:checked + span::before { content: '✗ '; white-space: pre; }
+.dreiwahl.netzform span { min-width: 3.7rem; }
+.chip.vorschlag { cursor: pointer; min-height: 40px; padding: .3rem .8rem; margin-top: .4rem; font-size: .8rem; font-family: inherit; color: var(--primary-dark); background: var(--primary-light); border-color: transparent; }
+.pruefer-zeile { display: flex; flex-wrap: wrap; align-items: baseline; gap: .3rem .7rem; padding: .3rem 0 .2rem; }
+.pruefer-zeile .form-label { margin: 0; }
+
+/* Prüfpunkte */
+.punkte { display: grid; }
+.punkt { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: .35rem .7rem; align-items: center; padding: .55rem 0; border-bottom: 1px solid var(--border); }
+.punkt:last-child { border-bottom: 0; }
+.punkt-text { font-size: .9rem; line-height: 1.35; }
+.punkt-quelle { font-size: .68rem; color: var(--text-muted); white-space: nowrap; }
+.punkt-hinweis { font-size: .76rem; color: var(--warning); margin-top: .2rem; }
+.punkt-hinweis::before { content: '! '; font-weight: 800; }
+.punkt-bemerkung { grid-column: 1 / -1; }
+.punkt-bemerkung .field { margin-bottom: .2rem; }
+.weitere-punkte { margin: .2rem 0 .4rem; }
+.weitere-punkte > summary, .kreise-ergaenzen > summary, .bericht details > summary { cursor: pointer; color: var(--primary); font-weight: 600; font-size: .84rem; min-height: 44px; display: flex; align-items: center; }
+
+/* Messwerte: Operator-Umschalter und Zahlenfeld */
+.messfeld { min-width: 0; margin-bottom: .2rem; }
+.messfeld label { display: block; font-size: .72rem; font-weight: 650; color: var(--text-muted); margin-bottom: .2rem; white-space: nowrap; }
+.messfeld-eingabe { display: flex; min-width: 0; }
+/* Zielgröße wie die übrigen Knöpfe: mindestens 48 px, mit dem Finger 56 px (auch am Telefon). */
+.op-wahl {
+    flex: 0 0 3rem; min-height: 48px; border: 1px solid var(--border); border-right: 0; border-radius: 8px 0 0 8px;
+    background: var(--surface-alt); color: var(--text-muted); font: inherit; font-size: 1rem; font-weight: 800; cursor: pointer; padding: 0;
+}
+.op-wahl[value=">"], .op-wahl[value="<"] { background: var(--warning-light); color: var(--warning); }
+.messfeld-eingabe input { flex: 1; min-width: 0; border-radius: 0 8px 8px 0; text-align: right; font-variant-numeric: tabular-nums; }
+@media (pointer: coarse) { .op-wahl { min-height: var(--ziel); flex-basis: 3.5rem; } }
+.grenze { font-size: .7rem; color: var(--text-muted); margin-top: .12rem; min-height: 1.05em; font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+/* Stromkreise: Karten, ab genügend Breite sechs Werte in einer Reihe */
+.kreise { display: grid; gap: .7rem; container-type: inline-size; }
+.kreise-kopf { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; margin-bottom: .4rem; }
+.kreis {
+    min-width: 0; padding: .55rem .7rem .2rem; border: 1px solid var(--border); border-left: 5px solid var(--stufe-keine);
+    border-radius: var(--radius); background: var(--surface);
+}
+.kreis.stufe-ok { border-left-color: var(--stufe-ok); }
+.kreis.stufe-hinweis, .kreis.stufe-manuell { border-left-color: var(--stufe-warn); }
+.kreis.stufe-mangel { border-left-color: var(--stufe-bad); }
+.kreis.stufe-fehlt { border-left-color: #6366f1; }
+.kreis.stufe-entf { border-left-color: var(--stufe-stumm); }
+.kreis-kopf { display: grid; grid-template-columns: 4rem minmax(0, 1fr) auto; gap: .6rem; align-items: start; }
+.kreis-kopf .field { margin-bottom: .25rem; }
+.kreis-kopf .bewertung { margin-top: 1.35rem; }
+.kreis-info { display: flex; flex-wrap: wrap; gap: .1rem .8rem; font-size: .74rem; color: var(--text-muted); }
+.kreis-kabel::before { content: '↳ '; }
+.kreis-werte { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: .45rem .55rem; margin-top: .25rem; }
+@container (min-width: 640px) { .kreis-werte { grid-template-columns: repeat(6, minmax(0, 1fr)); } }
+/* Am schmalen Telefon zwei Werte je Reihe – sonst bliebe neben dem Operator kaum Platz für die Zahl. */
+@container (max-width: 400px) { .kreis-werte { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+.kreis-details { border-top: 1px dashed var(--border); margin-top: .3rem; }
+.kreis-aktionen { margin: .2rem 0 .6rem; }
+.meldungen { list-style: none; padding: 0; margin: .25rem 0; font-size: .78rem; }
+.meldungen:empty { display: none; }
+.meldungen li { padding: .1rem 0; }
+.meldungen li::before { content: '• '; }
+.meldungen li.mangel { color: var(--danger); font-weight: 600; }
+.meldungen li.hinweis, .meldungen li.manuell { color: var(--warning); }
+.meldungen li.fehlt { color: #4338ca; }
+.meldungen li.info { color: var(--text-muted); }
+.bewertung-zeile { display: flex; flex-wrap: wrap; align-items: center; gap: .3rem .7rem; margin: .1rem 0 .7rem; }
+.bewertung-zeile .meldungen { flex-basis: 100%; margin: 0; }
+
+/* Bewertung: Symbol und Wort */
+.bewertung {
+    display: inline-flex; align-items: center; gap: .25rem; padding: .2rem .6rem; border-radius: 999px; white-space: nowrap;
+    font-size: .76rem; font-weight: 750; background: var(--surface-alt); color: var(--text-muted); border: 1px solid var(--border);
+}
+.bewertung.ok { background: var(--success-light); color: var(--success); border-color: transparent; }
+.bewertung.hinweis { background: var(--warning-light); color: var(--warning); border-color: transparent; }
+.bewertung.mangel { background: var(--danger-light); color: var(--danger); border-color: transparent; }
+.bewertung.fehlt { background: #e0e7ff; color: #3730a3; border-color: transparent; }
+.bewertung.manuell { background: #ede9fe; color: #5b21b6; border-color: transparent; }
+
+/* Auswahl als Chips (Normen, Prüfgeräte) */
+.chips { display: flex; flex-wrap: wrap; gap: .4rem; margin-bottom: .6rem; }
+.chip-wahl { position: relative; display: inline-flex; margin: 0; }
+.chip-wahl input { position: absolute; opacity: 0; width: 1px; height: 1px; pointer-events: none; }
+.chip-wahl span {
+    display: inline-flex; align-items: center; gap: .3rem; min-height: 44px; padding: .3rem .8rem;
+    border: 1px solid #cbd5e1; border-radius: 999px; background: var(--surface); font-size: .82rem; cursor: pointer; user-select: none; -webkit-user-select: none;
+}
+.chip-wahl input:checked + span { background: var(--primary-light); border-color: var(--primary); color: var(--primary-dark); font-weight: 650; }
+.chip-wahl input:checked + span::before { content: '✓'; }
+.chip-wahl input:focus-visible + span { outline: 3px solid var(--primary); outline-offset: 1px; }
+.chip-wahl small { font-size: .7rem; color: var(--danger); font-weight: 650; }
+
+/* Kunde: Freitext | Eventworx | aus früherem Bericht */
+.reiter { display: flex; gap: .2rem; border-bottom: 1px solid var(--border); margin-bottom: .8rem; overflow-x: auto; scrollbar-width: none; }
+.reiter-knopf {
+    flex: 0 0 auto; min-height: 44px; padding: .5rem .85rem; border: 0; border-bottom: 3px solid transparent; background: none;
+    font: inherit; font-size: .86rem; font-weight: 650; color: var(--text-muted); cursor: pointer; white-space: nowrap;
+}
+.reiter-knopf[aria-selected="true"] { color: var(--primary); border-bottom-color: var(--primary); }
+.reiter-knopf.grau { opacity: .55; }
+.ewx-suche { display: flex; gap: .5rem; }
+.ewx-suche input, .ewx-suche select { flex: 1; min-width: 0; }
+.ewx-treffer { list-style: none; padding: 0; margin: .4rem 0 0; display: grid; gap: .4rem; }
+.ewx-treffer button {
+    display: grid; gap: .1rem; width: 100%; min-height: var(--ziel); padding: .55rem .8rem; text-align: left; cursor: pointer;
+    border: 1px solid var(--border); border-radius: 10px; background: var(--surface); font: inherit; color: var(--text);
+}
+.ewx-treffer button:hover, .ewx-treffer button:focus-visible { border-color: var(--primary); }
+.ewx-verweis {
+    display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: .4rem .8rem;
+    margin-top: .8rem; padding: .5rem .7rem; border-radius: 8px; background: var(--info-light); font-size: .84rem;
+}
+
+/* Ergebnis, Mängel, Prüfen */
+.vorschlag { padding: .5rem .75rem; border-radius: 8px; background: var(--info-light); color: #0c4a6e; font-size: .86rem; }
+.vorschlag:empty { display: none; }
+.vorschlag.nein { background: var(--danger-light); color: #7f1d1d; }
+.maengel { display: grid; gap: .6rem; margin-bottom: .8rem; }
+.mangel { padding: .6rem .7rem .3rem; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface-alt); }
+.errichter { margin-top: .4rem; padding: .6rem .7rem; border-radius: 8px; border: 1px dashed var(--border); }
+.pruef-ergebnis { margin-top: .8rem; }
+.pruef-zusammenfassung { font-weight: 650; }
+.pruef-zusammenfassung.bereit { color: var(--success); }
+.pruef-fehler { list-style: none; padding: 0; margin: 0 0 .6rem; }
+.pruef-fehler li { border-bottom: 1px solid var(--border); }
+.pruef-fehler button {
+    display: block; width: 100%; min-height: 44px; padding: .45rem 0; text-align: left; border: 0; background: none;
+    font: inherit; font-size: .86rem; color: var(--danger); cursor: pointer;
+}
+.pruef-fehler button::after { content: ' →'; }
+.pruef-warnungen .check { padding: .35rem 0; font-size: .86rem; }
+
+/* Dialog (Übernahme aus Eventworx) */
+.bericht-dialog {
+    width: min(42rem, calc(100vw - 1.5rem)); max-height: calc(100dvh - 1.5rem); padding: 0; border: 0; border-radius: var(--radius);
+    box-shadow: 0 12px 40px rgba(15, 23, 42, .35); color: var(--text);
+}
+.bericht-dialog[open] { display: flex; flex-direction: column; }
+.bericht-dialog::backdrop { background: rgba(15, 23, 42, .5); }
+.bericht-dialog-kopf { padding: .8rem 1rem; border-bottom: 1px solid var(--border); }
+.bericht-dialog-kopf h2 { margin: 0; }
+.bericht-dialog-inhalt { padding: .8rem 1rem; overflow-y: auto; }
+.bericht-dialog-fuss { padding: .7rem 1rem; border-top: 1px solid var(--border); background: var(--surface-alt); }
+.ewx-gruppe { border: 1px solid var(--border); border-radius: 8px; padding: .5rem .7rem; margin-bottom: .5rem; }
+.ewx-gruppe .check { font-weight: 650; margin-bottom: .3rem; }
+.ewx-vergleich { display: grid; grid-template-columns: minmax(6rem, 10rem) minmax(0, 1fr); gap: .15rem .7rem; font-size: .8rem; margin: 0; }
+.ewx-vergleich dt { color: var(--text-muted); }
+.ewx-vergleich dd { margin: 0; white-space: pre-line; overflow-wrap: anywhere; }
+.ewx-alt { display: block; color: var(--text-muted); text-decoration: line-through; }
+
+/* Neuer Bericht: Anlagen als Kacheln, nach Speisung eingerückt */
+.bericht-anlagen .port { padding-left: calc(.5rem + min(var(--tiefe, 0), 3) * .9rem); }
+.bericht-filter input[type=search] { min-width: 12rem; }
+.bericht-ansicht .liste-schlicht .bewertung { margin-right: .4rem; }
+
+/* Unterschreiben: Vollbild-Dialog mit Fläche 3:1 (unterschrift.js) */
+.unterschreiben-zeile { display: flex; flex-wrap: wrap; align-items: center; gap: .4rem .8rem; margin-top: 1rem; padding-top: .9rem; border-top: 1px solid var(--border); }
+.unterschreiben-zeile .btn { min-height: 48px; }
+.unterschrift-dialog {
+    width: 100vw; max-width: 100vw; height: 100dvh; max-height: 100dvh; margin: 0; padding: 0; border: 0;
+    background: var(--surface); color: var(--text);
+}
+.unterschrift-dialog[open] { display: flex; flex-direction: column; }
+.unterschrift-dialog::backdrop { background: rgba(15, 23, 42, .6); }
+.unterschrift-dialog-kopf {
+    display: flex; align-items: center; justify-content: space-between; gap: .6rem;
+    padding: .6rem max(1rem, env(safe-area-inset-right)) .6rem max(1rem, env(safe-area-inset-left)); border-bottom: 1px solid var(--border);
+}
+.unterschrift-dialog-kopf h2 { margin: 0; font-size: 1.05rem; }
+.unterschrift-dialog-inhalt { flex: 1; overflow-y: auto; padding: .7rem max(1rem, env(safe-area-inset-right)) .7rem max(1rem, env(safe-area-inset-left)); }
+.unterschrift-dialog-fuss {
+    display: flex; flex-wrap: wrap; align-items: center; gap: .4rem .9rem; border-top: 1px solid var(--border); background: var(--surface-alt);
+    padding: .6rem max(1rem, env(safe-area-inset-right)) max(.6rem, env(safe-area-inset-bottom)) max(1rem, env(safe-area-inset-left));
+}
+.unterschrift-dialog .btn { min-height: 48px; }
+.unterschrift-dialog-fuss .btn-primary { min-width: 14rem; }
+.unterschrift-dialog input { font-size: 18px; min-height: 48px; }
+.unterschrift-dialog .field label, .kunde .field label { text-transform: none; letter-spacing: .01em; font-size: .85rem; }
+.unterschrift-hinweis { margin: 0 0 .5rem; }
+/* So groß wie möglich, aber Knöpfe und Namensfeld bleiben im Blick. */
+.unterschrift-flaeche {
+    position: relative; width: min(100%, calc((100dvh - 15rem) * 3)); min-width: min(100%, 18rem); aspect-ratio: 3 / 1; margin: 0 auto;
+    border: 2px dashed #94a3b8; border-radius: 10px; background: #fff; touch-action: none; user-select: none; -webkit-user-select: none;
+}
+.unterschrift-flaeche canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; color: #1e3a8a; touch-action: none; cursor: crosshair; }
+.unterschrift-linie { position: absolute; left: 6%; right: 6%; bottom: 24%; border-bottom: 1px solid #cbd5e1; pointer-events: none; }
+.unterschrift-leer { position: absolute; left: 6%; bottom: 26%; font-size: .85rem; color: #94a3b8; pointer-events: none; }
+.unterschrift-flaeche.hat-striche .unterschrift-leer { display: none; }
+.unterschrift-knoepfe { justify-content: center; margin: .6rem 0 .3rem; }
+.unterschrift-felder { margin-top: .4rem; }
+.unterschrift-meldung { min-height: 1.3em; margin: .3rem 0 0; font-weight: 600; }
+.unterschrift-meldung.fehler { color: var(--danger); }
+.quer-hinweis { display: none; margin: 0 0 .5rem; padding: .4rem .6rem; border-radius: 8px; background: var(--info-light); color: #0c4a6e; font-size: .84rem; }
+@media (orientation: portrait) and (max-width: 700px) { .quer-hinweis { display: block; } }
+
+/* Unterschriften in der Leseansicht: nur Geometrie als SVG */
+.unterschriften { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 16rem), 1fr)); gap: 1rem 1.5rem; }
+.unterschrift-block h3 { margin: 0 0 .3rem; }
+.unterschrift-bild { max-width: 24rem; border-bottom: 1px solid var(--border); margin-bottom: .3rem; color: #1e3a8a; }
+.unterschrift-svg { display: block; width: 100%; height: auto; aspect-ratio: 3 / 1; }
+/* PDF: Prüfsumme der Datei bricht auf dem Telefon um statt die Seite zu verbreitern. */
+.bericht-pdf .pruefsumme { overflow-wrap: anywhere; word-break: break-all; }
+.bericht-aktionen > summary { cursor: pointer; list-style: none; }
+.bericht-aktionen > summary::-webkit-details-marker { display: none; }
+.bericht-aktionen details > summary { cursor: pointer; color: var(--primary); font-weight: 600; min-height: 44px; display: flex; align-items: center; }
+.bericht-ohne-kunde { max-width: 36rem; }
+.befunde li { color: var(--danger); }
+
+/* Kundenmodus: das Gerät liegt beim Kunden – große Schrift, keine Navigation */
+body.kundenmodus { background: var(--bg); }
+.kunden-kopf {
+    display: flex; align-items: baseline; justify-content: space-between; gap: .8rem; padding: .8rem max(1rem, env(safe-area-inset-right)) .8rem max(1rem, env(safe-area-inset-left));
+    background: var(--surface); border-bottom: 1px solid var(--border); font-size: 1rem;
+}
+.kunden-kopf span { color: var(--text-muted); font-size: .85rem; }
+.kunden-inhalt { max-width: 62rem; margin: 0 auto; padding: 1rem max(1rem, env(safe-area-inset-right)) 3rem max(1rem, env(safe-area-inset-left)); }
+.kunde { font-size: 1.05rem; }
+.kunde .bericht-ansicht .kv, .kunde .bericht-ansicht td, .kunde .bericht-ansicht .card-body { font-size: .95rem; }
+.kunde-titel { font-size: 1.45rem; margin: .2rem 0 .3rem; }
+.kunde-einleitung { color: var(--text-muted); margin: 0 0 .9rem; }
+.kunde .notice { font-size: .95rem; }
+.kunde-hinweis { font-weight: 600; }
+.kunde .check { font-size: 1rem; align-items: center; min-height: 48px; margin-bottom: .3rem; }
+.kunde .check input[type=checkbox] { width: 26px; height: 26px; flex: 0 0 26px; margin: 0; }
+.kunde textarea, .kunde input:not([type=checkbox]) { font-size: 18px; min-height: 48px; font-family: inherit; }
+.kunde .btn { min-height: 52px; }
+.kunde-weiter { width: 100%; max-width: 24rem; font-size: 1.05rem; }
+.kunde-meldung { min-height: 1.3em; font-weight: 600; }
+.kunde-meldung.fehler { color: var(--danger); }
+.kunde-fertig { text-align: center; padding: 2rem 0; }
+.kunde-fertig h1 { font-size: 1.8rem; margin: 0 0 .6rem; }
+.kunde-gross { font-size: 1.25rem; }
+.kunde-entsperren > summary { cursor: pointer; list-style: none; }
+.kunde-entsperren > summary::-webkit-details-marker { display: none; }
+.kunde-entsperren h2 { font-size: .95rem; color: var(--text-muted); }
+.kunde-entsperren input[type=password] { min-width: min(100%, 16rem); }
+
+@media (max-width: 700px) {
+    .bericht { --kopf-hoehe: 3.7rem; }
+    .bericht .card-body { padding: .8rem .75rem; }
+    .speicherstand.ok .speicher-wort { display: none; }
+    .kreis { padding: .5rem .55rem .2rem; }
+    .kreis-werte { gap: .4rem; }
+    .messfeld-eingabe input { padding-left: .3rem; padding-right: .4rem; }
+    .punkt { grid-template-columns: minmax(0, 1fr) auto; }
+    .punkt-text { grid-column: 1 / -1; }
+    .dreiwahl span { min-width: 3.6rem; padding: 0 .6rem; }
+    .kreis-kopf { grid-template-columns: 3.3rem minmax(0, 1fr); }
+    .kreis-kopf .bewertung { grid-column: 1 / -1; margin-top: 0; justify-self: start; }
+    .bericht-filter input[type=search] { min-width: 0; }
+    .ewx-vergleich { grid-template-columns: 1fr; }
+    .bericht-ansicht .tabelle-karten td:empty { display: none; }
+}

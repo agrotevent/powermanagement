@@ -11,6 +11,13 @@
  * Die Bilder landen neben diesem Skript und werden von docs/*.md und der
  * README eingebunden. Nach Änderungen an der Oberfläche einfach neu aufnehmen.
  *
+ * Die Übergabeberichte kommen aus dem Demo-Gelände: der abgeschlossene für
+ * das PDF (Seite 1 über `pdftoppm` aus poppler-utils), der Entwurf für
+ * Formular und Eventworx-Suche (Demo-Vorgang, nichts wird übernommen), der
+ * vom Prüfer unterschriebene für den Kundenmodus – der wird dabei nur
+ * geöffnet und mit dem Kennwort wieder entsperrt (im Lebenslauf steht dann
+ * „an den Kunden übergeben“).
+ *
  * Für den Verteiler-Abgleich braucht es ein Repository. Das Skript legt sich
  * dafür ein eigenes an (git init --bare im Temp-Ordner) – kein Token, kein
  * Netz, auf GitHub landet nichts. Deshalb muss der Server diese Arbeitskopie
@@ -46,6 +53,7 @@ const ziel = dirname(fileURLToPath(import.meta.url));
 
 const DESKTOP = { width: 1280, height: 820 };
 const HANDY = { width: 390, height: 844 };
+const TABLET_QUER = { width: 1180, height: 820 };
 
 // Deutsche Oberfläche auch für Datums- und Zeitfelder des Browsers.
 const browser = await chromium.launch({
@@ -54,14 +62,18 @@ const browser = await chromium.launch({
 });
 const fehler = [];
 
-/** Angemeldet im Browser – bei dieser Instanz oder (`bei`) einer anderen. */
-async function sitzung(viewport, extra = {}, bei = { url: basis, name: benutzer, wort: kennwort }) {
+/**
+ * Angemeldet im Browser – als `bei.name` (Vorgabe: das Konto aus der
+ * Kommandozeile), bei dieser Instanz oder (`bei.url`) einer anderen.
+ */
+async function sitzung(viewport, extra = {}, bei = {}) {
+    const { url = basis, name = benutzer, wort = kennwort } = bei;
     const ctx = await browser.newContext({ viewport, deviceScaleFactor: 1, locale: 'de-DE', timezoneId: 'Europe/Berlin', ...extra });
     const page = await ctx.newPage();
     page.on('pageerror', (e) => fehler.push(page.url() + ': ' + e.message));
-    await page.goto(bei.url + '/login');
-    await page.fill('#username', bei.name);
-    await page.fill('#password', bei.wort);
+    await page.goto(url + '/login');
+    await page.fill('#username', name);
+    await page.fill('#password', wort);
     await Promise.all([page.waitForNavigation(), page.click('button[type=submit]')]);
     return { ctx, page };
 }
@@ -416,6 +428,70 @@ return $c;
             }
             foreach ($neu as $p) { $weg($p); }
             echo '@@', json_encode(true);`, benutzer, tmp);
+        rmSync(tmp, { recursive: true, force: true });
+    }
+}
+
+// ------------------------------------------------------------ Übergabeberichte
+{
+    // Als Prüfer: das Demo-Konto „technik“ hat Qualifikation und „bearbeiten“ auf dem Gelände.
+    const PRUEFER = { name: 'technik', wort: 'Technik2026!!' };
+    const wurzel = resolve(ziel, '../..');
+    const admin = await sitzung(DESKTOP);
+    await oeffnen(admin.page, '/system/einstellungen');
+    await element(admin.page, admin.page.locator('.card', { has: admin.page.locator('h2', { hasText: /^Eventworx$/ }) }), 'einstellungen-eventworx');
+    await admin.ctx.close();
+
+    const { ctx, page } = await sitzung(DESKTOP, {}, PRUEFER);
+    await oeffnen(page, '/berichte');
+    await foto(page, 'berichte-liste');
+    const zeile = (status) => page.locator('tr').filter({ has: page.locator('.badge', { hasText: status }) }).locator('a[href^="/berichte/"]').first();
+    const entwurf = await zeile('Entwurf').getAttribute('href');
+    const geprueft = await zeile('vom Prüfer unterschrieben').getAttribute('href');
+    const nummer = (await zeile(/^abgeschlossen$/).textContent()).trim();
+    await ctx.close();
+
+    // Tablet quer: das Formular des Entwurfs, dann die Eventworx-Suche (Demo-Vorgang, nicht übernommen)
+    const tab = await sitzung(TABLET_QUER, { hasTouch: true }, PRUEFER);
+    tab.page.on('dialog', (d) => d.accept());
+    await oeffnen(tab.page, entwurf, 800);
+    await foto(tab.page, 'bericht-formular');
+    await tab.page.click('[data-reiter="eventworx"]');
+    await tab.page.fill('[data-ewx-q]', 'AU-1042');
+    await tab.page.click('[data-ewx-suchen]');
+    await tab.page.locator('[data-ewx-treffer] button').first().click();
+    await tab.page.waitForSelector('dialog[data-ewx-dialog][open]');
+    await tab.page.waitForTimeout(400);
+    await foto(tab.page, 'bericht-eventworx');
+    await tab.page.keyboard.press('Escape');
+
+    // Kundenmodus: übergeben, Foto, mit dem Kennwort wieder entsperren
+    await oeffnen(tab.page, geprueft);
+    await Promise.all([tab.page.waitForNavigation(), tab.page.locator('form[action$="/kundenmodus"] button').click()]);
+    await tab.page.waitForLoadState('networkidle');
+    await tab.page.waitForTimeout(400);
+    await foto(tab.page, 'bericht-kundenmodus');
+    await tab.page.locator('.kunde-entsperren summary').click();
+    await tab.page.fill('input[name=kennwort]', PRUEFER.wort);
+    await Promise.all([tab.page.waitForNavigation(), tab.page.locator('form[action$="/kunde/beenden"] button').click()]);
+    await tab.ctx.close();
+
+    // Handy: die Stromkreise des Entwurfs
+    const handy = await sitzung(HANDY, { hasTouch: true, isMobile: true }, PRUEFER);
+    await oeffnen(handy.page, entwurf, 800);
+    await handy.page.locator('[data-kreise] .kreis').first().scrollIntoViewIfNeeded();
+    await handy.page.evaluate(() => window.scrollBy(0, -70));
+    await handy.page.waitForTimeout(300);
+    await foto(handy.page, 'bericht-messprotokoll-handy');
+    await handy.ctx.close();
+
+    // Seite 1 des gespeicherten PDF – über die Kommandozeile, wie es ein Betreiber herausholt
+    const tmp = mkdtempSync(join(tmpdir(), 'pm-bilder-'));
+    try {
+        execFileSync('php', ['bin/power', 'berichte:pdf', nummer, join(tmp, 'bericht.pdf')], { cwd: wurzel });
+        execFileSync('pdftoppm', ['-png', '-r', '90', '-f', '1', '-l', '1', '-singlefile', join(tmp, 'bericht.pdf'), join(ziel, 'bericht-pdf-1')]);
+        console.log('  bericht-pdf-1.png');
+    } finally {
         rmSync(tmp, { recursive: true, force: true });
     }
 }

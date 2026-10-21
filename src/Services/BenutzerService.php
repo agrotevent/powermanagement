@@ -229,6 +229,11 @@ final class BenutzerService
             'notizen'    => (string) ($daten['notizen'] ?? ''),
             'updated_at' => gmdate('c'),
         ];
+        // Ohne Qualifikation keine Prüfer-Unterschrift unter Übergabeberichten.
+        // Gepflegt wird sie nur hier, in der Benutzerverwaltung.
+        if (array_key_exists('pruefer_qualifikation', $daten)) {
+            $felder['pruefer_qualifikation'] = mb_substr(trim((string) preg_replace('/\s+/u', ' ', (string) $daten['pruefer_qualifikation'])), 0, 120);
+        }
         $kennwort = (string) ($daten['password'] ?? '');
         if ($kennwort !== '') {
             $fehler = Auth::validatePassword($kennwort);
@@ -244,6 +249,9 @@ final class BenutzerService
             return ['ok' => false, 'message' => 'Das eigene Konto lässt sich nicht deaktivieren.'];
         }
 
+        // Wer wen zum Prüfer gemacht hat, steht im Audit.
+        $qualiNeu = array_key_exists('pruefer_qualifikation', $felder)
+            && (!$id || (string) Database::scalar('SELECT pruefer_qualifikation FROM users WHERE id = ?', [$id]) !== $felder['pruefer_qualifikation']);
         if ($id) {
             Database::update('users', $id, $felder);
         } else {
@@ -276,7 +284,8 @@ final class BenutzerService
             Database::insert('user_roles', ['user_id' => $id, 'role_id' => (int) $admin['id'], 'gueltig_ab' => null, 'gueltig_bis' => null]);
         }
         Zugriff::vergessen();
-        Audit::log('benutzer.speichern', 'user', (string) $id, ['username' => $username]);
+        Audit::log('benutzer.speichern', 'user', (string) $id, ['username' => $username]
+            + ($qualiNeu ? ['pruefer_qualifikation' => $felder['pruefer_qualifikation']] : []));
         return ['ok' => true, 'message' => 'Benutzer „' . $username . '“ gespeichert.', 'id' => $id];
     }
 

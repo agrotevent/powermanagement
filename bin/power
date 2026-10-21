@@ -45,15 +45,25 @@ declare(strict_types=1);
  *   bin/power mqtt:zugaenge-schreiben [--viele-entfernen]
  *                                   Sollzustand für den Broker neu schreiben und warten
  *                                   (als Besitzer von storage/mqtt, z. B. sudo -u www-data)
- *   bin/power demo:seed [--reset]   Demo-Gelände mit Anlagen, Kabeln und Benutzern anlegen
+ *   bin/power berichte:pruefen [<nummer> [--fassung=N]] [--pdf]
+ *                                   Übergabeberichte nachrechnen: Inhalt, Unterschriften, Kette,
+ *                                   Siegel, PDF (--pdf: neu erzeugen und Byte für Byte vergleichen).
+ *                                   Ohne Nummer alle unterschriebenen. Exit 1 bei einem Befund
+ *   bin/power berichte:pdf <nummer> <ziel.pdf> [--fassung=N]
+ *                                   Das gespeicherte PDF eines abgeschlossenen Berichts herausschreiben
+ *   bin/power berichte:aufbewahrung [--ausfuehren]
+ *                                   Berichte über der Aufbewahrungsfrist zeigen, mit --ausfuehren löschen
+ *   bin/power eventworx:pruefen     Verbindung zu Eventworx prüfen (nur lesend)
+ *   bin/power demo:seed [--reset]   Demo-Gelände mit Anlagen, Kabeln, Benutzern und Übergabeberichten anlegen
  *   bin/power wartung               Protokolle aufräumen, abgebrochene MQTT-Prüfungen
- *                                   zurücksetzen, entschiedene Änderungsvorschläge (älter
- *                                   als 400 Tage) und verwaiste Vorschlags- und Temp-Ordner
- *                                   entfernen (täglich per Timer)
+ *                                   zurücksetzen, fällige Übergabeberichte melden, entschiedene
+ *                                   Änderungsvorschläge (älter als 400 Tage) und verwaiste
+ *                                   Vorschlags- und Temp-Ordner entfernen (täglich per Timer)
  */
 
 require dirname(__DIR__) . '/src/bootstrap.php';
 
+use App\Berichte\BerichtService;
 use App\Messung\Influx;
 use App\Messung\Messdaten;
 use App\Messung\Mqtt;
@@ -63,6 +73,7 @@ use App\Messung\Sammler;
 use App\Services\AnlagenService;
 use App\Services\BenutzerService;
 use App\Services\DemoSeed;
+use App\Services\Eventworx;
 use App\Services\LocationSync;
 use App\Services\PartnerAbgleich;
 use App\Services\PlanTileService;
@@ -78,9 +89,15 @@ $argumente = array_slice($argv, 1);
 $befehl = array_shift($argumente) ?? 'hilfe';
 $optionen = [];
 $werte = [];
-foreach ($argumente as $a) {
+// Optionen mit Wert gehen als --name=wert oder --name wert.
+$mitWert = ['fassung'];
+for ($i = 0; $i < count($argumente); $i++) {
+    $a = $argumente[$i];
     if (str_starts_with($a, '--')) {
         [$k, $v] = array_pad(explode('=', substr($a, 2), 2), 2, true);
+        if ($v === true && in_array($k, $mitWert, true) && isset($argumente[$i + 1]) && !str_starts_with($argumente[$i + 1], '--')) {
+            $v = $argumente[++$i];
+        }
         $optionen[$k] = $v;
     } else {
         $werte[] = $a;
@@ -98,6 +115,22 @@ $aus = static function (string $text): void {
 $fehler = static function (string $text): never {
     fwrite(STDERR, 'Fehler: ' . $text . PHP_EOL);
     exit(1);
+};
+
+/** Ein Übergabebericht über Nummer und --fassung – sonst Abbruch. */
+$bericht = static function (string $nummer) use ($optionen, $fehler): array {
+    $fassung = null;
+    if (isset($optionen['fassung'])) {
+        if (!is_string($optionen['fassung']) || !ctype_digit($optionen['fassung']) || (int) $optionen['fassung'] < 1) {
+            $fehler('--fassung braucht eine Zahl ab 1.');
+        }
+        $fassung = (int) $optionen['fassung'];
+    }
+    $b = BerichtService::nachNummer($nummer, $fassung);
+    if ($b === null) {
+        $fehler('Einen Übergabebericht ' . ($fassung === null ? 'mit dieser Nummer' : 'mit dieser Nummer und Fassung') . ' gibt es nicht.');
+    }
+    return $b;
 };
 
 $grundbestand = static function () use ($aus): void {
@@ -449,6 +482,93 @@ switch ($befehl) {
         }
         $fehler('Der Broker-Abgleich hat sich nicht gemeldet (journalctl -u powermanagement-mqtt-zugaenge).');
 
+    case 'berichte:pruefen':
+        // Ausgabe ohne Kundendaten: nur Nummer, Fassung, Status und Befunde.
+        $liste = isset($werte[0])
+            ? [$bericht((string) $werte[0])]
+            : BerichtService::eingefrorene();
+        if ($liste === []) {
+            $aus('Keine unterschriebenen Übergabeberichte.');
+            break;
+        }
+        $mitBefund = 0;
+        $hinweise = 0;
+        foreach ($liste as $b) {
+            $name = (string) ($b['nummer'] ?? '') !== '' ? (string) $b['nummer'] : 'Entwurf #' . $b['id'];
+            $titel = sprintf('%s (Fassung %d, %s)', $name, (int) $b['fassung'], BerichtService::STATUS[$b['status']] ?? $b['status']);
+            $erg = BerichtService::integritaet((int) $b['id'], isset($optionen['pdf']));
+            if (!$erg['eingefroren']) {
+                $aus('–        ' . $titel . ': nicht unterschrieben, nichts zu prüfen');
+                continue;
+            }
+            $aus(($erg['ok'] ? 'OK       ' : 'BEFUND   ') . $titel);
+            foreach ($erg['befunde'] as $text) {
+                $aus('         - ' . $text);
+            }
+            foreach ($erg['hinweise'] ?? [] as $text) {
+                $aus('         Hinweis: ' . $text);
+                $hinweise++;
+            }
+            $mitBefund += $erg['ok'] ? 0 : 1;
+        }
+        $aus(sprintf('%d geprüft, %d mit Befund%s.', count($liste), $mitBefund, $hinweise > 0 ? ', ' . $hinweise . ' Hinweis(e)' : ''));
+        exit($mitBefund > 0 ? 1 : 0);
+
+    case 'berichte:pdf':
+        if (count($werte) < 2) {
+            $fehler('Aufruf: bin/power berichte:pdf <nummer> <ziel.pdf> [--fassung=N]');
+        }
+        $b = $bericht((string) $werte[0]);
+        $bytes = BerichtService::pdfGespeichert((int) $b['id']);
+        if ($bytes === null) {
+            $fehler('Für diesen Bericht ist kein PDF gespeichert (Status: ' . (BerichtService::STATUS[$b['status']] ?? $b['status'])
+                . ') – gespeichert wird es beim Abschluss.');
+        }
+        $ziel = (string) $werte[1];
+        // Nie eine vorhandene Datei überschreiben (auch keinen Link darauf).
+        $datei = @fopen($ziel, 'x');
+        if ($datei === false) {
+            $fehler(file_exists($ziel) || is_link($ziel) ? $ziel . ' gibt es schon.' : $ziel . ' lässt sich nicht anlegen.');
+        }
+        fwrite($datei, $bytes);
+        fclose($datei);
+        @chmod($ziel, 0640);
+        $sha = hash('sha256', $bytes);
+        $aus($b['nummer'] . ' (Fassung ' . $b['fassung'] . ') → ' . $ziel . ', ' . number_format(strlen($bytes), 0, ',', '.') . ' Bytes, SHA-256 ' . $sha);
+        if (!hash_equals((string) BerichtService::pdfHash((int) $b['id']), $sha)) {
+            $fehler('Die Prüfsumme der gespeicherten Datei stimmt nicht (bin/power berichte:pruefen ' . $b['nummer'] . ').');
+        }
+        break;
+
+    case 'berichte:aufbewahrung':
+        $faellig = BerichtService::faellig();
+        if ($faellig === []) {
+            $aus('Kein Übergabebericht über der Aufbewahrungsfrist.');
+            break;
+        }
+        foreach ($faellig as $b) {
+            $aus(sprintf('  %-24s Fassung %d  %-14s aufbewahren bis %s', $b['nummer'] ?? ('Entwurf #' . $b['id']), (int) $b['fassung'],
+                BerichtService::STATUS[$b['status']] ?? $b['status'], $b['aufbewahren_bis']));
+        }
+        if (!isset($optionen['ausfuehren'])) {
+            $aus(count($faellig) . ' über der Aufbewahrungsfrist. Löschen (Bericht, Unterschriften, PDF, Lebenslauf) mit --ausfuehren.');
+            break;
+        }
+        // Je Nummer alle Fassungen gemeinsam (faellig() nennt nur ganze Familien).
+        $geloescht = [];
+        foreach ($faellig as $b) {
+            if (!in_array((int) $b['id'], $geloescht, true)) {
+                $geloescht = array_merge($geloescht, BerichtService::aufbewahrungLoeschen((int) $b['id']));
+            }
+        }
+        $aus(count($geloescht) . ' gelöscht.');
+        break;
+
+    case 'eventworx:pruefen':
+        $erg = Eventworx::verbindungTesten();
+        $erg['ok'] ? $aus($erg['message']) : $fehler($erg['message']);
+        break;
+
     case 'demo:seed':
         // Die Demo legt Konten mit bekannten Kennwörtern an (technik darf
         // schalten) und löscht mit --reset gleichnamige – nie im Betrieb.
@@ -469,6 +589,10 @@ switch ($befehl) {
         // Schnittstelle: entschiedene Vorschläge, verwaiste Vorschlagsordner,
         // liegengebliebene Temp-Ordner von Plan-Downloads
         foreach ([...VorschlagService::wartung(), ...PartnerAbgleich::wartung()] as $meldung) {
+            $aus($meldung);
+        }
+        // Übergabeberichte nur melden – gelöscht wird mit berichte:aufbewahrung.
+        foreach (BerichtService::wartungHinweise() as $meldung) {
             $aus($meldung);
         }
         break;

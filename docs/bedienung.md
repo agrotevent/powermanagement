@@ -259,6 +259,30 @@ was das für die nächste Planung heißt:
 
   gegen ihre Grenze.
 
+## Übergabeberichte
+
+Nach dem Aufbau prüft die Elektrofachkraft die Anlage und übergibt sie mit
+einem **Übergabebericht** – Prüfprotokoll nach DIN VDE 0100-600 und
+Errichterbestätigung nach DGUV Vorschrift 3 in einem (*Übersicht →
+Übergabeberichte*, im Aufbau oder an der Anlage *Übergabebericht*):
+
+1. Anlagen wählen – Abgänge, Sicherungen, RCDs und Kabel kommen aus dem
+   Plan, **Messwerte nie**.
+2. Am Tablet oder Telefon ausfüllen; das Formular speichert selbst, auch
+   bei schwacher Verbindung. Die Bewertung je Stromkreis kommt vom Server.
+3. *Prüfen*, dann **als Prüfer unterschreiben** – der Bericht ist
+   eingefroren und hat seine Nummer.
+4. **An Kunden übergeben**: Das Gerät zeigt nur noch diesen Bericht, der
+   Kunde bestätigt den Erhalt und unterschreibt. Zurück mit dem Kennwort des
+   Prüfers.
+5. Das PDF ist gespeichert – ansehen, herunterladen, teilen.
+
+![Formular eines Übergabeberichts am Tablet](bilder/bericht-formular.png)
+
+Alles Weitere – Felder, Grenzwerte, Kundenmodus, Korrektur, Integrität,
+Datenschutz, Aufbewahrung – steht in [berichte.md](berichte.md);
+Kundendaten aus Eventworx in [eventworx.md](eventworx.md).
+
 ## Inventar
 
 Im **Inventar** (*Anlagen → Inventar*) stehen die Geräte aus dem Lager, in

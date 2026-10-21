@@ -50,6 +50,10 @@ $meter = static fn ($v) => $v === null ? '–' : number_format((float) $v, 1, ',
     </div>
 </div>
 
+<?php if ($berichte !== null): ?>
+    <?= View::partial('berichte/_aufbau-karte', ['aufbau' => $aufbau, 'berichte' => $berichte, 'berichtNeu' => $berichtNeu, 'aufbauGeaendert' => $aufbauGeaendert]) ?>
+<?php endif; ?>
+
 <nav class="tabs" aria-label="Filter">
     <?php foreach (['' => 'Alle', 'offen' => 'Offen', 'geaendert' => 'Geändert', 'entfallen' => 'Entfallen', 'zusaetzlich' => 'Zusätzlich'] as $k => $n): ?>
         <a class="tab<?= $filter === $k ? ' active' : '' ?>" href="?zeigen=<?= $k ?>"><?= $n ?><?= $k !== '' ? ' (' . $z[$k] . ')' : '' ?></a>

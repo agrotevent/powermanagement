@@ -31,17 +31,20 @@ keine Build-Schritte. JS-Bibliotheken liegen fertig unter `public/assets/vendor`
   Texte aus Antworten per `textContent`, nie per `innerHTML`.
 - **Nichts hält die Sitzung, während es wartet.** PHP sperrt die
   Sitzungsdatei für die ganze Anfrage. Endpunkte, die regelmäßig abgefragt
-  werden oder auf InfluxDB, Geräte oder Clouds warten, rufen vorher
-  `Session::freigeben()` (danach nur noch lesen); wer danach noch in die
-  Sitzung schreibt (Anfragen an andere Instanzen), wartet in
-  `Session::ohneSperre()`. Abfragen im Browser starten erst, wenn die
-  vorige fertig ist (`live.js`, `karte.js`). Ohne Sitzungssperre läuft
-  dieselbe Aktion auch zweimal nebeneinander (Doppelklick, zweiter
-  Reiter): Wer danach anlegt oder verknüpft, braucht eine eigene Sperre,
-  und zwar **nicht blockierend** (`flock(LOCK_EX | LOCK_NB)`, sonst
-  Meldung – `PartnerAbgleich::gesperrt()`); blockierend hinge die zweite
-  Anfrage mit der Sitzung fest, und die erste käme nie zurück. Formulare
-  davor tragen `data-laeuft`.
+  werden oder auf InfluxDB, Geräte, Clouds oder andere Instanzen warten,
+  rufen vorher `Session::freigeben()` (danach nur noch lesen); was nach dem
+  Warten noch kurz in die Sitzung muss, trägt `Session::nachtragen()` ein,
+  und wer danach weiter in die Sitzung schreibt und weiterleitet (Anfragen
+  an andere Instanzen), wartet in `Session::ohneSperre()` – beide öffnen nur
+  dieselbe Sitzung desselben Benutzers wieder, ohne zweites Cookie.
+  Abfragen im Browser starten erst, wenn die vorige fertig ist (`live.js`,
+  `karte.js`), oder brechen sie ab (Eventworx in `bericht.js`). Ohne
+  Sitzungssperre läuft dieselbe Aktion auch zweimal nebeneinander
+  (Doppelklick, zweiter Reiter): Wer danach anlegt oder verknüpft, braucht
+  eine eigene Sperre, und zwar **nicht blockierend**
+  (`flock(LOCK_EX | LOCK_NB)`, sonst Meldung – `PartnerAbgleich::gesperrt()`);
+  blockierend hinge die zweite Anfrage mit der Sitzung fest, und die erste
+  käme nie zurück. Formulare davor tragen `data-laeuft`.
 - **Weiterleitungen** nur auf eigene Pfade: `Response::sichererPfad()`,
   `Response::zurueckZiel()` statt `$_SERVER['HTTP_REFERER']` oder `next`.
 - **Zeiten** werden in UTC gespeichert (ISO 8601) und in der Zeitzone der
@@ -83,6 +86,26 @@ keine Build-Schritte. JS-Bibliotheken liegen fertig unter `public/assets/vendor`
   zuerst die Schreibsperre (Zustand bzw. Standort), dann wird geprüft.
   Alles läuft über `LocationUebertrag`; Anfragen an andere Instanzen nur
   über `PartnerService::anfrage()` (folgt keiner Umleitung).
+- **Übergabeberichte ändern nur über `App\Berichte\BerichtService`.** Nach
+  der Prüfer-Unterschrift ist der Inhalt eingefroren, eine Korrektur ist eine
+  neue Fassung. Der Inhalt ist ein JSON-Dokument nur aus Strings
+  (`BerichtSchema`, `Kanon` – nie Gleitkomma); IDs der Stromkreise setzt nur
+  der Server. Messwerte nie vorbelegen; bewertet wird nur auf dem Server
+  (`Grenzwerte`). Unterschriften nur als Striche, nie Zeit oder Druck.
+  Formulare mit vielen Feldern (Bericht) senden ihren Zustand als **ein
+  JSON-Feld** – `max_input_vars` schnitte sonst still ab; der Zustand steht
+  in den Feldern (`data-feld`), nicht als JSON in der Seite. Das PDF
+  erzeugt nur `BerichtPdf` (Schreiber `App\Pdf`, Schriften in
+  `resources/fonts` wegen `open_basedir`) aus dem eingefrorenen Inhalt – nie
+  aus Einstellungen, ohne Uhr und Zufall: zweimal erzeugt, dieselben Bytes.
+  Wer am PDF etwas ändert, das die Bytes ändert, zählt `BerichtPdf::ERZEUGER`
+  hoch (sonst meldet `berichte:pruefen --pdf` jeden alten Bericht als
+  Befund). Eingefroren ist ein Bericht nach den Daten (Unterschrift,
+  `inhalt_hash`, PDF), nicht nach `status`. Der Kundenmodus sperrt Sitzung
+  und Gerät; offen ist nur `Kundenmodus::erlaubt()` – auch kein Abmelden.
+- **Eventworx nur lesend** über `App\Services\Eventworx` (GET, feste
+  Pfadliste, Token verschlüsselt und an den Host gebunden). Kundendaten und
+  Token nie in Log, Audit oder Antworten. `Http` folgt keiner Umleitung.
 - Neue Tabellen oder Spalten kommen als **neue Migration** dazu
   (`database/migrations/00N_*.sql`). Vorhandene Migrationen nie ändern.
 - Oberfläche **mobil zuerst**: Tabellen mit `tabelle-karten` und
@@ -124,9 +147,12 @@ bash -n deploy/*.sh tests/*.sh && shellcheck -S warning -e SC2016,SC1111 deploy/
 | `tests/schnittstelle.php` | API Seite A: Token, 401/403/404/405/413 nur JSON, keine Sitzung, Zuschnitt (nur freigegebene Standorte, nur fest, keine Messpunkte/Dosen/Racks/APs), Plandatei-Whitelist, Stand, Zugänge anlegen/anzeigen/widerrufen, keine Geheimnisse (eigener PHP-Server) |
 | `tests/schnittstelle-vorschlaege.php` | Vorschläge: Prüfungen beim Eingang (auch Anlage ohne Anschlüsse/Schutzorgane/Namen, Leitung ohne Punkte), MasterAdmin-Form, Unterschiede, annehmen nur mit Rechten, Namen/Schaltsperre/Messpunkte bleiben, Georeferenz bleibt, wenn sie fehlt, ablehnen nur mit „bearbeiten“, sehen nur mit dem ganzen Standort; direkt schreiben mit `plaene.schreiben` (passender Stand, 409, `erzwingen`, 422 Steckertypen); unbenutzte Steckertypen nie im Katalog, mobil Gewordenes bleibt mobil, Kabelenden an Anlagen, die nicht mitkommen, bleiben; ersetzte/direkte Zeilen nur mit Eckdaten, 60 Sendungen je Stunde; gleichzeitig entscheiden und schreiben (zweiter Prozess); Schlüssel älterer Fassungen (`-` am Ende, `-2` hinter 64 Zeichen) (eigener PHP-Server) |
 | `tests/schnittstelle-partner.php` | Andere Instanzen: eintragen, Zustände, übernehmen/zuordnen/verknüpfen/lösen nur am Standort (Zuordnen nur mit „bearbeiten“, mit Rückfrage), nichts wandert zwischen Standorten, zurückschicken und annehmen, hochladen (409, `erzwingen` → „dort geändert“), Befugnisse vor dem Senden frisch, eigene Einträge nie doppelt (Schlüssel aus der Antwort, `gesendet_als`, freie Schlüssel), dort Gelöschtes kommt nicht zurück, nur hier Vorhandenes hält „hier geändert“, mobil Gemachtes bleibt mobil, lange Schlüssel PM ↔ PM und von MasterAdmin, Verbindungsfehler, MasterAdmin-Format (zweite Instanz, Attrappe) |
-| `tests/web.php` | alle Seiten ohne PHP-Meldung, 403/404, CSRF, Schalt-Ablehnung, Weiterleitungen, Sitzung nach Kennwortwechsel, Benutzerverwaltung ohne Administration, Ändern nur mit „bearbeiten“, Seiten der Schnittstelle (Zugänge, andere Instanzen, Vorschläge; Standortnamen in der Liste der Zugänge nur, wo man hinsieht; CSRF bei Anlegen und Löschen) und `/api` ohne Sitzung (eigener PHP-Server) |
-| `tests/sitzung.php` | Sitzungssperre: Live-Endpunkte (Anlage, Dashboard, Karte, Bereiche) geben die Sitzung frei – Speichern und Seiten kommen bei träger InfluxDB durch; Seite einer anderen Instanz und „Prüfen“ halten sie nicht, während sie auf dort warten, Meldungen danach und aus einem zweiten Reiter kommen an; Doppelklick auf „Übernehmen“ legt einen Standort an (Sperre ohne Warten); Kennwortwechsel oder Abmelden im zweiten Reiter, während „Prüfen“ wartet: angemeldet bzw. abgemeldet, keine neue leere Sitzung (eigene Instanz, InfluxDB- und Partner-Attrappe) |
-| `tests/sicherheit.php` | Rechte vergeben, Anmelde-Bremse ohne Kontoerkennung, Geräte zuordnen, Kanal-Freigaben beim Schalten, Schlüssel aus dem Repository, Line Protocol, CSV, Adressen, app.key, PDF-Werkzeuge, Zugänge der Schnittstelle vergeben, anzeigen nur mit den Rechten dahinter, Bindung lösen nur mit Verwaltungsrecht, verfälschtes Token, Meldungen anderer Instanzen maskiert, Instanzseite ohne Etagen eines verborgenen Standorts, Ansichten ohne Inline-JS |
+| `tests/berichte.php` | Übergabeberichte: Vorbelegung aus Plan/Schutzorganen/Kabeln/Inventar (Messwerte nie), Grenzwerte (Zs/Ik, R_iso inkl. 250 V, RCD, „gemessen an“ nur am selben RCD, TT/IT ohne RCD, TN-C, Erdung inkl. IT), Speichern (Version/409, verlorene Antwort → 200, 422, IDs nur vom Server, kein Gleitkomma), Abschluss-Prüfung (Prüfdatum, Kurzliste, „ja“/„mängelfrei“ trotz Mangel, Erdung), Unterschrift (nur Striche aus ganzen Zahlen, Grenzen Punkte/Bytes, Name passt zum Konto), Einfrieren/Nummer/Siegel, Schreibsperre eines zweiten Prozesses, Zurückziehen, Kunde und ohne Kunde (gesehener Stand), Kundenmodus und Kennwort, Integrität (Status per SQL, PDF-Siegel, Erzeuger), PDF beim Abschluss (gespeichert, Neuerzeugung byte-gleich, ein Byte geändert → Befund), Korrektur, Kunde aus früherem Bericht, Sichtbarkeit mit Datenfenster (auch nach Löschen des Standorts), Löschen/Verwerfen, Lösch-Abläufe, Aufbewahrung (ab Abschluss, ganze Nummern, Nummer nie zweimal), Kommandozeile (`berichte:pruefen`/`pdf`/`aufbewahrung`) und Wartungs-Hinweise, Datenschutz |
+| `tests/bericht-pdf.php` | PDF der Übergabeberichte: eigener Schreiber, Schrift als Teilmenge (Prüfsumme, Glyphen, kein .notdef), Layout mit poppler (A4, Schriften eingebettet, Texte, Tabellenkopf je Seite, keine Bilder, Fuß „Blatt x von y“), zweimal erzeugt gleiche Bytes, Vorschau, ohne Kunde, Korrektur, 300 Kreise (ohne poppler übersprungen) |
+| `tests/eventworx.php` | Eventworx nur lesend: Adresse, Token an den Host gebunden, Pfadliste, Anfragen, Aufbereitung ohne Beträge/Notizen, Fehlerantworten, Nachlesen bei `data:null`, Drossel, Demo, keine Geheimnisse in Log/Audit/Meldungen (Http-Attrappe) |
+| `tests/web.php` | alle Seiten ohne PHP-Meldung (auch im Fehlerprotokoll des Servers), 403/404 als eigene Seite ohne Navigation, CSRF (mit `Accept: application/json` 419/401 als JSON), Schalt-Ablehnung, Weiterleitungen, Sitzung nach Kennwortwechsel, Benutzerverwaltung ohne Administration, Ändern nur mit „bearbeiten“, Seiten der Schnittstelle (Zugänge, andere Instanzen, Vorschläge; Standortnamen in der Liste der Zugänge nur, wo man hinsieht; CSRF bei Anlegen und Löschen) und `/api` ohne Sitzung, Übergabeberichte (Seiten, PDF mit Kopfzeilen/Vorschau/gespeicherten Bytes, Autosave 200/409/422/423, Eventworx-Demo, Firma-Karte, Prüfer-Qualifikation, Rechte von Kunde und Planer, Unterschreiben, Kundenmodus-Sperre auch für unbekannte/verbotene Adressen, die Seiten der Schnittstelle und Abmelden – `/api` bleibt davon unberührt –, Sperre am Gerät nach neuer Anmeldung, Bremse statt Abmelden nach fünf Fehlversuchen, Entsperren, ohne Kunde, Korrektur) (eigener PHP-Server) |
+| `tests/sitzung.php` | Sitzungssperre: Live-Endpunkte (Anlage, Dashboard, Karte, Bereiche) und Eventworx-Suche/-Vorgang im Bericht geben die Sitzung frei – Speichern, Bericht-Autosave und Seiten kommen bei träger InfluxDB bzw. trägem Eventworx durch, der geladene Vorgang bleibt vorgemerkt (`nachtragen()`), nach dem Abmelden 401 ohne Kundendaten; Seite einer anderen Instanz und „Prüfen“ halten sie nicht, während sie auf dort warten (`ohneSperre()`), Meldungen danach und aus einem zweiten Reiter kommen an; Doppelklick auf „Übernehmen“ legt einen Standort an (Sperre ohne Warten); Kennwortwechsel oder Abmelden im zweiten Reiter, während „Prüfen“ wartet: angemeldet bzw. abgemeldet, keine neue leere Sitzung; kein zweites Sitzungscookie beim Wiederöffnen (eigene Instanz, Attrappen für InfluxDB, Eventworx über `eventworx.basis` und eine andere Instanz) |
+| `tests/sicherheit.php` | Rechte vergeben, Anmelde-Bremse ohne Kontoerkennung, Geräte zuordnen, Kanal-Freigaben beim Schalten, Schlüssel aus dem Repository, Line Protocol, CSV, Adressen, keine Umleitung mit Token (curl und Streams), app.key, PDF-Werkzeuge, Zugänge der Schnittstelle vergeben, anzeigen nur mit den Rechten dahinter, Bindung lösen nur mit Verwaltungsrecht, verfälschtes Token, Meldungen anderer Instanzen maskiert, Instanzseite ohne Etagen eines verborgenen Standorts, Ansichten ohne Inline-JS, Bericht-JS ohne HTML aus Daten, nur mit Zeitgrenze, Abmelden ohne Rückschreiben des Entwurfs, andere Tabs im Kundenmodus, Unterschrift ohne Zeit/Druck, Handballen und Bytegrenze der Fläche (Node), als SVG nur Zahlen |
 | `tests/nodered-funktionen.mjs` | Node-RED-Funktionen, `flows.json` passt zu den Quellen |
 | `tests/installation-debian.sh` | `deploy/install-debian.sh` auf frischem Debian 13 mit systemd (Docker): Erstinstallation, zweiter Lauf (Kennwörter, app.key bleiben), Update mit neuem Ordner in `storage/`; Rechte (Code root, `storage/` www-data), Dienste, Anmeldung, Broker, `bin/power pruefen` |
 
@@ -154,6 +180,11 @@ php bin/power demo:seed --reset
 php -S 127.0.0.1:8080 -t public &
 NPM_ROOT=$(npm root -g) node docs/bilder/aufnehmen.mjs http://127.0.0.1:8080
 ```
+
+Die Übergabeberichte nimmt das Skript als Demo-Prüfer `technik` auf; Blatt 1
+des PDF holt es über `bin/power berichte:pdf` und `pdftoppm`. Den vom Prüfer
+unterschriebenen Demo-Bericht übergibt es dabei an den Kunden und entsperrt
+wieder – er lässt sich danach nicht mehr zurückziehen.
 
 Für den Verteiler-Abgleich legt das Skript sich ein eigenes Repository im
 Temp-Ordner an (kein Token, nichts auf GitHub) und stellt Einstellungen und

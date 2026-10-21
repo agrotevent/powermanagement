@@ -250,7 +250,9 @@ Bei einer vorhandenen **InfluxDB 1.8** mit Anmeldung ist das „Token“
    Schnittstelle `/api/`, Abschnitt 9), Datenbank, Administrator,
    InfluxDB- und MQTT-Zugang (verschlüsselt in der Datenbank).
 8. **Dienste:** `powermanagement-nodered`, `powermanagement-sammler`,
-   `powermanagement-wartung.timer` (täglich),
+   `powermanagement-wartung.timer` (täglich; räumt Protokolle auf und meldet
+   Übergabeberichte über der Aufbewahrungsfrist – gelöscht wird nur mit
+   `bin/power berichte:aufbewahrung --ausfuehren`),
    `powermanagement-mqtt-zugaenge.path` und `.timer` (eigene MQTT-Zugänge,
    nur mit Mosquitto im Container), Logrotate.
 9. **Prüfung** mit `bin/power pruefen` und eine Zusammenfassung mit allen
@@ -288,6 +290,26 @@ Mosquitto-ACL – neue Fassungen solcher Dateien legt es mit
 
 Danach in der Oberfläche unter **System → Einstellungen** Titel und
 Grenzwerte prüfen.
+
+**Für Übergabeberichte** ([berichte.md](berichte.md)):
+
+1. *System → Einstellungen → Firma & Übergabeberichte*: Firmenname (Pflicht
+   vor der ersten Prüfer-Unterschrift), Anschrift, Kontakt, Bank, Register –
+   sie stehen im Fuß jeder PDF-Seite. Das Repository bringt keine
+   Firmendaten mit; dazu Kürzel der Nummer, Texte und Aufbewahrung.
+2. *System → Benutzer & Freigaben*: bei den Prüfern die
+   **Prüfer-Qualifikation** eintragen.
+3. *Übergabeberichte → Prüfgeräte*: Installationstester mit Seriennummer
+   und Kalibrierdatum.
+4. Optional **Eventworx** (*System → Einstellungen → Eventworx*): Mandant
+   und ein Token „REST API Lesen“, dann *Verbindung prüfen* – oder auf der
+   Kommandozeile `sudo -u www-data php /opt/powermanagement/bin/power
+   eventworx:pruefen`. Der Container braucht dafür ausgehend HTTPS zu
+   `<mandant>.eventworx.biz`. Details: [eventworx.md](eventworx.md).
+
+Die Schrift für die PDF (Liberation Sans, SIL Open Font License) liegt im
+Repository unter `resources/fonts` – PHP-FPM darf wegen `open_basedir`
+nicht nach `/usr/share/fonts`. Weitere Pakete braucht die PDF nicht.
 
 Im Node-RED-Editor gibt es vier Tabs: **PowerManagement** (Überblick,
 Eingang `pm/messwert/#`), **Shelly Gen2+**, **Shelly Gen1** und
@@ -683,6 +705,9 @@ Welche Ports offen sein müssen – und für wen:
 | 1880 | Node-RED direkt | nur lokal (lauscht ohnehin nur auf 127.0.0.1) |
 | 22 | SSH | Verwaltungsnetz |
 
+Ausgehend braucht der Container nur das Übliche (DNS, Updates, Git) und –
+wenn Eventworx angebunden ist – HTTPS (443) zu `<mandant>.eventworx.biz`.
+
 Beispiel mit nftables im Container (Netze anpassen: `10.10.0.0/24` LAN,
 `10.99.0.0/24` Tunnel):
 
@@ -895,8 +920,8 @@ apt update && apt install --only-upgrade influxdb2 influxdb2-cli
 
 | Was | Wo | Warum |
 |-----|----|-------|
-| `config/config.php` | `/opt/powermanagement/config/` | enthält `app.key` – **ohne ihn sind alle hinterlegten Zugänge (Modbus, Cloud, InfluxDB-Token) verloren** |
-| Datenbank | `/opt/powermanagement/storage/database.sqlite` | Anlagen, Standorte, Benutzer, Einstellungen |
+| `config/config.php` | `/opt/powermanagement/config/` | enthält `app.key` – **ohne ihn sind alle hinterlegten Zugänge (Modbus, Cloud, InfluxDB-Token, Eventworx) verloren**, und die Siegel der Übergabeberichte lassen sich nicht mehr prüfen |
+| Datenbank | `/opt/powermanagement/storage/database.sqlite` | Anlagen, Standorte, Benutzer, Einstellungen, Übergabeberichte samt Unterschriften und PDF |
 | Grundrisse | `/opt/powermanagement/storage/plans/` | hochgeladene Pläne |
 | Zugänge | `/etc/powermanagement/` | Kennwörter, Tokens, Node-RED-Umgebung |
 | Node-RED | `/var/lib/powermanagement/node-red/` | Flows, `flows_cred.json`, eigene Paletten-Nodes |
