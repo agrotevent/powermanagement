@@ -37,6 +37,7 @@ final class Schutz
 
     public const T_DEAKTIVIERT = 'Dieses Konto ist deaktiviert.';
     public const T_KUNDE_LOKAL = 'Kundenzugänge melden sich mit Benutzername und Kennwort an.';
+    public const T_KUNDEN_AUS = 'Kundenzugänge über den Anmeldedienst sind hier ausgeschaltet – bitte bei der Verwaltung melden.';
     public const T_KUNDENGRUPPE = 'Die Gruppe des Kunden fehlt beim Anmeldedienst – bitte bei der Verwaltung melden.';
     public const T_KUNDE_ABWEICHEND = 'Beim Anmeldedienst gehört dieses Konto zu einem anderen Kunden – bitte bei der Verwaltung melden.';
     public const T_GEMISCHT = 'Kunden- und Personalgruppen zugleich – die Anmeldung über SSO geht nur mit einer der beiden.';
@@ -63,10 +64,11 @@ final class Schutz
     public static function darfPerSso(array $user): ?string
     {
         if (Kundenbereich::istKundenzugang($user)) {
-            if (!Kundenbereich::verfuegbar() || !Einstellungen::schalter(Einstellungen::KUNDEN)) {
-                return 'kunden_aus';
+            // Wie in der Prüfkette: ein lokaler Kundenzugang nie, einer aus SSO nur mit sso.kunden.
+            if ((int) ($user['nur_sso'] ?? 0) !== 1) {
+                return 'kunde_lokal';
             }
-            return (int) ($user['nur_sso'] ?? 0) === 1 ? null : 'kunde_lokal';
+            return Kundenbereich::verfuegbar() && Einstellungen::schalter(Einstellungen::KUNDEN) ? null : 'kunden_aus';
         }
         if (self::verwaltend(Auth::rechteVon((int) $user['id'])) && !Einstellungen::schalter(Einstellungen::ADMINS)) {
             return 'verwaltung';
@@ -97,8 +99,12 @@ final class Schutz
             throw $fehler('zeitraum', $sperre);
         }
         if (Kundenbereich::istKundenzugang($user)) {
-            if (!Kundenbereich::verfuegbar() || !Einstellungen::schalter(Einstellungen::KUNDEN) || (int) ($user['nur_sso'] ?? 0) !== 1) {
+            if ((int) ($user['nur_sso'] ?? 0) !== 1) {
                 throw $fehler('kunde_lokal', self::T_KUNDE_LOKAL);
+            }
+            if (!Kundenbereich::verfuegbar() || !Einstellungen::schalter(Einstellungen::KUNDEN)) {
+                // Ein Zugang aus SSO hat kein Kennwort – „mit Kennwort anmelden“ hülfe ihm nicht.
+                throw $fehler('kunden_aus', self::T_KUNDEN_AUS);
             }
             if ($kunde === null) {
                 throw $fehler('kundengruppe', self::T_KUNDENGRUPPE);

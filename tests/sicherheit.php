@@ -333,8 +333,11 @@ try {
     $boese = '<script>alert(1)</script>';
     $html = View::render('sso/einstellungen', [
         'zustand'        => ['befund' => [['ok' => false, 'text' => $boese]], 'geprueft_am' => time(), 'kids' => [$boese], 'algs' => ['RS256'],
-            'aussteller' => 'https://idp.example/' . $boese] + \App\Auth\Sso\Einstellungen::zustand(),
+            'aussteller' => 'https://idp.example/' . $boese,
+            'schalter' => ['kunden' => true] + \App\Auth\Sso\Einstellungen::zustand()['schalter']] + \App\Auth\Sso\Einstellungen::zustand(),
         'zuordnungen'    => [['id' => 1, 'gruppe' => $boese, 'art' => 'rolle', 'ziel_id' => 1, 'ziel_name' => $boese, 'created_by' => $boese, 'created_at' => gmdate('c')]],
+        'kunden'         => ['verfuegbar' => true, 'darf' => true, 'waehlbar' => [['id' => 1, 'name' => $boese]],
+            'gruppen' => [['id' => 2, 'gruppe' => $boese, 'art' => 'kunde', 'ziel_id' => 1, 'ziel_name' => $boese, 'created_by' => $boese, 'created_at' => gmdate('c')]]],
         'rollen'         => [['id' => 1, 'name' => $boese, 'verwaltend' => false, 'waehlbar' => true, 'freigaben' => 0]],
         'anfragen'       => [['id' => 1, 'name_dort' => $boese, 'voller_name' => $boese, 'email' => $boese, 'email_bestaetigt' => 1, 'gruppen' => [$boese],
             'grund' => $boese, 'anzahl' => 2, 'letzte_am' => gmdate('c'), 'vorschlag' => null]],
@@ -346,7 +349,8 @@ try {
         'schutz'         => ['vorbedingungen' => [['ok' => false, 'text' => $boese, 'fehlt' => $boese]], 'notzugaenge' => [$boese],
             'warnungen' => ['verwaltend' => [$boese], 'verknuepft' => 1]],
     ], '');
-    pruefe(!str_contains($html, '<script>') && substr_count($html, '&lt;script&gt;') >= 18, 'SSO-Einstellungen: Angaben des Anmeldedienstes und Benutzernamen (Schutz) nur maskiert');
+    pruefe(!str_contains($html, '<script>') && substr_count($html, '&lt;script&gt;') >= 21,
+        'SSO-Einstellungen: Angaben des Anmeldedienstes, Benutzer- und Kundennamen (Schutz, Kundengruppen) nur maskiert');
     // Was eine andere Instanz schickt, kommt in der Instanzseite nur maskiert an:
     // ihre Meldung, Namen von Locations und Etagen; ein Schlüssel, der keiner
     // ist, wird übergangen.

@@ -11,7 +11,7 @@ use App\Support\Database;
  * Die Hülle der Anmeldung über SSO um den Kundenbereich (016).
  *
  * Alles, was SSO über Kunden wissen muss, geht hier durch – so hängt 017
- * nur an diesen fünf Methoden und nicht an den Klassen des Kundenbereichs.
+ * nur an diesen Methoden und nicht an den Klassen des Kundenbereichs.
  * Kundenzugänge per SSO gibt es nur mit dem Schalter `sso.kunden` (Vorgabe
  * aus); ohne ihn melden sich Kundenzugänge wie bisher mit Benutzername und
  * Kennwort an. Ein Kundenzugang aus SSO hat wie jeder andere keine Rolle,
@@ -44,17 +44,29 @@ final class Kundenbereich
         return KundenService::find($id);
     }
 
-    /** @return list<array{id:int,name:string}> aktive Kunden für die Auswahl einer Kundengruppe */
+    /** @return list<array{id:int,name:string}> aktive, noch gültige Kunden für die Auswahl einer Kundengruppe */
     public static function alle(): array
     {
         if (!self::verfuegbar()) {
             return [];
         }
         $out = [];
-        foreach (KundenService::alle(['aktiv' => '1']) as $k) {
-            $out[] = ['id' => (int) $k['id'], 'name' => (string) $k['name']];
+        foreach (Database::select('SELECT id, name FROM kunden ORDER BY name, id') as $k) {
+            if (Kunden::kundeSperre((int) $k['id']) === null) {
+                $out[] = ['id' => (int) $k['id'], 'name' => (string) $k['name']];
+            }
         }
         return $out;
+    }
+
+    /**
+     * Darf der Angemeldete Zugänge dieses Kunden ausgeben? Eine Kundengruppe
+     * gibt jedem Gruppenmitglied einen Zugang – also nur, wer selbst alles
+     * sieht, was der Kunde sieht (wie beim Zugang von Hand, 016).
+     */
+    public static function darfZugangAusgeben(int $kundeId): bool
+    {
+        return self::verfuegbar() && KundenService::darfZugangAusgeben($kundeId);
     }
 
     /**

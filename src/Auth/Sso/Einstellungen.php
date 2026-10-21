@@ -596,6 +596,52 @@ final class Einstellungen
         return ['ok' => true, 'message' => implode(' ', $meldung)];
     }
 
+    /**
+     * Kundenzugänge über Gruppen (`sso.kunden`, Vorgabe aus) – nur mit dem
+     * Kundenbereich und nur, wer Kunden pflegen darf (kunden.manage; der
+     * Controller prüft es, hier noch einmal).
+     *
+     * An: Wer beim Anmeldedienst in genau einer Kundengruppe ist (und in
+     * keiner Rollen-Gruppe), bekommt bei der ersten Anmeldung einen
+     * Kundenzugang dieses Kunden (Konten::aufloesen). Stehen schon
+     * Kundengruppen da (von einem früheren „an“), gelten sie damit wieder –
+     * das darf nur, wer die Zugänge jedes dieser Kunden auch selbst ausgeben
+     * dürfte (KundenService::darfZugangAusgeben).
+     *
+     * Aus: Die Kundengruppen bleiben stehen, wirken aber nicht; laufende
+     * SSO-Sitzungen von Kundenzugängen enden bei ihrer nächsten Anfrage
+     * (Schutz::sitzungGilt → darfPerSso „kunden_aus“), ihre nächste Anmeldung
+     * über SSO wird abgelehnt.
+     *
+     * @return array{ok:bool,message:string}
+     */
+    public static function kundenSchalten(bool $an): array
+    {
+        if (!Kundenbereich::verfuegbar()) {
+            return ['ok' => false, 'message' => 'Ohne Kundenbereich gibt es keine Kundenzugänge über Gruppen – Kunden dann über eine kundeneigene Rolle zuordnen.'];
+        }
+        if (!Auth::can('kunden.manage')) {
+            return ['ok' => false, 'message' => 'Kundenzugänge über Gruppen schaltet nur, wer Kunden pflegen darf.'];
+        }
+        $name = self::name();
+        if ($an === self::schalter(self::KUNDEN)) {
+            return ['ok' => true, 'message' => 'Kundenzugänge über ' . $name . ' sind schon ' . ($an ? 'an' : 'aus') . '.'];
+        }
+        if ($an) {
+            foreach (Konten::kundengruppen() as $z) {
+                if (!Kundenbereich::darfZugangAusgeben((int) $z['ziel_id'])) {
+                    return ['ok' => false, 'message' => 'Es stehen noch Kundengruppen für Kunden da, deren Zugänge du nicht ausgeben darfst (Gruppe „'
+                        . $z['gruppe'] . '“) – erst entfernen lassen oder von jemandem einschalten lassen, der alles sieht, was diese Kunden sehen.'];
+                }
+            }
+        }
+        Settings::put(self::KUNDEN, $an ? '1' : '0');
+        Audit::log('einstellungen.sso', 'settings', '', ['schalter' => ['kunden' => $an]]);
+        return ['ok' => true, 'message' => $an
+            ? 'Kundenzugänge über ' . $name . ' sind an: Wer in einer Kundengruppe ist, bekommt bei der ersten Anmeldung einen Zugang dieses Kunden.'
+            : 'Kundenzugänge über ' . $name . ' sind aus – ihre Sitzungen über ' . $name . ' enden; Kundenzugänge mit Kennwort bleiben, wie sie sind.'];
+    }
+
     /** War die letzte „Verbindung prüfen“ (auch beim Einschalten) ganz erfolgreich? */
     public static function letztePruefungOk(): bool
     {

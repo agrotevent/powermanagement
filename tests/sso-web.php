@@ -8,7 +8,7 @@ declare(strict_types=1);
  * Weiterleitungen werden von Hand verfolgt, jede „Browser“-Sitzung hat ihre
  * eigene Cookie-Dose.
  *
- * Geprüft wird (§13.3 1–8 und 13):
+ * Geprüft wird (§13.3 1–13):
  *   1. Anmeldeseite ohne und mit SSO: Knopf als Link, kein Formular nach
  *      außen, CSP unverändert, kaputter Zwischenspeicher → Seite geht.
  *   2. Abmelden mit Kennwort → „Abgemeldet.“
@@ -35,6 +35,11 @@ declare(strict_types=1);
  *      entsperrt; fünf Fehlversuche → gebremst, nicht abgemeldet.
  *  11. Token anzeigen (Schnittstelle) für ein Konto „nur über SSO“: ohne
  *      Bestätigung abgelehnt, nach der Bestätigung genau einmal (no-store).
+ *  12. Kunden über Gruppen (Kundenbereich): sso.kunden nur mit „Kunden
+ *      pflegen“, Kundengruppe auf der Kundenseite; ein Kunden-SSO-Konto landet
+ *      im Kundenbereich, das Tor wirkt, kein Kennwort im Konto, Personal sieht
+ *      „über Authentik“ ohne Link/Kennwort, Abmelden über /abgemeldet, Gruppe
+ *      entfernt → Sitzung zu Ende.
  *  13. Die Seiten ohne PHP-Meldung (im HTML und im Fehlerprotokoll des Servers).
  * Dazu: Fehlertexte des Anbieters und Angaben aus Anfragen erscheinen nur
  * maskiert.
@@ -310,7 +315,7 @@ $ohne = ['/system/sso/verbindung' => ['aussteller' => 'https://evil.example/', '
     '/system/sso/zuordnung/' . $zuordnungId . '/loeschen' => [], '/system/sso/anfrage/' . $anfrageOhne . '/freischalten' => ['user_id' => (string) $erika],
     '/system/sso/anfrage/' . $anfrageOhne . '/anlegen' => ['username' => $kennung . '-ohne'], '/system/sso/anfrage/' . $anfrageOhne . '/verwerfen' => [],
     '/system/benutzer/' . $zweit . '/sso' => ['aktion' => 'loesen'], '/profil/sso/loesen' => [],
-    '/system/sso/schutz' => ['admins' => '1', 'mfa_verwaltung' => '1']];
+    '/system/sso/schutz' => ['admins' => '1', 'mfa_verwaltung' => '1'], '/system/sso/kunden' => ['kunden' => '1']];
 foreach ($ohne as $pfad => $felder) {
     $r = browser($pfad, $adminDose, 'POST', $felder);
     pruefe($r['status'] === 302, '8: ' . $pfad . ' ohne _token → zurück (' . $r['status'] . ')');
@@ -685,6 +690,88 @@ $r = $senden($sd, $anzeigen, [], '/system/schnittstelle');
 pruefe($r['status'] === 302 && !str_contains($r['text'], $tokenKlar), '11: ein zweites „Anzeigen“ → abgelehnt');
 gleich((int) Database::scalar("SELECT COUNT(*) FROM audit_log WHERE action = 'api.token.angezeigt' AND target_id = ?", [(string) $tokenId]), 1,
     '11: genau ein „angezeigt“ im Audit');
+
+// ================================================================ 12. Kunden über Gruppen (Kundenbereich)
+if (!\App\Auth\Sso\Kundenbereich::verfuegbar()) {
+    fwrite(STDOUT, "  12: übersprungen – kein Kundenbereich\n");
+} else {
+    \App\Auth\Auth::alsBenutzer($admin);
+    $kundeW = (int) \App\Kunden\KundenService::speichern(null, ['name' => 'Prüfung SSO ' . $kennung, 'aktiv' => 1])['id'];
+    \App\Auth\Auth::alsBenutzer(null);
+    $kundenSeite = '/kunden/' . $kundeW . '?tab=zugaenge';
+    $kgW = 'pm-kunde-' . $kennung;
+    // Ohne „Kunden pflegen“ (nur „SSO einrichten“): weder Schalter noch Kundengruppe.
+    $svd = $kennwortAnmelden($kennung . '-ssoverwalter', $pw);
+    $r = $senden($svd, '/system/sso/kunden', ['kunden' => '1'], '/system/sso');
+    $frisch();
+    pruefe($r['status'] === 403 && !$schalter(\App\Auth\Sso\Einstellungen::KUNDEN), '12: sso.kunden ohne kunden.manage → 403');
+    $seite = browser('/system/sso', $svd);
+    pruefe(str_contains($seite['text'], 'id="kunden"') && str_contains($seite['text'], 'nur mit „Kunden pflegen“ änderbar')
+        && str_contains($seite['text'], 'name="kunden" value="1" disabled>') && !str_contains($seite['text'], 'id="sso-kunde"'), '12: Kunden-Karte ohne kunden.manage nur lesend');
+    $abmelden($svd);
+    // Administrator: einschalten, Kundengruppe auf der Kundenseite zuordnen
+    $r = $senden($adminDose, '/system/sso/kunden', ['kunden' => '1'], '/system/sso');
+    $frisch();
+    pruefe($r['status'] === 302 && $r['ziel'] === '/system/sso#kunden' && $schalter(\App\Auth\Sso\Einstellungen::KUNDEN), '12: sso.kunden als Administrator an');
+    $seite = browser($kundenSeite, $adminDose);
+    pruefe($seite['status'] === 200 && str_contains($seite['text'], 'id="sso-gruppen"') && str_contains($seite['text'], 'name="art" value="kunde"')
+        && str_contains($seite['text'], 'name="zurueck" value="kunde"'), '12: Kundenseite (Zugänge) mit Abschnitt „Anmeldung über Authentik“ und Formular');
+    gleich(phpMeldung($seite['text']), null, '13: Kundenseite mit Kundengruppen ohne PHP-Meldung');
+    $r = $senden($adminDose, '/system/sso/zuordnung', ['gruppe' => $kgW, 'art' => 'kunde', 'ziel_id' => (string) $kundeW, 'zurueck' => 'kunde'], $kundenSeite);
+    pruefe($r['status'] === 302 && $r['ziel'] === $kundenSeite . '#sso-gruppen'
+        && (int) Database::scalar("SELECT ziel_id FROM sso_zuordnungen WHERE gruppe = ? AND art = 'kunde'", [$kgW]) === $kundeW, '12: Kundengruppe zugeordnet, zurück zur Kundenseite');
+    pruefe(str_contains(browser($kundenSeite, $adminDose)['text'], '<code>' . $kgW . '</code>')
+        && str_contains(browser('/system/sso', $adminDose)['text'], 'href="/kunden/' . $kundeW . '?tab=zugaenge"'), '12: die Gruppe auf der Kundenseite und in der Kunden-Karte');
+    $r = $senden($adminDose, '/system/sso/zuordnung', ['gruppe' => $kgW . '-x', 'art' => 'kunde', 'ziel_id' => (string) $kundeW, 'zurueck' => '//evil.example'], $kundenSeite);
+    pruefe($r['ziel'] === '/system/sso#kunden', '12: „zurueck“ führt nur auf die Kundenseite (fester Pfad), sonst zur Karte');
+    Database::execute("DELETE FROM sso_zuordnungen WHERE gruppe = ?", [$kgW . '-x']);
+    // Kunde meldet sich über die Kundengruppe an
+    $idp->benutzer($person('sub-kunde-' . $kennung, $kennung . '-kunde', [$kgW]));
+    $kd = $dose();
+    [, , $rueck] = $ssoAnmelden($kd, '/dashboard');
+    $kz = (int) Database::scalar('SELECT id FROM users WHERE username = ? AND kunde_id = ?', [$kennung . '-kunde', $kundeW]);
+    pruefe($rueck !== null && $rueck['ziel'] === '/kundenbereich' && $kz > 0, '12: Kunden-SSO-Konto angelegt, landet auf /kundenbereich (nicht /dashboard)');
+    $r = browser('/kundenbereich', $kd);
+    pruefe($r['status'] === 200 && phpMeldung($r['text']) === null, '12: /kundenbereich 200');
+    $r = browser('/dashboard', $kd);
+    pruefe($r['status'] === 302 && $r['ziel'] === '/kundenbereich', '12: das Tor wirkt (/dashboard → /kundenbereich)');
+    gleich(browser('/system/sso', $kd)['ziel'], '/kundenbereich', '12: auch /system/sso → /kundenbereich');
+    $konto = browser('/kundenbereich/konto', $kd);
+    pruefe($konto['status'] === 200 && !str_contains($konto['text'], 'name="current_password"') && str_contains($konto['text'], 'Anmeldung über Authentik')
+        && phpMeldung($konto['text']) === null, '12: Konto im Kundenbereich ohne Kennwortänderung, „Anmeldung über Authentik“');
+    $hash = (string) Database::scalar('SELECT password_hash FROM users WHERE id = ?', [$kz]);
+    $r = browser('/kundenbereich/konto/kennwort', $kd, 'POST', ['current_password' => 'x', 'new_password' => $pw, 'new_password_repeat' => $pw,
+        '_token' => token($konto['text'])]);
+    pruefe($r['status'] === 302 && $r['ziel'] === '/kundenbereich/konto' && (string) Database::scalar('SELECT password_hash FROM users WHERE id = ?', [$kz]) === $hash
+        && str_contains(browser('/kundenbereich/konto', $kd)['text'], 'ein Kennwort gibt es hier nicht'), '12: Kennwort ändern im Kundenbereich bei nur_sso → abgelehnt');
+    // Personal sieht den Zugang mit „über Authentik“, ohne Einrichtungslink und Kennwort
+    $seite = browser($kundenSeite, $adminDose);
+    preg_match('#<tr id="zugang-' . $kz . '">(.*?)</tr>#s', $seite['text'], $m);
+    $zeile = $m[1] ?? '';
+    pruefe($zeile !== '' && str_contains($zeile, 'über Authentik') && !str_contains($zeile, 'value="link"') && !str_contains($zeile, 'value="kennwort"')
+        && str_contains($zeile, 'value="sso_sitzungen"'), '12: Zugang „über Authentik“ ohne Einrichtungslink und Kennwort, mit „Sitzungen beenden“');
+    $r = $senden($adminDose, '/kunden/' . $kundeW . '/zugang/' . $kz, ['aktion' => 'link'], $kundenSeite);
+    pruefe($r['status'] === 302 && Database::scalar('SELECT einrichtung_hash FROM users WHERE id = ?', [$kz]) === null, '12: Einrichtungslink für den Zugang aus SSO → abgelehnt');
+    // Abmelden aus dem Kundenbereich: dieselbe Zwischenseite
+    $r = browser('/logout', $kd, 'POST', ['_token' => token(browser('/kundenbereich', $kd)['text'])]);
+    $ab = browser('/abgemeldet', $kd);
+    pruefe($r['ziel'] === '/abgemeldet' && $ab['status'] === 200 && str_contains($ab['text'], 'Auch bei Authentik abmelden') && !str_contains($ab['text'], 'class="nav'),
+        '12: Abmelden im Kundenbereich → /abgemeldet (ohne Navigation)');
+    // Kundengruppe entfernen (von der Kundenseite): die Sitzung des Kundenzugangs endet
+    [, , $rueck] = $ssoAnmelden($kd, '/kundenbereich');
+    pruefe($rueck !== null && $rueck['ziel'] === '/kundenbereich' && browser('/kundenbereich', $kd)['status'] === 200, '12: wieder angemeldet');
+    $zid = (int) Database::scalar("SELECT id FROM sso_zuordnungen WHERE gruppe = ? AND art = 'kunde'", [$kgW]);
+    $r = $senden($adminDose, '/system/sso/zuordnung/' . $zid . '/loeschen', ['zurueck' => 'kunde'], $kundenSeite);
+    pruefe($r['status'] === 302 && $r['ziel'] === $kundenSeite . '#sso-gruppen' && Database::first('SELECT id FROM sso_zuordnungen WHERE id = ?', [$zid]) === null,
+        '12: Kundengruppe entfernt, zurück zur Kundenseite');
+    $r = browser('/kundenbereich', $kd);
+    pruefe($r['status'] === 302 && str_starts_with($r['ziel'], '/login'), '12: … die Sitzung des Kundenzugangs über SSO ist zu Ende');
+    [, , $rueck] = $ssoAnmelden($kd, '/kundenbereich');
+    pruefe($rueck !== null && $rueck['ziel'] === '/login' && str_contains(browser('/login', $kd)['text'], 'Gruppe des Kunden fehlt'), '12: ohne Kundengruppe keine Anmeldung');
+    $r = $senden($adminDose, '/system/sso/kunden', [], '/system/sso');
+    $frisch();
+    pruefe($r['status'] === 302 && !$schalter(\App\Auth\Sso\Einstellungen::KUNDEN), '12: sso.kunden wieder aus (Häkchen fehlt)');
+}
 
 // ================================================================ 13. ohne PHP-Meldung
 foreach ([['/login', $dose()], ['/abgemeldet', $dose()], ['/profil', $adminDose], ['/profil', $u], ['/system/sso', $adminDose], ['/system/benutzer', $adminDose],

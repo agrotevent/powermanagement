@@ -358,13 +358,15 @@ $router->post('/system/einstellungen/eventworx/pruefen', [EinstellungenControlle
 $router->post('/system/einstellungen/kundenbereich', [EinstellungenController::class, 'kundenbereich'], 'settings.manage');
 
 // Anmeldung über SSO (OpenID Connect): Verbindung, Prüfen, Ein-/Ausschalten,
-// Optionen, Schutz, Gruppen → Rollen, Anmeldeanfragen. Gruppen zuordnen und
-// Anfragen freischalten zusätzlich nur mit „Benutzer verwalten“ und nur, was
-// man selbst vergeben bzw. verwalten darf (App\Auth\Sso\Konten); den Schutz
-// (Verwaltung per SSO, MFA, „nur SSO“) nur mit allen Rechten. Feste Pfade
-// vor {id}.
+// Optionen, Schutz, Kunden, Gruppen → Rollen/Kunden, Anmeldeanfragen. Gruppen
+// Rollen zuordnen und Anfragen freischalten zusätzlich nur mit „Benutzer
+// verwalten“ und nur, was man selbst vergeben bzw. verwalten darf
+// (App\Auth\Sso\Konten); Kundenzugänge über Gruppen und Kundengruppen nur mit
+// „Kunden pflegen“ und nur für Kunden, deren Zugänge man ausgeben dürfte; den
+// Schutz (Verwaltung per SSO, MFA, „nur SSO“) nur mit allen Rechten. Feste
+// Pfade vor {id}.
 $router->get('/system/sso', [SsoEinstellungenController::class, 'index'], 'sso.manage');
-foreach (['verbindung', 'pruefen', 'schalten', 'optionen', 'schutz', 'zuordnung'] as $aktion) {
+foreach (['verbindung', 'pruefen', 'schalten', 'optionen', 'schutz', 'kunden', 'zuordnung'] as $aktion) {
     $router->post('/system/sso/' . $aktion, [SsoEinstellungenController::class, $aktion], 'sso.manage');
 }
 $router->post('/system/sso/zuordnung/{id}/loeschen', [SsoEinstellungenController::class, 'zuordnungLoeschen'], 'sso.manage');

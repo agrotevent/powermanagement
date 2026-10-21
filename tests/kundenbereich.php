@@ -11,6 +11,13 @@ declare(strict_types=1);
  * und Rollen-Freigaben zählen nicht) und endet mit seinem Kunden. Die
  * Benutzerverwaltung lässt Kundenzugänge in Ruhe.
  *
+ * Anmeldung über SSO (017, Vorgabe sso.kunden aus – die Einstellungen der
+ * Arbeitskopie bleiben unberührt): ein lokaler Kundenzugang wird nie über
+ * SSO angemeldet oder verknüpft; ein Zugang aus SSO bekommt weder
+ * Einrichtungslink noch Kennwort, sein Name dort sperrt den Namen für lokale
+ * Zugänge, die Liste nennt die Verknüpfung, Löschen nimmt die Kundengruppen
+ * mit.
+ *
  * Kundenverwaltung (KundenService, Einrichtung): Kunden anlegen und ändern,
  * Zugänge über vorläufiges Kennwort oder Einrichtungslink (nur der HMAC
  * gespeichert, einmal, mit Ablauf, nur aus app.url), Benutzernamen ohne
@@ -56,6 +63,10 @@ declare(strict_types=1);
 require __DIR__ . '/hilfen/pruefung.php';
 
 use App\Auth\Auth;
+use App\Auth\Sso\Einstellungen as SsoEinstellungen;
+use App\Auth\Sso\Konten as SsoKonten;
+use App\Auth\Sso\Schutz as SsoSchutz;
+use App\Auth\Sso\SsoFehler;
 use App\Auth\Zugriff;
 use App\Berichte\BerichtSchema;
 use App\Berichte\BerichtService;
@@ -827,6 +838,51 @@ try {
     gleich((KundenService::zugang($kunden['k5'], $zugaenge['altlink']) ?? [])['zustand'] ?? '', 'link_abgelaufen', '… Zustand weiter: Link abgelaufen');
     gleich(Database::scalar('SELECT einrichtung_hash FROM users WHERE id = ?', [$zugaenge['kw']]), null, 'Wartung: nur abgelaufene Links');
 
+    // ------------------------------------------------ Anmeldung über SSO (017): Kundenzugänge bleiben lokal
+    // Die sso.*-Einstellungen der Arbeitskopie bleiben unberührt (Vorgabe sso.kunden = 0); Kunden über
+    // Gruppen mit sso.kunden prüft tests/sso.php in einer eigenen Instanz (Abschnitt L).
+    $ssoCode = static function (callable $f): string {
+        try {
+            $f();
+            return 'ok';
+        } catch (SsoFehler $e) {
+            return $e->pruefung;
+        }
+    };
+    $lokal = (array) BenutzerService::find($zugaenge['kw']);
+    $ssoIss = 'https://idp.example.test/application/o/' . $kennung . '/';
+    gleich(SsoSchutz::darfPerSso($lokal), 'kunde_lokal', 'SSO: ein lokaler Kundenzugang ist nie über SSO angemeldet');
+    gleich($ssoCode(static fn () => SsoSchutz::pruefkette($lokal, ['sub' => 'x'], [], null, [])), 'kunde_lokal', 'SSO: die Prüfkette lehnt den lokalen Kundenzugang ab');
+    foreach (['profil', 'freischaltung', 'cli'] as $weg) {
+        gleich($ssoCode(static fn () => SsoKonten::verknuepfen($zugaenge['kw'], $ssoIss, 'sub-' . $kennung, $weg, '', [])), 'kunde_lokal',
+            'SSO: lokalen Kundenzugang verknüpfen (' . $weg . ') → abgelehnt');
+    }
+    gleich((int) Database::scalar('SELECT COUNT(*) FROM sso_identitaeten WHERE user_id = ?', [$zugaenge['kw']]), 0, 'SSO: … und nicht verknüpft');
+    if (!SsoEinstellungen::schalter(SsoEinstellungen::KUNDEN)) {
+        gleich(SsoKonten::kundeFuer(['pm-kunde-' . $kennung]), null, 'SSO: Vorgabe sso.kunden aus – keine Kundengruppe wirkt');
+    }
+    // Ein Zugang aus SSO (wie ihn die Anmeldung über eine Kundengruppe anlegt): kein Link, kein Kennwort, sein Name dort gesperrt.
+    $zugaenge['sso'] = KundenService::kontoErzeugen($kunden['k5'], $kennung . '-sso', '', '', password_hash(bin2hex(random_bytes(16)), PASSWORD_DEFAULT), false);
+    Database::update('users', $zugaenge['sso'], ['nur_sso' => 1]);
+    Database::insert('sso_identitaeten', ['user_id' => $zugaenge['sso'], 'schluessel' => SsoKonten::schluessel($ssoIss, 'sub-sso-' . $kennung),
+        'aussteller' => $ssoIss, 'subjekt' => 'sub-sso-' . $kennung, 'weg' => 'anlage', 'name_dort' => $kennung . '-dort', 'angelegt_von' => 'sso',
+        'angelegt_am' => gmdate('c')]);
+    $ssoLink = Einrichtung::erzeugen($zugaenge['sso']);
+    gleich(Einrichtung::finden($ssoLink['token']), null, 'SSO: Einrichtungslink eines Zugangs nur über SSO → null');
+    Database::update('users', $zugaenge['sso'], ['einrichtung_hash' => null, 'einrichtung_bis' => null]);
+    alsBenutzer($personal['admin']);
+    gleich([KundenService::zugangLink($kunden['k5'], $zugaenge['sso'])['message'], KundenService::zugangKennwort($kunden['k5'], $zugaenge['sso'])['message']],
+        [KundenService::NUR_SSO, KundenService::NUR_SSO], 'SSO: weder Einrichtungslink noch vorläufiges Kennwort für einen Zugang nur über SSO');
+    $ssoZeilen = array_values(array_filter(KundenService::zugaenge($kunden['k5']), static fn (array $z): bool => $z['sso'] !== null));
+    gleich(array_map(static fn (array $z): array => [(int) $z['id'], $z['sso']['weg'], $z['sso']['name_dort'], (int) $z['nur_sso']], $ssoZeilen),
+        [[$zugaenge['sso'], 'anlage', $kennung . '-dort', 1]], 'SSO: zugaenge() nennt die Verknüpfung – nur beim Zugang aus SSO');
+    $r = KundenService::zugangAnlegen($kunden['k5'], ['username' => strtoupper($kennung) . '-DORT'], 'kennwort');
+    pruefe(!$r['ok'] && $r['message'] === KundenService::SSO_NAME, 'SSO: lokaler Zugang mit dem Namen einer SSO-Anmeldung (andere Schreibweise) → abgelehnt');
+    pruefe(KundenService::zugangSsoSitzungen($kunden['k5'], $zugaenge['sso'])['ok'] && !KundenService::zugangSsoSitzungen($kunden['k5'], $zugaenge['kw'])['ok']
+        && !KundenService::zugangSsoSitzungen($kunden['k1'], $zugaenge['sso'])['ok'], 'SSO: Sitzungen über SSO beenden – nur Zugänge aus SSO, nur am eigenen Kunden');
+    pruefe(Database::scalar('SELECT abgemeldet_am FROM sso_identitaeten WHERE user_id = ?', [$zugaenge['sso']]) !== null, 'SSO: … abgemeldet_am gesetzt');
+    alsBenutzer($personal['planung']);
+
     // Ändern, sperren, entsperren, löschen – nur Zugänge dieses Kunden.
     pruefe(KundenService::zugangSpeichern($kunden['k5'], $zugaenge['link'], ['full_name' => 'Max Muster', 'email' => $mail, 'is_active' => 0])['ok']
         && (KundenService::zugang($kunden['k5'], $zugaenge['link']) ?? [])['zustand'] === 'deaktiviert', 'Zugang deaktiviert');
@@ -952,6 +1008,8 @@ try {
     Database::insert('kunden_abrufe', ['kunde_id' => $kunden['k6'], 'user_id' => (int) $z6['user_id'], 'art' => 'nachweis', 'ziel_id' => 1, 'am' => gmdate('c')]);
     $bericht = Database::insert('berichte', ['status' => 'abgeschlossen', 'pruefdatum' => gmdate('Y-m-d'), 'inhalt' => '{}', 'titel' => $kennung,
         'erstellt_von' => $personal['admin'], 'created_at' => gmdate('c'), 'kunde_id' => $kunden['k6']]);
+    // Anmeldung über SSO (017): eine Kundengruppe geht mit dem Kunden.
+    Database::insert('sso_zuordnungen', ['gruppe' => 'pm-kunde-' . $kennung, 'art' => 'kunde', 'ziel_id' => $kunden['k6'], 'created_by' => 'sql', 'created_at' => gmdate('c')]);
     pruefe(!KundenService::loeschen($kunden['k6'], $kennung . ' Zum Löschen')['ok'], 'Löschen: aktiver Kunde abgelehnt');
     KundenService::speichern($kunden['k6'], ['name' => $kennung . ' Zum Löschen', 'aktiv' => 0]);
     pruefe(!KundenService::loeschen($kunden['k6'], $kennung . ' Zum Loeschen')['ok'] && KundenService::find($kunden['k6']) !== null,
@@ -972,6 +1030,8 @@ try {
     pruefe($b !== null && $b['kunde_id'] === null, 'der Übergabebericht bleibt, nur ohne Kunde');
     $details = json_decode((string) Database::scalar("SELECT details FROM audit_log WHERE action = 'kunden.loeschen' AND target_id = ?", [(string) $kunden['k6']]), true);
     gleich([$details['zugaenge'] ?? null, $details['nachweise'] ?? null, $details['berichte'] ?? null], [1, 2, 1], 'Audit kunden.loeschen mit Zahlen');
+    pruefe((int) Database::scalar("SELECT COUNT(*) FROM sso_zuordnungen WHERE art = 'kunde' AND ziel_id = ?", [$kunden['k6']]) === 0
+        && ($details['sso_gruppen'] ?? null) === 1, 'gelöscht: auch die Kundengruppe der Anmeldung über SSO (Audit nennt sie)');
 
     // ------------------------------------------------ Standort löschen
     $sites['d'] = SiteService::saveSite(null, ['name' => $kennung . ' Gelände D']);
@@ -1695,6 +1755,7 @@ try {
         array_map('intval', array_column(Database::select('SELECT id FROM kunden WHERE name LIKE ?', [$kennung . '%']), 'id')))));
     foreach ($kundenIds as $id) {
         Database::execute("DELETE FROM freigaben WHERE subject_type = 'kunde' AND subject_id = ?", [$id]);
+        Database::execute("DELETE FROM sso_zuordnungen WHERE art = 'kunde' AND ziel_id = ?", [$id]);
         foreach (Database::select('SELECT id FROM users WHERE kunde_id = ?', [$id]) as $u) {
             BenutzerService::kontoEntfernen((int) $u['id']);
             Database::execute("DELETE FROM audit_log WHERE target_type = 'user' AND target_id = ?", [(string) $u['id']]);

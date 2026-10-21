@@ -340,9 +340,11 @@ final class Anmeldung
         }
         $sperre = Schutz::darfPerSso($user);
         if ($sperre !== null) {
-            return $sperre === 'verwaltung'
-                ? 'Bestätigen über ' . $name . ' geht für Verwaltungskonten erst, wenn „Verwaltung per SSO“ eingeschaltet ist.'
-                : Schutz::T_KUNDE_LOKAL;
+            return match ($sperre) {
+                'verwaltung' => 'Bestätigen über ' . $name . ' geht für Verwaltungskonten erst, wenn „Verwaltung per SSO“ eingeschaltet ist.',
+                'kunden_aus' => Schutz::T_KUNDEN_AUS,
+                default      => Schutz::T_KUNDE_LOKAL,
+            };
         }
         [$art, $id] = explode(':', $zweck, 2);
         $m = Kundenmodus::aktiv();
@@ -431,7 +433,11 @@ final class Anmeldung
         }
         $sperre = Schutz::darfPerSso($user);
         if ($sperre !== null) {
-            throw new SsoFehler($sperre, $sperre === 'verwaltung' ? Schutz::T_VERWALTUNG : Schutz::T_KUNDE_LOKAL);
+            throw new SsoFehler($sperre, match ($sperre) {
+                'verwaltung' => Schutz::T_VERWALTUNG,
+                'kunden_aus' => Schutz::T_KUNDEN_AUS,
+                default      => Schutz::T_KUNDE_LOKAL,
+            });
         }
         [$art, $id] = explode(':', (string) $v['zweck'], 2);
         $id = (int) $id;

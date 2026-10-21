@@ -41,10 +41,17 @@ declare(strict_types=1);
  *    dieses Konto; andere Person, nicht neu angemeldet, Verwaltung ohne
  *    sso.admins (W7); Auth::bestaetigen mit Kennwort bzw. nie bei nur_sso;
  *    Kundenmodus entsperren (Fehlversuche zählen, Bremse vor dem Netz).
+ * L. Kunden über Gruppen (nur mit Kundenbereich): sso.kunden und
+ *    Kundengruppen nur mit kunden.manage und nur für Kunden, deren Zugänge man
+ *    ausgeben dürfte; aus → kein Zugang; an → Kundenzugang (kunde_id, nur_sso,
+ *    keine Rolle, keine Rechte, landet im Kundenbereich); zwei Kunden,
+ *    gemischt, Kunde inaktiv, andere bzw. fehlende Kundengruppe; lokale
+ *    Kundenzugänge nie verknüpft; Anfragen mit Kundengruppe nie Personal;
+ *    sso.kunden aus und Gruppe entfernen beenden die SSO-Sitzungen; die Haken
+ *    im Kundenbereich (Einrichtungslink, Kennwort, Name, Liste, Löschen).
  * M. Keine Geheimnisse (Code, Access-/ID-Token) in Sitzung, Audit und Log.
  *
- * Die Abschnitte L und N (Kunden, CLI) kommen mit den nächsten Schritten
- * dazu.
+ * Abschnitt N (Kommandozeile) kommt mit dem nächsten Schritt dazu.
  */
 
 require __DIR__ . '/hilfen/instanz.php';
@@ -59,11 +66,13 @@ use App\Auth\Sso\Einstellungen;
 use App\Auth\Sso\IdToken;
 use App\Auth\Sso\Jwk;
 use App\Auth\Sso\Konten;
+use App\Auth\Sso\Kundenbereich as SsoKunden;
 use App\Auth\Sso\Schutz;
 use App\Auth\Sso\SsoFehler;
 use App\Auth\Zugriff;
 use App\Berichte\BerichtService;
 use App\Berichte\Kundenmodus;
+use App\Kunden\Einrichtung;
 use App\Kunden\KundenService;
 use App\Messung\Http;
 use App\Services\BenutzerService;
@@ -1520,6 +1529,221 @@ pruefe($r['code'] === 'kundenmodus' && $r['meldung'] === Anmeldung::T_GEBREMST &
 unset($_SESSION[Kundenmodus::SITZUNG]);
 Database::execute('DELETE FROM bericht_ereignisse WHERE bericht_id = ?', [$bericht]);
 $abmelden();
+
+// ================================================================ L. Kunden über Gruppen (mit Kundenbereich)
+if (!SsoKunden::verfuegbar()) {
+    fwrite(STDOUT, "  Kunden: übersprungen – kein Kundenbereich\n");
+} else {
+    Settings::put(Einstellungen::ANLEGEN, '0');
+    Settings::put(Einstellungen::ADMINS, '0');
+    Settings::put(Einstellungen::NUR_SSO, '0');
+    Settings::put(Einstellungen::PFLICHTGRUPPEN, '[]');
+    Settings::put(Einstellungen::KUNDEN, '0');
+    alsBenutzer($admin);
+    $kunde1 = (int) KundenService::speichern(null, ['name' => 'Prüfung SSO L1 ' . $kennung, 'aktiv' => 1])['id'];
+    $kunde2 = (int) KundenService::speichern(null, ['name' => 'Prüfung SSO L2 ' . $kennung, 'aktiv' => 1])['id'];
+    $kunde3 = (int) KundenService::speichern(null, ['name' => 'Prüfung SSO L3 ' . $kennung, 'aktiv' => 0])['id'];
+    $rolleKundenpflege = (int) BenutzerService::rolleSpeichern(null, $kennung . '-kundenpflege', 'Prüfung', ['kunden.view', 'kunden.manage'])['id'];
+    $rolleKundenblick = (int) BenutzerService::rolleSpeichern(null, $kennung . '-kundenblick', 'Prüfung', ['kunden.view'])['id'];
+    // Pflegt Kunden, sieht aber nicht alles, was ein Kunde sieht (ohne „Alle Standorte …“) – gibt also keine Zugänge aus.
+    $pfleger = BenutzerService::anlegen($kennung . '-pfleger', $pw, 'kunde', false);
+    $blick = BenutzerService::anlegen($kennung . '-blick', $pw, 'kunde', false);
+    Database::execute('DELETE FROM user_roles WHERE user_id IN (?, ?)', [$pfleger, $blick]);
+    Database::insert('user_roles', ['user_id' => $pfleger, 'role_id' => $rolleKundenpflege]);
+    Database::insert('user_roles', ['user_id' => $blick, 'role_id' => $rolleKundenblick]);
+    $kg1 = 'pm-kunde-1-' . $kennung;
+    $kg2 = 'pm-kunde-2-' . $kennung;
+
+    // L.0 Schalter und Kundengruppen – wer darf was
+    pruefe(str_contains((string) Konten::zuordnungFehler($kg1, 'kunde', $kunde1), 'erst mit'), 'L.0: Kundengruppe bei sso.kunden aus → abgelehnt');
+    alsBenutzer($blick);
+    pruefe(!Einstellungen::kundenSchalten(true)['ok'] && !Einstellungen::schalter(Einstellungen::KUNDEN), 'L.0: sso.kunden ohne kunden.manage → abgelehnt');
+    alsBenutzer($admin);
+    pruefe(Einstellungen::kundenSchalten(true)['ok'] && Einstellungen::schalter(Einstellungen::KUNDEN), 'L.0: sso.kunden als Administrator an');
+    gleich($letztesAudit('einstellungen.sso'), ['schalter' => ['kunden' => true]], 'L.0: Audit einstellungen.sso mit dem Schalter');
+    alsBenutzer($blick);
+    pruefe(str_contains((string) Konten::zuordnungFehler($kg1, 'kunde', $kunde1), 'Kunden pflegen'), 'L.0: Kundengruppe ohne kunden.manage → abgelehnt');
+    alsBenutzer($pfleger);
+    pruefe(str_contains((string) Konten::zuordnungFehler($kg1, 'kunde', $kunde1), 'gibt Zugänge aus'),
+        'L.0: Kundengruppe ohne „sieht alles, was der Kunde sieht“ → abgelehnt (wie ein Zugang von Hand)');
+    alsBenutzer($admin);
+    pruefe(str_contains((string) Konten::zuordnungFehler($kg1, 'kunde', $kunde3), 'nicht aktiv'), 'L.0: Kundengruppe eines beendeten Kunden → abgelehnt');
+    pruefe(Konten::zuordnungSpeichern($kg1, 'kunde', $kunde1)['ok'] && Konten::zuordnungSpeichern($kg2, 'kunde', $kunde2)['ok'], 'L.0: zwei Kundengruppen zugeordnet');
+    pruefe(str_contains((string) Konten::zuordnungFehler($kg1, 'kunde', $kunde2), 'anderen Kunden'), 'L.0: eine Gruppe gehört zu genau einem Kunden');
+    pruefe(str_contains((string) Konten::zuordnungFehler($kg1, 'rolle', $rolleA), 'entweder'), 'L.0: Kundengruppe zugleich als Rollen-Gruppe → abgelehnt');
+    pruefe(str_contains((string) Konten::zuordnungFehler($gruppeA, 'kunde', $kunde1), 'entweder'), 'L.0: Rollen-Gruppe zugleich als Kundengruppe → abgelehnt');
+    gleich(array_column(Konten::kundengruppen($kunde1), 'gruppe'), [$kg1], 'L.0: Kundengruppen je Kunde');
+    pruefe(Einstellungen::kundenSchalten(false)['ok'], '(sso.kunden aus)');
+    alsBenutzer($pfleger);
+    $r = Einstellungen::kundenSchalten(true);
+    pruefe(!$r['ok'] && str_contains($r['message'], 'nicht ausgeben') && !Einstellungen::schalter(Einstellungen::KUNDEN),
+        'L.0: wieder an nur, wer die Zugänge aller Kunden mit Kundengruppe ausgeben dürfte');
+    alsBenutzer(null);
+    $abmelden();
+
+    // L.1 sso.kunden aus: eine Kundengruppe ohne Rollen-Gruppe legt nichts an
+    $subK = 'sub-kunde-' . $kennung;
+    $nameK = $kennung . '-klara';
+    $r = $ablauf($person($subK, $nameK, [$kg1]));
+    pruefe($r['code'] === 'kein_konto' && Database::first('SELECT id FROM users WHERE username = ?', [$nameK]) === null && Auth::id() === null,
+        'L.1: sso.kunden aus: Kundengruppe ohne Rollen-Gruppe → kein_konto, kein Zugang');
+    $anfrageK = (int) Database::scalar('SELECT id FROM sso_anfragen WHERE subjekt = ?', [$subK]);
+    alsBenutzer($admin);
+    pruefe(Einstellungen::kundenSchalten(true)['ok'], '(sso.kunden wieder an)');
+    $lPersonal = BenutzerService::anlegen($kennung . '-lpersonal', $pw, 'planung', false);
+    $kundenAnfrage = array_values(array_filter(Konten::anfragen(), static fn (array $a): bool => (int) $a['id'] === $anfrageK))[0] ?? [];
+    pruefe(!empty($kundenAnfrage['kundengruppe']), 'L.1: die Anfrage zeigt die Kundengruppe');
+    $r = Konten::anfrageFreischalten($anfrageK, $lPersonal);
+    pruefe(!$r['ok'] && $r['message'] === Konten::T_ANFRAGE_KUNDE && Konten::identitaet($lPersonal) === null,
+        'L.1: Anfrage mit Kundengruppe an ein Konto des Personals freischalten → abgelehnt');
+    $r = Konten::anfrageAnlegen($anfrageK, ['username' => $kennung . '-lneu']);
+    pruefe(!$r['ok'] && $r['message'] === Konten::T_ANFRAGE_KUNDE && Database::first('SELECT id FROM users WHERE username = ?', [$kennung . '-lneu']) === null,
+        'L.1: … und kein Konto des Personals daraus');
+    alsBenutzer(null);
+
+    // L.2 sso.kunden an: eine Kundengruppe → Kundenzugang dieses Kunden
+    Settings::put(Einstellungen::PFLICHTGRUPPEN, json_encode(['pm-personal-' . $kennung]));
+    $r = $ablauf($person($subK, $nameK, [$kg1], ['name' => 'Klara Kunde']), [], 'anmelden', null, null, '/dashboard');
+    $kz = (array) Database::first('SELECT * FROM users WHERE username = ?', [$nameK]);
+    $kzId = (int) ($kz['id'] ?? 0);
+    pruefe($r['ok'] && !empty($r['angelegt']) && Auth::id() === $kzId && $kzId > 0, 'L.2: Kundengruppe → Kundenzugang angelegt und angemeldet (ohne sso.anlegen, Pflichtgruppen gelten nicht)');
+    gleich($r['ziel'], '/kundenbereich', 'L.2: der Kundenzugang landet im Kundenbereich, nicht auf dem Ziel aus der Adresse');
+    pruefe((int) ($kz['kunde_id'] ?? 0) === $kunde1 && (int) $kz['nur_sso'] === 1 && (int) $kz['must_change_password'] === 0
+        && !password_verify('', (string) $kz['password_hash']) && $kz['full_name'] === 'Klara Kunde', 'L.2: kunde_id, nur_sso, ohne Kennwortwechsel und ohne nutzbares Kennwort');
+    gleich((int) Database::scalar('SELECT COUNT(*) FROM user_roles WHERE user_id = ?', [$kzId]), 0, 'L.2: keine Rolle');
+    gleich((int) Database::scalar("SELECT COUNT(*) FROM freigaben WHERE subject_type = 'user' AND subject_id = ?", [$kzId]), 0, 'L.2: keine Freigabe am Konto');
+    gleich(Konten::identitaet($kzId)['weg'] ?? null, 'anlage', 'L.2: verknüpft, Weg anlage');
+    gleich($letztesAudit('sso.konto_angelegt'), ['user_id' => $kzId, 'rollen' => [], 'kunde_id' => $kunde1], 'L.2: Audit sso.konto_angelegt mit dem Kunden');
+    gleich(Auth::permissions(), [], 'L.2: Auth::permissions() = [] (angemeldet)');
+    pruefe(Schutz::sitzungGilt($kz, (array) ($_SESSION['sso'] ?? []), (int) ($_SESSION['angemeldet'] ?? 0)), 'L.2: die SSO-Sitzung des Kundenzugangs gilt');
+    gleich(Database::first('SELECT id FROM sso_anfragen WHERE subjekt = ?', [$subK]), null, 'L.2: die Anfrage von vorhin ist weg');
+    $abmelden();
+    Database::insert('user_roles', ['user_id' => $kzId, 'role_id' => $rolleA, 'quelle' => 'hand']);
+    alsBenutzer($kzId);
+    gleich(Auth::permissions(), [], 'L.2: auch mit einer Rolle per SQL keine Rechte (alsBenutzer)');
+    alsBenutzer(null);
+    Database::execute('DELETE FROM user_roles WHERE user_id = ?', [$kzId]);
+    pruefe($ablauf($person($subK, $nameK . '-dort', [$kg1]))['ok'] && Auth::id() === $kzId, 'L.2: die nächste Anmeldung: derselbe Zugang');
+    pruefe((int) Database::scalar('SELECT COUNT(*) FROM users WHERE kunde_id = ?', [$kunde1]) === 1
+        && (string) Database::scalar('SELECT name_dort FROM sso_identitaeten WHERE user_id = ?', [$kzId]) === $nameK . '-dort'
+        && (int) Database::scalar('SELECT COUNT(*) FROM user_roles WHERE user_id = ?', [$kzId]) === 0, 'L.2: kein zweiter Zugang, Name dort neu, keine Rollen aus Gruppen');
+    $abmelden();
+    Settings::put(Einstellungen::PFLICHTGRUPPEN, '[]');
+    // Die Haken im Kundenbereich: kein Einrichtungslink, kein Kennwort, Name aus SSO nicht für lokale Zugänge
+    $link = Einrichtung::erzeugen($kzId);
+    gleich(Einrichtung::finden($link['token']), null, 'L.2: Einrichtungslink eines Zugangs nur über SSO gilt nie');
+    Database::update('users', $kzId, ['einrichtung_hash' => null, 'einrichtung_bis' => null]);
+    alsBenutzer($admin);
+    pruefe(KundenService::zugangLink($kunde1, $kzId)['message'] === KundenService::NUR_SSO && KundenService::zugangKennwort($kunde1, $kzId)['message'] === KundenService::NUR_SSO,
+        'L.2: für einen Zugang nur über SSO weder Einrichtungslink noch vorläufiges Kennwort');
+    $zeile = array_values(array_filter(KundenService::zugaenge($kunde1), static fn (array $z): bool => (int) $z['id'] === $kzId))[0] ?? [];
+    pruefe(($zeile['sso']['weg'] ?? null) === 'anlage' && ($zeile['sso']['name_dort'] ?? null) === $nameK . '-dort' && ($zeile['sso']['zuletzt_am'] ?? null) !== null
+        && (int) ($zeile['nur_sso'] ?? 0) === 1 && !isset($zeile['password_hash']), 'L.2: zugaenge() mit sso (Weg, Name dort, zuletzt), ohne Kennwort-Hash');
+    $r = KundenService::zugangAnlegen($kunde2, ['username' => strtoupper($nameK) . '-DORT'], 'kennwort');
+    pruefe(!$r['ok'] && $r['message'] === KundenService::SSO_NAME, 'L.2: lokaler Zugang mit dem Namen einer SSO-Anmeldung (Name dort, andere Schreibweise) → abgelehnt');
+    pruefe(KundenService::zugangAnlegen($kunde2, ['username' => $kennung . '-lokal2'], 'kennwort')['ok'], 'L.2: ein anderer Name geht');
+    alsBenutzer(null);
+    // Selbst wenn jemand sein Kennwort kennte (hier per SQL gesetzt): nur über SSO.
+    Database::update('users', $kzId, ['password_hash' => password_hash($pw, PASSWORD_DEFAULT)]);
+    $r = Auth::attempt($nameK, $pw, $ip);
+    pruefe(!$r['ok'] && str_contains($r['message'], 'nur über') && Auth::id() === null, 'L.2: Kennwort-Anmeldung des Zugangs nur über SSO → abgelehnt');
+    Database::update('users', $kzId, ['password_hash' => password_hash(bin2hex(random_bytes(32)), PASSWORD_DEFAULT), 'failed_logins' => 0]);
+    $abmelden();
+
+    // L.3 Ablehnungen: zwei Kunden, gemischt, Kunde inaktiv, andere bzw. keine Kundengruppe
+    $r = $ablauf($person($subK, $nameK, [$kg1, $kg2]));
+    pruefe($r['code'] === 'kunden_mehrere' && Auth::id() === null, 'L.3: zwei Kundengruppen → kunden_mehrere');
+    $r = $ablauf($person($subK, $nameK, [$kg1, $gruppeA]));
+    pruefe($r['code'] === 'gemischt' && Auth::id() === null, 'L.3: Kunden- und Rollen-Gruppe → gemischt');
+    $r = $ablauf($person('sub-gemischt-' . $kennung, $kennung . '-gemischt', [$kg2, $gruppeA]));
+    pruefe($r['code'] === 'gemischt' && Database::first('SELECT id FROM users WHERE username = ?', [$kennung . '-gemischt']) === null,
+        'L.3: neue Person mit Kunden- und Rollen-Gruppe → gemischt, kein Konto');
+    $r = $ablauf($person($subPlaner, 'planer-dort', [$kg1]));
+    pruefe($r['code'] === 'gemischt' && Auth::id() === null, 'L.3: Personal in einer Kundengruppe → gemischt');
+    alsBenutzer($admin);
+    KundenService::speichern($kunde2, ['name' => 'Prüfung SSO L2 ' . $kennung, 'aktiv' => 0]);
+    alsBenutzer(null);
+    \App\Kunden\Kundenbereich::vergessen();
+    $r = $ablauf($person('sub-inaktiv-' . $kennung, $kennung . '-inaktiv', [$kg2]));
+    pruefe($r['code'] === 'kunde_inaktiv' && Database::first('SELECT id FROM users WHERE username = ?', [$kennung . '-inaktiv']) === null,
+        'L.3: Kunde nicht aktiv → kunde_inaktiv, kein Zugang');
+    alsBenutzer($admin);
+    KundenService::speichern($kunde2, ['name' => 'Prüfung SSO L2 ' . $kennung, 'aktiv' => 1]);
+    alsBenutzer(null);
+    \App\Kunden\Kundenbereich::vergessen();
+    $vorherAbw = (int) Database::scalar("SELECT COUNT(*) FROM audit_log WHERE action = 'sso.kunde_abweichend'");
+    $r = $ablauf($person($subK, $nameK, [$kg2]));
+    pruefe($r['code'] === 'kunde_abweichend' && Auth::id() === null && (int) Database::scalar('SELECT kunde_id FROM users WHERE id = ?', [$kzId]) === $kunde1,
+        'L.3: später nur eine andere Kundengruppe → kunde_abweichend, kunde_id unverändert');
+    pruefe((int) Database::scalar("SELECT COUNT(*) FROM audit_log WHERE action = 'sso.kunde_abweichend'") === $vorherAbw + 1
+        && $letztesAudit('sso.kunde_abweichend') == ['user_id' => $kzId, 'kunde_id' => $kunde1, 'gruppen_kunde_id' => $kunde2], 'L.3: Audit sso.kunde_abweichend');
+    $r = $ablauf($person($subK, $nameK, []));
+    pruefe($r['code'] === 'kundengruppe' && Auth::id() === null, 'L.3: die Gruppe des eigenen Kunden fehlt → kundengruppe');
+
+    // L.4 ein lokaler Kundenzugang wird nie verknüpft – auch nicht über eine Freischaltung
+    alsBenutzer($admin);
+    $lokal = (int) KundenService::zugangAnlegen($kunde1, ['username' => $kennung . '-lokal'], 'kennwort')['user_id'];
+    alsBenutzer(null);
+    $r = $ablauf($person('sub-lokal-' . $kennung, $kennung . '-lokal', [$kg1]));
+    pruefe($r['code'] === 'name' && Konten::identitaet($lokal) === null && Auth::id() === null, 'L.4: lokaler Kundenzugang gleichen Namens → name, nicht verknüpft');
+    $anfrageL = (int) Database::scalar('SELECT id FROM sso_anfragen WHERE subjekt = ?', ['sub-lokal-' . $kennung]);
+    alsBenutzer($admin);
+    $r = Konten::anfrageFreischalten($anfrageL, $lokal);
+    pruefe(!$r['ok'] && Konten::identitaet($lokal) === null, 'L.4: … auch nicht über die Freischaltung');
+    alsBenutzer(null);
+    $lokalKonto = (array) BenutzerService::find($lokal);
+    gleich(Schutz::darfPerSso($lokalKonto), 'kunde_lokal', 'L.4: darfPerSso: lokaler Kundenzugang → kunde_lokal');
+    gleich($code(static fn () => Schutz::pruefkette($lokalKonto, ['sub' => 'x'], [$kg1], KundenService::find($kunde1), [])), 'kunde_lokal',
+        'L.4: Prüfkette: lokaler Kundenzugang → kunde_lokal');
+    gleich($code(static fn () => Konten::verknuepfen($lokal, $iss, 'sub-lokal-x-' . $kennung, 'profil', '', [])), 'kunde_lokal', 'L.4: verknuepfen (Profil) → kunde_lokal');
+
+    // L.5 sso.kunden aus und Kundengruppe entfernen: die SSO-Sitzungen der Kundenzugänge enden
+    $kzSitzung = static function () use ($kzId): array {
+        return [(array) BenutzerService::find($kzId), (array) ($_SESSION['sso'] ?? []), (int) ($_SESSION['angemeldet'] ?? 0)];
+    };
+    pruefe($ablauf($person($subK, $nameK, [$kg1]))['ok'] && Schutz::sitzungGilt(...$kzSitzung()), 'L.5: Kundenzugang über SSO angemeldet');
+    alsBenutzer($admin);
+    Einstellungen::kundenSchalten(false);
+    alsBenutzer(null);
+    pruefe(!Schutz::sitzungGilt(...$kzSitzung()), 'L.5: sso.kunden aus → Sitzung zu Ende (I.2 mit Kundenbereich)');
+    Auth::vergessen();
+    pruefe(Auth::user() === null, 'L.5: … Auth::user() beendet sie');
+    $abmelden();
+    $r = $ablauf($person($subK, $nameK, [$kg1]));
+    pruefe($r['code'] === 'kunden_aus' && $r['meldung'] === Schutz::T_KUNDEN_AUS && Auth::id() === null, 'L.5: sso.kunden aus → Anmeldung des Zugangs aus SSO abgelehnt (kunden_aus)');
+    alsBenutzer($admin);
+    Einstellungen::kundenSchalten(true);
+    alsBenutzer(null);
+    pruefe($ablauf($person($subK, $nameK, [$kg1]))['ok'] && Schutz::sitzungGilt(...$kzSitzung()), 'L.5: wieder an → angemeldet');
+    alsBenutzer($admin);
+    $zKg1 = (int) Database::scalar("SELECT id FROM sso_zuordnungen WHERE gruppe = ? AND art = 'kunde'", [$kg1]);
+    $r = Konten::zuordnungLoeschen($zKg1);
+    alsBenutzer(null);
+    pruefe($r['ok'] && ($r['art'] ?? '') === 'kunde' && ($r['ziel_id'] ?? 0) === $kunde1 && !Schutz::sitzungGilt(...$kzSitzung()),
+        'L.5: Kundengruppe entfernt → die SSO-Sitzung des Kundenzugangs endet');
+    gleich($letztesAudit('sso.zuordnung')['sso_sitzungen'] ?? null, 1, 'L.5: Audit sso.zuordnung nennt die beendeten Sitzungen');
+    $abmelden();
+    alsBenutzer($admin);
+    pruefe(Konten::zuordnungSpeichern($kg1, 'kunde', $kunde1)['ok'], '(Kundengruppe wieder da)');
+    alsBenutzer(null);
+    pruefe($ablauf($person($subK, $nameK, [$kg1]))['ok'], 'L.5: danach meldet sich der Zugang wieder an');
+    $abmelden();
+    alsBenutzer($admin);
+    pruefe(KundenService::zugangSsoSitzungen($kunde1, $kzId)['ok'] && !KundenService::zugangSsoSitzungen($kunde1, $lokal)['ok']
+        && !KundenService::zugangSsoSitzungen($kunde2, $kzId)['ok'], 'L.5: Sitzungen über SSO beenden (Kundenseite) – nur für Zugänge aus SSO dieses Kunden');
+    alsBenutzer(null);
+
+    // L.6 Kunde löschen nimmt Kundengruppen und Zugänge (mit Verknüpfung) mit
+    alsBenutzer($admin);
+    KundenService::speichern($kunde1, ['name' => 'Prüfung SSO L1 ' . $kennung, 'aktiv' => 0]);
+    $r = KundenService::loeschen($kunde1, 'Prüfung SSO L1 ' . $kennung);
+    alsBenutzer(null);
+    pruefe($r['ok'] && Konten::kundengruppen($kunde1) === [] && Database::first('SELECT id FROM sso_identitaeten WHERE user_id = ?', [$kzId]) === null
+        && BenutzerService::find($kzId) === null, 'L.6: Kunde gelöscht → Kundengruppen, Zugänge und ihre Verknüpfungen weg');
+    pruefe(($letztesAudit('kunden.loeschen')['sso_gruppen'] ?? 0) === 1, 'L.6: Audit kunden.loeschen nennt die Kundengruppen');
+    Settings::put(Einstellungen::KUNDEN, '0');
+    $abmelden();
+}
 
 // ================================================================ M. Geheimnisse im Ablauf
 $r = $ablauf($person($subPlaner, 'planer-dort'), ['kennung' => $kennung]);

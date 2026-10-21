@@ -7,6 +7,7 @@ use App\Auth\Auth;
 use App\Auth\Sso\Anbieter;
 use App\Auth\Sso\Einstellungen;
 use App\Auth\Sso\Konten;
+use App\Auth\Sso\Kundenbereich;
 use App\Auth\Sso\Schutz;
 use App\Services\BenutzerService;
 use App\Support\Database;
@@ -17,16 +18,19 @@ use App\Support\Response;
 /**
  * System → Anmeldung (SSO): Verbindung zum Anmeldedienst, „Verbindung
  * prüfen“, Ein-/Ausschalten, Optionen, Schutz (Verwaltung per SSO, MFA, „nur
- * SSO“ – nur mit allen Rechten), Gruppen → Rollen, Anmeldeanfragen und die
- * verknüpften Konten.
+ * SSO“ – nur mit allen Rechten), Kunden (Kundenzugänge über Gruppen),
+ * Gruppen → Rollen bzw. → Kunden, Anmeldeanfragen und die verknüpften Konten.
  *
  * Die Route verlangt `sso.manage`. Was darüber hinausgeht, prüfen die
  * Klassen in App\Auth\Sso selbst: Gruppen Rollen zuordnen nur mit
  * `system.users.manage` und nur Rollen, die man selbst vergeben darf
- * (Konten::zuordnungFehler), Anmeldeanfragen freischalten nur an Konten, die
- * man verwalten darf, neue Konten nur mit vergebbaren Rollen. Verknüpfungen
- * lösen und SSO-Sitzungen beenden geht über die Benutzerverwaltung
- * (BenutzerController::sso – `system.users.manage` und darfVerwalten).
+ * (Konten::zuordnungFehler), Kundengruppen und `sso.kunden` nur mit
+ * `kunden.manage` und nur für Kunden, deren Zugänge man ausgeben dürfte,
+ * Anmeldeanfragen freischalten nur an Konten, die man verwalten darf, neue
+ * Konten nur mit vergebbaren Rollen. Verknüpfungen lösen und SSO-Sitzungen
+ * beenden geht über die Benutzerverwaltung (BenutzerController::sso –
+ * `system.users.manage` und darfVerwalten), bei Kundenzugängen über die
+ * Kundenseite (KundenController::zugang – `kunden.manage`).
  *
  * Eingaben nur aus dem Formular ($_POST), nie aus der Adresse – das Secret
  * schon gar nicht. Es erscheint nie in der Seite (Einstellungen::zustand()
@@ -72,9 +76,18 @@ final class SsoEinstellungenController extends Controller
             $v['anderer_aussteller'] = !hash_equals(Einstellungen::aussteller(), (string) $v['aussteller']);
             return $v;
         }, Konten::verknuepfungen());
+        $darfKunden = Auth::can('kunden.manage');
         $this->view('sso/einstellungen', [
             'zustand'        => Einstellungen::zustand(),
             'zuordnungen'    => array_values(array_filter(Konten::zuordnungen(), static fn (array $z): bool => $z['art'] === 'rolle')),
+            'kunden'         => [
+                'verfuegbar' => Kundenbereich::verfuegbar(),
+                'darf'       => $darfKunden,
+                'gruppen'    => Konten::kundengruppen(),
+                // Zur Wahl nur aktive Kunden, deren Zugänge man selbst ausgeben dürfte.
+                'waehlbar'   => $darfKunden ? array_values(array_filter(Kundenbereich::alle(), static fn (array $k): bool
+                    => Kundenbereich::darfZugangAusgeben($k['id']))) : [],
+            ],
             'rollen'         => $rollen,
             'anfragen'       => Konten::anfragen(),
             'konten'         => $konten,
@@ -171,11 +184,30 @@ final class SsoEinstellungenController extends Controller
         $this->redirect(self::ZIEL . '#schutz');
     }
 
-    /** Gruppe → Rolle (bzw. mit Schritt 5 → Kunde) – Konten::zuordnungFehler entscheidet. */
+    /**
+     * Kundenzugänge über Gruppen (`sso.kunden`) an/aus – nur mit „Kunden
+     * pflegen“ (sonst 403); Einstellungen::kundenSchalten prüft den Rest.
+     */
+    public function kunden(Request $request): void
+    {
+        if (!Auth::can('kunden.manage')) {
+            Response::forbidden('Kundenzugänge über Gruppen schaltet nur, wer Kunden pflegen darf.');
+            return;
+        }
+        $r = Einstellungen::kundenSchalten(self::feld('kunden') === '1');
+        $r['ok'] ? Flash::success($r['message']) : Flash::error($r['message']);
+        $this->redirect(self::ZIEL . '#kunden');
+    }
+
+    /**
+     * Gruppe → Rolle oder → Kunde – Konten::zuordnungFehler entscheidet. Von
+     * der Kundenseite (zurueck=kunde) geht es dorthin zurück, sonst zur Karte.
+     */
     public function zuordnung(Request $request): void
     {
-        $art = self::feld('art');
-        $r = Konten::zuordnungSpeichern(self::feld('gruppe'), $art === '' ? 'rolle' : $art, self::zahl('ziel_id'));
+        $art = self::feld('art') === '' ? 'rolle' : self::feld('art');
+        $zielId = self::zahl('ziel_id');
+        $r = Konten::zuordnungSpeichern(self::feld('gruppe'), $art, $zielId);
         if (!$r['ok']) {
             Flash::error($r['message']);
         } else {
@@ -184,14 +216,14 @@ final class SsoEinstellungenController extends Controller
                 Flash::warning($r['hinweis']);
             }
         }
-        $this->redirect(self::ZIEL . '#gruppen');
+        $this->redirect(self::zurueck($art, $zielId));
     }
 
     public function zuordnungLoeschen(Request $request, array $params): void
     {
         $r = Konten::zuordnungLoeschen(self::id($params));
         $r['ok'] ? Flash::success($r['message']) : Flash::error($r['message']);
-        $this->redirect(self::ZIEL . '#gruppen');
+        $this->redirect(self::zurueck((string) ($r['art'] ?? 'rolle'), (int) ($r['ziel_id'] ?? 0)));
     }
 
     /** Eine Anmeldeanfrage an ein bestehendes Konto freischalten – aus dem Browser kommen nur die beiden IDs. */
@@ -234,6 +266,15 @@ final class SsoEinstellungenController extends Controller
     {
         $wert = trim(self::feld($name));
         return ctype_digit($wert) && strlen($wert) <= 10 ? (int) $wert : 0;
+    }
+
+    /** Wohin nach einer Zuordnung: die Kundenseite (nur mit zurueck=kunde, ID als Zahl) oder die passende Karte. */
+    private static function zurueck(string $art, int $kundeId): string
+    {
+        if ($art === 'kunde' && $kundeId > 0 && self::feld('zurueck') === 'kunde') {
+            return '/kunden/' . $kundeId . '?tab=zugaenge#sso-gruppen';
+        }
+        return self::ZIEL . ($art === 'kunde' ? '#kunden' : '#gruppen');
     }
 
     private static function id(array $params): int

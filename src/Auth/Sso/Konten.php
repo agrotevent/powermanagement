@@ -44,6 +44,7 @@ final class Konten
     public const T_NAME = 'Für diese Anmeldung gibt es hier noch kein Konto, und der Benutzername beim Anmeldedienst ist hier schon vergeben oder ungültig. Die Verwaltung kann sie unter ‚Anmeldung (SSO)‘ freischalten – bitte Bescheid geben.';
     public const T_VERKNUEPFT = 'Diese Anmeldung ist schon mit einem anderen Konto verknüpft.';
     public const T_KUNDE_NIE = 'Kundenzugänge werden nie mit einer SSO-Anmeldung verknüpft – sie melden sich mit Benutzername und Kennwort an.';
+    public const T_ANFRAGE_KUNDE = 'Diese Anmeldung ist beim Anmeldedienst in einer Kundengruppe – sie wird bei der nächsten Anmeldung selbst ein Kundenzugang, nie ein Konto des Personals. Ist ihr Benutzername hier schon vergeben, ihn beim Anmeldedienst ändern oder hier freimachen.';
 
     // ------------------------------------------------------------ Identitäten
 
@@ -355,6 +356,37 @@ final class Konten
     }
 
     /**
+     * Die Kundengruppen (Gruppe → Kunde) – alle oder die eines Kunden.
+     *
+     * @return list<array<string,mixed>>
+     */
+    public static function kundengruppen(?int $kundeId = null): array
+    {
+        return array_values(array_filter(self::zuordnungen(), static fn (array $z): bool
+            => $z['art'] === 'kunde' && ($kundeId === null || (int) $z['ziel_id'] === $kundeId)));
+    }
+
+    /**
+     * Ist unter diesen Gruppen eine Kundengruppe, die gerade wirkt (sso.kunden
+     * an, Kundenbereich da)? Eine solche Anmeldung wird ein Kundenzugang – nie
+     * ein Konto des Personals (die Prüfkette lehnte es als „gemischt“ ab).
+     *
+     * @param list<string> $gruppen
+     */
+    public static function kundengruppeIn(array $gruppen): bool
+    {
+        if ($gruppen === [] || !Kundenbereich::verfuegbar() || !Einstellungen::schalter(Einstellungen::KUNDEN)) {
+            return false;
+        }
+        foreach (self::kundengruppen() as $z) {
+            if (in_array((string) $z['gruppe'], $gruppen, true)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
      * Darf der Angemeldete diese Gruppe dieser Rolle bzw. diesem Kunden
      * zuordnen? null = ja, sonst die Meldung (§6.5). Wer eine Gruppe einer
      * Rolle zuordnet, vergibt die Rolle an jedes Gruppenmitglied – also nur,
@@ -394,7 +426,13 @@ final class Konten
             if (!Auth::can('kunden.manage')) {
                 return 'Gruppen Kunden zuordnen darf nur, wer Kunden pflegen darf.';
             }
-            return Kundenbereich::kunde($zielId) === null ? 'Diesen Kunden gibt es nicht, oder er ist nicht aktiv.' : null;
+            if (Kundenbereich::kunde($zielId) === null) {
+                return 'Diesen Kunden gibt es nicht, oder er ist nicht aktiv.';
+            }
+            // Jedes Gruppenmitglied bekommt einen Zugang dieses Kunden – wie ein
+            // Zugang von Hand nur von jemandem, der alles sieht, was der Kunde sieht.
+            return Kundenbereich::darfZugangAusgeben($zielId) ? null
+                : 'Eine Kundengruppe gibt Zugänge aus – zuordnen darf sie nur, wer selbst alles sieht, was der Kunde sieht (wie beim Zugang von Hand).';
         }
         $rolle = Database::first('SELECT id, name, is_system FROM roles WHERE id = ?', [$zielId]);
         if ($rolle === null) {
@@ -446,9 +484,11 @@ final class Konten
     /**
      * Eine Zuordnung löschen – bei einer Rolle sofort auch alle Rollen aus
      * Gruppen dieser Rolle (wer sie über eine andere Gruppe hat, bekommt sie
-     * bei der nächsten Anmeldung wieder). Löschen darf, wer anlegen dürfte.
+     * bei der nächsten Anmeldung wieder), bei einem Kunden die SSO-Sitzungen
+     * seiner Kundenzugänge. Eine Rolle löst, wer sie vergeben dürfte; eine
+     * Kundengruppe, wer Kunden pflegen darf (weniger Zugang gibt jeder).
      *
-     * @return array{ok:bool,message:string}
+     * @return array{ok:bool,message:string,art?:string,ziel_id?:int}
      */
     public static function zuordnungLoeschen(int $id): array
     {
@@ -464,17 +504,26 @@ final class Konten
             return ['ok' => false, 'message' => 'Kundengruppen entfernt nur, wer Kunden pflegen darf.'];
         }
         $rollen = 0;
-        Database::transaktion(static function () use ($id, $z, $rolle, &$rollen): void {
+        $sitzungen = 0;
+        Database::transaktion(static function () use ($id, $z, $rolle, &$rollen, &$sitzungen): void {
             Database::delete('sso_zuordnungen', $id);
             if ($rolle) {
                 $rollen = Database::execute("DELETE FROM user_roles WHERE role_id = ? AND quelle = 'sso'", [(int) $z['ziel_id']]);
+            } else {
+                // Wie bei den Rollen sofort: Die SSO-Sitzungen der Kundenzugänge
+                // dieses Kunden enden; wer noch in einer seiner Gruppen ist,
+                // meldet sich einfach neu an.
+                $sitzungen = Database::execute('UPDATE sso_identitaeten SET abgemeldet_am = ? WHERE user_id IN (SELECT id FROM users WHERE kunde_id = ?)',
+                    [Zeit::iso(Einstellungen::jetzt()), (int) $z['ziel_id']]);
             }
         });
         Zugriff::vergessen();
         Auth::rechteVergessen();
         Audit::log('sso.zuordnung', 'sso_zuordnung', (string) $id, ['gruppe' => (string) $z['gruppe'], 'art' => (string) $z['art'],
-            'ziel_id' => (int) $z['ziel_id'], 'aktion' => 'geloescht', 'sso_rollen' => $rollen]);
-        return ['ok' => true, 'message' => 'Zuordnung der Gruppe „' . $z['gruppe'] . '“ entfernt.'];
+            'ziel_id' => (int) $z['ziel_id'], 'aktion' => 'geloescht'] + ($rolle ? ['sso_rollen' => $rollen] : ['sso_sitzungen' => $sitzungen]));
+        return ['ok' => true, 'message' => 'Zuordnung der Gruppe „' . $z['gruppe'] . '“ entfernt.'
+            . (!$rolle && $sitzungen > 0 ? ' Die Sitzungen der Kundenzugänge über ' . Einstellungen::name() . ' sind beendet.' : ''),
+            'art' => (string) $z['art'], 'ziel_id' => (int) $z['ziel_id']];
     }
 
     // ------------------------------------------------------------ Anmeldeanfragen
@@ -543,6 +592,7 @@ final class Konten
         $out = [];
         foreach (Database::select('SELECT * FROM sso_anfragen ORDER BY letzte_am DESC, id DESC') as $a) {
             $a['gruppen'] = self::gruppenAus($a['gruppen'] ?? null);
+            $a['kundengruppe'] = self::kundengruppeIn($a['gruppen']);
             $a['vorschlag'] = null;
             foreach ($konten as $k) {
                 $name = (string) $a['name_dort'] !== '' && strcasecmp((string) $k['username'], (string) $a['name_dort']) === 0;
@@ -586,6 +636,9 @@ final class Konten
         if (!hash_equals(Einstellungen::aussteller(), (string) $a['aussteller'])) {
             return ['ok' => false, 'message' => 'Die Anfrage gehört zu einem anderen Aussteller – bitte verwerfen.'];
         }
+        if (self::kundengruppeIn(self::gruppenAus($a['gruppen'] ?? null))) {
+            return ['ok' => false, 'message' => self::T_ANFRAGE_KUNDE];
+        }
         try {
             Database::transaktion(static function () use ($a, $userId): void {
                 self::verknuepfen($userId, (string) $a['aussteller'], (string) $a['subjekt'], 'freischaltung', (string) $a['name_dort'],
@@ -617,6 +670,9 @@ final class Konten
         }
         if (!hash_equals(Einstellungen::aussteller(), (string) $a['aussteller'])) {
             return ['ok' => false, 'message' => 'Die Anfrage gehört zu einem anderen Aussteller – bitte verwerfen.'];
+        }
+        if (self::kundengruppeIn(self::gruppenAus($a['gruppen'] ?? null))) {
+            return ['ok' => false, 'message' => self::T_ANFRAGE_KUNDE];
         }
         $username = is_string($daten['username'] ?? null) ? trim($daten['username']) : '';
         if (!self::nameFrei($username)) {

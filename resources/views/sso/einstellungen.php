@@ -1,13 +1,14 @@
 <?php
 /**
  * System → Anmeldung (SSO): Zustand, Verbindung, Optionen, Gruppen → Rollen,
- * Anmeldeanfragen, Schutz (nur mit allen Rechten bedienbar) und verknüpfte
- * Konten. Alles über View::e – auch was der
- * Anmeldedienst geschickt hat (Name dort, Gruppen, Name und E-Mail einer
- * Anfrage). Das Secret steht nie in der Seite.
+ * Kunden (Kundenzugänge über Gruppen – nur mit Kundenbereich), Anmeldeanfragen,
+ * Schutz (nur mit allen Rechten bedienbar) und verknüpfte Konten. Alles über
+ * View::e – auch was der Anmeldedienst geschickt hat (Name dort, Gruppen, Name
+ * und E-Mail einer Anfrage). Das Secret steht nie in der Seite.
  *
  * @var array<string,mixed> $zustand Einstellungen::zustand()
  * @var list<array<string,mixed>> $zuordnungen Gruppe → Rolle
+ * @var array{verfuegbar:bool,darf:bool,gruppen:list<array<string,mixed>>,waehlbar:list<array{id:int,name:string}>} $kunden Gruppe → Kunde
  * @var list<array{id:int,name:string,verwaltend:bool,waehlbar:bool,freigaben:int}> $rollen
  * @var list<array<string,mixed>> $anfragen Konten::anfragen()
  * @var list<array<string,mixed>> $konten Ziele zum Freischalten (unverknüpft, verwaltbar)
@@ -21,7 +22,7 @@ use App\Support\View;
 use App\Support\Zeit;
 
 $title = 'Anmeldung (SSO)';
-$subtitle = 'OpenID Connect, etwa Authentik – Verbindung, Gruppen → Rollen, Anmeldeanfragen';
+$subtitle = 'OpenID Connect, etwa Authentik – Verbindung, Gruppen → Rollen und Kunden, Anmeldeanfragen';
 $z = $zustand;
 $name = (string) $z['name'];
 $stern = !empty($stern);
@@ -48,6 +49,8 @@ $secretText = [
 $wegText = ['profil' => 'im Profil', 'freischaltung' => 'Freischaltung', 'anlage' => 'automatisch angelegt', 'cli' => 'Kommandozeile'];
 $grundText = ['kein_konto' => 'noch kein Konto', 'name' => 'Benutzername vergeben oder ungültig'];
 $waehlbar = array_values(array_filter($rollen, static fn (array $r): bool => $r['waehlbar']));
+$kunden = ($kunden ?? null) ?: ['verfuegbar' => false, 'darf' => false, 'gruppen' => [], 'waehlbar' => []];
+$kundenAn = !empty($schalter['kunden']);
 $gruppenListe = static function (array $gruppen): string {
     if ($gruppen === []) {
         return '–';
@@ -251,6 +254,77 @@ $gruppenListe = static function (array $gruppen): string {
             <?php endif; ?>
         </div>
     </div>
+
+    <div class="card" id="kunden">
+        <div class="card-head"><h2>Kunden</h2><?= $kunden['verfuegbar'] && !$kunden['darf'] ? '<span class="hint">nur mit „Kunden pflegen“ änderbar</span>' : '' ?></div>
+        <?php if (!$kunden['verfuegbar']): ?>
+            <div class="card-body">
+                <p class="mb0">Ohne Kundenbereich: Kunden über eine kundeneigene Rolle zuordnen – eine Rolle je Kunde mit den Rechten „Kunde / Veranstalter“
+                    und den Freigaben an der Rolle, ihre Gruppe oben unter „Gruppen → Rollen“ (Doku: Anmeldung über SSO, Kunden über <?= View::e($name) ?>).</p>
+            </div>
+        <?php else: ?>
+            <form method="post" action="/system/sso/kunden" class="card-body">
+                <?= Csrf::field() ?>
+                <label class="check"><input type="checkbox" name="kunden" value="1"<?= $kundenAn ? ' checked' : '' ?><?= $kunden['darf'] ? '' : ' disabled' ?>>
+                    Kundenzugänge über Gruppen</label>
+                <p class="help">Aus (Vorgabe): Kundenzugänge melden sich mit Benutzername und Kennwort an. An: Wer bei <?= View::e($name) ?> in genau einer
+                    Kundengruppe ist und in keiner Personalgruppe, bekommt bei der ersten Anmeldung einen Zugang dieses Kunden – ohne Kennwort, ohne Rolle,
+                    er sieht, was dem Kunden freigegeben ist. Zugänge mit Kennwort werden nie verknüpft. Ausschalten beendet die Sitzungen dieser Zugänge.</p>
+                <?php if ($kunden['darf']): ?><button class="btn" type="submit">Speichern</button><?php endif; ?>
+            </form>
+            <div class="table-wrap">
+                <table class="tabelle-karten">
+                    <thead><tr><th>Gruppe</th><th>Kunde</th><th>seit</th><th></th></tr></thead>
+                    <tbody>
+                    <?php if ($kunden['gruppen'] === []): ?><tr><td colspan="4" class="muted">Keine Kundengruppe.</td></tr><?php endif; ?>
+                    <?php foreach ($kunden['gruppen'] as $kg): ?>
+                        <tr>
+                            <td data-label="Gruppe"><code><?= View::e((string) $kg['gruppe']) ?></code></td>
+                            <td data-label="Kunde"><?php if ($kunden['darf']): ?><a href="/kunden/<?= (int) $kg['ziel_id'] ?>?tab=zugaenge"><?= View::e((string) $kg['ziel_name']) ?></a>
+                                <?php else: ?><?= View::e((string) $kg['ziel_name']) ?><?php endif; ?></td>
+                            <td data-label="seit" class="small"><?= View::e(Zeit::anzeige((string) $kg['created_at'], 'd.m.Y')) ?></td>
+                            <td class="right">
+                                <?php if ($kunden['darf']): ?>
+                                    <form method="post" action="/system/sso/zuordnung/<?= (int) $kg['id'] ?>/loeschen"
+                                          data-confirm="Kundengruppe <?= View::e((string) $kg['gruppe']) ?> entfernen? Die Sitzungen der Zugänge dieses Kunden über <?= View::e($name) ?> enden.">
+                                        <?= Csrf::field() ?><button class="btn btn-sm btn-ghost" type="submit">Entfernen</button>
+                                    </form>
+                                <?php endif; ?>
+                            </td>
+                        </tr>
+                    <?php endforeach; ?>
+                    </tbody>
+                </table>
+            </div>
+            <div class="card-body">
+                <?php if (!$kunden['darf']): ?>
+                    <p class="muted mb0">Kundengruppen ordnet zu, wer Kunden pflegen darf.</p>
+                <?php elseif (!$kundenAn): ?>
+                    <p class="muted mb0">Kundengruppen gibt es, sobald „Kundenzugänge über Gruppen“ an ist.</p>
+                <?php elseif ($kunden['waehlbar'] === []): ?>
+                    <p class="muted mb0">Es gibt keinen aktiven Kunden, dessen Zugänge du ausgeben darfst.</p>
+                <?php else: ?>
+                    <form method="post" action="/system/sso/zuordnung">
+                        <?= Csrf::field() ?>
+                        <input type="hidden" name="art" value="kunde">
+                        <div class="field-row">
+                            <div class="field"><label for="sso-kgruppe">Gruppe beim Anmeldedienst</label>
+                                <input id="sso-kgruppe" name="gruppe" maxlength="150" required spellcheck="false" autocapitalize="off" placeholder="pm-kunde-…"></div>
+                            <div class="field"><label for="sso-kunde">Kunde</label>
+                                <select id="sso-kunde" name="ziel_id" required>
+                                    <?php foreach ($kunden['waehlbar'] as $k): ?>
+                                        <option value="<?= (int) $k['id'] ?>"><?= View::e($k['name']) ?></option>
+                                    <?php endforeach; ?>
+                                </select></div>
+                        </div>
+                        <button class="btn btn-primary" type="submit">Zuordnen</button>
+                    </form>
+                    <p class="help mt mb0">Eine Gruppe gehört zu genau einem Kunden und ist nie zugleich eine Personalgruppe. Zur Wahl stehen nur Kunden, deren Zugänge
+                        du auch von Hand ausgeben dürftest – eine Kundengruppe gibt jedem Mitglied einen Zugang.</p>
+                <?php endif; ?>
+            </div>
+        <?php endif; ?>
+    </div>
 </div>
 
 <div class="card" id="anfragen">
@@ -272,10 +346,17 @@ $gruppenListe = static function (array $gruppen): string {
                     <td data-label="E-Mail" class="small"><?= View::e((string) $a['email'] !== '' ? (string) $a['email'] : '–') ?>
                         <?= (string) $a['email'] !== '' ? ((int) $a['email_bestaetigt'] === 1 ? ' <span class="badge ok">✓ bestätigt</span>' : ' <span class="badge">unbestätigt</span>') : '' ?></td>
                     <td data-label="Gruppen" class="small"><?= $gruppenListe($a['gruppen']) ?></td>
-                    <td data-label="Grund" class="small"><?= View::e($grundText[(string) $a['grund']] ?? (string) $a['grund']) ?></td>
+                    <td data-label="Grund" class="small"><?= View::e($grundText[(string) $a['grund']] ?? (string) $a['grund']) ?>
+                        <?= !empty($a['kundengruppe']) ? '<div><span class="badge info">Kundengruppe</span></div>' : '' ?></td>
                     <td data-label="zuletzt" class="small"><?= View::e(Zeit::anzeige((string) $a['letzte_am'])) ?><?= (int) $a['anzahl'] > 1 ? ' · ' . (int) $a['anzahl'] . '×' : '' ?></td>
                     <td class="right">
-                        <?php if ($darfBenutzer): ?>
+                        <?php if ($darfBenutzer && !empty($a['kundengruppe'])): ?>
+                            <p class="help">In einer Kundengruppe – wird bei der nächsten Anmeldung selbst ein Kundenzugang (ist der Benutzername hier vergeben:
+                                ihn bei <?= View::e($name) ?> ändern oder hier freimachen).</p>
+                            <form method="post" action="/system/sso/anfrage/<?= $aid ?>/verwerfen" data-confirm="Diese Anmeldeanfrage verwerfen?">
+                                <?= Csrf::field() ?><button class="btn btn-sm btn-ghost" type="submit">Verwerfen</button>
+                            </form>
+                        <?php elseif ($darfBenutzer): ?>
                             <div class="btn-row">
                                 <?php if ($konten !== []): ?>
                                     <form method="post" action="/system/sso/anfrage/<?= $aid ?>/freischalten" class="inline-form"
@@ -390,7 +471,9 @@ $gruppenListe = static function (array $gruppen): string {
                 <tr>
                     <td data-label="Benutzer"><strong><?= View::e((string) $v['username']) ?></strong>
                         <?= (int) $v['nur_sso'] === 1 ? ' <span class="badge info">nur SSO</span>' : '' ?>
-                        <?= $v['kunde_id'] !== null ? ' <span class="badge">Kundenzugang</span>' : '' ?>
+                        <?php if ($v['kunde_id'] !== null): ?>
+                            <?= $kunden['darf'] ? ' <a class="badge" href="/kunden/' . (int) $v['kunde_id'] . '?tab=zugaenge">Kundenzugang</a>' : ' <span class="badge">Kundenzugang</span>' ?>
+                        <?php endif; ?>
                         <?= $v['anderer_aussteller'] ? ' <span class="badge warn">anderer Aussteller</span>' : '' ?>
                         <?php if ((string) $v['full_name'] !== ''): ?><div class="small muted"><?= View::e((string) $v['full_name']) ?></div><?php endif; ?></td>
                     <td data-label="Name dort"><?= View::e((string) $v['name_dort'] !== '' ? (string) $v['name_dort'] : '–') ?></td>
