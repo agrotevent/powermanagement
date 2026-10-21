@@ -57,6 +57,7 @@ use App\Auth\Zugriff;
 use App\Berichte\BerichtSchema;
 use App\Berichte\BerichtService;
 use App\Berichte\Kanon;
+use App\Berichte\Kundenmodus;
 use App\Controllers\KundenController;
 use App\Kunden\Einrichtung;
 use App\Kunden\KundenEinstellungen;
@@ -479,6 +480,18 @@ try {
     pruefe(Response::fehlerSeite(404, 'Seite nicht gefunden.')[1] === false, 'Fehlerseite des Personals: die schlichte');
     alsBenutzer($personal['admin']);
     gleich(array_column(Zugriff::freigaben($zugaenge['z1']), 'id'), [(int) $k1a['id']], 'Personal fragt die Freigaben eines Kundenzugangs: dieselben');
+    // Kundenzugänge haben nie einen Kundenmodus – auch nicht mit einer Sperre auf das eigene Konto in der Sitzung
+    // (von Hand gesetzt). Router, Controller::view(), Flash::add(), ausweg() und das vorläufige Kennwort fragen
+    // alle Kundenmodus::aktiv(); zum Vergleich sperrt dieselbe Sperre das Personal.
+    $sperreVon = static fn (int $konto): array => ['bericht' => 999999999, 'seit' => time(), 'fehl' => 0, 'bis' => 0, 'user' => $konto, 'name' => '', 'geraet' => 0];
+    alsBenutzer($zugaenge['z1']);
+    $_SESSION[Kundenmodus::SITZUNG] = $sperreVon($zugaenge['z1']);
+    gleich([Kundenmodus::aktiv(), Kundenmodus::sperrt('GET', '/kundenbereich'), Kundenmodus::ausweg('GET', '/berichte/999999999/kunde')], [null, null, false],
+        'Kundenzugang: kein Kundenmodus, auch nicht mit einer Sperre auf das eigene Konto in der Sitzung');
+    alsBenutzer($personal['admin']);
+    $_SESSION[Kundenmodus::SITZUNG] = $sperreVon($personal['admin']);
+    gleich(Kundenmodus::sperrt('GET', '/kundenbereich'), 999999999, 'zum Vergleich: dieselbe Sperre sperrt das Personal');
+    unset($_SESSION[Kundenmodus::SITZUNG]);
 
     // ------------------------------------------------ Sperre
     $z3 = BenutzerService::find($zugaenge['z3']) ?? [];
