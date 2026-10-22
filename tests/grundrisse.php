@@ -307,8 +307,15 @@ try {
         $neu = array_map('intval', $r['floors']);
         pruefe($r['ok'] && count($neu) === 2 && str_contains($r['message'], 'rechnet der Server im Hintergrund weiter'),
             'Zeit im Upload um: Antwort sofort, der Rest im Hintergrund – ' . $r['message']);
+        // Ins Audit vor dem Kacheln (ein Update, das währenddessen beginnt,
+        // sichert sonst ohne den Eintrag), welche Etagen im Hintergrund
+        // rechnen, ins Protokoll.
         $audit = Database::first("SELECT details FROM audit_log WHERE action = 'plan.upload' AND target_id = ? ORDER BY id DESC LIMIT 1", [(string) $siteId]);
-        gleich(json_decode((string) ($audit['details'] ?? ''), true)['im_hintergrund'] ?? null, $neu, 'Audit: welche Etagen im Hintergrund');
+        $details = json_decode((string) ($audit['details'] ?? ''), true) ?: [];
+        pruefe(($details['floors'] ?? null) === $neu && !isset($details['im_hintergrund']), 'Audit: Etagen des Uploads (vor dem Kacheln geschrieben)');
+        $protokoll = (string) @file_get_contents(dirname(__DIR__) . '/storage/logs/app.log', false, null, max(0, (int) @filesize(dirname(__DIR__) . '/storage/logs/app.log') - 65536));
+        pruefe(str_contains($protokoll, 'Grundriss: Kacheln im Hintergrund ' . json_encode(['standort' => $siteId, 'etagen' => $neu])),
+            'Protokoll: welche Etagen im Hintergrund');
         // Ein Tank und sein Kraftstoffschlauch sind Objekte im Plan wie jede
         // Anlage: Kacheln im Hintergrund und ein neuer Plan rühren ihre Lage
         // nicht an (sie steht in Plan-Koordinaten an der Anlage bzw. Leitung).

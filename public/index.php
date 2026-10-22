@@ -316,6 +316,12 @@ $router->post('/system/freigaben/loeschen', [BenutzerController::class, 'freigab
 $router->get('/system/rollen', [BenutzerController::class, 'rollen'], 'system.users.manage');
 $router->post('/system/rollen/speichern', [BenutzerController::class, 'rolleSpeichern'], 'system.users.manage');
 $router->post('/system/rollen/loeschen', [BenutzerController::class, 'rolleLoeschen'], 'system.users.manage');
+// Update aus der Oberfläche: nur ein Auftrag an den root-Helfer (storage/update/soll), nie ein Prozess.
+$router->get('/system/update', [\App\Controllers\UpdateController::class, 'index'], 'system.update');
+$router->get('/system/update/stand', [\App\Controllers\UpdateController::class, 'stand'], 'system.update');
+foreach (['suchen', 'starten', 'automatik'] as $aktion) {
+    $router->post('/system/update/' . $aktion, [\App\Controllers\UpdateController::class, $aktion], 'system.update');
+}
 
 $router->get('/system/einstellungen', [EinstellungenController::class, 'index'], 'settings.manage');
 $router->post('/system/einstellungen/speichern', [EinstellungenController::class, 'speichern'], 'settings.manage');
@@ -363,5 +369,10 @@ foreach (['annehmen', 'ablehnen'] as $aktion) {
 }
 
 $router->get('/audit', [AuditController::class, 'index'], 'audit.view');
+
+// Während eines Updates (Sicherung bis Prüfung) keine Änderungen: ein Zurückrollen spielte
+// die Datenbank von vorher zurück und verlöre sie. Vor dispatch() und nach allen Routen:
+// zurück geht es auf die nächste Seite, die es als GET gibt (Router::hatSeite()).
+\App\Services\UpdateService::wartungsSperre($router);
 
 $router->dispatch($anfrage);

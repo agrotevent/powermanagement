@@ -171,7 +171,13 @@ bin/power kunden:liste   ·   bin/power kunden:zugang <kunde-id> <benutzer> [--k
 bin/power kunden:aufbewahrung [--ausfuehren]   ·   bin/power kunden:nachweise-pruefen
 bin/power demo:seed [--reset]
 bin/power wartung
+bin/power update:stand   ·   bin/power update:suchen|update:starten [--warten]   ·   bin/power update:automatik [aus|suchen|einspielen]
 ```
+
+Auf einer Installation immer als Anwendungsbenutzer:
+`runuser -u www-data -- php bin/power …`. Als root bricht `bin/power` ab,
+solange `storage/` nicht root gehört – sonst entstünden dort root-eigene
+Dateien, an denen die Oberfläche scheitert.
 
 ## Prüfungen
 

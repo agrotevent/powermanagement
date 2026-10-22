@@ -81,6 +81,14 @@ nicht, geht dieselbe Eingabe beim nächsten Mal noch einmal hinaus – der
 Server erkennt sie (gleicher Inhalt, gleiches Konto) und antwortet
 „gespeichert“ statt mit einem Konflikt.
 
+Läuft gerade ein **Update** (System → Update, etwa eine Minute), nimmt der
+Server nichts an. Die Leiste zeigt „Update läuft“, die Eingaben bleiben auf
+dem Gerät, und nach einer halben Minute wird noch einmal gespeichert – von
+selbst, bis es durch ist. Eine Unterschrift (Prüfer oder Kunde) bleibt im
+Dialog stehen und geht dann noch einmal hinaus, ohne doppelt anzukommen.
+Wird die Seite mitten im Update neu geladen, wartet sie mit dem Übernehmen
+der Eingaben vom Gerät, bis das Update vorbei ist.
+
 Haben zwei Geräte denselben Bericht offen, überschreibt keines still das
 andere: Das zweite meldet „Auf einem anderen Gerät geändert – bitte neu
 laden“ und bietet die eigenen Eingaben danach wieder an. Nach dem Abmelden

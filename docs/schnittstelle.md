@@ -469,6 +469,7 @@ Antworten:
 | 422 | Vorschlag abgelehnt (Format, Etage, Datei, Prüfsumme …); beim direkten Schreiben auch unbekannte Steckertypen (`"stecker":[…]`). Gespeichert wird dann nichts. |
 | 429 | zehn offene Vorschläge dieses Zugangs oder 60 Sendungen in der letzten Stunde; von nginx auch bei mehr als zehn Anfragen in der Sekunde |
 | 500 | unerwarteter Fehler (Details im Log von A) |
+| 503 | bei A läuft gerade ein Update: `{"ok":false,"wartung":true,"message":"…"}` mit `Retry-After: 30` – nichts angenommen, nach einer halben Minute noch einmal senden. Lesen geht auch währenddessen |
 
 ## Verhältnis zum Location-Abgleich (Git)
 

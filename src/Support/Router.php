@@ -199,6 +199,23 @@ final class Router
     }
 
     /**
+     * Gibt es unter diesem Pfad eine Seite (eine GET-Route)? Die Antwort auf
+     * ein Formular ist oft keine – die Treffer einer Suche, die Dateien am
+     * Vorgang, eine Rückfrage stehen unter der Adresse des POST. Wer nach
+     * einer abgewiesenen Änderung „zurück“ schickt, sucht damit die nächste
+     * Seite (UpdateService::wartungsSperre()).
+     */
+    public function hatSeite(string $pfad): bool
+    {
+        foreach ($this->routes as $route) {
+            if ($route['method'] === 'GET' && preg_match($route['pattern'], $pfad) === 1) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
      * Erwartet die Anfrage JSON? Nur der Accept-Kopf zählt – nicht
      * X-Requested-With: Formulare mit `data-laeuft` (app.js) gehen per fetch
      * hinaus und sollen wie ein gewöhnliches Formular mit Meldung und

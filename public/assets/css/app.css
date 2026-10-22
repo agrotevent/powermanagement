@@ -1747,3 +1747,60 @@ input[type=password], input[type=number], input[type=email], select, textarea {
 .zugangsdaten dt { font-weight: 600; }
 .zugangsdaten dd { margin: 0; display: flex; flex-wrap: wrap; gap: .4rem; align-items: center; }
 .zugangsdaten code { font-size: 1rem; word-break: break-all; padding: .2rem .4rem; background: var(--surface-alt, var(--border)); border-radius: 4px; }
+
+/* ---------------------------------------------------------- System → Update */
+
+/* Hinweis am Menüeintrag („3“ neue Stände, „!“) und als Punkt am Gruppentitel. */
+.nav-hinweis {
+    margin-left: auto; min-width: 1.25rem; height: 1.25rem; padding: 0 .35rem;
+    border-radius: 999px; display: inline-grid; place-items: center;
+    font-size: .68rem; font-weight: 700; line-height: 1; font-variant-numeric: tabular-nums;
+    background: var(--primary); color: #fff;
+}
+.nav-hinweis.warn { background: var(--warning); }
+.nav-hinweis.bad { background: var(--danger); }
+.nav-punkt {
+    width: 7px; height: 7px; border-radius: 50%; flex: 0 0 7px;
+    background: var(--primary);
+}
+.nav-punkt.warn { background: var(--warning); }
+.nav-punkt.bad { background: var(--danger); }
+/* Offen steht der Hinweis am Eintrag – der Punkt nur bei zugeklappter Gruppe. */
+.nav-group.offen .nav-punkt { display: none; }
+/* Schmal gestellt: ein Punkt oben rechts am Kästchen. */
+html.menue-schmal .nav-item { position: relative; }
+html.menue-schmal .nav-hinweis {
+    position: absolute; top: 3px; right: 9px; min-width: 9px; width: 9px; height: 9px;
+    padding: 0; font-size: 0; overflow: hidden;
+}
+
+/* Das Zeichen in der Kopfleiste: auf dem Handy ist die Seitenleiste zu. */
+.update-zeichen.primary { background: var(--primary-light); color: var(--primary-dark); border-color: #93c5fd; }
+.update-zeichen.primary:hover { background: #bfdbfe; }
+.update-zeichen.bad { background: var(--danger-light); color: var(--danger); border-color: #fca5a5; }
+.update-zeichen.bad:hover { background: #fecaca; }
+
+.update-balken { margin: .2rem 0 .4rem; }
+.update-protokoll {
+    max-height: 22rem; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere;
+    margin: .8rem 0 0; padding: .6rem .75rem; font-size: .76rem; line-height: 1.45;
+    background: #0f172a; color: #e2e8f0; border-radius: 8px;
+}
+.update-protokoll.lang { max-height: 36rem; }
+.update-befehl {
+    white-space: pre-wrap; overflow-wrap: anywhere; margin: .5rem 0 0;
+    padding: .5rem .7rem; font-size: .78rem; background: var(--surface-alt, #f8fafc);
+    border: 1px solid var(--border); border-radius: 6px; color: var(--text);
+}
+details.update-konsole > summary { cursor: pointer; list-style: none; }
+details.update-konsole > summary::-webkit-details-marker { display: none; }
+details.update-konsole:not([open]) > summary { border-bottom: 0; }
+
+/* Automatische Updates: Wochentage nebeneinander, Erklärung unter dem Modus. */
+.update-automatik .check .help { display: block; margin-top: .1rem; }
+.update-tage { display: flex; flex-wrap: wrap; gap: .2rem 1.1rem; margin-bottom: .6rem; }
+.update-tage .check { margin-bottom: .2rem; }
+.update-automatik input[type=time] {
+    width: 100%; padding: .45rem .6rem; border: 1px solid var(--border); border-radius: 8px;
+    font-family: inherit; font-size: .84rem; background: #fff; color: var(--text);
+}

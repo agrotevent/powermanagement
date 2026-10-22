@@ -365,7 +365,11 @@ final class LocationBundle
      * mit 100 MB braucht Minuten, und solange hielte die Anfrage die Sitzung
      * und liefe in die Frist von nginx (Anfragezeit). Die Pläne gehen gleich
      * an einen eigenen Prozess (PlanTileService::imHintergrund), der sie
-     * nacheinander rechnet. Auf der Kommandozeile ohne Frist hier und jetzt.
+     * nacheinander rechnet. Auf der Kommandozeile ohne Frist hier und jetzt –
+     * aber wie dort unter PlanTileService::nacheinander(): kein zweiter Bau
+     * daneben (je großer Plan 150–200 MB), und die Automatik der Updates
+     * sieht ihn (rechnetImHintergrund()) und verschiebt. Aufrufer mit
+     * Vermerk oder Audit tragen die vorher ein (LocationSync::uebernehmen()).
      *
      * @param list<int> $etagenIds
      * @return list<int> die Etagen, die im Hintergrund gerechnet werden
@@ -386,8 +390,18 @@ final class LocationBundle
             PlanTileService::imHintergrund(array_keys($faellig));
             return array_keys($faellig);
         }
-        foreach ($faellig as $etage) {
-            PlanTileService::bauen($etage, true, false);
+        foreach (array_keys($faellig) as $etageId) {
+            PlanTileService::nacheinander(static function () use ($etageId): void {
+                // Während auf einen anderen Bau gewartet wurde, kann die Etage weg sein.
+                $etage = SiteService::floor($etageId);
+                if ($etage !== null) {
+                    PlanTileService::bauen($etage, true, false);
+                }
+            }, static function (string $satz): void {
+                if (defined('STDERR')) {
+                    fwrite(STDERR, $satz . "\n");
+                }
+            });
         }
         return [];
     }

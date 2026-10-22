@@ -78,6 +78,9 @@ ihrer Aufbewahrungsfrist, einige Jahre nach der Prüfung.
 - Ihr Kennwort ändern Sie unter [Konto](/kundenbereich/konto). Geben Sie es nicht weiter – für Kolleginnen und
   Kollegen richten wir gern einen eigenen Zugang ein.
 - Auf einem gemeinsam genutzten Rechner melden Sie sich nach der Arbeit bitte ab.
+- Gelegentlich aktualisieren wir das System. Für ein bis drei Minuten können Sie dann alles ansehen und
+  herunterladen, aber nichts speichern – etwa ein neues Kennwort. Der Kundenbereich sagt Ihnen das; versuchen Sie
+  es einfach etwas später noch einmal.
 - Wir speichern, wann Sie Dokumente abrufen; der Datenschutzhinweis unten sagt mehr dazu.
 
 > **Keine Rechtsberatung:** Die Hinweise auf dieser Seite fassen Vorschriften vereinfacht zusammen. Maßgeblich

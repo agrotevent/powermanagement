@@ -37,6 +37,15 @@ use App\Tanks\TankService;
  * Kundenmodus. Eingetragen wird je Tank nur einmal zur Zeit
  * (TankService::gesperrt()): Ohne Sitzungssperre liefe ein Doppelklick
  * sonst zweimal nebeneinander.
+ *
+ * Update: Eintragen ist immer ein POST – während der Schreibsperre weist
+ * UpdateService::wartungsSperre() es vor dem Controller ab (503 bzw.
+ * Meldung). Was vorher hereinkam, ist angemeldet (anfrageAnmelden()), und
+ * das Update sichert erst, wenn es fertig ist – auch wenn es dazwischen
+ * ohne Sitzungssperre auf die InfluxDB wartet. Das dauert höchstens
+ * influx.timeout je Abfrage, weit unter ANFRAGEN_WARTEN von wartung_an;
+ * darum fragt es vor dem Schreiben nicht noch einmal nach der Sperre (anders
+ * als LocationUebertrag::anwenden(), das auf andere Instanzen wartet).
  */
 final class TankController extends Controller
 {

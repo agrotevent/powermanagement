@@ -6,6 +6,7 @@ namespace App\Controllers;
 use App\Auth\ApiZugang;
 use App\Services\ApiBestand;
 use App\Services\LocationBundle;
+use App\Services\UpdateService;
 use App\Services\VorschlagService;
 use App\Support\Audit;
 use App\Support\Config;
@@ -31,6 +32,11 @@ use App\Support\Request;
  * Was ein Token sieht, kommt nur aus seinen Befugnissen und Standorten
  * (ApiZugang) – angemeldet wird dabei niemand, auch nicht der Benutzer, an
  * den ein Token gebunden ist.
+ *
+ * Während eines Updates (Schreibsperre, UpdateService::wartungAktiv())
+ * bekommt jede schreibende Methode 503 mit Retry-After – wie die Oberfläche
+ * (UpdateService::wartungsSperre() läuft erst hinter dieser Tür). Lesen geht
+ * weiter.
  */
 final class ApiController
 {
@@ -38,6 +44,9 @@ final class ApiController
     public static bool $aktiv = false;
 
     public const PRAEFIX = '/api/';
+
+    /** Antwort schreibender Methoden während der Schreibsperre eines Updates (503, Retry-After: 30). */
+    public const WARTUNG = 'Auf der angefragten Instanz läuft gerade ein Update – bitte in etwa einer Minute noch einmal senden.';
 
     /** Größter Körper (JSON, Plandateien als base64). nginx lässt 50 MB durch. */
     public const MAX_KOERPER = 48 * 1024 * 1024;
@@ -94,6 +103,20 @@ final class ApiController
             return;
         }
         Audit::akteur('api:' . mb_substr((string) $token['name'], 0, 60));
+
+        // Schreibsperre eines Updates: Was jetzt ankäme, verlöre ein
+        // Zurückrollen (die Datenbank von vorher kommt zurück). Erst nach dem
+        // Token – ein ungültiges bekommt weiter genau dieselbe 401. Erst
+        // anmelden, dann fragen: auf eine Anfrage, die vor der Sperre kam,
+        // wartet das Update, bevor es sichert (UpdateService::anfrageAnmelden()).
+        if (in_array($methode, ['POST', 'PUT', 'PATCH', 'DELETE'], true)) {
+            UpdateService::anfrageAnmelden();
+            if (UpdateService::wartungAktiv()) {
+                UpdateService::anfrageAbmelden();
+                $this->wartung();
+                return;
+            }
+        }
 
         $pfad = $request->path();
         $k = self::SCHLUESSEL;
@@ -217,9 +240,21 @@ final class ApiController
         }
         unset($roh);
         $ergebnis = VorschlagService::einreichen($token, $schluessel, $koerper);
+        if (!empty($ergebnis['wartung'])) {
+            // Das Update begann, während der Körper ankam: beim Schreiben bemerkt, nichts geändert.
+            $this->wartung();
+            return;
+        }
         $status = (int) ($ergebnis['status'] ?? (!empty($ergebnis['ok']) ? 201 : 422));
         unset($ergebnis['status']);
         $this->antwort($ergebnis, $status);
+    }
+
+    /** 503 mit Retry-After: auf dieser Instanz läuft gerade ein Update. */
+    private function wartung(): void
+    {
+        header('Retry-After: 30');
+        $this->antwort(['ok' => false, 'wartung' => true, 'message' => self::WARTUNG], 503);
     }
 
     /** Nur GET (und HEAD) – sonst 405 mit Allow. */

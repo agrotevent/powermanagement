@@ -644,7 +644,8 @@ final class VorschlagService
                 ]);
                 if (!$r['ok']) {
                     $pdo->rollBack();
-                    return self::nein(422, $r['message']);
+                    // Schreibsperre erst beim Schreiben bemerkt: 503 zum Wiederholen (ApiController).
+                    return self::nein(422, $r['message'], !empty($r['wartung']) ? ['wartung' => true] : []);
                 }
                 $name = 'api:' . mb_substr((string) $token['name'], 0, 60);
                 $etagen = array_keys($v['paare']);

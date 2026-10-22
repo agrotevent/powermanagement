@@ -1,0 +1,18 @@
+# /etc/systemd/system/powermanagement-update.path
+#
+# Startet powermanagement-update.service, sobald die Anwendung einen Auftrag nach
+# storage/update/soll/auftrag legt (Temp-Datei + Umbenennen). PathExists, nicht
+# PathChanged: systemd prüft nach jedem Lauf erneut – ein Auftrag, der während eines
+# Laufs kam, geht nicht verloren. Der Helfer räumt den Auftrag als Erstes weg.
+#
+# Platzhalter: __APP_DIR__
+
+[Unit]
+Description=PowerManagement: Update-Aufträge aus der Oberfläche beobachten
+
+[Path]
+PathExists=__APP_DIR__/storage/update/soll/auftrag
+Unit=powermanagement-update.service
+
+[Install]
+WantedBy=paths.target
