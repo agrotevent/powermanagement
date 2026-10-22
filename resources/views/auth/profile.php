@@ -5,6 +5,11 @@ use App\Support\Zeit;
 
 $title = 'Mein Konto';
 $subtitle = 'Rollen, Freigaben und Passwort';
+/** @var array<string,mixed>|null $sso AuthController::ssoProfil() */
+$sso = $sso ?? null;
+$wegText = ['profil' => 'selbst im Profil verbunden', 'freischaltung' => 'von der Verwaltung freigeschaltet',
+    'anlage' => 'bei der ersten Anmeldung automatisch angelegt', 'cli' => 'über die Kommandozeile'];
+$ssoRollen = array_values(array_filter($roles, static fn (array $r): bool => ($r['quelle'] ?? 'hand') === 'sso'));
 ?>
 <div class="grid grid-2">
     <div class="card">
@@ -32,7 +37,7 @@ $subtitle = 'Rollen, Freigaben und Passwort';
                 <dt>Rollen</dt>
                 <dd>
                     <?php foreach ($roles as $role): ?>
-                        <span class="badge primary"><?= View::e($role['name']) ?><?= !empty($role['gueltig_bis']) ? ' bis ' . View::e(Zeit::anzeige($role['gueltig_bis'], 'd.m.Y')) : '' ?></span>
+                        <span class="badge primary"><?= View::e($role['name']) ?><?= ($role['quelle'] ?? 'hand') === 'sso' ? ' · über Gruppe' : '' ?><?= !empty($role['gueltig_bis']) ? ' bis ' . View::e(Zeit::anzeige($role['gueltig_bis'], ($role['quelle'] ?? 'hand') === 'sso' ? 'd.m.Y H:i' : 'd.m.Y')) : '' ?></span>
                     <?php endforeach; ?>
                 </dd>
             </dl>
@@ -62,6 +67,15 @@ $subtitle = 'Rollen, Freigaben und Passwort';
         </div>
     </div>
 
+    <?php if ($sso !== null && $sso['nur_sso']): ?>
+    <div class="card">
+        <div class="card-head"><h2>Passwort</h2></div>
+        <div class="card-body">
+            <p>Dieses Konto meldet sich nur über <?= View::e($sso['name']) ?> an.</p>
+            <p class="small muted mb0">Ein Kennwort gilt dafür nicht – geändert wird es bei <?= View::e($sso['name']) ?>.</p>
+        </div>
+    </div>
+    <?php else: ?>
     <div class="card">
         <div class="card-head"><h2>Passwort ändern</h2></div>
         <div class="card-body">
@@ -84,4 +98,71 @@ $subtitle = 'Rollen, Freigaben und Passwort';
             </form>
         </div>
     </div>
+    <?php endif; ?>
+
+    <?php if ($sso !== null): ?>
+    <?php $i = $sso['identitaet']; ?>
+    <div class="card" id="sso">
+        <div class="card-head"><h2>Anmeldung über <?= View::e($sso['name']) ?></h2></div>
+        <div class="card-body">
+            <?php if ($sso['weg'] === 'sso' && $sso['seit'] > 0): ?>
+                <p><span class="badge ok">angemeldet über <?= View::e($sso['name']) ?></span>
+                    seit <?= View::e(Zeit::anzeige(gmdate('c', (int) $sso['seit']))) ?></p>
+            <?php endif; ?>
+            <?php if ($i !== null): ?>
+                <dl class="kv">
+                    <dt>Verknüpft seit</dt><dd><?= View::e(Zeit::anzeige($i['angelegt_am'])) ?></dd>
+                    <dt>Wie</dt><dd><?= View::e($wegText[$i['weg']] ?? $i['weg']) ?></dd>
+                    <dt>Name dort</dt><dd><?= View::e($i['name_dort'] !== '' ? $i['name_dort'] : '–') ?></dd>
+                    <dt>Zuletzt über <?= View::e($sso['name']) ?></dt><dd><?= $i['zuletzt_am'] !== null ? View::e(Zeit::anzeige($i['zuletzt_am'])) : 'noch nie' ?></dd>
+                    <dt>Gruppen dort</dt>
+                    <dd><?php if ($i['gruppen'] === []): ?>–<?php else: ?>
+                        <details><summary><?= count($i['gruppen']) ?> <?= count($i['gruppen']) === 1 ? 'Gruppe' : 'Gruppen' ?> bei der letzten Anmeldung</summary>
+                            <ul class="liste-schlicht small"><?php foreach ($i['gruppen'] as $g): ?><li><?= View::e($g) ?></li><?php endforeach; ?></ul>
+                        </details><?php endif; ?></dd>
+                    <dt>Rollen aus Gruppen</dt>
+                    <dd><?php if ($ssoRollen === []): ?>–<?php endif; ?>
+                        <?php foreach ($ssoRollen as $r): ?>
+                            <span class="badge info"><?= View::e($r['name']) ?> · über Gruppe<?= !empty($r['gueltig_bis']) ? ', bis ' . View::e(Zeit::anzeige($r['gueltig_bis'])) : '' ?></span>
+                        <?php endforeach; ?></dd>
+                </dl>
+                <?php if ($i['anderer_aussteller']): ?>
+                    <p class="notice warn mt">Die Verknüpfung gehört zu einem anderen Anmeldedienst als dem jetzt eingerichteten – sie gilt erst wieder, wenn die Verwaltung sie umstellt.</p>
+                <?php endif; ?>
+                <p class="help mt">Rollen aus Gruppen gelten bis zum Ende der Sitzung über <?= View::e($sso['name']) ?>; eine Anmeldung mit Kennwort entfernt sie.
+                    Was sichtbar ist, regeln weiter die Freigaben hier.</p>
+                <?php if (!$sso['nur_sso']): ?>
+                    <form method="post" action="/profil/sso/loesen" class="mt"
+                          data-confirm="Die Verknüpfung mit <?= View::e($sso['name']) ?> lösen?<?= $sso['weg'] === 'sso' ? ' Diese Sitzung endet, danach mit Kennwort anmelden.' : '' ?>">
+                        <?= Csrf::field() ?>
+                        <button class="btn" type="submit">Verknüpfung lösen</button>
+                    </form>
+                <?php endif; ?>
+            <?php else: ?>
+                <p>Dieses Konto ist nicht mit <?= View::e($sso['name']) ?> verknüpft.</p>
+                <?php if ($sso['verbinden'] && $sso['verbinden_bereit']): ?>
+                    <p><a class="btn btn-primary" href="/login/sso/verbinden">Weiter zu <?= View::e($sso['name']) ?></a></p>
+                    <p class="help">Das Kennwort ist bestätigt. Jetzt bei <?= View::e($sso['name']) ?> einmal neu anmelden (innerhalb von fünf Minuten) –
+                        danach geht die Anmeldung hier auch darüber.</p>
+                <?php elseif ($sso['verbinden']): ?>
+                    <form method="post" action="/profil/sso/verbinden">
+                        <?= Csrf::field() ?>
+                        <div class="field">
+                            <label for="sso-verbinden-kennwort">Kennwort dieses Kontos</label>
+                            <input id="sso-verbinden-kennwort" type="password" name="kennwort" autocomplete="current-password" required>
+                        </div>
+                        <button class="btn btn-primary" type="submit">Mit <?= View::e($sso['name']) ?> verbinden</button>
+                    </form>
+                    <p class="help">Erst das Kennwort, dann bei <?= View::e($sso['name']) ?> einmal neu anmelden – danach geht die Anmeldung hier auch darüber.
+                        Benutzername und E-Mail-Adresse verknüpfen nie von selbst.</p>
+                <?php elseif ($sso['weg'] === 'notzugang'): ?>
+                    <p class="small muted">Ein Notzugang wird nie verknüpft.</p>
+                <?php endif; ?>
+            <?php endif; ?>
+            <?php if ($sso['verwaltung']): ?>
+                <p class="notice warn mt mb0">Anmelden über <?= View::e($sso['name']) ?> geht für dieses Konto erst, wenn „Verwaltung per SSO“ eingeschaltet ist.</p>
+            <?php endif; ?>
+        </div>
+    </div>
+    <?php endif; ?>
 </div>

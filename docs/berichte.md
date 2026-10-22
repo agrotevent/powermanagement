@@ -297,10 +297,13 @@ andere Adresse führt zurück zur Kundenseite. Andere Tabs desselben
 Browsers leeren sich und gehen ebenfalls zur Kundenseite. Nach der
 Unterschrift steht da „Vielen Dank – bitte geben Sie das Gerät an …
 zurück“ – an den, der den Kundenmodus gestartet hat; entsperrt wird mit
-**dessen Kennwort**. Ist der Bericht einem Kunden mit eigenem Zugang
+**dessen Kennwort** – oder, ist Anmeldung über SSO eingerichtet, mit **Mit
+Authentik entsperren**: eine neue Anmeldung dort, und nur dieselbe Person
+entsperrt ([anmeldung-sso.md](anmeldung-sso.md#bestätigen-über-authentik)).
+Konten „nur über SSO“ haben kein Kennwortfeld. Ist der Bericht einem Kunden mit eigenem Zugang
 zugeordnet ([kundenbereich.md](kundenbereich.md)), steht dort außerdem
-„Der Bericht steht ab sofort in Ihrem Kundenbereich bereit.“ Ab fünf falschen Versuchen wird das Entsperren
-gebremst (eine Minute, dann jeweils doppelt so lange, höchstens 15
+„Der Bericht steht ab sofort in Ihrem Kundenbereich bereit.“ Ab fünf falschen Versuchen (auch über SSO mit einer anderen Person) wird
+das Entsperren gebremst (eine Minute, dann jeweils doppelt so lange, höchstens 15
 Minuten); abgemeldet wird nicht, und das Konto selbst wird nicht gesperrt.
 Das Kennwortfeld füllt der Browser nicht von selbst aus – sonst entsperrte
 ein Tipp des Kunden das Gerät.

@@ -351,13 +351,17 @@ final class ApiZugaenge
     }
 
     /**
-     * Das Token noch einmal im Klartext – nur mit dem eigenen Kennwort und
-     * nur für jemanden, der alles sieht. Jeder Versuch steht im Audit-Log
-     * (ohne das Token).
+     * Das Token noch einmal im Klartext – nur bestätigt und nur für jemanden,
+     * der alles sieht. Bestätigt wird mit dem eigenen Kennwort oder, ohne
+     * Kennwort ($kennwort = ''), über eine frische Anmeldung beim
+     * Anmeldedienst für genau diesen Zugang (Auth::bestaetigen, Zweck
+     * token:<id> – einmalig, höchstens fünf Minuten alt). Ein Konto „nur über
+     * SSO“ bestätigt nur so. Jeder Versuch steht im Audit-Log (ohne das
+     * Token).
      *
      * @return array{ok:bool,message:string,token?:string,name?:string}
      */
-    public static function klartext(int $id, string $kennwort): array
+    public static function klartext(int $id, #[\SensitiveParameter] string $kennwort): array
     {
         $user = Auth::user();
         if ($user === null || !Zugriff::alles()) {
@@ -372,9 +376,14 @@ final class ApiZugaenge
         if (!self::darfVerwaltenToken($z)) {
             return ['ok' => false, 'message' => 'Dieses Token trägt Befugnisse oder eine Bindung, die du selbst nicht vergeben dürftest – anzeigen darf es nur, wer sie hat.'];
         }
-        if ($kennwort === '' || !password_verify($kennwort, (string) $user['password_hash'])) {
+        if (!Auth::bestaetigen('token:' . $id, $kennwort)) {
             Audit::log('api.token.anzeigen_abgelehnt', 'api_token', (string) $id, ['name' => (string) $z['name']]);
-            return ['ok' => false, 'message' => 'Das Kennwort stimmt nicht – das Token wird nicht angezeigt.'];
+            $sso = \App\Auth\Sso\Einstellungen::name();
+            return ['ok' => false, 'message' => match (true) {
+                $kennwort === ''                    => 'Nicht bestätigt (oder die Bestätigung über ' . $sso . ' ist abgelaufen) – das Token wird nicht angezeigt.',
+                \App\Auth\Sso\Schutz::nurSso($user) => 'Dieses Konto bestätigt nur über ' . $sso . ' – das Token wird nicht angezeigt.',
+                default                             => 'Das Kennwort stimmt nicht – das Token wird nicht angezeigt.',
+            }];
         }
         if ($z['revoked_at'] !== null || (string) ($z['token_enc'] ?? '') === '') {
             return ['ok' => false, 'message' => 'Dieses Token lässt sich nicht mehr anzeigen – es ist widerrufen. Bei Bedarf einen neuen Zugang anlegen.'];

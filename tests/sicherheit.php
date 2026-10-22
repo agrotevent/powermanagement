@@ -87,6 +87,25 @@ try {
         'Rechte der Übergabeberichte nur, wer sie selbst hat');
     pruefe(!BenutzerService::darfVergeben(['kunden.view']) && !BenutzerService::darfVergeben(['kunden.manage'])
         && !BenutzerService::darfVergeben(['kunden.nachweise']), 'Rechte des Kundenbereichs nur, wer sie selbst hat');
+    // Anmeldung über SSO: einrichten (Gruppen → Rollen, Anmeldeanfragen) nur, wer es selbst darf.
+    pruefe(Permissions::exists('sso.manage') && !BenutzerService::darfVergeben(['sso.manage']), '„SSO einrichten“ vergibt nur, wer es hat');
+    foreach (Permissions::standardRollen() as $schluessel => $rolle) {
+        if ($schluessel !== 'admin') {
+            pruefe(!in_array('sso.manage', $rolle['permissions'], true), 'Standardrolle ' . $schluessel . ' ohne sso.manage');
+        }
+    }
+    // Gruppe → Rolle vergibt die Rolle an jedes Gruppenmitglied – also nur, wer sie von Hand vergeben dürfte.
+    $planungRolle = (int) Database::scalar("SELECT id FROM roles WHERE role_key = 'planung'");
+    pruefe(\App\Auth\Sso\Konten::zuordnungFehler('pm-' . $k, 'rolle', $planungRolle) !== null, 'Gruppe → Rolle mit Rechten, die man nicht hat → abgelehnt');
+    pruefe(\App\Auth\Sso\Konten::zuordnungFehler('pm-' . $k, 'rolle', $rollen['klein']) === null, 'Gruppe → Rolle mit eigenen Rechten → erlaubt');
+    alsBenutzer($benutzer['klein']);
+    pruefe(\App\Auth\Sso\Konten::zuordnungFehler('pm-' . $k, 'rolle', $rollen['klein']) !== null, 'Gruppe → Rolle ohne „Benutzer verwalten“ → abgelehnt');
+    pruefe(!\App\Auth\Sso\Konten::anfrageVerwerfen(0)['ok'] && !\App\Auth\Sso\Konten::anfrageFreischalten(0, $benutzer['klein'])['ok'],
+        'Anmeldeanfragen verwerfen/freischalten ohne „Benutzer verwalten“ → abgelehnt');
+    alsBenutzer($benutzer['verwalter']);
+    // Wohin das SSO-Secret geht und wohin die Anmeldung zurückkehrt, ändert nie die Oberfläche.
+    pruefe(preg_grep('/^sso\./', array_keys(Settings::OVERRIDABLE)) === [] && !array_key_exists('app.url', Settings::OVERRIDABLE),
+        'Settings::OVERRIDABLE ohne sso.* und app.url');
     // Kundenbereich: Standorte für Kunden gibt nur frei, wer selbst alles sieht (was sie
     // speichert – nur Standort, nur sehen –, prüft kundenbereich.php).
     pruefe(!BenutzerService::freigabeFuerKunde(1, ['site_id' => 1, 'gueltig_ab' => '2026-01-01', 'gueltig_bis' => '2026-01-02',
@@ -279,8 +298,14 @@ try {
     // Die Ansichten der Schnittstelle: kein Skript ohne Nonce, keine on…=, kein javascript:
     $ansichten = array_merge(glob(dirname(__DIR__) . '/resources/views/schnittstelle/*.php') ?: [], glob(dirname(__DIR__) . '/resources/views/instanzen/*.php') ?: [],
         glob(dirname(__DIR__) . '/resources/views/vorschlaege/*.php') ?: [], [dirname(__DIR__) . '/resources/views/partials/token-standorte.php'],
-        glob(dirname(__DIR__) . '/resources/views/kunden/*.php') ?: [], [dirname(__DIR__) . '/resources/views/berichte/_kundenbereich.php']);
-    pruefe(count($ansichten) >= 16, 'Ansichten der Schnittstelle, der anderen Instanzen, der Vorschläge und der Kundenverwaltung gefunden');
+        glob(dirname(__DIR__) . '/resources/views/kunden/*.php') ?: [], [dirname(__DIR__) . '/resources/views/berichte/_kundenbereich.php'],
+        // Anmeldung (auch über SSO): Anmeldeseite, Profil, die Seite nach dem Abmelden
+        [dirname(__DIR__) . '/resources/views/auth/login.php', dirname(__DIR__) . '/resources/views/auth/profile.php',
+            dirname(__DIR__) . '/resources/views/auth/abgemeldet.php'], glob(dirname(__DIR__) . '/resources/views/sso/*.php') ?: [],
+        // Kundenmodus: Kundenseite, „Gerät gesperrt“ und das Entsperren (Kennwort oder über SSO)
+        [dirname(__DIR__) . '/resources/views/berichte/kunde.php', dirname(__DIR__) . '/resources/views/berichte/kunde-gesperrt.php',
+            dirname(__DIR__) . '/resources/views/berichte/_entsperren.php']);
+    pruefe(count($ansichten) >= 19, 'Ansichten der Schnittstelle, der anderen Instanzen, der Vorschläge und der Kundenverwaltung gefunden');
     // … und die des Kundenbereichs (dort gar kein Inline-Skript).
     $kundenAnsichten = array_merge(glob(dirname(__DIR__) . '/resources/views/kundenbereich/*.php') ?: [],
         [dirname(__DIR__) . '/resources/views/layout/kundenbereich.php']);
@@ -303,6 +328,29 @@ try {
         pruefe(preg_match('/\son[a-z]+\s*=/i', $text) !== 1 && stripos($text, 'javascript:') === false, $name . ': kein on…= und kein javascript:');
     }
 
+    // Was der Anmeldedienst schickt (Name dort, Name, E-Mail, Gruppen einer Anfrage oder
+    // Verknüpfung) und Befunde der Prüfung kommen auf /system/sso nur maskiert an.
+    $boese = '<script>alert(1)</script>';
+    $html = View::render('sso/einstellungen', [
+        'zustand'        => ['befund' => [['ok' => false, 'text' => $boese]], 'geprueft_am' => time(), 'kids' => [$boese], 'algs' => ['RS256'],
+            'aussteller' => 'https://idp.example/' . $boese,
+            'schalter' => ['kunden' => true] + \App\Auth\Sso\Einstellungen::zustand()['schalter']] + \App\Auth\Sso\Einstellungen::zustand(),
+        'zuordnungen'    => [['id' => 1, 'gruppe' => $boese, 'art' => 'rolle', 'ziel_id' => 1, 'ziel_name' => $boese, 'created_by' => $boese, 'created_at' => gmdate('c')]],
+        'kunden'         => ['verfuegbar' => true, 'darf' => true, 'waehlbar' => [['id' => 1, 'name' => $boese]],
+            'gruppen' => [['id' => 2, 'gruppe' => $boese, 'art' => 'kunde', 'ziel_id' => 1, 'ziel_name' => $boese, 'created_by' => $boese, 'created_at' => gmdate('c')]]],
+        'rollen'         => [['id' => 1, 'name' => $boese, 'verwaltend' => false, 'waehlbar' => true, 'freigaben' => 0]],
+        'anfragen'       => [['id' => 1, 'name_dort' => $boese, 'voller_name' => $boese, 'email' => $boese, 'email_bestaetigt' => 1, 'gruppen' => [$boese],
+            'grund' => $boese, 'anzahl' => 2, 'letzte_am' => gmdate('c'), 'vorschlag' => null]],
+        'konten'         => [['id' => 1, 'username' => $boese, 'full_name' => $boese]],
+        'verknuepfungen' => [['user_id' => 1, 'username' => $boese, 'full_name' => $boese, 'name_dort' => $boese, 'weg' => $boese, 'zuletzt_am' => null,
+            'gruppen' => [$boese], 'nur_sso' => 0, 'kunde_id' => null, 'verwaltbar' => true, 'anderer_aussteller' => false]],
+        'darfBenutzer'   => true,
+        'stern'          => true,
+        'schutz'         => ['vorbedingungen' => [['ok' => false, 'text' => $boese, 'fehlt' => $boese]], 'notzugaenge' => [$boese],
+            'warnungen' => ['verwaltend' => [$boese], 'verknuepft' => 1]],
+    ], '');
+    pruefe(!str_contains($html, '<script>') && substr_count($html, '&lt;script&gt;') >= 21,
+        'SSO-Einstellungen: Angaben des Anmeldedienstes, Benutzer- und Kundennamen (Schutz, Kundengruppen) nur maskiert');
     // Was eine andere Instanz schickt, kommt in der Instanzseite nur maskiert an:
     // ihre Meldung, Namen von Locations und Etagen; ein Schlüssel, der keiner
     // ist, wird übergangen.

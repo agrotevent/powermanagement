@@ -13,11 +13,13 @@
  * @var bool $vermutet app.url fehlt – Adresse aus dieser Anfrage
  * @var string $einmal
  * @var array<string,mixed> $eingabe
+ * @var array{name:string, link:bool, nur_sso:bool, bestaetigt:list<int>} $sso „Anzeigen“ über den Anmeldedienst bestätigen
  */
 use App\Support\Csrf;
 use App\Support\View;
 use App\Support\Zeit;
 
+$sso = ($sso ?? null) ?: ['name' => '', 'link' => false, 'nur_sso' => false, 'bestaetigt' => []];
 $title = 'Schnittstelle (API)';
 $subtitle = 'Zugänge für andere Instanzen – Grundrisse, Maßstab, Georeferenz und Feststrom teilen';
 $zustandBadge = ['aktiv' => 'ok', 'abgelaufen' => 'warn', 'widerrufen' => 'bad', 'ruht' => 'warn'];
@@ -55,12 +57,28 @@ $zustandText = ['aktiv' => 'aktiv', 'abgelaufen' => 'abgelaufen', 'widerrufen' =
                     <td data-label="Token">
                         <span class="mono small"><?= View::e((string) $t['token_prefix']) ?>…</span>
                         <?php if ($darf && $t['abrufbar'] && $t['verwaltbar']): ?>
-                            <form method="post" action="/system/schnittstelle/<?= $id ?>/anzeigen" class="api-anzeigen">
-                                <?= Csrf::field() ?>
-                                <input type="password" name="kennwort" required autocomplete="current-password" placeholder="eigenes Kennwort"
-                                       aria-label="Eigenes Kennwort, um das Token von <?= View::e((string) $t['name']) ?> anzuzeigen">
-                                <button class="btn btn-sm" type="submit">Anzeigen</button>
-                            </form>
+                            <?php if (in_array($id, $sso['bestaetigt'], true)): ?>
+                                <?php /* Über den Anmeldedienst bestätigt: einmal, ohne Kennwortfeld. */ ?>
+                                <form method="post" action="/system/schnittstelle/<?= $id ?>/anzeigen" class="api-anzeigen">
+                                    <?= Csrf::field() ?>
+                                    <button class="btn btn-sm btn-primary" type="submit">Token jetzt anzeigen</button>
+                                </form>
+                            <?php else: ?>
+                                <?php if (!$sso['nur_sso']): ?>
+                                    <form method="post" action="/system/schnittstelle/<?= $id ?>/anzeigen" class="api-anzeigen">
+                                        <?= Csrf::field() ?>
+                                        <input type="password" name="kennwort" required autocomplete="current-password" placeholder="eigenes Kennwort"
+                                               aria-label="Eigenes Kennwort, um das Token von <?= View::e((string) $t['name']) ?> anzuzeigen">
+                                        <button class="btn btn-sm" type="submit">Anzeigen</button>
+                                    </form>
+                                <?php endif; ?>
+                                <?php if ($sso['link']): ?>
+                                    <a class="btn btn-sm btn-ghost" href="<?= View::e('/login/sso/bestaetigen?' . http_build_query(['zweck' => 'token:' . $id,
+                                        'zurueck' => '/system/schnittstelle'], '', '&', PHP_QUERY_RFC3986)) ?>">Mit <?= View::e($sso['name']) ?> bestätigen</a>
+                                <?php elseif ($sso['nur_sso']): ?>
+                                    <div class="small muted">Anzeigen nur nach Bestätigung über <?= View::e($sso['name']) ?> – das geht gerade nicht.</div>
+                                <?php endif; ?>
+                            <?php endif; ?>
                         <?php endif; ?>
                     </td>
                     <td data-label="Standorte" class="small">
@@ -124,7 +142,7 @@ $zustandText = ['aktiv' => 'aktiv', 'abgelaufen' => 'abgelaufen', 'widerrufen' =
                 'standorte'  => $standorte,
             ]) ?>
             <p class="small muted">Das Token erscheint nach dem Anlegen genau einmal. Später lässt es sich mit dem eigenen Kennwort
-                noch einmal anzeigen; widerrufen löscht es endgültig.</p>
+                <?= $sso['link'] ? '(oder über ' . View::e($sso['name']) . ' bestätigt) ' : '' ?>noch einmal anzeigen; widerrufen löscht es endgültig.</p>
             <button class="btn btn-primary" type="submit">Zugang anlegen</button>
         </div>
     </form>

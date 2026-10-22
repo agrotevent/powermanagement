@@ -330,6 +330,13 @@ final class UpdateAutomatik
     // ================================================================ Betrieb
 
     /**
+     * Die Anmeldung über SSO ist kein Hindernis: Ein Vorgang dauert Sekunden
+     * und lässt sich wiederholen (während der Schreibsperre beginnt keiner,
+     * und der Rückruf schreibt nichts – Sso\Anmeldung), Sitzungen liegen nicht
+     * in der Datenbank und überstehen den Neustart der Dienste, Einstellungen
+     * und Secret stehen in der Sicherung, und am Anmeldedienst ändert ein
+     * Update nichts.
+     *
      * @return list<array{art:string, text:string}> aufbau (jeder Aufbau, der nicht beendet ist), geschaltet
      */
     public static function hindernisse(int $jetzt): array

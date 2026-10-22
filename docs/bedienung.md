@@ -1127,6 +1127,34 @@ Audit-Log*) zeichnet Anmeldungen, Änderungen und Schaltvorgänge auf.
 - Steht ein TLS-Proxy davor, der kein `X-Forwarded-Proto` schickt, erzwingt
   `security.cookie_secure => true` das Sitzungs-Cookie nur über HTTPS.
 
+**Anmeldung über SSO (Authentik)**
+
+Ist die Anmeldung über einen Anmeldedienst eingerichtet
+([anmeldung-sso.md](anmeldung-sso.md)), steht auf der Anmeldeseite oben
+**Mit Authentik anmelden**, darunter weiter die Anmeldung mit Benutzername
+und Kennwort – mit „nur SSO“ eingeklappt („Mit Benutzername und Kennwort
+(Kunden, Notzugang)“).
+
+<img src="bilder/anmeldung-sso.png" alt="Anmeldeseite mit „Mit Authentik anmelden“" width="260">
+
+- Im **Profil** verbindet *Mit Authentik verbinden* das eigene Konto: erst
+  das Kennwort noch einmal, dann *Weiter zu Authentik* und dort einmal neu
+  anmelden; danach geht die Anmeldung auch darüber. Lösen geht dort auch –
+  außer bei Konten „nur über SSO“.
+- Rollen aus Gruppen stehen im Profil und in der Benutzerverwaltung als
+  „über Gruppe“ – sie gelten bis zum Ende der Sitzung über SSO. Was sichtbar
+  ist, regeln weiter die Freigaben hier.
+- Nach dem **Abmelden** einer Sitzung über SSO – oder einer Sitzung, in der
+  über Authentik bestätigt oder verbunden wurde – bietet eine Zwischenseite
+  *Auch bei Authentik abmelden* an – auf geteilten Tablets wichtig.
+- Wer unbekannt ist, landet als **Anmeldeanfrage** unter *System →
+  Anmeldung (SSO)*; die Verwaltung verknüpft sie mit einem Konto oder legt
+  eines an.
+- In der **Benutzerverwaltung** zeigt die Spalte *Anmeldung*, ob ein Konto
+  verknüpft ist (und unter welchem Namen dort); wann es zuletzt über SSO
+  kam, steht im Formular des Kontos. Dort lässt es sich lösen, seine
+  SSO-Sitzungen beenden und auf „nur über SSO“ stellen.
+
 ## Update
 
 **System → Update** bringt PowerManagement auf den neuesten Stand – ohne
@@ -1165,6 +1193,9 @@ auf Eventworx wartete, übernimmt nichts mehr und zeigt die Liste mit
 Auswahl und Angaben wieder – nach dem Update genügt ein Klick. Kunden im
 Kundenbereich lesen weiter; ein neues Kennwort speichern sie erst danach
 (sie sehen dazu einen eigenen Hinweis, nie etwas vom Update selbst).
+Anmelden über Authentik geht in dieser Zeit nicht – die Anmeldeseite sagt
+„in etwa einer Minute wieder möglich“ –, mit Kennwort schon; wer angemeldet
+ist, bleibt es ([anmeldung-sso.md](anmeldung-sso.md#während-eines-updates)).
 Andere Instanzen bekommen über die
 Schnittstelle dieselbe Antwort (HTTP 503) – wer dort sendet, schickt es nach
 einer Minute noch einmal. Geht etwas schief, kommt der alte Stand von selbst zurück –

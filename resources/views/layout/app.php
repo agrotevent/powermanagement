@@ -83,6 +83,10 @@ try {
             </div>
         </header>
         <main class="content">
+            <?php if ($user !== null && \App\Auth\Auth::anmeldeweg() === 'notzugang'): ?>
+                <div class="notzugang" role="alert"><strong>Angemeldet über den Notzugang</strong> – nur für den Notfall.
+                    Diese Anmeldung steht im Audit und im Fehlerprotokoll; im Alltag über SSO anmelden.</div>
+            <?php endif; ?>
             <?= View::partial('partials/flash', ['flashes' => $flashes ?? []]) ?>
             <?= $content ?>
         </main>

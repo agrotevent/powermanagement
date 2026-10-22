@@ -48,7 +48,7 @@ final class KundenService
     /** Die Felder eines Zugangs, die das Personal sieht – nie Kennwort-Hash oder Link-HMAC. */
     private const ZUGANG_FELDER = 'id, username, full_name, email, is_active, must_change_password, gueltig_ab, gueltig_bis,
         failed_logins, locked_until, last_login_at, einrichtung_bis, (einrichtung_hash IS NOT NULL) AS link_hinterlegt,
-        kunde_id, created_at, updated_at';
+        kunde_id, nur_sso, created_at, updated_at';
 
     /** @var array<int,?array<string,mixed>> */
     private static array $cache = [];
@@ -69,6 +69,12 @@ final class KundenService
 
     /** Was mit einem Kunden verknüpft wird: Aufträge und Lieferscheine (ein Angebot ist noch keine Lieferung). */
     public const EWX_ARTEN = ['order', 'deliverynote'];
+
+    /** Zugänge aus der Anmeldung über SSO (nur_sso): kein Einrichtungslink, kein Kennwort. */
+    public const NUR_SSO = 'Dieser Zugang meldet sich nur über SSO an – Einrichtungslink und vorläufiges Kennwort gibt es dafür nicht. '
+        . 'Soll die Person sich mit Kennwort anmelden, bekommt sie einen neuen Zugang.';
+    public const SSO_NAME = 'Unter diesem Namen meldet sich jemand über SSO an (Verknüpfung oder Anmeldeanfrage) – ein lokaler Zugang würde nie mit '
+        . 'dieser Anmeldung verknüpft. Bitte einen anderen Benutzernamen wählen; Kundenzugänge über SSO entstehen über eine Kundengruppe.';
 
     /** Wer nicht alles sieht, was der Kunde sieht, gibt keinen Zugang aus (darfZugangAusgeben). */
     public const NICHT_AUSGEBEN = 'Zugänge, Einrichtungslinks und vorläufige Kennwörter gibt nur aus – und einen Kunden oder Zugang wieder öffnen darf nur –, '
@@ -232,10 +238,11 @@ final class KundenService
 
     /**
      * Einen Kunden ganz löschen – nur einen beendeten (inaktiv), und nur mit
-     * seinem Namen als Bestätigung. Weg sind danach: seine Zugänge, seine
-     * Freigaben, seine Eventworx-Vorgänge, seine Prüfnachweise (mit den
-     * Dateien, die sonst niemand nutzt) und die Abrufe. Übergabeberichte
-     * bleiben (Aufbewahrung), nur ohne Zuordnung zum Kunden.
+     * seinem Namen als Bestätigung. Weg sind danach: seine Zugänge (auch die
+     * aus SSO, mit ihren Verknüpfungen), seine Freigaben, seine Kundengruppen
+     * der Anmeldung über SSO, seine Eventworx-Vorgänge, seine Prüfnachweise
+     * (mit den Dateien, die sonst niemand nutzt) und die Abrufe.
+     * Übergabeberichte bleiben (Aufbewahrung), nur ohne Zuordnung zum Kunden.
      *
      * @return array{ok:bool,message:string}
      */
@@ -256,7 +263,8 @@ final class KundenService
         $nachweise = (int) Database::scalar('SELECT COUNT(*) FROM pruefnachweise WHERE kunde_id = ?', [$id]);
         // Alle zugeordneten Berichte (auch Entwürfe) verlieren die Zuordnung.
         $berichte = (int) Database::scalar('SELECT COUNT(*) FROM berichte WHERE kunde_id = ?', [$id]);
-        self::transaktion(static function () use ($id): void {
+        $ssoGruppen = 0;
+        self::transaktion(static function () use ($id, &$ssoGruppen): void {
             // Unter MySQL: wer gerade einen Vorgang verknüpft oder Nachweise
             // übernimmt, sperrt dieselbe Zeile – erst danach wird gelöscht.
             Database::first('SELECT id FROM kunden WHERE id = ?' . self::fuerUpdate(), [$id]);
@@ -264,6 +272,9 @@ final class KundenService
                 BenutzerService::kontoEntfernen((int) $u['id']);
             }
             Database::execute("DELETE FROM freigaben WHERE subject_type = 'kunde' AND subject_id = ?", [$id]);
+            // Kundengruppen der Anmeldung über SSO (017) – eine stehen gebliebene
+            // Gruppe zeigte sonst auf eine ID, die ein neuer Kunde bekommen kann.
+            $ssoGruppen = Database::execute("DELETE FROM sso_zuordnungen WHERE art = 'kunde' AND ziel_id = ?", [$id]);
             Database::execute('DELETE FROM kunden_vorgaenge WHERE kunde_id = ?', [$id]);
             // Nachweise mit ihren Abrufen; gleiche Bytes liegen nur einmal da –
             // eine Datei, die noch ein anderer Nachweis nutzt, bleibt.
@@ -277,7 +288,7 @@ final class KundenService
         Zugriff::vergessen();
         Audit::log('kunden.loeschen', 'kunde', (string) $id, [
             'kunde_id' => $id, 'zugaenge' => $zahlen['zugaenge'], 'nachweise' => $nachweise, 'berichte' => $berichte,
-        ]);
+        ] + ($ssoGruppen > 0 ? ['sso_gruppen' => $ssoGruppen] : []));
         return ['ok' => true, 'message' => 'Kunde gelöscht.'];
     }
 
@@ -333,14 +344,23 @@ final class KundenService
     }
 
     /**
-     * Die Zugänge eines Kunden – ohne Kennwort-Hash und Link-HMAC, mit Zustand.
+     * Die Zugänge eines Kunden – ohne Kennwort-Hash und Link-HMAC, mit Zustand
+     * und `sso`: die Verknüpfung mit der Anmeldung über SSO (Weg, Name dort,
+     * verknüpft am, zuletzt) oder null. Zugänge aus SSO (nur_sso) haben kein
+     * Kennwort und keinen Einrichtungslink.
      *
      * @return list<array<string,mixed>>
      */
     public static function zugaenge(int $kundeId): array
     {
         $zugaenge = Database::select('SELECT ' . self::ZUGANG_FELDER . ' FROM users WHERE kunde_id = ? ORDER BY username', [$kundeId]);
-        return array_map([self::class, 'mitZustand'], $zugaenge);
+        $sso = [];
+        foreach (Database::select('SELECT i.user_id, i.weg, i.name_dort, i.angelegt_am, i.zuletzt_am FROM sso_identitaeten i
+            JOIN users u ON u.id = i.user_id WHERE u.kunde_id = ? ORDER BY i.id', [$kundeId]) as $i) {
+            $sso[(int) $i['user_id']] ??= ['weg' => (string) $i['weg'], 'name_dort' => (string) $i['name_dort'],
+                'angelegt_am' => (string) $i['angelegt_am'], 'zuletzt_am' => $i['zuletzt_am']];
+        }
+        return array_map(static fn (array $z): array => self::mitZustand($z) + ['sso' => $sso[(int) $z['id']] ?? null], $zugaenge);
     }
 
     /**
@@ -362,7 +382,10 @@ final class KundenService
      *
      * Der Benutzername muss frei sein, ohne Rücksicht auf Groß- und
      * Kleinschreibung („Muster“ neben „muster“ wäre eine Verwechslung, die
-     * jemand ausnutzt). Keine Rolle, keine Freigaben am Konto.
+     * jemand ausnutzt) – und darf nicht der Name einer Anmeldung über SSO sein
+     * (Name dort einer Verknüpfung oder Anmeldeanfrage): ein lokaler Zugang
+     * wird nie mit ihr verknüpft, er nähme ihr nur den Namen. Keine Rolle,
+     * keine Freigaben am Konto.
      *
      * Ausgeben darf nur, wer alles sieht, was der Kunde sieht
      * (darfZugangAusgeben) – außer auf der Kommandozeile des Servers
@@ -393,6 +416,9 @@ final class KundenService
         }
         if (Database::first('SELECT id FROM users WHERE LOWER(username) = ?', [strtolower($username)]) !== null) {
             return ['ok' => false, 'message' => 'Diesen Benutzernamen gibt es schon (auch in anderer Schreibweise).'];
+        }
+        if (self::ssoName($username)) {
+            return ['ok' => false, 'message' => self::SSO_NAME];
         }
         $pruefung = self::personPruefen($wert('full_name'), $wert('email'));
         if ($pruefung !== null) {
@@ -531,6 +557,26 @@ final class KundenService
         Database::update('users', $userId, ['failed_logins' => 0, 'locked_until' => null]);
         Audit::log('kunden.zugang_entsperren', 'kunde', (string) $kundeId, ['kunde_id' => $kundeId, 'user_id' => $userId]);
         return ['ok' => true, 'message' => 'Zugang entsperrt.'];
+    }
+
+    /**
+     * Die Sitzungen eines Zugangs über SSO beenden (017) – etwa nach einem
+     * verlorenen Tablet. Die nächste Anmeldung über SSO geht wieder, solange
+     * die Person in der Kundengruppe ist; sonst deaktivieren oder löschen.
+     *
+     * @return array{ok:bool,message:string}
+     */
+    public static function zugangSsoSitzungen(int $kundeId, int $userId): array
+    {
+        $z = self::zugang($kundeId, $userId);
+        if ($z === null) {
+            return ['ok' => false, 'message' => 'Diesen Zugang gibt es nicht.'];
+        }
+        if (Database::first('SELECT id FROM sso_identitaeten WHERE user_id = ?', [$userId]) === null) {
+            return ['ok' => false, 'message' => 'Dieser Zugang meldet sich nicht über SSO an.'];
+        }
+        \App\Auth\Sso\Konten::sitzungenBeenden($userId);
+        return ['ok' => true, 'message' => 'Die Sitzungen von „' . $z['username'] . '“ über SSO sind beendet.'];
     }
 
     /** @return array{ok:bool,message:string} */
@@ -1120,6 +1166,14 @@ final class KundenService
         return $z;
     }
 
+    /** Ist der Benutzername der Name einer Anmeldung über SSO (Verknüpfung oder Anmeldeanfrage, ohne Groß/Klein)? */
+    private static function ssoName(string $username): bool
+    {
+        $klein = strtolower($username);
+        return Database::first('SELECT id FROM sso_identitaeten WHERE LOWER(name_dort) = ?', [$klein]) !== null
+            || Database::first('SELECT id FROM sso_anfragen WHERE LOWER(name_dort) = ?', [$klein]) !== null;
+    }
+
     /** Warum für diesen Zugang kein Link und kein Kennwort ausgegeben wird – oder null. */
     private static function zugangFehler(int $kundeId, ?array $z): ?string
     {
@@ -1127,6 +1181,8 @@ final class KundenService
             $z === null                                    => 'Diesen Zugang gibt es nicht.',
             Kundenbereich::kundeSperre($kundeId) !== null  => 'Der Kunde ist nicht aktiv – erst wieder aktivieren.',
             (int) $z['is_active'] !== 1                    => 'Der Zugang ist deaktiviert – erst wieder aktivieren.',
+            // Ein Zugang aus SSO meldet sich nur dort an (Auth::attempt lehnt sein Kennwort ab).
+            (int) ($z['nur_sso'] ?? 0) === 1               => self::NUR_SSO,
             !self::darfZugangAusgeben($kundeId)            => self::NICHT_AUSGEBEN,
             default                                        => null,
         };

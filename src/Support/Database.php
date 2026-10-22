@@ -117,6 +117,49 @@ final class Database
         self::execute("DELETE FROM {$table} WHERE id = ?", [$id]);
     }
 
+    /** Tiefe verschachtelter transaktion()-Aufrufe. */
+    private static int $tiefe = 0;
+
+    /**
+     * $arbeit in einer Transaktion ausführen: alles oder nichts.
+     *
+     * Wirft $arbeit, wird zurückgerollt und die Ausnahme weitergereicht.
+     * Läuft schon eine Transaktion (auch eine von BerichtService oder einer
+     * anderen Stelle), gehört $arbeit einfach dazu. SQLite beginnt mit
+     * BEGIN IMMEDIATE: Die Schreibsperre kommt sofort, nicht erst beim
+     * ersten Schreiben – zwei gleichzeitige Abläufe, die erst lesen und dann
+     * schreiben (etwa zwei Rückrufe derselben neuen SSO-Identität), stoßen
+     * so nicht erst beim COMMIT zusammen.
+     *
+     * @template T
+     * @param callable():T $arbeit
+     * @return T
+     */
+    public static function transaktion(callable $arbeit): mixed
+    {
+        $pdo = self::pdo();
+        if (self::$tiefe > 0 || $pdo->inTransaction()) {
+            return $arbeit();
+        }
+        $sqlite = self::driver() === 'sqlite';
+        $sqlite ? $pdo->exec('BEGIN IMMEDIATE') : $pdo->beginTransaction();
+        self::$tiefe++;
+        try {
+            $ergebnis = $arbeit();
+            $sqlite ? $pdo->exec('COMMIT') : $pdo->commit();
+            return $ergebnis;
+        } catch (\Throwable $e) {
+            try {
+                $sqlite ? $pdo->exec('ROLLBACK') : $pdo->rollBack();
+            } catch (\Throwable) {
+                // schon zurückgerollt (etwa nach SQLITE_BUSY beim COMMIT)
+            }
+            throw $e;
+        } finally {
+            self::$tiefe--;
+        }
+    }
+
     /** Führt alle noch nicht angewandten Migrationen aus database/migrations aus. */
     public static function migrate(string $dir): array
     {

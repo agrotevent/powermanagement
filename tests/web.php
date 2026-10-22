@@ -205,7 +205,7 @@ try {
         '/stecker', '/standorte', '/location', '/verteiler-abgleich', '/statistik', '/statistik?zeitraum=7d', '/statistik?zeitraum=frei&von=2026-01-01&bis=2026-01-02',
         '/datenquellen', '/datenquellen/profile', '/datenquellen/mqtt-zugaenge', '/datenquellen/mqtt-zugaenge?filter=eigen', '/steuerung/protokoll', '/system/benutzer', '/system/freigaben?art=user&id=' . $benutzer['kunde'],
         '/system/freigaben?art=role&id=' . (int) Database::scalar("SELECT id FROM roles WHERE role_key = 'kunde'"), '/system/rollen',
-        '/system/einstellungen', '/system/update', '/audit', '/anlagen?fest=1', '/anlagen?fest=0', '/anlagen/neu?art=anschluss&fest=1',
+        '/system/einstellungen', '/system/sso', '/system/update', '/audit', '/anlagen?fest=1', '/anlagen?fest=0', '/anlagen/neu?art=anschluss&fest=1',
         '/anlagen/neu?art=anschluss&vorlage=1&fest=1'];
     // Jede Anlage und jeder Standard-Verteiler mit allen Reitern – Aggregat,
     // Speicher und Verteilung mit Messgeräten zeigen jeweils anderes.
@@ -1244,6 +1244,64 @@ try {
         pruefe($r['status'] === 302 && preg_match('#^/[A-Za-z]#', (string) $r['ziel']) === 1, 'next=' . json_encode($next) . ' führt nicht hinaus: ' . $r['ziel']);
         aufruf($basis, $dose, 'POST', '/logout', ['_token' => token(aufruf($basis, $dose, 'GET', '/profil')['text'])]);
     }
+    // Anmeldung über SSO, solange sie aus ist: Start und Rückruf führen zur
+    // Anmeldung mit Meldung (no-store, no-referrer), auch ein HEAD auf den
+    // Rückruf, /abgemeldet ohne Hinweis führt zur Anmeldung. „Abgemeldet.“
+    // kommt an (neue Sitzung nach dem Abmelden). Dass HEAD bei
+    // eingeschaltetem SSO nichts verbraucht (Start, Rückruf, Verbinden,
+    // Bestätigen, /abgemeldet), prüft tests/sso-web.php.
+    $ohneSso = tempnam(sys_get_temp_dir(), 'pm-web-');
+    $dosen[] = $ohneSso;
+    $r = aufruf($basis, $ohneSso, 'GET', '/login/sso?next=/karte');
+    pruefe($r['status'] === 302 && $r['ziel'] === '/login' && preg_match('/^Cache-Control:\s*no-store/mi', $r['kopf']) === 1
+        && preg_match('/^Referrer-Policy:\s*no-referrer/mi', $r['kopf']) === 1, 'SSO aus: /login/sso → /login, no-store, no-referrer');
+    pruefe(str_contains(aufruf($basis, $ohneSso, 'GET', '/login')['text'], 'nicht eingerichtet'), 'SSO aus: Meldung „nicht eingerichtet“');
+    $r = aufruf($basis, $ohneSso, 'GET', '/login/sso/rueckruf?state=' . str_repeat('a', 43) . '&code=x');
+    pruefe($r['status'] === 302 && $r['ziel'] === '/login' && str_contains(aufruf($basis, $ohneSso, 'GET', '/login')['text'], 'abgelaufen oder wurde schon benutzt'),
+        'Rückruf ohne Vorgang → /login mit Meldung');
+    $c = curl_init($basis . '/login/sso/rueckruf?state=' . str_repeat('b', 43));
+    curl_setopt_array($c, [CURLOPT_NOBODY => true, CURLOPT_RETURNTRANSFER => true, CURLOPT_HEADER => true, CURLOPT_TIMEOUT => 30]);
+    $kopfHead = (string) curl_exec($c);
+    pruefe((int) curl_getinfo($c, CURLINFO_RESPONSE_CODE) === 302 && preg_match('#^Location:\s*/login\s*$#mi', $kopfHead) === 1, 'HEAD auf den Rückruf → /login');
+    curl_close($c);
+    $r = aufruf($basis, $ohneSso, 'GET', '/abgemeldet');
+    pruefe($r['status'] === 302 && $r['ziel'] === '/login', '/abgemeldet ohne Sitzung → /login');
+    $r = aufruf($basis, $ohneSso, 'GET', '/login/sso/verbinden');
+    pruefe($r['status'] === 302 && $r['ziel'] === '/login?next=%2Fprofil' && preg_match('/^Cache-Control:\s*no-store/mi', $r['kopf']) === 1,
+        '/login/sso/verbinden ohne Anmeldung → /login?next=/profil');
+    gleich(aufruf($basis, $ohneSso, 'GET', '/login/sso/verbinden', [], ['Sec-Fetch-Site: cross-site'])['status'], 403, '/login/sso/verbinden von fremder Seite → 403');
+    $bestaetigen = '/login/sso/bestaetigen?zweck=token%3A1&zurueck=%2Fsystem%2Fschnittstelle';
+    $r = aufruf($basis, $ohneSso, 'GET', $bestaetigen);
+    pruefe($r['status'] === 302 && $r['ziel'] === '/login?next=%2Fsystem%2Fschnittstelle' && preg_match('/^Cache-Control:\s*no-store/mi', $r['kopf']) === 1,
+        '/login/sso/bestaetigen ohne Anmeldung → /login?next=zurück');
+    gleich(aufruf($basis, $ohneSso, 'GET', $bestaetigen, [], ['Sec-Fetch-Site: cross-site'])['status'], 403, '/login/sso/bestaetigen von fremder Seite → 403');
+    $r = aufruf($basis, $ohneSso, 'GET', '/login/sso/bestaetigen?zweck=token%3A1&zurueck=https%3A%2F%2Fevil.example%2F');
+    pruefe($r['status'] === 302 && $r['ziel'] === '/login?next=%2F', '/login/sso/bestaetigen mit fremdem Ziel → nur ein eigener Pfad');
+    $r = aufruf($basis, $ohneSso, 'GET', '/system/sso');
+    pruefe($r['status'] === 302 && str_starts_with((string) $r['ziel'], '/login'), '/system/sso ohne Anmeldung → Anmeldeseite');
+    $loginSeite = aufruf($basis, $ohneSso, 'GET', '/login');
+    pruefe(!str_contains($loginSeite['text'], 'sso-knopf') && !str_contains($loginSeite['text'], '<details class="lokal"'), 'SSO aus: Anmeldeseite ohne Knopf, Formular offen');
+    $seite = aufruf($basis, $ohneSso, 'GET', '/login');
+    aufruf($basis, $ohneSso, 'POST', '/login', ['username' => $kennung . '-zwei', 'password' => $kennwort, '_token' => token($seite['text'])]);
+    // SSO aus: Verbinden führt mit Meldung zurück ins Profil, das Profil zeigt keine SSO-Karte.
+    $r = aufruf($basis, $ohneSso, 'GET', '/login/sso/verbinden');
+    pruefe($r['status'] === 302 && $r['ziel'] === '/profil' && str_contains(aufruf($basis, $ohneSso, 'GET', '/profil')['text'], 'nicht eingerichtet'),
+        'SSO aus: Verbinden → /profil mit Meldung');
+    $r = aufruf($basis, $ohneSso, 'GET', $bestaetigen);
+    pruefe($r['status'] === 302 && $r['ziel'] === '/system/schnittstelle' && str_contains(aufruf($basis, $ohneSso, 'GET', '/profil')['text'], 'nicht eingerichtet'),
+        'SSO aus: Bestätigen → zurück mit Meldung');
+    $r = aufruf($basis, $ohneSso, 'GET', '/profil');
+    pruefe(!str_contains($r['text'], 'id="sso"') && str_contains($r['text'], 'Passwort ändern'), 'SSO aus: Profil ohne SSO-Karte, mit Kennwort-Karte');
+    $r = aufruf($basis, $ohneSso, 'POST', '/profil/sso/loesen', ['_token' => token($r['text'])]);
+    pruefe($r['status'] === 302 && $r['ziel'] === '/profil' && str_contains(aufruf($basis, $ohneSso, 'GET', '/profil')['text'], 'mit keiner Anmeldung'),
+        'Lösen ohne Verknüpfung → /profil mit Meldung');
+    $r = aufruf($basis, $ohneSso, 'POST', '/logout', ['_token' => token(aufruf($basis, $ohneSso, 'GET', '/profil')['text'])]);
+    pruefe($r['status'] === 302 && $r['ziel'] === '/login' && preg_match('/^Set-Cookie:\s*pm_sso_neu=/mi', $r['kopf']) !== 1,
+        'Abmelden (Kennwort) → /login, ohne pm_sso_neu');
+    $seite = aufruf($basis, $ohneSso, 'GET', '/login');
+    pruefe(str_contains($seite['text'], 'Abgemeldet.'), '„Abgemeldet.“ steht nach dem Abmelden auf der Anmeldeseite');
+    pruefe(aufruf($basis, $ohneSso, 'GET', '/profil')['status'] === 302, 'nach dem Abmelden nicht mehr angemeldet');
+
     // Das Token zählt nur aus dem Formular; ein fremder Referer wird nicht angesteuert
     $vorher = (int) Database::scalar('SELECT COUNT(*) FROM steckertypen');
     $r = aufruf($basis, $admin['dose'], 'POST', '/stecker/speichern?_token=' . rawurlencode($admin['token']), ['name' => $kennung . '-stecker'], ['Referer: https://evil.example/x']);
@@ -1269,6 +1327,14 @@ try {
     // ---------------------------------------------------- Benutzer verwalten ohne Administration
     $verwalter = anmelden($basis, $kennung . '-verwalter', $kennwort);
     $dosen[] = $verwalter['dose'];
+    // Anmeldung über SSO einrichten nur mit sso.manage – auch nicht mit „Benutzer verwalten“.
+    gleich(aufruf($basis, $verwalter['dose'], 'GET', '/system/sso')['status'], 403, 'Verwalter ohne sso.manage: /system/sso → 403');
+    $vorherSso = Database::select("SELECT setting_key, setting_value FROM settings WHERE setting_key LIKE 'sso.%' ORDER BY setting_key");
+    $r = aufruf($basis, $verwalter['dose'], 'POST', '/system/sso/optionen', ['anlegen' => '1', 'scopes' => 'openid', '_token' => $verwalter['token']]);
+    pruefe($r['status'] === 403 && Database::select("SELECT setting_key, setting_value FROM settings WHERE setting_key LIKE 'sso.%' ORDER BY setting_key") == $vorherSso,
+        'Verwalter ohne sso.manage: Optionen speichern → 403, nichts geändert');
+    $r = aufruf($basis, $verwalter['dose'], 'GET', '/system/benutzer');
+    pruefe($r['status'] === 200 && !str_contains($r['text'], 'href="/system/sso'), 'Verwalter ohne sso.manage: kein Verweis auf Anmeldung (SSO)');
     $adminRolle = (int) Database::scalar('SELECT id FROM roles WHERE is_system = 1 ORDER BY id LIMIT 1');
     aufruf($basis, $verwalter['dose'], 'POST', '/system/benutzer/speichern', ['id' => $benutzer['verwalter'], 'username' => $kennung . '-verwalter', 'is_active' => 1,
         'rollen' => [$adminRolle => ['aktiv' => 1], $verwalterRolle => ['aktiv' => 1]], '_token' => $verwalter['token']]);
@@ -1790,7 +1856,7 @@ try {
     $hashVorher = (string) Database::scalar('SELECT password_hash FROM users WHERE id = ?', [$benutzer['admin']]);
     Database::execute('UPDATE users SET password_hash = ? WHERE id = ?', [password_hash('Zurueckgesetzt-' . bin2hex(random_bytes(6)), PASSWORD_DEFAULT), $benutzer['admin']]);
     $ereignisseVorher = (int) Database::scalar('SELECT COUNT(*) FROM bericht_ereignisse WHERE bericht_id = ?', [$b3]);
-    $fehlVorher = (int) Database::scalar("SELECT COUNT(*) FROM audit_log WHERE action = 'auth.kundenmodus_fehlversuch' AND user_id = ?", [$benutzer['bkunde']]);
+    $fehlVorher = (int) Database::scalar("SELECT COUNT(*) FROM audit_log WHERE action = 'auth.bestaetigung_fehlversuch' AND user_id = ?", [$benutzer['bkunde']]);
     $geraetVorher = Database::select('SELECT id, bericht_id, user_id FROM kundenmodus_geraete WHERE user_id = ? ORDER BY id', [$benutzer['admin']]);
     $r = aufruf($basis, $geraet, 'GET', '/dashboard');
     pruefe($r['status'] === 302 && str_starts_with((string) $r['ziel'], '/login'), 'Kennwort des Prüfers zurückgesetzt: seine Sitzung im gesperrten Browser ist zu Ende');
@@ -1810,7 +1876,7 @@ try {
     pruefe($aKunde['status'] === 403 && !str_contains($aKunde['text'], 'kunde/beenden') && $aBeenden === array_fill(0, Kundenmodus::HOECHSTENS_FEHL, 403),
         'anderes Konto: Kundenseite und Entsperren des fremden Kundenmodus → 403 wie ohne Recht (' . $aKunde['status'] . ', ' . implode('/', $aBeenden) . ')');
     gleich([(int) Database::scalar('SELECT COUNT(*) FROM bericht_ereignisse WHERE bericht_id = ?', [$b3]),
-        (int) Database::scalar("SELECT COUNT(*) FROM audit_log WHERE action = 'auth.kundenmodus_fehlversuch' AND user_id = ?", [$benutzer['bkunde']]),
+        (int) Database::scalar("SELECT COUNT(*) FROM audit_log WHERE action = 'auth.bestaetigung_fehlversuch' AND user_id = ?", [$benutzer['bkunde']]),
         Database::select('SELECT id, bericht_id, user_id FROM kundenmodus_geraete WHERE user_id = ? ORDER BY id', [$benutzer['admin']])],
         [$ereignisseVorher, $fehlVorher, $geraetVorher], 'anderes Konto: kein Ereignis am Bericht, kein Fehlversuch, die Sperre am Gerät bleibt');
     $r = aufruf($basis, $geraet, 'POST', '/logout', ['_token' => $aToken]);

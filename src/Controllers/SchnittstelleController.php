@@ -5,6 +5,9 @@ namespace App\Controllers;
 
 use App\Auth\ApiZugang;
 use App\Auth\Auth;
+use App\Auth\Sso\Anmeldung;
+use App\Auth\Sso\Einstellungen as SsoEinstellungen;
+use App\Auth\Sso\Schutz;
 use App\Auth\Zugriff;
 use App\Services\ApiZugaenge;
 use App\Services\BenutzerService;
@@ -46,8 +49,20 @@ final class SchnittstelleController extends Controller
         $alles = Zugriff::alles();
         $eingabe = (array) Session::get(self::EINGABE, []);
         Session::forget(self::EINGABE);
+        $tokens = ApiZugaenge::alle();
+        $user = Auth::user();
+        // „Anzeigen“ mit Kennwort oder über den Anmeldedienst bestätigt (dann
+        // ohne Kennwortfeld, einmalig) – ein Konto „nur über SSO“ nur so.
+        $sso = [
+            'name'       => SsoEinstellungen::name(),
+            'link'       => $alles && Anmeldung::bestaetigenFehler('token:0') === null,
+            'nur_sso'    => $user !== null && Schutz::nurSso($user),
+            'bestaetigt' => array_values(array_filter(array_map(static fn (array $t): int => (int) $t['id'], $tokens),
+                static fn (int $id): bool => Anmeldung::bestaetigt('token:' . $id, false))),
+        ];
         $this->view('schnittstelle/index', [
-            'tokens'     => ApiZugaenge::alle(),
+            'tokens'     => $tokens,
+            'sso'        => $sso,
             'befugnisse' => ApiZugang::BEFUGNISSE,
             'vergebbar'  => self::vergebbar(),
             'darf'       => $alles,
@@ -145,7 +160,11 @@ final class SchnittstelleController extends Controller
         $this->redirect(ApiZugaenge::find($id) !== null ? self::ZIEL . '/' . $id : self::ZIEL);
     }
 
-    /** Mit dem eigenen Kennwort noch einmal anzeigen – direkt in der Antwort. */
+    /**
+     * Noch einmal anzeigen – direkt in der Antwort: mit dem eigenen Kennwort
+     * oder, ohne Kennwortfeld, nach einer Bestätigung über den Anmeldedienst
+     * (ApiZugaenge::klartext, Auth::bestaetigen).
+     */
     public function anzeigen(Request $request, array $params): void
     {
         header('Cache-Control: no-store');

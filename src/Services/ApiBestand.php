@@ -28,7 +28,8 @@ use App\Tanks\TankService;
  * Kennlinien und Ereignisse der Tanks, Bereiche, Aufbau, Einsätze,
  * Inventar, der Fremdbestand (Dosen, Racks, APs von MasterAdmin), alles aus
  * dem Kundenbereich (Kunden, Kundenzugänge, Freigaben am Kunden, Vorgänge,
- * Prüfnachweise, die Zuordnung der Übergabeberichte) – und auf
+ * Prüfnachweise, die Zuordnung der Übergabeberichte), nichts aus der
+ * Anmeldung über SSO (Identitäten, Gruppen-Zuordnungen, Anmeldeanfragen) – und auf
  * den Etagen weder „dosen“ noch „racks“ noch „aps“: eine leere Liste hieße
  * bei MasterAdmin „hier gibt es keine“ und löschte dort die Dosen. Was fehlt,
  * fehlt als Schlüssel. Ebenso „referenz“, wenn kein Maßstab gesetzt ist –

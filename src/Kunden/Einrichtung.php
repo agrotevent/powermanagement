@@ -51,8 +51,9 @@ final class Einrichtung
 
     /**
      * Das Konto zu einem Link – oder null: falsches Format (ohne Abfrage),
-     * unbekannt, abgelaufen, kein Kundenzugang, Konto deaktiviert, Konto
-     * außerhalb seiner Zeit oder Kunde nicht aktiv.
+     * unbekannt, abgelaufen, kein Kundenzugang, Konto deaktiviert, Konto nur
+     * über SSO (nur_sso: dort gälte ein Kennwort nie), Konto außerhalb seiner
+     * Zeit oder Kunde nicht aktiv.
      *
      * @return array<string,mixed>|null
      */
@@ -62,7 +63,7 @@ final class Einrichtung
             return null;
         }
         $konto = Database::first('SELECT * FROM users WHERE einrichtung_hash = ?', [self::hash($token)]);
-        if ($konto === null || !Kundenbereich::istKundenzugang($konto) || (int) $konto['is_active'] !== 1) {
+        if ($konto === null || !Kundenbereich::istKundenzugang($konto) || (int) $konto['is_active'] !== 1 || (int) ($konto['nur_sso'] ?? 0) === 1) {
             return null;
         }
         $bis = Zeit::ts($konto['einrichtung_bis'] ?? null);

@@ -69,6 +69,13 @@ Mehr Bilder in der [Bedienungsanleitung](docs/bedienung.md).
 - **Rechte mit Zeitfenstern**: Rollen, Freigaben für Standort, Anlage oder
   Gerät mit *gültig ab/bis* und eigenem *Datenzeitraum*. Beispiel: „Kunde A
   sieht die Statistik vom 1. bis 7. Juli, danach nichts mehr.“
+- **Anmeldung über SSO** (optional): OpenID Connect, etwa mit
+  **Authentik** – Code-Flow mit PKCE, ID-Token immer mit Signatur geprüft,
+  Konten nur über Aussteller und Subjekt verknüpft (nie über Name oder
+  E-Mail), Unbekannte als Anmeldeanfrage. Rollen aus Gruppen (befristet,
+  Freigaben bleiben hier), optional Kunden über Kundengruppen, „nur SSO“
+  mit Notzugang, Bestätigen über Authentik für Kundenmodus und Tokens. Das
+  Kennwort bleibt möglich.
 - **Location-Abgleich** mit MasterAdmin über ein gemeinsames Git-Repository.
   Die **Feststromanschlüsse** der Location und die **fest verlegten Kabel**
   dazwischen liegen als `strom.json` neben der `location.json`. Mobile
@@ -144,7 +151,8 @@ Update: **[docs/installation-debian-lxc.md](docs/installation-debian-lxc.md)**.
 | [docs/bedienung.md](docs/bedienung.md) | Übersicht, Karte, Anlagen, Verteilerplan, Aufbau und Abgleich, Übergabeberichte, Kunden, Inventar, Tanks und Kraftstoff, Auswertung, Bereiche, Materialliste, Schalten, Location- und Verteiler-Abgleich, andere Instanzen |
 | [docs/berichte.md](docs/berichte.md) | Übergabeberichte: Ablauf vor Ort, Felder, Vorbelegung, Grenzwerte, Unterschrift und Beweiswert, Kundenmodus, Korrektur, Integrität, Datenschutz, Aufbewahrung |
 | [docs/kundenbereich.md](docs/kundenbereich.md) | Kundenbereich: Kunden und Zugänge, was Kunden sehen, mehrere Veranstalter je Gelände, Protokolle zuordnen, Prüfnachweise (DGUV V3), Abrufe, Datenschutz |
-| [docs/rechte.md](docs/rechte.md) | Rollen, Freigaben, Zeitfenster, Schaltrechte je Gerät, Kundenzugänge |
+| [docs/rechte.md](docs/rechte.md) | Rollen, Freigaben, Zeitfenster, Schaltrechte je Gerät, Kundenzugänge, Rollen aus Authentik-Gruppen |
+| [docs/anmeldung-sso.md](docs/anmeldung-sso.md) | Anmeldung über SSO (OpenID Connect, Authentik): Einrichtung dort und hier, Konten verbinden, Gruppen → Rollen und Kunden, nur SSO und Notzugang, Abmelden, Bestätigen, Fehlersuche, Datenschutz |
 | [docs/schnittstelle.md](docs/schnittstelle.md) | Schnittstelle zu anderen Instanzen (PowerManagement, MasterAdmin): Zugänge, Übernehmen, Vorschläge, direktes Schreiben, Endpunkte |
 | [docs/datenquellen.md](docs/datenquellen.md) | MQTT-Format, InfluxDB-Schema, Shelly, Victron, ComAp, WireGuard, Sammler, Node-RED |
 | [docs/eventworx.md](docs/eventworx.md) | Eventworx (nur lesend): Kundendaten für Berichte, Vorgänge und Prüfprotokolle für den Kundenbereich, Token, Fehlermeldungen, Datenschutz, Lese-Probe |
@@ -169,6 +177,9 @@ bin/power berichte:aufbewahrung [--ausfuehren]   ·   bin/power eventworx:pruefe
 bin/power eventworx:sonde [--job=OID] [--stock=OID] [--serie=…] [--json]
 bin/power kunden:liste   ·   bin/power kunden:zugang <kunde-id> <benutzer> [--kennwort] [--name=…] [--email=…]
 bin/power kunden:aufbewahrung [--ausfuehren]   ·   bin/power kunden:nachweise-pruefen
+bin/power sso:zustand   ·   bin/power sso:pruefen   ·   bin/power sso:an   ·   bin/power sso:aus [--nur-sso]
+printf '%s' "$SECRET" | bin/power sso:einrichten <aussteller> <client-id> [--name=Authentik]
+bin/power sso:verknuepfungen [<benutzer>]   ·   bin/power sso:loesen <benutzer> --ja   ·   bin/power sso:aussteller-umstellen <neu> --ja
 bin/power demo:seed [--reset]
 bin/power wartung
 bin/power update:stand   ·   bin/power update:suchen|update:starten [--warten]   ·   bin/power update:automatik [aus|suchen|einspielen]
@@ -205,6 +216,7 @@ resources/views/          Vorlagen (PHP)
 resources/fonts/          Liberation Sans für die PDF (SIL OFL 1.1)
 resources/hilfe/          Hilfe-Seite des Kundenbereichs (Markdown)
 src/Auth/                 Anmeldung, Rechte, Freigaben/Zeitfenster (Zugriff), Tokens der Schnittstelle (ApiZugang)
+src/Auth/Sso/             Anmeldung über SSO: Einstellungen, Anbieter (Discovery, JWKS, Token), ID-Token-Prüfung, Konten, Schutz
 src/Berichte/             Übergabeberichte: Schema, Vorbelegung, Grenzwerte, Unterschrift, Kundenmodus, PDF-Layout
 src/Controllers/          Seiten, Schnittstelle /api/v1 (ApiController)
 src/Kunden/               Kundenbereich: Kunden, Zugänge, Einrichtungslink, was Kunden sehen (KundenSicht), Prüfnachweise, Abrufe
