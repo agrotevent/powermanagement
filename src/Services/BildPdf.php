@@ -18,7 +18,7 @@ namespace App\Services;
  * PNG-Prädiktor – die IDAT-Daten eines PNG sind genau das. poppler liest
  * beides Zeile für Zeile; gemessen 215 MB bei einem Streifen aus einem
  * JPEG mit 139 Megapixeln. Danach ist es ein PDF-Grundriss wie jeder
- * andere (PlanTileService::schneidenPdf), heruntergerechnet auf MAX_PIXEL.
+ * andere (PlanTileService::schneidenPdf), über MAX_BILDPIXEL heruntergerechnet.
  *
  * Nicht jedes Bild geht so:
  *  - progressive JPEG: libjpeg hält dafür alle Koeffizienten im Speicher –
@@ -50,16 +50,16 @@ final class BildPdf
      * Gelesen wird nur der Kopf (JPEG bis zum Bildanfang, PNG die Chunks bis
      * zum ersten IDAT), nie das Bild selbst.
      *
-     * @return array{ok:bool,art:string,breite:int,hoehe:int,grund:string}
-     *         grund: warum nicht (leer, wenn ok)
+     * @return array{ok:bool,art:string,breite:int,hoehe:int,grund:string,durchsichtig:bool}
+     *         grund: warum nicht (leer, wenn ok); durchsichtig: PNG mit Alpha oder tRNS
      */
     public static function pruefen(string $pfad): array
     {
         $kopf = self::kopf($pfad);
         if ($kopf === null) {
-            return ['ok' => false, 'art' => '', 'breite' => 0, 'hoehe' => 0, 'grund' => 'Der Kopf der Bilddatei ist unlesbar.'];
+            return ['ok' => false, 'art' => '', 'breite' => 0, 'hoehe' => 0, 'grund' => 'Der Kopf der Bilddatei ist unlesbar.', 'durchsichtig' => false];
         }
-        return ['ok' => $kopf['grund'] === ''] + array_intersect_key($kopf, ['art' => 1, 'breite' => 1, 'hoehe' => 1, 'grund' => 1]);
+        return ['ok' => $kopf['grund'] === ''] + array_intersect_key($kopf, ['art' => 1, 'breite' => 1, 'hoehe' => 1, 'grund' => 1, 'durchsichtig' => 1]);
     }
 
     /**
@@ -143,7 +143,7 @@ final class BildPdf
     // ------------------------------------------------------------ Kopf lesen
 
     /**
-     * @return array{art:string,breite:int,hoehe:int,grund:string,pdf:string,laenge:int,bloecke:list<array{int,int}>}|null
+     * @return array{art:string,breite:int,hoehe:int,grund:string,durchsichtig:bool,pdf:string,laenge:int,bloecke:list<array{int,int}>}|null
      */
     private static function kopf(string $pfad): ?array
     {
@@ -168,7 +168,7 @@ final class BildPdf
     /** @param resource $griff */
     private static function jpeg($griff, int $groesse): ?array
     {
-        $ergebnis = ['art' => 'jpeg', 'breite' => 0, 'hoehe' => 0, 'grund' => '', 'pdf' => '', 'laenge' => $groesse, 'bloecke' => [[0, $groesse]]];
+        $ergebnis = ['art' => 'jpeg', 'breite' => 0, 'hoehe' => 0, 'grund' => '', 'durchsichtig' => false, 'pdf' => '', 'laenge' => $groesse, 'bloecke' => [[0, $groesse]]];
         fseek($griff, 2);
         // Segmente bis zum Bildrahmen (SOF) – höchstens 4 MB Kopf (EXIF, ICC).
         while (ftell($griff) < min($groesse, 4 << 20)) {
@@ -218,7 +218,7 @@ final class BildPdf
     /** @param resource $griff */
     private static function png($griff): ?array
     {
-        $ergebnis = ['art' => 'png', 'breite' => 0, 'hoehe' => 0, 'grund' => '', 'pdf' => '', 'laenge' => 0, 'bloecke' => []];
+        $ergebnis = ['art' => 'png', 'breite' => 0, 'hoehe' => 0, 'grund' => '', 'durchsichtig' => false, 'pdf' => '', 'laenge' => 0, 'bloecke' => []];
         $tiefe = $typ = $zeilensprung = 0;
         $palette = '';
         $durchsichtig = false;
@@ -265,6 +265,7 @@ final class BildPdf
         if (!$gesehen || $ergebnis['breite'] === 0 || $ergebnis['hoehe'] === 0 || ($ergebnis['laenge'] === 0 && $ergebnis['grund'] === '')) {
             return null;
         }
+        $ergebnis['durchsichtig'] = $typ === 4 || $typ === 6 || $durchsichtig;
         $farben = match ($typ) {
             0, 3 => 1,
             2 => 3,

@@ -284,6 +284,59 @@ try {
     gleich([$r['status'], $r['text']], [404, 'kein Grundriss hinterlegt'], 'Etage ohne Plan: 404 wie bisher');
     gleich(aufruf($basis, $admin['dose'], 'GET', '/grundriss/999999999/datei')['status'], 404, 'Plandatei einer unbekannten Etage: 404');
 
+    // Kacheln: der Stand der Pyramide steht in der Adresse, darunter bleibt
+    // eine Kachel ein Jahr im Browser. session_start() setzt „Pragma:
+    // no-cache“ und ein Ablaufdatum von 1981 – damit hielt Chrome keine
+    // einzige Kachel. Neu gerechnet: neuer Stand, der alte gibt 404.
+    if (extension_loaded('gd')) {
+        $kBild = imagecreatetruecolor(1800, 1200);
+        imagefilledrectangle($kBild, 0, 0, 1799, 1199, 0xFFFFFF);
+        imageline($kBild, 100, 100, 1700, 1100, 0x000000);
+        $kDatei = 'site' . $planSite . '_' . bin2hex(random_bytes(8)) . '.png';
+        imagepng($kBild, \App\Services\SiteService::planDir() . '/' . $kDatei);
+        $kEtage = \App\Services\SiteService::saveFloor(null, ['site_id' => $planSite, 'name' => $kennung . ' Kacheln']);
+        $auditZiele[] = ['floor', $kEtage];
+        Database::update('floors', $kEtage, ['plan_file' => $kDatei, 'plan_type' => 'image', 'plan_original_name' => 'Kacheln.png']);
+        $kMeta = (array) (\App\Services\PlanTileService::bauen(\App\Services\SiteService::floor($kEtage), true)['meta'] ?? []);
+        $kStand = \App\Services\PlanTileService::stand($kMeta);
+        $kPfad = static fn (): string => (string) (\App\Services\PlanTileService::kachel(\App\Services\SiteService::floor($kEtage), 0, 0, 0)['pfad'] ?? '');
+        $kAdresse = '/grundriss/' . $kEtage . '/kachel/0/0/0';
+        $karteSeite = aufruf($basis, $admin['dose'], 'GET', '/karte?etage=' . $kEtage)['text'];
+        pruefe(str_contains($karteSeite, 'data-plan-kachel-url="/grundriss/' . $kEtage . '/kachel/{z}/{x}/{y}?v=' . $kStand . '"'),
+            'Karte: Kacheladresse mit dem Stand der Pyramide (?v=' . $kStand . ')');
+        $r = aufruf($basis, $admin['dose'], 'GET', $kAdresse . '?v=' . $kStand);
+        gleich([$r['status'], $kopf($r, 'Content-Type'), $kopf($r, 'Cache-Control'), $kopf($r, 'Pragma'), $kopf($r, 'Expires'), $kopf($r, 'Set-Cookie'),
+            $r['text'] === (string) file_get_contents($kPfad())],
+            [200, \App\Services\PlanTileService::mime((string) ($kMeta['format'] ?? '')), 'private, max-age=31536000, immutable', '', '', '', true],
+            'Kachel mit Stand: ein Jahr im Browser (immutable), ohne Pragma und Expires, kein neues Sitzungscookie');
+        $r = aufruf($basis, $admin['dose'], 'GET', $kAdresse);
+        gleich([$r['status'], $kopf($r, 'Cache-Control'), $kopf($r, 'Pragma')], [200, 'private, no-cache', ''],
+            'Kachel ohne Stand (Seite von vor dem Update): jedes Mal nachfragen');
+        $r = aufruf($basis, $admin['dose'], 'GET', $kAdresse . '?v=ffffffffffff');
+        gleich([$r['status'], $kopf($r, 'Cache-Control'), $r['text']], [404, 'no-store', ''], 'Kachel eines anderen Stands: 404, nicht im Browser gehalten');
+        $kAltBytes = (string) file_get_contents($kPfad());
+        $kMetaNeu = (array) (\App\Services\PlanTileService::bauen(\App\Services\SiteService::floor($kEtage), true)['meta'] ?? []);
+        $kStandNeu = \App\Services\PlanTileService::stand($kMetaNeu);
+        $alt = aufruf($basis, $admin['dose'], 'GET', $kAdresse . '?v=' . $kStand);
+        $neu = aufruf($basis, $admin['dose'], 'GET', $kAdresse . '?v=' . $kStandNeu);
+        gleich([$kStandNeu !== $kStand, $alt['status'], $alt['text'] === $kAltBytes, $kopf($alt, 'Cache-Control'), $neu['status'], $neu['text'] === (string) file_get_contents($kPfad()),
+            str_contains(aufruf($basis, $admin['dose'], 'GET', '/karte?etage=' . $kEtage)['text'], '/kachel/{z}/{x}/{y}?v=' . $kStandNeu . '"')],
+            [true, 200, true, 'private, max-age=31536000, immutable', 200, true, true],
+            'neu gerechnet: die Karte nennt den neuen Stand; unter dem alten kommen noch die alten Bytes (eine offene Karte zeigt ihren Plan weiter) – nie eine neue Kachel unter alter Adresse');
+        // Nach GNADE ist die abgelöste Fassung weg: der alte Stand gibt 404, nicht im Browser gehalten.
+        $kPlan = \App\Services\PlanTileService::planDir(\App\Services\SiteService::floor($kEtage));
+        touch($kPlan . '/v' . $kStand . '/.abgeloest', time() - \App\Services\PlanTileService::GNADE - 1);
+        \App\Services\PlanTileService::abgeloesteWeg($kPlan);
+        $alt = aufruf($basis, $admin['dose'], 'GET', $kAdresse . '?v=' . $kStand);
+        gleich([$alt['status'], $kopf($alt, 'Cache-Control'), $alt['text']], [404, 'no-store', ''], 'nach GNADE: der alte Stand gibt 404, nicht im Browser gehalten');
+        $planer = anmelden($basis, $kennung . '-planer', $kennwort);
+        $dosen[] = $planer['dose'];
+        $r = aufruf($basis, $planer['dose'], 'GET', $kAdresse . '?v=' . $kStandNeu);
+        $ohne = aufruf($basis, $leer, 'GET', $kAdresse . '?v=' . $kStandNeu);
+        gleich([$r['status'], str_contains($r['text'], "\x89PNG") || str_contains($r['text'], 'WEBP'), $ohne['status'] === 200],
+            [403, false, false], 'Kachel eines Standorts, den man nicht sieht: 403 ohne Bild; ohne Anmeldung keine Kachel');
+    }
+
     // Eventworx-Karte: Token verschlüsselt, an den Host gebunden, nie in der Seite
     $ewxToken = 'tok-' . $kennung . '-' . bin2hex(random_bytes(6));
     $r = aufruf($basis, $admin['dose'], 'POST', '/system/einstellungen/eventworx', ['eventworx_adresse' => $kennung, 'eventworx_token' => $ewxToken, '_token' => $admin['token']]);
@@ -1431,6 +1484,146 @@ try {
         \App\Services\SiteService::deleteSite($werk);
     }
 
+    // ---------------------------------------------------- Plan neu rechnen: Rechte, CSRF, Status, Knopf, Audit
+    // Nur mit „Grundrisse verwalten“ und „bearbeiten“ an jedem Standort, der
+    // die Pyramide nutzt; gerechnet wird im Hintergrund (eigener Prozess des
+    // Servers), der Status gibt die Sitzung frei und nennt weder Pfade noch Namen.
+    if (extension_loaded('gd')) {
+        $json = ['Accept: application/json'];
+        $nSite = \App\Services\SiteService::saveSite(null, ['name' => $kennung . ' Neu rechnen']);
+        $nSicht = \App\Services\SiteService::saveSite(null, ['name' => $kennung . ' Nur sehen']);
+        $nFremd = \App\Services\SiteService::saveSite(null, ['name' => $kennung . ' Fremd']);
+        array_push($auditZiele, ['site', $nSite], ['site', $nSicht], ['site', $nFremd]);
+        $planBild = static function (int $site, string $name, string $endung = 'png') use (&$auditZiele): int {
+            $datei = 'site' . $site . '_' . bin2hex(random_bytes(8)) . '.' . $endung;
+            if ($endung === 'svg') {
+                file_put_contents(\App\Services\SiteService::planDir() . '/' . $datei, '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 300"><rect width="400" height="300" fill="#fff"/></svg>');
+            } else {
+                $bild = imagecreatetruecolor(1800, 1200);
+                imagefilledrectangle($bild, 0, 0, 1799, 1199, 0xFFFFFF);
+                imageline($bild, 0, 0, 1799, 1199, 0x000000);
+                imagepng($bild, \App\Services\SiteService::planDir() . '/' . $datei);
+            }
+            $id = \App\Services\SiteService::saveFloor(null, ['site_id' => $site, 'name' => $name]);
+            $auditZiele[] = ['floor', $id];
+            Database::update('floors', $id, ['plan_file' => $datei, 'plan_type' => $endung === 'svg' ? 'svg' : 'image', 'plan_page' => 1, 'plan_original_name' => $name . '.' . $endung]);
+            if ($endung !== 'svg') {
+                \App\Services\PlanTileService::bauen((array) \App\Services\SiteService::floor($id), true);
+            }
+            return $id;
+        };
+        $nEtage = $planBild($nSite, 'Halle');
+        $sEtage = $planBild($nSicht, 'Halle');
+        $fEtage = $planBild($nFremd, 'Halle');
+        $svgEtage = $planBild($nSite, 'Gelände', 'svg');
+        // Eine Etage auf dem eigenen Standort mit dem Plan einer Etage, die man nur sieht: dieselbe Pyramide.
+        $gEtage = \App\Services\SiteService::saveFloor(null, ['site_id' => $nSite, 'name' => 'Geteilt']);
+        $auditZiele[] = ['floor', $gEtage];
+        Database::update('floors', $gEtage, ['plan_file' => (string) Database::scalar('SELECT plan_file FROM floors WHERE id = ?', [$sEtage]), 'plan_type' => 'image', 'plan_page' => 1]);
+        BenutzerService::freigabeSpeichern(['subject_type' => 'user', 'subject_id' => $benutzer['planer'], 'ziel_art' => 'site', 'ziel_id' => $nSite, 'darf_bearbeiten' => 1]);
+        BenutzerService::freigabeSpeichern(['subject_type' => 'user', 'subject_id' => $benutzer['planer'], 'ziel_art' => 'site', 'ziel_id' => $nSicht]);
+        $planer = anmelden($basis, $kennung . '-planer', $kennwort);
+        $dosen[] = $planer['dose'];
+        $auftragDa = static fn (int $etage): bool => is_file(\App\Services\PlanTileService::planDir((array) \App\Services\SiteService::floor($etage)) . '/.auftrag.json');
+        $neuRechnen = static fn (array $wer, int $etage, array $felder = []): array
+            => aufruf($basis, $wer['dose'], 'POST', '/grundriss/' . $etage . '/neu-rechnen', $felder + ['_token' => $wer['token']], $json);
+        $standVon = static fn (array $wer, int $etage): array => aufruf($basis, $wer['dose'], 'GET', '/grundriss/' . $etage . '/kacheln/stand', [], $json);
+        $nAudit = static fn (int $etage): int => (int) Database::scalar("SELECT COUNT(*) FROM audit_log WHERE action = 'plan.neu_rechnen' AND target_type = 'floor' AND target_id = ?", [(string) $etage]);
+
+        // Knopf: nur mit „bearbeiten“, nur für gekachelte Pläne (nie für SVG), nie für eine geteilte Pyramide auf einem nur sichtbaren Standort.
+        $knopf = static fn (array $wer, int $etage): bool => str_contains(aufruf($basis, $wer['dose'], 'GET', '/karte?etage=' . $etage)['text'], 'data-aktion="plan-neu"');
+        gleich([$knopf($planer, $nEtage), $knopf($planer, $sEtage), $knopf($planer, $gEtage), $knopf($admin, $svgEtage), $knopf($admin, $nEtage)],
+            [true, false, false, false, true], 'Karte: Knopf „Plan neu rechnen“ nur mit „bearbeiten“, nicht für eine geteilte Pyramide eines nur sichtbaren Standorts, nie bei SVG');
+        $standorte = aufruf($basis, $planer['dose'], 'GET', '/standorte')['text'];
+        gleich([str_contains($standorte, 'action="/grundriss/' . $nEtage . '/neu-rechnen"'), str_contains($standorte, 'action="/grundriss/' . $sEtage . '/neu-rechnen"'),
+            str_contains($standorte, 'action="/grundriss/' . $gEtage . '/neu-rechnen"'), str_contains($standorte, 'action="/grundriss/' . $svgEtage . '/neu-rechnen"'),
+            str_contains($standorte, 'Kacheln 1.800 × 1.200 px · Fassung ' . \App\Services\PlanTileService::FASSUNG)],
+            [true, false, false, false, true], 'Standorte: Zeile mit Maßen und Fassung, „Neu rechnen“ nur, wo man darf');
+
+        // Ohne Token, ohne Recht, nur sehen, fremd, geteilt, unbekannte Qualität, SVG: nichts angestoßen.
+        $r = aufruf($basis, $planer['dose'], 'POST', '/grundriss/' . $nEtage . '/neu-rechnen', [], $json);
+        pruefe($r['status'] === 419 && (json_decode($r['text'], true)['token'] ?? false) === true, 'Neu rechnen ohne CSRF-Token: 419 als JSON');
+        $klein = anmelden($basis, $kennung . '-klein', $kennwort);
+        $kundeRolle = anmelden($basis, $kennung . '-kunde', $kennwort);
+        $technik = anmelden($basis, $kennung . '-technik', $kennwort);
+        array_push($dosen, $klein['dose'], $kundeRolle['dose'], $technik['dose']);
+        gleich([$neuRechnen($klein, $nEtage)['status'], $neuRechnen($kundeRolle, $nEtage)['status'], $neuRechnen($technik, $nEtage)['status']], [403, 403, 403],
+            'Neu rechnen ohne „Grundrisse verwalten“ (nur Übersicht, Kunde, Technik): 403');
+        $r = $neuRechnen($planer, $sEtage);
+        $g = $neuRechnen($planer, $gEtage);
+        gleich([$r['status'], (json_decode($r['text'], true)['ok'] ?? null), $neuRechnen($planer, $fEtage)['status'], $g['status'],
+            $neuRechnen($planer, 999999999)['status'], $neuRechnen($planer, $nEtage, ['qualitaet' => '../fein'])['status'], $neuRechnen($planer, $svgEtage)['status']],
+            [403, false, 404, 403, 404, 422, 422],
+            'Neu rechnen: nur sehen → 403 (JSON), fremder Standort → 404, geteilte Pyramide mit nur sichtbarem Standort → 403, unbekannte Etage → 404, unbekannte Qualität und SVG → 422');
+        gleich([$auftragDa($nEtage), $auftragDa($sEtage), $auftragDa($fEtage), $nAudit($nEtage) + $nAudit($sEtage) + $nAudit($gEtage)], [false, false, false, 0],
+            '… kein Auftrag angelegt, nichts im Audit');
+
+        // Status: JSON, nie zwischengespeichert, ohne Pfade und Namen; fremd → 403, unbekannt → 404 (beides JSON).
+        $s = $standVon($planer, $nEtage);
+        $sj = json_decode($s['text'], true) ?? [];
+        $standVorher = (string) ($sj['stand'] ?? '');
+        gleich([$s['status'], $kopf($s, 'Cache-Control'), $sj['zustand'] ?? null, preg_match('/^[0-9a-f]{12}$/', $standVorher), str_contains((string) ($sj['plan']['kachel_url'] ?? ''), '?v=' . $standVorher)],
+            [200, 'no-store', 'keiner', 1, true], 'Status des Plans: JSON mit Stand und Kacheladresse, Cache-Control no-store');
+        $f = $standVon($planer, $fEtage);
+        $u = $standVon($planer, 999999999);
+        gleich([$f['status'], json_decode($f['text'], true)['ok'] ?? null, $u['status'], json_decode($u['text'], true)['ok'] ?? null], [403, false, 404, false],
+            'Status eines fremden Standorts: 403, einer unbekannten Etage: 404 – beides als JSON');
+
+        // Mit „bearbeiten“: angestoßen, sofort zurück, ein Eintrag im Audit; ein zweiter Klick ergibt keinen zweiten Auftrag.
+        $start = microtime(true);
+        $r = $neuRechnen($planer, $nEtage);
+        $dauer = microtime(true) - $start;
+        $rj = json_decode($r['text'], true) ?? [];
+        $r2 = json_decode($neuRechnen($planer, $nEtage)['text'], true) ?? [];
+        $audit = Database::first("SELECT username, details FROM audit_log WHERE action = 'plan.neu_rechnen' AND target_type = 'floor' AND target_id = ? ORDER BY id DESC LIMIT 1", [(string) $nEtage]);
+        $details = json_decode((string) ($audit['details'] ?? ''), true) ?? [];
+        pruefe($r['status'] === 200 && ($rj['ok'] ?? false) === true && ($rj['neu'] ?? false) === true && in_array($rj['zustand'] ?? '', \App\Services\PlanTileService::OFFEN, true)
+            && ($r2['neu'] ?? true) === false && ($r2['ok'] ?? false) === true && $nAudit($nEtage) === 1 && $dauer < 2,
+            sprintf('Neu rechnen mit „bearbeiten“: 200 in %.2f s, Auftrag angenommen; der zweite Klick: „%s“ – ein Eintrag im Audit', $dauer, (string) ($r2['message'] ?? '')));
+        gleich([array_keys($details), $details['etagen'] ?? null, $details['stand_vorher'] ?? null, $details['fassung_vorher'] ?? null,
+            str_contains((string) ($audit['details'] ?? ''), '/'), (string) ($audit['username'] ?? '')],
+            [['etagen', 'qualitaet', 'fassung_vorher', 'stand_vorher'], [$nEtage], $standVorher, \App\Services\PlanTileService::FASSUNG, false, $kennung . '-planer'],
+            'Audit „plan.neu_rechnen“: Etagen, Qualität, Fassung und Stand vorher – ohne Pfade');
+        // Der Status, bis es fertig ist: dann ein neuer Stand.
+        $ende = microtime(true) + 60;
+        $verlauf = [];
+        do {
+            usleep(300_000);
+            $s = $standVon($planer, $nEtage);
+            $sj = json_decode($s['text'], true) ?? [];
+            $verlauf[] = (string) ($sj['zustand'] ?? '?');
+        } while (in_array($sj['zustand'] ?? '', \App\Services\PlanTileService::OFFEN, true) && microtime(true) < $ende);
+        $wurzel = dirname(__DIR__);
+        pruefe(($sj['zustand'] ?? '') === 'fertig' && ($sj['stand'] ?? '') !== $standVorher && preg_match('/^[0-9a-f]{12}$/', (string) ($sj['stand'] ?? '')) === 1
+            && !str_contains($s['text'], $wurzel) && !str_contains($s['text'], 'storage') && !str_contains($s['text'], $kennung . '-planer')
+            && !str_contains($s['text'], (string) Database::scalar('SELECT plan_file FROM floors WHERE id = ?', [$nEtage])),
+            'Status nach dem Neurechnen: „fertig“ mit neuem Stand – ohne Pfade, Plandatei und Benutzernamen (' . implode(' → ', array_values(array_unique($verlauf))) . ')');
+        $karte = aufruf($basis, $planer['dose'], 'GET', '/karte?etage=' . $nEtage)['text'];
+        $live = json_decode(aufruf($basis, $planer['dose'], 'GET', '/karte/' . $nEtage . '/live', [], $json)['text'], true) ?? [];
+        gleich([str_contains($karte, 'data-plan-stand="' . ($sj['stand'] ?? '') . '"'), $live['plan_stand'] ?? null], [true, $sj['stand'] ?? ''],
+            'danach: Karte und Livewerte nennen den neuen Stand (eine offene Karte merkt den Wechsel)');
+        // Ein Bild ohne Kacheln, das welche bekäme (sein Bau im Hintergrund starb): „Plan aufbereiten“
+        // in der Karte, „Aufbereiten“ auf der Standortseite – vorher 422 und kein Knopf bis zur nächsten Nacht.
+        $oEtage = $planBild($nSite, 'Ohne Kacheln');
+        \App\Services\PlanTileService::aufraeumen((array) \App\Services\SiteService::floor($oEtage));
+        $karteOhne = aufruf($basis, $planer['dose'], 'GET', '/karte?etage=' . $oEtage)['text'];
+        $standorteOhne = aufruf($basis, $planer['dose'], 'GET', '/standorte')['text'];
+        $r = $neuRechnen($planer, $oEtage);
+        gleich([str_contains($karteOhne, 'data-plan-art="bild"'), str_contains($karteOhne, '>Plan aufbereiten'),
+            str_contains($standorteOhne, 'action="/grundriss/' . $oEtage . '/neu-rechnen"'), $r['status'], json_decode($r['text'], true)['neu'] ?? null],
+            [true, true, true, 200, true], 'Bild ohne Kacheln: Karte mit „Plan aufbereiten“, Standortseite mit „Aufbereiten“, angestoßen (200)');
+        // Aus dem Formular der Standortseite (ohne JSON): Meldung und Rücksprung.
+        $r = aufruf($basis, $planer['dose'], 'POST', '/grundriss/' . $sEtage . '/neu-rechnen', ['_token' => $planer['token']], ['Referer: ' . $basis . '/standorte']);
+        gleich([$r['status'], $r['ziel']], [302, '/standorte'], 'Formular ohne Recht: Meldung und zurück zur Standortseite');
+        // Abgemeldet: 401 als JSON, nichts über den Plan.
+        $weg = anmelden($basis, $kennung . '-planer', $kennwort);
+        aufruf($basis, $weg['dose'], 'POST', '/logout', ['_token' => $weg['token']]);
+        $s = $standVon($weg, $nEtage);
+        gleich([$s['status'], json_decode($s['text'], true)['anmelden'] ?? null, str_contains($s['text'], 'stand')], [401, true, false], 'Status nach dem Abmelden: 401 als JSON, ohne Stand');
+        @unlink($weg['dose']);
+        Database::execute("DELETE FROM freigaben WHERE subject_type = 'user' AND subject_id = ?", [$benutzer['planer']]);
+    }
+
     // ---------------------------------------------------- Übergabeberichte: Seiten, Autosave, Eventworx, Rechte
     $json = ['Accept: application/json'];
     $typen = [];
@@ -1804,6 +1997,18 @@ try {
     gleich([(int) Database::scalar('SELECT COUNT(*) FROM api_tokens'), Database::scalar('SELECT status FROM api_vorschlaege WHERE id = ?', [$vorschlagId]),
         Database::first('SELECT verified_at FROM api_partner WHERE id = ?', [$selbstId])], [$tokensVorher, 'offen', $partnerVorher],
         'Kundenmodus: kein Zugang angelegt, kein Vorschlag abgelehnt, keine Instanz geprüft');
+    // Ebenso „Plan neu rechnen“ und sein Status (plan-neu.js lädt bei 423 neu – zur Kundenseite): kein Auftrag.
+    if (isset($nEtage)) {
+        $auftragDatei = \App\Services\PlanTileService::planDir((array) \App\Services\SiteService::floor($nEtage)) . '/.auftrag.json';
+        $auftragVorher = (string) @file_get_contents($auftragDatei);
+        $s = aufruf($basis, $admin['dose'], 'GET', '/grundriss/' . $nEtage . '/kacheln/stand', [], $json);
+        $j = aufruf($basis, $admin['dose'], 'POST', '/grundriss/' . $nEtage . '/neu-rechnen', ['_token' => $admin['token']], $json);
+        $f = aufruf($basis, $admin['dose'], 'POST', '/grundriss/' . $nEtage . '/neu-rechnen', ['_token' => $admin['token']]);
+        gleich([$s['status'], json_decode($s['text'], true)['kundenmodus'] ?? null, str_contains($s['text'], 'stand'), $j['status'],
+            json_decode($j['text'], true)['kundenmodus'] ?? null, $f['status'], $f['ziel'], (string) @file_get_contents($auftragDatei) === $auftragVorher],
+            [423, true, false, 423, true, 302, '/berichte/' . $b3 . '/kunde', true],
+            'Kundenmodus: Status des Plans und „Plan neu rechnen“ gesperrt (423 bzw. zur Kundenseite), kein Auftrag');
+    }
     // Ebenso der Tank: Seite, Verlauf, Tage, CSV, Peilung und Betankung.
     if (($tankId ?? 0) > 0) {
         $ereignisseVorher = (int) Database::scalar('SELECT COUNT(*) FROM tank_ereignisse WHERE objekt_id = ?', [$tankId]);

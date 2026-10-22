@@ -11,6 +11,10 @@ User=__APP_USER__
 Group=__APP_USER__
 WorkingDirectory=__APP_DIR__
 ExecStart=/usr/bin/php __APP_DIR__/bin/power wartung
+# Grundrisse neu rechnen (veraltete Kachelfassungen, bis 20 min je Nacht) soll
+# Oberfläche und Sammler nicht ausbremsen.
+Nice=10
+IOSchedulingClass=idle
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict

@@ -40,14 +40,34 @@ final class PdfRasterService
     private const HOECHSTENS = 1_048_576;
 
     /**
-     * Lange Kante des gerasterten Plans in Pixeln.
+     * Lange Kante des gerasterten Plans in Pixeln, wenn pdfinfo die
+     * Seitengröße nicht nennt (sonst PlanTileService::ziel()).
      *
      * Bei A3 sind das rund 370 dpi – deutlich mehr, als ein Bildschirm auf
-     * der tiefsten Zoomstufe zeigt, und noch weit unter der Obergrenze von
-     * PlanTileService::MAX_PIXEL. Höher kostet vor allem Rechenzeit beim
-     * Hochladen und bringt nichts mehr.
+     * der tiefsten Zoomstufe zeigt.
      */
     public const KANTE = 6144;
+
+    /**
+     * So viel Adressraum bekommt pdftoppm höchstens (Bytes, über prlimit).
+     *
+     * Was poppler braucht, hängt nicht nur an der Fläche, die gerechnet
+     * wird: Ein progressives JPEG im PDF packt es bei jedem Aufruf ganz aus
+     * – gemessen 695 MB für einen Scan mit 139 Megapixeln, wo ein
+     * Grundlinien-JPEG 297 MB brauchte. Zwei davon nebeneinander sprengten
+     * einen Container mit 2 GB. Mit der Grenze scheitert so ein Aufruf,
+     * statt den OOM-Killer zu rufen; ein Vektorplan bleibt bei 70–80 MB,
+     * ein Bild bis MAX_BILDPIXEL bei rund 300 MB.
+     */
+    public const SPEICHER = 1024 * 1024 * 1024;
+
+    /**
+     * So meldet poppler zu wenig Speicher. Vorsicht: Mit diesem Satz auf
+     * stderr endet pdftoppm trotzdem mit 0 und liefert einen weißen Streifen
+     * (gemessen Helligkeit 255 statt 221) – ein Bau schaltete sonst auf
+     * einen leeren Plan um.
+     */
+    private const SPEICHER_FEHLT = '/out of memory|bad_alloc|cannot allocate memory|bogus memory allocation/i';
 
 
     /**
@@ -110,9 +130,11 @@ final class PdfRasterService
      * genau dieser Fall – der Aufrufer muss ihn verwerfen.
      *
      * 'zeit' ist true, wenn poppler die Zeitgrenze überschritten hat – ein
-     * niedrigerer Streifen kann dann noch gehen.
+     * niedrigerer Streifen kann dann noch gehen. 'speicher' ist true, wenn
+     * poppler mit SPEICHER nicht auskam – eine kleinere Seite kann dann noch
+     * gehen.
      *
-     * @return array{ok:bool,pfad:?string,breite:int,hoehe:int,message:string,zeit?:bool}
+     * @return array{ok:bool,pfad:?string,breite:int,hoehe:int,message:string,zeit?:bool,speicher?:bool}
      */
     public static function streifen(
         string $pdf,
@@ -127,7 +149,10 @@ final class PdfRasterService
             return ['ok' => false, 'pfad' => null, 'breite' => 0, 'hoehe' => 0, 'message' => $w['hinweis']];
         }
 
+        // Mit harter Speichergrenze (SPEICHER), wenn prlimit da ist (util-linux, auf Debian immer).
+        $prlimit = Programm::finden('prlimit', ['--version']);
         $argumente = [
+            ...($prlimit !== null ? [$prlimit, '--as=' . self::SPEICHER, '--'] : []),
             $w['pfad'],
             '-f', (string) $seite,
             '-l', (string) $seite,
@@ -146,7 +171,9 @@ final class PdfRasterService
 
         $ergebnis = self::starten($argumente);
         if (!$ergebnis['ok']) {
-            return ['ok' => false, 'pfad' => null, 'breite' => 0, 'hoehe' => 0, 'message' => $ergebnis['message'], 'zeit' => !empty($ergebnis['zeit'])];
+            self::aufraeumen($zielOhneEndung);
+            return ['ok' => false, 'pfad' => null, 'breite' => 0, 'hoehe' => 0, 'message' => $ergebnis['message'],
+                'zeit' => !empty($ergebnis['zeit']), 'speicher' => !empty($ergebnis['speicher'])];
         }
 
         // poppler hängt die Seitennummer an: ziel-1.png, ziel-01.png, …
@@ -249,6 +276,61 @@ final class PdfRasterService
         }
 
         return ['breite' => $breite, 'hoehe' => $hoehe];
+    }
+
+    /**
+     * Die größte Fläche, auf die poppler ein Bild dieser Seite hochrechnet,
+     * in Punkt² – eine Maske zählt ein Drittel (1 statt 3 Byte je Pixel).
+     *
+     * pdftoppm rechnet jedes Bild bei jedem Aufruf auf seine ganze Größe in
+     * der Ausgabe, auch für einen schmalen Streifen (siehe
+     * PlanTileService::MAX_BILDPIXEL). Wie groß es auf der Seite steht,
+     * sagt pdfimages -list (Pixel und Auflösung je Bild), ohne ein Bild
+     * auszupacken: gemessen 0,05 s für einen leichten Plan, 3,3 s für einen
+     * Vektorplan mit 90 MB Inhalt. Eine weiche Maske (smask) zählt zu ihrem
+     * Bild – poppler rechnet beide zugleich. Mehr als die Seite
+     * ($seitenflaeche in Punkt²) zählt kein Bild; eines ohne Auflösung
+     * (gestreckt, unter 0,5 ppi) zählt als ganze Seite.
+     *
+     * @return float|null 0.0 ohne Bilder; null, wenn pdfimages fehlt oder scheitert
+     */
+    public static function bildflaeche(string $pdf, int $seite, ?float $seitenflaeche = null): ?float
+    {
+        $pfad = self::finden('pdfimages');
+        if ($pfad === null) {
+            return null;
+        }
+        $ergebnis = self::starten([$pfad, '-list', '-f', (string) $seite, '-l', (string) $seite, $pdf]);
+        if (!$ergebnis['ok']) {
+            return null;
+        }
+        $groesste = $zeichnung = 0.0;
+        foreach (preg_split('/\R/', $ergebnis['ausgabe']) ?: [] as $zeile) {
+            // page num type width height color comp bpc enc interp object ID x-ppi y-ppi size ratio
+            // (object ID ist bei einem eingebetteten Bild „[inline]“ – also von hinten zählen)
+            $t = preg_split('/\s+/', trim($zeile)) ?: [];
+            $n = count($t);
+            if ($n < 14 || !ctype_digit($t[0]) || !ctype_digit($t[3]) || !ctype_digit($t[4])) {
+                continue;
+            }
+            $xppi = (float) $t[$n - 4];
+            $yppi = (float) $t[$n - 3];
+            $flaeche = $xppi > 0 && $yppi > 0 ? ((int) $t[3] / $xppi * 72) * ((int) $t[4] / $yppi * 72) : INF;
+            if ($seitenflaeche !== null && $seitenflaeche > 0) {
+                $flaeche = min($flaeche, $seitenflaeche);
+            }
+            if (!is_finite($flaeche)) {
+                // Ohne Seitengröße und ohne Auflösung: nicht abzuschätzen.
+                return null;
+            }
+            $zeichnung = match ($t[2]) {
+                'image'         => $flaeche,
+                'smask', 'mask' => $zeichnung + $flaeche / 3,
+                default         => $flaeche / 3,
+            };
+            $groesste = max($groesste, $zeichnung);
+        }
+        return $groesste;
     }
 
     /** Seitenzahl eines PDF, soweit poppler sie hergibt. */
@@ -354,12 +436,17 @@ final class PdfRasterService
         fclose($rohre[2]);
         proc_close($prozess);
 
-        if ($rc !== 0) {
+        // Zu wenig Speicher ist ein Fehler, auch wenn poppler mit 0 endet (siehe SPEICHER_FEHLT).
+        $speicher = preg_match(self::SPEICHER_FEHLT, $fehler) === 1;
+        if ($rc !== 0 || $speicher) {
             Logger::info('PDF-Rastern fehlgeschlagen (rc=' . $rc . '): ' . trim($fehler));
             return [
-                'ok'      => false,
-                'ausgabe' => $ausgabe,
-                'message' => trim($fehler) !== '' ? trim($fehler) : 'Rückgabewert ' . $rc,
+                'ok'       => false,
+                'ausgabe'  => $ausgabe,
+                'speicher' => $speicher,
+                'message'  => $speicher
+                    ? 'poppler kam mit ' . intdiv(self::SPEICHER, 1024 * 1024) . ' MB Speicher nicht aus („' . trim((string) strtok(trim($fehler), "\n")) . '“).'
+                    : (trim($fehler) !== '' ? trim($fehler) : 'Rückgabewert ' . $rc),
             ];
         }
 

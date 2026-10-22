@@ -117,7 +117,7 @@ vorgaben() {
     SAMMLER_ANGEHALTEN="nein"; NEU_MERKEN="nein"; ABGLEICH_BEGONNEN="nein"; NACH_SIGNAL="nein"
     WARNUNGEN=(); PRUEFUNG="-"; PRUEF_RC=1; PRUEF_AUSGABE=""
     SCHRITT_NR=0; SCHRITT_NAME="Start"; SCHRITT_GRUND="intern"
-    SIGNAL=""; ZURUECK=""; ABBRUCH=""; ARBEIT=""
+    SIGNAL=""; ZURUECK=""; ABBRUCH=""; ARBEIT=""; SPERRE_AUFGEHOBEN="nein"
     KENNUNG="-"; AUSLOESER="konsole"; VON="root"
     FPM_VERSION=""
 }
@@ -738,7 +738,7 @@ wartung_an() {
 }
 wartung_aus() {
     if as_app test -e "$ZIEL/storage/update/ist/wartung" 2>/dev/null; then
-        as_app rm -f -- "$ZIEL/storage/update/ist/wartung" && echo "    Schreibsperre der Oberfläche aus"
+        as_app rm -f -- "$ZIEL/storage/update/ist/wartung" && echo "    Schreibsperre der Oberfläche aus" && SPERRE_AUFGEHOBEN="ja"
     fi
     return 0
 }
@@ -1488,6 +1488,15 @@ wunschpruefung() {
 # rechnet mit dem neuen Code und schreibt nur unter storage/plans/kacheln, nie
 # in die Datenbank. Ohne Namensräume (PrivateTmp & Co.), damit sie auch im LXC
 # ohne Nesting startet. Was nicht anläuft, holt die nächtliche Wartung nach.
+#
+# --nachholen: was das Update liegen ließ – Aufträge, die während der
+# Schreibsperre warteten (Upload, Abgleich, „Plan neu rechnen“), Bauten, die
+# ein Neustart von PHP-FPM beendete, Pläne ohne Kacheln. Nicht die Pläne einer
+# älteren Kachelfassung: Bringt das Update eine neue (FASSUNG), wären das alle
+# – auf einem kleinen LXC eine Stunde und mehr neben InfluxDB. Die bleiben, wie
+# sie sind („neu rechnen empfohlen“), bis die nächtliche Wartung (20 min je
+# Nacht, nie in das Fenster der automatischen Updates) oder „Plan neu rechnen“
+# sie dran nimmt.
 kacheln_anstossen() {
     local php
     [[ "$OHNE_DIENSTE" == "nein" ]] || return 0
@@ -1497,15 +1506,29 @@ kacheln_anstossen() {
     fi
     php="$(command -v php 2>/dev/null || true)"
     if [[ -n "$php" ]] && systemd-run --quiet --no-block --collect --unit=powermanagement-kacheln \
-            --description="PowerManagement: fehlende Kacheln nachrechnen" \
-            --uid="$APP_USER" --gid="$APP_USER" --working-directory="$ZIEL" -p Nice=10 \
-            "$php" "$ZIEL/bin/power" plan:kacheln >/dev/null 2>&1; then
-        echo "    Fehlende Kacheln rechnet jetzt powermanagement-kacheln nach (journalctl -u powermanagement-kacheln)"
+            --description="PowerManagement: fehlende Kacheln und offene Aufträge nachrechnen" \
+            --uid="$APP_USER" --gid="$APP_USER" --working-directory="$ZIEL" -p Nice=10 -p IOSchedulingClass=idle \
+            "$php" "$ZIEL/bin/power" plan:kacheln --nachholen >/dev/null 2>&1; then
+        echo "    Fehlende Kacheln rechnet jetzt powermanagement-kacheln nach, dazu offene Aufträge (journalctl -u powermanagement-kacheln)"
+        echo "    Pläne einer älteren Kachelfassung bleiben bis zur nächtlichen Wartung oder „Plan neu rechnen“."
     else
         hinweis "Fehlende Kacheln ließen sich nicht anstoßen – die nächtliche Wartung rechnet sie nach."
         WARNUNGEN+=(kacheln)
     fi
     return 0
+}
+
+# Nach einem Abbruch oder Zurückrollen ebenso – sonst holte niemand ab, was
+# unter der Schreibsperre stehen blieb: Aufträge („Plan neu rechnen“, ein
+# Upload kurz davor) und der Rest eines Prozesses, der wegen des Updates
+# aufhörte. Die Karte meldete nach einer Minute „abgebrochen“, gerechnet würde
+# erst in der nächsten Nacht. Nur, wenn dieser Lauf die Sperre eben aufgehoben
+# hat (wartung_aus), und nicht beim Herunterfahren. Ein alter Stand ohne
+# --nachholen rechnet einfach die fehlenden Kacheln.
+kacheln_nach_abbruch() {
+    [[ "$SPERRE_AUFGEHOBEN" == "ja" ]] || return 0
+    [[ "$(systemctl is-system-running 2>/dev/null)" != "stopping" ]] || return 0
+    kacheln_anstossen
 }
 
 # Ohne den Update-Dienst gestartet (Konsole): ihn einmal anstoßen, damit
@@ -1551,6 +1574,7 @@ abbrechen() {   # abbrechen <grund> [<zeile>]
         systemctl start powermanagement-sammler.service && rm -f -- "$ZUSTAND/sammler-angehalten"
     fi
     wartung_aus
+    kacheln_nach_abbruch
     if [[ "$ABGLEICH_BEGONNEN" == "ja" ]]; then
         hinweis "Der Abgleich blieb unvollständig – derselbe Aufruf holt ihn nach. Der Code ist unverändert."
     else
@@ -1610,6 +1634,8 @@ zurueckrollen() {   # zurueckrollen <grund> [<zeile>]
         # besteht bash -n nicht): kein Neustart von PHP-FPM (N11).
         [[ "$herunter" == "nein" ]] && systemctl start powermanagement-sammler.service
         wartung_aus
+        # Nur mit dem alten Code zurück – sonst rechnete er mit dem, was git liegen ließ.
+        [[ "$code_zurueck" == "ja" ]] && kacheln_nach_abbruch
         case "$grund" in abgebrochen|unterbrochen) ;; *) gescheitert_merken "$NEU" "$grund" ;; esac
         if [[ "$luecke" == "nein" ]]; then
             schnappschuss_loeschen
@@ -1736,6 +1762,8 @@ zurueckrollen() {   # zurueckrollen <grund> [<zeile>]
     # dann bleibt die Oberfläche gesperrt, bis ein weiterer Versuch gelingt.
     if [[ "$daten_luecke" == "nein" ]]; then
         wartung_aus
+        # Auch Bauten, die das Anhalten von PHP-FPM beendete (abgebrochen).
+        kacheln_nach_abbruch
     else
         hinweis "Die Schreibsperre der Oberfläche bleibt, bis die Datenbank zurückliegt."
     fi
@@ -2243,7 +2271,7 @@ stufe2() {
     # Fehlende Kacheln nicht hier, unter der Schreibsperre – erst nach dem
     # Punkt ohne Rückweg, in einer eigenen Einheit (kacheln_anstossen).
     schritt 10 "Grundrisse kacheln" intern
-    echo "    Fehlende Kacheln rechnet nach der Prüfung eine eigene Einheit nach (powermanagement-kacheln)."
+    echo "    Fehlende Kacheln und offene Aufträge rechnet nach der Prüfung eine eigene Einheit nach (powermanagement-kacheln)."
 
     schritt 11 "Prüfen" pruefung
     if ! pflichtpruefung; then

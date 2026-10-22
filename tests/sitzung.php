@@ -54,6 +54,12 @@ declare(strict_types=1);
  * einen durch, der zweite hört sofort mit einer Meldung auf – auch ein
  * „Hochladen“, während der Verteiler-Abgleich das Repository abfragt.
  *
+ * Und „Plan neu rechnen“: Der Knopf stößt nur an (ein eigener Prozess
+ * rechnet, mit trägem pdftoppm), der Status gibt die Sitzung frei, bevor er
+ * liest – hängt das Lesen des Auftrags, kommt eine Seite trotzdem durch –,
+ * und die Karte fragt ihn erst nach der vorigen Antwort wieder (plan-neu.js
+ * in Node).
+ *
  * Und für die Anmeldung über SSO (OIDC-Attrappe als eigener Server, der
  * auf Wunsch trödelt): Der Rückruf wartet auf den Anmeldedienst (Code
  * einlösen), der Start auf eine veraltete Discovery – eine andere Seite
@@ -1280,6 +1286,91 @@ if ($echtesPdftoppm === null || !extension_loaded('gd')) {
     @unlink($ordner . '/bin/pdftoppm');
     preg_match('/name="_token" value="([^"]+)"/', $danach['text'], $m);
     $token = $m[1] ?? $token;
+
+    // ------------------------------------------------------------ Plan neu rechnen: im Hintergrund, Status ohne Sitzungssperre
+    // „Neu rechnen“ stößt nur an – ein eigener Prozess rechnet, mit dem
+    // trägen pdftoppm der Instanz eine Sekunde je Aufruf. Der Knopf ist
+    // sofort zurück; während gerechnet wird, kommen der Status und eine
+    // Seite aus einem zweiten Reiter gleich durch.
+    $neuEtage = (int) ($planEtagen[0]['id'] ?? 0);
+    $standAdresse = $basis . '/grundriss/' . $neuEtage . '/kacheln/stand';
+    $standVorher = (string) (json_decode(holen($standAdresse, null, true)['text'], true)['stand'] ?? '');
+    file_put_contents($ordner . '/bin/pdftoppm', "#!/bin/sh\n[ \"\$1\" != -v ] && sleep 1\nexec " . escapeshellarg($echtesPdftoppm) . " \"\$@\"\n");
+    chmod($ordner . '/bin/pdftoppm', 0700);
+    $start = microtime(true);
+    $r = holen($basis . '/grundriss/' . $neuEtage . '/neu-rechnen', ['_token' => $token], true);
+    $dauer = microtime(true) - $start;
+    $rj = json_decode($r['text'], true) ?? [];
+    pruefe($r['status'] === 200 && ($rj['neu'] ?? false) === true && $dauer < 1 && !sitzungsCookie($r['kopf']),
+        sprintf('Plan neu rechnen mit trägem pdftoppm: sofort zurück (%.2f s), gerechnet wird im Hintergrund – %s', $dauer, (string) ($rj['message'] ?? $r['status'])));
+    $zweiterReiter = null;
+    $langsamste = 0.0;
+    $zustaende = [];
+    $ende = microtime(true) + 60;
+    do {
+        $t0 = microtime(true);
+        $s = holen($standAdresse, null, true);
+        $langsamste = max($langsamste, microtime(true) - $t0);
+        $sj = json_decode($s['text'], true) ?? [];
+        $z = (string) ($sj['zustand'] ?? '?');
+        $zustaende[] = $z;
+        if ($z === 'laeuft' && $zweiterReiter === null) {
+            $t0 = microtime(true);
+            $seite = holen($basis . '/karte?etage=' . $neuEtage);
+            $zweiterReiter = ['dauer' => microtime(true) - $t0, 'status' => $seite['status'], 'laeuft' => str_contains($seite['text'], 'data-plan-zustand="laeuft"'),
+                'stand' => str_contains($seite['text'], 'data-plan-stand="' . $standVorher . '"')];
+        }
+        usleep(250_000);
+    } while (in_array($z, ['angefordert', 'wartet', 'laeuft'], true) && microtime(true) < $ende);
+    pruefe($zweiterReiter !== null && $zweiterReiter['status'] === 200 && $zweiterReiter['dauer'] < 1.5 && $zweiterReiter['laeuft'] && $zweiterReiter['stand'] && $langsamste < 1,
+        sprintf('während gerechnet wird: Karte im zweiten Reiter in %.2f s (zeigt „läuft“ und den bisherigen Plan), Status höchstens %.2f s (%s)',
+            (float) ($zweiterReiter['dauer'] ?? -1), $langsamste, implode(' → ', array_values(array_unique($zustaende)))));
+    pruefe($z === 'fertig' && ($sj['stand'] ?? '') !== $standVorher && preg_match('/^cache-control:\s*no-store\s*$/mi', $s['kopf']) === 1 && !sitzungsCookie($s['kopf']),
+        'danach „fertig“ mit neuem Stand; der Status wird nie zwischengespeichert und schickt kein Sitzungscookie');
+
+    // Der Status gibt die Sitzung frei, bevor er etwas liest: Hängt das Lesen
+    // des Auftrags (eine träge Platte – hier ein FIFO statt .auftrag.json),
+    // kommt eine Seite aus einem zweiten Reiter trotzdem gleich durch.
+    if (function_exists('posix_mkfifo')) {
+        $auftragDatei = $kachelOrdner . '/.auftrag.json';
+        $gesichert = (string) @file_get_contents($auftragDatei);
+        @unlink($auftragDatei);
+        posix_mkfifo($auftragDatei, 0600);
+        $mehrfach = curl_multi_init();
+        $kopfS = '';
+        $g = griff($standAdresse, null, true, $kopfS);
+        curl_multi_add_handle($mehrfach, $g);
+        $bis = microtime(true) + 0.8;
+        do {
+            curl_multi_exec($mehrfach, $laufend);
+            curl_multi_select($mehrfach, 0.05);
+        } while (microtime(true) < $bis);
+        $t0 = microtime(true);
+        $profil = holen($basis . '/profil');
+        $profilDauer = microtime(true) - $t0;
+        $nochOffen = $laufend > 0;
+        // Lesen und Schreiben zugleich: öffnet ohne zu warten, auch wenn niemand liest.
+        $schreiber = fopen($auftragDatei, 'r+');
+        fwrite($schreiber, (string) json_encode(['zustand' => 'fertig', 'ende' => gmdate('c')]));
+        fclose($schreiber);
+        $bis = microtime(true) + 20;
+        do {
+            curl_multi_exec($mehrfach, $laufend);
+            curl_multi_select($mehrfach, 0.1);
+        } while ($laufend > 0 && microtime(true) < $bis);
+        $statusText = (string) curl_multi_getcontent($g);
+        curl_multi_remove_handle($mehrfach, $g);
+        curl_close($g);
+        curl_multi_close($mehrfach);
+        @unlink($auftragDatei);
+        file_put_contents($auftragDatei, $gesichert);
+        pruefe($nochOffen && $profil['status'] === 200 && $profilDauer < 1.5 && (json_decode($statusText, true)['zustand'] ?? '') === 'fertig',
+            sprintf('Status gibt die Sitzung frei, bevor er liest: während er am Auftrag hängt, kommt eine Seite in %.2f s; danach liefert er seine Antwort', $profilDauer));
+    } else {
+        fwrite(STDOUT, "sitzung: Status mit hängendem Lesen übersprungen – posix fehlt\n");
+    }
+    @unlink($ordner . '/bin/pdftoppm');
+
     gleich(holen($basis . '/standorte/loeschen', ['_token' => $token, 'id' => (string) $planSite])['status'], 302, 'Grundriss: Standort wieder gelöscht');
     pruefe($planDatei !== '' && !is_file($wurzel . '/storage/plans/' . $planDatei) && !is_dir($kachelOrdner), 'Plan und Kacheln mit dem Standort weg');
 }
@@ -1350,6 +1441,26 @@ if ($node === '') {
         'Grundriss-Upload: danach eine passende Datei – per fetch hinaus und neu geladen, die Meldung weg');
     pruefe(($b['live_kundenmodus']['neuGeladen'] ?? 0) === 1, 'live.js: 423 mit „kundenmodus“ → neu laden, also zur Kundenseite');
     pruefe(($b['live_abgelaufen']['neuGeladen'] ?? 1) === 0 && ($b['live_abgelaufen']['stand'] ?? '') === 'Sitzung abgelaufen', 'live.js: 401 → nur die Meldung, kein Neuladen');
+
+    // Plan neu rechnen: Die Karte fragt nach dem Zustand (plan-neu.js) –
+    // nie zwei Fragen zugleich, die nächste erst nach der Antwort.
+    $p = json_decode((string) shell_exec(escapeshellarg($node) . ' ' . escapeshellarg(__DIR__ . '/hilfen/plan-neu.cjs') . ' '
+        . escapeshellarg($js . 'module/plan-neu.js')), true) ?? ['abbruch' => 'keine Ausgabe'];
+    pruefe(!isset($p['abbruch']), 'plan-neu.js ohne Browser ausgeführt' . (isset($p['abbruch']) ? ': ' . mb_substr((string) $p['abbruch'], 0, 300) : ''));
+    $l = $p['laufend'] ?? [];
+    gleich([$l['hoechstens'] ?? null, $l['vorAntwort'] ?? null, $l['nochImmer'] ?? null, $l['direktDanach'] ?? null, $l['geplant'] ?? null, $l['knappDavor'] ?? null, $l['nachPause'] ?? null],
+        [1, 1, 1, 1, [2500], 1, 2], 'plan-neu.js: nie zwei Abfragen zugleich (auch nicht mit start()/einmal() dazwischen), die nächste erst 2,5 s nach der Antwort');
+    gleich([$l['ende'] ?? null, $l['antworten'] ?? null, $l['laeuftNoch'] ?? null, $l['accept'] ?? null, $l['cache'] ?? null, $l['signal'] ?? null],
+        [3, ['laeuft', 'wartet', 'fertig'], false, 'application/json', 'no-store', true], 'plan-neu.js: Schluss bei „fertig“; JSON, nicht zwischengespeichert, mit Zeitgrenze');
+    gleich([$p['fehler']['anfragen'] ?? null, $p['fehler']['laeuftNoch'] ?? null], [1, false], 'plan-neu.js: Schluss bei „fehler“');
+    gleich([$p['kundenmodus']['anfragen'] ?? null, $p['kundenmodus']['neuGeladen'] ?? null, $p['abgemeldet']['anfragen'] ?? null, $p['abgemeldet']['abgemeldet'] ?? null,
+        $p['abgemeldet']['neuGeladen'] ?? null, $p['verboten']['anfragen'] ?? null, $p['verboten']['laeuftNoch'] ?? null],
+        [1, 1, 1, 1, 0, 1, false], 'plan-neu.js: 423 → neu laden (zur Kundenseite), 401 → Schluss mit Hinweis, 403 → Schluss');
+    gleich([$p['verborgen']['verborgen'] ?? null, $p['verborgen']['zurueck'] ?? null, $p['netzfehler']['direkt'] ?? null, $p['netzfehler']['danach'] ?? null,
+        $p['einmal']['ohne'] ?? null, $p['einmal']['mitLauf'] ?? null],
+        [1, 2, 1, 2, 1, 3], 'plan-neu.js: im verborgenen Reiter keine Frage, zurück gleich eine; nach einem Netzfehler die nächste nach der Pause; einmal() läuft nur weiter, wenn gerechnet wird');
+    gleich([$p['fenster']['boeseAlsText'] ?? null, $p['fenster']['beimLauf'] ?? null, $p['fenster']['nachFehler'] ?? null],
+        [3, [true, 'Wird gerechnet …'], [false, 'Neu rechnen']], 'plan-neu.js: das Fenster zeigt Text aus Daten als Text, der Knopf ist gesperrt, solange gerechnet wird');
 }
 
 // ------------------------------------------------------------ Anmeldung über SSO

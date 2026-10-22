@@ -18,7 +18,10 @@
  *   MasterAdmin    Racks, Dosen und Accesspoints zur Orientierung (abschaltbar).
  *
  * Werkzeuge: Ansehen, Verschieben, Anlage setzen (auch aus dem Katalog der
- * Standard-Verteiler), Kabel, Kabelweg, Kabelbrücke, Schlauch, Maßstab.
+ * Standard-Verteiler), Kabel, Kabelweg, Kabelbrücke, Schlauch, Maßstab –
+ * und „Plan neu rechnen“ (plan-neu.js): Der Server rechnet im Hintergrund,
+ * die Karte fragt, wie weit es ist, und steigt danach auf die neuen Kacheln
+ * um (oder bittet, neu zu laden).
  *
  * Geschrieben wird über kleine POSTs; die Seite lädt sich dabei nicht neu,
  * damit der Ausschnitt bleibt, in dem man auf dem Tablet gerade arbeitet.
@@ -28,6 +31,8 @@ const kennung = new URL(import.meta.url).search;
 const { planKarte } = await import('./plan-karte.js' + kennung);
 // Tanks: Pegel am Zeichen, eigene Seitenleiste, Tanksensor einsetzen.
 const tankModul = await import('./karte-tank.js' + kennung);
+// Plan neu rechnen: Fenster und Abfrage des Zustands.
+const planNeu = await import('./plan-neu.js' + kennung);
 
 const el = document.getElementById('karte');
 const seite = document.getElementById('seite-inhalt');
@@ -36,7 +41,11 @@ const daten = JSON.parse(document.getElementById('karte-daten').textContent);
 const etage = Number(el.dataset.etage);
 const PM = window.PM;
 
-const karte = await planKarte(el, { melden: (t) => status(t) });
+// Die Abfrage, wie weit das Neurechnen ist – schon hier, weil eine fehlende
+// Kachel (kachelFehlt) melden kann, bevor der Rest der Seite steht.
+let planAbfrage = null;
+let kachelFehltZuletzt = 0;
+const karte = await planKarte(el, { melden: (t) => status(t), kachelFehler: () => kachelFehlt() });
 const map = karte.map;
 // Mehr Rand um den Plan als beim reinen Ansehen: Die Werte je Phase und die
 // Fenster an Anlagen am Planrand brauchen Platz, sonst schneidet die Karte
@@ -258,6 +267,8 @@ async function liveLaden() {
         }
         live = daten.objekte || {};
         liveAnwenden();
+        // Jemand hat den Plan neu rechnen lassen (auch in einem anderen Browser): nachfragen und umsteigen.
+        if (typeof daten.plan_stand === 'string' && daten.plan_stand !== planStand && planAbfrage && !planAbfrage.laeuft) { planAbfrage.einmal(); }
         if (auswahl && auswahl.art === 'objekt') { panelLiveSetzen(auswahl.id); }
     } catch (e) { /* nächster Versuch in 5 Sekunden */ } finally {
         clearTimeout(frist);
@@ -1337,6 +1348,114 @@ function positionKnopf() {
     });
 }
 
+// ------------------------------------------------------------------ Plan neu rechnen
+
+// Stand der Pyramide, die die Karte zeigt (PlanTileService::stand()); '' ohne.
+let planStand = el.dataset.planStand || '';
+let planZustand = { zustand: el.dataset.planZustand || 'keiner', meldung: (daten.plan && daten.plan.zustand_text) || '' };
+// In dieser Seite ein Neurechnen gesehen oder angestoßen – erst dann gehören
+// „fertig“ und „gescheitert“ auf die Seite, nicht ein Ergebnis von gestern.
+let planAuftrag = false;
+let planFenster = null;
+let planHinweisUhr = null;
+const planHinweis = document.getElementById('plan-neu-hinweis');
+
+function planHinweisZeigen(text, neuLadenKnopf = false, kurz = false) {
+    if (!planHinweis) { return; }
+    clearTimeout(planHinweisUhr);
+    planHinweis.querySelector('[data-text]').textContent = text || '';
+    planHinweis.querySelector('[data-aktion="plan-neu-laden"]').hidden = !neuLadenKnopf;
+    planHinweis.hidden = !text;
+    if (kurz && text) { planHinweisUhr = setTimeout(() => { planHinweis.hidden = true; }, 8000); }
+}
+
+/** Eine Kachel kam nicht (404): Vielleicht ist der Plan neu gerechnet – höchstens alle 10 s nachfragen. */
+function kachelFehlt() {
+    if (planAbfrage === null || Date.now() - kachelFehltZuletzt < 10000) { return; }
+    kachelFehltZuletzt = Date.now();
+    planAbfrage.einmal();
+}
+
+/** Ausschnitt merken – nach dem Neuladen steht die Karte wieder dort, gleich groß (karte.ansicht()). */
+function ansichtMerken() {
+    try {
+        sessionStorage.setItem('pm-karte-ansicht-' + etage, JSON.stringify(karte.ansicht()));
+    } catch (e) { /* ohne sessionStorage eben die Übersicht */ }
+}
+
+function planAntwort(d) {
+    planZustand = d;
+    if (planFenster && planFenster.offen()) { planFenster.zustandSetzen(d); }
+    if (planNeu.OFFEN.includes(d.zustand)) {
+        planAuftrag = true;
+        planHinweisZeigen(d.meldung);
+        return;
+    }
+    if (typeof d.stand === 'string' && d.stand !== '' && d.stand !== planStand) {
+        // Eine neue Pyramide: umsteigen, wenn sie dieselbe Fläche bedeckt, sonst neu laden lassen.
+        planStand = d.stand;
+        el.dataset.planStand = d.stand;
+        // Das Fenster zeigt ab jetzt die neue (Maße, Fassung, gerechnet am …), der Knopf empfiehlt nichts mehr.
+        if (daten.plan && d.plan) {
+            Object.assign(daten.plan, { art: 'kacheln', breite: d.plan.breite, hoehe: d.plan.hoehe, fassung: d.fassung, qualitaet: d.qualitaet,
+                empfohlen: !!d.empfohlen, gebaut: d.gebaut || '', dauer: d.dauer || '' });
+        }
+        const abzeichen = planNeuKnopf && !d.empfohlen ? planNeuKnopf.querySelector('.badge') : null;
+        if (abzeichen) { abzeichen.remove(); }
+        if (planFenster && planFenster.offen()) { planFensterZeigen(); }
+        if (karte.kachelnWechseln(d.plan)) {
+            planHinweisZeigen('Neu gerechnet – die Karte zeigt jetzt den neuen Plan.', false, true);
+        } else {
+            planHinweisZeigen('Der Plan ist neu gerechnet – neu laden, um ihn zu sehen.', true);
+        }
+        planAuftrag = false;
+        return;
+    }
+    if (planAuftrag) {
+        planHinweisZeigen(d.meldung, false, d.zustand === 'fertig');
+        planAuftrag = false;
+    }
+}
+
+planAbfrage = planNeu.standAbfrage({
+    adresse: `/grundriss/${etage}/kacheln/stand`,
+    antwort: planAntwort,
+    // Kundenmodus begann, während die Seite offen war (423): neu laden führt zur Kundenseite – wie live.js.
+    neuLaden: () => window.location.reload(),
+    abgemeldet: () => planHinweisZeigen('Abgemeldet – neu laden und anmelden, um weiterzumachen.', true),
+});
+
+async function planSenden(qualitaet) {
+    const erg = await PM.post(`/grundriss/${etage}/neu-rechnen`, qualitaet ? { qualitaet } : {});
+    if (erg && erg.kundenmodus === true) { window.location.reload(); return; }
+    PM.melden(erg.message || (erg.ok ? 'Angestoßen.' : 'Nicht möglich.'), !!erg.ok);
+    if (!erg.ok) { return; }
+    planAuftrag = true;
+    const jetzt = { zustand: erg.zustand || 'angefordert', meldung: erg.zustand_text || erg.message };
+    planZustand = jetzt;
+    if (planFenster && planFenster.offen()) { planFenster.zustandSetzen(jetzt); }
+    planHinweisZeigen(jetzt.meldung);
+    planAbfrage.start();
+}
+
+function planFensterZeigen() {
+    planFenster = planNeu.planNeuPanel(seite, daten.plan, planZustand, planSenden);
+}
+
+const planNeuKnopf = document.querySelector('[data-aktion="plan-neu"]');
+if (planNeuKnopf && daten.plan) {
+    planNeuKnopf.addEventListener('click', () => {
+        if (modus !== 'ansehen') { setModus('ansehen'); }
+        auswahl = null;
+        planFensterZeigen();
+        document.getElementById('karte-seite').scrollIntoView({ block: 'nearest' });
+    });
+}
+const planNeuLaden = document.querySelector('[data-aktion="plan-neu-laden"]');
+if (planNeuLaden) {
+    planNeuLaden.addEventListener('click', () => { ansichtMerken(); window.location.reload(); });
+}
+
 // ------------------------------------------------------------------ Start
 
 await laden();
@@ -1345,6 +1464,18 @@ await liveLaden();
 setInterval(liveLaden, 5000);
 document.addEventListener('visibilitychange', () => { if (!document.hidden) { liveLaden(); } });
 PM.liveNeu = liveLaden;
+
+// Nach „neu laden“ (neu gerechneter Plan) wieder dort, wo man war.
+try {
+    const gemerkt = JSON.parse(sessionStorage.getItem('pm-karte-ansicht-' + etage) || 'null');
+    sessionStorage.removeItem('pm-karte-ansicht-' + etage);
+    karte.ansichtSetzen(gemerkt);
+} catch (e) { /* ohne sessionStorage: die Übersicht */ }
+// Wird gerade gerechnet (auch von jemand anderem angestoßen): gleich nachfragen.
+if (planNeu.OFFEN.includes(planZustand.zustand)) {
+    planAuftrag = true;
+    planAbfrage.start();
+}
 
 if (el.dataset.startModus === 'aufbau' && stand.aufbau && document.querySelector('[data-modus="aufbau"]')) { setModus('aufbau'); }
 const fokus = Number(el.dataset.fokus || 0);

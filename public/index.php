@@ -179,6 +179,9 @@ $router->post('/karte/massstab', [KarteController::class, 'massstab'], 'plans.ma
 $router->post('/karte/georeferenz', [KarteController::class, 'georeferenz'], 'plans.manage');
 $router->get('/grundriss/{id}/datei', [KarteController::class, 'planDatei'], 'karte.view');
 $router->get('/grundriss/{id}/kachel/{z}/{x}/{y}', [KarteController::class, 'planKachel'], 'karte.view');
+// Plan neu rechnen: anstoßen (Recht „Grundrisse verwalten“, dazu „bearbeiten“ am Standort) und nachfragen, wie weit es ist.
+$router->get('/grundriss/{id}/kacheln/stand', [KarteController::class, 'planStand'], 'karte.view');
+$router->post('/grundriss/{id}/neu-rechnen', [KarteController::class, 'planNeuRechnen'], 'plans.manage');
 
 // ---------------------------------------------------------------- Anlagen
 $router->get('/anlagen', [AnlagenController::class, 'index'], 'anlagen.view');

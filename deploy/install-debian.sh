@@ -593,6 +593,9 @@ PAKETE=(
     nginx php-fpm php-cli php-sqlite3 php-gd php-curl php-mbstring php-xml
     # rastert PDF-Grundrisse; ohne zeichnet sie der Browser (in Safari nur flach)
     poppler-utils
+    # prlimit: pdftoppm bekommt höchstens 1 GB Adressraum (PdfRasterService::SPEICHER).
+    # Auf Debian essenziell und immer installiert – genannt, weil die Grenze darauf baut.
+    util-linux
     git curl ca-certificates gnupg openssl logrotate
     # Werkzeuge für einen WireGuard-Tunnel im Container (Einrichtung: Doku)
     wireguard-tools

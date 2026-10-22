@@ -376,11 +376,17 @@ final class LocationBundle
      */
     public static function kachelnBauen(array $etagenIds): array
     {
+        // Jede Pyramide einmal – Etagen mit derselben Plandatei (und Seite) teilen sie sich.
         $faellig = [];
+        $pyramiden = [];
         foreach (array_unique(array_map('intval', $etagenIds)) as $etageId) {
             $etage = SiteService::floor($etageId);
-            if ($etage !== null && PlanTileService::lohnt((string) SiteService::planPath($etage))) {
+            if ($etage === null || isset($pyramiden[PlanTileService::planDir($etage)])) {
+                continue;
+            }
+            if (PlanTileService::lohnt((string) SiteService::planPath($etage))) {
                 $faellig[$etageId] = $etage;
+                $pyramiden[PlanTileService::planDir($etage)] = true;
             }
         }
         if ($faellig === []) {
@@ -391,6 +397,7 @@ final class LocationBundle
             return array_keys($faellig);
         }
         foreach (array_keys($faellig) as $etageId) {
+            // Nie neben einem anderen Bau (Speicher) – auf der Kommandozeile darf gewartet werden.
             PlanTileService::nacheinander(static function () use ($etageId): void {
                 // Während auf einen anderen Bau gewartet wurde, kann die Etage weg sein.
                 $etage = SiteService::floor($etageId);

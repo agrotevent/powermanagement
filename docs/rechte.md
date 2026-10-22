@@ -109,6 +109,7 @@ eine Freigabe mit *bearbeiten* – nicht nur eine, die ihn sichtbar macht:
 | Anlage anlegen, verlegen (auch über die Etage), ins Inventar einsetzen | „Anlagen ändern“ + *bearbeiten* für den Standort (bzw. für die Anlage) |
 | Kabel, Kabelweg, Kabelbrücke zeichnen, ändern, löschen | „Kabel zeichnen“ + *bearbeiten* für den Standort **oder** für eine Anlage an einem Kabelende; ein neues Kabelende steht auf der Etage des Kabels |
 | Etagen, Grundriss, Maßstab, Georeferenz | „Grundrisse pflegen“ + *bearbeiten* für den Standort |
+| Grundriss neu rechnen (Karte, Standorte) | „Grundrisse pflegen“ + *bearbeiten* für jeden Standort, dessen Etagen den Plan nutzen; den Zustand sieht jeder, der die Karte sieht |
 | ein Messgerät einer Anlage zuordnen | es darf gerade an keiner Anlage messen, die man nicht bearbeiten darf; ohne „alle Standorte“ bzw. „Datenquellen verwalten“ zählen seine Messwerte erst ab der Zuordnung |
 | ein Inventarstück einsetzen, das gerade woanders steckt | *bearbeiten* auch dort, wo es herauskommt |
 

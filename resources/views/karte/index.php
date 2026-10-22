@@ -1,11 +1,18 @@
 <?php
 use App\Services\AnlagenService;
 use App\Services\LeitungService;
+use App\Services\PlanTileService;
 use App\Support\View;
+use App\Support\Zeit;
 
 $title = 'Karte';
 $subtitle = $etage !== null ? $etage['site_name'] . ' · ' . $etage['name'] : 'Grundriss mit Anlagen und Kabelwegen';
 $darfSetzen = $darfAnlegen;
+// Plan neu rechnen: Zustand für alle (die Karte steigt nach dem Neurechnen um), Knopf und Fenster nur mit Recht.
+$planZustand = (string) ($plan['zustand'] ?? 'keiner');
+$planLaeuft = in_array($planZustand, PlanTileService::OFFEN, true);
+// Noch ohne Kacheln (ein PDF, das der Browser zeichnet, ein großes Bild am Stück): aufbereiten statt neu rechnen.
+$planAufbereiten = ($plan['art'] ?? '') !== 'kacheln';
 ?>
 <?php if ($etage === null): ?>
     <div class="card"><div class="card-body">
@@ -53,9 +60,17 @@ $darfSetzen = $darfAnlegen;
         <?php if ($geo !== null): ?>
             <button type="button" class="btn btn-sm" data-aktion="position" aria-pressed="false" title="Eigene GPS-Position im Plan zeigen">Hier bin ich</button>
         <?php endif; ?>
+        <?php if ($darfNeuRechnen): ?>
+            <button type="button" class="btn btn-sm" data-aktion="plan-neu" title="<?= $planAufbereiten ? 'Den Grundriss auf dem Server in Kacheln rechnen lassen' : 'Den Grundriss auf dem Server noch einmal in Kacheln rechnen lassen – die Karte bleibt so lange benutzbar' ?>"><?= $planAufbereiten ? 'Plan aufbereiten' : 'Plan neu rechnen' ?><?php if (!empty($plan['empfohlen'])): ?> <span class="badge warn">empfohlen</span><?php endif; ?></button>
+        <?php endif; ?>
         <a class="btn btn-sm" href="/karte/<?= (int) $etage['id'] ?>/material" target="_blank" rel="noopener" title="Material für den Aufbau dieser Etage: Anlagen, Kabelstücke, Kabelbrücken">Material</a>
         <button type="button" class="btn btn-sm" data-aktion="vollbild" title="Karte über die ganze Fläche">Vollbild</button>
     </div>
+</div>
+
+<div class="notice small plan-neu-hinweis" id="plan-neu-hinweis" role="status"<?= $planLaeuft ? '' : ' hidden' ?>>
+    <span data-text><?= $planLaeuft ? View::e((string) ($plan['zustand_text'] ?? '')) : '' ?></span>
+    <button type="button" class="btn btn-sm" data-aktion="plan-neu-laden" hidden>Neu laden</button>
 </div>
 
 <div class="karte-raster">
@@ -77,7 +92,9 @@ $darfSetzen = $darfAnlegen;
                  data-plan-max-zoom="<?= (int) ($plan['max_zoom'] ?? 3) ?>"
                  data-plan-kachel-url="<?= View::e((string) ($plan['kachel_url'] ?? '')) ?>"
                  data-plan-kachel="<?= (int) ($plan['kachel'] ?? 256) ?>"
-                 data-plan-zusatz="<?= (int) ($plan['zusatz'] ?? 2) ?>"></div>
+                 data-plan-zusatz="<?= (int) ($plan['zusatz'] ?? 2) ?>"
+                 data-plan-stand="<?= View::e((string) ($plan['stand'] ?? '')) ?>"
+                 data-plan-zustand="<?= View::e($planZustand) ?>"></div>
             <div class="karte-status" id="karte-status" aria-live="polite"></div>
         </div>
         <div class="karte-fuss">
@@ -138,5 +155,23 @@ $darfSetzen = $darfAnlegen;
     'schlauchtypen' => LeitungService::SCHLAUCHTYPEN,
     'kupplung'   => LeitungService::KUPPLUNG_VORGABE,
     'darf'       => ['setzen' => $darfSetzen, 'leitung' => $darfLeitung, 'massstab' => $darfMassstab, 'statistik' => View::can('statistik.view'),
-        'inventar' => View::can('datenquellen.view')],
+        'inventar' => View::can('datenquellen.view'), 'neuRechnen' => $darfNeuRechnen],
+    // Für das Fenster „Plan neu rechnen“ – nur, wer es darf.
+    'plan'       => $darfNeuRechnen ? [
+        'art'             => (string) $plan['art'],
+        'breite'          => (int) $plan['breite'],
+        'hoehe'           => (int) $plan['hoehe'],
+        'fassung'         => (int) ($plan['fassung'] ?? 0),
+        'fassung_aktuell' => PlanTileService::FASSUNG,
+        'qualitaet'       => (string) ($plan['qualitaet'] ?? 'standard'),
+        // Zur Wahl nur, wenn „fein“ den Plan deutlich schärfer machte – oder er schon fein ist.
+        'qualitaeten'     => !empty($plan['fein_moeglich']) || ($plan['qualitaet'] ?? '') === 'fein' ? [
+            ['wert' => 'standard', 'name' => PlanTileService::QUALITAETEN['standard']['name'], 'hinweis' => 'bis 200 Megapixel'],
+            ['wert' => 'fein', 'name' => PlanTileService::QUALITAETEN['fein']['name'], 'hinweis' => 'bis 400 Megapixel, etwa doppelt so lange und doppelt so viel Platz'],
+        ] : [],
+        'empfohlen'       => !empty($plan['empfohlen']),
+        'gebaut'          => !empty($plan['gebaut']) ? Zeit::anzeige((string) $plan['gebaut']) : '',
+        'dauer'           => (string) ($plan['dauer'] ?? ''),
+        'zustand_text'    => (string) ($plan['zustand_text'] ?? ''),
+    ] : null,
 ], JSON_UNESCAPED_UNICODE | JSON_HEX_TAG | JSON_HEX_AMP) ?></script>

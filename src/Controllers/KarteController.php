@@ -16,7 +16,9 @@ use App\Services\PlanGeoService;
 use App\Services\PlanMassstabService;
 use App\Services\PlanTileService;
 use App\Services\SiteService;
+use App\Support\Audit;
 use App\Support\Database;
+use App\Support\Flash;
 use App\Support\Request;
 use App\Support\Response;
 use App\Support\Session;
@@ -129,6 +131,7 @@ final class KarteController extends Controller
             'darfLeitung'  => Auth::can('leitungen.manage') && $siteId !== null && (Zugriff::darfStandortAendern($siteId)
                 || array_filter(AnlagenService::liste(['site_id' => $siteId]), static fn ($o) => Zugriff::bearbeitetObjekt($o)) !== []),
             'darfMassstab' => Auth::can('plans.manage') && $siteId !== null && Zugriff::darfStandortAendern($siteId),
+            'darfNeuRechnen' => $etage !== null && !empty($quelle['neu_rechenbar']) && $this->darfPlanRechnen($etage),
             'fokus'        => $request->int('anlage'),
             'stylesheets'  => ['/assets/vendor/leaflet/leaflet.css'],
             'scripts'      => ['/assets/vendor/leaflet/leaflet.js', '/assets/js/live.js', '/assets/js/module/karte.js'],
@@ -282,7 +285,9 @@ final class KarteController extends Controller
         // Nur lesen, und das regelmäßig – die Sitzung nicht gesperrt halten.
         Session::freigeben();
         $objekte = Zugriff::filtern(AnlagenService::liste(['floor_id' => (int) $etage['id']]));
-        $this->json(['ts' => time(), 'objekte' => LiveService::fuerObjekte($objekte)]);
+        // Der Stand des Grundrisses: Wurde er neu gerechnet (auch von jemand
+        // anderem), steigt die Karte um (karte.js, planStand) – kostet 0,02 ms.
+        $this->json(['ts' => time(), 'objekte' => LiveService::fuerObjekte($objekte), 'plan_stand' => PlanTileService::aktuellerStand($etage)]);
     }
 
     /** Materialliste der ganzen Etage zum Drucken. */
@@ -642,15 +647,133 @@ final class KarteController extends Controller
         if ($etage === null) {
             return;
         }
-        $kachel = PlanTileService::kachel($etage, (int) $params['z'], (int) $params['x'], (int) $params['y']);
+        // Ab hier wird nur gelesen. Eine Ansicht holt Dutzende Kacheln
+        // zugleich, und jede hielte sonst die Sitzungsdatei, bis sie fertig ist.
+        Session::freigeben();
+        // Der Stand der Pyramide aus der Adresse (PlanTileService::stand()).
+        $v = $request->str('v');
+        $stand = $v !== '' ? $v : null;
+        $kachel = PlanTileService::kachel($etage, (int) $params['z'], (int) $params['x'], (int) $params['y'], $stand);
         if ($kachel === null) {
+            // Auch eine Kachel eines älteren Stands: Der Plan wurde inzwischen
+            // neu gerechnet. Lieber eine Lücke in einer offenen Karte als ein
+            // Ausschnitt der neuen Pyramide an der Stelle der alten.
+            header('Cache-Control: no-store');
             http_response_code(404);
             return;
         }
+        /*
+         * session_start() hat „Pragma: no-cache“ und ein Ablaufdatum von 1981
+         * gesetzt. Chrome nimmt Pragma auch neben Cache-Control ernst – es
+         * hielt deshalb keine einzige Kachel, und jede Ansicht lud alles neu.
+         * Mit Stand in der Adresse ändert sich eine Kachel nie mehr: ein Jahr
+         * im Browser. Ohne (eine Seite von vor dem Update) jedes Mal fragen.
+         */
+        header_remove('Pragma');
+        header_remove('Expires');
         header('Content-Type: ' . $kachel['mime']);
         header('Content-Length: ' . (string) filesize($kachel['pfad']));
         header('X-Content-Type-Options: nosniff');
-        header('Cache-Control: private, max-age=86400, immutable');
+        header('Cache-Control: ' . ($stand !== null ? 'private, max-age=31536000, immutable' : 'private, no-cache'));
         readfile($kachel['pfad']);
+    }
+
+    // ------------------------------------------------------- Plan neu rechnen
+
+    /**
+     * Darf der Benutzer den Plan dieser Etage neu rechnen lassen? Das Recht
+     * „Grundrisse verwalten“ (plans.manage) prüft die Route; dazu braucht es
+     * „bearbeiten“ an jedem Standort, dessen Etagen sich die Pyramide teilen
+     * – neu gerechnet ändert sie sich für alle.
+     */
+    private function darfPlanRechnen(array $etage): bool
+    {
+        if (!Auth::can('plans.manage')) {
+            return false;
+        }
+        foreach (PlanTileService::etagenMitPyramide($etage) ?: [['site_id' => (int) $etage['site_id']]] as $f) {
+            if (!Zugriff::darfStandortAendern((int) $f['site_id'])) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /** Antwort als JSON mit $status – oder als Meldung mit Rücksprung (Formular der Standortseite). */
+    private function planAntwort(Request $request, array $ergebnis, int $status, string $ziel): void
+    {
+        if ($request->wantsJson()) {
+            $this->json($ergebnis, $status);
+            return;
+        }
+        !empty($ergebnis['ok']) ? Flash::success((string) $ergebnis['message']) : Flash::error((string) $ergebnis['message']);
+        $this->redirect(Response::zurueckZiel($ziel));
+    }
+
+    /**
+     * „Plan neu rechnen“: stößt den Bau im Hintergrund an und ist sofort
+     * zurück (PlanTileService::neuRechnenAnfordern()) – gerechnet wird in
+     * einen neuen Ordner, die Karte bleibt so lange benutzbar.
+     */
+    public function planNeuRechnen(Request $request, array $params): void
+    {
+        $etage = SiteService::floor((int) $params['id']);
+        $ziel = '/karte?etage=' . (int) $params['id'];
+        // Nicht da oder nicht sichtbar: dieselbe Antwort – wer den Standort nicht sieht, erfährt nichts über ihn.
+        if ($etage === null || !Zugriff::siehtStandort((int) $etage['site_id'])) {
+            $this->planAntwort($request, ['ok' => false, 'message' => 'Diese Etage gibt es nicht.'], 404, '/standorte');
+            return;
+        }
+        if (!$this->darfPlanRechnen($etage)) {
+            $this->planAntwort($request, ['ok' => false, 'message' => 'Diesen Plan darfst du nicht neu rechnen lassen – dafür braucht es „bearbeiten“ an jedem Standort, der ihn nutzt.'], 403, $ziel);
+            return;
+        }
+        $wunsch = $request->str('qualitaet');
+        if ($wunsch !== '' && !isset(PlanTileService::QUALITAETEN[$wunsch])) {
+            $this->planAntwort($request, ['ok' => false, 'message' => 'Diese Qualität gibt es nicht.'], 422, $ziel);
+            return;
+        }
+        $quelle = PlanTileService::quelle($etage);
+        if (empty($quelle['neu_rechenbar'])) {
+            $this->planAntwort($request, ['ok' => false, 'message' => $quelle === null
+                ? 'Für diese Etage ist kein Grundriss hinterlegt.'
+                : 'Dieser Plan wird nicht gekachelt (SVG, kleines Bild oder es fehlt ein Werkzeug auf dem Server) – da gibt es nichts neu zu rechnen.'], 422, $ziel);
+            return;
+        }
+
+        $meta = PlanTileService::meta($etage);
+        $ergebnis = Session::ohneSperre(static fn (): array => PlanTileService::neuRechnenAnfordern($etage, $wunsch !== '' ? $wunsch : null));
+        if ($ergebnis['neu']) {
+            Audit::log('plan.neu_rechnen', 'floor', (string) $etage['id'], [
+                'etagen'         => array_column(PlanTileService::etagenMitPyramide($etage), 'id'),
+                'qualitaet'      => $wunsch !== '' ? $wunsch : PlanTileService::qualitaet($meta['qualitaet'] ?? null),
+                'fassung_vorher' => $meta !== null ? PlanTileService::fassung($meta) : null,
+                'stand_vorher'   => $meta !== null ? PlanTileService::stand($meta) : null,
+            ]);
+        }
+        $status = PlanTileService::status($etage);
+        $this->planAntwort($request, $ergebnis + ['zustand' => $status['zustand'], 'zustand_text' => $status['meldung']], $ergebnis['ok'] ? 200 : 422, $ziel);
+    }
+
+    /**
+     * Wie weit ist das Neurechnen? Für die Karte, die danach fragt, solange
+     * gerechnet wird – je Abfrage erst nach der Antwort auf die vorige
+     * (karte.js). Gibt zuerst die Sitzung frei: Das wird regelmäßig gefragt
+     * und darf andere Anfragen desselben Browsers nie aufhalten.
+     */
+    public function planStand(Request $request, array $params): void
+    {
+        Session::freigeben();
+        header('Cache-Control: no-store');
+        $etage = SiteService::floor((int) $params['id']);
+        if ($etage === null) {
+            $this->json(['ok' => false, 'message' => 'Diese Etage gibt es nicht.'], 404);
+            return;
+        }
+        if (!Zugriff::siehtStandort((int) $etage['site_id'])) {
+            $this->json(['ok' => false, 'message' => 'Dieser Standort ist für dich nicht freigegeben.'], 403);
+            return;
+        }
+        $this->json(['ok' => true] + PlanTileService::status($etage));
     }
 }

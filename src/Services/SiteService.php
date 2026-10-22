@@ -40,9 +40,11 @@ final class SiteService
      * So viele Sekunden kachelt der Upload selbst, bevor er antwortet.
      *
      * Ein gewöhnlicher Plan ist in dieser Zeit fertig. Ein 100-MB-Plan
-     * nicht: gemessen 73 Sekunden für einen eingebetteten Scan, 270 für
-     * eine A0-Seite mit 104 MB Vektordaten, eine halbe Stunde für 60
-     * Seiten. Was dann noch fehlt, rechnet ein eigener Prozess weiter
+     * nicht: gemessen (Fassung 2 der Kacheln, bis 200 Megapixel) 96
+     * Sekunden für einen eingescannten A0-Plan mit 91 MB, 196 für eine
+     * A0-Seite mit 97 MB Vektordaten; ein leichter A0-Plan braucht schon
+     * eine Minute, 60 Seiten weit über eine halbe Stunde. Was dann noch
+     * fehlt, rechnet ein eigener Prozess weiter
      * (PlanTileService::imHintergrund) – der Browser wartet nicht, bis
      * nginx aufgibt.
      */
@@ -386,16 +388,19 @@ final class SiteService
          * Pläne gleich in Kacheln zerlegen – dann ist der erste Aufruf der
          * Karte so schnell wie jeder weitere.
          *
-         * Und zwar für *jede* betroffene Etage, nicht nur bis die erste
-         * geklappt hat: bei einem mehrseitigen PDF hat jede Seite ihre
-         * eigene Pyramide. Sonst rastert die Grundriss-Seite Seite 2 beim
-         * ersten Öffnen nach – und steht dabei eine Viertelminute.
+         * Und zwar für *jede* Pyramide, nicht nur bis die erste geklappt
+         * hat: bei einem mehrseitigen PDF hat jede Seite ihre eigene. Sonst
+         * rastert die Grundriss-Seite Seite 2 beim ersten Öffnen nach – und
+         * steht dabei eine Viertelminute. Etagen mit derselben Datei (und
+         * Seite) teilen sich eine Pyramide – die wird einmal gerechnet
+         * (gemessen sonst dasselbe Bild zweimal: 9,5 statt 5,3 s).
          */
         $gebaut  = 0;
         $kachelN = 0;
         $klemmt  = '';
         $namen   = [];
         $spaeter = [];
+        $pyramiden = [];
         $grossesBild = $extension !== 'pdf' && $extension !== 'svg' && PlanTileService::ueberGd($target);
         $bis = microtime(true) + Anfragezeit::hoechstens((float) ($options['kachelzeit'] ?? self::KACHELZEIT_IM_UPLOAD));
         foreach ($floorIds as $floorId) {
@@ -404,15 +409,34 @@ final class SiteService
                 continue;
             }
             $namen[] = (string) $etage['name'];
+            $pyramide = PlanTileService::planDir($etage);
+            if (isset($pyramiden[$pyramide])) {
+                continue;
+            }
+            $pyramiden[$pyramide] = true;
 
-            // Die Zeit im Upload ist um: der Rest kommt in den Hintergrund.
-            if (microtime(true) > $bis) {
+            // Die Zeit im Upload ist um – oder inzwischen hat ein Update begonnen (dieser
+            // Upload kam vor der Schreibsperre, das Update wartet auf ihn, und während eines
+            // Updates beginnt kein Plan, PlanTileService::updateDazwischen()): der Rest kommt
+            // in den Hintergrund, nach dem Update rechnet ihn powermanagement-kacheln.
+            if (microtime(true) > $bis || UpdateService::wartungAktiv()) {
                 if (PlanTileService::lohnt($target)) {
                     $spaeter[] = (int) $floorId;
                 }
                 continue;
             }
-            $ergebnis = PlanTileService::bauen($etage, true, true, $bis);
+            /*
+             * Nie neben einem anderen Bau (PlanTileService::nacheinander()):
+             * Rechnet gerade einer – der Hintergrund am vorigen Upload –,
+             * wartet die Anfrage nicht, sondern gibt den Plan gleich mit in
+             * den Hintergrund. Gemessen liefen sonst bei zwei Uploads
+             * nacheinander zwei Bauten mit je 297 MB bei pdftoppm (zusammen
+             * 1 GB, mit progressivem JPEG 1,8 GB). Was keine Kacheln bekommt,
+             * sagt bauen() gleich (und warum).
+             */
+            $ergebnis = !PlanTileService::lohnt($target) ? PlanTileService::bauen($etage, true, true, $bis)
+                : PlanTileService::nacheinander(static fn (): array => PlanTileService::bauen($etage, true, true, $bis), null, microtime(true))
+                    ?? ['ok' => false, 'abgebrochen' => true, 'kacheln' => 0, 'meta' => null, 'message' => ''];
             if (!empty($ergebnis['abgebrochen'])) {
                 $spaeter[] = (int) $floorId;
             } elseif ($ergebnis['ok'] && $ergebnis['kacheln'] > 0) {
@@ -431,7 +455,7 @@ final class SiteService
             // Ins Protokoll, nicht ins Audit: das ist geschrieben (oben), und
             // der Bau im Hintergrund schreibt seine Zeilen nach kacheln.log.
             Logger::info('Grundriss: Kacheln im Hintergrund', ['standort' => $siteId, 'etagen' => $spaeter]);
-            $wieviele = count($spaeter) > 1 ? count($spaeter) . ' Etagen' : 'diesen Plan';
+            $wieviele = count($spaeter) > 1 ? count($spaeter) . ' Seiten' : 'diesen Plan';
             $kacheln .= PlanTileService::imHintergrund($spaeter)
                 ? sprintf(' Die Kacheln für %s rechnet der Server im Hintergrund weiter – bei so einem Plan einige Minuten.'
                     . ' Bis dahin zeichnet der Browser den Plan selbst (langsamer, weniger scharf); danach die Karte neu laden.', $wieviele)
@@ -684,13 +708,13 @@ final class SiteService
         }
         $pruefung = BildPdf::pruefen($pfad);
         if (!$pruefung['ok']) {
-            return sprintf('Das Bild hat %s. Über %d Megapixel rechnet der Server es mit poppler herunter, und dafür muss es so gespeichert sein: '
+            return sprintf('Das Bild hat %s. Über %d Megapixel bereitet der Server es mit poppler auf, und dafür muss es so gespeichert sein: '
                 . 'JPEG nicht progressiv, in RGB oder Graustufen – PNG ohne Transparenz und ohne Zeilensprung. %s '
                 . 'Anders gespeichert oder auf höchstens %d Megapixel verkleinert klappt es.',
                 $wie, intdiv(PlanTileService::MAX_PIXEL, 1_000_000), $pruefung['grund'], intdiv(PlanTileService::MAX_PIXEL, 1_000_000));
         }
         if (!PdfRasterService::verfuegbar()) {
-            return sprintf('Das Bild hat %s. Über %d Megapixel rechnet der Server es mit poppler herunter. %s',
+            return sprintf('Das Bild hat %s. Über %d Megapixel bereitet der Server es mit poppler auf. %s',
                 $wie, intdiv(PlanTileService::MAX_PIXEL, 1_000_000), PdfRasterService::werkzeug()['hinweis']);
         }
         return null;

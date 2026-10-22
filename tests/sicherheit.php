@@ -208,6 +208,13 @@ try {
         pruefe(!str_contains($quelle, 'innerHTML') && !str_contains($quelle, 'insertAdjacentHTML') && !str_contains($quelle, 'outerHTML'),
             basename($datei) . ' setzt kein HTML aus Daten');
     }
+    // Plan neu rechnen: Fenster und Meldungen (Zustand vom Server) nur per textContent – in plan-neu.js
+    // und im Abschnitt von karte.js, der sie zeigt (karte.js baut seine übrigen Fenster mit esc()).
+    $planNeu = (string) file_get_contents($js . 'module/plan-neu.js');
+    $abschnitt = preg_match('#// -+ Plan neu rechnen\n(.*?)// -+ Start\n#s', (string) file_get_contents($js . 'module/karte.js'), $m) === 1 ? $m[1] : '';
+    pruefe($abschnitt !== '' && preg_match('/innerHTML|outerHTML|insertAdjacentHTML/', $planNeu . $abschnitt) === 0
+        && str_contains($abschnitt, '.textContent = ') && str_contains($planNeu, 'textContent'),
+        'plan-neu.js und „Plan neu rechnen“ in karte.js setzen kein HTML aus Daten');
     // Unterschriften nur als Linie: keine Zeit, kein Druck, keine Neigung im Erfassungscode.
     pruefe(preg_match('/pressure|timeStamp|Date\.now|performance\.now|tiltX|tiltY|twist|tangential/', (string) file_get_contents($js . 'unterschrift.js')) === 0,
         'unterschrift.js liest weder Zeit noch Druck');

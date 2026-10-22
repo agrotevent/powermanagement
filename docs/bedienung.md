@@ -91,6 +91,8 @@ vorhanden ist.
 
 **Material** (oben in der Werkzeugleiste) öffnet die Materialliste der
 ganzen Etage zum Drucken – siehe [Materialliste](#materialliste).
+**Plan neu rechnen** lässt den Server den Grundriss noch einmal in Kacheln
+rechnen, etwa wenn er zu unscharf ist – siehe [Plan neu rechnen](#plan-neu-rechnen).
 
 Beim Zeichnen (Kabel, Kabelweg, Kabelbrücke, Maßstab, Georeferenz) setzt
 ein Tipp auf eine vorhandene Linie einen Punkt – so lässt sich ein Kabel
@@ -940,23 +942,95 @@ eine zu große Datei schon beim Auswählen, bevor sie über die Leitung geht.
 Größere PDFs werden meist deutlich kleiner, wenn eingebettete Bilder mit
 geringerer Auflösung exportiert werden.
 
-- **Aufbereiten:** Der Server rechnet jeden Plan einmal in Kacheln (höchstens
-  50 Megapixel, also etwa 7 000 × 7 000 Pixel). Ein gewöhnlicher Plan ist
-  beim Hochladen gleich fertig. Bei großen Plänen antwortet der Upload nach
-  rund einer halben Minute und rechnet im Hintergrund weiter – gemessen
-  ein bis vier Minuten für eine Seite mit 100 MB, länger für viele Seiten.
-  Bis dahin zeichnet der Browser den Plan selbst (langsamer, weniger
-  scharf); danach die Karte neu laden. Pläne aus dem Location-Abgleich oder
-  von einer anderen Instanz rechnet immer der Hintergrund; mehrere große
-  Pläne kommen nacheinander dran.
+- **Aufbereiten:** Der Server rechnet jeden Plan einmal in Kacheln. Ein PDF
+  bekommt rund 360 dpi (5 Pixel je Punkt), höchstens 200 Megapixel: A0 fast
+  ganz (16 773 × 11 924 Pixel), ein Geländeplan von 2 × 1 m rund 250 dpi.
+  Steckt ein eingescannter Plan im PDF, wird die Seite nur so groß, dass
+  der Scan bei 80 Megapixeln bleibt (sonst bräuchte poppler über 600 MB
+  Speicher). Ein gewöhnlicher Plan ist beim Hochladen gleich fertig. Bei
+  großen Plänen antwortet der Upload nach rund einer halben Minute und
+  rechnet im Hintergrund weiter – gemessen ein bis vier Minuten für eine
+  Seite mit 100 MB, länger für viele Seiten. Bis dahin zeichnet der
+  Browser den Plan selbst (langsamer, weniger scharf); danach die Karte neu
+  laden. Pläne aus dem Location-Abgleich oder von einer anderen Instanz
+  rechnet immer der Hintergrund; mehrere große Pläne kommen nacheinander
+  dran.
+- **Übersicht und Lesestufe:** Auch die Zoomstufen unter der feinsten
+  rechnet poppler bei einem PDF selbst – Haarlinien bleiben in der
+  Übersicht wie in einem PDF-Betrachter zu sehen, und Linien und Schrift
+  sind auf der Stufe, auf der man gewöhnlich liest, so kräftig wie im PDF,
+  statt blass gemittelt. Pläne, die vor dieser Fassung gerechnet wurden, zeigt die
+  Karte weiter; schärfer werden sie mit **Plan neu rechnen** (siehe
+  unten), die nächtliche Wartung rechnet sie nach und nach selbst neu.
+  *Fein* rechnet ein PDF bis 400 Megapixel (der Geländeplan mit vollen
+  360 dpi) – doppelt so lange, doppelt so viel Platte.
+- **Anzeige:** Die Karte holt die Kacheln passend zur Pixeldichte des
+  Bildschirms – am Tablet und Telefon die feinere Stufe, die der Bildschirm
+  auch zeigen kann, statt eine gröbere zu vergrößern – und zeigt jede
+  Kachel ungestreckt. Dafür lädt eine Ansicht am Telefon mehr Kacheln als
+  früher; der Browser behält sie aber, ein zweiter Besuch kommt ohne Server
+  aus. Wird ein Plan neu gerechnet, bekommen seine Kacheln neue Adressen –
+  der Browser hält keine alten fest.
 - **Ersetzen:** Ein neuer Plan auf einer Etage ersetzt den alten; wird der
   alte von keiner Etage mehr genutzt, löscht der Server ihn samt Kacheln.
-- **Große Bilder:** PNG und JPEG über 50 Megapixel rechnet der Server mit
-  poppler herunter, ohne sie ganz in den Speicher zu laden. Dafür muss ein
+  Mehrere Etagen mit derselben Datei teilen sich die Kacheln – gerechnet
+  wird einmal.
+- **Große Bilder:** PNG und JPEG über 50 Megapixel bereitet der Server mit
+  poppler auf, ohne sie ganz in den Speicher zu laden – bis 80 Megapixel in
+  Originalgröße, darüber verkleinert. Ein Scan wird JPEG-Kacheln, ein
+  sauberer CAD-Export verlustfreie (WebP oder PNG). Dafür muss ein
   JPEG *nicht progressiv* und in RGB oder Graustufen gespeichert sein, ein
   PNG ohne Transparenz und ohne Zeilensprung (interlaced); über 400
   Megapixel nimmt der Upload kein Bild an. Was nicht passt, lehnt der Upload
   mit dem Grund ab – anders speichern, verkleinern oder als PDF hochladen.
+
+### Plan neu rechnen
+
+Ist die Karte zu unscharf – etwa ein Plan, der vor der jetzigen Fassung der
+Kacheln gerechnet wurde –, rechnet der Server ihn noch einmal. Dafür gibt
+es in der Werkzeugleiste der Karte **Plan neu rechnen** (bei einem Plan,
+der noch gar keine Kacheln hat – ein PDF oder ein großes Bild, dessen
+Aufbereiten etwa durch einen Neustart des Servers abbrach: **Plan
+aufbereiten**) und unter **Standorte** in der Spalte *Grundriss* den Knopf
+**Neu rechnen** bzw. **Aufbereiten**. Dort
+steht auch, wie der Plan jetzt gerechnet ist: „Kacheln 8.386 × 5.962 px ·
+Fassung 1“.
+
+- **Wer:** wer *Grundrisse verwalten* darf und am Standort *bearbeiten*
+  freigegeben hat – wie bei Maßstab und Georeferenz. Teilen sich Etagen
+  mehrerer Standorte einen Plan, braucht es *bearbeiten* an jedem. Wer den
+  Standort nur sieht, bekommt den Knopf nicht.
+- **Empfohlen:** Ist der Plan mit einer älteren Fassung gerechnet, trägt
+  der Knopf das Abzeichen *empfohlen*. Das Fenster daneben nennt Maße,
+  Fassung, Qualität und wie lange es zuletzt gedauert hat. *Fein* steht
+  nur zur Wahl, wenn es den Plan deutlich schärfer machte.
+- **Die Karte bleibt benutzbar.** Gerechnet wird im Hintergrund in einen
+  eigenen Ordner; bis alles fertig ist, zeigt die Karte den bisherigen
+  Plan. Über der Karte steht, wie weit es ist („Wartet, bis ein anderer
+  Plan fertig gerechnet ist“, „Wird gerechnet“). Danach steigt sie von
+  selbst auf den neuen Plan um – auch bei allen anderen, die die Karte
+  gerade offen haben. Liegt der neue Plan anders im Raster (selten), steht
+  dort **Neu laden**; die Karte kommt danach wieder an dieselbe Stelle, in
+  derselben Größe.
+  Anlagen, Kabel, Maßstab und Georeferenz bleiben, wo sie sind.
+- **Dauer:** einige Sekunden für einen gewöhnlichen Plan, rund eine Minute
+  für einen A0-Plan, bis zu vier Minuten für ein PDF mit 100 MB. Es rechnet
+  immer nur ein Plan zugleich, alle angestoßenen kommen nacheinander dran;
+  wer warten muss, sieht es. Wird der Platz auf dem Server knapp (unter
+  256 MB frei), rechnet er keinen Plan weiter – der bisherige bleibt.
+- **Geht etwas schief** (ein kaputtes PDF, der Server wird neu gestartet),
+  bleibt der bisherige Plan, wie er war. Ein abgebrochenes Neurechnen
+  holt die nächtliche Wartung nach.
+- **Nachts:** Die Wartung rechnet Pläne einer älteren Fassung von selbst
+  neu – die schnellsten zuerst, höchstens 20 Minuten je Nacht, mit
+  niedriger Priorität und nie in das Fenster der automatischen Updates
+  hinein.
+- **Während eines Updates** ist der Knopf gesperrt wie jede Änderung;
+  angestoßene Pläne warten und kommen danach dran (*Update*, unten).
+
+Auf der Kommandozeile: `bin/power plan:kacheln --neu --etage=<id>` (eine
+Etage), `--veraltet` (alle einer älteren Fassung), `--qualitaet=fein`,
+`--nachholen` (offene Aufträge und fehlende Kacheln, wie nach einem Update).
 
 **Location-Abgleich** arbeitet mit demselben Git-Repository wie MasterAdmin
 (`locations/<schlüssel>/location.json` und `plaene/`):
@@ -1198,7 +1272,21 @@ Anmelden über Authentik geht in dieser Zeit nicht – die Anmeldeseite sagt
 ist, bleibt es ([anmeldung-sso.md](anmeldung-sso.md#während-eines-updates)).
 Andere Instanzen bekommen über die
 Schnittstelle dieselbe Antwort (HTTP 503) – wer dort sendet, schickt es nach
-einer Minute noch einmal. Geht etwas schief, kommt der alte Stand von selbst zurück –
+einer Minute noch einmal.
+
+*Grundrisse während des Updates:* Die Karte bleibt benutzbar. **Plan neu
+rechnen** ist gesperrt wie jede Änderung; ein Plan, der gerade gerechnet
+wird, rechnet zu Ende, angestoßene Pläne „warten, bis das Update
+eingespielt ist“ und kommen danach von selbst dran, auch wenn das Update
+scheitert und zurückrollt – ebenso Pläne, deren Kacheln noch fehlen. Bringt
+das Update eine neue, schärfere Fassung der Kacheln, bleiben die
+vorhandenen Pläne, wie sie sind, und tragen „neu rechnen empfohlen“: Die
+nächtliche Wartung rechnet sie nach und nach (bis 20 Minuten je Nacht, nie
+in das Fenster der automatischen Updates hinein), oder man drückt **Plan
+neu rechnen** – nicht alle auf einmal gleich nach dem Update, das würde
+einen kleinen Server lange auslasten.
+
+Geht etwas schief, kommt der alte Stand von selbst zurück –
 Code, Datenbank und Einrichtung. Läuft gerade ein Aufbau oder wurde in den
 letzten 30 Minuten geschaltet, nennt die Seite das und verlangt das
 Kästchen **Trotzdem jetzt aktualisieren**. Ist der Knopf gesperrt, steht

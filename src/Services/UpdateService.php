@@ -616,18 +616,25 @@ final class UpdateService
         });
     }
 
+    /** Eine kleine Datei unter .git (höchstens $max Byte, ohne Leerraum am Rand) – leer, wenn es sie nicht gibt. */
+    private static function gitDatei(string $pfad, int $max = 1024): string
+    {
+        return @is_file($pfad) ? trim((string) @file_get_contents($pfad, false, null, 0, $max)) : '';
+    }
+
     /**
-     * HEAD aus .git lesen – Dateien, kein Prozess: HEAD → refs/heads/<zweig>
-     * → packed-refs. Auch eine Arbeitskopie mit „.git“ als Datei (worktree).
+     * Wo git liegt: [Verzeichnis dieser Arbeitskopie, gemeinsames
+     * Verzeichnis] – Dateien, kein Prozess. Bei einer Arbeitskopie mit
+     * „.git“ als Datei (worktree) liegen HEAD und sein Reflog in ihrem
+     * eigenen Verzeichnis, Zweige und packed-refs im gemeinsamen.
      *
-     * @return array{commit:?string, zweig:?string}|null
+     * @return array{0:string,1:string}|null
      */
-    private static function ausGit(): ?array
+    private static function gitOrdner(): ?array
     {
         $git = (string) Config::get('update.git_verzeichnis', APP_ROOT . '/.git');
-        $klein = static fn (string $pfad, int $max = 1024): string => @is_file($pfad) ? trim((string) @file_get_contents($pfad, false, null, 0, $max)) : '';
         if (@is_file($git)) {
-            if (preg_match('#^gitdir: (/[^\n]+)$#', $klein($git), $m) !== 1) {
+            if (preg_match('#^gitdir: (/[^\n]+)$#', self::gitDatei($git), $m) !== 1) {
                 return null;
             }
             $git = $m[1];
@@ -636,10 +643,53 @@ final class UpdateService
             return null;
         }
         $gemeinsam = $git;
-        if (($c = $klein($git . '/commondir')) !== '' && !str_contains($c, "\n")) {
+        if (($c = self::gitDatei($git . '/commondir')) !== '' && !str_contains($c, "\n")) {
             $gemeinsam = str_starts_with($c, '/') ? $c : $git . '/' . $c;
         }
-        $head = $klein($git . '/HEAD');
+        return [$git, $gemeinsam];
+    }
+
+    /**
+     * Der letzte Eintrag im Reflog von HEAD, als Prüfsumme (er nennt, wer
+     * auscheckte) – null ohne Reflog. Jedes Auschecken hängt einen an: ein
+     * Update von der Konsole wie eines über den Helfer, auch ein
+     * Zurückrollen auf denselben Commit. Für Prozesse, die merken wollen, ob
+     * seit ihrem Start Code ausgecheckt wurde
+     * (PlanTileService::updateDazwischen()). Gelesen werden nur die letzten
+     * 4 KB, ohne git-Prozess und ohne Merker.
+     */
+    public static function kopfZuletzt(): ?string
+    {
+        $ordner = self::gitOrdner();
+        if ($ordner === null) {
+            return null;
+        }
+        $pfad = $ordner[0] . '/logs/HEAD';
+        clearstatcache(true, $pfad);
+        if (!@is_file($pfad)) {
+            return null;
+        }
+        $groesse = (int) @filesize($pfad);
+        $ende = rtrim((string) @file_get_contents($pfad, false, null, max(0, $groesse - 4096), 4096), "\n");
+        $ab = strrpos($ende, "\n");
+        $letzte = $ab === false ? $ende : substr($ende, $ab + 1);
+        return $letzte !== '' ? hash('sha256', $letzte) : null;
+    }
+
+    /**
+     * HEAD aus .git lesen – Dateien, kein Prozess: HEAD → refs/heads/<zweig>
+     * → packed-refs. Auch eine Arbeitskopie mit „.git“ als Datei (worktree).
+     *
+     * @return array{commit:?string, zweig:?string}|null
+     */
+    private static function ausGit(): ?array
+    {
+        $ordner = self::gitOrdner();
+        if ($ordner === null) {
+            return null;
+        }
+        [$git, $gemeinsam] = $ordner;
+        $head = self::gitDatei($git . '/HEAD');
         if (preg_match(self::SHA, $head) === 1) {
             return ['commit' => $head, 'zweig' => null];
         }
@@ -651,12 +701,12 @@ final class UpdateService
         $ref = $m[1];
         $zweig = substr($ref, strlen('refs/heads/'));
         foreach (array_unique([$git, $gemeinsam]) as $dir) {
-            $wert = $klein($dir . '/' . $ref, 128);
+            $wert = self::gitDatei($dir . '/' . $ref, 128);
             if (preg_match(self::SHA, $wert) === 1) {
                 return ['commit' => $wert, 'zweig' => $zweig];
             }
         }
-        $gepackt = $klein($gemeinsam . '/packed-refs', 4 * 1024 * 1024);
+        $gepackt = self::gitDatei($gemeinsam . '/packed-refs', 4 * 1024 * 1024);
         foreach (explode("\n", $gepackt) as $zeile) {
             if (preg_match('/^([0-9a-f]{40}) (\S+)$/', trim($zeile), $p) === 1 && $p[2] === $ref) {
                 return ['commit' => $p[1], 'zweig' => $zweig];

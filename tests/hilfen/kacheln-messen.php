@@ -3,8 +3,9 @@ declare(strict_types=1);
 
 /**
  * Kacheln einer Etage in einem eigenen Prozess bauen und messen: Zeit,
- * PHP-Speicher und die Spitze des ganzen Prozesses (VmHWM – dort zählt
- * auch, was gd außerhalb von memory_limit hält). Ausgabe als JSON.
+ * PHP-Speicher, die Spitze des ganzen Prozesses (VmHWM – dort zählt
+ * auch, was gd außerhalb von memory_limit hält) und die des größten
+ * Kindprozesses (pdftoppm). Ausgabe als JSON.
  *
  * Aufruf: php -d memory_limit=512M tests/hilfen/kacheln-messen.php <etage-id>
  */
@@ -30,4 +31,7 @@ fwrite(STDOUT, (string) json_encode([
     'php_mb'    => round(memory_get_peak_usage(true) / 1048576),
     // ohne /proc (kein Linux) bleibt es bei null
     'prozess_mb' => isset($m[1]) ? round(((int) $m[1]) / 1024) : null,
+    // der größte Kindprozess (pdftoppm) – Linux zählt dabei mit, was dieser
+    // Prozess beim Abzweigen hielt; es ist also eine Obergrenze
+    'kind_mb'    => PHP_OS_FAMILY === 'Linux' ? round(getrusage(1)['ru_maxrss'] / 1024) : null,
 ]));
