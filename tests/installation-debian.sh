@@ -247,6 +247,20 @@ fortschritt_abwarten() {
     return 1
 }
 # einheit_abwarten <einheit>: bis sie nicht mehr läuft (≤ 1200 s)
+# lauf_toeten: Absturz des Laufs bei laufendem systemd – alle Prozesse der
+# Einheit auf einmal mit SIGKILL (Momentaufnahme der cgroup). Nicht
+# systemctl kill: das tötet die cgroup als Ganzes (cgroup.kill) und trifft
+# auch den Nachlauf (ExecStopPost), den systemd gleich nach dem Ende des
+# Hauptprozesses startet – im Journal „Control process exited, code=killed“.
+lauf_toeten() {
+    local cg pids=() p
+    cg="/sys/fs/cgroup$(systemctl show -p ControlGroup --value powermanagement-update.service)"
+    while read -r p; do
+        [[ -n "$p" ]] && pids+=("$p")
+    done < "$cg/cgroup.procs"
+    (( ${#pids[@]} )) || return 1
+    kill -9 "${pids[@]}" 2>/dev/null || true
+}
 einheit_abwarten() {
     for _ in $(seq 1 1200); do
         case "$(systemctl is-active "$1" 2>/dev/null || true)" in
@@ -1253,7 +1267,7 @@ pruefe "Update über die Oberfläche angefordert" ueber_oberflaeche "$NEU"
 pruefe "Fortschritt erreicht den Abgleich" ist_schritt_abwarten 8
 LAUF_VORHER="$(ist_wert lauf kennung)"
 KILL_ZEIT="$(date +%s)"
-systemctl kill -s KILL powermanagement-update.service
+pruefe "Absturz: alle Prozesse des Laufs mit SIGKILL" lauf_toeten
 pruefe "Update-Dienst nach SIGKILL beendet" einheit_abwarten powermanagement-update.service
 pruefe "Marke „offen“ bleibt" test -e "$MARKE_OFFEN"
 pruefe "Schreibsperre bleibt" test -e "$WARTUNG"
