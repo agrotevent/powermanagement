@@ -1215,18 +1215,19 @@ try {
             $an ? file_put_contents($updOrdner . '/ist/wartung', \App\Services\UpdateService::KOPF_WARTUNG . "\nseit " . time() . "\nkennung -\n")
                 : @unlink($updOrdner . '/ist/wartung');
         };
-        $laufSchreiben = static function (string $zustand) use ($updOrdner): void {
+        $laufSchreiben = static function (string $zustand, string $aktion = 'aktualisieren') use ($updOrdner): void {
             file_put_contents($updOrdner . '/ist/lauf', \App\Services\UpdateService::KOPF_LAUF . "\nkennung " . bin2hex(random_bytes(16))
-                . "\naktion aktualisieren\nausloeser hand\nvon pruefer\nzustand {$zustand}\nbeginn " . time() . "\npuls " . time() . "\n");
+                . "\naktion {$aktion}\nausloeser hand\nvon pruefer\nzustand {$zustand}\nbeginn " . time() . "\npuls " . time() . "\n");
             \App\Services\UpdateService::vergessen();
         };
         $rohAuftrag = static fn (array $e): string => (string) (json_decode((string) @file_get_contents(PlanTileService::planDir($e) . '/.auftrag.json'), true)['zustand'] ?? '');
-        $logAb = static function () use ($logPfad): callable {
-            clearstatcache(true, $logPfad);
-            $ab = (int) @filesize($logPfad);
-            return static function () use ($logPfad, $ab): string {
-                clearstatcache(true, $logPfad);
-                return substr((string) @file_get_contents($logPfad), $ab);
+        $logAb = static function (?string $pfad = null) use ($logPfad): callable {
+            $pfad ??= $logPfad;
+            clearstatcache(true, $pfad);
+            $ab = (int) @filesize($pfad);
+            return static function () use ($pfad, $ab): string {
+                clearstatcache(true, $pfad);
+                return (string) @file_get_contents($pfad, false, null, $ab);
             };
         };
         $plan = static function (string $name) use ($bildEtage): array {
@@ -1253,12 +1254,18 @@ try {
             $standB = PlanTileService::aktuellerStand($uB);
 
             // Schreibsperre: „Plan neu rechnen“ trägt ein (der POST kam vor der Sperre), aber kein Prozess beginnt ihn.
+            // Kein Prozess heißt auch: nichts Neues in kacheln.log. Einer, der doch startete, sähe die Sperre,
+            // schriebe „Ein Update hat begonnen …“ und endete binnen Millisekunden – den zählte $arbeiter() nicht mehr.
             $sperreAn(true);
+            $neueZeilen = $logAb();
+            $neueAppZeilen = $logAb(dirname(__DIR__) . '/storage/logs/app.log');
             $r = PlanTileService::neuRechnenAnfordern($uA);
-            usleep(800_000);
+            usleep(1_000_000);
             $z = PlanTileService::zustand($uA);
-            gleich([$r['ok'], $r['neu'], $arbeiter(), $rohAuftrag($uA), $z['zustand'], str_contains($z['meldung'], 'bis das Update eingespielt ist')],
-                [true, true, 0, 'angefordert', 'wartet', true], 'Schreibsperre: Auftrag eingetragen, kein Prozess im Hintergrund – er „wartet“ auf das Update (' . $z['meldung'] . ')');
+            gleich([$r['ok'], $r['neu'], $arbeiter(), $neueZeilen(), str_contains($neueAppZeilen(), 'Kacheln im Hintergrund: ein Update läuft – der Auftrag wartet, bis es eingespielt ist.'),
+                $rohAuftrag($uA), $z['zustand'], str_contains($z['meldung'], 'bis das Update eingespielt ist')],
+                [true, true, 0, '', true, 'angefordert', 'wartet', true],
+                'Schreibsperre: Auftrag eingetragen, kein Prozess im Hintergrund (nichts in kacheln.log) – er „wartet“ auf das Update (' . $z['meldung'] . ')');
             $erledigt = PlanTileService::arbeiten(null, null, $wegenUpdate);
             $fehlend = PlanTileService::fehlendeNachrechnen();
             $veraltet = PlanTileService::veralteteNachrechnen(600);
@@ -1334,6 +1341,81 @@ try {
                 substr_count($zeilen, 'Nach dem Update: weiter mit dem neuen Stand.'), substr_count($zeilen, 'Ein Update hat begonnen – der Plan kommt danach dran.')],
                 [[true, true], true, true, true, true, true, 1, 1],
                 'Update lief, während der Prozess wartete: er macht mit dem neuen Stand weiter, beide Aufträge gerechnet');
+
+            // Ein Update von der Konsole schreibt ist/lauf nicht (nur der Helfer), und jeder Prüflauf danach
+            // überschreibt den Lauf: Ob seit dem Start Code ausgecheckt wurde, sagen auch der Commit und der
+            // letzte Eintrag im Reflog von HEAD – ein eigenes .git, nur Dateien (UpdateService liest ohne Prozess).
+            $git = $tmp . '/git';
+            @mkdir($git . '/refs/heads', 0775, true);
+            @mkdir($git . '/logs', 0775, true);
+            file_put_contents($git . '/HEAD', "ref: refs/heads/main\n");
+            $auschecken = static function (string $commit) use ($git): void {
+                file_put_contents($git . '/refs/heads/main', $commit . "\n");
+                file_put_contents($git . '/logs/HEAD', str_repeat('0', 40) . ' ' . $commit . ' Pruefung <pruefung@example.invalid> ' . time()
+                    . " +0000\tcheckout: moving to " . substr($commit, 0, 7) . ' ' . bin2hex(random_bytes(4)) . "\n", FILE_APPEND);
+            };
+            [$cA, $cB] = [str_repeat('a', 40), str_repeat('b', 40)];
+            $gitVorher = Config::get('update.git_verzeichnis');
+            Config::set('update.git_verzeichnis', $git);
+            try {
+                $auschecken($cA);
+                $laufSchreiben('fertig');
+                $k = PlanTileService::updateKennung();
+                $ruhig = PlanTileService::updateDazwischen($k);
+                $laufSchreiben('fertig', 'pruefen');
+                $nurPruefen = PlanTileService::updateDazwischen($k);
+                // Von der Konsole: Sperre, neuer Commit, Sperre weg – ist/lauf bleibt.
+                $k = PlanTileService::updateKennung();
+                $sperreAn(true);
+                $waehrend = PlanTileService::updateDazwischen($k);
+                $auschecken($cB);
+                $sperreAn(false);
+                $konsole = PlanTileService::updateDazwischen($k);
+                // Über den Helfer, danach ein Prüflauf: Der Lauf ist überschrieben, der Commit nicht.
+                $k = PlanTileService::updateKennung();
+                $laufSchreiben('fertig');
+                $auschecken($cA);
+                $helfer = PlanTileService::updateDazwischen($k);
+                $laufSchreiben('fertig', 'pruefen');
+                $danachPruefen = PlanTileService::updateDazwischen($k);
+                // Von der Konsole und zurückgerollt: wieder derselbe Commit, aber zweimal ausgecheckt.
+                $k = PlanTileService::updateKennung();
+                $auschecken($cB);
+                $auschecken($cA);
+                $zurueck = PlanTileService::updateDazwischen($k);
+                gleich([$k['commit'], $ruhig, $nurPruefen, $waehrend, $konsole, $helfer, $danachPruefen, $zurueck], [$cA, false, false, true, true, true, true, true],
+                    'Update seit dem Start: ohne keins, ein Prüflauf allein keins; von der Konsole (nach der Sperre), über den Helfer auch nach einem Prüflauf, '
+                    . 'zurückgerollt auf denselben Commit – jedes erkannt');
+
+                // Und der Prozess im Hintergrund: Während er den ersten Plan rechnet, spielt jemand von der Konsole ein
+                // Update ein (Sperre schon wieder weg) – den zweiten beginnt er nicht, beide Aufträge waren angefordert.
+                $standA = PlanTileService::aktuellerStand($uA);
+                $standC = PlanTileService::aktuellerStand($uC);
+                $eingetragen = [PlanTileService::auftragEintragen($uA, true)['neu'], PlanTileService::auftragEintragen($uC, true)['neu']];
+                $zeilen = [];
+                $erledigt = PlanTileService::arbeiten(static function (string $zeile) use (&$zeilen, $auschecken, $cB): void {
+                    if ($zeilen === []) {
+                        $auschecken($cB);
+                    }
+                    $zeilen[] = $zeile;
+                }, null, $wegenUpdate);
+                $gerechnet = [PlanTileService::aktuellerStand($uA) !== $standA, PlanTileService::aktuellerStand($uC) !== $standC];
+                $offen = array_values(array_filter([$rohAuftrag($uA), $rohAuftrag($uC)], static fn (string $z): bool => $z === 'angefordert'));
+                gleich([$eingetragen, $erledigt, $wegenUpdate, array_sum($gerechnet), $offen, end($zeilen)],
+                    [[true, true], 1, true, 1, ['angefordert'], PlanTileService::UPDATE_DAZWISCHEN],
+                    'Update von der Konsole während des ersten Plans: der zweite bleibt angefordert, der Prozess hört auf – ' . implode(' | ', $zeilen));
+                foreach ([$uA, $uC] as $e) {
+                    @unlink(PlanTileService::planDir($e) . '/.auftrag.json');
+                }
+            } finally {
+                Config::set('update.git_verzeichnis', $gitVorher ?? dirname(__DIR__) . '/.git');
+                foreach (['logs/HEAD', 'refs/heads/main', 'HEAD'] as $datei) {
+                    @unlink($git . '/' . $datei);
+                }
+                foreach (['logs', 'refs/heads', 'refs', ''] as $dir) {
+                    @rmdir($git . '/' . $dir);
+                }
+            }
 
             // Die nächtliche Wartung rechnet ältere Fassungen nur, solange kein Fenster für automatische Updates
             // beginnt (UpdateAutomatik::kachelnBis()): bis 2 min davor, 100 s davor gar nicht.

@@ -2380,21 +2380,38 @@ final class PlanTileService
         . 'danach geht es mit dem neuen Stand weiter.';
 
     /**
-     * Kennung des Update-Laufs, der zuletzt Code ausgecheckt haben kann
-     * (aktualisieren oder wiederaufnehmen; ein Prüflauf nicht) – null ohne.
-     * Ein Prozess im Hintergrund merkt sie sich beim Start (updateDazwischen()).
+     * Woran ein Prozess im Hintergrund merkt, dass seit seinem Start Code
+     * ausgecheckt wurde – er merkt es sich beim Start (updateDazwischen()):
+     * der ausgecheckte Commit (.git, ohne Prozess), der letzte Eintrag im
+     * Reflog von HEAD (ein Zurückrollen auf denselben Commit hängt auch
+     * einen an) und die Kennung des Laufs, der zuletzt Code ausgecheckt
+     * haben kann (aktualisieren oder wiederaufnehmen; ein Prüflauf nicht).
+     * Der Lauf allein reichte nicht: Ein Update von der Konsole schreibt
+     * ist/lauf nicht, und jeder Prüflauf danach überschreibt ihn.
+     *
+     * @return array{commit:?string, kopf:?string, lauf:?string}
      */
-    public static function updateKennung(): ?string
+    public static function updateKennung(): array
     {
+        clearstatcache();
         UpdateService::vergessen();
         $lauf = UpdateService::lauf();
-        return $lauf !== null && in_array($lauf['aktion'], ['aktualisieren', 'wiederaufnehmen'], true) ? (string) $lauf['kennung'] : null;
+        return [
+            'commit' => UpdateService::installiert()['commit'],
+            'kopf'   => UpdateService::kopfZuletzt(),
+            'lauf'   => $lauf !== null && in_array($lauf['aktion'], ['aktualisieren', 'wiederaufnehmen'], true) ? (string) $lauf['kennung'] : null,
+        ];
     }
 
     /**
      * Soll ein Prozess im Hintergrund jetzt keinen weiteren Plan beginnen?
      * Ja, solange die Schreibsperre eines Updates steht – und wenn seit
-     * seinem Start ($kennung aus updateKennung()) ein Update lief.
+     * seinem Start ($kennung aus updateKennung()) ein Update lief: ein
+     * anderer Commit, ein neuer Eintrag im Reflog von HEAD oder ein neuer
+     * Lauf, der Code auschecken kann. Lieber einmal zu oft: Der Prozess im
+     * Hintergrund macht dann als derselbe mit dem Code weiter, der jetzt
+     * dort liegt (bin/power plan:kacheln, pcntl_exec), die Wartung in der
+     * nächsten Nacht.
      *
      * Ein Bau schreibt nur Dateien unter storage/plans/kacheln und den
      * Auftrag, nie die Datenbank – ein Update, das neben ihm läuft oder
@@ -2406,13 +2423,14 @@ final class PlanTileService
      * Frist der Wartung), ein weiterer beginnt erst mit einem Prozess, der
      * nach dem Update startet.
      */
-    public static function updateDazwischen(?string $kennung): bool
+    public static function updateDazwischen(array $kennung): bool
     {
         if (UpdateService::wartungAktiv()) {
             return true;
         }
         $jetzt = self::updateKennung();
-        return $jetzt !== null && $jetzt !== $kennung;
+        return $jetzt['commit'] !== ($kennung['commit'] ?? null) || $jetzt['kopf'] !== ($kennung['kopf'] ?? null)
+            || ($jetzt['lauf'] !== null && $jetzt['lauf'] !== ($kennung['lauf'] ?? null));
     }
 
     /** Wo die Prozesse im Hintergrund aufeinander warten (nacheinander()). */

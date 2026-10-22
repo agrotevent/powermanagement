@@ -1277,13 +1277,14 @@ einer Minute noch einmal.
 *Grundrisse während des Updates:* Die Karte bleibt benutzbar. **Plan neu
 rechnen** ist gesperrt wie jede Änderung; ein Plan, der gerade gerechnet
 wird, rechnet zu Ende, angestoßene Pläne „warten, bis das Update
-eingespielt ist“ und kommen danach von selbst dran – ebenso Pläne, deren
-Kacheln noch fehlen. Bringt das Update eine neue, schärfere Fassung der
-Kacheln, bleiben die vorhandenen Pläne, wie sie sind, und tragen „neu
-rechnen empfohlen“: Die nächtliche Wartung rechnet sie nach und nach (bis 20
-Minuten je Nacht, nie in das Fenster der automatischen Updates hinein), oder
-man drückt **Plan neu rechnen** – nicht alle auf einmal gleich nach dem
-Update, das würde einen kleinen Server lange auslasten.
+eingespielt ist“ und kommen danach von selbst dran, auch wenn das Update
+scheitert und zurückrollt – ebenso Pläne, deren Kacheln noch fehlen. Bringt
+das Update eine neue, schärfere Fassung der Kacheln, bleiben die
+vorhandenen Pläne, wie sie sind, und tragen „neu rechnen empfohlen“: Die
+nächtliche Wartung rechnet sie nach und nach (bis 20 Minuten je Nacht, nie
+in das Fenster der automatischen Updates hinein), oder man drückt **Plan
+neu rechnen** – nicht alle auf einmal gleich nach dem Update, das würde
+einen kleinen Server lange auslasten.
 
 Geht etwas schief, kommt der alte Stand von selbst zurück –
 Code, Datenbank und Einrichtung. Läuft gerade ein Aufbau oder wurde in den

@@ -920,7 +920,8 @@ Datenbank und InfluxDB brauchen den Platz; der bisherige Plan bleibt. Bricht
 einer ab – etwa weil ein Update zurückrollt und dabei PHP-FPM anhält (ein
 gewöhnliches Update lädt PHP-FPM nur neu, die Bauten laufen weiter) –,
 bleibt der bisherige Plan, und der nächste Bau dieses Plans beginnt von
-vorn. Fehlende Kacheln und offene Aufträge rechnet nach jedem Update
+vorn. Fehlende Kacheln und offene Aufträge rechnet nach jedem Update – auch
+einem abgebrochenen oder zurückgerollten –
 `powermanagement-kacheln` nach (`plan:kacheln --nachholen`), sonst die
 nächtliche Wartung; sie räumt auch die Zwischendateien weg. Während eines
 Updates beginnt kein Prozess einen weiteren Plan (Abschnitt 10, Schritt 10).
@@ -1155,8 +1156,13 @@ Die Schritte (die Oberfläche zählt sie mit):
     das Update braucht selbst Speicher. Er hört vor dem nächsten Plan auf,
     die übrigen Aufträge zeigt die Karte als „wartet, bis das Update
     eingespielt ist“; ist das Update schon durch, macht er als derselbe
-    Prozess mit dem neuen Code weiter. Der Knopf **Plan neu rechnen** ist
-    während der Schreibsperre gesperrt wie jede Änderung.
+    Prozess mit dem neuen Code weiter. Ein Update merkt er an der
+    Schreibsperre, am ausgecheckten Commit und am Reflog von HEAD – auch
+    eines von der Konsole und eines, das auf denselben Stand zurückrollte.
+    Bricht das Update ab oder rollt es zurück, stößt es
+    `powermanagement-kacheln` ebenso an, sobald die Schreibsperre
+    aufgehoben ist. Der Knopf **Plan neu rechnen** ist während der
+    Schreibsperre gesperrt wie jede Änderung.
 
     **Neue Kachelfassung:** Bringt ein Update eine neue Fassung der Kacheln
     (schärfer gerechnet, `FASSUNG` in `PlanTileService`), rechnet

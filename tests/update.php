@@ -1567,16 +1567,36 @@ stream_wrapper_register("langsam", LangsamAttrappe::class);
         pruefe($r['status'] === 302 && $r['ziel'] === '/standorte' && str_contains($seite, UpdateService::GESPERRT) && !is_file($auftragDatei),
             'Schreibsperre: „Neu rechnen“ auf der Standortseite → Meldung und zurück, kein Auftrag');
         $eingetragen = \App\Services\PlanTileService::auftragEintragen($neuFloor, true);
-        $gestartet = \App\Services\PlanTileService::arbeiterStarten();
-        usleep(800_000);
+        // Kein Prozess heißt auch: nichts Neues in kacheln.log. Einer, der doch startete, sähe die
+        // Sperre, schriebe „Ein Update hat begonnen …“ und endete binnen Millisekunden – den zählte
+        // /proc nicht mehr. Damit er die Sperre dieser Instanz sähe, bekommt er ihre Konfiguration.
+        $groesse = static function (string $pfad): int {
+            clearstatcache(true, $pfad);
+            return (int) @filesize($pfad);
+        };
+        $kachelLog = $wurzel . '/storage/logs/kacheln.log';
+        $appLog = $wurzel . '/storage/logs/app.log';
+        [$kachelLogVorher, $appLogVorher] = [$groesse($kachelLog), $groesse($appLog)];
+        putenv('POWERMANAGEMENT_CONFIG=' . $ordner . '/config.php');
+        try {
+            $gestartet = \App\Services\PlanTileService::arbeiterStarten();
+        } finally {
+            putenv('POWERMANAGEMENT_CONFIG');
+        }
+        usleep(1_000_000);
         $prozesse = 0;
         foreach (glob('/proc/[0-9]*/cmdline') ?: [] as $cmd) {
             $prozesse += str_contains((string) @file_get_contents($cmd), "bin/power\0plan:kacheln\0--auftraege") ? 1 : 0;
         }
+        $kachelLogNeu = $groesse($kachelLog) - $kachelLogVorher;
+        $appLogNeu = (string) @file_get_contents($appLog, false, null, $appLogVorher);
         $s = $aufruf($port, $a['dose'], 'GET', '/grundriss/' . $neuEtage . '/kacheln/stand', [], ['Accept: application/json']);
         $sj = json_decode($s['text'], true) ?? [];
-        pruefe($eingetragen['neu'] && $gestartet && $prozesse === 0 && (json_decode((string) @file_get_contents($auftragDatei), true)['zustand'] ?? '') === 'angefordert',
-            'Schreibsperre: ein Auftrag von vorher – kein Prozess im Hintergrund beginnt ihn (' . $prozesse . ')');
+        pruefe($eingetragen['neu'] && $gestartet && $prozesse === 0 && $kachelLogNeu === 0
+            && str_contains($appLogNeu, 'Kacheln im Hintergrund: ein Update läuft – der Auftrag wartet, bis es eingespielt ist.')
+            && (json_decode((string) @file_get_contents($auftragDatei), true)['zustand'] ?? '') === 'angefordert',
+            'Schreibsperre: ein Auftrag von vorher – kein Prozess im Hintergrund beginnt ihn (' . $prozesse . ' Prozesse, '
+            . $kachelLogNeu . ' Byte neu in kacheln.log)');
         pruefe($s['status'] === 200 && ($sj['zustand'] ?? '') === 'wartet' && str_contains((string) ($sj['meldung'] ?? ''), 'Update'),
             'Schreibsperre: Status liest weiter – der Auftrag „wartet“ auf das Update (' . (string) ($sj['meldung'] ?? $s['status']) . ')');
         @unlink($auftragDatei);
@@ -1736,7 +1756,8 @@ stream_wrapper_register("langsam", LangsamAttrappe::class);
         'install-debian.sh: poppler-utils und util-linux (prlimit für pdftoppm) in der Paketliste');
     $attrappen = $ordner . '/kacheln-attrappen';
     mkdir($attrappen, 0700, true);
-    file_put_contents($attrappen . '/systemctl', "#!/bin/sh\n[ -f \"\$PM_AKTIV\" ] && exit 0\nexit 3\n");
+    file_put_contents($attrappen . '/systemctl', "#!/bin/sh\nif [ \"\$1\" = is-system-running ]; then [ -n \"\$PM_HERUNTER\" ] && echo stopping || echo running; exit 0; fi\n"
+        . "[ -f \"\$PM_AKTIV\" ] && exit 0\nexit 3\n");
     file_put_contents($attrappen . '/systemd-run', "#!/bin/sh\nprintf '%s\\n' \"\$@\" > \"\$PM_ARGS\"\nexit \"\$(cat \"\$PM_RC\")\"\n");
     chmod($attrappen . '/systemctl', 0700);
     chmod($attrappen . '/systemd-run', 0700);
@@ -1781,6 +1802,79 @@ stream_wrapper_register("langsam", LangsamAttrappe::class);
         'kacheln_anstossen: startet sie nicht – Warnung kacheln, das Update bleibt eingespielt');
     [$rc, $aus, $args] = $anstossen('ja', false, 0);
     pruefe($rc === 0 && $args === null && str_contains($aus, 'WARNUNGEN ' . "\n"), 'kacheln_anstossen: --ohne-dienste startet nichts');
+
+    // Bricht das Update ab oder rollt es zurück, holt ebenso jemand ab, was unter der Schreibsperre
+    // stehen blieb (Aufträge, der Rest eines Prozesses, der wegen des Updates aufhörte) – sonst
+    // meldete die Karte nach einer Minute „abgebrochen“, und gerechnet würde erst in der nächsten
+    // Nacht. Jedes wartung_aus in abbrechen() und zurueckrollen() hat vor dem nächsten exit ein
+    // kacheln_nach_abbruch; das stößt an, wenn dieser Lauf die Sperre eben aufhob, nicht beim
+    // Herunterfahren.
+    $ohneAnstoss = [];
+    foreach (['abbrechen', 'zurueckrollen'] as $funktion) {
+        preg_match('/^' . $funktion . '\(\) \{.*?$(.*?)^\}$/ms', $skript, $koerper);
+        $zeilen = preg_split('/\R/', $koerper[1] ?? '') ?: [];
+        $gefunden = 0;
+        foreach ($zeilen as $i => $zeile) {
+            if (trim($zeile) !== 'wartung_aus') {
+                continue;
+            }
+            $gefunden++;
+            $danach = '';
+            foreach (array_slice($zeilen, $i + 1) as $folgende) {
+                if (preg_match('/^\s*exit\b/', $folgende) === 1) {
+                    break;
+                }
+                $danach .= $folgende . "\n";
+            }
+            if (preg_match('/^\s*(?:\[\[ [^\n]*\]\] && )?kacheln_nach_abbruch$/m', $danach) !== 1) {
+                $ohneAnstoss[] = $funktion . ' +' . ($i + 1);
+            }
+        }
+        if ($gefunden === 0) {
+            $ohneAnstoss[] = $funktion . ': kein wartung_aus gefunden';
+        }
+    }
+    gleich($ohneAnstoss, [], 'update-debian.sh: nach jedem wartung_aus in abbrechen() und zurueckrollen() Kacheln anstoßen (kacheln_nach_abbruch)');
+    preg_match('/^vorgaben\(\) \{$(.*?)^\}$/ms', $skript, $vorgaben);
+    pruefe(preg_match('/\bSPERRE_AUFGEHOBEN="nein"/', $vorgaben[1] ?? '') === 1, 'update-debian.sh: SPERRE_AUFGEHOBEN steht in vorgaben() (set -u)');
+    $abbruchZiel = $ordner . '/abbruch-ziel';
+    mkdir($abbruchZiel . '/storage/update/ist', 0700, true);
+    file_put_contents($ordner . '/kacheln-nach-abbruch.sh', <<<'SH'
+        set -Eeuo pipefail
+        ZIEL="$1"; APP_USER=www-data; OHNE_DIENSTE=nein; WARNUNGEN=()
+        hinweis() { printf 'HINWEIS %s\n' "$1"; }
+        as_app() { "$@"; }
+        for f in vorgaben wartung_aus kacheln_nach_abbruch kacheln_anstossen; do
+            eval "$(sed -n "/^$f() {\$/,/^}\$/p" "$2")"
+            declare -F "$f" > /dev/null || { echo "$f fehlt in update-debian.sh"; exit 9; }
+        done
+        ziel="$ZIEL"; vorgaben; ZIEL="$ziel"; OHNE_DIENSTE=nein
+        wartung_aus
+        kacheln_nach_abbruch
+        SH);
+    $nachAbbruch = static function (bool $sperre, bool $herunter) use ($ordner, $attrappen, $wurzel, $abbruchZiel): array {
+        @unlink($ordner . '/kacheln-args');
+        file_put_contents($ordner . '/kacheln-rc', '0');
+        @unlink($ordner . '/kacheln-aktiv');
+        $sperre ? file_put_contents($abbruchZiel . '/storage/update/ist/wartung', UpdateService::KOPF_WARTUNG . "\nseit " . time() . "\nkennung -\n")
+            : @unlink($abbruchZiel . '/storage/update/ist/wartung');
+        $p = proc_open(['bash', $ordner . '/kacheln-nach-abbruch.sh', $abbruchZiel, $wurzel . '/deploy/update-debian.sh'],
+            [0 => ['file', '/dev/null', 'r'], 1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $rohre, null,
+            ['PATH' => $attrappen . ':' . (string) getenv('PATH'), 'PM_AKTIV' => $ordner . '/kacheln-aktiv', 'PM_ARGS' => $ordner . '/kacheln-args',
+                'PM_RC' => $ordner . '/kacheln-rc'] + ($herunter ? ['PM_HERUNTER' => '1'] : []));
+        $aus = stream_get_contents($rohre[1]) . stream_get_contents($rohre[2]);
+        fclose($rohre[1]);
+        fclose($rohre[2]);
+        return [proc_close($p), $aus, is_file($ordner . '/kacheln-args') ? file($ordner . '/kacheln-args', FILE_IGNORE_NEW_LINES) : null,
+            is_file($abbruchZiel . '/storage/update/ist/wartung')];
+    };
+    [$rc, $aus, $args, $steht] = $nachAbbruch(true, false);
+    pruefe($rc === 0 && !$steht && $args !== null && array_slice($args, -2) === ['plan:kacheln', '--nachholen'] && in_array('--uid=www-data', $args, true),
+        'Abbruch/Zurückrollen: Sperre aufgehoben → powermanagement-kacheln mit --nachholen – ' . trim($aus));
+    [$rc, $aus, $args] = $nachAbbruch(false, false);
+    pruefe($rc === 0 && $args === null, 'Abbruch vor der Schreibsperre: nichts anzustoßen – ' . trim($aus));
+    [$rc, $aus, $args, $steht] = $nachAbbruch(true, true);
+    pruefe($rc === 0 && !$steht && $args === null, 'Zurückrollen beim Herunterfahren: Sperre aus, aber keine Einheit gestartet – ' . trim($aus));
 
     // Ein Grundriss, während ein Update beginnt. Der Upload ist ein POST:
     // angemeldet, bevor er nach der Sperre fragt – das Update wartet bis zu
