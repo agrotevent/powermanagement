@@ -372,11 +372,17 @@ final class LocationBundle
      */
     public static function kachelnBauen(array $etagenIds): array
     {
+        // Jede Pyramide einmal – Etagen mit derselben Plandatei (und Seite) teilen sie sich.
         $faellig = [];
+        $pyramiden = [];
         foreach (array_unique(array_map('intval', $etagenIds)) as $etageId) {
             $etage = SiteService::floor($etageId);
-            if ($etage !== null && PlanTileService::lohnt((string) SiteService::planPath($etage))) {
+            if ($etage === null || isset($pyramiden[PlanTileService::planDir($etage)])) {
+                continue;
+            }
+            if (PlanTileService::lohnt((string) SiteService::planPath($etage))) {
                 $faellig[$etageId] = $etage;
+                $pyramiden[PlanTileService::planDir($etage)] = true;
             }
         }
         if ($faellig === []) {

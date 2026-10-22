@@ -252,10 +252,13 @@ Bei einer vorhandenen **InfluxDB 1.8** mit Anmeldung ist das „Token“
    dürfen bis **100 MB** groß sein – die Grenzen dafür stehen unten unter
    *Größe der Uploads*.
 8. **Dienste:** `powermanagement-nodered`, `powermanagement-sammler`,
-   `powermanagement-wartung.timer` (täglich; räumt Protokolle auf, räumt
-   bei Grundrissen Liegengebliebenes weg – Pläne und Kacheln ohne Etage,
-   Zwischendateien abgebrochener Bauten –, rechnet fehlende Kacheln nach und
-   meldet Übergabeberichte über der Aufbewahrungsfrist – gelöscht wird nur mit
+   `powermanagement-wartung.timer` (täglich, mit niedriger Priorität für
+   CPU und Platte; räumt Protokolle auf, räumt bei Grundrissen
+   Liegengebliebenes weg – Pläne und Kacheln ohne Etage, abgelöste
+   Kachelfassungen, Zwischendateien abgebrochener Bauten –, rechnet fehlende
+   Kacheln und abgebrochenes Neurechnen nach, rechnet höchstens 20 Minuten
+   lang Grundrisse einer älteren Kachelfassung neu und meldet
+   Übergabeberichte über der Aufbewahrungsfrist – gelöscht wird nur mit
    `bin/power berichte:aufbewahrung --ausfuehren`),
    `powermanagement-mqtt-zugaenge.path` und `.timer` (eigene MQTT-Zugänge,
    nur mit Mosquitto im Container), Logrotate.
@@ -862,8 +865,34 @@ nächtliche Wartung es nach und räumt seine Zwischendateien weg.
 Platte: Ein PDF bekommt seit Fassung 2 der Kacheln bis 200 Megapixel
 (vorher 50) – gemessen 4,5 MB für einen leichten A0-Plan, 7 MB für einen
 Geländeplan, 24 MB für einen schweren Vektorplan, 30–35 MB für einen
-eingescannten Plan. Ältere Pläne bleiben,
-wie sie sind; schärfer rechnet sie `bin/power plan:kacheln --neu`.
+eingescannten Plan. Ältere Pläne bleiben, wie sie sind; schärfer rechnet
+sie **Plan neu rechnen** in der Karte, `bin/power plan:kacheln --veraltet`
+oder Nacht für Nacht die Wartung.
+
+Neu rechnen: Gerechnet wird nie in den Ordner, aus dem die Karte liest.
+Jeder Plan hat unter `storage/plans/kacheln/<plan>/` einen Zeiger
+`kacheln.json` auf seine aktive Fassung `v<stand>/`; gebaut wird daneben in
+`v<stand>.bau/`, eingesetzt erst, wenn alles fertig ist (ein `rename`).
+Während des Neubaus braucht ein Plan also kurz doppelt so viel Platz; die
+abgelöste Fassung bleibt noch zwei Minuten liegen (eine Karte, die dabei
+offen war, holt so lange noch ihre Kacheln) und geht dann weg – spätestens
+mit der nächsten Wartung. Scheitert ein Neubau oder bricht er ab, bleibt
+die bisherige Fassung, wie sie war. Den Zustand eines Auftrags
+(`.auftrag.json` im selben Ordner) zeigt die Karte; der Prozess dafür ist
+`bin/power plan:kacheln --etage=… --neu` mit niedriger Priorität
+(`nice 10`), Protokoll in `storage/logs/kacheln.log`. Ältere Pyramiden
+(Stufen direkt im Planordner) bleiben lesbar und ziehen beim nächsten Bau
+in diese Form um.
+
+Von Hand:
+
+```bash
+cd /opt/powermanagement
+runuser -u www-data -- php bin/power plan:kacheln               # fehlende
+runuser -u www-data -- php bin/power plan:kacheln --veraltet    # die einer älteren Fassung
+runuser -u www-data -- php bin/power plan:kacheln --neu --etage=12   # eine Etage neu (dazu --qualitaet=fein: PDF bis 400 Megapixel)
+runuser -u www-data -- php bin/power plan:kacheln --bis=600     # nach 10 Minuten keinen weiteren Plan beginnen
+```
 
 Holen und Hochladen über Git und das Übernehmen von einer anderen Instanz
 dürfen in der Oberfläche zusammen höchstens **285 Sekunden** dauern
@@ -1190,6 +1219,7 @@ printf 'Authorization: Token %s\n' "$T" | curl -sG -H @- http://127.0.0.1:8086/q
 | `502 Bad Gateway` | PHP-FPM läuft nicht: `systemctl status php8.4-fpm`, Socket `/run/php/powermanagement.sock`. |
 | Grundriss-Upload: englisches „413 Request Entity Too Large“, „Die Anfrage ist für den Webserver zu groß“ oder Abbruch ohne Meldung | Ein Proxy davor oder eine von Hand veränderte nginx-Site begrenzt die Größe – Abschnitt 9, *Größe der Uploads*. Die Meldung „größer, als der Server annimmt“ kommt von PHP: Pool prüfen (`grep -e upload_max -e post_max /etc/php/8.4/fpm/pool.d/powermanagement.conf`). |
 | Großer Grundriss hochgeladen (oder über den Abgleich übernommen), die Karte zeichnet ihn unscharf und langsam | Die Kacheln rechnen noch im Hintergrund – `tail /opt/powermanagement/storage/logs/kacheln.log`; mehrere Pläne rechnen nacheinander („Ein anderer Prozess rechnet gerade Kacheln“). Von Hand: `cd /opt/powermanagement && runuser -u www-data -- php bin/power plan:kacheln`. |
+| Ein Grundriss ist zu unscharf („Fassung 1“ unter Standorte, „empfohlen“ am Knopf) | In der Karte **Plan neu rechnen** – die Karte bleibt benutzbar und steigt danach um. Steht dort lange „Wartet“, rechnet gerade ein anderer Plan (`kacheln.log`). „Der Server wurde währenddessen neu gestartet“: der bisherige Plan ist geblieben, die nächtliche Wartung holt es nach – oder noch einmal anstoßen. |
 | Location-Abgleich oder andere Instanz: „… länger, als eine Anfrage hier dauern darf (zusammen höchstens 285 Sekunden …)“ | Die Leitung ist für die Größe der Pläne zu langsam. Noch einmal versuchen (bei Git kommt, was schon vollständig geholt ist, nicht noch einmal); für Git sonst auf dem Server `cd /opt/powermanagement && runuser -u www-data -- php bin/power location:uebernehmen <schlüssel>`, bei einer anderen Instanz die Pläne dort kleiner exportieren. |
 | „Welcome to nginx“ statt Anmeldung | `rm -f /etc/nginx/sites-enabled/default && systemctl reload nginx` |
 | Andere Instanz: „Das Token wird dort nicht (mehr) angenommen“, obwohl es stimmt | Ein Proxy (oder Apache ohne `CGIPassAuth On`) verschluckt den Kopf `Authorization` – Abschnitt 9, *Schnittstelle für andere Instanzen*. Sonst ist es widerrufen oder abgelaufen: bei der Gegenseite unter *System → Schnittstelle (API)* nachsehen. |

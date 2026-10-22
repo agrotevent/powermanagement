@@ -1,4 +1,5 @@
 <?php
+use App\Services\PlanTileService;
 use App\Support\Csrf;
 use App\Support\View;
 use App\Support\Zeit;
@@ -27,7 +28,25 @@ $subtitle = 'Gelände und Gebäude mit ihren Grundrissen';
                         <?php foreach ($s['floors'] as $f): ?>
                             <tr>
                                 <td data-label="Etage"><strong><?= View::e($f['name']) ?></strong> <span class="small muted">Ebene <?= (int) $f['level_no'] ?></span></td>
-                                <td data-label="Grundriss" class="small"><?= $f['plan_file'] !== '' ? View::e($f['plan_original_name']) . '<div class="muted">' . View::e(Zeit::anzeige($f['plan_uploaded_at'])) . '</div>' : '<span class="muted">keiner</span>' ?></td>
+                                <td data-label="Grundriss" class="small"><?= $f['plan_file'] !== '' ? View::e($f['plan_original_name']) . '<div class="muted">' . View::e(Zeit::anzeige($f['plan_uploaded_at'])) . '</div>' : '<span class="muted">keiner</span>' ?>
+                                    <?php $k = $kacheln[(int) $f['id']] ?? null; ?>
+                                    <?php if ($k !== null): ?>
+                                        <?php $laeuft = in_array($k['zustand'], PlanTileService::OFFEN, true); ?>
+                                        <div class="muted plan-kacheln" data-plan-zustand="<?= View::e($k['zustand']) ?>">
+                                            <?php if ($k['gekachelt']): ?>Kacheln <?= View::e(number_format($k['breite'], 0, ',', '.')) ?> × <?= View::e(number_format($k['hoehe'], 0, ',', '.')) ?> px · Fassung <?= (int) $k['fassung'] ?><?= $k['qualitaet'] === 'fein' ? ' · fein' : '' ?><?php else: ?>noch ohne Kacheln<?php endif; ?>
+                                            <?php if ($laeuft): ?> · <span class="badge info">wird gerechnet</span>
+                                            <?php elseif ($k['veraltet']): ?> · <span class="badge warn">neu rechnen empfohlen</span>
+                                            <?php elseif ($k['zustand'] === 'fehler' || $k['zustand'] === 'abgebrochen'): ?> · <span class="badge bad" title="<?= View::e($k['zustand_text']) ?>"><?= $k['zustand'] === 'fehler' ? 'gescheitert' : 'abgebrochen' ?></span>
+                                            <?php endif; ?>
+                                        </div>
+                                        <?php if ($k['neu_rechenbar'] && !$laeuft && ($darfNeu[(int) $f['id']] ?? false)): ?>
+                                            <form method="post" action="/grundriss/<?= (int) $f['id'] ?>/neu-rechnen" class="plan-neu-form" data-laeuft="wird angestoßen …">
+                                                <?= Csrf::field() ?>
+                                                <button class="btn btn-sm btn-ghost" type="submit" title="Den Grundriss im Hintergrund noch einmal in Kacheln rechnen – die Karte bleibt so lange benutzbar"><?= $k['gekachelt'] ? 'Neu rechnen' : 'Aufbereiten' ?></button>
+                                            </form>
+                                        <?php endif; ?>
+                                    <?php endif; ?>
+                                </td>
                                 <td data-label="Anlagen" class="num"><?= (int) $f['objekt_count'] ?></td>
                                 <td data-label="Leitungen" class="num"><?= (int) $f['leitung_count'] ?></td>
                                 <td class="right">

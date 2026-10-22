@@ -250,6 +250,12 @@ tr.live-zeile.stufe-stumm td:first-child { box-shadow: inset 4px 0 0 var(--stufe
     opacity: 0; transition: opacity .15s ease; pointer-events: none;
 }
 .karte-status.sichtbar { opacity: 1; }
+/* Plan neu rechnen: Zustand über der Karte, mit „Neu laden“, wenn die neue Pyramide anders liegt */
+.plan-neu-hinweis { display: flex; align-items: center; gap: .6rem; flex-wrap: wrap; margin-bottom: .7rem; }
+.plan-neu-hinweis [data-text] { flex: 1 1 14rem; }
+.karte-werkzeuge [data-aktion="plan-neu"] .badge { margin-left: .25rem; }
+.plan-kacheln { margin-top: .15rem; }
+.plan-neu-form { margin-top: .3rem; }
 
 /* Anlagen im Plan: ein Zeichen, Rand in der Farbe der Auslastung */
 .pm-anlage { font-size: .7rem; font-weight: 650; cursor: pointer; }

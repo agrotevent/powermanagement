@@ -9,6 +9,13 @@ declare(strict_types=1);
  * Pläne in einer Web-Anfrage gleich dort, Abbruch und gelöschte Etage ohne
  * Reste, ersetzte Pläne weg, Streifenhöhe und die nächtliche Wartung.
  *
+ * Neu rechnen: in einen eigenen Ordner je Fassung, erst fertig per rename()
+ * eingesetzt – während ein Prozess im Hintergrund rechnet (ein träges
+ * pdftoppm vorn in seinem PATH), liefert kachel() die alte Kachel; scheitert
+ * er oder bricht er ab, bleibt die bisherige Fassung. Aufträge (einer je
+ * Plan, abgebrochene holt die Wartung nach), ältere Pyramiden (empfohlen,
+ * nachts mit Budget) und das Aufräumen abgelöster Fassungen.
+ *
  * Große Dateien entstehen dünn belegt (hilfen/grundriss-dateien.php) – ein
  * PDF mit 100 MB kostet so weder Zeit noch Platte.
  */
@@ -46,6 +53,8 @@ $planDateien = static fn (): array => array_values(array_filter(scandir(SiteServ
 
 $siteId = SiteService::saveSite(null, ['name' => $kennung]);
 $tankId = null;
+// Etagen, die die Prüfung selbst löscht – ihre Audit-Einträge kommen am Ende mit weg.
+$geloeschteEtagen = [];
 try {
     // ------------------------------------------------ eine Zahl, überall dieselbe
     gleich(SiteService::MAX_UPLOAD_BYTES, 100 * 1024 * 1024, 'Grenze: 100 MiB');
@@ -297,7 +306,10 @@ try {
         $b = PlanTileService::bauen($linien, true);
         $meta = (array) ($b['meta'] ?? []);
         $fmt = (string) ($meta['format'] ?? '');
-        $ordnerL = PlanTileService::planDir($linien);
+        $ordnerL = (string) PlanTileService::aktiveFassung($linien);
+        pruefe(preg_match('#/v[0-9a-f]{12}$#', $ordnerL) === 1 && str_starts_with($ordnerL, PlanTileService::planDir($linien) . '/')
+            && ($meta['ordner'] ?? '') === basename($ordnerL) && is_file($ordnerL . '/kacheln.json'),
+            'Kacheln in einem eigenen Fassungsordner (' . basename($ordnerL) . ') mit eigenem kacheln.json, der Zeiger im Planordner nennt ihn');
         pruefe($b['ok'] && $fmt === PlanTileService::verlustfrei() && in_array($fmt, ['png', 'webp'], true)
             && ($meta['fassung'] ?? null) === PlanTileService::FASSUNG && ($meta['qualitaet'] ?? '') === 'standard' && (int) ($meta['max_zoom'] ?? 0) === 3,
             'CAD-Bild (PNG): verlustfreie Kacheln (' . $fmt . '), kacheln.json mit Fassung ' . PlanTileService::FASSUNG);
@@ -325,27 +337,61 @@ try {
             PlanTileService::kachel($linien, 1, 0, 0)['pfad'] ?? null],
             [1, '/grundriss/' . $linien['id'] . '/kachel/{z}/{x}/{y}?v=' . $stand, $stand, true, null, null, $k['pfad'] ?? ''],
             'Kacheladresse mit dem Stand der Pyramide; ein anderer Stand: keine Kachel, ohne Stand die, die liegt');
-        // Neu gerechnet (dieselbe Datei, eine Sekunde später): neuer Stand,
-        // der alte findet nichts mehr – kein Bild der neuen Pyramide unter der
-        // Adresse der alten, die der Browser ein Jahr behält.
-        for ($i = 0; $i < 40 && gmdate('c') === (string) ($meta['gebaut'] ?? ''); $i++) {
-            usleep(50_000);
-        }
+        // Neu gerechnet: in einen neuen Ordner, eingesetzt per rename() – neuer
+        // Stand in der Adresse. Unter dem alten kommen GNADE Sekunden lang noch
+        // die alten Kacheln (eine offene Karte zeigt ihren Plan weiter, statt
+        // Lücken), danach keine mehr – nie ein Bild der neuen Pyramide unter
+        // der Adresse der alten, die der Browser ein Jahr behält.
+        $altBytes = (string) @file_get_contents((string) ($k['pfad'] ?? ''));
+        $altOrdner = $ordnerL;
         $neu = (array) (PlanTileService::bauen($linien, true)['meta'] ?? []);
         $standNeu = PlanTileService::stand($neu);
-        gleich([$standNeu !== $stand, PlanTileService::kachel($linien, 1, 0, 0, $stand), PlanTileService::kachel($linien, 1, 0, 0, $standNeu)['stand'] ?? null,
-            PlanTileService::quelle($linien)['kachel_url'] ?? null],
-            [true, null, $standNeu, '/grundriss/' . $linien['id'] . '/kachel/{z}/{x}/{y}?v=' . $standNeu],
-            'neu gerechnet: neuer Stand in der Adresse, unter dem alten keine Kachel mehr');
+        $altKachel = PlanTileService::kachel($linien, 1, 0, 0, $stand);
+        gleich([$standNeu !== $stand, $altBytes !== '' && (string) @file_get_contents((string) ($altKachel['pfad'] ?? '')) === $altBytes, $altKachel['stand'] ?? null,
+            PlanTileService::kachel($linien, 1, 0, 0, $standNeu)['stand'] ?? null, PlanTileService::quelle($linien)['kachel_url'] ?? null,
+            is_file($altOrdner . '/.abgeloest'), PlanTileService::aktiveFassung($linien) !== $altOrdner],
+            [true, true, $stand, $standNeu, '/grundriss/' . $linien['id'] . '/kachel/{z}/{x}/{y}?v=' . $standNeu, true, true],
+            'neu gerechnet: eigener Ordner, neuer Stand in der Adresse; unter dem alten noch die alten Bytes (abgelöst, GNADE ' . PlanTileService::GNADE . ' s)');
+        $planL = PlanTileService::planDir($linien);
+        $weg = PlanTileService::abgeloesteWeg($planL);
+        $nochDa = is_dir($altOrdner);
+        touch($altOrdner . '/.abgeloest', time() - PlanTileService::GNADE - 1);
+        $weg2 = PlanTileService::abgeloesteWeg($planL);
+        gleich([$weg['fassungen'], $nochDa, $weg2['fassungen'], is_dir($altOrdner), PlanTileService::kachel($linien, 1, 0, 0, $stand),
+            is_file((string) (PlanTileService::kachel($linien, 1, 0, 0, $standNeu)['pfad'] ?? ''))],
+            [0, true, 1, false, null, true], 'abgelöste Fassung: vor Ablauf von GNADE bleibt sie, danach weg – unter ihrem Stand keine Kachel mehr, die aktive bleibt');
         $meta = $neu;
-        // Eine Pyramide von vorher (ohne Fassung) bleibt nutzbar, ist aber veraltet.
+
+        // Eine Pyramide von vor den Fassungsordnern (Fassung 1): ihre Stufen
+        // direkt im Planordner, kacheln.json ohne Fassung, Ordner und Qualität.
+        $fassungL = (string) PlanTileService::aktiveFassung($linien);
+        foreach (glob($fassungL . '/[0-9]*', GLOB_ONLYDIR) ?: [] as $stufe) {
+            rename($stufe, $planL . '/' . basename($stufe));
+        }
         $altMeta = $meta;
-        unset($altMeta['fassung'], $altMeta['qualitaet']);
+        unset($altMeta['fassung'], $altMeta['qualitaet'], $altMeta['ordner']);
         file_put_contents(PlanTileService::metaPfad($linien), json_encode($altMeta));
+        @unlink($fassungL . '/kacheln.json');
+        @rmdir($fassungL);
+        $standAlt = PlanTileService::stand($altMeta);
+        $altBytes = (string) @file_get_contents((string) (PlanTileService::kachel($linien, 1, 0, 0, $standAlt)['pfad'] ?? ''));
         $q = PlanTileService::quelle($linien);
-        gleich([$q['art'] ?? null, $q['fassung'] ?? null, $q['veraltet'] ?? null], ['kacheln', 1, true], 'Pyramide ohne Fassung: Kacheln wie bisher, als veraltet gemeldet');
-        pruefe(str_ends_with((string) ($q['kachel_url'] ?? ''), '?v=' . PlanTileService::stand($altMeta)) && PlanTileService::stand($altMeta) !== $standNeu,
-            '… auch sie mit Stand in der Adresse');
+        gleich([$q['art'] ?? null, $q['fassung'] ?? null, $q['veraltet'] ?? null, $q['empfohlen'] ?? null, $altBytes !== '',
+            str_ends_with((string) ($q['kachel_url'] ?? ''), '?v=' . $standAlt), $standAlt !== $standNeu, preg_match('/^[0-9a-f]{12}$/', $standAlt)],
+            ['kacheln', 1, true, true, true, true, true, 1],
+            'Pyramide von vorher (Stufen im Planordner, ohne Fassung): Kacheln wie bisher, mit Stand in der Adresse, veraltet – neu rechnen empfohlen');
+        // Die Wartung rechnet veraltete nur, solange ihr Budget reicht: mit 0 keinen – sie sagt, wie viele noch warten.
+        $zeilen = PlanTileService::veralteteNachrechnen(0);
+        pruefe(PlanTileService::stand((array) PlanTileService::meta($linien)) === $standAlt && preg_match('/^Noch \d+ Grundriss/', (string) end($zeilen)) === 1,
+            'veralteteNachrechnen(0): nichts gerechnet – „' . (string) end($zeilen) . '“');
+        // Neu gerechnet: Die alten Stufen ziehen in einen Ordner mit ihrem Stand um und bleiben dort GNADE Sekunden.
+        $b = PlanTileService::bauen($linien, true);
+        $m2 = (array) ($b['meta'] ?? []);
+        $alteK = PlanTileService::kachel($linien, 1, 0, 0, $standAlt);
+        gleich([$m2['fassung'] ?? null, PlanTileService::veraltet($m2), glob($planL . '/[0-9]*', GLOB_ONLYDIR), is_file($planL . '/v' . $standAlt . '/.abgeloest'),
+            (string) @file_get_contents((string) ($alteK['pfad'] ?? '')) === $altBytes, PlanTileService::quelle($linien)['empfohlen'] ?? null],
+            [PlanTileService::FASSUNG, false, [], true, true, false],
+            'neu gerechnet: Fassung ' . PlanTileService::FASSUNG . ', die alten Stufen abgelöst in v<Stand> – darunter noch die alten Bytes, nichts mehr empfohlen');
 
         // Ein JPEG bleibt JPEG – jetzt in Qualität 92 (Fassung 1: 85).
         $foto = imagecreatetruecolor(1800, 1200);
@@ -355,7 +401,7 @@ try {
         }
         $jpeg = $bildEtage($foto, 'jpg', 'Foto');
         $b = PlanTileService::bauen($jpeg, true);
-        $dc = pruefJpegDc(PlanTileService::planDir($jpeg) . '/' . (int) ($b['meta']['max_zoom'] ?? 0) . '/0/0.jpg');
+        $dc = pruefJpegDc(PlanTileService::aktiveFassung($jpeg) . '/' . (int) ($b['meta']['max_zoom'] ?? 0) . '/0/0.jpg');
         gleich([$b['meta']['format'] ?? null, $dc], ['jpg', 3], 'JPEG-Quelle: Kacheln JPEG in Qualität 92 (Quantisierung DC 3, bei 85 wäre es 5)');
 
         // Ein Scan als PNG wird JPEG – mit Transparenz bleibt er verlustfrei.
@@ -402,6 +448,11 @@ try {
                 'devicePixelRatio ' . $dichte . ': Kacheln ungestreckt (256 px) mit Stand in der Adresse, Ecken höchstens 1 px neben dem Marker auf demselben Planpunkt ('
                 . (string) ($d['groessterVersatz'] ?? '?') . ' px), Papierweiß darunter');
         }
+        $w = $js['wechseln'] ?? [];
+        gleich([$w['anders'] ?? null, $w['ok'] ?? null, $w['neueEbene'] ?? null, $w['alteWeg'] ?? null, $w['ebenen'] ?? null, $w['maxZoom'] ?? null,
+            $w['nativ'] ?? null, $w['punktGleich'] ?? null, $w['adressen'] ?? null],
+            [false, true, true, true, 1, 1, 8, true, true],
+            'neu gerechnet, offene Karte (kachelnWechseln): doppelt so fein steigt sie um – neue Ebene mit neuem Stand, eine Stufe mehr, derselbe Planpunkt an derselben Stelle, die alte Ebene weg; andere Fläche: neu laden');
         foreach (['1', '2', '3'] as $dichte) {
             $a = $js['animiert'][$dichte] ?? ['schritte' => [], 'fehler' => ['fehlt']];
             pruefe(count($a['schritte']) === 4 && $a['fehler'] === []
@@ -463,6 +514,52 @@ try {
         @rmdir($o);
     }
 
+    // Im Kachelordner einer Etage: abgelöste Fassungen nach GNADE, Bauordner
+    // getöteter Bauten nach einem Tag, Stufen einer älteren Pyramide neben
+    // einer aktiven Fassung, Zwischendateien, alte Aufträge – die aktive
+    // Fassung, Frisches und Fremdes bleiben, ebenso alles, solange jemand rechnet.
+    $mitEtage = PlanTileService::planDir((array) SiteService::floor($benutztId));
+    $v = static fn (): string => 'v' . bin2hex(random_bytes(6));
+    [$aktiv, $abgeloest, $frischAbgeloest, $bauAlt, $bauNeu] = [$v(), $v(), $v(), $v() . '.bau', $v() . '.bau'];
+    foreach ([$aktiv, $abgeloest, $frischAbgeloest, $bauAlt, $bauNeu, '0', 'eigener-ordner'] as $o) {
+        mkdir($mitEtage . '/' . $o . '/0/0', 0775, true);
+        file_put_contents($mitEtage . '/' . $o . '/0/0/0.png', 'x');
+    }
+    file_put_contents($mitEtage . '/kacheln.json', json_encode(['breite' => 1, 'hoehe' => 1, 'max_zoom' => 0, 'format' => 'png', 'ordner' => $aktiv]));
+    touch($mitEtage . '/.sperre');
+    touch($mitEtage . '/' . $abgeloest . '/.abgeloest', time() - PlanTileService::GNADE - 5);
+    touch($mitEtage . '/' . $frischAbgeloest . '/.abgeloest');
+    foreach ([$bauAlt, $aktiv, '0', 'eigener-ordner'] as $o) {
+        touch($mitEtage . '/' . $o, $alt);
+    }
+    file_put_contents($mitEtage . '/kacheln.json.0a1b2c3d.tmp', '{');
+    touch($mitEtage . '/kacheln.json.0a1b2c3d.tmp', $alt);
+    file_put_contents($mitEtage . '/.auftrag.json', json_encode(['zustand' => 'fertig', 'ende' => gmdate('c', time() - 40 * 86400)]));
+    touch($mitEtage . '/.auftrag.json', time() - 40 * 86400);
+    $zeilen = PlanTileService::wartung();
+    $da = static fn (string $n): bool => file_exists($mitEtage . '/' . $n);
+    gleich([$da($aktiv), $da($abgeloest), $da($frischAbgeloest), $da($bauAlt), $da($bauNeu), $da('0'), $da('eigener-ordner'),
+        $da('kacheln.json.0a1b2c3d.tmp'), $da('.auftrag.json'), $da('kacheln.json')],
+        [true, false, true, false, true, false, true, false, false, true],
+        'Wartung im Kachelordner einer Etage: abgelöste Fassung nach GNADE, Bau ohne Prozess nach einem Tag, alte Stufen neben der aktiven Fassung, '
+        . 'Zwischendatei und alter Auftrag weg – aktive Fassung, frisch Abgelöstes, frischer Bau und Fremdes bleiben');
+    pruefe(array_filter($zeilen, static fn (string $z): bool => str_contains($z, 'abgelöste Kachelfassung')) !== []
+        && array_filter($zeilen, static fn (string $z): bool => str_contains($z, 'Kachelbau(ten) ohne Prozess')) !== [],
+        'Wartung meldet es: ' . implode(' | ', array_filter($zeilen, static fn (string $z): bool => str_contains($z, 'Kachel'))));
+    $gesperrtAbgeloest = $v();
+    mkdir($mitEtage . '/' . $gesperrtAbgeloest);
+    touch($mitEtage . '/' . $gesperrtAbgeloest . '/.abgeloest', time() - PlanTileService::GNADE - 5);
+    $griff = fopen($mitEtage . '/.sperre', 'c');
+    flock($griff, LOCK_EX);
+    try {
+        PlanTileService::wartung();
+    } finally {
+        flock($griff, LOCK_UN);
+        fclose($griff);
+    }
+    pruefe($da($gesperrtAbgeloest) && $da($frischAbgeloest), 'Wartung: solange jemand rechnet (Sperre gehalten), bleibt auch Abgelöstes liegen');
+    PlanTileService::aufraeumen((array) SiteService::floor($benutztId));
+
     if (!$poppler) {
         fwrite(STDOUT, "  (ohne poppler-utils oder gd: Kacheln über poppler übersprungen)\n");
     } else {
@@ -516,7 +613,7 @@ try {
         $b = PlanTileService::bauen($haar, true);
         $meta = (array) ($b['meta'] ?? []);
         $fmt = (string) ($meta['format'] ?? '');
-        $ordnerH = PlanTileService::planDir($haar);
+        $ordnerH = (string) PlanTileService::aktiveFassung($haar);
         pruefe($b['ok'] && [$meta['breite'] ?? 0, $meta['max_zoom'] ?? 0, $meta['direkt'] ?? null, $meta['fassung'] ?? 0] === [3000, 4, [3, 2, 1, 0], PlanTileService::FASSUNG]
             && $fmt === PlanTileService::verlustfrei() && array_key_exists('grenze', $meta) && $meta['grenze'] === null,
             'PDF 600 × 400 pt: 3 000 px (5 px/pt), Stufen 3 bis 0 direkt von poppler, verlustfrei, Fassung ' . PlanTileService::FASSUNG . ' – ' . $b['message']);
@@ -532,29 +629,24 @@ try {
         }
         gleich($schwach, [3 => 1.0, 2 => 1.0, 1 => 1.0], 'Haarlinien eine, zwei und drei Stufen unter der obersten überall zu sehen (Anteil der Punkte, schwächste Linie)');
 
-        // Neu rechnen: Qualität und Seitenverhältnis bleiben; was nicht mehr
-        // zur Pyramide gehört, geht – Fremdes bleibt; kacheln.json wird ersetzt, nicht überschrieben.
+        // Neu rechnen: Qualität und Seitenverhältnis bleiben. Gerechnet wird
+        // in einen neuen Ordner, die bisherige Fassung abgelöst; Fremdes im
+        // Planordner bleibt; kacheln.json wird ersetzt, nicht überschrieben.
+        $planH = PlanTileService::planDir($haar);
+        file_put_contents($planH . '/notiz.txt', 'fremd');
         $b = PlanTileService::bauen($haar, true, true, null, 'fein');
         $inode = fileinode(PlanTileService::metaPfad($haar));
-        foreach (['9/0', '0/5', '1/0'] as $teil) {
-            @mkdir($ordnerH . '/' . $teil, 0775, true);
-        }
-        $andersFormat = $fmt === 'png' ? 'jpg' : 'png';
-        foreach (['9/0/0.' . $fmt, '0/5/0.' . $fmt, '1/0/0.' . $andersFormat, '1/0/7.' . $fmt] as $rest) {
-            file_put_contents($ordnerH . '/' . $rest, 'alt');
-        }
-        file_put_contents($ordnerH . '/notiz.txt', 'fremd');
+        $vorher = (string) PlanTileService::aktiveFassung($haar);
         $b2 = PlanTileService::bauen($haar, true);
         clearstatcache();
         pruefe(($b['meta']['qualitaet'] ?? '') === 'fein' && ($b2['meta']['qualitaet'] ?? '') === 'fein'
             && ($b2['meta']['verhaeltnis'] ?? 0) === ($meta['verhaeltnis'] ?? 1) && ($b2['meta']['hoehe'] ?? 0) === ($meta['hoehe'] ?? 1),
             'neu gerechnet ohne Angabe: Qualität „fein“ bleibt, Seitenverhältnis und Höhe wie zuvor');
-        pruefe(!is_dir($ordnerH . '/9') && !is_dir($ordnerH . '/0/5') && !is_file($ordnerH . '/1/0/0.' . $andersFormat) && !is_file($ordnerH . '/1/0/7.' . $fmt)
-            && is_file($ordnerH . '/1/0/0.' . $fmt) && is_file($ordnerH . '/notiz.txt'),
-            'nach dem Bau weg: Stufe über der obersten, Spalte und Zeile außerhalb, anderes Format – eigene Kacheln und fremde Datei bleiben');
-        pruefe(fileinode(PlanTileService::metaPfad($haar)) !== $inode && glob($ordnerH . '/*.tmp') === [],
-            'kacheln.json über eine Zwischendatei ersetzt (neue Inode, keine Zwischendatei übrig)');
-        @unlink($ordnerH . '/notiz.txt');
+        $reste = array_values(array_filter(scandir($planH) ?: [], static fn (string $n): bool => str_ends_with($n, '.tmp') || str_ends_with($n, '.bau')));
+        pruefe(fileinode(PlanTileService::metaPfad($haar)) !== $inode && $reste === [] && is_file($planH . '/notiz.txt')
+            && is_file($vorher . '/.abgeloest') && PlanTileService::aktiveFassung($haar) !== $vorher,
+            'kacheln.json über eine Zwischendatei ersetzt (neue Inode), keine Zwischendatei und kein Bauordner übrig, die bisherige Fassung abgelöst, Fremdes bleibt');
+        @unlink($planH . '/notiz.txt');
 
         // pdfimages: wie groß stehen Bilder auf der Seite? Ein Bild über die
         // ganze Seite (wie ein Scan) deckelt die Seite, ein Plan ohne Bilder nicht.
@@ -574,6 +666,183 @@ try {
                 && $zs['grenze'] === 'bild' && $zs['breite'] * $zs['hoehe'] <= PlanTileService::MAX_BILDPIXEL && $zs['breite'] * $zs['hoehe'] > 79_000_000,
                 sprintf('pdfimages: Bild über die ganze Seite %.0f pt² (Seite 15 360 000), ohne Bilder 0 – die Seite mit Bild auf %d × %d px', $flaeche, $zs['breite'], $zs['hoehe']));
         }
+
+        // ------------------------------------------------ Neu rechnen im Hintergrund
+        // Ein träges pdftoppm vorn im PATH des Prozesses im Hintergrund (eine
+        // Sekunde je Aufruf): So lange rechnet der Bau, dass sich nachsehen
+        // lässt, was die Karte währenddessen bekommt.
+        $echt = (string) PdfRasterService::werkzeug()['pfad'];
+        $attrappe = static function (string $name, string $vorher) use ($tmp, $echt): string {
+            $bin = $tmp . '/' . $name;
+            @mkdir($bin, 0700);
+            file_put_contents($bin . '/pdftoppm', "#!/bin/sh\n" . $vorher . "\nexec " . escapeshellarg($echt) . " \"\$@\"\n");
+            chmod($bin . '/pdftoppm', 0700);
+            return $bin;
+        };
+        $traege = $attrappe('traege', 'sleep 1');
+        $kliLog = $tmp . '/kli.log';
+        touch($kliLog);
+        /** bin/power mit $bin vorn im PATH – bis zum Ende (null) oder im Hintergrund (Prozess, beim Beenden gestoppt). */
+        $kli = static function (array $argumente, string $bin, bool $warten) use ($kliLog): mixed {
+            $p = proc_open(array_merge([PHP_BINARY, dirname(__DIR__) . '/bin/power'], $argumente),
+                [0 => ['pipe', 'r'], 1 => ['file', $kliLog, 'a'], 2 => ['file', $kliLog, 'a']], $rohre, null, ['PATH' => $bin . ':' . (string) getenv('PATH')] + getenv());
+            fclose($rohre[0]);
+            if ($warten) {
+                proc_close($p);
+                return null;
+            }
+            register_shutdown_function(static function () use ($p): void {
+                if (is_resource($p)) {
+                    proc_terminate($p);
+                    proc_close($p);
+                }
+            });
+            return $p;
+        };
+        $kliNeu = static function () use ($kliLog): callable {
+            clearstatcache(true, $kliLog);
+            $ab = (int) filesize($kliLog);
+            return static function () use ($kliLog, $ab): string {
+                clearstatcache(true, $kliLog);
+                return substr((string) file_get_contents($kliLog), $ab);
+            };
+        };
+        $sobald = static function (callable $bedingung, float $sekunden): bool {
+            $ende = microtime(true) + $sekunden;
+            while (!$bedingung()) {
+                if (microtime(true) > $ende) {
+                    return false;
+                }
+                usleep(100_000);
+            }
+            return true;
+        };
+
+        // Angestoßen wie aus der Oberfläche: sofort zurück, ein Auftrag – während
+        // gerechnet wird, liefert kachel() Byte für Byte die bisherige Kachel.
+        $haar = SiteService::floor($haarId);
+        $standVorher = (string) PlanTileService::aktuellerStand($haar);
+        $kVorher = (array) PlanTileService::kachel($haar, 2, 0, 0, $standVorher);
+        $bytesVorher = (string) file_get_contents((string) $kVorher['pfad']);
+        $pfadVorher = (string) getenv('PATH');
+        $start = microtime(true);
+        putenv('PATH=' . $traege . ':' . $pfadVorher);
+        try {
+            $r = PlanTileService::neuRechnenAnfordern($haar);
+        } finally {
+            putenv('PATH=' . $pfadVorher);
+        }
+        $zweite = PlanTileService::neuRechnenAnfordern($haar);
+        $dauer = microtime(true) - $start;
+        pruefe($r['ok'] && $r['neu'] && $zweite['ok'] && !$zweite['neu'] && $dauer < 1,
+            sprintf('Neu rechnen angestoßen und sofort zurück (%.2f s); ein zweiter Klick ergibt keinen zweiten Auftrag – %s', $dauer, $zweite['message']));
+        $laeuft = $sobald(static fn (): bool => PlanTileService::zustand($haar)['zustand'] === 'laeuft', 20);
+        $gleich = true;
+        $bau = false;
+        $proben = 0;
+        for ($i = 0; $i < 10 && PlanTileService::zustand($haar)['zustand'] === 'laeuft'; $i++) {
+            $k = PlanTileService::kachel($haar, 2, 0, 0, $standVorher);
+            $gleich = $gleich && (string) @file_get_contents((string) ($k['pfad'] ?? '')) === $bytesVorher
+                && PlanTileService::aktuellerStand($haar) === $standVorher && (PlanTileService::kachel($haar, 2, 0, 0)['pfad'] ?? '') === $kVorher['pfad'];
+            $bau = $bau || glob(PlanTileService::planDir($haar) . '/v*.bau', GLOB_ONLYDIR) !== [];
+            $proben++;
+            usleep(200_000);
+        }
+        pruefe($laeuft && $proben > 0 && $gleich && $bau,
+            'während des Neubaus im Hintergrund (träges pdftoppm): dieselbe Kachel Byte für Byte, derselbe Stand – gerechnet wird daneben (v….bau), ' . $proben . ' Proben');
+        $neueZeilen = $kliNeu();
+        $kli(['plan:kacheln', '--neu', '--etage=' . $haarId], $traege, true);
+        pruefe(str_contains($neueZeilen(), 'läuft schon'), 'ein zweiter Prozess für denselben Plan endet sofort mit „läuft schon“');
+        $fertig = $sobald(static fn (): bool => PlanTileService::zustand($haar)['zustand'] === 'fertig', 90);
+        $standNachher = (string) PlanTileService::aktuellerStand($haar);
+        $altK = PlanTileService::kachel($haar, 2, 0, 0, $standVorher);
+        $z = PlanTileService::zustand($haar);
+        gleich([$fertig, $standNachher !== $standVorher, (string) @file_get_contents((string) ($altK['pfad'] ?? '')) === $bytesVorher, str_starts_with($z['meldung'], 'Fertig gerechnet')],
+            [true, true, true, true], 'danach umgeschaltet: neuer Stand, unter dem alten noch die alten Bytes (GNADE) – ' . $z['meldung']);
+
+        // Ein Auftrag ohne Prozess (der Server wurde neu gestartet): abgebrochen,
+        // die Wartung holt ihn nach – mit der verlangten Qualität.
+        $auftragDatei = PlanTileService::planDir($haar) . '/.auftrag.json';
+        file_put_contents($auftragDatei, json_encode(['zustand' => 'laeuft', 'qualitaet' => 'standard', 'angefordert' => gmdate('c', time() - 300), 'beginn' => gmdate('c', time() - 290)]));
+        $z = PlanTileService::zustand($haar);
+        file_put_contents($auftragDatei, json_encode(['zustand' => 'angefordert', 'angefordert' => gmdate('c', time() - 120)]));
+        $z2 = PlanTileService::zustand($haar);
+        file_put_contents($auftragDatei, json_encode(['zustand' => 'angefordert', 'angefordert' => gmdate('c', time() - 5)]));
+        $z3 = PlanTileService::zustand($haar);
+        gleich([$z['zustand'], str_contains($z['meldung'], 'neu gestartet – der bisherige Plan ist geblieben'), $z2['zustand'], $z3['zustand']],
+            ['abgebrochen', true, 'abgebrochen', 'angefordert'],
+            'Auftrag ohne Prozess (laufend, oder vor über einer Minute angefordert): abgebrochen; eben erst angefordert: angefordert – ' . $z['meldung']);
+        file_put_contents($auftragDatei, json_encode(['zustand' => 'laeuft', 'qualitaet' => 'standard', 'angefordert' => gmdate('c', time() - 300)]));
+        $zeilen = PlanTileService::fehlendeNachrechnen();
+        pruefe(array_filter($zeilen, static fn (string $z): bool => str_starts_with($z, 'Abgebrochenes Neurechnen nachgeholt: ' . $kennung . ' / Haarlinien')) !== []
+            && (PlanTileService::meta($haar)['qualitaet'] ?? '') === 'standard' && PlanTileService::zustand($haar)['zustand'] === 'fertig',
+            'Wartung: abgebrochenes Neurechnen nachgeholt, in der verlangten Qualität („standard“ statt bisher „fein“)');
+
+        // pdftoppm scheitert am zweiten Streifen: Kacheln und kacheln.json
+        // bleiben, wie sie waren, kein Bauordner bleibt liegen, der Zustand
+        // sagt es – ohne Pfade des Servers.
+        $streifenId = SiteService::saveFloor(null, ['site_id' => $siteId, 'name' => 'Zwei Streifen']);
+        $streifenName = 'site' . $siteId . '_' . bin2hex(random_bytes(8)) . '.pdf';
+        pruefPdfHaarlinien(SiteService::planDir() . '/' . $streifenName, 1100, 800, [100.0, 500.0, 900.0], [100.0, 400.0, 700.0]);
+        Database::update('floors', $streifenId, ['plan_file' => $streifenName, 'plan_type' => 'pdf', 'plan_page' => 1]);
+        $streifen = SiteService::floor($streifenId);
+        $b = PlanTileService::bauen($streifen, true);
+        $metaVorher = PlanTileService::meta($streifen);
+        $kVorher = (array) PlanTileService::kachel($streifen, (int) ($metaVorher['max_zoom'] ?? 0), 0, 0);
+        $bytesVorher = (string) @file_get_contents((string) ($kVorher['pfad'] ?? ''));
+        $zaehler = $tmp . '/zaehler';
+        file_put_contents($zaehler, '0');
+        $kaputt = $attrappe('kaputt', 'n=$(( $(cat ' . escapeshellarg($zaehler) . ') + 1 )); echo "$n" > ' . escapeshellarg($zaehler) . "\n"
+            . 'if [ "$n" -ge 2 ]; then echo "Syntax Error: Couldn' . "'" . 't read ' . $tmp . '/geheim/plan.pdf" >&2; exit 1; fi');
+        $kli(['plan:kacheln', '--neu', '--etage=' . $streifenId], $kaputt, true);
+        $z = PlanTileService::zustand($streifen);
+        $reste = array_values(array_filter(scandir(PlanTileService::planDir($streifen)) ?: [], static fn (string $n): bool => str_ends_with($n, '.bau')));
+        $kNachher = PlanTileService::kachel($streifen, (int) ($metaVorher['max_zoom'] ?? 0), 0, 0);
+        pruefe($b['ok'] && (int) file_get_contents($zaehler) >= 2 && PlanTileService::meta($streifen) === $metaVorher && $bytesVorher !== ''
+            && (string) @file_get_contents((string) ($kNachher['pfad'] ?? '')) === $bytesVorher && $reste === [] && $z['zustand'] === 'fehler'
+            && str_contains($z['meldung'], 'der bisherige Plan ist geblieben') && str_contains($z['meldung'], 'plan.pdf') && !str_contains($z['meldung'], $tmp),
+            'pdftoppm scheitert am zweiten Streifen: Kacheln und kacheln.json unverändert, kein Bauordner übrig, Zustand „fehler“ ohne Pfade – ' . $z['meldung']);
+        pruefe(PlanTileService::veralteteNachrechnen(0) === [] || PlanTileService::zustand($streifen)['zustand'] === 'fehler',
+            '… und die Wartung versucht ihn nicht jede Nacht wieder (er ist ohnehin aktuell)');
+
+        // Dieselbe Datei für zwei Etagen: eine Pyramide, einmal gerechnet –
+        // beim Hochladen wie beim Neurechnen.
+        $hallen = [SiteService::saveFloor(null, ['site_id' => $siteId, 'name' => 'Halle A']), SiteService::saveFloor(null, ['site_id' => $siteId, 'name' => 'Halle B'])];
+        $bild = imagecreatetruecolor(2400, 1600);
+        imagefilledrectangle($bild, 0, 0, 2399, 1599, 0xFFFFFF);
+        imageline($bild, 0, 0, 2399, 1599, 0x000000);
+        imagepng($bild, $tmp . '/hallen.png');
+        $r = SiteService::uploadPlan($siteId, $datei($tmp . '/hallen.png', 'hallen.png'), ['floor_ids' => $hallen]);
+        $hA = (array) SiteService::floor($hallen[0]);
+        $hB = (array) SiteService::floor($hallen[1]);
+        $planHallen = PlanTileService::planDir($hA);
+        pruefe($r['ok'] && $planHallen === PlanTileService::planDir($hB) && count(glob($planHallen . '/v*', GLOB_ONLYDIR) ?: []) === 1
+            && str_contains($r['message'], 'Kacheln berechnet.') && !str_contains($r['message'], 'Seiten)'),
+            'dieselbe Datei für zwei Etagen: eine Pyramide, beim Hochladen einmal gerechnet – ' . $r['message']);
+        $standA = (string) PlanTileService::aktuellerStand($hA);
+        $neueZeilen = $kliNeu();
+        $kli(['plan:kacheln', '--neu', '--etage=' . implode(',', $hallen)], $tmp . '/leer', false);
+        $sobald(static fn (): bool => str_contains($neueZeilen(), 'Kacheln in'), 60);
+        $ausgabe = $neueZeilen();
+        pruefe(substr_count($ausgabe, 'Kacheln in') === 1 && str_contains($ausgabe, $kennung . ' / Halle A, Halle B: ')
+            && PlanTileService::aktuellerStand($hA) !== $standA && PlanTileService::aktuellerStand($hA) === PlanTileService::aktuellerStand($hB),
+            'plan:kacheln --neu --etage=A,B: einmal gerechnet, eine Zeile für beide Etagen – ' . trim($ausgabe));
+
+        // Etage gelöscht, während ihr Plan im Hintergrund neu gerechnet wird:
+        // Plandatei und Kachelordner sind danach weg, nichts entsteht neu.
+        $loeschId = SiteService::saveFloor(null, ['site_id' => $siteId, 'name' => 'Wird gelöscht']);
+        $geloeschteEtagen[] = (string) $loeschId;
+        $loeschName = 'site' . $siteId . '_' . bin2hex(random_bytes(8)) . '.pdf';
+        pruefPdfHaarlinien(SiteService::planDir() . '/' . $loeschName, 600, 400, [100.0, 300.0], [100.0, 200.0]);
+        Database::update('floors', $loeschId, ['plan_file' => $loeschName, 'plan_type' => 'pdf', 'plan_page' => 1]);
+        $loesch = (array) SiteService::floor($loeschId);
+        PlanTileService::bauen($loesch, true);
+        $p = $kli(['plan:kacheln', '--neu', '--etage=' . $loeschId], $traege, false);
+        $laeuft = $sobald(static fn (): bool => PlanTileService::zustand($loesch)['zustand'] === 'laeuft', 20);
+        SiteService::deleteFloor($loeschId);
+        $vorbei = $sobald(static fn (): bool => !proc_get_status($p)['running'], 60);
+        pruefe($laeuft && $vorbei && !is_dir(PlanTileService::planDir($loesch)) && !is_file(SiteService::planDir() . '/' . $loeschName),
+            'Etage gelöscht, während ihr Plan im Hintergrund neu gerechnet wurde: kein Kachelordner und keine Plandatei bleiben');
 
         // ------------------------------------------------ Zeitgrenze: Abbruch, dann Hintergrund
         $pdf = $tmp . '/zwei.pdf';
@@ -635,18 +904,20 @@ try {
         }
         pruefe(PlanTileService::meta(SiteService::floor($neu[1])) !== null, '… und rechnet, sobald sie frei ist');
 
-        // Abbruch über einer fertigen Pyramide (der Upload und früher der
-        // Abgleich mit Frist, auf einem Namen, der schon Kacheln hat): keine
-        // halbe Pyramide und kein kacheln.json, das auf fehlende Kacheln zeigt.
+        // Abbruch über einer fertigen Pyramide (der Upload mit Frist): Die
+        // bisherige bleibt, wie sie war – vorher war sie danach ganz weg, und
+        // die Karte zeichnete im Browser bis zur nächsten Nacht.
         $eine = SiteService::floor($neu[0]);
-        pruefe(PlanTileService::meta($eine) !== null, 'vorher: fertige Pyramide');
+        $metaVorher = PlanTileService::meta($eine);
+        pruefe($metaVorher !== null, 'vorher: fertige Pyramide');
         $b = PlanTileService::bauen($eine, true, true, microtime(true) - 1);
-        $reste = glob(PlanTileService::planDir($eine) . '/[0-9]*', GLOB_ONLYDIR) ?: [];
-        pruefe(!$b['ok'] && ($b['abgebrochen'] ?? false) === true && PlanTileService::meta($eine) === null && $reste === []
-            && (PlanTileService::quelle($eine)['art'] ?? '') === 'pdf',
-            'bauen() mit abgelaufener Frist: abgebrochen, keine Kacheln, kein kacheln.json – die Karte zeichnet im Browser statt ins Leere');
+        $reste = array_values(array_filter(scandir(PlanTileService::planDir($eine)) ?: [], static fn (string $n): bool => str_ends_with($n, '.bau')));
+        pruefe(!$b['ok'] && ($b['abgebrochen'] ?? false) === true && PlanTileService::meta($eine) === $metaVorher && $reste === []
+            && (PlanTileService::quelle($eine)['art'] ?? '') === 'kacheln',
+            'bauen() mit abgelaufener Frist: abgebrochen – die bisherige Pyramide bleibt, kein Bauordner übrig');
 
         // Die nächtliche Wartung rechnet nach, was fehlt
+        PlanTileService::aufraeumen($eine);
         $zeilen = PlanTileService::fehlendeNachrechnen();
         pruefe(PlanTileService::meta(SiteService::floor($neu[0])) !== null
             && array_filter($zeilen, static fn (string $z): bool => str_starts_with($z, 'Kacheln nachgerechnet: ' . $kennung)) !== [],
@@ -718,7 +989,7 @@ try {
     if ($tankId !== null && $tankId > 0) {
         AnlagenService::loeschen($tankId);
     }
-    $etagenIds = [];
+    $etagenIds = $geloeschteEtagen;
     foreach (SiteService::floors($siteId) as $f) {
         $etagenIds[] = (string) $f['id'];
         PlanTileService::aufraeumen($f);

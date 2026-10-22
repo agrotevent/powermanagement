@@ -6,6 +6,7 @@ namespace App\Services;
 use App\Support\Database;
 use App\Support\Logger;
 use App\Support\Programm;
+use App\Support\Zeit;
 
 /**
  * Kacheln für Grundrisse.
@@ -43,6 +44,21 @@ use App\Support\Programm;
  * Mit Plänen bis 100 MB dauert das Minuten. Der Upload rechnet deshalb nur
  * eine Weile selbst (bauen() mit Frist) und gibt den Rest an einen eigenen
  * Prozess (imHintergrund()); was dabei liegen bleibt, holt die Wartung nach.
+ *
+ * Gerechnet wird nie in den Ordner, aus dem die Karte liest:
+ *
+ *   kacheln/<plan>[_sN]/
+ *     kacheln.json     Zeiger auf die aktive Fassung ('ordner'), mit ihren Maßen
+ *     v<stand>/        aktive Fassung: z/x/y.<format> und ein eigenes kacheln.json
+ *     v<stand>.bau/    im Bau – erst fertig, dann per rename() eingesetzt
+ *     .sperre          hält, wer baut (laeuft())
+ *     .auftrag         hält der Prozess im Hintergrund vom Start bis zum Ende
+ *     .auftrag.json    Zustand des Auftrags für die Karte (zustand())
+ *
+ * Eine abgelöste Fassung bleibt GNADE Sekunden liegen; scheitert ein Bau
+ * oder wird er abgebrochen, bleibt die bisherige ganz. Pyramiden von vor
+ * den Fassungsordnern liegen mit ihren Stufen direkt im Planordner und
+ * werden beim nächsten Bau abgelöst (umschalten()).
  *
  * SVG bleibt ungekachelt – es skaliert von sich aus verlustfrei.
  */
@@ -172,6 +188,39 @@ final class PlanTileService
      */
     public const STREIFEN_PIXEL = 16_000_000;
 
+    /**
+     * So lange bleibt eine abgelöste Fassung nach dem Umschalten liegen
+     * (Sekunden). Eine Karte, die dabei offen war, holt ihre Kacheln unter
+     * dem alten Stand so lange weiter (kachel()), statt Lücken zu zeigen –
+     * bis sie den Wechsel bemerkt (Status, Livewerte) und umsteigt oder neu
+     * geladen wird. Gemessen kostet das Umschalten selbst 0,5–1,1 ms, das
+     * Löschen einer Fassung mit 1 700 Kacheln 36–54 ms.
+     */
+    public const GNADE = 120;
+
+    /** Zustände eines Auftrags, die noch nicht zu Ende sind (zustand()). */
+    public const OFFEN = ['angefordert', 'wartet', 'laeuft'];
+
+    /**
+     * So lange gilt ein Auftrag ohne Prozess noch als „angefordert“
+     * (Sekunden): Zwischen dem Klick und dem Moment, in dem der Prozess im
+     * Hintergrund seine Sperre hält, vergeht ein Augenblick. Danach heißt
+     * ein offener Auftrag ohne Prozess: er ist gestorben.
+     */
+    private const ANGEFORDERT_FRIST = 60;
+
+    /** Beendete Aufträge (.auftrag.json) räumt die Wartung nach so vielen Sekunden weg. */
+    private const AUFTRAG_AUFBEWAHREN = 30 * 86400;
+
+    /** Ordner einer Fassung: „v“ und ihr Stand (stand()). */
+    private const FASSUNGSORDNER = '/^v[0-9a-f]{12}$/';
+
+    /** … und solange sie gebaut wird. */
+    private const BAUORDNER = '/^v[0-9a-f]{12}\.bau$/';
+
+    /** Stufen einer Pyramide von vor den Fassungsordnern (direkt im Planordner). */
+    private const STUFENORDNER = '/^\d{1,2}$/';
+
     public static function dir(): string
     {
         $dir = dirname(__DIR__, 2) . '/storage/plans/kacheln';
@@ -287,15 +336,60 @@ final class PlanTileService
         return self::planDir($floor) . '/kacheln.json';
     }
 
-    /** Bereits berechnete Pyramide, sonst null. */
+    /**
+     * Bereits berechnete Pyramide, sonst null – der Zeiger kacheln.json
+     * (mit 'ordner', der aktiven Fassung; ohne: eine Pyramide von vor den
+     * Fassungsordnern, ihre Stufen liegen direkt im Planordner).
+     */
     public static function meta(array $floor): ?array
     {
-        $pfad = self::metaPfad($floor);
-        if (!is_file($pfad)) {
+        $daten = self::jsonLesen(self::metaPfad($floor));
+        return $daten !== null && isset($daten['breite'], $daten['max_zoom']) ? $daten : null;
+    }
+
+    /** Ordner der Kacheln, die die Karte dieser Etage jetzt zeigt (z/x/y.<format>) – null ohne Pyramide. */
+    public static function aktiveFassung(array $floor): ?string
+    {
+        $meta = self::meta($floor);
+        return $meta !== null ? self::kachelOrdner(self::planDir($floor), $meta) : null;
+    }
+
+    /** Wo die Kacheln der Pyramide $meta liegen: ihr Fassungsordner oder (ältere) der Planordner selbst. */
+    private static function kachelOrdner(string $planOrdner, array $meta): string
+    {
+        $ordner = (string) ($meta['ordner'] ?? '');
+        return preg_match(self::FASSUNGSORDNER, $ordner) === 1 ? $planOrdner . '/' . $ordner : $planOrdner;
+    }
+
+    /**
+     * Eine JSON-Datei lesen – ohne vorher nachzusehen, ob es sie gibt: Was
+     * zwischen Nachsehen und Lesen verschwindet (umgeschaltet, aufgeräumt),
+     * ist dann einfach null.
+     */
+    private static function jsonLesen(string $pfad): ?array
+    {
+        $text = @file_get_contents($pfad);
+        if (!is_string($text) || $text === '') {
             return null;
         }
-        $daten = json_decode((string) file_get_contents($pfad), true);
-        return is_array($daten) && isset($daten['breite'], $daten['max_zoom']) ? $daten : null;
+        $daten = json_decode($text, true);
+        return is_array($daten) ? $daten : null;
+    }
+
+    /**
+     * Eine JSON-Datei schreiben – über eine Zwischendatei und rename(): so
+     * liest niemand ein halbes (direkt geschrieben war gemessen jede
+     * fünfzigste Lesung unlesbar, während gerade geschrieben wurde).
+     */
+    private static function jsonSchreiben(string $pfad, array $daten): bool
+    {
+        $zwischen = $pfad . '.' . bin2hex(random_bytes(4)) . '.tmp';
+        $text = json_encode($daten, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+        if (!is_string($text) || @file_put_contents($zwischen, $text) === false || !@rename($zwischen, $pfad)) {
+            @unlink($zwischen);
+            return false;
+        }
+        return true;
     }
 
     /** Fassung einer Pyramide (FASSUNG); ohne Eintrag ist es Fassung 1. */
@@ -345,11 +439,20 @@ final class PlanTileService
     /** Hält jemand die Sperrdatei dieses Kachelordners (siehe laeuft())? */
     private static function ordnerGesperrt(string $ordner): bool
     {
-        $pfad = $ordner . '/.sperre';
+        return self::gehalten($ordner . '/.sperre');
+    }
+
+    /**
+     * Hält jemand diese Sperrdatei? Nachgesehen mit einer geteilten Sperre
+     * für einen Augenblick – darum holt sperreHolen() eine kurz belegte
+     * Sperre trotzdem.
+     */
+    private static function gehalten(string $pfad): bool
+    {
         if (!is_file($pfad)) {
             return false;
         }
-        $griff = @fopen($pfad, 'r');
+        $griff = @fopen($pfad, 're');
         if ($griff === false) {
             return false;
         }
@@ -359,6 +462,59 @@ final class PlanTileService
         }
         fclose($griff);
         return !$frei;
+    }
+
+    /**
+     * Eine Sperrdatei exklusiv holen. Wer nicht warten will, bekommt sie
+     * trotzdem, wenn sie nur einen Augenblick belegt ist: gehalten() hält
+     * sie dafür geteilt – das ist kein Bau, der hält sie Sekunden bis
+     * Minuten. Ohne die Wiederholung ließe ein Blick des Status-Endpunkts
+     * (alle 2,5 Sekunden) einen Bau glauben, ein anderer rechne schon.
+     *
+     * @param resource $griff
+     */
+    private static function sperreHolen($griff, bool $warten): bool
+    {
+        if ($warten) {
+            return flock($griff, LOCK_EX);
+        }
+        for ($versuch = 0; $versuch < 20; $versuch++) {
+            if (flock($griff, LOCK_EX | LOCK_NB)) {
+                return true;
+            }
+            usleep(10_000);
+        }
+        return false;
+    }
+
+    /**
+     * Sperrdatei öffnen und exklusiv holen (sperreHolen()) – mit „e“: Ein
+     * Kindprozess (poppler, der Prozess im Hintergrund) erbt den Griff
+     * nicht und hält die Sperre so auch nicht über das Ende dieses
+     * Prozesses hinaus.
+     *
+     * @return resource|null
+     */
+    private static function sperren(string $pfad, bool $warten)
+    {
+        $griff = @fopen($pfad, 'ce');
+        if ($griff === false) {
+            return null;
+        }
+        if (!self::sperreHolen($griff, $warten)) {
+            fclose($griff);
+            return null;
+        }
+        return $griff;
+    }
+
+    /** @param resource|null $griff */
+    private static function freigeben($griff): void
+    {
+        if (is_resource($griff)) {
+            flock($griff, LOCK_UN);
+            fclose($griff);
+        }
     }
 
     /** Ohne gd gibt es keine Kachel – weder aus PDF noch aus JPEG. */
@@ -439,9 +595,18 @@ final class PlanTileService
     /**
      * Zerlegt einen Raster-Grundriss in Kacheln.
      *
-     * Ist die Pyramide schon vorhanden, passiert nichts. Gleichzeitige
-     * Aufrufe werden über eine Sperrdatei abgefangen – beim ersten Aufruf
-     * der Seite lädt sonst jede Kachelanfrage den Bau erneut an.
+     * Ist die Pyramide schon vorhanden, passiert nichts (außer mit $neu).
+     * Gleichzeitige Aufrufe werden über eine Sperrdatei abgefangen; wer
+     * warten musste und danach eine fertige neue Pyramide vorfindet, rechnet
+     * nicht noch einmal.
+     *
+     * Gerechnet wird in einen eigenen Ordner (v<stand>.bau), nie in den, aus
+     * dem die Karte liest. Erst wenn alles fertig ist, setzt umschalten() ihn
+     * ein. Gemessen stand vorher 25 von 27 Sekunden eines Neubaus eine
+     * Pyramide aus zwei Maßstäben unter einem kacheln.json, und ein
+     * abgebrochener Bau ließ sie für immer so; ein Fehler löschte die
+     * fertige Pyramide ganz. Jetzt bleibt bei Fehler und Abbruch die
+     * bisherige, wie sie war.
      *
      * $bis (microtime): Wer nur bis dahin warten kann – der Upload –, bekommt
      * danach 'abgebrochen' => true zurück, bevor poppler den nächsten
@@ -459,8 +624,9 @@ final class PlanTileService
         if ($quelle === null) {
             return ['ok' => false, 'message' => 'Kein Grundriss hinterlegt.', 'kacheln' => 0, 'meta' => null];
         }
-        if (!$neu && ($meta = self::meta($floor)) !== null) {
-            return ['ok' => true, 'message' => 'Kacheln liegen bereits vor.', 'kacheln' => (int) $meta['kacheln'], 'meta' => $meta];
+        $vorher = self::meta($floor);
+        if (!$neu && $vorher !== null) {
+            return ['ok' => true, 'message' => 'Kacheln liegen bereits vor.', 'kacheln' => (int) $vorher['kacheln'], 'meta' => $vorher];
         }
         $hindernis = self::hindernis($quelle);
         if ($hindernis !== null) {
@@ -474,57 +640,87 @@ final class PlanTileService
             $grund = self::ueberGd($quelle) ? SiteService::bildPruefen($quelle) : null;
             return ['ok' => false, 'message' => $grund ?? 'Für diese Datei werden keine Kacheln gebraucht.', 'kacheln' => 0, 'meta' => null];
         }
+        $qualitaet = $qualitaet !== null ? self::qualitaet($qualitaet) : null;
 
         $ordner = self::planDir($floor);
-        if (!is_dir($ordner) && !mkdir($ordner, 0775, true) && !is_dir($ordner)) {
+        if (!is_dir($ordner) && !@mkdir($ordner, 0775, true) && !is_dir($ordner)) {
             return ['ok' => false, 'message' => 'Kachelordner konnte nicht angelegt werden.', 'kacheln' => 0, 'meta' => null];
         }
 
-        $sperre = fopen($ordner . '/.sperre', 'c');
+        $sperre = @fopen($ordner . '/.sperre', 'ce');
         if ($sperre === false) {
             return ['ok' => false, 'message' => 'Kachelordner ist nicht beschreibbar.', 'kacheln' => 0, 'meta' => null];
         }
-        if (!flock($sperre, LOCK_EX | LOCK_NB)) {
-            if (!$warten) {
-                // Beim Seitenaufruf: einer rechnet schon, ein zweiter
-                // Arbeiter, der danebensteht und wartet, bringt nichts.
-                fclose($sperre);
-                return ['ok' => false, 'message' => 'Der Plan wird gerade berechnet.', 'kacheln' => 0, 'meta' => null];
-            }
-            // Ein anderer Aufruf baut gerade – auf dessen Ergebnis warten.
-            flock($sperre, LOCK_EX);
-            flock($sperre, LOCK_UN);
+        if (!self::sperreHolen($sperre, $warten)) {
+            // Beim Seitenaufruf: einer rechnet schon, ein zweiter Arbeiter,
+            // der danebensteht und wartet, bringt nichts.
             fclose($sperre);
-            $meta = self::meta($floor);
-            return ['ok' => $meta !== null, 'message' => 'Kacheln wurden bereits gebaut.', 'kacheln' => (int) ($meta['kacheln'] ?? 0), 'meta' => $meta];
+            return ['ok' => false, 'message' => 'Der Plan wird gerade berechnet.', 'kacheln' => 0, 'meta' => null];
         }
 
         try {
+            /*
+             * Hat ein anderer Bau fertig gerechnet, während hier auf die
+             * Sperre gewartet wurde, ist nichts mehr zu tun – außer es ist
+             * eine andere Qualität verlangt. Nur „schon gebaut“ genügt
+             * nicht: Wer nachsieht, ob gerechnet wird (gehalten()), hält
+             * die Sperre einen Augenblick, und dahinter stand bisher jeder
+             * Neubau ohne Ergebnis wieder auf.
+             */
+            $jetzt = self::meta($floor);
+            if ($jetzt !== null && (!$neu || (($vorher === null || self::stand($jetzt) !== self::stand($vorher))
+                && ($qualitaet === null || self::qualitaet($jetzt['qualitaet'] ?? null) === $qualitaet)))) {
+                return ['ok' => true, 'message' => 'Kacheln wurden inzwischen gebaut.', 'kacheln' => (int) $jetzt['kacheln'], 'meta' => $jetzt];
+            }
+
+            // Wer die Sperre hält, ist allein: Bauordner sind Reste getöteter
+            // Bauten, Abgelöstes über GNADE kann weg.
+            self::wegraeumen($ordner, self::GNADE, 0);
+
             /*
              * Was die vorhandene Pyramide schon festgelegt hat, bleibt: die
              * Qualität, wenn keine verlangt ist, und das Seitenverhältnis.
              * Anlagen, Maßstab und Georeferenz stehen in Prozent von Breite
              * und Höhe – mit einem anderen Verhältnis säßen sie daneben.
              */
-            $alt = self::meta($floor);
+            $alt = $jetzt;
             if ($alt !== null && ((string) ($alt['quelle'] ?? '') !== basename($quelle)
                 || (int) ($alt['seite'] ?? 1) !== max(1, (int) ($floor['plan_page'] ?? 1)))) {
                 $alt = null;
             }
-            $qualitaet = self::qualitaet($qualitaet ?? ($alt['qualitaet'] ?? null));
-            $ergebnis = self::schneiden($floor, $quelle, $ordner, $bis, $qualitaet, $alt);
+            $qualitaet ??= self::qualitaet($alt['qualitaet'] ?? null);
+
+            $name = 'v' . bin2hex(random_bytes(6));
+            $bau = $ordner . '/' . $name . '.bau';
+            if (!@mkdir($bau, 0775) && !is_dir($bau)) {
+                return ['ok' => false, 'message' => 'Kachelordner ist nicht beschreibbar.', 'kacheln' => 0, 'meta' => null];
+            }
+            try {
+                $ergebnis = self::schneiden($floor, $quelle, $bau, $bis, $qualitaet, $alt);
+                /*
+                 * Wurde die Etage gelöscht (oder bekam sie einen anderen
+                 * Plan), während hier gerechnet wurde – im Hintergrund dauert
+                 * das Minuten –, hat SiteService die Kacheln schon
+                 * weggeräumt; geschrieben wurde danach weiter, der Ordner
+                 * entstand neu. Dann wird nicht umgeschaltet (siehe unten).
+                 */
+                if ($ergebnis['ok'] && $ergebnis['meta'] !== null && !self::verwaist($floor)) {
+                    $meta = ['ordner' => $name] + $ergebnis['meta'];
+                    $ergebnis = self::umschalten($ordner, $bau, $name, $meta, $jetzt)
+                        ? ['meta' => $meta] + $ergebnis
+                        : ['ok' => false, 'message' => 'Die neuen Kacheln ließen sich nicht einsetzen – der bisherige Plan bleibt.', 'kacheln' => 0, 'meta' => null];
+                }
+            } finally {
+                // Gescheitert, abgebrochen oder verwaist: nur der Bau ist weg.
+                if (is_dir($bau)) {
+                    self::verzeichnisWeg($bau);
+                }
+            }
         } finally {
-            flock($sperre, LOCK_UN);
-            fclose($sperre);
+            self::freigeben($sperre);
         }
 
-        /*
-         * Wurde die Etage gelöscht (oder bekam sie einen anderen Plan),
-         * während hier gerechnet wurde – im Hintergrund dauert das Minuten –,
-         * hat SiteService die Kacheln schon weggeräumt; geschrieben wurde
-         * danach weiter, der Ordner entstand neu. Ohne Etage, die auf ihn
-         * zeigt, kommt er wieder weg.
-         */
+        // Ohne Etage, die auf den Ordner zeigt, kommt er ganz weg.
         if (self::verwaist($floor)) {
             self::aufraeumen($floor);
             return ['ok' => false, 'message' => 'Den Plan gibt es nicht mehr – die Etage wurde gelöscht oder hat einen anderen bekommen.', 'kacheln' => 0, 'meta' => null];
@@ -543,27 +739,174 @@ final class PlanTileService
         if ($datei === '') {
             return false;
         }
+        return self::etagenMitPyramide($floor) === [];
+    }
+
+    /**
+     * Alle Etagen, die sich die Pyramide von $floor teilen (dieselbe
+     * Plandatei, bei einem PDF dieselbe Seite) – aus der Datenbank.
+     *
+     * @return list<array{id:int,site_id:int,name:string,plan_file:string,plan_page:int}>
+     */
+    public static function etagenMitPyramide(array $floor): array
+    {
+        $datei = basename((string) ($floor['plan_file'] ?? ''));
+        if ($datei === '') {
+            return [];
+        }
         $ordner = self::planDir($floor);
-        foreach (Database::select('SELECT plan_file, plan_page FROM floors WHERE plan_file = ?', [$datei]) as $f) {
+        $etagen = [];
+        foreach (Database::select('SELECT id, site_id, name, plan_file, plan_page FROM floors WHERE plan_file = ? ORDER BY id', [$datei]) as $f) {
             if (self::planDir($f) === $ordner) {
-                return false;
+                $etagen[] = ['id' => (int) $f['id'], 'site_id' => (int) $f['site_id'], 'name' => (string) $f['name'],
+                    'plan_file' => (string) $f['plan_file'], 'plan_page' => (int) $f['plan_page']];
             }
         }
+        return $etagen;
+    }
+
+    /**
+     * Die fertige Fassung einsetzen, ohne dass die Karte je eine halbe sieht:
+     *
+     *  1. ihr eigenes kacheln.json in den Bauordner,
+     *  2. rename() zum Fassungsordner – ein Schritt im Dateisystem,
+     *  3. der Zeiger kacheln.json im Planordner (Zwischendatei + rename()),
+     *  4. die bisherige Fassung als abgelöst markiert (.abgeloest): Sie
+     *     bleibt GNADE Sekunden liegen, kachel() liefert sie unter ihrem
+     *     Stand weiter.
+     *
+     * Eine Pyramide von vor den Fassungsordnern (ihre Stufen direkt im
+     * Planordner) zieht dabei in einen Ordner mit ihrem Stand um – so findet
+     * kachel() auch sie noch. Gemessen dauert das alles unter 2 ms.
+     */
+    private static function umschalten(string $ordner, string $bau, string $name, array $meta, ?array $vorher): bool
+    {
+        if (!self::jsonSchreiben($bau . '/kacheln.json', $meta) || !@rename($bau, $ordner . '/' . $name)) {
+            return false;
+        }
+        if (!self::jsonSchreiben($ordner . '/kacheln.json', $meta)) {
+            // Der Zeiger blieb, wie er war – die neue Fassung ist ein Rest, den wegraeumen() holt.
+            return false;
+        }
+        if ($vorher === null) {
+            return true;
+        }
+        $alt = (string) ($vorher['ordner'] ?? '');
+        if (preg_match(self::FASSUNGSORDNER, $alt) === 1) {
+            if ($alt !== $name && is_dir($ordner . '/' . $alt)) {
+                @touch($ordner . '/' . $alt . '/.abgeloest');
+            }
+            return true;
+        }
+        $ziel = $ordner . '/v' . self::stand($vorher);
+        if (!is_dir($ziel) && !@mkdir($ziel, 0775) && !is_dir($ziel)) {
+            // Dann bleiben die Stufen liegen, bis wegraeumen() sie holt.
+            return true;
+        }
+        foreach (scandir($ordner) ?: [] as $stufe) {
+            $pfad = $ordner . '/' . $stufe;
+            if (preg_match(self::STUFENORDNER, $stufe) === 1 && is_dir($pfad) && !is_link($pfad)) {
+                @rename($pfad, $ziel . '/' . $stufe);
+            }
+        }
+        self::jsonSchreiben($ziel . '/kacheln.json', $vorher);
+        @touch($ziel . '/.abgeloest');
         return true;
     }
 
-    /** Ein abgebrochener oder gescheiterter Bau: Zoomstufen und kacheln.json weg. */
-    private static function teilbauWeg(array $floor): void
+    /**
+     * Abgelöste Fassungen eines Planordners wegräumen, sobald sie
+     * $mindestalter Sekunden abgelöst sind, dazu Bauordner ab $bauAlter –
+     * für den Prozess im Hintergrund (nach GNADE) und die Wartung. Rechnet
+     * gerade jemand, bleibt alles, wie es ist: Er räumt beim Start selbst
+     * auf (bauen()).
+     *
+     * @return array{fassungen:int,bauten:int,bytes_fassungen:int,bytes_bauten:int}
+     */
+    public static function abgeloesteWeg(string $ordner, int $mindestalter = self::GNADE, int $bauAlter = 86400): array
     {
-        // Erst das meta – ohne es zeigt die Karte keine Kacheln mehr an,
-        // die gleich darauf fehlen; der Bau beginnt beim nächsten Mal von vorn.
-        @unlink(self::metaPfad($floor));
-        foreach (glob(self::planDir($floor) . '/[0-9]*', GLOB_ONLYDIR) ?: [] as $teil) {
-            self::verzeichnisWeg($teil);
+        $nichts = ['fassungen' => 0, 'bauten' => 0, 'bytes_fassungen' => 0, 'bytes_bauten' => 0];
+        if (!is_dir($ordner) || is_link($ordner) || !str_starts_with($ordner, self::dir() . '/') || !is_file($ordner . '/.sperre')) {
+            return $nichts;
+        }
+        $sperre = self::sperren($ordner . '/.sperre', false);
+        if ($sperre === null) {
+            return $nichts;
+        }
+        try {
+            return self::wegraeumen($ordner, $mindestalter, $bauAlter);
+        } finally {
+            self::freigeben($sperre);
         }
     }
 
     /**
+     * Was im Planordner nicht mehr gebraucht wird – der Aufrufer hält die
+     * Sperre: abgelöste Fassungen (und Fassungsordner, die nie eingesetzt
+     * wurden) nach $mindestalter, Stufen einer älteren Pyramide neben einer
+     * aktiven Fassung ebenso, Bauordner ab $bauAlter. Die aktive Fassung nie,
+     * andere Namen auch nicht.
+     *
+     * @return array{fassungen:int,bauten:int,bytes_fassungen:int,bytes_bauten:int}
+     */
+    private static function wegraeumen(string $ordner, int $mindestalter, int $bauAlter): array
+    {
+        $ergebnis = ['fassungen' => 0, 'bauten' => 0, 'bytes_fassungen' => 0, 'bytes_bauten' => 0];
+        $aktiv = (string) (self::jsonLesen($ordner . '/kacheln.json')['ordner'] ?? '');
+        $mitFassung = preg_match(self::FASSUNGSORDNER, $aktiv) === 1;
+        $jetzt = time();
+        $stufenWeg = false;
+        foreach (scandir($ordner) ?: [] as $name) {
+            $pfad = $ordner . '/' . $name;
+            if ($name === $aktiv || !is_dir($pfad) || is_link($pfad)) {
+                continue;
+            }
+            clearstatcache(true, $pfad);
+            $bau = preg_match(self::BAUORDNER, $name) === 1;
+            $fassung = preg_match(self::FASSUNGSORDNER, $name) === 1;
+            // Stufen direkt im Planordner sind nur neben einer aktiven Fassung ein Rest – sonst sind sie die Pyramide.
+            $stufe = $mitFassung && preg_match(self::STUFENORDNER, $name) === 1;
+            if (!$bau && !$fassung && !$stufe) {
+                continue;
+            }
+            $marke = $pfad . '/.abgeloest';
+            $seit = $fassung && is_file($marke) ? (int) filemtime($marke) : (int) filemtime($pfad);
+            if ($jetzt - $seit < ($bau ? $bauAlter : $mindestalter)) {
+                continue;
+            }
+            $bytes = self::groesse($pfad);
+            self::verzeichnisWeg($pfad);
+            if (is_dir($pfad)) {
+                continue;
+            }
+            $ergebnis[$bau ? 'bytes_bauten' : 'bytes_fassungen'] += $bytes;
+            if ($bau) {
+                $ergebnis['bauten']++;
+            } elseif ($fassung) {
+                $ergebnis['fassungen']++;
+            } elseif (!$stufenWeg) {
+                // Alle Stufen zusammen sind eine Fassung.
+                $stufenWeg = true;
+                $ergebnis['fassungen']++;
+            }
+        }
+        return $ergebnis;
+    }
+
+    /** Bytes aller Dateien unter $pfad. */
+    private static function groesse(string $pfad): int
+    {
+        $bytes = 0;
+        foreach (new \RecursiveIteratorIterator(new \RecursiveDirectoryIterator($pfad, \FilesystemIterator::SKIP_DOTS)) as $eintrag) {
+            $bytes += $eintrag->isFile() ? (int) $eintrag->getSize() : 0;
+        }
+        return $bytes;
+    }
+
+    /**
+     * Kacheln nach $ordner (dem Bauordner) schneiden; zurück kommt das
+     * meta der neuen Pyramide – geschrieben wird es von bauen().
+     *
      * @param ?array $alt kacheln.json der bisherigen Pyramide derselben Datei und Seite
      */
     private static function schneiden(array $floor, string $quelle, string $ordner, ?float $bis, string $qualitaet, ?array $alt): array
@@ -663,9 +1006,6 @@ final class PlanTileService
             'gebaut'     => gmdate('c'),
             'dauer_ms'   => (int) round((microtime(true) - $start) * 1000),
         ];
-        self::metaSchreiben($floor, $meta);
-        self::ueberzaehligeWeg($ordner, $raster, $format);
-
         return [
             'ok'      => true,
             'message' => sprintf('%d Kacheln in %d Stufen berechnet.', $anzahl, $maxZ + 1),
@@ -713,10 +1053,9 @@ final class PlanTileService
     ): array {
         $seite = max(1, (int) ($floor['plan_page'] ?? 1));
         $fehler = static fn (string $text): array => ['ok' => false, 'message' => $text, 'kacheln' => 0, 'meta' => null];
-        $abgebrochen = static function () use ($floor): array {
+        $abgebrochen = static function (): array {
             // Der Aufrufer wartet nicht länger (Upload): ein halber Plan
-            // hilft niemandem, also weg damit – imHintergrund() rechnet ihn.
-            self::teilbauWeg($floor);
+            // hilft niemandem, bauen() räumt ihn weg – imHintergrund() rechnet ihn.
             return ['ok' => false, 'abgebrochen' => true, 'message' => 'Die Zeit im Upload ist um – der Plan wird im Hintergrund fertig gerechnet.', 'kacheln' => 0, 'meta' => null];
         };
 
@@ -790,10 +1129,7 @@ final class PlanTileService
             return $abgebrochen();
         }
         if (!$oben['ok']) {
-            // Was bis hierher geschnitten ist, passt zu keiner Pyramide.
-            if ($oben['anzahl'] > 0) {
-                self::teilbauWeg($floor);
-            }
+            // Was bis hierher geschnitten ist, räumt bauen() weg – der bisherige Plan bleibt.
             return $fehler($oben['message']);
         }
         if ($oben['anzahl'] === 0) {
@@ -865,8 +1201,6 @@ final class PlanTileService
             'gebaut'      => gmdate('c'),
             'dauer_ms'    => (int) round((microtime(true) - $start) * 1000),
         ];
-        self::metaSchreiben($floor, $meta);
-        self::ueberzaehligeWeg($ordner, $raster, $format);
 
         $masse = number_format($ziel['breite'], 0, ',', '.') . ' × ' . number_format($ziel['hoehe'], 0, ',', '.') . ' Pixel';
         return [
@@ -1132,7 +1466,8 @@ final class PlanTileService
 
     /**
      * Kacheln in einem eigenen Prozess rechnen lassen – für den Upload, der
-     * nicht länger warten kann (SiteService::KACHELZEIT_IM_UPLOAD).
+     * nicht länger warten kann (SiteService::KACHELZEIT_IM_UPLOAD), und für
+     * „Plan neu rechnen“ in der Oberfläche (neuRechnenAnfordern()).
      *
      * Ein eigener Prozess statt Weiterrechnen nach der Antwort: Der Pool
      * zählt mit max_execution_time (300 s, als php_admin_value –
@@ -1146,9 +1481,13 @@ final class PlanTileService
      * den Prozess bei der ersten Zeile. Stirbt er (php-fpm neu gestartet),
      * rechnet die nächtliche Wartung nach (`bin/power wartung`).
      *
+     * $optionen: 'neu' rechnet vorhandene Pyramiden neu, 'qualitaet' ist
+     * eine der QUALITAETEN (ohne: die der vorhandenen Pyramide).
+     *
      * @param list<int> $etagenIds
+     * @param array{neu?:bool,qualitaet?:?string} $optionen
      */
-    public static function imHintergrund(array $etagenIds): bool
+    public static function imHintergrund(array $etagenIds, array $optionen = []): bool
     {
         $ids = array_values(array_unique(array_filter(array_map('intval', $etagenIds), static fn (int $id): bool => $id > 0)));
         if ($ids === []) {
@@ -1162,11 +1501,15 @@ final class PlanTileService
         }
         $wurzel = dirname(__DIR__, 2);
         $log = $wurzel . '/storage/logs/kacheln.log';
-        $prozess = @proc_open(
-            [$php, $wurzel . '/bin/power', 'plan:kacheln', '--etage=' . implode(',', $ids)],
-            [0 => ['pipe', 'r'], 1 => ['file', $log, 'a'], 2 => ['file', $log, 'a']],
-            $rohre
-        );
+        $befehl = [$php, $wurzel . '/bin/power', 'plan:kacheln', '--etage=' . implode(',', $ids)];
+        if (!empty($optionen['neu'])) {
+            $befehl[] = '--neu';
+        }
+        $qualitaet = (string) ($optionen['qualitaet'] ?? '');
+        if (isset(self::QUALITAETEN[$qualitaet])) {
+            $befehl[] = '--qualitaet=' . $qualitaet;
+        }
+        $prozess = @proc_open($befehl, [0 => ['pipe', 'r'], 1 => ['file', $log, 'a'], 2 => ['file', $log, 'a']], $rohre);
         if (!is_resource($prozess)) {
             Logger::info('Kacheln im Hintergrund: bin/power ließ sich nicht starten.');
             return false;
@@ -1177,36 +1520,366 @@ final class PlanTileService
         return true;
     }
 
+    // -------------------------------------------------------------- Aufträge
+
+    private static function auftragLesen(string $ordner): ?array
+    {
+        return self::jsonLesen($ordner . '/.auftrag.json');
+    }
+
+    private static function auftragSchreiben(string $ordner, array $auftrag): bool
+    {
+        return self::jsonSchreiben($ordner . '/.auftrag.json', $auftrag);
+    }
+
+    /**
+     * Wie steht es um den Plan dieser Etage – für die Karte (Status, quelle())
+     * und die Standortseite:
+     *
+     *   keiner       noch nie im Hintergrund gerechnet
+     *   angefordert  angestoßen, der Prozess im Hintergrund beginnt gleich
+     *   wartet       der Prozess wartet, bis ein anderer Plan fertig ist (nacheinander())
+     *   laeuft       es wird gerechnet – im Hintergrund, im Upload oder auf der Kommandozeile
+     *   fertig       gerechnet und umgeschaltet
+     *   fehler       gescheitert – die bisherige Pyramide ist geblieben
+     *   abgebrochen  der Prozess starb (php-fpm neu gestartet) oder hatte keine Zeit mehr
+     *
+     * Ob ein Prozess lebt, sagen die Sperren (.sperre, .auftrag), nicht die
+     * Datei: Stirbt er, sind sie frei, und ein offener Auftrag gilt als
+     * abgebrochen – die Wartung holt ihn nach (fehlendeNachrechnen()).
+     * 'meldung' ist für Menschen, ohne Pfade; 'seit' ist UTC (ISO 8601).
+     *
+     * @return array{zustand:string,meldung:string,seit:?string,qualitaet:?string}
+     */
+    public static function zustand(array $floor): array
+    {
+        $ordner = self::planDir($floor);
+        $auftrag = self::auftragLesen($ordner) ?? [];
+        $roh = (string) ($auftrag['zustand'] ?? '');
+        $angefordert = strtotime((string) ($auftrag['angefordert'] ?? '')) ?: 0;
+        $gestorben = false;
+        if (self::ordnerGesperrt($ordner)) {
+            $zustand = 'laeuft';
+        } elseif (self::gehalten($ordner . '/.auftrag')) {
+            $zustand = $roh === 'laeuft' ? 'laeuft' : 'wartet';
+        } elseif ($roh === 'angefordert' && time() - $angefordert <= self::ANGEFORDERT_FRIST) {
+            $zustand = 'angefordert';
+        } elseif (in_array($roh, self::OFFEN, true)) {
+            $zustand = 'abgebrochen';
+            $gestorben = true;
+        } elseif (in_array($roh, ['fertig', 'fehler', 'abgebrochen'], true)) {
+            $zustand = $roh;
+        } else {
+            $zustand = 'keiner';
+        }
+
+        $meta = self::meta($floor);
+        $bisher = $meta !== null;
+        $grund = trim((string) ($auftrag['meldung'] ?? ''));
+        $meldung = match ($zustand) {
+            'angefordert' => 'Angestoßen – der Server beginnt gleich.',
+            'wartet'      => 'Wartet, bis ein anderer Plan fertig gerechnet ist.',
+            'laeuft'      => 'Wird gerechnet' . ($bisher ? ' – bis dahin zeigt die Karte den bisherigen Plan.' : '.')
+                . self::dauerText($meta, ' Zuletzt dauerte es %s.'),
+            'fertig'      => 'Fertig gerechnet' . (isset($auftrag['ende']) ? ' am ' . Zeit::anzeige((string) $auftrag['ende']) : '') . '.'
+                . ($grund !== '' ? ' ' . $grund : ''),
+            'fehler'      => ($bisher ? 'Neu rechnen ist gescheitert – der bisherige Plan ist geblieben.' : 'Aufbereiten ist gescheitert.')
+                . ($grund !== '' ? ' ' . $grund : ''),
+            'abgebrochen' => $gestorben
+                ? 'Der Server wurde währenddessen neu gestartet – ' . ($bisher ? 'der bisherige Plan ist geblieben.' : 'die nächtliche Wartung rechnet den Plan nach.')
+                : ($grund !== '' ? $grund : 'Abgebrochen.') . ($bisher ? ' Der bisherige Plan ist geblieben.' : ''),
+            default       => '',
+        };
+        $seit = match ($zustand) {
+            'laeuft'                => $auftrag['beginn'] ?? null,
+            'wartet', 'angefordert' => $auftrag['angefordert'] ?? null,
+            'keiner'                => null,
+            default                 => $auftrag['ende'] ?? $auftrag['beginn'] ?? $auftrag['angefordert'] ?? null,
+        };
+        $qualitaet = (string) ($auftrag['qualitaet'] ?? '');
+        return [
+            'zustand'   => $zustand,
+            'meldung'   => $meldung,
+            'seit'      => is_string($seit) ? $seit : null,
+            'qualitaet' => isset(self::QUALITAETEN[$qualitaet]) ? $qualitaet : null,
+        ];
+    }
+
+    /** „rund 18 s“ / „rund 3 min“ aus dauer_ms der Pyramide – leer ohne. */
+    private static function dauerText(?array $meta, string $muster = '%s'): string
+    {
+        $ms = (int) ($meta['dauer_ms'] ?? 0);
+        if ($ms <= 0) {
+            return '';
+        }
+        $s = (int) max(1, round($ms / 1000));
+        return sprintf($muster, $s < 120 ? 'rund ' . $s . ' s' : 'rund ' . (int) round($s / 60) . ' min');
+    }
+
+    /** Eine Meldung für Status und Oberfläche: ohne Pfade des Servers, höchstens 300 Zeichen. */
+    private static function ohnePfade(string $text): string
+    {
+        $text = (string) preg_replace('#(?<![\w.~-])/(?:[^\s/\'"`]+/)+([^\s/\'"`]*)#u', '…/$1', $text);
+        return mb_strimwidth(trim((string) preg_replace('/\s+/u', ' ', $text)), 0, 300, '…');
+    }
+
+    /**
+     * „Plan neu rechnen“ anstoßen – für den Knopf in der Oberfläche
+     * (KarteController::planNeuRechnen). Gerechnet wird nicht hier: Der
+     * Auftrag kommt nach .auftrag.json, ein eigener Prozess rechnet ihn
+     * (imHintergrund() → auftrag()), und die Anfrage ist sofort zurück.
+     * Läuft für den Plan schon etwas – ein Auftrag, ein Upload, die
+     * Wartung –, bleibt es dabei: 'neu' ist dann false.
+     *
+     * .anfrage hält nur den Augenblick zwischen Nachsehen und Eintragen:
+     * Zwei Klicks zugleich ergeben einen Auftrag. Losgelassen wird sie vor
+     * dem Start des Prozesses – er soll sie nicht erben.
+     *
+     * @param ?string $qualitaet eine der QUALITAETEN; null: die der vorhandenen Pyramide
+     * @return array{ok:bool,neu:bool,message:string}
+     */
+    public static function neuRechnenAnfordern(array $floor, ?string $qualitaet = null): array
+    {
+        if (SiteService::planPath($floor) === null) {
+            return ['ok' => false, 'neu' => false, 'message' => 'Kein Grundriss hinterlegt.'];
+        }
+        $ordner = self::planDir($floor);
+        if (!is_dir($ordner) && !@mkdir($ordner, 0775, true) && !is_dir($ordner)) {
+            return ['ok' => false, 'neu' => false, 'message' => 'Kachelordner konnte nicht angelegt werden.'];
+        }
+        $qualitaet = $qualitaet !== null && isset(self::QUALITAETEN[$qualitaet]) ? $qualitaet : null;
+        $anfrage = self::sperren($ordner . '/.anfrage', false);
+        if ($anfrage === null) {
+            return ['ok' => true, 'neu' => false, 'message' => 'Der Plan wird schon neu gerechnet.'];
+        }
+        try {
+            $jetzt = self::zustand($floor);
+            if (in_array($jetzt['zustand'], self::OFFEN, true)) {
+                return ['ok' => true, 'neu' => false, 'message' => 'Der Plan wird schon gerechnet: ' . $jetzt['meldung']];
+            }
+            $meta = self::meta($floor);
+            $auftrag = [
+                'zustand'        => 'angefordert',
+                'qualitaet'      => $qualitaet,
+                'angefordert'    => gmdate('c'),
+                'beginn'         => null,
+                'ende'           => null,
+                'meldung'        => '',
+                'fassung_vorher' => $meta !== null ? self::fassung($meta) : null,
+                'fassung_ziel'   => self::FASSUNG,
+                'stand_vorher'   => $meta !== null ? self::stand($meta) : null,
+                'stand'          => null,
+            ];
+            if (!self::auftragSchreiben($ordner, $auftrag)) {
+                return ['ok' => false, 'neu' => false, 'message' => 'Kachelordner ist nicht beschreibbar.'];
+            }
+        } finally {
+            self::freigeben($anfrage);
+        }
+
+        if (!self::imHintergrund([(int) $floor['id']], ['neu' => true, 'qualitaet' => $qualitaet])) {
+            $auftrag['zustand'] = 'fehler';
+            $auftrag['ende'] = gmdate('c');
+            $auftrag['meldung'] = 'Der Server konnte dafür keinen eigenen Prozess starten (php für die Kommandozeile fehlt?). '
+                . 'Von Hand: bin/power plan:kacheln --neu --etage=' . (int) $floor['id'];
+            self::auftragSchreiben($ordner, $auftrag);
+            return ['ok' => false, 'neu' => false, 'message' => $auftrag['meldung']];
+        }
+        return ['ok' => true, 'neu' => true, 'message' => 'Der Plan wird im Hintergrund neu gerechnet'
+            . self::dauerText($meta, ' (zuletzt dauerte es %s, schärfer gerechnet auch länger)')
+            . '. Die Karte bleibt so lange benutzbar und zeigt danach den neuen Plan.'];
+    }
+
+    /**
+     * Den Plan einer Etage rechnen und dabei den Auftrag führen – für
+     * bin/power plan:kacheln --etage (so startet ihn imHintergrund()) und
+     * die Wartung.
+     *
+     * .auftrag hält dieser Prozess vom Start bis zum Ende: Ein zweiter für
+     * denselben Plan hört sofort auf (null), und stirbt dieser, ist sie frei
+     * – der Auftrag gilt dann als abgebrochen (zustand()). Gerechnet wird
+     * nie neben einem anderen Bau (nacheinander()); bis dahin „wartet“ der
+     * Auftrag. Etagen mit derselben Plandatei teilen sich die Pyramide und
+     * damit den Auftrag.
+     *
+     * @param (callable(string):void)|null $warten wie bei nacheinander()
+     * @return array{ok:bool,message:string,kacheln:int,meta:?array,abgebrochen?:bool,umgeschaltet:bool}|null
+     */
+    public static function auftrag(array $floor, bool $neu, ?string $qualitaet = null, ?float $bis = null, ?callable $warten = null): ?array
+    {
+        $pfad = SiteService::planPath($floor);
+        if ($pfad === null) {
+            return ['ok' => false, 'message' => 'Kein Grundriss hinterlegt.', 'kacheln' => 0, 'meta' => null, 'umgeschaltet' => false];
+        }
+        // Was nie gekachelt wird (SVG, kleines Bild), bekommt auch keinen Auftrag; fehlt ein Werkzeug, sagt der Auftrag es.
+        if (self::hindernis($pfad) === null && !self::lohnt($pfad)) {
+            return ['ok' => false, 'message' => 'Für diese Datei werden keine Kacheln gebraucht.', 'kacheln' => 0, 'meta' => null, 'umgeschaltet' => false];
+        }
+        $ordner = self::planDir($floor);
+        if (!is_dir($ordner) && !@mkdir($ordner, 0775, true) && !is_dir($ordner)) {
+            return ['ok' => false, 'message' => 'Kachelordner konnte nicht angelegt werden.', 'kacheln' => 0, 'meta' => null, 'umgeschaltet' => false];
+        }
+        $griff = self::sperren($ordner . '/.auftrag', false);
+        if ($griff === null) {
+            return null;
+        }
+        try {
+            $vorher = self::meta($floor);
+            $offen = self::auftragLesen($ordner);
+            if (!in_array($offen['zustand'] ?? '', self::OFFEN, true)) {
+                $offen = null;
+            }
+            // Ohne Angabe die aus der Anforderung (Oberfläche), sonst die der vorhandenen Pyramide (bauen()).
+            $verlangt = (string) ($offen['qualitaet'] ?? '');
+            $qualitaet ??= isset(self::QUALITAETEN[$verlangt]) ? $verlangt : null;
+            $auftrag = [
+                'zustand'        => 'wartet',
+                'qualitaet'      => $qualitaet,
+                'angefordert'    => is_string($offen['angefordert'] ?? null) ? $offen['angefordert'] : gmdate('c'),
+                'beginn'         => null,
+                'ende'           => null,
+                'meldung'        => '',
+                'fassung_vorher' => $vorher !== null ? self::fassung($vorher) : null,
+                'fassung_ziel'   => self::FASSUNG,
+                'stand_vorher'   => $vorher !== null ? self::stand($vorher) : null,
+                'stand'          => null,
+            ];
+            self::auftragSchreiben($ordner, $auftrag);
+
+            $ergebnis = self::nacheinander(static function () use (&$auftrag, $ordner, $floor, $neu, $qualitaet, $bis): array {
+                $auftrag['zustand'] = 'laeuft';
+                $auftrag['beginn'] = gmdate('c');
+                self::auftragSchreiben($ordner, $auftrag);
+                // Während gewartet wurde, kann die Etage gelöscht sein oder einen anderen Plan bekommen haben.
+                $jetzt = SiteService::floor((int) $floor['id']);
+                if ($jetzt === null || self::planDir($jetzt) !== $ordner) {
+                    return ['ok' => false, 'message' => 'Den Plan gibt es nicht mehr – die Etage wurde gelöscht oder hat einen anderen bekommen.', 'kacheln' => 0, 'meta' => null];
+                }
+                return self::bauen($jetzt, $neu, true, $bis, $qualitaet);
+            }, $warten, $bis) ?? ['ok' => false, 'abgebrochen' => true, 'kacheln' => 0, 'meta' => null,
+                'message' => 'Die Zeit war um, bevor der Plan an der Reihe war – den Rest rechnet die nächtliche Wartung.'];
+
+            $nachher = self::meta($floor);
+            $auftrag['zustand'] = $ergebnis['ok'] ? 'fertig' : (!empty($ergebnis['abgebrochen']) ? 'abgebrochen' : 'fehler');
+            $auftrag['ende'] = gmdate('c');
+            $auftrag['meldung'] = self::ohnePfade((string) $ergebnis['message']);
+            $auftrag['stand'] = $nachher !== null ? self::stand($nachher) : null;
+            // Ist der Ordner weg (Etage gelöscht), entsteht er hier nicht neu.
+            if (is_dir($ordner)) {
+                self::auftragSchreiben($ordner, $auftrag);
+            }
+            // Umgeschaltet heißt hier: Es gibt eine abgelöste Fassung (für den Aufrufer, der nach GNADE aufräumt).
+            return $ergebnis + ['umgeschaltet' => $auftrag['stand'] !== null && $auftrag['stand_vorher'] !== null && $auftrag['stand'] !== $auftrag['stand_vorher']];
+        } finally {
+            self::freigeben($griff);
+        }
+    }
+
     /**
      * Grundrisse ohne Kacheln nachrechnen – für die nächtliche Wartung.
      *
      * Der Upload rechnet große Pläne in einem eigenen Prozess weiter
-     * (imHintergrund). Starb der – php-fpm beim Update neu gestartet, der
-     * Container neu gebootet –, fehlen die Kacheln bis hierher. Wer gerade
-     * rechnet, wird nicht gestört; was nicht gekachelt wird (SVG, kleine
-     * Bilder), fällt gar nicht erst auf.
+     * (imHintergrund), „Plan neu rechnen“ ebenso. Starb der – php-fpm beim
+     * Update neu gestartet, der Container neu gebootet –, fehlen die Kacheln
+     * bis hierher, oder der Auftrag ist abgebrochen (dann mit der verlangten
+     * Qualität). Jede Pyramide einmal, auch wenn Etagen sie teilen. Wer
+     * gerade rechnet, wird nicht gestört; was nicht gekachelt wird (SVG,
+     * kleine Bilder), fällt gar nicht erst auf.
      *
-     * @return list<string> eine Zeile je Etage, für die etwas getan wurde
+     * @return list<string> eine Zeile je Plan, für den etwas getan wurde
      */
     public static function fehlendeNachrechnen(): array
     {
         $meldungen = [];
+        $gesehen = [];
         foreach (SiteService::allFloors() as $etage) {
             $pfad = SiteService::planPath($etage);
-            if ($pfad === null || self::meta($etage) !== null || !self::lohnt($pfad) || self::laeuft($etage)) {
+            if ($pfad === null) {
                 continue;
             }
-            // Wie im Hintergrund nie neben einem anderen Bau (nacheinander()).
-            $ergebnis = self::nacheinander(static function () use ($etage): ?array {
-                // Während gewartet wurde, kann die Etage gelöscht oder schon gerechnet sein.
-                $jetzt = SiteService::floor((int) $etage['id']);
-                return $jetzt === null || self::meta($jetzt) !== null ? null : self::bauen($jetzt, false, false);
-            });
+            $ordner = self::planDir($etage);
+            if (isset($gesehen[$ordner])) {
+                continue;
+            }
+            $gesehen[$ordner] = true;
+            $fehlt = self::meta($etage) === null;
+            $zustand = self::zustand($etage);
+            if ((!$fehlt && $zustand['zustand'] !== 'abgebrochen') || in_array($zustand['zustand'], self::OFFEN, true) || !self::lohnt($pfad)) {
+                continue;
+            }
+            $ergebnis = self::auftrag($etage, !$fehlt, $zustand['zustand'] === 'abgebrochen' ? $zustand['qualitaet'] : null);
             if ($ergebnis === null) {
                 continue;
             }
-            $meldungen[] = ($ergebnis['ok'] ? 'Kacheln nachgerechnet: ' : 'Kacheln fehlen weiter: ')
-                . $etage['site_name'] . ' / ' . $etage['name'] . ' – ' . $ergebnis['message'];
+            $meldungen[] = match (true) {
+                $ergebnis['ok'] && $fehlt => 'Kacheln nachgerechnet: ',
+                $ergebnis['ok']           => 'Abgebrochenes Neurechnen nachgeholt: ',
+                $fehlt                    => 'Kacheln fehlen weiter: ',
+                default                   => 'Neu rechnen weiter gescheitert (der bisherige Plan bleibt): ',
+            } . $etage['site_name'] . ' / ' . $etage['name'] . ' – ' . $ergebnis['message'];
+        }
+        return $meldungen;
+    }
+
+    /**
+     * Pyramiden einer älteren Fassung (veraltet()) neu rechnen – für die
+     * nächtliche Wartung (bin/power wartung, plan:kacheln --veraltet).
+     *
+     * Einzeln und nur, solange $budget (Sekunden) reicht: die schnellsten
+     * zuerst, geschätzt aus der Dauer des letzten Baus (schärfer gerechnet
+     * gemessen rund das Dreieinhalbfache, höchstens ZEITBUDGET). Jeder Plan
+     * holt sich nacheinander() für sich – ein „Plan neu rechnen“ aus der
+     * Oberfläche kommt so dazwischen, statt hinter allen zu warten. Ein Plan,
+     * an dem diese Fassung schon gescheitert ist, wird nicht jede Nacht
+     * wieder versucht. Was bleibt, sagt die letzte Zeile („Noch N …“).
+     *
+     * @param (callable(string):void)|null $warten wie bei nacheinander()
+     * @return list<string>
+     */
+    public static function veralteteNachrechnen(int $budget, ?callable $warten = null): array
+    {
+        $start = microtime(true);
+        $faellig = [];
+        $gesehen = [];
+        $noch = 0;
+        foreach (SiteService::allFloors() as $etage) {
+            $pfad = SiteService::planPath($etage);
+            $ordner = self::planDir($etage);
+            if ($pfad === null || isset($gesehen[$ordner])) {
+                continue;
+            }
+            $gesehen[$ordner] = true;
+            $meta = self::meta($etage);
+            if ($meta === null || !self::veraltet($meta) || (string) ($meta['quelle'] ?? '') !== basename($pfad)) {
+                continue;
+            }
+            $auftrag = self::auftragLesen($ordner);
+            if (($auftrag['zustand'] ?? '') === 'fehler' && (int) ($auftrag['fassung_ziel'] ?? 0) >= self::FASSUNG) {
+                $noch++;
+                continue;
+            }
+            $faellig[] = ['etage' => $etage, 'schaetzung' => (int) min(self::ZEITBUDGET, max(30, 3.5 * (int) ($meta['dauer_ms'] ?? 0) / 1000))];
+        }
+        usort($faellig, static fn (array $a, array $b): int => $a['schaetzung'] <=> $b['schaetzung']);
+
+        $meldungen = [];
+        foreach ($faellig as ['etage' => $etage, 'schaetzung' => $schaetzung]) {
+            if (microtime(true) - $start + $schaetzung > $budget || in_array(self::zustand($etage)['zustand'], self::OFFEN, true)) {
+                $noch++;
+                continue;
+            }
+            $ergebnis = self::auftrag($etage, true, null, null, $warten);
+            if ($ergebnis === null || !$ergebnis['ok']) {
+                $noch++;
+            }
+            if ($ergebnis !== null) {
+                $meldungen[] = ($ergebnis['ok'] ? 'Kacheln neu gerechnet (ältere Fassung): ' : 'Neu rechnen gescheitert (der bisherige Plan bleibt): ')
+                    . $etage['site_name'] . ' / ' . $etage['name'] . ' – ' . $ergebnis['message'];
+            }
+        }
+        if ($noch > 0) {
+            $meldungen[] = sprintf('Noch %d Grundriss(e) mit älterer Kachelfassung – die Wartung rechnet sie Nacht für Nacht neu '
+                . '(sofort: bin/power plan:kacheln --veraltet oder „Plan neu rechnen“ in der Karte).', $noch);
         }
         return $meldungen;
     }
@@ -1232,17 +1905,18 @@ final class PlanTileService
      *
      * Die Sperre ist ein flock auf hintergrundSperre(): Der nächste wartet,
      * bis der vorige fertig ist; stirbt einer, ist sie frei. $warten bekommt
-     * eine Zeile, wenn gewartet werden muss.
+     * eine Zeile, wenn gewartet werden muss. Mit $bis (microtime) wird nur
+     * bis dahin gewartet – danach kommt null zurück, ohne $arbeit.
      *
      * @template T
      * @param callable():T $arbeit
      * @param (callable(string):void)|null $warten
-     * @return T
+     * @return T|null
      */
-    public static function nacheinander(callable $arbeit, ?callable $warten = null): mixed
+    public static function nacheinander(callable $arbeit, ?callable $warten = null, ?float $bis = null): mixed
     {
         // Zum Sperren genügt Lesen – auch wenn root die Datei einmal angelegt hat.
-        $griff = @fopen(self::hintergrundSperre(), 'c') ?: @fopen(self::hintergrundSperre(), 'r');
+        $griff = @fopen(self::hintergrundSperre(), 'ce') ?: @fopen(self::hintergrundSperre(), 're');
         if ($griff === false) {
             // Ohne Sperrdatei lieber rechnen als gar nicht – der Bau selbst
             // meldet, wenn der Ordner nicht beschreibbar ist.
@@ -1253,7 +1927,16 @@ final class PlanTileService
                 if ($warten !== null) {
                     $warten('Ein anderer Prozess rechnet gerade Kacheln – es geht weiter, sobald er fertig ist.');
                 }
-                flock($griff, LOCK_EX);
+                if ($bis === null) {
+                    flock($griff, LOCK_EX);
+                } else {
+                    while (!flock($griff, LOCK_EX | LOCK_NB)) {
+                        if (microtime(true) > $bis) {
+                            return null;
+                        }
+                        usleep(250_000);
+                    }
+                }
             }
             return $arbeit();
         } finally {
@@ -1353,6 +2036,45 @@ final class PlanTileService
             }
         }
         $zeile('Kachelordner ohne Etage', $zahl, $bytes);
+
+        /*
+         * In den Kachelordnern, die noch gebraucht werden: abgelöste Fassungen
+         * (nach GNADE – meist hat sie der Prozess im Hintergrund schon
+         * geholt), Bauordner getöteter Bauten und liegen gebliebene
+         * Zwischendateien (ab $alter), beendete Aufträge nach
+         * AUFTRAG_AUFBEWAHREN. Wer gerade rechnet, wird nicht gestört
+         * (abgeloesteWeg() holt sich die Sperre, sonst bleibt alles).
+         */
+        $fassungen = $bauten = $bytesFassung = $bytesBau = $auftraege = 0;
+        foreach (glob(self::dir() . '/*', GLOB_ONLYDIR) ?: [] as $pfad) {
+            $name = basename($pfad);
+            if (preg_match(self::KACHELORDNER_NAME, $name) !== 1 || !isset($ordner[$name]) || is_link($pfad)) {
+                continue;
+            }
+            $weg = self::abgeloesteWeg($pfad, self::GNADE, $alter);
+            $fassungen += $weg['fassungen'];
+            $bauten += $weg['bauten'];
+            $bytesFassung += $weg['bytes_fassungen'];
+            $bytesBau += $weg['bytes_bauten'];
+            foreach (scandir($pfad) ?: [] as $datei) {
+                $zwischen = $pfad . '/' . $datei;
+                clearstatcache(true, $zwischen);
+                if (str_ends_with($datei, '.tmp') && is_file($zwischen) && !is_link($zwischen) && (int) filemtime($zwischen) < $grenze) {
+                    @unlink($zwischen);
+                }
+            }
+            $auftrag = self::auftragLesen($pfad);
+            $datei = $pfad . '/.auftrag.json';
+            if ($auftrag !== null && !in_array($auftrag['zustand'] ?? '', self::OFFEN, true) && !self::gehalten($pfad . '/.auftrag')
+                && (int) @filemtime($datei) < time() - self::AUFTRAG_AUFBEWAHREN && @unlink($datei)) {
+                $auftraege++;
+            }
+        }
+        $zeile('abgelöste Kachelfassung(en)', $fassungen, $bytesFassung);
+        $zeile('Kachelbau(ten) ohne Prozess, älter als ein Tag', $bauten, $bytesBau);
+        if ($auftraege > 0) {
+            $meldungen[] = sprintf('Aufgeräumt: %d beendete(r) Kachelauftrag/-aufträge, älter als %d Tage.', $auftraege, intdiv(self::AUFTRAG_AUFBEWAHREN, 86400));
+        }
 
         return $meldungen;
     }
@@ -1611,59 +2333,6 @@ final class PlanTileService
         return $bild;
     }
 
-    /**
-     * kacheln.json schreiben – über eine Zwischendatei und rename(): so
-     * liest die Karte nie ein halbes (direkt geschrieben war gemessen jede
-     * fünfzigste Lesung unlesbar, während gerade geschrieben wurde).
-     */
-    private static function metaSchreiben(array $floor, array $meta): void
-    {
-        $pfad = self::metaPfad($floor);
-        $zwischen = $pfad . '.' . bin2hex(random_bytes(4)) . '.tmp';
-        if (@file_put_contents($zwischen, json_encode($meta, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES)) === false || !@rename($zwischen, $pfad)) {
-            @unlink($zwischen);
-        }
-    }
-
-    /**
-     * Was nach einem Bau nicht mehr zur Pyramide gehört: Stufen über der
-     * obersten, Kacheln außerhalb des Rasters einer Stufe ($raster: Spalten
-     * und Zeilen je Stufe) und in einem anderen Format – Reste einer
-     * früheren Pyramide derselben Datei. Angefasst werden nur Namen, die
-     * das Kacheln selbst vergibt (Stufe/Spalte/Zeile.Format).
-     *
-     * @param array<int,array{int,int}> $raster
-     */
-    private static function ueberzaehligeWeg(string $ordner, array $raster, string $format): void
-    {
-        foreach (scandir($ordner) ?: [] as $stufe) {
-            $pfadZ = $ordner . '/' . $stufe;
-            if (preg_match('/^\d{1,2}$/', $stufe) !== 1 || !is_dir($pfadZ) || is_link($pfadZ)) {
-                continue;
-            }
-            if (!isset($raster[(int) $stufe])) {
-                self::verzeichnisWeg($pfadZ);
-                continue;
-            }
-            [$spalten, $zeilen] = $raster[(int) $stufe];
-            foreach (scandir($pfadZ) ?: [] as $spalte) {
-                $pfadX = $pfadZ . '/' . $spalte;
-                if (preg_match('/^\d+$/', $spalte) !== 1 || !is_dir($pfadX) || is_link($pfadX)) {
-                    continue;
-                }
-                if ((int) $spalte >= $spalten) {
-                    self::verzeichnisWeg($pfadX);
-                    continue;
-                }
-                foreach (scandir($pfadX) ?: [] as $datei) {
-                    if (preg_match('/^(\d+)\.(png|jpg|webp)$/', $datei, $m) === 1 && ((int) $m[1] >= $zeilen || $m[2] !== $format)) {
-                        @unlink($pfadX . '/' . $datei);
-                    }
-                }
-            }
-        }
-    }
-
     /** Bis zu dieser Größe taugt ein ungekachelter Plan als Vorschau am Stück. */
     public const VORSCHAU_BYTES = 2097152;
 
@@ -1706,41 +2375,73 @@ final class PlanTileService
      * Adressen. Ohne ihn holte der Browser unter derselben Adresse weiter
      * die alte Kachel aus dem Cache, und eine offene Karte setzte Kacheln
      * der neuen Pyramide an die Stellen der alten: gemessen ein
-     * Flickenteppich aus zwei Maßstäben. `gebaut` ändert sich bei jedem Bau;
-     * die übrigen Felder stehen dabei, damit eine Pyramide aus derselben
-     * Sekunde mit anderer Geometrie nicht denselben Stand bekommt.
+     * Flickenteppich aus zwei Maßstäben.
+     *
+     * Eine Fassung im eigenen Ordner trägt ihn im Namen (v<stand>, zufällig
+     * beim Bau vergeben). Eine Pyramide von vor den Fassungsordnern bekommt
+     * ihn aus ihrem kacheln.json: `gebaut` ändert sich bei jedem Bau, die
+     * übrigen Felder stehen dabei, damit eine Pyramide aus derselben Sekunde
+     * mit anderer Geometrie nicht denselben Stand bekommt.
      */
     public static function stand(array $meta): string
     {
+        $ordner = (string) ($meta['ordner'] ?? '');
+        if (preg_match(self::FASSUNGSORDNER, $ordner) === 1) {
+            return substr($ordner, 1);
+        }
         return substr(hash('sha256', implode('|', array_map(
             static fn (string $feld): string => is_scalar($meta[$feld] ?? null) ? (string) $meta[$feld] : '',
             ['quelle', 'gebaut', 'breite', 'hoehe', 'max_zoom', 'kachel', 'format', 'fassung', 'qualitaet']
         ))), 0, 12);
     }
 
+    /** Stand der Pyramide, die die Karte dieser Etage jetzt zeigt – null ohne (passende) Pyramide. */
+    public static function aktuellerStand(array $floor): ?string
+    {
+        $meta = self::meta($floor);
+        $pfad = SiteService::planPath($floor);
+        return $meta !== null && $pfad !== null && (string) ($meta['quelle'] ?? '') === basename($pfad) ? self::stand($meta) : null;
+    }
+
     /**
      * Eine einzelne Kachel ausliefern – oder null, wenn sie nicht existiert.
      *
-     * $stand: der Stand aus der Kacheladresse. Gehört er nicht zur
-     * Pyramide, die jetzt liegt, gibt es die Kachel nicht – die Seite stammt
-     * von vor dem letzten Neuberechnen, und eine Kachel der neuen Pyramide
-     * säße an ihrer Stelle daneben. null: ohne Stand (Seiten von vor dem
-     * Update), dann die Kachel, die gerade liegt.
+     * $stand: der Stand aus der Kacheladresse. Ist es der der aktiven
+     * Pyramide, kommt deren Kachel. Ist es der einer abgelösten Fassung,
+     * die noch liegt (GNADE nach dem Umschalten), kommt deren Kachel – eine
+     * offene Karte zeigt so bis zum Umsteigen weiter ihren Plan statt
+     * Lücken. Sonst gibt es die Kachel nicht: Eine Kachel der neuen Pyramide
+     * säße an der Stelle einer alten daneben. null: ohne Stand (Seiten von
+     * vor dem Update), dann die Kachel, die gerade liegt.
      *
      * @return array{pfad:string,mime:string,stand:string}|null
      */
     public static function kachel(array $floor, int $z, int $x, int $y, ?string $stand = null): ?array
     {
         $meta = self::meta($floor);
-        if ($meta === null || $z < 0 || $x < 0 || $y < 0 || $z > (int) $meta['max_zoom']) {
+        if ($meta === null || $z < 0 || $x < 0 || $y < 0) {
             return null;
         }
+        $planOrdner = self::planDir($floor);
         $jetzt = self::stand($meta);
+        $ordner = self::kachelOrdner($planOrdner, $meta);
         if ($stand !== null && !hash_equals($jetzt, $stand)) {
+            // Nur ein Name, den das Kacheln selbst vergibt – nie ein Pfad aus der Adresse.
+            if (preg_match('/^[0-9a-f]{12}$/', $stand) !== 1) {
+                return null;
+            }
+            $ordner = $planOrdner . '/v' . $stand;
+            $meta = self::jsonLesen($ordner . '/kacheln.json');
+            if ($meta === null || !isset($meta['max_zoom'])) {
+                return null;
+            }
+            $jetzt = $stand;
+        }
+        if ($z > (int) $meta['max_zoom']) {
             return null;
         }
         $format = (string) ($meta['format'] ?? 'jpg');
-        $pfad   = self::pfad(self::planDir($floor), $z, $x, $y, $format);
+        $pfad   = self::pfad($ordner, $z, $x, $y, $format);
         if (!is_file($pfad)) {
             return null;
         }
@@ -1753,10 +2454,15 @@ final class PlanTileService
         return '/grundriss/' . $id . '/kachel/{z}/{x}/{y}?v=' . self::stand($meta);
     }
 
+    /** Die Kacheln dieser Etage ganz weg (alle Fassungen, Aufträge) – nur mit Plandatei. */
     public static function aufraeumen(array $floor): void
     {
+        // Ohne Plandatei wäre planDir() der Kachelordner aller Pläne.
+        if (basename((string) ($floor['plan_file'] ?? '')) === '') {
+            return;
+        }
         $ordner = self::planDir($floor);
-        if (!is_dir($ordner) || !str_starts_with($ordner, self::dir() . '/')) {
+        if (!is_dir($ordner) || $ordner === self::dir() . '/' || !str_starts_with($ordner, self::dir() . '/')) {
             return;
         }
         $eintraege = new \RecursiveIteratorIterator(
@@ -1792,12 +2498,116 @@ final class PlanTileService
     }
 
     /**
+     * Was die Oberfläche zum Neurechnen wissen muss – ohne die Plandatei zu
+     * lesen: Stand der Pyramide, Zustand des Auftrags (zustand()), ob neu
+     * rechnen empfohlen ist (eine ältere Fassung, veraltet()) und ob es
+     * überhaupt geht ($rechenbar). Ob es auch darf, entscheidet der
+     * Aufrufer (KarteController).
+     *
+     * @return array{stand:string,zustand:string,zustand_text:string,empfohlen:bool,neu_rechenbar:bool,gebaut:?string,dauer:string}
+     */
+    private static function neuRechnen(array $floor, ?array $meta, bool $rechenbar): array
+    {
+        $zustand = self::zustand($floor);
+        return [
+            'stand'         => $meta !== null ? self::stand($meta) : '',
+            'zustand'       => $zustand['zustand'],
+            'zustand_text'  => $zustand['meldung'],
+            'empfohlen'     => $meta !== null && self::veraltet($meta),
+            'neu_rechenbar' => $rechenbar,
+            'gebaut'        => is_string($meta['gebaut'] ?? null) ? $meta['gebaut'] : null,
+            'dauer'         => self::dauerText($meta),
+        ];
+    }
+
+    /**
+     * Antwort des Status-Endpunkts (KarteController::planStand): Zustand des
+     * Auftrags und die Pyramide, die jetzt gilt – genug, damit eine offene
+     * Karte auf die neue umsteigen kann. Ohne Pfade, ohne Benutzernamen,
+     * ohne die Plandatei zu lesen.
+     *
+     * @return array{zustand:string,meldung:string,seit:?string,stand:?string,plan:?array{kachel_url:string,breite:int,hoehe:int,max_zoom:int,kachel:int},fassung:?int,qualitaet:?string,empfohlen:bool,gebaut:?string,dauer:string}
+     */
+    public static function status(array $floor): array
+    {
+        $meta = self::meta($floor);
+        $pfad = SiteService::planPath($floor);
+        if ($meta !== null && ($pfad === null || (string) ($meta['quelle'] ?? '') !== basename($pfad))) {
+            $meta = null;
+        }
+        $zustand = self::zustand($floor);
+        return [
+            'zustand'   => $zustand['zustand'],
+            'meldung'   => $zustand['meldung'],
+            'seit'      => $zustand['seit'],
+            'stand'     => $meta !== null ? self::stand($meta) : null,
+            'plan'      => $meta === null ? null : [
+                'kachel_url' => self::kachelUrl((int) $floor['id'], $meta),
+                'breite'     => (int) $meta['breite'],
+                'hoehe'      => (int) $meta['hoehe'],
+                'max_zoom'   => (int) $meta['max_zoom'],
+                'kachel'     => (int) ($meta['kachel'] ?? self::KACHEL),
+            ],
+            'fassung'   => $meta !== null ? self::fassung($meta) : null,
+            'qualitaet' => $meta !== null ? self::qualitaet($meta['qualitaet'] ?? null) : null,
+            'empfohlen' => $meta !== null && self::veraltet($meta),
+            // Für das Fenster „Plan neu rechnen“, schon in der Zeitzone der Installation.
+            'gebaut'    => is_string($meta['gebaut'] ?? null) ? Zeit::anzeige($meta['gebaut']) : null,
+            'dauer'     => self::dauerText($meta),
+        ];
+    }
+
+    /**
+     * Eine Zeile für die Standortseite: Maße und Fassung der Pyramide, der
+     * Zustand des Auftrags und ob neu rechnen geht – null für einen Plan,
+     * der nicht gekachelt wird (SVG, kleines Bild) und nie wurde.
+     *
+     * Liest nur kacheln.json und den Auftrag; ob poppler da ist, nur bei
+     * einem PDF ohne Kacheln (Programm::finden(), einmal je Anfrage).
+     *
+     * @return array{breite:int,hoehe:int,fassung:int,veraltet:bool,qualitaet:string,zustand:string,zustand_text:string,neu_rechenbar:bool,gekachelt:bool}|null
+     */
+    public static function uebersicht(array $floor): ?array
+    {
+        $pfad = SiteService::planPath($floor);
+        if ($pfad === null) {
+            return null;
+        }
+        $meta = self::meta($floor);
+        if ($meta !== null && (string) ($meta['quelle'] ?? '') !== basename($pfad)) {
+            $meta = null;
+        }
+        $zustand = self::zustand($floor);
+        if ($meta === null) {
+            $pdf = strtolower(pathinfo($pfad, PATHINFO_EXTENSION)) === 'pdf';
+            if (!$pdf && $zustand['zustand'] === 'keiner') {
+                return null;
+            }
+            $rechenbar = $pdf && extension_loaded('gd') && PdfRasterService::verfuegbar();
+        } else {
+            $rechenbar = extension_loaded('gd');
+        }
+        return [
+            'breite'        => (int) ($meta['breite'] ?? 0),
+            'hoehe'         => (int) ($meta['hoehe'] ?? 0),
+            'fassung'       => $meta !== null ? self::fassung($meta) : 0,
+            'veraltet'      => $meta !== null && self::veraltet($meta),
+            'qualitaet'     => self::qualitaet($meta['qualitaet'] ?? null),
+            'zustand'       => $zustand['zustand'],
+            'zustand_text'  => $zustand['meldung'],
+            'neu_rechenbar' => $rechenbar,
+            'gekachelt'     => $meta !== null,
+        ];
+    }
+
+    /**
      * Alles, was die Karte im Browser über diesen Plan wissen muss.
      *
-     * Bei Kacheln dazu, wie sie gerechnet sind (gerechnet()); die
-     * Kacheladresse trägt den Stand der Pyramide (stand()).
+     * Bei Kacheln dazu, wie sie gerechnet sind (gerechnet()), und was es
+     * zum Neurechnen braucht (neuRechnen()); die Kacheladresse trägt den
+     * Stand der Pyramide (stand()).
      *
-     * @return array{art:string,url:string,breite:int,hoehe:int,seite:int,max_zoom:int,zusatz:int,kachel_url:?string,kachel:int,fassung?:int,qualitaet?:string,veraltet?:bool,fein_moeglich?:bool}|null
+     * @return array{art:string,url:string,breite:int,hoehe:int,seite:int,max_zoom:int,zusatz:int,kachel_url:?string,kachel:int,fassung?:int,qualitaet?:string,veraltet?:bool,fein_moeglich?:bool,stand?:string,zustand?:string,zustand_text?:string,empfohlen?:bool,neu_rechenbar?:bool,gebaut?:?string,dauer?:string}|null
      */
     public static function quelle(array $floor): ?array
     {
@@ -1825,7 +2635,7 @@ final class PlanTileService
                     'zusatz'     => 2,
                     'kachel_url' => self::kachelUrl($id, $meta),
                     'kachel'     => (int) ($meta['kachel'] ?? self::KACHEL),
-                ] + self::gerechnet($meta);
+                ] + self::gerechnet($meta) + self::neuRechnen($floor, $meta, extension_loaded('gd'));
             }
 
             /*
@@ -1849,6 +2659,7 @@ final class PlanTileService
              * keiner.
              */
             $gdFehlt = !extension_loaded('gd');
+            $aufbereiten = $gdFehlt ? 'unmoeglich' : (PdfRasterService::verfuegbar() ? 'server' : 'browser');
 
             return [
                 'art'         => 'pdf',
@@ -1860,12 +2671,10 @@ final class PlanTileService
                 'zusatz'      => self::PDF_ZUSATZ_BROWSER,
                 'kachel_url'  => null,
                 'kachel'      => 512,
-                'aufbereiten' => $gdFehlt
-                    ? 'unmoeglich'
-                    : (PdfRasterService::verfuegbar() ? 'server' : 'browser'),
+                'aufbereiten' => $aufbereiten,
                 'hindernis'   => $gdFehlt ? self::GD_FEHLT : '',
                 'laeuft'      => !$gdFehlt && self::laeuft($floor),
-            ];
+            ] + self::neuRechnen($floor, null, $aufbereiten === 'server');
         }
 
         $masse = self::masse($pfad) ?? ['breite' => 1191, 'hoehe' => 842];
@@ -1887,7 +2696,7 @@ final class PlanTileService
                 'zusatz'     => 2,
                 'kachel_url' => self::kachelUrl($id, $meta),
                 'kachel'     => (int) ($meta['kachel'] ?? self::KACHEL),
-            ] + self::gerechnet($meta);
+            ] + self::gerechnet($meta) + self::neuRechnen($floor, $meta, extension_loaded('gd'));
         }
 
         return [

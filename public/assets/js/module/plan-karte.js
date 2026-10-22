@@ -35,6 +35,8 @@ export function quelleAus(el) {
         kachel: parseInt(el.dataset.planKachel || '256', 10),
         // Wie weit über die Originalauflösung hinaus gezoomt werden darf.
         zusatz: parseInt(el.dataset.planZusatz || '2', 10),
+        // Stand der Kachelpyramide (PlanTileService::stand()) – neu gerechnet: ein neuer.
+        stand: el.dataset.planStand || '',
     };
 }
 
@@ -170,7 +172,8 @@ export async function planKarte(el, optionen = {}) {
     el.dataset.planMaxZoom = String(quelle.maxZoom);
 
     // Eine Planeinheit ist ein Bildpunkt des Plans auf der höchsten Stufe.
-    const einheit = 1 / Math.pow(2, quelle.maxZoom);
+    // (let: kachelnWechseln() setzt sie mit einer feineren Pyramide neu.)
+    let einheit = 1 / Math.pow(2, quelle.maxZoom);
     const map = L.map(el, {
         crs: L.CRS.Simple,
         minZoom: 0,
@@ -190,6 +193,25 @@ export async function planKarte(el, optionen = {}) {
         L.latLng(0, quelle.breite * einheit)
     );
     map.setMaxBounds(grenzen.pad(0.35));
+
+    /** Kachelebene der Pyramide vom Server – Stufe nach Gerätepixeln (geraetepixel). */
+    const serverKacheln = (url, maxNativeZoom) => {
+        const lage = new (L.TileLayer.extend(geraetepixel))(url, {
+            tileSize: quelle.kachel,
+            minNativeZoom: 0,
+            maxNativeZoom,
+            bounds: grenzen,
+            noWrap: true,
+            keepBuffer: 3,
+            className: 'plan-kachel',
+        });
+        // Eine Kachel fehlt (404): vielleicht wurde der Plan neu gerechnet – karte.js fragt nach.
+        if (optionen.kachelFehler) {
+            lage.on('tileerror', optionen.kachelFehler);
+        }
+        return lage;
+    };
+    let kachelLage = null;
 
     if (quelle.art === 'kacheln' && quelle.kachelUrl !== '') {
         /*
@@ -211,15 +233,7 @@ export async function planKarte(el, optionen = {}) {
         L.rectangle(grenzen, {
             pane: 'planGrund', stroke: false, fillColor: '#ffffff', fillOpacity: 1, interactive: false,
         }).addTo(map);
-        new (L.TileLayer.extend(geraetepixel))(quelle.kachelUrl, {
-            tileSize: quelle.kachel,
-            minNativeZoom: 0,
-            maxNativeZoom: quelle.maxZoom,
-            bounds: grenzen,
-            noWrap: true,
-            keepBuffer: 3,
-            className: 'plan-kachel',
-        }).addTo(map);
+        kachelLage = serverKacheln(quelle.kachelUrl, quelle.maxZoom).addTo(map);
     } else if (quelle.art === 'pdf') {
         pdfKachelLage(seite, quelle).addTo(map);
     } else if (quelle.url !== '') {
@@ -293,6 +307,48 @@ export async function planKarte(el, optionen = {}) {
         /** Prozentpunkte aus einem Linienzug zurücklesen. */
         linieZuProzent(linie) {
             return linie.getLatLngs().map((ll) => zuProzent(ll));
+        },
+        /** Die Kachelebene vom Server (null bei PDF im Browser, Bild, SVG). */
+        get kachelLage() {
+            return kachelLage;
+        },
+        /**
+         * Auf eine neu gerechnete Pyramide umsteigen, ohne die Seite neu zu
+         * laden (plan: Antwort von /grundriss/<id>/kacheln/stand).
+         *
+         * Geht nur, wenn sie im Kartenraster dieselbe Fläche bedeckt –
+         * Breite und Höhe durch 2^maxZoom bis auf ein Pixel gleich: Dann
+         * stimmen alle Koordinaten weiter (Marker, Kabel, Maßstab,
+         * Georeferenz rechnen in Prozent mal Breite mal Planeinheit). Ein
+         * doppelt so fein gerechneter Plan (eine Stufe mehr) ist so einer,
+         * ebenso einer, an dem sich nur Filter oder Format geändert haben.
+         * Sonst false – dann muss die Seite neu geladen werden.
+         *
+         * Die neue Ebene kommt über die alte, die alte geht erst, wenn die
+         * neue geladen ist: kein weißes Aufblitzen.
+         */
+        kachelnWechseln(plan) {
+            if (kachelLage === null || !plan || typeof plan.kachel_url !== 'string' || plan.kachel_url === '') {
+                return false;
+            }
+            const faktor = Math.pow(2, plan.max_zoom - quelle.maxZoom);
+            if (plan.kachel !== quelle.kachel || Math.abs(plan.breite - quelle.breite * faktor) > 1
+                || Math.abs(plan.hoehe - quelle.hoehe * faktor) > 1) {
+                return false;
+            }
+            const alt = kachelLage;
+            const zusatz = map.getMaxZoom() - quelle.maxZoom;
+            kachelLage = serverKacheln(plan.kachel_url, plan.max_zoom);
+            kachelLage.once('load', () => map.removeLayer(alt));
+            kachelLage.addTo(map);
+            Object.assign(quelle, { breite: plan.breite, hoehe: plan.hoehe, maxZoom: plan.max_zoom, kachelUrl: plan.kachel_url });
+            einheit = 1 / Math.pow(2, quelle.maxZoom);
+            map.setMaxZoom(quelle.maxZoom + zusatz);
+            el.dataset.planBreite = String(plan.breite);
+            el.dataset.planHoehe = String(plan.hoehe);
+            el.dataset.planMaxZoom = String(plan.max_zoom);
+            el.dataset.planKachelUrl = plan.kachel_url;
+            return true;
         },
         vollbild: vollbild(el),
     };

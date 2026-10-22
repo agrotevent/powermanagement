@@ -4,6 +4,7 @@ declare(strict_types=1);
 namespace App\Controllers;
 
 use App\Auth\Zugriff;
+use App\Services\PlanTileService;
 use App\Services\SiteService;
 use App\Support\Flash;
 use App\Support\Request;
@@ -16,8 +17,31 @@ final class StandortController extends Controller
         // Was PHP hier wirklich annimmt (höchstens SiteService::MAX_UPLOAD_BYTES) –
         // das Formular nennt es, und der Browser prüft vor dem Hochladen dagegen.
         $grenze = SiteService::uploadGrenze();
+        $standorte = Zugriff::standorteFiltern(SiteService::all());
+        /*
+         * Je Etage mit Plan: wie seine Kacheln gerechnet sind (Maße, Fassung,
+         * neu rechnen empfohlen, läuft) – aus kacheln.json, ohne die Datei zu
+         * lesen. Den Knopf „Neu rechnen“ bekommt, wer den Standort ändern darf
+         * (wie Maßstab und Georeferenz); prüfen tut es der Server noch einmal.
+         */
+        $kacheln = [];
+        $darfNeu = [];
+        foreach ($standorte as $s) {
+            $darfHier = Zugriff::darfStandortAendern((int) $s['id']);
+            foreach ($s['floors'] as $f) {
+                if ((string) $f['plan_file'] === '') {
+                    continue;
+                }
+                $kacheln[(int) $f['id']] = PlanTileService::uebersicht($f);
+                // Teilen sich Etagen mehrerer Standorte die Pyramide, an jedem „bearbeiten“.
+                $darfNeu[(int) $f['id']] = $darfHier && array_filter(PlanTileService::etagenMitPyramide($f),
+                    static fn (array $e): bool => !Zugriff::darfStandortAendern($e['site_id'])) === [];
+            }
+        }
         $this->view('standorte/index', [
-            'standorte'    => Zugriff::standorteFiltern(SiteService::all()),
+            'standorte'    => $standorte,
+            'kacheln'      => $kacheln,
+            'darfNeu'      => $darfNeu,
             'uploadGrenze' => $grenze,
             'uploadText'   => SiteService::mb($grenze),
         ]);

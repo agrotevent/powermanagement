@@ -367,16 +367,19 @@ final class SiteService
          * Pläne gleich in Kacheln zerlegen – dann ist der erste Aufruf der
          * Karte so schnell wie jeder weitere.
          *
-         * Und zwar für *jede* betroffene Etage, nicht nur bis die erste
-         * geklappt hat: bei einem mehrseitigen PDF hat jede Seite ihre
-         * eigene Pyramide. Sonst rastert die Grundriss-Seite Seite 2 beim
-         * ersten Öffnen nach – und steht dabei eine Viertelminute.
+         * Und zwar für *jede* Pyramide, nicht nur bis die erste geklappt
+         * hat: bei einem mehrseitigen PDF hat jede Seite ihre eigene. Sonst
+         * rastert die Grundriss-Seite Seite 2 beim ersten Öffnen nach – und
+         * steht dabei eine Viertelminute. Etagen mit derselben Datei (und
+         * Seite) teilen sich eine Pyramide – die wird einmal gerechnet
+         * (gemessen sonst dasselbe Bild zweimal: 9,5 statt 5,3 s).
          */
         $gebaut  = 0;
         $kachelN = 0;
         $klemmt  = '';
         $namen   = [];
         $spaeter = [];
+        $pyramiden = [];
         $grossesBild = $extension !== 'pdf' && $extension !== 'svg' && PlanTileService::ueberGd($target);
         $bis = microtime(true) + Anfragezeit::hoechstens((float) ($options['kachelzeit'] ?? self::KACHELZEIT_IM_UPLOAD));
         foreach ($floorIds as $floorId) {
@@ -385,6 +388,11 @@ final class SiteService
                 continue;
             }
             $namen[] = (string) $etage['name'];
+            $pyramide = PlanTileService::planDir($etage);
+            if (isset($pyramiden[$pyramide])) {
+                continue;
+            }
+            $pyramiden[$pyramide] = true;
 
             // Die Zeit im Upload ist um: der Rest kommt in den Hintergrund.
             if (microtime(true) > $bis) {
@@ -409,7 +417,7 @@ final class SiteService
             : $klemmt;
 
         if ($spaeter !== []) {
-            $wieviele = count($spaeter) > 1 ? count($spaeter) . ' Etagen' : 'diesen Plan';
+            $wieviele = count($spaeter) > 1 ? count($spaeter) . ' Seiten' : 'diesen Plan';
             $kacheln .= PlanTileService::imHintergrund($spaeter)
                 ? sprintf(' Die Kacheln für %s rechnet der Server im Hintergrund weiter – bei so einem Plan einige Minuten.'
                     . ' Bis dahin zeichnet der Browser den Plan selbst (langsamer, weniger scharf); danach die Karte neu laden.', $wieviele)

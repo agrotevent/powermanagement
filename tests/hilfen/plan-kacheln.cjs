@@ -218,6 +218,31 @@ async function main() {
         ergebnis.animiert[String(dichte)] = { schritte, fehler: fehler.slice(vorher) };
     }
 
+    // Umsteigen auf eine neu gerechnete Pyramide (karte.kachelnWechseln): doppelt so fein
+    // (eine Stufe mehr) deckt dieselbe Fläche – die Koordinaten bleiben, die neue Ebene
+    // ersetzt die alte, sobald sie geladen ist. Andere Fläche: false, neu laden.
+    {
+        const { map, karte, lage } = await neueKarte(2, 820, 1180);
+        map.setZoom(5, { animate: false });
+        const vorher = map.latLngToContainerPoint(karte.zuLatLng(37, 61));
+        const maxVorher = map.getMaxZoom();
+        const stand = 'fedcba987654';
+        const anders = karte.kachelnWechseln({ kachel_url: '/grundriss/7/kachel/{z}/{x}/{y}?v=' + stand, breite: plan.breite + 40, hoehe: plan.hoehe, max_zoom: plan.maxZoom, kachel: 256 });
+        const ok = karte.kachelnWechseln({ kachel_url: '/grundriss/7/kachel/{z}/{x}/{y}?v=' + stand, breite: plan.breite * 2, hoehe: plan.hoehe * 2, max_zoom: plan.maxZoom + 1, kachel: 256 });
+        const neu = karte.kachelLage;
+        const nachher = map.latLngToContainerPoint(karte.zuLatLng(37, 61));
+        neu.fire('load');
+        let ebenen = 0;
+        map.eachLayer((l) => { if (l instanceof L.TileLayer) { ebenen++; } });
+        const kacheln = Object.values(neu._tiles);
+        ergebnis.wechseln = {
+            anders, ok, neueEbene: neu !== lage, alteWeg: !map.hasLayer(lage), ebenen,
+            maxZoom: map.getMaxZoom() - maxVorher, nativ: neu.options.maxNativeZoom,
+            punktGleich: Math.abs(vorher.x - nachher.x) < 1e-6 && Math.abs(vorher.y - nachher.y) < 1e-6,
+            adressen: kacheln.length > 0 && kacheln.every((k) => k.el.src.endsWith('?v=' + stand)),
+        };
+    }
+
     // Die Rechnung selbst
     ergebnis.kachelStufe = typeof modul.kachelStufe === 'function'
         ? [[0, 1], [3, 1], [3.04, 1], [3.06, 1], [3, 2], [2.5, 3], [4.47, 3]].map(([z, d]) => modul.kachelStufe(z, d))

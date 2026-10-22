@@ -91,6 +91,8 @@ vorhanden ist.
 
 **Material** (oben in der Werkzeugleiste) öffnet die Materialliste der
 ganzen Etage zum Drucken – siehe [Materialliste](#materialliste).
+**Plan neu rechnen** lässt den Server den Grundriss noch einmal in Kacheln
+rechnen, etwa wenn er zu unscharf ist – siehe [Plan neu rechnen](#plan-neu-rechnen).
 
 Beim Zeichnen (Kabel, Kabelweg, Kabelbrücke, Maßstab, Georeferenz) setzt
 ein Tipp auf eine vorhandene Linie einen Punkt – so lässt sich ein Kabel
@@ -955,19 +957,21 @@ geringerer Auflösung exportiert werden.
 - **Übersicht:** Die kleinen Zoomstufen eines PDF rechnet poppler selbst –
   Haarlinien bleiben dort wie in einem PDF-Betrachter zu sehen, statt
   wegzumitteln. Pläne, die vor dieser Fassung gerechnet wurden, zeigt die
-  Karte weiter; schärfer werden sie mit `bin/power plan:kacheln --neu`.
-  `--qualitaet=fein` rechnet ein PDF bis 400 Megapixel (der Geländeplan
-  mit vollen 360 dpi) – doppelt so lange, doppelt so viel Platte.
+  Karte weiter; schärfer werden sie mit **Plan neu rechnen** (siehe
+  unten), die nächtliche Wartung rechnet sie nach und nach selbst neu.
+  *Fein* rechnet ein PDF bis 400 Megapixel (der Geländeplan mit vollen
+  360 dpi) – doppelt so lange, doppelt so viel Platte.
 - **Anzeige:** Die Karte holt die Kacheln passend zur Pixeldichte des
   Bildschirms – am Tablet und Telefon die feinere Stufe, die der Bildschirm
   auch zeigen kann, statt eine gröbere zu vergrößern – und zeigt jede
   Kachel ungestreckt. Dafür lädt eine Ansicht am Telefon mehr Kacheln als
   früher; der Browser behält sie aber, ein zweiter Besuch kommt ohne Server
-  aus. Wird ein Plan neu gerechnet, bekommen seine Kacheln neue Adressen:
-  Nach dem Neuladen zeigt die Karte den neuen Plan, eine Karte, die dabei
-  offen war, zeigt an neuen Stellen Lücken, bis sie neu geladen wird.
+  aus. Wird ein Plan neu gerechnet, bekommen seine Kacheln neue Adressen –
+  der Browser hält keine alten fest.
 - **Ersetzen:** Ein neuer Plan auf einer Etage ersetzt den alten; wird der
   alte von keiner Etage mehr genutzt, löscht der Server ihn samt Kacheln.
+  Mehrere Etagen mit derselben Datei teilen sich die Kacheln – gerechnet
+  wird einmal.
 - **Große Bilder:** PNG und JPEG über 50 Megapixel bereitet der Server mit
   poppler auf, ohne sie ganz in den Speicher zu laden – bis 80 Megapixel in
   Originalgröße, darüber verkleinert. Ein Scan wird JPEG-Kacheln, ein
@@ -976,6 +980,45 @@ geringerer Auflösung exportiert werden.
   PNG ohne Transparenz und ohne Zeilensprung (interlaced); über 400
   Megapixel nimmt der Upload kein Bild an. Was nicht passt, lehnt der Upload
   mit dem Grund ab – anders speichern, verkleinern oder als PDF hochladen.
+
+### Plan neu rechnen
+
+Ist die Karte zu unscharf – etwa ein Plan, der vor der jetzigen Fassung der
+Kacheln gerechnet wurde –, rechnet der Server ihn noch einmal. Dafür gibt
+es in der Werkzeugleiste der Karte **Plan neu rechnen** (bei einem PDF,
+das noch gar keine Kacheln hat: **Plan aufbereiten**) und unter
+**Standorte** in der Spalte *Grundriss* den Knopf **Neu rechnen**. Dort
+steht auch, wie der Plan jetzt gerechnet ist: „Kacheln 8.386 × 5.962 px ·
+Fassung 1“.
+
+- **Wer:** wer *Grundrisse verwalten* darf und am Standort *bearbeiten*
+  freigegeben hat – wie bei Maßstab und Georeferenz. Teilen sich Etagen
+  mehrerer Standorte einen Plan, braucht es *bearbeiten* an jedem. Wer den
+  Standort nur sieht, bekommt den Knopf nicht.
+- **Empfohlen:** Ist der Plan mit einer älteren Fassung gerechnet, trägt
+  der Knopf das Abzeichen *empfohlen*. Das Fenster daneben nennt Maße,
+  Fassung, Qualität und wie lange es zuletzt gedauert hat. *Fein* steht
+  nur zur Wahl, wenn es den Plan deutlich schärfer machte.
+- **Die Karte bleibt benutzbar.** Gerechnet wird im Hintergrund in einen
+  eigenen Ordner; bis alles fertig ist, zeigt die Karte den bisherigen
+  Plan. Über der Karte steht, wie weit es ist („Wartet, bis ein anderer
+  Plan fertig gerechnet ist“, „Wird gerechnet“). Danach steigt sie von
+  selbst auf den neuen Plan um – auch bei allen anderen, die die Karte
+  gerade offen haben. Liegt der neue Plan anders im Raster (selten), steht
+  dort **Neu laden**; die Karte kommt danach wieder an dieselbe Stelle.
+  Anlagen, Kabel, Maßstab und Georeferenz bleiben, wo sie sind.
+- **Dauer:** einige Sekunden für einen gewöhnlichen Plan, bis zu einigen
+  Minuten für ein PDF mit 100 MB. Es rechnet immer nur ein Plan zugleich;
+  wer warten muss, sieht es.
+- **Geht etwas schief** (ein kaputtes PDF, der Server wird neu gestartet),
+  bleibt der bisherige Plan, wie er war. Ein abgebrochenes Neurechnen
+  holt die nächtliche Wartung nach.
+- **Nachts:** Die Wartung rechnet Pläne einer älteren Fassung von selbst
+  neu – die schnellsten zuerst, höchstens 20 Minuten je Nacht, mit
+  niedriger Priorität.
+
+Auf der Kommandozeile: `bin/power plan:kacheln --neu --etage=<id>` (eine
+Etage), `--veraltet` (alle einer älteren Fassung), `--qualitaet=fein`.
 
 **Location-Abgleich** arbeitet mit demselben Git-Repository wie MasterAdmin
 (`locations/<schlüssel>/location.json` und `plaene/`):
