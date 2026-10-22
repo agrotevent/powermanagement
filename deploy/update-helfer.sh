@@ -72,6 +72,10 @@ ABSTAND_PRUEFEN=60
 WIEDERAUFNAHMEN_MAX=2
 WARTUNG_VERWAIST=600
 KENNUNGEN_MAX=200
+# Nachlauf (ExecStopPost): so lange auf Sperren warten, die getötete Prozesse
+# des Laufs noch halten. systemctl kill trifft alle Prozesse; wer gerade in einem
+# Aufruf im Kern steckt (sync, fsync auf einer langsamen Platte), endet erst danach.
+NACHLAUF_WARTEN=20
 VERLAUF_ZEIGEN=100
 PROTOKOLLE_MAX=30
 PROTOKOLL_BYTES=65536
@@ -1275,6 +1279,11 @@ nachlauf() {
     L_ZUSTAND="${lr[zustand]:-}"; L_ERGEBNIS="${lr[ergebnis]:--}"; L_GRUND="${lr[grund]:--}"
 
     if [[ "$L_ZUSTAND" == "laeuft" ]]; then
+        local gewartet=0
+        while ! update_sperre_frei && (( gewartet < NACHLAUF_WARTEN )); do
+            sleep 1
+            gewartet=$((gewartet + 1))
+        done
         if ! update_sperre_frei; then
             echo "update-helfer.sh: das Update läuft noch (update.lock belegt) – nichts nachzutragen."
             return 0
@@ -1318,7 +1327,9 @@ main() {
     [[ -d "${SPERRE%/*}" ]] || install -d -m 750 -- "${SPERRE%/*}"
     exec 8>>"$SPERRE" || aufruf_fehler "Sperrdatei $SPERRE lässt sich nicht öffnen"
     chmod 600 -- "$SPERRE" 2>/dev/null || true
-    if ! flock -w 5 8; then
+    local warten=5
+    [[ "$MODUS" == "nachlauf" ]] && warten="$NACHLAUF_WARTEN"
+    if ! flock -w "$warten" 8; then
         # Läuft schon ein Helfer: PathExists= holt einen liegenden Auftrag danach.
         echo "update-helfer.sh: ein anderer Lauf des Helfers ist aktiv – dieser endet."
         return 0

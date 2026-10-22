@@ -119,7 +119,8 @@ DOCKERFILE
                 for u in nginx mosquitto influxdb powermanagement-nodered powermanagement-sammler \
                          powermanagement-mqtt-zugaenge powermanagement-wartung powermanagement-update \
                          powermanagement-update-zeitplan pm-umstieg; do
-                    echo "--- journalctl -u $u"; journalctl -a -u "$u" --no-pager -n 30 2>/dev/null
+                    n=30; [ "$u" = powermanagement-update ] && n=150
+                    echo "--- journalctl -u $u"; journalctl -a -u "$u" --no-pager -n "$n" 2>/dev/null
                 done
                 juengstes="$(ls -1t /var/log/powermanagement/update/*.log 2>/dev/null | head -n 1)"
                 for f in /var/log/nginx/powermanagement.error.log /opt/powermanagement/storage/logs/*.log \
@@ -1251,12 +1252,17 @@ LAUF_VORHER="$(ist_wert lauf kennung)"
 pruefe "Update über die Oberfläche angefordert" ueber_oberflaeche "$NEU"
 pruefe "Fortschritt erreicht den Abgleich" ist_schritt_abwarten 8
 LAUF_VORHER="$(ist_wert lauf kennung)"
+KILL_ZEIT="$(date +%s)"
 systemctl kill -s KILL powermanagement-update.service
 pruefe "Update-Dienst nach SIGKILL beendet" einheit_abwarten powermanagement-update.service
 pruefe "Marke „offen“ bleibt" test -e "$MARKE_OFFEN"
 pruefe "Schreibsperre bleibt" test -e "$WARTUNG"
 pruefe "Nachlauf: ist/lauf fehler abgebrochen helfer (kam: $(ist_wert lauf zustand) $(ist_wert lauf ergebnis) $(ist_wert lauf grund))" \
     test "$(ist_wert lauf kennung) $(ist_wert lauf zustand) $(ist_wert lauf ergebnis) $(ist_wert lauf grund)" = "$LAUF_VORHER fehler abgebrochen helfer"
+if [[ "$(ist_wert lauf zustand)" == laeuft ]]; then
+    echo "    (Journal des Update-Dienstes seit dem SIGKILL:)"
+    journalctl -a -u powermanagement-update --no-pager -o short-precise --since "@$KILL_ZEIT" 2>/dev/null | tail -n 40 | sed 's/^/  | /' || true
+fi
 update_lauf
 pruefe "ein neues Update lehnt ab (kam: $RC)" test "$RC" = 1
 pruefe "ein neues Update nennt --wiederaufnehmen" enthaelt "$LAUF" "--wiederaufnehmen"
