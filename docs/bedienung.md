@@ -1023,10 +1023,14 @@ Fassung 1“.
   holt die nächtliche Wartung nach.
 - **Nachts:** Die Wartung rechnet Pläne einer älteren Fassung von selbst
   neu – die schnellsten zuerst, höchstens 20 Minuten je Nacht, mit
-  niedriger Priorität.
+  niedriger Priorität und nie in das Fenster der automatischen Updates
+  hinein.
+- **Während eines Updates** ist der Knopf gesperrt wie jede Änderung;
+  angestoßene Pläne warten und kommen danach dran (*Update*, unten).
 
 Auf der Kommandozeile: `bin/power plan:kacheln --neu --etage=<id>` (eine
-Etage), `--veraltet` (alle einer älteren Fassung), `--qualitaet=fein`.
+Etage), `--veraltet` (alle einer älteren Fassung), `--qualitaet=fein`,
+`--nachholen` (offene Aufträge und fehlende Kacheln, wie nach einem Update).
 
 **Location-Abgleich** arbeitet mit demselben Git-Repository wie MasterAdmin
 (`locations/<schlüssel>/location.json` und `plaene/`):
@@ -1268,7 +1272,20 @@ Anmelden über Authentik geht in dieser Zeit nicht – die Anmeldeseite sagt
 ist, bleibt es ([anmeldung-sso.md](anmeldung-sso.md#während-eines-updates)).
 Andere Instanzen bekommen über die
 Schnittstelle dieselbe Antwort (HTTP 503) – wer dort sendet, schickt es nach
-einer Minute noch einmal. Geht etwas schief, kommt der alte Stand von selbst zurück –
+einer Minute noch einmal.
+
+*Grundrisse während des Updates:* Die Karte bleibt benutzbar. **Plan neu
+rechnen** ist gesperrt wie jede Änderung; ein Plan, der gerade gerechnet
+wird, rechnet zu Ende, angestoßene Pläne „warten, bis das Update
+eingespielt ist“ und kommen danach von selbst dran – ebenso Pläne, deren
+Kacheln noch fehlen. Bringt das Update eine neue, schärfere Fassung der
+Kacheln, bleiben die vorhandenen Pläne, wie sie sind, und tragen „neu
+rechnen empfohlen“: Die nächtliche Wartung rechnet sie nach und nach (bis 20
+Minuten je Nacht, nie in das Fenster der automatischen Updates hinein), oder
+man drückt **Plan neu rechnen** – nicht alle auf einmal gleich nach dem
+Update, das würde einen kleinen Server lange auslasten.
+
+Geht etwas schief, kommt der alte Stand von selbst zurück –
 Code, Datenbank und Einrichtung. Läuft gerade ein Aufbau oder wurde in den
 letzten 30 Minuten geschaltet, nennt die Seite das und verlangt das
 Kästchen **Trotzdem jetzt aktualisieren**. Ist der Knopf gesperrt, steht

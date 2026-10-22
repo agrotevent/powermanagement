@@ -41,6 +41,7 @@ use App\Services\PdfRasterService;
 use App\Services\PlanTileService;
 use App\Services\SiteService;
 use App\Support\Anfragezeit;
+use App\Support\Config;
 use App\Support\Database;
 
 $kennung = 'pm-grundriss-' . bin2hex(random_bytes(3));
@@ -1195,6 +1196,166 @@ try {
             PlanTileService::quelle($kleinEtage)['neu_rechenbar'] ?? null, PlanTileService::uebersicht($kleinEtage)],
             ['bild', true, true, false, false, null],
             'Bild ohne Kacheln, das welche bekäme: aufbereiten möglich (Karte und Standortseite); ein kleines Bild nicht');
+
+        // ------------------------------------------------ Kacheln während eines Updates
+        // Ein Bau schreibt nur Dateien, nie die Datenbank – aber während eines Updates
+        // beginnt kein Plan: Der Prozess im Hintergrund hätte Teile des alten Codes
+        // geladen und lüde den Rest aus dem neuen, und das Update braucht selbst Speicher.
+        // Hier mit eigenem storage/update (Schreibsperre, Lauf) und ohne Demo-Modus – im
+        // Prüfprozess über Config, für die Prozesse im Hintergrund über eine config.php.
+        $updOrdner = $tmp . '/update';
+        @mkdir($updOrdner . '/ist', 0775, true);
+        $updConfig = $tmp . '/config-update.php';
+        $vorlage = is_file(dirname(__DIR__) . '/config/config.php') ? dirname(__DIR__) . '/config/config.php' : dirname(__DIR__) . '/config/config.example.php';
+        file_put_contents($updConfig, '<?php $c = require ' . var_export($vorlage, true) . '; $c["app"]["demo"] = false; $c["update"]["verzeichnis"] = '
+            . var_export($updOrdner, true) . '; $c["database"] = ' . var_export(Config::get('database'), true) . '; return $c;');
+        $demoVorher = Config::isDemo();
+        $updVorher = Config::get('update.verzeichnis');
+        $sperreAn = static function (bool $an) use ($updOrdner): void {
+            $an ? file_put_contents($updOrdner . '/ist/wartung', \App\Services\UpdateService::KOPF_WARTUNG . "\nseit " . time() . "\nkennung -\n")
+                : @unlink($updOrdner . '/ist/wartung');
+        };
+        $laufSchreiben = static function (string $zustand) use ($updOrdner): void {
+            file_put_contents($updOrdner . '/ist/lauf', \App\Services\UpdateService::KOPF_LAUF . "\nkennung " . bin2hex(random_bytes(16))
+                . "\naktion aktualisieren\nausloeser hand\nvon pruefer\nzustand {$zustand}\nbeginn " . time() . "\npuls " . time() . "\n");
+            \App\Services\UpdateService::vergessen();
+        };
+        $rohAuftrag = static fn (array $e): string => (string) (json_decode((string) @file_get_contents(PlanTileService::planDir($e) . '/.auftrag.json'), true)['zustand'] ?? '');
+        $logAb = static function () use ($logPfad): callable {
+            clearstatcache(true, $logPfad);
+            $ab = (int) @filesize($logPfad);
+            return static function () use ($logPfad, $ab): string {
+                clearstatcache(true, $logPfad);
+                return substr((string) @file_get_contents($logPfad), $ab);
+            };
+        };
+        $plan = static function (string $name) use ($bildEtage): array {
+            $bild = imagecreatetruecolor(1800, 1200);
+            imagefilledrectangle($bild, 0, 0, 1799, 1199, 0xFFFFFF);
+            imageline($bild, 0, 600, 1799, 600, 0x000000);
+            $etage = $bildEtage($bild, 'png', $name);
+            PlanTileService::bauen($etage, true);
+            return $etage;
+        };
+        Config::set('app.demo', false);
+        Config::set('update.verzeichnis', $updOrdner);
+        putenv('POWERMANAGEMENT_CONFIG=' . $updConfig);
+        try {
+            [$uA, $uB, $uC] = [$plan('Update A'), $plan('Update B'), $plan('Update C')];
+            // C ohne Kacheln, mit dem Rest eines getöteten Baus von vor den Fassungsordnern (Stufe direkt im Planordner).
+            PlanTileService::aufraeumen($uC);
+            mkdir(PlanTileService::planDir($uC) . '/9/77', 0775, true);
+            file_put_contents(PlanTileService::planDir($uC) . '/9/77/88.png', 'Rest eines getöteten Baus');
+            // B mit einer älteren Fassung – die rechnet nach einem Update nur die Wartung (oder der Knopf).
+            $zeigerB = PlanTileService::metaPfad($uB);
+            file_put_contents($zeigerB, json_encode(['fassung' => 1, 'dauer_ms' => 100] + (array) json_decode((string) file_get_contents($zeigerB), true)));
+            $standA = PlanTileService::aktuellerStand($uA);
+            $standB = PlanTileService::aktuellerStand($uB);
+
+            // Schreibsperre: „Plan neu rechnen“ trägt ein (der POST kam vor der Sperre), aber kein Prozess beginnt ihn.
+            $sperreAn(true);
+            $r = PlanTileService::neuRechnenAnfordern($uA);
+            usleep(800_000);
+            $z = PlanTileService::zustand($uA);
+            gleich([$r['ok'], $r['neu'], $arbeiter(), $rohAuftrag($uA), $z['zustand'], str_contains($z['meldung'], 'bis das Update eingespielt ist')],
+                [true, true, 0, 'angefordert', 'wartet', true], 'Schreibsperre: Auftrag eingetragen, kein Prozess im Hintergrund – er „wartet“ auf das Update (' . $z['meldung'] . ')');
+            $erledigt = PlanTileService::arbeiten(null, null, $wegenUpdate);
+            $fehlend = PlanTileService::fehlendeNachrechnen();
+            $veraltet = PlanTileService::veralteteNachrechnen(600);
+            gleich([$erledigt, $wegenUpdate, PlanTileService::aktuellerStand($uA) === $standA, $rohAuftrag($uA), PlanTileService::meta($uC),
+                in_array('Fehlende Kacheln: ' . PlanTileService::UPDATE_DAZWISCHEN, $fehlend, true),
+                in_array('Ältere Kachelfassungen: ' . PlanTileService::UPDATE_DAZWISCHEN, $veraltet, true) && str_contains((string) end($veraltet), 'Noch '),
+                PlanTileService::aktuellerStand($uB) === $standB],
+                [0, true, true, 'angefordert', null, true, true, true],
+                'Schreibsperre: weder der Prozess im Hintergrund noch die Wartung (fehlende, ältere Fassung) beginnt einen Plan');
+
+            // Ein Prozess wartet auf einen anderen Bau, da beginnt ein Update: Er beginnt den Plan nicht mehr,
+            // der Auftrag steht weiter an, und er endet – nach dem Update holt powermanagement-kacheln ihn ab.
+            $sperreAn(false);
+            $neueZeilen = $logAb();
+            $sperre = fopen(PlanTileService::hintergrundSperre(), 'c');
+            flock($sperre, LOCK_EX);
+            try {
+                PlanTileService::arbeiterStarten();
+                $wartet = $sobald(static fn (): bool => PlanTileService::zustand($uA)['zustand'] === 'wartet' && $rohAuftrag($uA) === 'wartet', 15);
+                $laufSchreiben('laeuft');
+                $sperreAn(true);
+            } finally {
+                flock($sperre, LOCK_UN);
+                fclose($sperre);
+            }
+            $vorbei = $sobald(static fn (): bool => $arbeiter() === 0, 30);
+            $zeilen = $neueZeilen();
+            gleich([$wartet, $vorbei, $rohAuftrag($uA), PlanTileService::aktuellerStand($uA) === $standA, str_contains($zeilen, 'Ein Update hat begonnen – der Plan kommt danach dran.'),
+                str_contains($zeilen, 'Ein Update läuft – danach rechnet powermanagement-kacheln weiter.')],
+                [true, true, 'angefordert', true, true, true],
+                'Update beginnt, während der Prozess im Hintergrund wartet: kein Plan begonnen, Auftrag steht an, Prozess endet');
+
+            // Nach dem Update (Sperre weg, Lauf fertig): plan:kacheln --nachholen, wie powermanagement-kacheln es
+            // aufruft – den offenen Auftrag und den Plan ohne Kacheln (samt Rest weg), nicht die ältere Fassung.
+            $sperreAn(false);
+            $laufSchreiben('fertig');
+            $neueZeilen = $kliNeu();
+            $p = proc_open([PHP_BINARY, dirname(__DIR__) . '/bin/power', 'plan:kacheln', '--nachholen'], [0 => ['pipe', 'r'], 1 => ['file', $kliLog, 'a'],
+                2 => ['file', $kliLog, 'a']], $rohre, null, ['POWERMANAGEMENT_CONFIG' => $updConfig] + getenv());
+            fclose($rohre[0]);
+            $rc = proc_close($p);
+            $zeilen = $neueZeilen();
+            gleich([$rc, PlanTileService::zustand($uA)['zustand'], PlanTileService::aktuellerStand($uA) !== $standA, PlanTileService::meta($uC) !== null,
+                is_dir(PlanTileService::planDir($uC) . '/9'), PlanTileService::aktuellerStand($uB) === $standB, PlanTileService::veraltet((array) PlanTileService::meta($uB))],
+                [0, 'fertig', true, true, false, true, true],
+                'plan:kacheln --nachholen: offener Auftrag gerechnet, fehlende Kacheln nachgerechnet (Rest des getöteten Baus weg), ältere Fassung bleibt – ' . trim($zeilen));
+
+            // Lief ein Update, während der Prozess wartete, und ist es schon durch: Er beginnt den Plan nicht mit dem
+            // alten Code, sondern macht als derselbe Prozess mit dem neuen weiter (pcntl_exec) – beide Aufträge fertig.
+            $standA = PlanTileService::aktuellerStand($uA);
+            $standC = PlanTileService::aktuellerStand($uC);
+            $neueZeilen = $logAb();
+            $sperre = fopen(PlanTileService::hintergrundSperre(), 'c');
+            flock($sperre, LOCK_EX);
+            try {
+                $angestossen = [PlanTileService::neuRechnenAnfordern($uA)['neu'], PlanTileService::neuRechnenAnfordern($uC)['neu']];
+                $wartet = $sobald(static fn (): bool => $rohAuftrag($uA) === 'wartet' || $rohAuftrag($uC) === 'wartet', 15);
+                $pid = null;
+                foreach (glob('/proc/[0-9]*/cmdline') ?: [] as $cmd) {
+                    if (str_contains((string) @file_get_contents($cmd), dirname(__DIR__) . "/bin/power\0plan:kacheln\0--auftraege")) {
+                        $pid = (int) basename(dirname($cmd));
+                    }
+                }
+                $laufSchreiben('fertig');
+            } finally {
+                flock($sperre, LOCK_UN);
+                fclose($sperre);
+            }
+            $fertig = $sobald(static fn (): bool => PlanTileService::zustand($uA)['zustand'] === 'fertig' && PlanTileService::zustand($uC)['zustand'] === 'fertig'
+                && $arbeiter() === 0, 60);
+            $zeilen = $neueZeilen();
+            gleich([$angestossen, $wartet, $pid !== null, $fertig, PlanTileService::aktuellerStand($uA) !== $standA, PlanTileService::aktuellerStand($uC) !== $standC,
+                substr_count($zeilen, 'Nach dem Update: weiter mit dem neuen Stand.'), substr_count($zeilen, 'Ein Update hat begonnen – der Plan kommt danach dran.')],
+                [[true, true], true, true, true, true, true, 1, 1],
+                'Update lief, während der Prozess wartete: er macht mit dem neuen Stand weiter, beide Aufträge gerechnet');
+
+            // Die nächtliche Wartung rechnet ältere Fassungen nur, solange kein Fenster für automatische Updates
+            // beginnt (UpdateAutomatik::kachelnBis()): bis 2 min davor, 100 s davor gar nicht.
+            $jetzt = time();
+            gleich([PlanTileService::wartungsBudget(null, $jetzt), PlanTileService::wartungsBudget($jetzt + 7200, $jetzt), PlanTileService::wartungsBudget($jetzt + 600, $jetzt),
+                PlanTileService::wartungsBudget($jetzt + 100, $jetzt), PlanTileService::wartungsBudget($jetzt, $jetzt)], [1200, 1200, 480, 0, 0],
+                'Wartung: Budget für ältere Fassungen 20 min, aber nur bis 2 min vor dem Fenster der Updates');
+            $vorher = PlanTileService::veralteteInDerWartung($jetzt + 100, $jetzt);
+            gleich([str_starts_with($vorher[0] ?? '', 'Ältere Kachelfassungen: heute nicht'), str_contains((string) end($vorher), 'Noch '),
+                PlanTileService::aktuellerStand($uB) === $standB, $rohAuftrag($uB)], [true, true, true, ''],
+                'Wartung kurz vor dem Fenster der Updates: keine ältere Fassung begonnen – ' . implode(' | ', $vorher));
+        } finally {
+            putenv('POWERMANAGEMENT_CONFIG');
+            Config::set('app.demo', $demoVorher);
+            Config::set('update.verzeichnis', $updVorher);
+            \App\Services\UpdateService::vergessen();
+            foreach (['wartung', 'lauf'] as $datei) {
+                @unlink($updOrdner . '/ist/' . $datei);
+            }
+            @rmdir($updOrdner . '/ist');
+            @rmdir($updOrdner);
+        }
     }
 
 } finally {

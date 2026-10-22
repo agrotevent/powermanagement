@@ -1997,6 +1997,18 @@ try {
     gleich([(int) Database::scalar('SELECT COUNT(*) FROM api_tokens'), Database::scalar('SELECT status FROM api_vorschlaege WHERE id = ?', [$vorschlagId]),
         Database::first('SELECT verified_at FROM api_partner WHERE id = ?', [$selbstId])], [$tokensVorher, 'offen', $partnerVorher],
         'Kundenmodus: kein Zugang angelegt, kein Vorschlag abgelehnt, keine Instanz geprüft');
+    // Ebenso „Plan neu rechnen“ und sein Status (plan-neu.js lädt bei 423 neu – zur Kundenseite): kein Auftrag.
+    if (isset($nEtage)) {
+        $auftragDatei = \App\Services\PlanTileService::planDir((array) \App\Services\SiteService::floor($nEtage)) . '/.auftrag.json';
+        $auftragVorher = (string) @file_get_contents($auftragDatei);
+        $s = aufruf($basis, $admin['dose'], 'GET', '/grundriss/' . $nEtage . '/kacheln/stand', [], $json);
+        $j = aufruf($basis, $admin['dose'], 'POST', '/grundriss/' . $nEtage . '/neu-rechnen', ['_token' => $admin['token']], $json);
+        $f = aufruf($basis, $admin['dose'], 'POST', '/grundriss/' . $nEtage . '/neu-rechnen', ['_token' => $admin['token']]);
+        gleich([$s['status'], json_decode($s['text'], true)['kundenmodus'] ?? null, str_contains($s['text'], 'stand'), $j['status'],
+            json_decode($j['text'], true)['kundenmodus'] ?? null, $f['status'], $f['ziel'], (string) @file_get_contents($auftragDatei) === $auftragVorher],
+            [423, true, false, 423, true, 302, '/berichte/' . $b3 . '/kunde', true],
+            'Kundenmodus: Status des Plans und „Plan neu rechnen“ gesperrt (423 bzw. zur Kundenseite), kein Auftrag');
+    }
     // Ebenso der Tank: Seite, Verlauf, Tage, CSV, Peilung und Betankung.
     if (($tankId ?? 0) > 0) {
         $ereignisseVorher = (int) Database::scalar('SELECT COUNT(*) FROM tank_ereignisse WHERE objekt_id = ?', [$tankId]);

@@ -617,8 +617,11 @@ try {
         clearstatcache();
         $wwwData = function_exists('posix_getpwuid') ? (string) ((posix_getpwuid(33) ?: [])['name'] ?? '') : '';
         // Auch die Befehle der Anmeldung über SSO – der Notausgang sso:aus --nur-sso eingeschlossen – nur als Anwendungsbenutzer.
+        // Ebenso die Prozesse der Kacheln (php-fpm, die Wartung und das Update starten sie als Anwendungsbenutzer) –
+        // als root legten sie root-eigene Kacheln und Aufträge an.
         foreach ([['pruefen'], ['update:stand'], ['migrate'], ['user:password', 'jemand', 'Geheim-Kennwort-2026'], ['sso:aus', '--nur-sso'], ['sso:zustand'],
-            ['sso:einrichten', 'https://auth.example.com/application/o/pm/', 'Geheim-Kennwort-Client']] as $befehl) {
+            ['sso:einrichten', 'https://auth.example.com/application/o/pm/', 'Geheim-Kennwort-Client'], ['plan:kacheln', '--auftraege'],
+            ['plan:kacheln', '--nachholen'], ['plan:kacheln', '--veraltet', '--bis=60'], ['wartung']] as $befehl) {
             [$rc, $aus] = $baumPower($befehl);
             pruefe($rc === 1 && str_contains($aus, 'runuser -u ' . ($wwwData !== '' ? $wwwData : 'www-data') . ' -- php bin/power ' . $befehl[0]),
                 'Wächter: als root, storage/ gehört UID 33 → ' . $befehl[0] . ' abgelehnt (' . trim($aus) . ')');
@@ -888,6 +891,37 @@ try {
     $r = UpdateAutomatik::entscheiden($jetzt, $lage($jetzt, ['letzter' => ['tag' => '2026-10-21', 'ergebnis' => 'angefordert', 'zeit' => $J, 'grund' => '', 'ziel' => $V, 'text' => '', 'gemeldet' => []]],
         ['karenz' => 0, 'beginn' => '23:30', 'tage' => [3]]));
     gleich($r['grund'], 'erledigt', 'entscheiden: über Mitternacht, schon am Starttag angefordert → erledigt');
+
+    // kachelnBis(): Bis wann die nächtliche Wartung Pläne einer älteren Kachelfassung
+    // rechnen darf, ohne ein automatisches Update aufzuhalten (es verschöbe, solange
+    // sie die Sperre hält): bis zum frühesten Einspielen des nächsten Fensters, in
+    // einem offenen gar nicht – außer der Tag ist schon entschieden.
+    $eingerichtet();
+    $automatikZurueck();
+    $nacht = $ts('2026-10-22 03:20');   // ein Donnerstag
+    gleich(UpdateAutomatik::kachelnBis($nacht), null, 'kachelnBis: nur suchen (Vorgabe) → keine Grenze');
+    gleich(UpdateAutomatik::speichern('einspielen', [1, 2, 3, 4, 5, 6, 7], '04:00', 120, 0, '', 10)['ok'], true, 'kachelnBis: täglich ab 04:00, Versatz 10 min');
+    gleich(UpdateAutomatik::kachelnBis($nacht), $ts('2026-10-22 04:10'), 'kachelnBis: vor dem Fenster → bis zum frühesten Einspielen (04:10)');
+    gleich(UpdateAutomatik::kachelnBis($ts('2026-10-22 04:30')), $ts('2026-10-22 04:30'), 'kachelnBis: im offenen Fenster, nichts entschieden → jetzt');
+    Settings::put(UpdateAutomatik::LETZTER, (string) json_encode(['tag' => '2026-10-22', 'zeit' => $ts('2026-10-22 04:12'), 'ergebnis' => 'verschoben',
+        'grund' => 'karenz', 'ziel' => null, 'text' => '', 'gemeldet' => []]));
+    gleich(UpdateAutomatik::kachelnBis($ts('2026-10-22 04:30')), $ts('2026-10-22 04:30'), 'kachelnBis: im Fenster, heute verschoben (offen) → jetzt');
+    Settings::put(UpdateAutomatik::LETZTER, (string) json_encode(['tag' => '2026-10-22', 'zeit' => $ts('2026-10-22 04:12'), 'ergebnis' => 'nichts_neu',
+        'grund' => '', 'ziel' => null, 'text' => '', 'gemeldet' => []]));
+    gleich(UpdateAutomatik::kachelnBis($ts('2026-10-22 04:30')), $ts('2026-10-23 04:10'), 'kachelnBis: im Fenster, heute nichts Neues → bis zum Fenster von morgen');
+    gleich(UpdateAutomatik::speichern('einspielen', [5], '03:00', 60, 0, '', 20)['ok'], true, 'kachelnBis: nur freitags ab 03:00, Versatz 20 min');
+    gleich(UpdateAutomatik::kachelnBis($nacht), $ts('2026-10-23 03:20'), 'kachelnBis: Donnerstag 03:20 → bis Freitag 03:20');
+    $powerQuelle = (string) file_get_contents($wurzel . '/bin/power');
+    $wartungTeil = (string) substr($powerQuelle, (int) strpos($powerQuelle, "case 'wartung':"));
+    pruefe(str_contains(substr($wartungTeil, 0, (int) strpos($wartungTeil, 'break;')),
+        'PlanTileService::veralteteInDerWartung(\\App\\Services\\UpdateAutomatik::kachelnBis(time()))'),
+        'bin/power wartung: ältere Kachelfassungen nur bis kachelnBis()');
+    $schreiben('helfer', $helferText(time(), 'ja', 'nein'));
+    gleich(UpdateAutomatik::kachelnBis($nacht), null, 'kachelnBis: AUTOMATIK=nein in update.conf → keine Grenze');
+    $schreiben('helfer', $helferText(time()));
+    Config::set('app.demo', true);
+    gleich(UpdateAutomatik::kachelnBis($nacht), null, 'kachelnBis: Demo → keine Grenze');
+    Config::set('app.demo', false);
 
     // ------------------------------------------------------------ Automatik: Zeitplan (Dateien, Einstellungen, Audit)
     $eingerichtet();
@@ -1509,6 +1543,45 @@ stream_wrapper_register("langsam", LangsamAttrappe::class);
         && (int) Database::scalar('SELECT COUNT(*) FROM floors WHERE site_id = ?', [$sperrSite]) === 0
         && array_values(array_diff(glob($wurzel . '/storage/plans/*') ?: [], $plaeneVorher)) === [],
         'Schreibsperre: Grundriss hochladen abgewiesen – keine Etage, keine Datei (' . $r['status'] . ')');
+    // „Plan neu rechnen“ während der Schreibsperre: abgewiesen wie jeder POST (JSON 503,
+    // Formular Meldung und zurück), kein Auftrag. Der Status liest weiter; ein Auftrag von
+    // vor der Sperre „wartet“ auf das Update, und kein Prozess im Hintergrund beginnt ihn
+    // (PlanTileService::arbeiterStarten()) – nach dem Update holt ihn powermanagement-kacheln ab.
+    if (extension_loaded('gd')) {
+        $neuDatei = 'site' . $sperrSite . '_' . bin2hex(random_bytes(8)) . '.png';
+        $bild = imagecreatetruecolor(1800, 1200);
+        imagefilledrectangle($bild, 0, 0, 1799, 1199, 0xFFFFFF);
+        imageline($bild, 0, 0, 1799, 1199, 0x000000);
+        imagepng($bild, SiteService::planDir() . '/' . $neuDatei);
+        $neuEtage = SiteService::saveFloor(null, ['site_id' => $sperrSite, 'name' => 'Halle']);
+        Database::update('floors', $neuEtage, ['plan_file' => $neuDatei, 'plan_type' => 'image', 'plan_page' => 1, 'plan_original_name' => 'halle.png']);
+        $neuFloor = (array) SiteService::floor($neuEtage);
+        $gebaut = \App\Services\PlanTileService::bauen($neuFloor, true);
+        $auftragDatei = \App\Services\PlanTileService::planDir($neuFloor) . '/.auftrag.json';
+        $neuAudit = static fn (): int => (int) Database::scalar("SELECT COUNT(*) FROM audit_log WHERE action = 'plan.neu_rechnen' AND target_id = ?", [(string) $neuEtage]);
+        $r = $aufruf($port, $a['dose'], 'POST', '/grundriss/' . $neuEtage . '/neu-rechnen', ['_token' => $a['token']], ['Accept: application/json']);
+        pruefe($gebaut['ok'] && $r['status'] === 503 && (json_decode($r['text'], true)['wartung'] ?? false) === true && preg_match('/^Retry-After: 30\r?$/mi', $r['kopf']) === 1
+            && !is_file($auftragDatei) && $neuAudit() === 0, 'Schreibsperre: „Plan neu rechnen“ (JSON) → 503 mit Retry-After, kein Auftrag, nichts im Audit (' . $r['status'] . ')');
+        $r = $aufruf($port, $a['dose'], 'POST', '/grundriss/' . $neuEtage . '/neu-rechnen', ['_token' => $a['token']], ['Referer: http://127.0.0.1:' . $port . '/standorte']);
+        $seite = $aufruf($port, $a['dose'], 'GET', '/standorte')['text'];
+        pruefe($r['status'] === 302 && $r['ziel'] === '/standorte' && str_contains($seite, UpdateService::GESPERRT) && !is_file($auftragDatei),
+            'Schreibsperre: „Neu rechnen“ auf der Standortseite → Meldung und zurück, kein Auftrag');
+        $eingetragen = \App\Services\PlanTileService::auftragEintragen($neuFloor, true);
+        $gestartet = \App\Services\PlanTileService::arbeiterStarten();
+        usleep(800_000);
+        $prozesse = 0;
+        foreach (glob('/proc/[0-9]*/cmdline') ?: [] as $cmd) {
+            $prozesse += str_contains((string) @file_get_contents($cmd), "bin/power\0plan:kacheln\0--auftraege") ? 1 : 0;
+        }
+        $s = $aufruf($port, $a['dose'], 'GET', '/grundriss/' . $neuEtage . '/kacheln/stand', [], ['Accept: application/json']);
+        $sj = json_decode($s['text'], true) ?? [];
+        pruefe($eingetragen['neu'] && $gestartet && $prozesse === 0 && (json_decode((string) @file_get_contents($auftragDatei), true)['zustand'] ?? '') === 'angefordert',
+            'Schreibsperre: ein Auftrag von vorher – kein Prozess im Hintergrund beginnt ihn (' . $prozesse . ')');
+        pruefe($s['status'] === 200 && ($sj['zustand'] ?? '') === 'wartet' && str_contains((string) ($sj['meldung'] ?? ''), 'Update'),
+            'Schreibsperre: Status liest weiter – der Auftrag „wartet“ auf das Update (' . (string) ($sj['meldung'] ?? $s['status']) . ')');
+        @unlink($auftragDatei);
+        \App\Services\PlanTileService::aufraeumen($neuFloor);
+    }
     SiteService::deleteSite($sperrSite);
 
     $schreiben('wartung', UpdateService::KOPF_WARTUNG . "\nseit " . (time() - 4000) . "\nkennung -\n");
@@ -1651,6 +1724,16 @@ stream_wrapper_register("langsam", LangsamAttrappe::class);
     gleich($alsRootGerechnet, [], 'deploy/*.sh: plan:kacheln nur als Anwendungsbenutzer (as_app oder die Einheit mit --uid)');
     pruefe(preg_match('/^kacheln_anstossen\(\) \{$.*?--uid="\$APP_USER" --gid="\$APP_USER".*?^\}$/ms', $skript) === 1,
         'kacheln_anstossen: Einheit mit --uid/--gid des Anwendungsbenutzers');
+    // Die anderen Wege zu plan:kacheln laufen ebenso als Anwendungsbenutzer: die Wartung
+    // (veraltete Fassungen, fehlende Kacheln) und php-fpm (der Prozess im Hintergrund,
+    // PlanTileService::arbeiterStarten()). pdftoppm darunter mit prlimit aus util-linux.
+    $wartungEinheit = (string) file_get_contents($wurzel . '/deploy/powermanagement-wartung.service');
+    $pool = (string) file_get_contents($wurzel . '/deploy/php-fpm-pool.conf');
+    pruefe(preg_match('/^User=__APP_USER__$/m', $wartungEinheit) === 1 && preg_match('/^ExecStart=\S+ __APP_DIR__\/bin\/power wartung$/m', $wartungEinheit) === 1
+        && preg_match('/^user = __APP_USER__$/m', $pool) === 1, 'Wartung und php-fpm rechnen Kacheln als Anwendungsbenutzer');
+    preg_match('/^PAKETE=\((.*?)^\)$/ms', (string) file_get_contents($wurzel . '/deploy/install-debian.sh'), $pakete);
+    pruefe(preg_match('/^\s*util-linux$/m', $pakete[1] ?? '') === 1 && preg_match('/^\s*poppler-utils$/m', $pakete[1] ?? '') === 1,
+        'install-debian.sh: poppler-utils und util-linux (prlimit für pdftoppm) in der Paketliste');
     $attrappen = $ordner . '/kacheln-attrappen';
     mkdir($attrappen, 0700, true);
     file_put_contents($attrappen . '/systemctl', "#!/bin/sh\n[ -f \"\$PM_AKTIV\" ] && exit 0\nexit 3\n");
@@ -1683,9 +1766,14 @@ stream_wrapper_register("langsam", LangsamAttrappe::class);
     $php = (string) trim((string) shell_exec('command -v php'));
     pruefe($rc === 0 && $args !== null && in_array('--uid=www-data', $args, true) && in_array('--gid=www-data', $args, true)
         && in_array('--unit=powermanagement-kacheln', $args, true) && in_array('--collect', $args, true) && in_array('--no-block', $args, true)
-        && in_array('--working-directory=/opt/pm-pruefung', $args, true) && array_slice($args, -3) === [$php, '/opt/pm-pruefung/bin/power', 'plan:kacheln']
-        && str_contains($aus, 'WARNUNGEN ' . "\n") && str_contains($aus, 'powermanagement-kacheln nach'),
-        'kacheln_anstossen: eigene Einheit als www-data, ohne zu warten, mit plan:kacheln – ' . trim($aus));
+        && in_array('--working-directory=/opt/pm-pruefung', $args, true) && array_slice($args, -4) === [$php, '/opt/pm-pruefung/bin/power', 'plan:kacheln', '--nachholen']
+        && in_array('IOSchedulingClass=idle', $args, true) && str_contains($aus, 'WARNUNGEN ' . "\n") && str_contains($aus, 'powermanagement-kacheln nach')
+        && str_contains($aus, 'älteren Kachelfassung bleiben'),
+        'kacheln_anstossen: eigene Einheit als www-data, ohne zu warten, mit plan:kacheln --nachholen (keine älteren Fassungen) – ' . trim($aus));
+    // Was die Einheit aufruft, kennt bin/power dieses Standes – kein Fehler, keine Hilfe statt der Arbeit.
+    [$rc, $aus] = $power(['plan:kacheln', '--nachholen']);
+    pruefe($rc === 0 && !str_contains($aus, 'Fehler') && !str_contains($aus, 'bin/power install'),
+        'bin/power plan:kacheln --nachholen (so startet ihn das Update) läuft durch – ' . trim($aus));
     [$rc, $aus, $args] = $anstossen('nein', true, 0);
     pruefe($rc === 0 && $args === null && str_contains($aus, 'rechnet noch'), 'kacheln_anstossen: läuft schon eine – keine zweite');
     [$rc, $aus, $args] = $anstossen('nein', false, 1);
@@ -1764,6 +1852,27 @@ stream_wrapper_register("langsam", LangsamAttrappe::class);
         pruefe($rc === 0 && \App\Services\PlanTileService::meta($etage) !== null && !is_file($kOrdner . '/9/77/88.png') && !is_dir($kOrdner . '/9'),
             'plan:kacheln (wie im Hintergrund): Reste des getöteten Baus weg, Pyramide neu – ' . trim($aus));
         gleich($fingerabdruck(), $vorher, 'plan:kacheln schreibt nichts in die Datenbank (alle Tabellen unverändert)');
+
+        // Ein Upload, der vor der Schreibsperre hereinkam (das Update wartet auf ihn), rechnet
+        // nicht mehr selbst, sobald die Sperre steht: Er trägt ein und gibt den Plan an den
+        // Hintergrund – dort beginnt während des Updates keiner, der Auftrag „wartet“. Danach
+        // rechnet ihn, was das Update startet (plan:kacheln --nachholen), ohne in die
+        // Datenbank zu schreiben.
+        $schreiben('wartung', UpdateService::KOPF_WARTUNG . "\nseit " . time() . "\nkennung -\n");
+        pruefPdf($ordner . '/og.pdf', 1);
+        $hoch = SiteService::uploadPlan($kachelSite, ['name' => 'og.pdf', 'type' => 'application/pdf', 'tmp_name' => $ordner . '/og.pdf',
+            'error' => UPLOAD_ERR_OK, 'size' => (int) filesize($ordner . '/og.pdf')], ['neue_etagen' => true]);
+        $og = (array) SiteService::floor((int) ($hoch['floors'][0] ?? 0));
+        $ogZustand = $og !== [] ? \App\Services\PlanTileService::zustand($og) : [];
+        pruefe($hoch['ok'] && $og !== [] && \App\Services\PlanTileService::meta($og) === null && str_contains($hoch['message'], 'im Hintergrund')
+            && ($ogZustand['zustand'] ?? '') === 'wartet', 'Upload, während die Schreibsperre schon steht: eingetragen, nicht selbst gekachelt, der Auftrag wartet auf das Update – '
+            . $hoch['message']);
+        $schreiben('wartung', null);
+        $vorher = $fingerabdruck();
+        [$rc, $aus] = $power(['plan:kacheln', '--nachholen']);
+        pruefe($rc === 0 && $og !== [] && \App\Services\PlanTileService::meta($og) !== null && \App\Services\PlanTileService::zustand($og)['zustand'] === 'fertig',
+            'nach dem Update: plan:kacheln --nachholen rechnet den wartenden Auftrag – ' . trim($aus));
+        gleich($fingerabdruck(), $vorher, 'plan:kacheln --nachholen schreibt nichts in die Datenbank (alle Tabellen unverändert)');
     }
     SiteService::deleteSite($kachelSite);
 

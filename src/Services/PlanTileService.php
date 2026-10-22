@@ -1715,6 +1715,13 @@ final class PlanTileService
         if (self::gehalten(self::arbeiterSperre())) {
             return true;
         }
+        // Während eines Updates beginnt kein Plan (updateDazwischen()): Der
+        // Auftrag bleibt eingetragen, nach dem Update holt ihn
+        // powermanagement-kacheln ab (plan:kacheln --nachholen).
+        if (UpdateService::wartungAktiv()) {
+            Logger::info('Kacheln im Hintergrund: ein Update läuft – der Auftrag wartet, bis es eingespielt ist.');
+            return true;
+        }
         // Unter php-fpm ist PHP_BINARY php-fpm selbst – gebraucht wird php.
         $php = in_array(PHP_SAPI, ['cli', 'cli-server'], true) ? PHP_BINARY : Programm::finden('php', ['-v']);
         if ($php === null || $php === '') {
@@ -1749,22 +1756,38 @@ final class PlanTileService
      * Abgelöstes über GNADE räumt er zuletzt weg; was jünger ist, bleibt für
      * den nächsten Bau oder die Wartung – gewartet wird darauf nicht.
      *
+     * Beginnt ein Update, nimmt er keinen weiteren Plan mehr an
+     * (updateDazwischen()): Der laufende rechnet mit dem Code zu Ende, mit
+     * dem er begann, die übrigen Aufträge bleiben stehen ($update wird true).
+     * Nach dem Update rechnet sie ein Prozess mit dem neuen Code
+     * (bin/power plan:kacheln startet sich neu, sonst powermanagement-kacheln).
+     *
      * @param (callable(string):void)|null $aus eine Zeile je Plan
      * @param (callable(string):void)|null $warten wie bei nacheinander()
+     * @param bool|null $update wird true, wenn ein Update dazwischenkam
      * @return int|null erledigte Aufträge; null, wenn schon ein anderer arbeitet
      */
-    public static function arbeiten(?callable $aus = null, ?callable $warten = null): ?int
+    public static function arbeiten(?callable $aus = null, ?callable $warten = null, ?bool &$update = null): ?int
     {
+        $update = false;
         $griff = self::sperren(self::arbeiterSperre(), false);
         if ($griff === null) {
             return null;
         }
+        $kennung = self::updateKennung();
         $erledigt = 0;
         $erledigtIn = [];
         // Ein Auftrag, den dieser Prozess schon hatte (Nummer je Ordner) – nie zweimal.
         $gesehen = [];
         try {
             while (true) {
+                if (self::updateDazwischen($kennung)) {
+                    $update = true;
+                    if ($aus !== null) {
+                        $aus(self::UPDATE_DAZWISCHEN);
+                    }
+                    break;
+                }
                 $naechster = self::naechsterAuftrag($gesehen);
                 if ($naechster === null) {
                     self::freigeben($griff);
@@ -1785,6 +1808,14 @@ final class PlanTileService
                 if ($ergebnis === null) {
                     // Den Plan rechnet gerade ein anderer Prozess (Kommandozeile) – der führt auch den Auftrag.
                     continue;
+                }
+                if (!empty($ergebnis['update'])) {
+                    // Während er auf einen anderen Bau wartete, begann ein Update: Der Auftrag steht weiter an.
+                    $update = true;
+                    if ($aus !== null) {
+                        $aus($wer . ': ' . $ergebnis['message']);
+                    }
+                    break;
                 }
                 // Hat auftrag() ihn nicht angefasst (kein Plan mehr, nichts zu kacheln), ist er hier zu Ende.
                 $danach = self::auftragLesen($ordner);
@@ -1854,7 +1885,8 @@ final class PlanTileService
      *
      *   keiner       noch nie im Hintergrund gerechnet
      *   angefordert  angestoßen, der Prozess im Hintergrund beginnt gleich
-     *   wartet       der Prozess wartet, bis ein anderer Plan fertig ist (nacheinander())
+     *   wartet       der Prozess wartet, bis ein anderer Plan fertig ist (nacheinander()),
+     *                oder der Auftrag, bis ein Update eingespielt ist
      *   laeuft       es wird gerechnet – im Hintergrund, im Upload oder auf der Kommandozeile
      *   fertig       gerechnet und umgeschaltet
      *   fehler       gescheitert – die bisherige Pyramide ist geblieben
@@ -1874,6 +1906,7 @@ final class PlanTileService
         $roh = (string) ($auftrag['zustand'] ?? '');
         $angefordert = strtotime((string) ($auftrag['angefordert'] ?? '')) ?: 0;
         $gestorben = false;
+        $wegenUpdate = false;
         if (self::ordnerGesperrt($ordner)) {
             $zustand = 'laeuft';
         } elseif (self::gehalten($ordner . '/.auftrag')) {
@@ -1881,6 +1914,10 @@ final class PlanTileService
         } elseif ($roh === 'angefordert' && self::gehalten(self::arbeiterSperre())) {
             // Der Prozess im Hintergrund lebt und nimmt ihn mit (arbeiten()), so lange es dauert.
             $zustand = 'wartet';
+        } elseif ($roh === 'angefordert' && UpdateService::wartungAktiv()) {
+            // Während eines Updates beginnt kein Plan (arbeiterStarten()) – danach holt ihn powermanagement-kacheln ab.
+            $zustand = 'wartet';
+            $wegenUpdate = true;
         } elseif ($roh === 'angefordert' && time() - $angefordert <= self::ANGEFORDERT_FRIST) {
             $zustand = 'angefordert';
         } elseif (in_array($roh, self::OFFEN, true)) {
@@ -1897,7 +1934,8 @@ final class PlanTileService
         $grund = trim((string) ($auftrag['meldung'] ?? ''));
         $meldung = match ($zustand) {
             'angefordert' => 'Angestoßen – der Server beginnt gleich.',
-            'wartet'      => 'Wartet, bis ein anderer Plan fertig gerechnet ist.',
+            'wartet'      => $wegenUpdate ? 'Wartet, bis das Update eingespielt ist – danach rechnet der Server weiter.'
+                : 'Wartet, bis ein anderer Plan fertig gerechnet ist.',
             'laeuft'      => 'Wird gerechnet' . ($bisher ? ' – bis dahin zeigt die Karte den bisherigen Plan.' : '.')
                 . self::dauerText($meta, ' Zuletzt dauerte es %s.'),
             'fertig'      => 'Fertig gerechnet' . (isset($auftrag['ende']) ? ' am ' . Zeit::anzeige((string) $auftrag['ende']) : '') . '.'
@@ -2042,11 +2080,18 @@ final class PlanTileService
      * Auftrag. Etagen mit derselben Plandatei teilen sich die Pyramide und
      * damit den Auftrag.
      *
+     * Während eines Updates beginnt kein Plan, auch nicht nach dem Warten
+     * auf einen anderen Bau (updateDazwischen()): Dann bleibt der Auftrag,
+     * wie er war, und das Ergebnis trägt 'update' – nach dem Update rechnet
+     * ihn powermanagement-kacheln (plan:kacheln --nachholen) bzw. die
+     * nächste Nacht.
+     *
      * @param (callable(string):void)|null $warten wie bei nacheinander()
-     * @return array{ok:bool,message:string,kacheln:int,meta:?array,abgebrochen?:bool,umgeschaltet:bool}|null
+     * @return array{ok:bool,message:string,kacheln:int,meta:?array,abgebrochen?:bool,update?:bool,umgeschaltet:bool}|null
      */
     public static function auftrag(array $floor, bool $neu, ?string $qualitaet = null, ?float $bis = null, ?callable $warten = null): ?array
     {
+        $kennung = self::updateKennung();
         $pfad = SiteService::planPath($floor);
         if ($pfad === null) {
             return ['ok' => false, 'message' => 'Kein Grundriss hinterlegt.', 'kacheln' => 0, 'meta' => null, 'umgeschaltet' => false];
@@ -2063,7 +2108,12 @@ final class PlanTileService
         if ($griff === null) {
             return null;
         }
+        $updateErgebnis = ['ok' => false, 'abgebrochen' => true, 'update' => true, 'kacheln' => 0, 'meta' => null, 'umgeschaltet' => false,
+            'message' => 'Ein Update hat begonnen – der Plan kommt danach dran.'];
         try {
+            if (self::updateDazwischen($kennung)) {
+                return $updateErgebnis;
+            }
             $vorher = self::meta($floor);
             $gewesen = self::auftragLesen($ordner);
             $offen = in_array($gewesen['zustand'] ?? '', self::OFFEN, true) ? $gewesen : null;
@@ -2086,7 +2136,11 @@ final class PlanTileService
             ];
             self::auftragSchreiben($ordner, $auftrag);
 
-            $ergebnis = self::nacheinander(static function () use (&$auftrag, $ordner, $floor, $neu, $qualitaet, $bis): array {
+            $ergebnis = self::nacheinander(static function () use (&$auftrag, $ordner, $floor, $neu, $qualitaet, $bis, $kennung): array {
+                // Begann ein Update, während auf einen anderen Bau gewartet wurde: jetzt nicht.
+                if (self::updateDazwischen($kennung)) {
+                    return ['update' => true];
+                }
                 $auftrag['zustand'] = 'laeuft';
                 $auftrag['beginn'] = gmdate('c');
                 self::auftragSchreiben($ordner, $auftrag);
@@ -2098,6 +2152,11 @@ final class PlanTileService
                 return self::bauen($jetzt, $neu, true, $bis, $qualitaet);
             }, $warten, $bis);
 
+            if (!empty($ergebnis['update'])) {
+                // Gerechnet wurde nichts: Der Auftrag steht wieder so da, wie er war.
+                $gewesen !== null ? self::auftragSchreiben($ordner, $gewesen) : @unlink($ordner . '/.auftrag.json');
+                return $updateErgebnis;
+            }
             if ($ergebnis === null && $offen === null) {
                 // Die Frist war um, bevor der Plan an der Reihe war, und verlangt hatte ihn keiner (die Wartung):
                 // Gerechnet wurde nichts – es bleibt beim vorigen Zustand, die nächste Nacht versucht es wieder.
@@ -2141,13 +2200,22 @@ final class PlanTileService
      * gerade rechnet, wird nicht gestört; was nicht gekachelt wird (SVG,
      * kleine Bilder), fällt gar nicht erst auf.
      *
+     * Beginnt ein Update, kommt kein weiterer Plan dran (updateDazwischen()):
+     * Die übrigen holt powermanagement-kacheln nach dem Update nach
+     * (plan:kacheln --nachholen), sonst die nächste Nacht.
+     *
      * @return list<string> eine Zeile je Plan, für den etwas getan wurde
      */
     public static function fehlendeNachrechnen(): array
     {
+        $kennung = self::updateKennung();
         $meldungen = [];
         $gesehen = [];
         foreach (SiteService::allFloors() as $etage) {
+            if (self::updateDazwischen($kennung)) {
+                $meldungen[] = 'Fehlende Kacheln: ' . self::UPDATE_DAZWISCHEN;
+                break;
+            }
             $pfad = SiteService::planPath($etage);
             if ($pfad === null) {
                 continue;
@@ -2167,6 +2235,10 @@ final class PlanTileService
             $ergebnis = self::auftrag($etage, !$fehlt, $zustand['zustand'] === 'abgebrochen' ? $zustand['qualitaet'] : null);
             if ($ergebnis === null) {
                 continue;
+            }
+            if (!empty($ergebnis['update'])) {
+                $meldungen[] = 'Fehlende Kacheln: ' . self::UPDATE_DAZWISCHEN;
+                break;
             }
             $meldungen[] = match (true) {
                 $ergebnis['ok'] && $fehlt => 'Kacheln nachgerechnet: ',
@@ -2192,7 +2264,8 @@ final class PlanTileService
      * ZEITBUDGET. Jeder Plan holt sich nacheinander() für sich – ein „Plan
      * neu rechnen“ aus der Oberfläche kommt so dazwischen, statt hinter allen
      * zu warten. Ein Plan, an dem diese Fassung schon gescheitert ist, wird
-     * nicht jede Nacht wieder versucht. Was bleibt, sagt die letzte Zeile
+     * nicht jede Nacht wieder versucht. Beginnt ein Update, kommt kein
+     * weiterer Plan dran (updateDazwischen()). Was bleibt, sagt die letzte Zeile
      * („Noch N …“).
      *
      * @param (callable(string):void)|null $warten wie bei nacheinander()
@@ -2201,6 +2274,7 @@ final class PlanTileService
     public static function veralteteNachrechnen(int $budget, ?callable $warten = null): array
     {
         $start = microtime(true);
+        $kennung = self::updateKennung();
         $faellig = [];
         $gesehen = [];
         $noch = 0;
@@ -2228,12 +2302,20 @@ final class PlanTileService
         $bis = $budget < PHP_INT_MAX ? $start + $budget : null;
 
         $meldungen = [];
+        $update = false;
         foreach ($faellig as ['etage' => $etage, 'schaetzung' => $schaetzung]) {
-            if (microtime(true) - $start + $schaetzung > $budget || in_array(self::zustand($etage)['zustand'], self::OFFEN, true)) {
+            // Ein Update hat begonnen: kein weiterer Plan (updateDazwischen()) – die nächste Nacht.
+            $update = $update || self::updateDazwischen($kennung);
+            if ($update || microtime(true) - $start + $schaetzung > $budget || in_array(self::zustand($etage)['zustand'], self::OFFEN, true)) {
                 $noch++;
                 continue;
             }
             $ergebnis = self::auftrag($etage, true, null, $bis, $warten);
+            if (!empty($ergebnis['update'])) {
+                $update = true;
+                $noch++;
+                continue;
+            }
             if ($ergebnis === null || !$ergebnis['ok']) {
                 $noch++;
             }
@@ -2245,11 +2327,92 @@ final class PlanTileService
                 } . $etage['site_name'] . ' / ' . $etage['name'] . ' – ' . $ergebnis['message'];
             }
         }
+        if ($update) {
+            $meldungen[] = 'Ältere Kachelfassungen: ' . self::UPDATE_DAZWISCHEN;
+        }
         if ($noch > 0) {
             $meldungen[] = sprintf('Noch %d Grundriss(e) mit älterer Kachelfassung – die Wartung rechnet sie Nacht für Nacht neu '
                 . '(sofort: bin/power plan:kacheln --veraltet oder „Plan neu rechnen“ in der Karte).', $noch);
         }
         return $meldungen;
+    }
+
+    /** So lange rechnet die nächtliche Wartung Pläne einer älteren Kachelfassung neu (Sekunden). */
+    public const WARTUNG_BUDGET = 1200;
+
+    /** So viel früher, als ein Fenster für automatische Updates beginnt, ist die Wartung damit fertig. */
+    public const UPDATE_LUFT = 120;
+
+    /**
+     * Der Teil der nächtlichen Wartung (bin/power wartung) mit den Plänen
+     * einer älteren Kachelfassung: veralteteNachrechnen() mit
+     * WARTUNG_BUDGET – aber nur bis UPDATE_LUFT vor $updateBis
+     * (UpdateAutomatik::kachelnBis(): dann beginnt ein Fenster für
+     * automatische Updates, die so lange verschöben, wie hier gerechnet
+     * wird). Bleibt weniger als eine Minute, rechnet die Wartung heute
+     * keinen und sagt, warum („Noch N …“ bleibt).
+     *
+     * @return list<string>
+     */
+    public static function veralteteInDerWartung(?int $updateBis, ?int $jetzt = null): array
+    {
+        $budget = self::wartungsBudget($updateBis, $jetzt);
+        if ($budget >= 60) {
+            return self::veralteteNachrechnen($budget);
+        }
+        $zeilen = self::veralteteNachrechnen(0);
+        if ($zeilen === []) {
+            return [];
+        }
+        return ['Ältere Kachelfassungen: heute nicht – das Fenster für automatische Updates ist offen oder beginnt gleich, '
+            . 'und solange hier gerechnet würde, wartete das Update.', ...$zeilen];
+    }
+
+    /** Sekunden für ältere Kachelfassungen in der Wartung: WARTUNG_BUDGET, aber bis UPDATE_LUFT vor $updateBis. */
+    public static function wartungsBudget(?int $updateBis, ?int $jetzt = null): int
+    {
+        $jetzt ??= time();
+        return $updateBis === null ? self::WARTUNG_BUDGET : max(0, min(self::WARTUNG_BUDGET, $updateBis - $jetzt - self::UPDATE_LUFT));
+    }
+
+    /** So melden sich Prozesse im Hintergrund, die wegen eines Updates aufhören (updateDazwischen()). */
+    public const UPDATE_DAZWISCHEN = 'Ein Update hat begonnen – bis es eingespielt ist, beginnt kein weiterer Plan; '
+        . 'danach geht es mit dem neuen Stand weiter.';
+
+    /**
+     * Kennung des Update-Laufs, der zuletzt Code ausgecheckt haben kann
+     * (aktualisieren oder wiederaufnehmen; ein Prüflauf nicht) – null ohne.
+     * Ein Prozess im Hintergrund merkt sie sich beim Start (updateDazwischen()).
+     */
+    public static function updateKennung(): ?string
+    {
+        UpdateService::vergessen();
+        $lauf = UpdateService::lauf();
+        return $lauf !== null && in_array($lauf['aktion'], ['aktualisieren', 'wiederaufnehmen'], true) ? (string) $lauf['kennung'] : null;
+    }
+
+    /**
+     * Soll ein Prozess im Hintergrund jetzt keinen weiteren Plan beginnen?
+     * Ja, solange die Schreibsperre eines Updates steht – und wenn seit
+     * seinem Start ($kennung aus updateKennung()) ein Update lief.
+     *
+     * Ein Bau schreibt nur Dateien unter storage/plans/kacheln und den
+     * Auftrag, nie die Datenbank – ein Update, das neben ihm läuft oder
+     * zurückrollt, verliert nichts, und ein getöteter Bau lässt den
+     * bisherigen Plan stehen. Aber ein Prozess, der vor dem Auschecken
+     * begann, hat einen Teil des alten Codes geladen und lüde den Rest aus
+     * dem neuen nach; und ein Update braucht selbst Speicher (Migrationen,
+     * apt, npm). Also: Der laufende Plan rechnet zu Ende (Minuten, mit der
+     * Frist der Wartung), ein weiterer beginnt erst mit einem Prozess, der
+     * nach dem Update startet.
+     */
+    public static function updateDazwischen(?string $kennung): bool
+    {
+        if (UpdateService::wartungAktiv()) {
+            return true;
+        }
+        $jetzt = self::updateKennung();
+        return $jetzt !== null && $jetzt !== $kennung;
     }
 
     /** Wo die Prozesse im Hintergrund aufeinander warten (nacheinander()). */

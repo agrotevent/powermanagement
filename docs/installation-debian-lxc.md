@@ -257,7 +257,8 @@ Bei einer vorhandenen **InfluxDB 1.8** mit Anmeldung ist das „Token“
    Liegengebliebenes weg – Pläne und Kacheln ohne Etage, abgelöste
    Kachelfassungen, Zwischendateien abgebrochener Bauten –, rechnet fehlende
    Kacheln und abgebrochenes Neurechnen nach, rechnet höchstens 20 Minuten
-   lang Grundrisse einer älteren Kachelfassung neu und meldet
+   lang Grundrisse einer älteren Kachelfassung neu – mit automatischen
+   Updates nur bis zwei Minuten vor deren Fenster – und meldet
    Übergabeberichte über der Aufbewahrungsfrist – gelöscht wird nur mit
    `bin/power berichte:aufbewahrung --ausfuehren`),
    `powermanagement-mqtt-zugaenge.path` und `.timer` (eigene MQTT-Zugänge,
@@ -919,8 +920,10 @@ Datenbank und InfluxDB brauchen den Platz; der bisherige Plan bleibt. Bricht
 einer ab – etwa weil ein Update zurückrollt und dabei PHP-FPM anhält (ein
 gewöhnliches Update lädt PHP-FPM nur neu, die Bauten laufen weiter) –,
 bleibt der bisherige Plan, und der nächste Bau dieses Plans beginnt von
-vorn. Fehlende Kacheln rechnet nach jedem Update `powermanagement-kacheln`
-nach, sonst die nächtliche Wartung; sie räumt auch die Zwischendateien weg.
+vorn. Fehlende Kacheln und offene Aufträge rechnet nach jedem Update
+`powermanagement-kacheln` nach (`plan:kacheln --nachholen`), sonst die
+nächtliche Wartung; sie räumt auch die Zwischendateien weg. Während eines
+Updates beginnt kein Prozess einen weiteren Plan (Abschnitt 10, Schritt 10).
 
 Platte: Ein PDF bekommt seit Fassung 2 der Kacheln bis 200 Megapixel
 (vorher 50) – gemessen 4,5 MB für einen leichten A0-Plan, 7 MB für einen
@@ -954,6 +957,7 @@ Von Hand:
 ```bash
 cd /opt/powermanagement
 runuser -u www-data -- php bin/power plan:kacheln               # fehlende
+runuser -u www-data -- php bin/power plan:kacheln --nachholen   # offene Aufträge, fehlende, abgebrochene (wie nach einem Update)
 runuser -u www-data -- php bin/power plan:kacheln --veraltet    # die einer älteren Fassung
 runuser -u www-data -- php bin/power plan:kacheln --neu --etage=12   # eine Etage neu (dazu --qualitaet=fein: PDF bis 400 Megapixel)
 runuser -u www-data -- php bin/power plan:kacheln --bis=600     # nach 10 Minuten aufhören (auch beim Warten und im Bau; der bisherige Plan bleibt)
@@ -1134,14 +1138,36 @@ Die Schritte (die Oberfläche zählt sie mit):
 9. **Dienste starten:** PHP-FPM nach `php-fpm -t` nur neu laden (die
    Oberfläche ist kaum weg), nginx nach `nginx -t`, den Sammler neu starten,
    Node-RED nur, wenn sich Einheit, Einstellungen oder Flows ändern.
-10. **Grundrisse kacheln** – nicht in diesem Schritt: Fehlende Kacheln
+10. **Grundrisse kacheln** – nicht in diesem Schritt: Was liegen blieb,
     rechnet nach der Prüfung, wenn die Schreibsperre aufgehoben ist, eine
-    eigene Einheit als www-data (`powermanagement-kacheln`; mitlesen mit
-    `journalctl -u powermanagement-kacheln`). Ein Plan mit 100 MB braucht
-    Minuten – so lange bliebe sonst die Oberfläche gesperrt. Bauten, die
-    schon im Hintergrund laufen (ein eben hochgeladener Plan), rechnen
-    während des Updates weiter: Sie lesen die Datenbank nur und schreiben
-    nur Kacheln.
+    eigene Einheit als www-data (`powermanagement-kacheln` mit
+    `bin/power plan:kacheln --nachholen`; mitlesen mit
+    `journalctl -u powermanagement-kacheln`): Aufträge, die während des
+    Updates warteten („Plan neu rechnen“, ein Upload kurz davor), Bauten,
+    die ein Neustart von PHP-FPM beendete, und Pläne ohne Kacheln. Ein Plan
+    mit 100 MB braucht Minuten – so lange bliebe sonst die Oberfläche
+    gesperrt. Ein Bau, der schon im Hintergrund läuft (ein eben
+    hochgeladener Plan, die Wartung), rechnet seinen Plan zu Ende – er liest
+    die Datenbank nur und schreibt nur unter `storage/plans/kacheln`; rollt
+    das Update zurück, endet er mit PHP-FPM, und der bisherige Plan bleibt.
+    Einen *weiteren* Plan beginnt während des Updates niemand: Der Prozess
+    hätte Teile des alten Codes geladen und lüde den Rest aus dem neuen, und
+    das Update braucht selbst Speicher. Er hört vor dem nächsten Plan auf,
+    die übrigen Aufträge zeigt die Karte als „wartet, bis das Update
+    eingespielt ist“; ist das Update schon durch, macht er als derselbe
+    Prozess mit dem neuen Code weiter. Der Knopf **Plan neu rechnen** ist
+    während der Schreibsperre gesperrt wie jede Änderung.
+
+    **Neue Kachelfassung:** Bringt ein Update eine neue Fassung der Kacheln
+    (schärfer gerechnet, `FASSUNG` in `PlanTileService`), rechnet
+    `powermanagement-kacheln` die bestehenden Pläne *nicht* neu – das wären
+    alle auf einmal, auf einem kleinen Container eine Stunde und mehr neben
+    InfluxDB. Sie funktionieren weiter wie bisher und tragen „neu rechnen
+    empfohlen“. Die nächtliche Wartung rechnet sie nach und nach (die
+    schnellsten zuerst, höchstens 20 Minuten je Nacht und nie in das
+    Fenster der automatischen Updates hinein, siehe unten); wer nicht warten
+    will, drückt **Plan neu rechnen** oder rechnet alle auf einmal:
+    `runuser -u www-data -- php bin/power plan:kacheln --veraltet`.
 11. **Prüfen.** *Pflicht:* Die Anmeldeseite antwortet mit HTTP 200 (wenn
     sie es vorher tat), PHP-FPM, nginx und alle Dienste, die vorher liefen,
     laufen (der Sammler ohne Neustarts), und `bin/power pruefen` erreicht
@@ -1406,7 +1432,14 @@ Update-Dienst prüft wie jeden anderen; root liest nie die Datenbank.
   im Hintergrund Kacheln für Grundrisse rechnet (ein großer Plan, ein
   Abgleich – meist Minuten): Das schadet einem Update nicht, aber beides
   zugleich braucht viel Speicher, und rollt das Update zurück, finge der
-  Bau von vorn an. *Jetzt aktualisieren* von Hand hält es nicht auf. Ebenso bei *Pausieren bis*
+  Bau von vorn an. *Jetzt aktualisieren* von Hand hält es nicht auf (der
+  laufende Plan rechnet zu Ende, ein weiterer beginnt erst nach dem
+  Update). Die nächtliche Wartung (03:17, bis 20 Minuten später) rechnet
+  Pläne einer älteren Kachelfassung deshalb nur bis zwei Minuten vor dem
+  frühesten Einspielen (Beginn plus Versatz) und in einem offenen Fenster
+  gar nicht, solange an diesem Tag noch nicht eingespielt oder „nichts
+  Neues“ gefunden wurde – in der Vorgabe (04:00) bleiben ihr die vollen 20
+  Minuten. Fehlende Kacheln rechnet sie immer nach. Ebenso bei *Pausieren bis*
   (einschließlich dieses Tages, höchstens 90 Tage voraus), lokalen
   Änderungen am Code, nicht linearem Verlauf, `AUTOMATIK=nein` und einem
   noch nicht zurückgerollten Update. Ins Audit-Log kommt das höchstens

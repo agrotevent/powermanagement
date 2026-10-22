@@ -415,8 +415,11 @@ final class SiteService
             }
             $pyramiden[$pyramide] = true;
 
-            // Die Zeit im Upload ist um: der Rest kommt in den Hintergrund.
-            if (microtime(true) > $bis) {
+            // Die Zeit im Upload ist um – oder inzwischen hat ein Update begonnen (dieser
+            // Upload kam vor der Schreibsperre, das Update wartet auf ihn, und während eines
+            // Updates beginnt kein Plan, PlanTileService::updateDazwischen()): der Rest kommt
+            // in den Hintergrund, nach dem Update rechnet ihn powermanagement-kacheln.
+            if (microtime(true) > $bis || UpdateService::wartungAktiv()) {
                 if (PlanTileService::lohnt($target)) {
                     $spaeter[] = (int) $floorId;
                 }

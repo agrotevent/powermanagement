@@ -56,6 +56,13 @@ declare(strict_types=1);
  *                                   Der Prozess im Hintergrund: rechnet die Aufträge aus Upload,
  *                                   Abgleich und „Plan neu rechnen“ ab, einen nach dem anderen –
  *                                   läuft er schon, endet ein zweiter sofort
+ *   bin/power plan:kacheln --nachholen
+ *                                   Was ein Update oder Neustart liegen ließ: offene Aufträge, dann
+ *                                   fehlende Kacheln und abgebrochenes Neurechnen – keine Pläne
+ *                                   einer älteren Kachelfassung (die rechnet die Wartung). So startet
+ *                                   ein Update powermanagement-kacheln. Während eines Updates beginnt
+ *                                   kein Plan (der laufende rechnet zu Ende); begann eines, seit der
+ *                                   Prozess läuft, macht er danach mit dem neuen Stand weiter
  *   bin/power location:liste        Locations im gemeinsamen Repository anzeigen
  *   bin/power location:uebernehmen <schlüssel>
  *   bin/power verteiler:liste       Verteiler hier und im Repository mit ihrem Stand
@@ -558,13 +565,43 @@ switch ($befehl) {
             }
             break;
         }
-        if (isset($optionen['auftraege'])) {
-            // Der Prozess im Hintergrund (PlanTileService::arbeiterStarten()): hinter den Anfragen der Oberfläche zurückstehen.
+        if (isset($optionen['auftraege']) || isset($optionen['nachholen'])) {
+            // Der Prozess im Hintergrund (PlanTileService::arbeiterStarten(), nach einem Update
+            // powermanagement-kacheln): hinter den Anfragen der Oberfläche zurückstehen.
             @proc_nice(10);
             $zeitstempel = static fn (string $zeile) => $aus(gmdate('Y-m-d\TH:i:s\Z') . ' ' . $zeile);
-            $erledigt = PlanTileService::arbeiten($zeitstempel, $zeitstempel);
+            $erledigt = PlanTileService::arbeiten($zeitstempel, $zeitstempel, $wegenUpdate);
             if ($erledigt === null) {
-                $aus(gmdate('Y-m-d\TH:i:s\Z') . ' Aufträge: ein anderer Prozess arbeitet sie schon ab.');
+                $zeitstempel('Aufträge: ein anderer Prozess arbeitet sie schon ab.');
+            }
+            if (isset($optionen['nachholen']) && !$wegenUpdate) {
+                // Fehlende Kacheln und abgebrochenes Neurechnen wie die Wartung – keine älteren Fassungen.
+                foreach (PlanTileService::fehlendeNachrechnen() as $zeile) {
+                    $zeitstempel($zeile);
+                    $wegenUpdate = $wegenUpdate || str_ends_with($zeile, PlanTileService::UPDATE_DAZWISCHEN);
+                }
+            }
+            /*
+             * Hörte die Arbeit vor dem nächsten Plan auf, weil ein Update lief
+             * oder läuft (PlanTileService::updateDazwischen()): Dieser Prozess
+             * hat noch Teile des alten Codes geladen. Ist das Update durch,
+             * geht es mit dem neuen weiter – als derselbe Prozess (pcntl_exec):
+             * Ein Kind endete in powermanagement-kacheln mit der Einheit, und
+             * deren zweiten Start lässt kacheln_anstossen aus, solange diese
+             * noch läuft. Läuft das Update noch, holt es powermanagement-kacheln
+             * danach ab.
+             */
+            if ($wegenUpdate) {
+                if (\App\Services\UpdateService::wartungAktiv()) {
+                    $zeitstempel('Ein Update läuft – danach rechnet powermanagement-kacheln weiter.');
+                    break;
+                }
+                $zeitstempel('Nach dem Update: weiter mit dem neuen Stand.');
+                if (PHP_SAPI === 'cli' && function_exists('pcntl_exec')) {
+                    @pcntl_exec(PHP_BINARY, $argv);
+                }
+                // Ohne pcntl: ein neuer Prozess für die Aufträge, den Rest die nächste Nacht.
+                PlanTileService::arbeiterStarten();
             }
             break;
         }
@@ -572,6 +609,7 @@ switch ($befehl) {
             // Im Hintergrund hinter den Anfragen der Oberfläche zurückstehen.
             @proc_nice(10);
         }
+        $kennung = PlanTileService::updateKennung();
 
         // Jede Pyramide einmal: Etagen mit derselben Plandatei (und Seite) teilen sie sich.
         $plaene = [];
@@ -584,6 +622,10 @@ switch ($befehl) {
         foreach ($plaene as $ordner => $etagen) {
             $erste = $etagen[0];
             $wer = $erste['site_name'] . ' / ' . implode(', ', array_map(static fn (array $e): string => (string) $e['name'], $etagen));
+            if (PlanTileService::updateDazwischen($kennung)) {
+                $aus($stempel() . PlanTileService::UPDATE_DAZWISCHEN . ' Den Rest danach mit demselben Befehl.');
+                break;
+            }
             if ($bis !== null && microtime(true) > $bis) {
                 $aus($stempel() . $wer . ': Die Zeit ist um – den Rest rechnet die nächtliche Wartung.');
                 continue;
@@ -1330,7 +1372,12 @@ switch ($befehl) {
         // Bauten, Pläne und Kacheln ohne Etage, abgelöste Fassungen), dann
         // fehlende Kacheln und abgebrochenes Neurechnen nachholen, zuletzt
         // veraltete Pyramiden – höchstens 20 Minuten je Nacht, einzeln.
-        foreach ([...PlanTileService::wartung(), ...PlanTileService::fehlendeNachrechnen(), ...PlanTileService::veralteteNachrechnen(1200)] as $meldung) {
+        foreach ([...PlanTileService::wartung(), ...PlanTileService::fehlendeNachrechnen()] as $meldung) {
+            $aus($meldung);
+        }
+        // Veraltete Pyramiden nur, solange kein Fenster für automatische Updates
+        // beginnt oder offen ist – sonst verschöbe das Update (verschoben:kacheln).
+        foreach (PlanTileService::veralteteInDerWartung(\App\Services\UpdateAutomatik::kachelnBis(time())) as $meldung) {
             $aus($meldung);
         }
         break;

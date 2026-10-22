@@ -327,6 +327,48 @@ final class UpdateAutomatik
         return $f === null ? null : max($f['ab'], (int) ($e['pause_bis'] ?? 0), $jetzt);
     }
 
+    /**
+     * Bis wann darf die nächtliche Wartung Grundrisse einer älteren
+     * Kachelfassung neu rechnen, ohne ein automatisches Update aufzuhalten
+     * (Unix) – null: so lange sie will.
+     *
+     * Ein Bau hält die Sperre von PlanTileService::nacheinander(), und
+     * solange verschiebt die Automatik (verschoben:kacheln). Die Wartung
+     * läuft um 03:17 (bis 20 min später) und rechnet bis 20 min; das
+     * Fenster beginnt nach Vorgabe um 04:00 – eingestellt auf 03:00, mit
+     * 60 min Dauer und Versatz, bliebe davon sonst nichts. Also: Beginnt ein
+     * Fenster, endet ihr Budget vorher (bei ab, dem frühesten Einspielen);
+     * ist eines offen und für heute noch nicht entschieden (eingespielt
+     * oder nichts Neues), gibt es keins (der Rückgabewert ist jetzt). Nur
+     * im Modus „einspielen“ und wenn die Automatik nicht abgeschaltet ist
+     * (OBERFLAECHE oder AUTOMATIK=nein in update.conf). Fehlende Kacheln
+     * rechnet die Wartung unabhängig davon nach – ohne sie zeigt die Karte
+     * nichts.
+     */
+    public static function kachelnBis(int $jetzt): ?int
+    {
+        $z = UpdateService::zustand($jetzt);
+        if (in_array($z['zustand'], ['demo', 'nicht_eingerichtet'], true) || $z['abgeschaltet'] || $z['automatik_root']) {
+            return null;
+        }
+        $e = self::einstellungen();
+        if ($e['modus'] !== 'einspielen' || $e['tage'] === []) {
+            return null;
+        }
+        $ab = $jetzt;
+        $f = self::fenster($jetzt, $e);
+        if ($f !== null) {
+            $l = self::letzter();
+            if ($l === null || $l['tag'] !== $f['tag'] || !in_array($l['ergebnis'], ['angefordert', 'nichts_neu'], true)) {
+                return $jetzt;
+            }
+            // Heute schon entschieden: erst das nächste Fenster zählt.
+            $ab = $f['bis'];
+        }
+        $n = self::naechstesFenster($ab, $e);
+        return $n === null ? null : max($jetzt, $n['ab'], (int) ($e['pause_bis'] ?? 0));
+    }
+
     // ================================================================ Betrieb
 
     /**
