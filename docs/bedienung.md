@@ -954,9 +954,11 @@ geringerer Auflösung exportiert werden.
   laden. Pläne aus dem Location-Abgleich oder von einer anderen Instanz
   rechnet immer der Hintergrund; mehrere große Pläne kommen nacheinander
   dran.
-- **Übersicht:** Die kleinen Zoomstufen eines PDF rechnet poppler selbst –
-  Haarlinien bleiben dort wie in einem PDF-Betrachter zu sehen, statt
-  wegzumitteln. Pläne, die vor dieser Fassung gerechnet wurden, zeigt die
+- **Übersicht und Lesestufe:** Auch die Zoomstufen unter der feinsten
+  rechnet poppler bei einem PDF selbst – Haarlinien bleiben in der
+  Übersicht wie in einem PDF-Betrachter zu sehen, und Linien und Schrift
+  sind auf der Stufe, auf der man gewöhnlich liest, so kräftig wie im PDF,
+  statt blass gemittelt. Pläne, die vor dieser Fassung gerechnet wurden, zeigt die
   Karte weiter; schärfer werden sie mit **Plan neu rechnen** (siehe
   unten), die nächtliche Wartung rechnet sie nach und nach selbst neu.
   *Fein* rechnet ein PDF bis 400 Megapixel (der Geländeplan mit vollen
@@ -985,9 +987,11 @@ geringerer Auflösung exportiert werden.
 
 Ist die Karte zu unscharf – etwa ein Plan, der vor der jetzigen Fassung der
 Kacheln gerechnet wurde –, rechnet der Server ihn noch einmal. Dafür gibt
-es in der Werkzeugleiste der Karte **Plan neu rechnen** (bei einem PDF,
-das noch gar keine Kacheln hat: **Plan aufbereiten**) und unter
-**Standorte** in der Spalte *Grundriss* den Knopf **Neu rechnen**. Dort
+es in der Werkzeugleiste der Karte **Plan neu rechnen** (bei einem Plan,
+der noch gar keine Kacheln hat – ein PDF oder ein großes Bild, dessen
+Aufbereiten etwa durch einen Neustart des Servers abbrach: **Plan
+aufbereiten**) und unter **Standorte** in der Spalte *Grundriss* den Knopf
+**Neu rechnen** bzw. **Aufbereiten**. Dort
 steht auch, wie der Plan jetzt gerechnet ist: „Kacheln 8.386 × 5.962 px ·
 Fassung 1“.
 
@@ -1005,11 +1009,14 @@ Fassung 1“.
   Plan fertig gerechnet ist“, „Wird gerechnet“). Danach steigt sie von
   selbst auf den neuen Plan um – auch bei allen anderen, die die Karte
   gerade offen haben. Liegt der neue Plan anders im Raster (selten), steht
-  dort **Neu laden**; die Karte kommt danach wieder an dieselbe Stelle.
+  dort **Neu laden**; die Karte kommt danach wieder an dieselbe Stelle, in
+  derselben Größe.
   Anlagen, Kabel, Maßstab und Georeferenz bleiben, wo sie sind.
-- **Dauer:** einige Sekunden für einen gewöhnlichen Plan, bis zu einigen
-  Minuten für ein PDF mit 100 MB. Es rechnet immer nur ein Plan zugleich;
-  wer warten muss, sieht es.
+- **Dauer:** einige Sekunden für einen gewöhnlichen Plan, rund eine Minute
+  für einen A0-Plan, bis zu vier Minuten für ein PDF mit 100 MB. Es rechnet
+  immer nur ein Plan zugleich, alle angestoßenen kommen nacheinander dran;
+  wer warten muss, sieht es. Wird der Platz auf dem Server knapp (unter
+  256 MB frei), rechnet er keinen Plan weiter – der bisherige bleibt.
 - **Geht etwas schief** (ein kaputtes PDF, der Server wird neu gestartet),
   bleibt der bisherige Plan, wie er war. Ein abgebrochenes Neurechnen
   holt die nächtliche Wartung nach.

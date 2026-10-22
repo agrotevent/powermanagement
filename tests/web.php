@@ -1536,6 +1536,16 @@ try {
         $live = json_decode(aufruf($basis, $planer['dose'], 'GET', '/karte/' . $nEtage . '/live', [], $json)['text'], true) ?? [];
         gleich([str_contains($karte, 'data-plan-stand="' . ($sj['stand'] ?? '') . '"'), $live['plan_stand'] ?? null], [true, $sj['stand'] ?? ''],
             'danach: Karte und Livewerte nennen den neuen Stand (eine offene Karte merkt den Wechsel)');
+        // Ein Bild ohne Kacheln, das welche bekäme (sein Bau im Hintergrund starb): „Plan aufbereiten“
+        // in der Karte, „Aufbereiten“ auf der Standortseite – vorher 422 und kein Knopf bis zur nächsten Nacht.
+        $oEtage = $planBild($nSite, 'Ohne Kacheln');
+        \App\Services\PlanTileService::aufraeumen((array) \App\Services\SiteService::floor($oEtage));
+        $karteOhne = aufruf($basis, $planer['dose'], 'GET', '/karte?etage=' . $oEtage)['text'];
+        $standorteOhne = aufruf($basis, $planer['dose'], 'GET', '/standorte')['text'];
+        $r = $neuRechnen($planer, $oEtage);
+        gleich([str_contains($karteOhne, 'data-plan-art="bild"'), str_contains($karteOhne, '>Plan aufbereiten'),
+            str_contains($standorteOhne, 'action="/grundriss/' . $oEtage . '/neu-rechnen"'), $r['status'], json_decode($r['text'], true)['neu'] ?? null],
+            [true, true, true, 200, true], 'Bild ohne Kacheln: Karte mit „Plan aufbereiten“, Standortseite mit „Aufbereiten“, angestoßen (200)');
         // Aus dem Formular der Standortseite (ohne JSON): Meldung und Rücksprung.
         $r = aufruf($basis, $planer['dose'], 'POST', '/grundriss/' . $sEtage . '/neu-rechnen', ['_token' => $planer['token']], ['Referer: ' . $basis . '/standorte']);
         gleich([$r['status'], $r['ziel']], [302, '/standorte'], 'Formular ohne Recht: Meldung und zurück zur Standortseite');

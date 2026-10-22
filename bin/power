@@ -25,9 +25,8 @@ declare(strict_types=1);
  *   bin/power titel "Titel" [untertitel] [kürzel]
  *   bin/power plan:kacheln [--neu | --veraltet] [--etage=<id>,…] [--qualitaet=standard|fein] [--bis=<s>]
  *                                   Fehlende Kacheln aller (oder dieser) Grundrisse berechnen –
- *                                   jede Pyramide einmal, auch wenn Etagen sie teilen. So rechnen
- *                                   der Upload und „Plan neu rechnen“ im Hintergrund (--etage:
- *                                   Auftrag je Plan, den Zustand zeigt die Karte; ein zweiter
+ *                                   jede Pyramide einmal, auch wenn Etagen sie teilen (--etage:
+ *                                   als Auftrag je Plan, den Zustand zeigt die Karte; ein zweiter
  *                                   Prozess für denselben Plan endet mit „läuft schon“). Läuft
  *                                   schon ein Bau, wird gewartet (nie zwei nebeneinander).
  *                                   Gerechnet wird in einen neuen Ordner, die Karte zeigt bis
@@ -35,8 +34,13 @@ declare(strict_types=1);
  *                                   --neu rechnet vorhandene neu (ohne --qualitaet in der
  *                                   bisherigen Qualität); fein: PDF bis 400 statt 200 Megapixel.
  *                                   --veraltet nur die einer älteren Kachelfassung. --bis: nach
- *                                   so vielen Sekunden keinen weiteren Plan beginnen, einen
- *                                   laufenden abbrechen (er bleibt, wie er war)
+ *                                   so vielen Sekunden keinen weiteren Plan beginnen, das Warten
+ *                                   auf einen anderen Bau und einen laufenden abbrechen (der
+ *                                   bisherige Plan bleibt, wie er war)
+ *   bin/power plan:kacheln --auftraege
+ *                                   Der Prozess im Hintergrund: rechnet die Aufträge aus Upload,
+ *                                   Abgleich und „Plan neu rechnen“ ab, einen nach dem anderen –
+ *                                   läuft er schon, endet ein zweiter sofort
  *   bin/power location:liste        Locations im gemeinsamen Repository anzeigen
  *   bin/power location:uebernehmen <schlüssel>
  *   bin/power verteiler:liste       Verteiler hier und im Repository mit ihrem Stand
@@ -388,10 +392,9 @@ switch ($befehl) {
         break;
 
     case 'plan:kacheln':
-        // --etage=3,4: nur diese – so starten der Upload und „Plan neu rechnen“
-        // den Bau im Hintergrund (PlanTileService::imHintergrund), mit
-        // Zeitstempel fürs Protokoll und einem Auftrag je Plan (den Zustand
-        // zeigt die Karte).
+        // --etage=3,4: nur diese, mit Zeitstempel fürs Protokoll und einem
+        // Auftrag je Plan (den Zustand zeigt die Karte). Upload, Abgleich und
+        // „Plan neu rechnen“ rechnen über --auftraege (PlanTileService::arbeiten()).
         $nur = null;
         if (isset($optionen['etage'])) {
             $nur = array_values(array_filter(array_map('intval', explode(',', (string) $optionen['etage'])), static fn (int $id): bool => $id > 0));
@@ -431,6 +434,16 @@ switch ($befehl) {
             }
             break;
         }
+        if (isset($optionen['auftraege'])) {
+            // Der Prozess im Hintergrund (PlanTileService::arbeiterStarten()): hinter den Anfragen der Oberfläche zurückstehen.
+            @proc_nice(10);
+            $zeitstempel = static fn (string $zeile) => $aus(gmdate('Y-m-d\TH:i:s\Z') . ' ' . $zeile);
+            $erledigt = PlanTileService::arbeiten($zeitstempel, $zeitstempel);
+            if ($erledigt === null) {
+                $aus(gmdate('Y-m-d\TH:i:s\Z') . ' Aufträge: ein anderer Prozess arbeitet sie schon ab.');
+            }
+            break;
+        }
         if ($nur !== null) {
             // Im Hintergrund hinter den Anfragen der Oberfläche zurückstehen.
             @proc_nice(10);
@@ -444,7 +457,6 @@ switch ($befehl) {
             }
             $plaene[PlanTileService::planDir($etage)][] = $etage;
         }
-        $umgeschaltet = [];
         foreach ($plaene as $ordner => $etagen) {
             $erste = $etagen[0];
             $wer = $erste['site_name'] . ' / ' . implode(', ', array_map(static fn (array $e): string => (string) $e['name'], $etagen));
@@ -475,25 +487,9 @@ switch ($befehl) {
                 }, $warten($wer), $bis) ?? ['ok' => false, 'message' => 'Die Zeit ist um – den Rest rechnet die nächtliche Wartung.'];
             }
             $aus($stempel() . $wer . ': ' . $ergebnis['message'] . ($nur !== null ? sprintf(' (%.0f s)', microtime(true) - $start) : ''));
-            if (!empty($ergebnis['umgeschaltet'])) {
-                $umgeschaltet[$ordner] = microtime(true);
-            }
         }
-        /*
-         * Abgelöste Fassungen wegräumen – im Hintergrund erst nach GNADE:
-         * So lange holt eine Karte, die beim Umschalten offen war, unter dem
-         * alten Stand noch ihre Kacheln. Von Hand gleich nicht; das holt der
-         * nächste Bau oder die Wartung nach.
-         */
-        if ($nur !== null && $umgeschaltet !== []) {
-            $rest = (int) ceil(max($umgeschaltet) + PlanTileService::GNADE - microtime(true));
-            if ($rest > 0) {
-                sleep($rest);
-            }
-            foreach (array_keys($umgeschaltet) as $ordner) {
-                PlanTileService::abgeloesteWeg($ordner);
-            }
-        }
+        // Abgelöste Fassungen bleiben: Unter ihrem Stand kommen sie noch GNADE Sekunden (PlanTileService::kachel()),
+        // weg räumt sie der nächste Bau des Plans oder die Wartung – gewartet wird darauf nicht.
         break;
 
     case 'location:liste':

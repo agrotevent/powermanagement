@@ -11,7 +11,8 @@ $darfSetzen = $darfAnlegen;
 // Plan neu rechnen: Zustand für alle (die Karte steigt nach dem Neurechnen um), Knopf und Fenster nur mit Recht.
 $planZustand = (string) ($plan['zustand'] ?? 'keiner');
 $planLaeuft = in_array($planZustand, PlanTileService::OFFEN, true);
-$planAufbereiten = ($plan['art'] ?? '') === 'pdf';
+// Noch ohne Kacheln (ein PDF, das der Browser zeichnet, ein großes Bild am Stück): aufbereiten statt neu rechnen.
+$planAufbereiten = ($plan['art'] ?? '') !== 'kacheln';
 ?>
 <?php if ($etage === null): ?>
     <div class="card"><div class="card-body">

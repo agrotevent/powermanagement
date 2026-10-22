@@ -23,9 +23,10 @@ use App\Support\Zeit;
  *
  * Gebaut wird von oben nach unten aus den bereits geschriebenen Kacheln.
  * Dadurch liegen nie mehr als fünf Kacheln gleichzeitig im Speicher, wie
- * groß der Plan auch ist. Bei einem PDF rechnet poppler die kleinen Stufen
- * (bis STREIFEN_PIXEL) selbst – dort zeigt die Übersicht Haarlinien wie ein
- * PDF-Betrachter, statt sie wegzumitteln (siehe schneidenPdf()).
+ * groß der Plan auch ist. Bei einem PDF rechnet poppler auch die Stufen
+ * darunter selbst, große wie die oberste in Streifen – dort zeigen Linien
+ * und Schrift dieselbe Tinte wie in einem PDF-Betrachter, statt mit jeder
+ * Stufe weiter zu verblassen (siehe schneidenPdf()).
  *
  * Was die Pixel ändert, zählt FASSUNG hoch: Eine ältere Pyramide bleibt
  * nutzbar, ist aber als veraltet erkennbar (veraltet()).
@@ -42,23 +43,29 @@ use App\Support\Zeit;
  * ganz aus. Über MAX_BILDPIXEL rechnet poppler sie herunter.
  *
  * Mit Plänen bis 100 MB dauert das Minuten. Der Upload rechnet deshalb nur
- * eine Weile selbst (bauen() mit Frist) und gibt den Rest an einen eigenen
- * Prozess (imHintergrund()); was dabei liegen bleibt, holt die Wartung nach.
+ * eine Weile selbst (bauen() mit Frist) und gibt den Rest als Auftrag an
+ * den einen Prozess im Hintergrund (imHintergrund(), arbeiten()); was dabei
+ * liegen bleibt, holt die Wartung nach. Es rechnet nie mehr als ein Bau
+ * zugleich (nacheinander()).
  *
  * Gerechnet wird nie in den Ordner, aus dem die Karte liest:
  *
- *   kacheln/<plan>[_sN]/
- *     kacheln.json     Zeiger auf die aktive Fassung ('ordner'), mit ihren Maßen
- *     v<stand>/        aktive Fassung: z/x/y.<format> und ein eigenes kacheln.json
- *     v<stand>.bau/    im Bau – erst fertig, dann per rename() eingesetzt
- *     .sperre          hält, wer baut (laeuft())
- *     .auftrag         hält der Prozess im Hintergrund vom Start bis zum Ende
- *     .auftrag.json    Zustand des Auftrags für die Karte (zustand())
+ *   kacheln/
+ *     .hintergrund       hält, wer gerade baut – nie zwei zugleich (nacheinander())
+ *     .arbeiter          hält der eine Prozess im Hintergrund (arbeiten())
+ *     <plan>[_sN]/
+ *       kacheln.json     Zeiger auf die aktive Fassung ('ordner'), mit ihren Maßen
+ *       v<stand>/        aktive Fassung: z/x/y.<format> und ein eigenes kacheln.json
+ *       v<stand>.bau/    im Bau – erst fertig, dann per rename() eingesetzt
+ *       .sperre          hält, wer baut (laeuft())
+ *       .auftrag         hält, wer den Auftrag gerade rechnet (auftrag())
+ *       .auftrag.json    Auftrag und sein Zustand für die Karte (zustand())
  *
- * Eine abgelöste Fassung bleibt GNADE Sekunden liegen; scheitert ein Bau
- * oder wird er abgebrochen, bleibt die bisherige ganz. Pyramiden von vor
- * den Fassungsordnern liegen mit ihren Stufen direkt im Planordner und
- * werden beim nächsten Bau abgelöst (umschalten()).
+ * Unter ihrem Stand kommt eine abgelöste Fassung noch GNADE Sekunden
+ * (kachel()), weggeräumt wird sie beim nächsten Bau oder in der Wartung;
+ * scheitert ein Bau oder wird er abgebrochen, bleibt die bisherige ganz.
+ * Pyramiden von vor den Fassungsordnern liegen mit ihren Stufen direkt im
+ * Planordner und werden beim nächsten Bau abgelöst (umschalten()).
  *
  * SVG bleibt ungekachelt – es skaliert von sich aus verlustfrei.
  */
@@ -99,6 +106,15 @@ final class PlanTileService
      * PDF nur so groß, dass sein größtes Bild darunter bleibt (siehe
      * PdfRasterService::bildflaeche()) – mit 80 Megapixeln rund 300 MB bei
      * poppler, dazu bis 200 MB im PHP-Prozess.
+     *
+     * Das gilt für ein Bild als Grundlinien-JPEG (so hüllt BildPdf ein, ein
+     * progressives lehnt es ab). Steckt im PDF ein progressives JPEG, packt
+     * poppler es bei jedem Aufruf ganz aus, und der Speicher hängt an seiner
+     * Größe in der Datei, nicht an der Ausgabe: gemessen 402 statt 238 MB
+     * bei 58 Megapixeln, 695 statt 297 MB bei 139. Dagegen hilft keine
+     * Fläche – pdftoppm läuft deshalb mit einer harten Grenze
+     * (PdfRasterService::SPEICHER); reicht die nicht, wird kleiner gerechnet
+     * oder der Bau scheitert, und der bisherige Plan bleibt.
      */
     public const MAX_BILDPIXEL = 80_000_000;
 
@@ -130,9 +146,12 @@ final class PlanTileService
      * Hochzählen bei jeder Änderung, die Pixel der Kacheln ändert – wie
      * BerichtPdf::ERZEUGER. 2: Mitteln statt bikubisch (keine verlorenen
      * Haarlinien, kein Grauschleier), kleine Stufen eines PDF direkt von
-     * poppler, PDF bis 200 Megapixel, JPEG in Qualität 92, WebP.
+     * poppler, PDF bis 200 Megapixel, JPEG in Qualität 92, WebP. 3: auch die
+     * großen Stufen unter der obersten direkt von poppler (in Streifen) –
+     * in Fassung 2 war die Stufe darunter, die gewöhnliche Lesestufe, ein
+     * Mittel mit blassen Linien und Schrift.
      */
-    public const FASSUNG = 2;
+    public const FASSUNG = 3;
 
     /** JPEG-Qualität der Kacheln: gemessen wich 85 im Mittel um 3,1 vom Scan ab, 92 um 1,0 – für ein Drittel mehr Bytes. */
     public const JPEG_QUALITAET = 92;
@@ -153,8 +172,37 @@ final class PlanTileService
      */
     public const ZEITBUDGET = 900;
 
-    /** So lange dürfen die kleinen Stufen eines PDF bei poppler mindestens dauern (Sekunden). */
+    /**
+     * So lange dürfen die Stufen unter der obersten eines PDF bei poppler
+     * mindestens dauern (Sekunden) – sonst so lange wie die oberste.
+     */
     public const KLEINE_STUFEN_ZEIT = 60;
+
+    /**
+     * So viel Platz bleibt auf der Platte immer frei (Bytes): Darunter
+     * rechnet kein Bau weiter – SQLite und InfluxDB liegen auf derselben
+     * Platte und bekämen sonst kein Byte mehr. Gemessen füllte ein Neubau
+     * eine Platte mit 9,6 MB frei bis zum letzten Byte, bevor libpng
+     * aufgab.
+     */
+    public const PLATTE_RESERVE = 256 * 1024 * 1024;
+
+    /**
+     * Mindestens so viel belegt eine Kachel auf der Platte (Bytes): ein
+     * Block des Dateisystems. Gemessen 4,5 MB Kacheln, aber 17 MB belegt.
+     */
+    public const KACHEL_BLOCK = 4096;
+
+    /**
+     * Für Prüfskripte: Grenzen, die sich sonst nur mit stundenlangen Bauten
+     * oder einer vollen Platte zeigten – 'zeitbudget' (ZEITBUDGET),
+     * 'kleine_stufen_zeit' (KLEINE_STUFEN_ZEIT), 'streifen_pixel'
+     * (STREIFEN_PIXEL), 'notstufen' (NOTSTUFEN), 'frei' (freier Platz in
+     * Bytes statt disk_free_space()). Leer im Betrieb.
+     *
+     * @var array<string,mixed>
+     */
+    public static array $pruefung = [];
 
     /**
      * Größtes Bild, das überhaupt noch aufbereitet wird (Pixel).
@@ -189,12 +237,15 @@ final class PlanTileService
     public const STREIFEN_PIXEL = 16_000_000;
 
     /**
-     * So lange bleibt eine abgelöste Fassung nach dem Umschalten liegen
-     * (Sekunden). Eine Karte, die dabei offen war, holt ihre Kacheln unter
-     * dem alten Stand so lange weiter (kachel()), statt Lücken zu zeigen –
-     * bis sie den Wechsel bemerkt (Status, Livewerte) und umsteigt oder neu
-     * geladen wird. Gemessen kostet das Umschalten selbst 0,5–1,1 ms, das
-     * Löschen einer Fassung mit 1 700 Kacheln 36–54 ms.
+     * So lange kommt eine abgelöste Fassung nach dem Umschalten noch unter
+     * ihrem Stand (Sekunden). Eine Karte, die dabei offen war, holt ihre
+     * Kacheln so lange weiter (kachel()), statt Lücken zu zeigen – bis sie
+     * den Wechsel bemerkt (Status, Livewerte) und umsteigt oder neu geladen
+     * wird. Danach räumt sie der nächste Bau dieses Plans oder die Wartung
+     * weg – dafür wartet kein Prozess (gemessen hielt das Warten im
+     * Hintergrund 91–93 MB je Plan zwei Minuten lang). Gemessen kostet das
+     * Umschalten selbst 0,5–1,1 ms, das Löschen einer Fassung mit 1 700
+     * Kacheln 36–54 ms.
      */
     public const GNADE = 120;
 
@@ -205,7 +256,9 @@ final class PlanTileService
      * So lange gilt ein Auftrag ohne Prozess noch als „angefordert“
      * (Sekunden): Zwischen dem Klick und dem Moment, in dem der Prozess im
      * Hintergrund seine Sperre hält, vergeht ein Augenblick. Danach heißt
-     * ein offener Auftrag ohne Prozess: er ist gestorben.
+     * ein offener Auftrag ohne Prozess: er ist gestorben. Hält der Prozess
+     * im Hintergrund seine Sperre (.arbeiter), „wartet“ er, so lange es
+     * dauert – der Prozess nimmt ihn noch mit.
      */
     private const ANGEFORDERT_FRIST = 60;
 
@@ -418,8 +471,8 @@ final class PlanTileService
     public static function feinMoeglich(array $meta): bool
     {
         $fein = (int) ($meta['kanten']['fein'] ?? 0);
-        // Wich der Bau schon wegen Zeit oder Platte aus, hülfe „fein“ nicht.
-        return self::qualitaet($meta['qualitaet'] ?? null) !== 'fein' && !in_array($meta['grenze'] ?? null, ['zeit', 'platte'], true)
+        // Wich der Bau schon wegen Zeit, Platte oder Speicher aus, hülfe „fein“ nicht.
+        return self::qualitaet($meta['qualitaet'] ?? null) !== 'fein' && !in_array($meta['grenze'] ?? null, ['zeit', 'platte', 'speicher'], true)
             && $fein >= 1.1 * max(1, (int) ($meta['kante'] ?? 0));
     }
 
@@ -491,13 +544,14 @@ final class PlanTileService
      * Sperrdatei öffnen und exklusiv holen (sperreHolen()) – mit „e“: Ein
      * Kindprozess (poppler, der Prozess im Hintergrund) erbt den Griff
      * nicht und hält die Sperre so auch nicht über das Ende dieses
-     * Prozesses hinaus.
+     * Prozesses hinaus. Zum Sperren genügt Lesen – auch wenn root die Datei
+     * einmal angelegt hat (wie bei nacheinander()).
      *
      * @return resource|null
      */
     private static function sperren(string $pfad, bool $warten)
     {
-        $griff = @fopen($pfad, 'ce');
+        $griff = @fopen($pfad, 'ce') ?: (is_file($pfad) ? @fopen($pfad, 're') : false);
         if ($griff === false) {
             return null;
         }
@@ -696,7 +750,16 @@ final class PlanTileService
                 return ['ok' => false, 'message' => 'Kachelordner ist nicht beschreibbar.', 'kacheln' => 0, 'meta' => null];
             }
             try {
-                $ergebnis = self::schneiden($floor, $quelle, $bau, $bis, $qualitaet, $alt);
+                try {
+                    $ergebnis = self::schneiden($floor, $quelle, $bau, $bis, $qualitaet, $alt);
+                } catch (\RuntimeException $voll) {
+                    // Die Platte reicht nicht (plattePruefen()): aufhören, bevor sie voll ist.
+                    if ($voll->getCode() !== self::PLATTE_VOLL) {
+                        throw $voll;
+                    }
+                    Logger::info('Kacheln: ' . $voll->getMessage());
+                    $ergebnis = ['ok' => false, 'message' => $voll->getMessage(), 'kacheln' => 0, 'meta' => null];
+                }
                 /*
                  * Wurde die Etage gelöscht (oder bekam sie einen anderen
                  * Plan), während hier gerechnet wurde – im Hintergrund dauert
@@ -926,6 +989,8 @@ final class PlanTileService
          */
         if (self::ueberGd($quelle)) {
             $kopf = BildPdf::pruefen($quelle);
+            // Die Hülle ist eine Kopie des Bildes (bis 100 MB) – erst, wenn daneben die Reserve bleibt.
+            self::plattePruefen($ordner, (int) @filesize($quelle));
             $huelle = PdfRasterService::tempName('bild') . '.pdf';
             try {
                 if (!BildPdf::schreiben($quelle, $huelle)) {
@@ -967,7 +1032,10 @@ final class PlanTileService
         // ---- oberste Stufe: direkt aus der Quelle schneiden
         $spalten = (int) ceil($breite / self::KACHEL);
         $zeilen  = (int) ceil($hoehe / self::KACHEL);
+        // Platz für alle Stufen (ein Drittel dazu), je Kachel mindestens ein Block – und die Reserve.
+        self::plattePruefen($ordner, (int) ($spalten * $zeilen * 4 / 3 * self::KACHEL_BLOCK));
         for ($x = 0; $x < $spalten; $x++) {
+            self::plattePruefen($ordner);
             for ($y = 0; $y < $zeilen; $y++) {
                 $kachel = self::leer($format);
                 imagecopy(
@@ -1023,16 +1091,21 @@ final class PlanTileService
      * Speicher von PHP an der Fläche eines Streifens, nicht an der des
      * Plans.
      *
-     * Die Stufen darunter entstehen durch Mitteln (stufeMitteln()) – bis
-     * auf die kleinen (bis STREIFEN_PIXEL, ein Aufruf je Stufe): die rechnet
-     * poppler selbst. Ein Mittel ist physikalisch richtig, nur macht es
-     * eine Haarlinie je Stufe halb so kräftig; zwei Stufen unter der
-     * obersten war sie gemessen nicht mehr zu sehen (0 % der Linienpunkte
-     * mit einem Viertel Kontrast), ein PDF-Betrachter zeichnet sie aber
-     * mindestens ein Pixel breit (direkt gerechnet 87–95 %). Bei schweren
-     * Plänen kostet jeder Aufruf so lange wie ein Streifen oder länger – sind
-     * die kleinen Stufen absehbar teurer als kleineDirekt() erlaubt, werden
-     * auch sie gemittelt.
+     * Die Stufen darunter rechnet poppler ebenso, große in Streifen wie die
+     * oberste. Ein Mittel (stufeMitteln()) ist physikalisch richtig, nur
+     * macht es eine Haarlinie je Stufe halb so kräftig; zwei Stufen unter
+     * der obersten war sie gemessen nicht mehr zu sehen (0 % der
+     * Linienpunkte mit einem Viertel Kontrast), ein PDF-Betrachter zeichnet
+     * sie aber mindestens ein Pixel breit (direkt gerechnet 87–95 %). Auch
+     * eine Stufe tiefer kosten Linien und Schrift im Mittel ein Drittel ihrer
+     * Tinte – gemessen am A0-Plan auf der gewöhnlichen Lesestufe 0,57–0,71
+     * statt 0,79–0,88 im Vergleich zu poppler. Bei schweren Plänen kostet
+     * jeder Aufruf so lange wie ein Streifen oder länger – was absehbar
+     * teurer wird, als kleineDirekt() erlaubt (höchstens so lange wie die
+     * oberste Stufe, mindestens KLEINE_STUFEN_ZEIT), wird gemittelt, die
+     * kleinsten Stufen zuerst. Gemessen kostet das am leichten A0-Plan
+     * 5 Sekunden mehr (4 Streifen für Stufe 6), am schweren Vektorplan mit
+     * 97 MB rund 76 (248 statt 172 Sekunden, alle Stufen direkt).
      *
      * $bild: ist $quelle nur die Hülle eines Bildes (BildPdf) – Name, Maße
      * und Kachelformat ('jpg', oder 'auto': nach dem ersten Streifen). Ein
@@ -1054,9 +1127,10 @@ final class PlanTileService
         $seite = max(1, (int) ($floor['plan_page'] ?? 1));
         $fehler = static fn (string $text): array => ['ok' => false, 'message' => $text, 'kacheln' => 0, 'meta' => null];
         $abgebrochen = static function (): array {
-            // Der Aufrufer wartet nicht länger (Upload): ein halber Plan
-            // hilft niemandem, bauen() räumt ihn weg – imHintergrund() rechnet ihn.
-            return ['ok' => false, 'abgebrochen' => true, 'message' => 'Die Zeit im Upload ist um – der Plan wird im Hintergrund fertig gerechnet.', 'kacheln' => 0, 'meta' => null];
+            // Der Aufrufer wartet nicht länger (Upload, Zeitbudget der Wartung):
+            // ein halber Plan hilft niemandem, bauen() räumt ihn weg – den
+            // Plan rechnet der Hintergrund oder die nächste Wartung.
+            return ['ok' => false, 'abgebrochen' => true, 'message' => 'Die Zeit war um, bevor der Plan fertig gerechnet war – er wird später fertig gerechnet.', 'kacheln' => 0, 'meta' => null];
         };
 
         /*
@@ -1087,9 +1161,9 @@ final class PlanTileService
          * letzten, die dann auf jeden Fall gerechnet wird.
          */
         $flaechen = [null];
-        foreach (self::NOTSTUFEN as $notstufe) {
+        foreach ((array) self::grenze('notstufen', self::NOTSTUFEN) as $notstufe) {
             if ($notstufe < self::QUALITAETEN[$qualitaet]['pixel']) {
-                $flaechen[] = $notstufe;
+                $flaechen[] = (int) $notstufe;
             }
         }
         /*
@@ -1122,8 +1196,11 @@ final class PlanTileService
                 break;
             }
             $ausgewichen = $oben['zu_teuer'];
-            Logger::info(sprintf('Kacheln: %s × %s Pixel %s – es wird kleiner gerechnet.', $ziel['breite'], $ziel['hoehe'],
-                $ausgewichen === 'zeit' ? 'dauerten länger als ' . intdiv(self::ZEITBUDGET, 60) . ' Minuten' : 'passten nicht auf die Platte'));
+            Logger::info(sprintf('Kacheln: %s × %s Pixel %s – es wird kleiner gerechnet.', $ziel['breite'], $ziel['hoehe'], match ($ausgewichen) {
+                'zeit'     => 'dauerten länger als ' . intdiv(self::ZEITBUDGET, 60) . ' Minuten',
+                'speicher' => 'bekamen bei poppler nicht genug Speicher',
+                default    => 'passten nicht auf die Platte',
+            }));
         }
         if (!empty($oben['abgebrochen'])) {
             return $abgebrochen();
@@ -1143,21 +1220,27 @@ final class PlanTileService
         $direkt = [];
 
         /*
-         * Die Stufen darunter. Bis eine in einen Aufruf passt, wird
-         * gemittelt; die kleinen rechnet poppler, solange kleineDirekt()
-         * die Zeit dafür gibt – sonst wird ab da weiter gemittelt.
+         * Die Stufen darunter rechnet poppler ebenso, eine große wie die
+         * oberste in Streifen – von oben nach unten, solange kleineDirekt()
+         * die Zeit für die Aufrufe dieser Stufe gibt (geschätzt mit dem
+         * teuersten Aufruf bis hier). Reicht sie nicht, wird diese Stufe
+         * gemittelt und bei der nächsten, billigeren wieder gefragt. Die
+         * großen zuerst: Die Stufe unter der obersten ist die, auf der man
+         * gewöhnlich liest, zwei, drei darunter liegt die Übersicht; die
+         * kleinsten zeigt die Karte nur, wenn man weiter herauszoomt, als
+         * der Plan auf den Schirm passt. Gemessen am schweren A0-Plan
+         * (97 MB, ein Aufruf 6–16 s) kosteten die Stufen darunter so 76 s;
+         * zählten die Aufrufe aller kleineren mit, wurde Stufe 4 – die
+         * Übersicht am Desktop – gemittelt und 3 bis 0 direkt gerechnet.
          */
         $selbst  = $bild === null;
         $je      = $oben['sekunden'] / max(1, $oben['aufrufe']);
-        $budget  = max(self::KLEINE_STUFEN_ZEIT, 0.5 * $oben['sekunden']);
+        $budget  = max((float) self::grenze('kleine_stufen_zeit', self::KLEINE_STUFEN_ZEIT), $oben['sekunden']);
         $bisher  = 0.0;
         for ($z = $maxZ - 1; $z >= 0; $z--) {
             $kanteZ = max(1, (int) round($ziel['kante'] / 2 ** ($maxZ - $z)));
             $masseZ = PdfRasterService::masseAus($verhaeltnis, $kanteZ);
-            if ($selbst && $masseZ['breite'] * $masseZ['hoehe'] <= self::STREIFEN_PIXEL) {
-                $selbst = self::kleineDirekt($bisher, $je, $z + 1, $budget);
-            }
-            if ($selbst && $masseZ['breite'] * $masseZ['hoehe'] <= self::STREIFEN_PIXEL) {
+            if ($selbst && self::kleineDirekt($bisher, $je, self::aufrufe($masseZ['breite'], $masseZ['hoehe']), $budget)) {
                 if ($bis !== null && microtime(true) > $bis) {
                     return $abgebrochen();
                 }
@@ -1170,12 +1253,14 @@ final class PlanTileService
                     $anzahl += $stufe['anzahl'];
                     $direkt[] = $z;
                     $bisher += $stufe['sekunden'];
-                    $je = max($je, $stufe['sekunden']);
+                    $je = max($je, $stufe['sekunden'] / max(1, $stufe['aufrufe']));
                     continue;
                 }
-                // poppler mag diese Stufe nicht: gemittelt ist sie auch gut.
+                // poppler mag diese Stufe nicht: gemittelt ist sie auch gut, die übrigen ebenso.
                 Logger::info('Kacheln: Stufe ' . $z . ' ließ sich nicht direkt rechnen (' . $stufe['message'] . ') – sie wird gemittelt.');
                 $selbst = false;
+                // Was die Stufe schon geschrieben hat, ersetzt das Mittel ganz.
+                self::verzeichnisWeg($ordner . '/' . $z);
             }
             $anzahl += self::stufeMitteln($ordner, $z, $raster[$z + 1], $format);
             $raster[$z] = [(int) ceil($raster[$z + 1][0] / 2), (int) ceil($raster[$z + 1][1] / 2)];
@@ -1293,11 +1378,11 @@ final class PlanTileService
     }
 
     /**
-     * Noch eine kleine Stufe direkt von poppler? Ja, solange die bisher
-     * dafür gebrauchte Zeit und die geschätzte für die übrigen $rest Stufen
+     * Noch eine Stufe direkt von poppler? Ja, solange die bisher dafür
+     * gebrauchte Zeit und die geschätzte für die $rest Aufrufe dieser Stufe
      * ($je Sekunden je Aufruf – so lange wie ein Streifen der obersten Stufe
-     * oder die teuerste kleine Stufe bis hier) in $budget passen
-     * (KLEINE_STUFEN_ZEIT, mindestens die Hälfte der obersten Stufe).
+     * oder der teuerste Aufruf bis hier) in $budget passen (so lange wie
+     * die oberste Stufe, mindestens KLEINE_STUFEN_ZEIT).
      */
     public static function kleineDirekt(float $bisher, float $je, int $rest, float $budget): bool
     {
@@ -1305,28 +1390,85 @@ final class PlanTileService
     }
 
     /**
+     * So oft ruft stufeRendern() poppler für eine Stufe von $breite × $hoehe
+     * Pixeln auf (ohne Wiederholungen nach einer Zeitüberschreitung).
+     */
+    public static function aufrufe(int $breite, int $hoehe): int
+    {
+        $zeilen = (int) ceil($hoehe / self::KACHEL);
+        if ($breite * $zeilen * self::KACHEL <= (int) self::grenze('streifen_pixel', self::STREIFEN_PIXEL)) {
+            return 1;
+        }
+        return (int) ceil($zeilen / self::zeilenJeStreifen($breite, $zeilen));
+    }
+
+    /**
      * Würde die oberste Stufe zu teuer? Hochgerechnet aus dem ersten
      * Streifen: $sekunden und $bytes für $kacheln Kacheln, $streifen
      * Streifen insgesamt, $alle Kacheln der obersten Stufe. Die Stufen
-     * darunter kommen mit einem Drittel dazu, und auf der Platte soll das
-     * Dreifache frei sein ($frei, null: unbekannt).
+     * darunter kommen mit einem Drittel dazu, und über PLATTE_RESERVE hinaus
+     * soll das Dreifache frei sein ($frei, null: unbekannt).
+     *
+     * Eine Kachel zählt dabei mindestens einen Block (KACHEL_BLOCK): Der
+     * erste Streifen ist meist weißer Rand – gemessen 48 Byte je Kachel an
+     * einem Vektorplan, der dann 36 MB belegte; verlangt waren so 0,6 MB.
      *
      * @return 'zeit'|'platte'|null
      */
     public static function zuTeuer(float $sekunden, int $streifen, int $bytes, int $kacheln, int $alle, ?float $frei): ?string
     {
-        if ($sekunden * $streifen > self::ZEITBUDGET) {
+        if ($sekunden * $streifen > (float) self::grenze('zeitbudget', self::ZEITBUDGET)) {
             return 'zeit';
         }
-        if ($frei !== null && $kacheln > 0 && 3 * ($bytes / $kacheln) * $alle * 4 / 3 > $frei) {
+        if ($frei !== null && $kacheln > 0
+            && 3 * max($bytes / $kacheln, self::KACHEL_BLOCK) * $alle * 4 / 3 > $frei - self::PLATTE_RESERVE) {
             return 'platte';
         }
         return null;
     }
 
+    /** Eine Grenze: im Betrieb $vorgabe (die Konstante), in Prüfskripten aus $pruefung. */
+    private static function grenze(string $name, mixed $vorgabe): mixed
+    {
+        return self::$pruefung[$name] ?? $vorgabe;
+    }
+
+    /** Freier Platz der Platte unter $ordner (Bytes) – null, wenn es keiner sagen kann. */
+    private static function frei(string $ordner): ?float
+    {
+        if (isset(self::$pruefung['frei'])) {
+            return (float) self::$pruefung['frei'];
+        }
+        $frei = @disk_free_space($ordner);
+        return $frei === false ? null : (float) $frei;
+    }
+
+    /** Fehlernummer der Ausnahme aus plattePruefen() – bauen() fängt sie. */
+    private const PLATTE_VOLL = 507;
+
     /**
-     * Eine Stufe der Pyramide mit poppler rendern und schneiden – die
-     * oberste in Streifen, eine kleine (bis STREIFEN_PIXEL) in einem Aufruf.
+     * Bleiben neben $mehr Bytes noch PLATTE_RESERVE frei? Sonst hört der Bau
+     * auf (eine Ausnahme, die bauen() zur Meldung macht – der bisherige Plan
+     * bleibt). Gefragt wird vor dem Bau eines Bildes und nach jedem Streifen
+     * bzw. jeder Spalte Kacheln: Die Hochrechnung (zuTeuer()) kennt nur den
+     * ersten Streifen.
+     */
+    private static function plattePruefen(string $ordner, int $mehr = 0): void
+    {
+        $frei = self::frei($ordner);
+        if ($frei !== null && $frei - $mehr < self::PLATTE_RESERVE) {
+            throw new \RuntimeException(sprintf('Auf der Platte des Servers ist zu wenig frei (%s frei%s; %s bleiben immer für Datenbank und Messwerte)'
+                . ' – der Plan wird nicht weiter gerechnet, der bisherige bleibt.',
+                SiteService::mb((int) max(0, $frei)), $mehr > 0 ? ', gebraucht rund ' . SiteService::mb($mehr) : '',
+                SiteService::mb(self::PLATTE_RESERVE)), self::PLATTE_VOLL);
+        }
+    }
+
+    /**
+     * Eine Stufe der Pyramide mit poppler rendern und schneiden – eine große
+     * in Streifen, eine kleine (bis STREIFEN_PIXEL) in einem Aufruf
+     * (aufrufe()). Nach jedem Streifen muss die Reserve auf der Platte
+     * bleiben (plattePruefen()).
      *
      * Ein Streifen ist so hoch, wie STREIFEN_PIXEL es erlaubt: poppler
      * liest und deutet bei jedem Aufruf die ganze Seite, ganz gleich, wie
@@ -1342,7 +1484,8 @@ final class PlanTileService
      *
      * $format 'auto': nach dem ersten Streifen (fotoartig()).
      * $waechter: nach dem ersten Streifen hochrechnen (zuTeuer()) und mit
-     * 'zu_teuer' aufhören, statt weiterzurechnen.
+     * 'zu_teuer' aufhören, statt weiterzurechnen – ebenso, wenn poppler
+     * schon für den ersten Streifen zu wenig Speicher hatte ('speicher').
      *
      * @return array{ok:bool,message:string,anzahl:int,spalten:int,zeilen:int,format:string,aufrufe:int,sekunden:float,abgebrochen?:bool,zu_teuer?:string}
      */
@@ -1370,7 +1513,7 @@ final class PlanTileService
             ];
         };
 
-        $jeStreifen = $breite * $zeilen * self::KACHEL <= self::STREIFEN_PIXEL ? $zeilen + 2 : self::zeilenJeStreifen($breite, $zeilen);
+        $jeStreifen = self::aufrufe($breite, $hoehe) === 1 ? $zeilen + 2 : self::zeilenJeStreifen($breite, $zeilen);
         $streifenHoch = $jeStreifen * self::KACHEL;
 
         $y = 0;
@@ -1389,6 +1532,10 @@ final class PlanTileService
                     $jeStreifen   = max(1, intdiv(min($jeStreifen, $zeilen), 2));
                     $streifenHoch = $jeStreifen * self::KACHEL;
                     continue;
+                }
+                // Zu wenig Speicher gleich im ersten Streifen: kleiner geht es vielleicht (ein Bild braucht je Pixel der Ausgabe).
+                if (!empty($streifen['speicher']) && $waechter && $y === 0) {
+                    return $ergebnis(false, '', ['zu_teuer' => 'speicher']);
                 }
                 return $ergebnis(false, 'Streifen ab Zeile ' . $nummer . ': ' . $streifen['message']);
             }
@@ -1445,13 +1592,13 @@ final class PlanTileService
             $anzahl += $geschrieben;
 
             if ($waechter && $y === 0 && $streifenHoehe >= $streifenHoch) {
-                $frei = @disk_free_space($ordner);
                 $teuer = self::zuTeuer(microtime(true) - $beginn, (int) ceil($zeilen / $jeStreifen), $bytes, $geschrieben,
-                    $spalten * $zeilen, $frei === false ? null : (float) $frei);
+                    $spalten * $zeilen, self::frei($ordner));
                 if ($teuer !== null) {
                     return $ergebnis(false, '', ['zu_teuer' => $teuer]);
                 }
             }
+            self::plattePruefen($ordner);
 
             // Kürzer als verlangt: das war der untere Rand.
             if ($streifenHoehe < $streifenHoch) {
@@ -1465,32 +1612,67 @@ final class PlanTileService
     }
 
     /**
-     * Kacheln in einem eigenen Prozess rechnen lassen – für den Upload, der
-     * nicht länger warten kann (SiteService::KACHELZEIT_IM_UPLOAD), und für
-     * „Plan neu rechnen“ in der Oberfläche (neuRechnenAnfordern()).
+     * Kacheln im Hintergrund rechnen lassen – für den Upload, der nicht
+     * länger warten kann (SiteService::KACHELZEIT_IM_UPLOAD), und
+     * übernommene Pläne (LocationBundle::kachelnBauen()); „Plan neu
+     * rechnen“ kommt über neuRechnenAnfordern() denselben Weg.
      *
-     * Ein eigener Prozess statt Weiterrechnen nach der Antwort: Der Pool
-     * zählt mit max_execution_time (300 s, als php_admin_value –
-     * set_time_limit() greift dort nicht) die Rechenzeit der ganzen Anfrage,
-     * und ein PDF mit 60 Seiten braucht mehr. `bin/power plan:kacheln` läuft
-     * auf der Kommandozeile ohne diese Grenze, als derselbe Benutzer, und
-     * hält keinen PHP-FPM-Arbeiter fest.
-     *
-     * Die Ausgabe geht nach storage/logs/kacheln.log: /dev/null darf PHP
-     * unter open_basedir nicht öffnen, und ein geschlossenes Rohr beendete
-     * den Prozess bei der ersten Zeile. Stirbt er (php-fpm neu gestartet),
-     * rechnet die nächtliche Wartung nach (`bin/power wartung`).
+     * Je Pyramide ein Auftrag in .auftrag.json (auftragEintragen()), dann
+     * arbeiterStarten(): Es gibt nur einen Prozess im Hintergrund, und der
+     * rechnet alle Aufträge nacheinander ab (arbeiten()). Vorher startete
+     * jeder Klick und jeder Upload einen eigenen, der dann auf die Sperre
+     * wartete – gemessen 38 MB je Wartendem, nach dem Umschalten noch zwei
+     * Minuten 91–93 MB; zwanzig Klicks auf der Standortseite hielten so
+     * rund 760 MB neben dem laufenden Bau.
      *
      * $optionen: 'neu' rechnet vorhandene Pyramiden neu, 'qualitaet' ist
      * eine der QUALITAETEN (ohne: die der vorhandenen Pyramide).
      *
      * @param list<int> $etagenIds
      * @param array{neu?:bool,qualitaet?:?string} $optionen
+     * @return bool false: kein Prozess zu starten (php fehlt) – die Aufträge holt die Wartung nach
      */
     public static function imHintergrund(array $etagenIds, array $optionen = []): bool
     {
         $ids = array_values(array_unique(array_filter(array_map('intval', $etagenIds), static fn (int $id): bool => $id > 0)));
-        if ($ids === []) {
+        $gesehen = [];
+        foreach ($ids as $id) {
+            $etage = SiteService::floor($id);
+            if ($etage === null || SiteService::planPath($etage) === null || isset($gesehen[self::planDir($etage)])) {
+                continue;
+            }
+            $gesehen[self::planDir($etage)] = true;
+            self::auftragEintragen($etage, !empty($optionen['neu']), $optionen['qualitaet'] ?? null);
+        }
+        return $gesehen === [] || self::arbeiterStarten();
+    }
+
+    /** Hält der Prozess im Hintergrund, solange er Aufträge abarbeitet (arbeiten()). */
+    public static function arbeiterSperre(): string
+    {
+        return self::dir() . '/.arbeiter';
+    }
+
+    /**
+     * Den Prozess im Hintergrund starten – außer er läuft schon (er hält
+     * arbeiterSperre()): dann nimmt er neue Aufträge noch mit, bevor er
+     * endet (arbeiten()).
+     *
+     * Ein eigener Prozess statt Weiterrechnen nach der Antwort: Der Pool
+     * zählt mit max_execution_time (300 s, als php_admin_value –
+     * set_time_limit() greift dort nicht) die Rechenzeit der ganzen Anfrage,
+     * und ein PDF mit 60 Seiten braucht mehr. `bin/power plan:kacheln
+     * --auftraege` läuft auf der Kommandozeile ohne diese Grenze, als
+     * derselbe Benutzer, und hält keinen PHP-FPM-Arbeiter fest.
+     *
+     * Die Ausgabe geht nach storage/logs/kacheln.log: /dev/null darf PHP
+     * unter open_basedir nicht öffnen, und ein geschlossenes Rohr beendete
+     * den Prozess bei der ersten Zeile. Stirbt er (php-fpm neu gestartet),
+     * rechnet die nächtliche Wartung nach (`bin/power wartung`).
+     */
+    public static function arbeiterStarten(): bool
+    {
+        if (self::gehalten(self::arbeiterSperre())) {
             return true;
         }
         // Unter php-fpm ist PHP_BINARY php-fpm selbst – gebraucht wird php.
@@ -1501,15 +1683,8 @@ final class PlanTileService
         }
         $wurzel = dirname(__DIR__, 2);
         $log = $wurzel . '/storage/logs/kacheln.log';
-        $befehl = [$php, $wurzel . '/bin/power', 'plan:kacheln', '--etage=' . implode(',', $ids)];
-        if (!empty($optionen['neu'])) {
-            $befehl[] = '--neu';
-        }
-        $qualitaet = (string) ($optionen['qualitaet'] ?? '');
-        if (isset(self::QUALITAETEN[$qualitaet])) {
-            $befehl[] = '--qualitaet=' . $qualitaet;
-        }
-        $prozess = @proc_open($befehl, [0 => ['pipe', 'r'], 1 => ['file', $log, 'a'], 2 => ['file', $log, 'a']], $rohre);
+        $prozess = @proc_open([$php, $wurzel . '/bin/power', 'plan:kacheln', '--auftraege'],
+            [0 => ['pipe', 'r'], 1 => ['file', $log, 'a'], 2 => ['file', $log, 'a']], $rohre);
         if (!is_resource($prozess)) {
             Logger::info('Kacheln im Hintergrund: bin/power ließ sich nicht starten.');
             return false;
@@ -1518,6 +1693,107 @@ final class PlanTileService
         // Nicht warten: Das Kind läuft weiter, wenn diese Anfrage endet –
         // PHP räumt den Griff ohne Warten weg (waitpid mit WNOHANG).
         return true;
+    }
+
+    /**
+     * Die Aufträge abarbeiten, die angefordert sind – der älteste zuerst,
+     * jeder mit auftrag() (nie neben einem anderen Bau, nacheinander()). Das
+     * ist der Prozess im Hintergrund (`bin/power plan:kacheln --auftraege`,
+     * gestartet von arbeiterStarten()); er hält arbeiterSperre(), solange er
+     * arbeitet, ein zweiter endet sofort (null).
+     *
+     * Bevor er endet, lässt er die Sperre los und sieht noch einmal nach:
+     * Wer gerade einen Auftrag eingetragen hat, sah die Sperre noch gehalten
+     * und startete keinen eigenen Prozess – den Auftrag nimmt dieser hier
+     * dann noch mit (oder ein neuer, der die Sperre inzwischen hat).
+     * Abgelöstes über GNADE räumt er zuletzt weg; was jünger ist, bleibt für
+     * den nächsten Bau oder die Wartung – gewartet wird darauf nicht.
+     *
+     * @param (callable(string):void)|null $aus eine Zeile je Plan
+     * @param (callable(string):void)|null $warten wie bei nacheinander()
+     * @return int|null erledigte Aufträge; null, wenn schon ein anderer arbeitet
+     */
+    public static function arbeiten(?callable $aus = null, ?callable $warten = null): ?int
+    {
+        $griff = self::sperren(self::arbeiterSperre(), false);
+        if ($griff === null) {
+            return null;
+        }
+        $erledigt = 0;
+        $erledigtIn = [];
+        // Ein Auftrag, den dieser Prozess schon hatte (Nummer je Ordner) – nie zweimal.
+        $gesehen = [];
+        try {
+            while (true) {
+                $naechster = self::naechsterAuftrag($gesehen);
+                if ($naechster === null) {
+                    self::freigeben($griff);
+                    $griff = null;
+                    if (self::naechsterAuftrag($gesehen) === null || ($griff = self::sperren(self::arbeiterSperre(), false)) === null) {
+                        break;
+                    }
+                    continue;
+                }
+                [$etage, $offen, $etagen] = $naechster;
+                $ordner = self::planDir($etage);
+                $gesehen[$ordner] = (string) ($offen['nr'] ?? '');
+                $wer = $etage['site_name'] . ' / ' . implode(', ', array_map(static fn (array $e): string => (string) $e['name'], $etagen));
+                $start = microtime(true);
+                $qualitaet = (string) ($offen['qualitaet'] ?? '');
+                $ergebnis = self::auftrag($etage, !empty($offen['neu']), isset(self::QUALITAETEN[$qualitaet]) ? $qualitaet : null, null,
+                    $warten !== null ? static fn (string $satz) => $warten($wer . ': ' . $satz) : null);
+                if ($ergebnis === null) {
+                    // Den Plan rechnet gerade ein anderer Prozess (Kommandozeile) – der führt auch den Auftrag.
+                    continue;
+                }
+                // Hat auftrag() ihn nicht angefasst (kein Plan mehr, nichts zu kacheln), ist er hier zu Ende.
+                $danach = self::auftragLesen($ordner);
+                if (($danach['zustand'] ?? '') === 'angefordert' && (string) ($danach['nr'] ?? '') === $gesehen[$ordner]) {
+                    self::auftragSchreiben($ordner, ['zustand' => 'fehler', 'ende' => gmdate('c'), 'meldung' => self::ohnePfade((string) $ergebnis['message'])] + $danach);
+                }
+                $erledigt++;
+                $erledigtIn[$ordner] = true;
+                if ($aus !== null) {
+                    $aus($wer . ': ' . $ergebnis['message'] . sprintf(' (%.0f s)', microtime(true) - $start));
+                }
+            }
+        } finally {
+            self::freigeben($griff);
+        }
+        foreach (array_keys($erledigtIn) as $ordner) {
+            self::abgeloesteWeg($ordner);
+        }
+        return $erledigt;
+    }
+
+    /**
+     * Der älteste angeforderte Auftrag, den gerade keiner rechnet – mit
+     * seiner Etage und allen Etagen, die sich die Pyramide teilen. Aus der
+     * Datenbank: ein Auftrag im Ordner einer gelöschten Etage zählt nicht.
+     *
+     * @param array<string,string> $gesehen Ordner => Nummer des Auftrags, den der Prozess schon hatte
+     * @return array{0:array,1:array,2:list<array>}|null
+     */
+    private static function naechsterAuftrag(array $gesehen): ?array
+    {
+        $plaene = [];
+        foreach (SiteService::allFloors() as $etage) {
+            if ((string) $etage['plan_file'] !== '') {
+                $plaene[self::planDir($etage)][] = $etage;
+            }
+        }
+        $bester = null;
+        foreach ($plaene as $ordner => $etagen) {
+            $auftrag = self::auftragLesen($ordner);
+            if (($auftrag['zustand'] ?? '') !== 'angefordert' || self::gehalten($ordner . '/.auftrag')
+                || (isset($gesehen[$ordner]) && $gesehen[$ordner] === (string) ($auftrag['nr'] ?? ''))) {
+                continue;
+            }
+            if ($bester === null || strcmp((string) ($auftrag['angefordert'] ?? ''), (string) ($bester[1]['angefordert'] ?? '')) < 0) {
+                $bester = [$etagen[0], $auftrag, $etagen];
+            }
+        }
+        return $bester;
     }
 
     // -------------------------------------------------------------- Aufträge
@@ -1562,6 +1838,9 @@ final class PlanTileService
             $zustand = 'laeuft';
         } elseif (self::gehalten($ordner . '/.auftrag')) {
             $zustand = $roh === 'laeuft' ? 'laeuft' : 'wartet';
+        } elseif ($roh === 'angefordert' && self::gehalten(self::arbeiterSperre())) {
+            // Der Prozess im Hintergrund lebt und nimmt ihn mit (arbeiten()), so lange es dauert.
+            $zustand = 'wartet';
         } elseif ($roh === 'angefordert' && time() - $angefordert <= self::ANGEFORDERT_FRIST) {
             $zustand = 'angefordert';
         } elseif (in_array($roh, self::OFFEN, true)) {
@@ -1624,21 +1903,20 @@ final class PlanTileService
     }
 
     /**
-     * „Plan neu rechnen“ anstoßen – für den Knopf in der Oberfläche
-     * (KarteController::planNeuRechnen). Gerechnet wird nicht hier: Der
-     * Auftrag kommt nach .auftrag.json, ein eigener Prozess rechnet ihn
-     * (imHintergrund() → auftrag()), und die Anfrage ist sofort zurück.
-     * Läuft für den Plan schon etwas – ein Auftrag, ein Upload, die
-     * Wartung –, bleibt es dabei: 'neu' ist dann false.
+     * Einen Auftrag für den Plan dieser Etage eintragen (.auftrag.json,
+     * „angefordert“) – für den Prozess im Hintergrund (arbeiten()). Läuft
+     * für den Plan schon etwas – ein Auftrag, ein Upload, die Wartung –,
+     * bleibt es dabei: 'neu' ist dann false.
      *
      * .anfrage hält nur den Augenblick zwischen Nachsehen und Eintragen:
      * Zwei Klicks zugleich ergeben einen Auftrag. Losgelassen wird sie vor
      * dem Start des Prozesses – er soll sie nicht erben.
      *
+     * @param bool $neu vorhandene Kacheln neu rechnen (sonst nur, was fehlt)
      * @param ?string $qualitaet eine der QUALITAETEN; null: die der vorhandenen Pyramide
-     * @return array{ok:bool,neu:bool,message:string}
+     * @return array{ok:bool,neu:bool,message:string,auftrag?:array}
      */
-    public static function neuRechnenAnfordern(array $floor, ?string $qualitaet = null): array
+    public static function auftragEintragen(array $floor, bool $neu, ?string $qualitaet = null): array
     {
         if (SiteService::planPath($floor) === null) {
             return ['ok' => false, 'neu' => false, 'message' => 'Kein Grundriss hinterlegt.'];
@@ -1660,6 +1938,8 @@ final class PlanTileService
             $meta = self::meta($floor);
             $auftrag = [
                 'zustand'        => 'angefordert',
+                'nr'             => bin2hex(random_bytes(6)),
+                'neu'            => $neu,
                 'qualitaet'      => $qualitaet,
                 'angefordert'    => gmdate('c'),
                 'beginn'         => null,
@@ -1676,13 +1956,33 @@ final class PlanTileService
         } finally {
             self::freigeben($anfrage);
         }
+        return ['ok' => true, 'neu' => true, 'message' => '', 'auftrag' => $auftrag];
+    }
 
-        if (!self::imHintergrund([(int) $floor['id']], ['neu' => true, 'qualitaet' => $qualitaet])) {
+    /**
+     * „Plan neu rechnen“ anstoßen – für den Knopf in der Oberfläche
+     * (KarteController::planNeuRechnen). Gerechnet wird nicht hier: Der
+     * Auftrag kommt nach .auftrag.json (auftragEintragen()), der Prozess im
+     * Hintergrund rechnet ihn (arbeiterStarten() → arbeiten() → auftrag()),
+     * und die Anfrage ist sofort zurück.
+     *
+     * @param ?string $qualitaet eine der QUALITAETEN; null: die der vorhandenen Pyramide
+     * @return array{ok:bool,neu:bool,message:string}
+     */
+    public static function neuRechnenAnfordern(array $floor, ?string $qualitaet = null): array
+    {
+        $eingetragen = self::auftragEintragen($floor, true, $qualitaet);
+        if (!$eingetragen['neu']) {
+            return $eingetragen;
+        }
+        $meta = self::meta($floor);
+        if (!self::arbeiterStarten()) {
+            $auftrag = (array) $eingetragen['auftrag'];
             $auftrag['zustand'] = 'fehler';
             $auftrag['ende'] = gmdate('c');
             $auftrag['meldung'] = 'Der Server konnte dafür keinen eigenen Prozess starten (php für die Kommandozeile fehlt?). '
                 . 'Von Hand: bin/power plan:kacheln --neu --etage=' . (int) $floor['id'];
-            self::auftragSchreiben($ordner, $auftrag);
+            self::auftragSchreiben(self::planDir($floor), $auftrag);
             return ['ok' => false, 'neu' => false, 'message' => $auftrag['meldung']];
         }
         return ['ok' => true, 'neu' => true, 'message' => 'Der Plan wird im Hintergrund neu gerechnet'
@@ -1725,15 +2025,15 @@ final class PlanTileService
         }
         try {
             $vorher = self::meta($floor);
-            $offen = self::auftragLesen($ordner);
-            if (!in_array($offen['zustand'] ?? '', self::OFFEN, true)) {
-                $offen = null;
-            }
+            $gewesen = self::auftragLesen($ordner);
+            $offen = in_array($gewesen['zustand'] ?? '', self::OFFEN, true) ? $gewesen : null;
             // Ohne Angabe die aus der Anforderung (Oberfläche), sonst die der vorhandenen Pyramide (bauen()).
             $verlangt = (string) ($offen['qualitaet'] ?? '');
             $qualitaet ??= isset(self::QUALITAETEN[$verlangt]) ? $verlangt : null;
             $auftrag = [
                 'zustand'        => 'wartet',
+                'nr'             => is_string($offen['nr'] ?? null) ? $offen['nr'] : bin2hex(random_bytes(6)),
+                'neu'            => $neu,
                 'qualitaet'      => $qualitaet,
                 'angefordert'    => is_string($offen['angefordert'] ?? null) ? $offen['angefordert'] : gmdate('c'),
                 'beginn'         => null,
@@ -1756,7 +2056,16 @@ final class PlanTileService
                     return ['ok' => false, 'message' => 'Den Plan gibt es nicht mehr – die Etage wurde gelöscht oder hat einen anderen bekommen.', 'kacheln' => 0, 'meta' => null];
                 }
                 return self::bauen($jetzt, $neu, true, $bis, $qualitaet);
-            }, $warten, $bis) ?? ['ok' => false, 'abgebrochen' => true, 'kacheln' => 0, 'meta' => null,
+            }, $warten, $bis);
+
+            if ($ergebnis === null && $offen === null) {
+                // Die Frist war um, bevor der Plan an der Reihe war, und verlangt hatte ihn keiner (die Wartung):
+                // Gerechnet wurde nichts – es bleibt beim vorigen Zustand, die nächste Nacht versucht es wieder.
+                $gewesen !== null ? self::auftragSchreiben($ordner, $gewesen) : @unlink($ordner . '/.auftrag.json');
+                return ['ok' => false, 'abgebrochen' => true, 'kacheln' => 0, 'meta' => null, 'umgeschaltet' => false,
+                    'message' => 'Die Zeit war um, bevor der Plan an der Reihe war.'];
+            }
+            $ergebnis ??= ['ok' => false, 'abgebrochen' => true, 'kacheln' => 0, 'meta' => null,
                 'message' => 'Die Zeit war um, bevor der Plan an der Reihe war – den Rest rechnet die nächtliche Wartung.'];
 
             $nachher = self::meta($floor);
@@ -1764,11 +2073,17 @@ final class PlanTileService
             $auftrag['ende'] = gmdate('c');
             $auftrag['meldung'] = self::ohnePfade((string) $ergebnis['message']);
             $auftrag['stand'] = $nachher !== null ? self::stand($nachher) : null;
+            if (!empty($ergebnis['abgebrochen']) && $offen === null && $bis !== null) {
+                // Abgebrochen an der Frist der Wartung, nicht gestorben: kein Fall für fehlendeNachrechnen() –
+                // veralteteNachrechnen() versucht es wieder, wenn die Zeit dafür reicht.
+                $auftrag['frist'] = true;
+                $auftrag['meldung'] = 'Die Zeit der nächtlichen Wartung war um, bevor der Plan fertig war – sie rechnet ihn in einer der nächsten Nächte.';
+            }
             // Ist der Ordner weg (Etage gelöscht), entsteht er hier nicht neu.
             if (is_dir($ordner)) {
                 self::auftragSchreiben($ordner, $auftrag);
             }
-            // Umgeschaltet heißt hier: Es gibt eine abgelöste Fassung (für den Aufrufer, der nach GNADE aufräumt).
+            // Umgeschaltet heißt hier: Es gibt jetzt eine abgelöste Fassung.
             return $ergebnis + ['umgeschaltet' => $auftrag['stand'] !== null && $auftrag['stand_vorher'] !== null && $auftrag['stand'] !== $auftrag['stand_vorher']];
         } finally {
             self::freigeben($griff);
@@ -1804,7 +2119,9 @@ final class PlanTileService
             $gesehen[$ordner] = true;
             $fehlt = self::meta($etage) === null;
             $zustand = self::zustand($etage);
-            if ((!$fehlt && $zustand['zustand'] !== 'abgebrochen') || in_array($zustand['zustand'], self::OFFEN, true) || !self::lohnt($pfad)) {
+            // An der Frist der Wartung abgebrochen ist nicht gestorben: Das holt veralteteNachrechnen() mit seinem Budget nach.
+            $frist = !empty(self::auftragLesen($ordner)['frist']);
+            if ((!$fehlt && ($zustand['zustand'] !== 'abgebrochen' || $frist)) || in_array($zustand['zustand'], self::OFFEN, true) || !self::lohnt($pfad)) {
                 continue;
             }
             $ergebnis = self::auftrag($etage, !$fehlt, $zustand['zustand'] === 'abgebrochen' ? $zustand['qualitaet'] : null);
@@ -1827,11 +2144,16 @@ final class PlanTileService
      *
      * Einzeln und nur, solange $budget (Sekunden) reicht: die schnellsten
      * zuerst, geschätzt aus der Dauer des letzten Baus (schärfer gerechnet
-     * gemessen rund das Dreieinhalbfache, höchstens ZEITBUDGET). Jeder Plan
-     * holt sich nacheinander() für sich – ein „Plan neu rechnen“ aus der
-     * Oberfläche kommt so dazwischen, statt hinter allen zu warten. Ein Plan,
-     * an dem diese Fassung schon gescheitert ist, wird nicht jede Nacht
-     * wieder versucht. Was bleibt, sagt die letzte Zeile („Noch N …“).
+     * gemessen rund das Dreieinhalbfache, höchstens ZEITBUDGET). Die Frist
+     * gilt auch beim Warten auf einen anderen Bau und im Bau selbst
+     * (auftrag() mit $bis): Gemessen dauerte `--veraltet --bis=40` vorher
+     * 175 s, 84 davon hinter einem Bau aus der Oberfläche. Bricht ein Plan
+     * an der Frist ab, bleibt der bisherige; geschätzt wird er danach mit
+     * ZEITBUDGET. Jeder Plan holt sich nacheinander() für sich – ein „Plan
+     * neu rechnen“ aus der Oberfläche kommt so dazwischen, statt hinter allen
+     * zu warten. Ein Plan, an dem diese Fassung schon gescheitert ist, wird
+     * nicht jede Nacht wieder versucht. Was bleibt, sagt die letzte Zeile
+     * („Noch N …“).
      *
      * @param (callable(string):void)|null $warten wie bei nacheinander()
      * @return list<string>
@@ -1858,9 +2180,12 @@ final class PlanTileService
                 $noch++;
                 continue;
             }
-            $faellig[] = ['etage' => $etage, 'schaetzung' => (int) min(self::ZEITBUDGET, max(30, 3.5 * (int) ($meta['dauer_ms'] ?? 0) / 1000))];
+            $faellig[] = ['etage' => $etage, 'schaetzung' => !empty($auftrag['frist']) && (int) ($auftrag['fassung_ziel'] ?? 0) >= self::FASSUNG
+                ? self::ZEITBUDGET
+                : (int) min(self::ZEITBUDGET, max(10, 3.5 * (int) ($meta['dauer_ms'] ?? 0) / 1000))];
         }
         usort($faellig, static fn (array $a, array $b): int => $a['schaetzung'] <=> $b['schaetzung']);
+        $bis = $budget < PHP_INT_MAX ? $start + $budget : null;
 
         $meldungen = [];
         foreach ($faellig as ['etage' => $etage, 'schaetzung' => $schaetzung]) {
@@ -1868,13 +2193,16 @@ final class PlanTileService
                 $noch++;
                 continue;
             }
-            $ergebnis = self::auftrag($etage, true, null, null, $warten);
+            $ergebnis = self::auftrag($etage, true, null, $bis, $warten);
             if ($ergebnis === null || !$ergebnis['ok']) {
                 $noch++;
             }
             if ($ergebnis !== null) {
-                $meldungen[] = ($ergebnis['ok'] ? 'Kacheln neu gerechnet (ältere Fassung): ' : 'Neu rechnen gescheitert (der bisherige Plan bleibt): ')
-                    . $etage['site_name'] . ' / ' . $etage['name'] . ' – ' . $ergebnis['message'];
+                $meldungen[] = match (true) {
+                    $ergebnis['ok']                  => 'Kacheln neu gerechnet (ältere Fassung): ',
+                    !empty($ergebnis['abgebrochen']) => 'Neu rechnen abgebrochen, die Zeit war um (der bisherige Plan bleibt): ',
+                    default                          => 'Neu rechnen gescheitert (der bisherige Plan bleibt): ',
+                } . $etage['site_name'] . ' / ' . $etage['name'] . ' – ' . $ergebnis['message'];
             }
         }
         if ($noch > 0) {
@@ -1891,8 +2219,10 @@ final class PlanTileService
     }
 
     /**
-     * $arbeit rechnen, aber nie neben einem anderen Bau im Hintergrund – für
-     * bin/power plan:kacheln (so rechnet imHintergrund()) und die Wartung.
+     * $arbeit rechnen, aber nie neben einem anderen Bau – für den Prozess im
+     * Hintergrund (auftrag(), arbeiten()), den Upload (SiteService, der nicht
+     * wartet, sondern dann an den Hintergrund gibt), bin/power plan:kacheln
+     * und die Wartung.
      *
      * Jeder Bau eines großen Plans hält gemessen 175–200 MB im PHP-Prozess
      * (gd außerhalb von memory_limit, auf der Kommandozeile ohnehin ohne
@@ -2093,7 +2423,7 @@ final class PlanTileService
      */
     public static function zeilenJeStreifen(int $breite, int $zeilen): int
     {
-        $je = max(1, intdiv(self::STREIFEN_PIXEL, max(1, $breite) * self::KACHEL));
+        $je = max(1, intdiv((int) self::grenze('streifen_pixel', self::STREIFEN_PIXEL), max(1, $breite) * self::KACHEL));
         return $zeilen > 2 ? max(1, min($je, $zeilen - 2)) : 1;
     }
 
@@ -2156,6 +2486,7 @@ final class PlanTileService
         $zeilen  = (int) ceil($oben[1] / 2);
         $anzahl  = 0;
         for ($x = 0; $x < $spalten; $x++) {
+            self::plattePruefen($ordner);
             for ($y = 0; $y < $zeilen; $y++) {
                 $gross = self::leer($format, self::KACHEL * 2);
                 imagealphablending($gross, false);
@@ -2431,6 +2762,11 @@ final class PlanTileService
                 return null;
             }
             $ordner = $planOrdner . '/v' . $stand;
+            // Nur eine abgelöste Fassung, und nur GNADE Sekunden lang – ganz gleich, wann sie weggeräumt wird.
+            $seit = @filemtime($ordner . '/.abgeloest');
+            if ($seit === false || time() - $seit > self::GNADE) {
+                return null;
+            }
             $meta = self::jsonLesen($ordner . '/kacheln.json');
             if ($meta === null || !isset($meta['max_zoom'])) {
                 return null;
@@ -2579,11 +2915,13 @@ final class PlanTileService
         }
         $zustand = self::zustand($floor);
         if ($meta === null) {
+            // Ein PDF ohne Kacheln, sobald poppler da ist; ein Bild, wenn es Kacheln bekäme (lohnt(), liest nur den Kopf) –
+            // etwa weil sein Bau im Hintergrund starb.
             $pdf = strtolower(pathinfo($pfad, PATHINFO_EXTENSION)) === 'pdf';
-            if (!$pdf && $zustand['zustand'] === 'keiner') {
+            $rechenbar = $pdf ? extension_loaded('gd') && PdfRasterService::verfuegbar() : self::lohnt($pfad);
+            if (!$pdf && !$rechenbar && $zustand['zustand'] === 'keiner') {
                 return null;
             }
-            $rechenbar = $pdf && extension_loaded('gd') && PdfRasterService::verfuegbar();
         } else {
             $rechenbar = extension_loaded('gd');
         }
@@ -2699,7 +3037,13 @@ final class PlanTileService
             ] + self::gerechnet($meta) + self::neuRechnen($floor, $meta, extension_loaded('gd'));
         }
 
-        return [
+        /*
+         * Ein Bild ohne Kacheln kommt am Stück. Bekäme es welche (lohnt():
+         * nur der Kopf der Datei) – ein großer Plan, dessen Bau im
+         * Hintergrund starb –, gibt es dafür „Plan aufbereiten“; sonst
+         * stand bis zur nächsten Nacht das ganze Bild in der Karte.
+         */
+        $bild = [
             'art'        => 'bild',
             'url'        => $url,
             'breite'     => $masse['breite'],
@@ -2711,5 +3055,6 @@ final class PlanTileService
             'kachel_url' => null,
             'kachel'     => self::KACHEL,
         ];
+        return $ext === 'svg' ? $bild : $bild + self::neuRechnen($floor, null, self::lohnt($pfad));
     }
 }

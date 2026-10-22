@@ -9,7 +9,9 @@
  * Kacheln ungestreckt bleiben und wo ihre Ecken auf dem Bildschirm landen
  * – gegen die Stelle, an die Leaflet einen Marker auf denselben Planpunkt
  * setzt. Dazu animiertes Zoomen über mehrere Stufen (dort reicht Leaflet
- * eine schon berechnete Stufe weiter).
+ * eine schon berechnete Stufe weiter), das Umsteigen auf eine neu gerechnete
+ * Pyramide und der gemerkte Ausschnitt nach „Neu laden“ (gleich groß, auch
+ * wenn der Plan danach andere Pixel und eine andere oberste Stufe hat).
  *
  * Aufruf: node tests/hilfen/plan-kacheln.cjs public/assets/vendor/leaflet/leaflet.js public/assets/js/module/plan-karte.js
  */
@@ -127,14 +129,14 @@ async function main() {
 
     // Ein A0-Plan wie vom Server: 16 772 × 11 924 Pixel, sieben Stufen.
     const plan = { breite: 16772, hoehe: 11924, maxZoom: 7, stand: '0123456789ab' };
-    const neueKarte = async (dichte, breite, hoehe) => {
+    const neueKarte = async (dichte, breite, hoehe, p = plan) => {
         fenster.devicePixelRatio = dichte;
         const el = new Knoten('div');
         el.clientWidth = breite;
         el.clientHeight = hoehe;
         el.dataset = {
-            planArt: 'kacheln', planUrl: '/grundriss/7/datei', planBreite: String(plan.breite), planHoehe: String(plan.hoehe),
-            planSeite: '1', planMaxZoom: String(plan.maxZoom), planKachelUrl: '/grundriss/7/kachel/{z}/{x}/{y}?v=' + plan.stand,
+            planArt: 'kacheln', planUrl: '/grundriss/7/datei', planBreite: String(p.breite), planHoehe: String(p.hoehe),
+            planSeite: '1', planMaxZoom: String(p.maxZoom), planKachelUrl: '/grundriss/7/kachel/{z}/{x}/{y}?v=' + p.stand,
             planKachel: '256', planZusatz: '2',
         };
         const karte = await modul.planKarte(el, {});
@@ -241,6 +243,36 @@ async function main() {
             punktGleich: Math.abs(vorher.x - nachher.x) < 1e-6 && Math.abs(vorher.y - nachher.y) < 1e-6,
             adressen: kacheln.length > 0 && kacheln.every((k) => k.el.src.endsWith('?v=' + stand)),
         };
+    }
+
+    /*
+     * „Neu laden“ nach dem Neurechnen (karte.ansicht() vor, ansichtSetzen()
+     * nach dem Laden): Der Plan steht danach gleich groß und an derselben
+     * Stelle – auch wenn er andere Pixel und eine andere oberste Stufe hat.
+     * Gemerkt war vorher die Zoomstufe über der obersten Stufe: Ein A3-PDF
+     * aus dem Browser (842 Punkt, Stufe 2) kam als Kacheln (4 210 Pixel,
+     * Stufe 5) fünfmal so groß zurück, fein → standard (25 000 → 20 480
+     * Pixel, beide Stufe 7) auf 0,82.
+     */
+    {
+        const breiteAufSchirm = (map, karte) => map.latLngToContainerPoint(karte.zuLatLng(100, 50)).x - map.latLngToContainerPoint(karte.zuLatLng(0, 50)).x;
+        ergebnis.neuLaden = [];
+        for (const [vorher, nachher, zoom] of [
+            [{ breite: 842, hoehe: 595, maxZoom: 2, stand: '' }, { breite: 4210, hoehe: 2975, maxZoom: 5, stand: 'aaaaaaaaaaaa' }, 1.95],
+            [{ breite: 25000, hoehe: 17678, maxZoom: 7, stand: 'bbbbbbbbbbbb' }, { breite: 20480, hoehe: 14482, maxZoom: 7, stand: 'cccccccccccc' }, 5.3],
+            [{ breite: 9960, hoehe: 5019, maxZoom: 6, stand: 'dddddddddddd' }, { breite: 19922, hoehe: 10039, maxZoom: 7, stand: 'eeeeeeeeeeee' }, 4.4],
+        ]) {
+            const alt = await neueKarte(2, 820, 1180, vorher);
+            alt.map.setView(alt.karte.zuLatLng(37, 61), zoom, { animate: false });
+            const gemerkt = JSON.parse(JSON.stringify(alt.karte.ansicht()));
+            const soGross = breiteAufSchirm(alt.map, alt.karte);
+            const neu = await neueKarte(2, 820, 1180, nachher);
+            const gesetzt = neu.karte.ansichtSetzen(gemerkt);
+            const mitte = neu.map.latLngToContainerPoint(neu.karte.zuLatLng(gemerkt.x, gemerkt.y));
+            ergebnis.neuLaden.push({ gesetzt, faktor: +(breiteAufSchirm(neu.map, neu.karte) / soGross).toFixed(4),
+                mitteVersatz: +Math.max(Math.abs(mitte.x - 410), Math.abs(mitte.y - 590)).toFixed(3) });
+        }
+        ergebnis.neuLadenOhne = (await neueKarte(1, 800, 600)).karte.ansichtSetzen(null);
     }
 
     // Die Rechnung selbst

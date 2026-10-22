@@ -158,7 +158,9 @@ export function planNeuPanel(ziel, plan, zustand, senden) {
     ziel.replaceChildren();
     ziel.appendChild(knoten('h2', '', aufbereiten ? 'Plan aufbereiten' : 'Plan neu rechnen'));
     ziel.appendChild(knoten('p', 'small muted', aufbereiten
-        ? 'Der Server rechnet den Grundriss im Hintergrund in Kacheln. Bis dahin zeichnet der Browser den Plan selbst.'
+        ? 'Der Server rechnet den Grundriss im Hintergrund in Kacheln. ' + (plan.art === 'bild'
+            ? 'Bis dahin lädt die Karte das ganze Bild auf einmal (langsamer, am Telefon viel Speicher).'
+            : 'Bis dahin zeichnet der Browser den Plan selbst.')
         : 'Der Server rechnet den Grundriss im Hintergrund noch einmal in Kacheln. Die Karte bleibt so lange benutzbar '
             + 'und zeigt danach den neuen Plan – geht etwas schief, bleibt der bisherige.'));
 

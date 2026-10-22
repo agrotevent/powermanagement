@@ -1376,11 +1376,10 @@ function kachelFehlt() {
     planAbfrage.einmal();
 }
 
-/** Ausschnitt merken – nach dem Neuladen steht die Karte wieder dort (Mitte in Prozent, Zoom über der obersten Stufe). */
+/** Ausschnitt merken – nach dem Neuladen steht die Karte wieder dort, gleich groß (karte.ansicht()). */
 function ansichtMerken() {
     try {
-        const mitte = karte.zuProzent(map.getCenter());
-        sessionStorage.setItem('pm-karte-ansicht-' + etage, JSON.stringify({ x: mitte.x, y: mitte.y, dz: map.getZoom() - karte.quelle.maxZoom }));
+        sessionStorage.setItem('pm-karte-ansicht-' + etage, JSON.stringify(karte.ansicht()));
     } catch (e) { /* ohne sessionStorage eben die Übersicht */ }
 }
 
@@ -1470,9 +1469,7 @@ PM.liveNeu = liveLaden;
 try {
     const gemerkt = JSON.parse(sessionStorage.getItem('pm-karte-ansicht-' + etage) || 'null');
     sessionStorage.removeItem('pm-karte-ansicht-' + etage);
-    if (gemerkt && Number.isFinite(gemerkt.x) && Number.isFinite(gemerkt.y) && Number.isFinite(gemerkt.dz)) {
-        map.setView(karte.zuLatLng(gemerkt.x, gemerkt.y), karte.quelle.maxZoom + gemerkt.dz, { animate: false });
-    }
+    karte.ansichtSetzen(gemerkt);
 } catch (e) { /* ohne sessionStorage: die Übersicht */ }
 // Wird gerade gerechnet (auch von jemand anderem angestoßen): gleich nachfragen.
 if (planNeu.OFFEN.includes(planZustand.zustand)) {

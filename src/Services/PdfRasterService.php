@@ -48,6 +48,27 @@ final class PdfRasterService
      */
     public const KANTE = 6144;
 
+    /**
+     * So viel Adressraum bekommt pdftoppm höchstens (Bytes, über prlimit).
+     *
+     * Was poppler braucht, hängt nicht nur an der Fläche, die gerechnet
+     * wird: Ein progressives JPEG im PDF packt es bei jedem Aufruf ganz aus
+     * – gemessen 695 MB für einen Scan mit 139 Megapixeln, wo ein
+     * Grundlinien-JPEG 297 MB brauchte. Zwei davon nebeneinander sprengten
+     * einen Container mit 2 GB. Mit der Grenze scheitert so ein Aufruf,
+     * statt den OOM-Killer zu rufen; ein Vektorplan bleibt bei 70–80 MB,
+     * ein Bild bis MAX_BILDPIXEL bei rund 300 MB.
+     */
+    public const SPEICHER = 1024 * 1024 * 1024;
+
+    /**
+     * So meldet poppler zu wenig Speicher. Vorsicht: Mit diesem Satz auf
+     * stderr endet pdftoppm trotzdem mit 0 und liefert einen weißen Streifen
+     * (gemessen Helligkeit 255 statt 221) – ein Bau schaltete sonst auf
+     * einen leeren Plan um.
+     */
+    private const SPEICHER_FEHLT = '/out of memory|bad_alloc|cannot allocate memory|bogus memory allocation/i';
+
 
     /**
      * Welches Werkzeug rastert hier PDF – und wenn keines, warum nicht.
@@ -109,9 +130,11 @@ final class PdfRasterService
      * genau dieser Fall – der Aufrufer muss ihn verwerfen.
      *
      * 'zeit' ist true, wenn poppler die Zeitgrenze überschritten hat – ein
-     * niedrigerer Streifen kann dann noch gehen.
+     * niedrigerer Streifen kann dann noch gehen. 'speicher' ist true, wenn
+     * poppler mit SPEICHER nicht auskam – eine kleinere Seite kann dann noch
+     * gehen.
      *
-     * @return array{ok:bool,pfad:?string,breite:int,hoehe:int,message:string,zeit?:bool}
+     * @return array{ok:bool,pfad:?string,breite:int,hoehe:int,message:string,zeit?:bool,speicher?:bool}
      */
     public static function streifen(
         string $pdf,
@@ -126,7 +149,10 @@ final class PdfRasterService
             return ['ok' => false, 'pfad' => null, 'breite' => 0, 'hoehe' => 0, 'message' => $w['hinweis']];
         }
 
+        // Mit harter Speichergrenze (SPEICHER), wenn prlimit da ist (util-linux, auf Debian immer).
+        $prlimit = Programm::finden('prlimit', ['--version']);
         $argumente = [
+            ...($prlimit !== null ? [$prlimit, '--as=' . self::SPEICHER, '--'] : []),
             $w['pfad'],
             '-f', (string) $seite,
             '-l', (string) $seite,
@@ -145,7 +171,9 @@ final class PdfRasterService
 
         $ergebnis = self::starten($argumente);
         if (!$ergebnis['ok']) {
-            return ['ok' => false, 'pfad' => null, 'breite' => 0, 'hoehe' => 0, 'message' => $ergebnis['message'], 'zeit' => !empty($ergebnis['zeit'])];
+            self::aufraeumen($zielOhneEndung);
+            return ['ok' => false, 'pfad' => null, 'breite' => 0, 'hoehe' => 0, 'message' => $ergebnis['message'],
+                'zeit' => !empty($ergebnis['zeit']), 'speicher' => !empty($ergebnis['speicher'])];
         }
 
         // poppler hängt die Seitennummer an: ziel-1.png, ziel-01.png, …
@@ -408,12 +436,17 @@ final class PdfRasterService
         fclose($rohre[2]);
         proc_close($prozess);
 
-        if ($rc !== 0) {
+        // Zu wenig Speicher ist ein Fehler, auch wenn poppler mit 0 endet (siehe SPEICHER_FEHLT).
+        $speicher = preg_match(self::SPEICHER_FEHLT, $fehler) === 1;
+        if ($rc !== 0 || $speicher) {
             Logger::info('PDF-Rastern fehlgeschlagen (rc=' . $rc . '): ' . trim($fehler));
             return [
-                'ok'      => false,
-                'ausgabe' => $ausgabe,
-                'message' => trim($fehler) !== '' ? trim($fehler) : 'Rückgabewert ' . $rc,
+                'ok'       => false,
+                'ausgabe'  => $ausgabe,
+                'speicher' => $speicher,
+                'message'  => $speicher
+                    ? 'poppler kam mit ' . intdiv(self::SPEICHER, 1024 * 1024) . ' MB Speicher nicht aus („' . trim((string) strtok(trim($fehler), "\n")) . '“).'
+                    : (trim($fehler) !== '' ? trim($fehler) : 'Rückgabewert ' . $rc),
             ];
         }
 

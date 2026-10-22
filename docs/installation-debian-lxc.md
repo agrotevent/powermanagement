@@ -847,40 +847,53 @@ gilt je Lesevorgang, nicht für die ganze Datei – auch eine langsame Leitung
 kommt durch, solange Daten fließen. PHP bekommt den Körper erst danach
 (`max_input_time` 120 s reicht für das Lesen über den Socket). Danach
 kachelt der Upload höchstens rund 30 Sekunden selbst und antwortet; was
-dann noch fehlt (ein Vektorplan mit 100 MB braucht gemessen gut drei
+dann noch fehlt (ein Vektorplan mit 100 MB braucht gemessen gut vier
 Minuten, ein eingescannter mit 90 MB gut eineinhalb, ein PDF mit 60 Seiten
-länger), rechnet ein eigener Prozess
-(`bin/power plan:kacheln --etage=…`, Protokoll in
+länger), rechnet **ein** Prozess im Hintergrund
+(`bin/power plan:kacheln --auftraege`, Protokoll in
 `storage/logs/kacheln.log`). Pläne aus dem Location-Abgleich, von einer
-anderen Instanz oder aus einem angenommenen Vorschlag rechnet immer dieser
-Prozess – die Anfrage selbst wartet nicht darauf. Solche Prozesse rechnen
-**nacheinander**, nie zwei Pläne zugleich (jeder hält bei einem großen Plan
-175–200 MB, dazu pdftoppm mit 70–80 MB, mit eingebettetem Scan bis
-300 MB); wer warten muss, sagt es im Protokoll. Würde ein Plan länger als
-15 Minuten rechnen oder die Platte nicht reichen (gebraucht wird das
-Dreifache der erwarteten Kacheln), rechnet der Server ihn kleiner. Bricht
+anderen Instanz oder aus einem angenommenen Vorschlag und „Plan neu
+rechnen“ gehen als Auftrag an denselben Prozess – die Anfrage selbst wartet
+nicht darauf, und es gibt nie mehr als einen davon, wie viele Aufträge auch
+anstehen. Gerechnet wird **nacheinander**, nie zwei Pläne zugleich (ein Bau
+hält bei einem großen Plan 175–200 MB, dazu pdftoppm mit 70–80 MB, mit
+eingebettetem Scan bis 300 MB); rechnet gerade einer, kachelt auch der
+Upload nicht daneben, sondern gibt seinen Plan gleich an den Hintergrund.
+pdftoppm bekommt höchstens 1 GB Adressraum (`prlimit`, aus util-linux): Ein
+progressives JPEG im PDF braucht ein Mehrfaches (gemessen 695 MB für einen
+Scan mit 139 Megapixeln) – reicht das nicht, wird kleiner gerechnet oder der
+Plan bleibt, wie er war. Würde ein Plan länger als 15 Minuten rechnen oder
+die Platte nicht reichen (gebraucht wird das Dreifache der erwarteten
+Kacheln, je Kachel mindestens ein Block von 4 KB), rechnet der Server ihn
+kleiner. Bleiben weniger als 256 MB frei, rechnet kein Plan weiter –
+Datenbank und InfluxDB brauchen den Platz; der bisherige Plan bleibt. Bricht
 einer ab – etwa weil php-fpm beim Update neu startet –, holt die
 nächtliche Wartung es nach und räumt seine Zwischendateien weg.
 
 Platte: Ein PDF bekommt seit Fassung 2 der Kacheln bis 200 Megapixel
 (vorher 50) – gemessen 4,5 MB für einen leichten A0-Plan, 7 MB für einen
 Geländeplan, 24 MB für einen schweren Vektorplan, 30–35 MB für einen
-eingescannten Plan. Ältere Pläne bleiben, wie sie sind; schärfer rechnet
-sie **Plan neu rechnen** in der Karte, `bin/power plan:kacheln --veraltet`
-oder Nacht für Nacht die Wartung.
+eingescannten Plan; belegt sind wegen der vielen kleinen Dateien (je
+mindestens ein Block von 4 KB) mehr, gemessen 17 statt 4,5 MB und 36 statt
+24 MB. Seit Fassung 3 rechnet poppler auch die Stufe direkt unter der
+obersten selbst, statt sie zu mitteln (Linien und Schrift auf der
+gewöhnlichen Lesestufe so kräftig wie im PDF). Ältere Pläne bleiben, wie sie
+sind; schärfer rechnet sie **Plan neu rechnen** in der Karte,
+`bin/power plan:kacheln --veraltet` oder Nacht für Nacht die Wartung.
 
 Neu rechnen: Gerechnet wird nie in den Ordner, aus dem die Karte liest.
 Jeder Plan hat unter `storage/plans/kacheln/<plan>/` einen Zeiger
 `kacheln.json` auf seine aktive Fassung `v<stand>/`; gebaut wird daneben in
 `v<stand>.bau/`, eingesetzt erst, wenn alles fertig ist (ein `rename`).
 Während des Neubaus braucht ein Plan also kurz doppelt so viel Platz; die
-abgelöste Fassung bleibt noch zwei Minuten liegen (eine Karte, die dabei
-offen war, holt so lange noch ihre Kacheln) und geht dann weg – spätestens
-mit der nächsten Wartung. Scheitert ein Neubau oder bricht er ab, bleibt
-die bisherige Fassung, wie sie war. Den Zustand eines Auftrags
-(`.auftrag.json` im selben Ordner) zeigt die Karte; der Prozess dafür ist
-`bin/power plan:kacheln --etage=… --neu` mit niedriger Priorität
-(`nice 10`), Protokoll in `storage/logs/kacheln.log`. Ältere Pyramiden
+abgelöste Fassung liefert der Server noch zwei Minuten aus (eine Karte, die
+dabei offen war, holt so lange noch ihre Kacheln), weggeräumt wird sie beim
+nächsten Bau dieses Plans oder spätestens mit der nächsten Wartung.
+Scheitert ein Neubau oder bricht er ab, bleibt die bisherige Fassung, wie
+sie war. Den Zustand eines Auftrags (`.auftrag.json` im selben Ordner)
+zeigt die Karte; der Prozess dafür ist `bin/power plan:kacheln --auftraege`
+mit niedriger Priorität (`nice 10`), Protokoll in
+`storage/logs/kacheln.log`. Ältere Pyramiden
 (Stufen direkt im Planordner) bleiben lesbar und ziehen beim nächsten Bau
 in diese Form um.
 
@@ -891,7 +904,7 @@ cd /opt/powermanagement
 runuser -u www-data -- php bin/power plan:kacheln               # fehlende
 runuser -u www-data -- php bin/power plan:kacheln --veraltet    # die einer älteren Fassung
 runuser -u www-data -- php bin/power plan:kacheln --neu --etage=12   # eine Etage neu (dazu --qualitaet=fein: PDF bis 400 Megapixel)
-runuser -u www-data -- php bin/power plan:kacheln --bis=600     # nach 10 Minuten keinen weiteren Plan beginnen
+runuser -u www-data -- php bin/power plan:kacheln --bis=600     # nach 10 Minuten aufhören (auch beim Warten und im Bau; der bisherige Plan bleibt)
 ```
 
 Holen und Hochladen über Git und das Übernehmen von einer anderen Instanz

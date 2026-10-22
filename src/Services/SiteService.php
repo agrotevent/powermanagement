@@ -401,7 +401,18 @@ final class SiteService
                 }
                 continue;
             }
-            $ergebnis = PlanTileService::bauen($etage, true, true, $bis);
+            /*
+             * Nie neben einem anderen Bau (PlanTileService::nacheinander()):
+             * Rechnet gerade einer – der Hintergrund am vorigen Upload –,
+             * wartet die Anfrage nicht, sondern gibt den Plan gleich mit in
+             * den Hintergrund. Gemessen liefen sonst bei zwei Uploads
+             * nacheinander zwei Bauten mit je 297 MB bei pdftoppm (zusammen
+             * 1 GB, mit progressivem JPEG 1,8 GB). Was keine Kacheln bekommt,
+             * sagt bauen() gleich (und warum).
+             */
+            $ergebnis = !PlanTileService::lohnt($target) ? PlanTileService::bauen($etage, true, true, $bis)
+                : PlanTileService::nacheinander(static fn (): array => PlanTileService::bauen($etage, true, true, $bis), null, microtime(true))
+                    ?? ['ok' => false, 'abgebrochen' => true, 'kacheln' => 0, 'meta' => null, 'message' => ''];
             if (!empty($ergebnis['abgebrochen'])) {
                 $spaeter[] = (int) $floorId;
             } elseif ($ergebnis['ok'] && $ergebnis['kacheln'] > 0) {

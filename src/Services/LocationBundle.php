@@ -393,7 +393,8 @@ final class LocationBundle
             return array_keys($faellig);
         }
         foreach ($faellig as $etage) {
-            PlanTileService::bauen($etage, true, false);
+            // Nie neben einem anderen Bau (Speicher) – auf der Kommandozeile darf gewartet werden.
+            PlanTileService::nacheinander(static fn (): array => PlanTileService::bauen($etage, true, false));
         }
         return [];
     }

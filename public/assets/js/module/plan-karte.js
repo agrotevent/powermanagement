@@ -313,6 +313,27 @@ export async function planKarte(el, optionen = {}) {
             return kachelLage;
         },
         /**
+         * Der Ausschnitt zum Merken (neu laden nach dem Neurechnen): die Mitte
+         * in Prozent des Plans und die Größe, in der der Plan zu sehen ist –
+         * log2 seiner Breite in CSS-Pixeln. Nicht die Zoomstufe: Nach dem
+         * Neurechnen hat der Plan andere Pixel und eine andere oberste Stufe
+         * (ein PDF aus dem Browser in Punkt, danach in Kacheln mit 5 Pixeln je
+         * Punkt) – gemessen kam die Karte mit der Zoomstufe fünfmal so groß
+         * zurück.
+         */
+        ansicht() {
+            const mitte = zuProzent(map.getCenter());
+            return { x: mitte.x, y: mitte.y, groesse: map.getZoom() - quelle.maxZoom + Math.log2(quelle.breite) };
+        },
+        /** Einen gemerkten Ausschnitt (ansicht()) wieder einnehmen – auch mit einem anders gerechneten Plan. */
+        ansichtSetzen(gemerkt) {
+            if (!gemerkt || !Number.isFinite(gemerkt.x) || !Number.isFinite(gemerkt.y) || !Number.isFinite(gemerkt.groesse)) {
+                return false;
+            }
+            map.setView(zuLatLng(gemerkt.x, gemerkt.y), gemerkt.groesse - Math.log2(quelle.breite) + quelle.maxZoom, { animate: false });
+            return true;
+        },
+        /**
          * Auf eine neu gerechnete Pyramide umsteigen, ohne die Seite neu zu
          * laden (plan: Antwort von /grundriss/<id>/kacheln/stand).
          *
