@@ -44,6 +44,13 @@ declare(strict_types=1);
  *      „über Authentik“ ohne Link/Kennwort, Abmelden über /abgemeldet, Gruppe
  *      entfernt → Sitzung zu Ende.
  *  13. Die Seiten ohne PHP-Meldung (im HTML und im Fehlerprotokoll des Servers).
+ *  14. Während eines Updates (Schreibsperre): Start, Verbinden und Bestätigen
+ *      beginnen keinen Vorgang (Hinweis); ein Rückruf schreibt nichts – auch
+ *      nicht, wenn das Update beginnt, während er wartet (dann ist er
+ *      angemeldet) –, der Vorgang ist verbraucht, danach geht es neu; das
+ *      bestätigte Kennwort fürs Verbinden bleibt; Kennwort-Anmeldung,
+ *      Abmelden, /abgemeldet und Lesen gehen; /system/sso ändert nichts (503
+ *      bzw. Hinweis).
  * Dazu: Fehlertexte des Anbieters und Angaben aus Anfragen erscheinen nur
  * maskiert.
  */
@@ -859,6 +866,181 @@ if (!\App\Auth\Sso\Kundenbereich::verfuegbar()) {
     $frisch();
     pruefe($r['status'] === 302 && !$schalter(\App\Auth\Sso\Einstellungen::KUNDEN), '12: sso.kunden wieder aus (Häkchen fehlt)');
 }
+
+// ================================================================ 14. Während eines Updates
+// Die Schreibsperre der Instanz (storage/update/ist/wartung, wie sie
+// update-debian.sh setzt): Kein SSO-Vorgang beginnt, ein Rückruf schreibt
+// nichts – auch nicht, wenn das Update erst beginnt, während er auf den
+// Anmeldedienst wartet (dann ist er angemeldet, das Update wartet auf ihn).
+// Kennwort-Anmeldung, Abmelden und Lesen bleiben wie ohne SSO; POSTs weist
+// die Sperre ab (UpdateService::wartungsSperre()).
+$upd = (string) Config::get('update.verzeichnis');
+pruefe($upd !== '' && str_starts_with($upd, $ordner . '/'), '14: storage/update der Instanz');
+@mkdir($upd . '/ist', 0700, true);
+$sperre = static function (bool $an) use ($upd): void {
+    $pfad = $upd . '/ist/wartung';
+    $an ? file_put_contents($pfad, \App\Services\UpdateService::KOPF_WARTUNG . "\nseit " . time() . "\nkennung -\n") : @unlink($pfad);
+};
+/** Alle Tabellen der Instanz (ohne die Zwischenspeicher des Anmeldedienstes) als Prüfsumme. */
+$stand = static function (): string {
+    $teile = [];
+    foreach (array_column(Database::select("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name"), 'name') as $t) {
+        $zeilen = $t === 'settings'
+            ? Database::select("SELECT setting_key, setting_value FROM settings WHERE setting_key NOT IN ('sso.discovery', 'sso.discovery_am', 'sso.jwks', 'sso.jwks_am') ORDER BY setting_key")
+            : Database::select('SELECT * FROM "' . $t . '"');
+        $teile[] = $t . ':' . md5((string) json_encode($zeilen));
+    }
+    return md5(implode('|', $teile));
+};
+/** Hält gerade eine Anfrage storage/update/.anfragen (angemeldet, das Update wartete auf sie)? */
+$angemeldet = static function () use ($upd): bool {
+    $h = fopen($upd . '/' . \App\Services\UpdateService::ANFRAGEN, 'c');
+    $frei = flock($h, LOCK_EX | LOCK_NB);
+    if ($frei) {
+        flock($h, LOCK_UN);
+    }
+    fclose($h);
+    return !$frei;
+};
+$gesperrt = \App\Services\UpdateService::GESPERRT;
+$imSystem = 'Gerade wird das System aktualisiert – die Anmeldung über Authentik ist in etwa einer Minute wieder möglich.';
+// Ein eigenes verknüpftes Konto (der Planer ist seit 8. gelöst).
+$upd14 = BenutzerService::anlegen($kennung . '-upd', $pw, 'kunde', false);
+Konten::verknuepfen($upd14, $idp->aussteller(), 'sub-upd-' . $kennung, 'cli', 'upd-dort', []);
+$idp->benutzer($person('sub-upd-' . $kennung, 'upd-dort', [$gruppe]));
+$w = $dose();
+browser('/login', $w);
+
+// 14.1 Start: kein Vorgang beim Anbieter, der Hinweis auf der Anmeldeseite
+$sperre(true);
+$vorher = $stand();
+$r = browser('/login/sso?next=/dashboard', $w);
+$seite = browser('/login', $w);
+pruefe($r['status'] === 302 && $r['ziel'] === '/login' && str_contains($seite['text'], '<div class="flash warning">' . $imSystem)
+    && str_contains($seite['text'], 'sso-knopf'), '14.1: Start während der Sperre → zurück zur Anmeldung mit Hinweis, kein Vorgang beim Anbieter');
+gleich($stand(), $vorher, '14.1: nichts geschrieben');
+// 14.2 Die Kennwort-Anmeldung bleibt offen (wie ohne SSO: POST /login lässt die Sperre durch)
+$kd14 = $kennwortAnmelden($kennung . '-admin', $pw);
+gleich(browser('/system/sso', $kd14)['status'], 200, '14.2: Kennwort-Anmeldung während der Sperre, /system/sso lesbar');
+
+// 14.3 Rückruf, der während der Sperre ankommt (begonnen vorher): nichts geschrieben, Vorgang verbraucht
+$sperre(false);
+$start = browser('/login/sso?next=/dashboard', $w);
+$auth = str_starts_with($start['ziel'], $idpBasis . '/') ? browser($start['ziel'], $w) : ['ziel' => ''];
+pruefe(str_starts_with($auth['ziel'], $basis . '/login/sso/rueckruf?'), '14.3: vor der Sperre begonnen, der Anbieter schickt zurück');
+$nToken = count($protokoll('token'));
+$sperre(true);
+$vorher = $stand();
+$rueck = browser($auth['ziel'], $w);
+$seite = browser('/login', $w);
+pruefe($rueck['status'] === 302 && $rueck['ziel'] === '/login' && str_contains($seite['text'], '<div class="flash warning">' . $imSystem)
+    && browser('/dashboard', $w)['status'] === 302, '14.3: Rückruf während der Sperre → Anmeldeseite mit Hinweis, nicht angemeldet');
+gleich($stand(), $vorher, '14.3: nichts geschrieben (Konto, Identität, Rollen, letzte Anmeldung, Audit, Bremse)');
+gleich(count($protokoll('token')), $nToken, '14.3: der Code wurde nicht eingelöst');
+pruefe(!$angemeldet(), '14.3: danach hält keine Anfrage die Anmeldung beim Update');
+$sperre(false);
+$rueck = browser($auth['ziel'], $w);
+pruefe($rueck['ziel'] === '/login' && str_contains(browser('/login', $w)['text'], 'abgelaufen oder wurde schon benutzt'),
+    '14.3: der Vorgang ist verbraucht – derselbe Rückruf nach dem Update → „schon benutzt“');
+[, , $rueck] = $ssoAnmelden($w, '/dashboard');
+pruefe($rueck !== null && $rueck['ziel'] === '/dashboard' && browser('/dashboard', $w)['status'] === 200, '14.3: nach dem Update noch einmal – angemeldet');
+$abmelden($w);
+
+// 14.4 Das Update beginnt, während der Rückruf auf den Anbieter wartet
+$idp->steuern(['verzoegerung' => 1.5]);
+$start = browser('/login/sso?next=/dashboard', $w);
+$auth = str_starts_with($start['ziel'], $idpBasis . '/') ? browser($start['ziel'], $w) : ['ziel' => ''];
+$vorher = $stand();
+$c = curl_init($auth['ziel']);
+curl_setopt_array($c, [CURLOPT_RETURNTRANSFER => true, CURLOPT_HEADER => true, CURLOPT_COOKIEJAR => $w, CURLOPT_COOKIEFILE => $w,
+    CURLOPT_TIMEOUT => 60, CURLOPT_FOLLOWLOCATION => false]);
+$mh = curl_multi_init();
+curl_multi_add_handle($mh, $c);
+$laeuft = 1;
+$bis = microtime(true) + 0.7;
+do {
+    curl_multi_exec($mh, $laeuft);
+    curl_multi_select($mh, 0.05);
+} while ($laeuft > 0 && microtime(true) < $bis);
+$sperre(true);
+$warAngemeldet = $angemeldet();
+do {
+    curl_multi_exec($mh, $laeuft);
+    curl_multi_select($mh, 0.1);
+} while ($laeuft > 0);
+$roh = (string) curl_multi_getcontent($c);
+$status = (int) curl_getinfo($c, CURLINFO_RESPONSE_CODE);
+curl_multi_remove_handle($mh, $c);
+curl_close($c);
+curl_multi_close($mh);
+$idp->steuern(['verzoegerung' => null]);
+pruefe($warAngemeldet, '14.4: der wartende Rückruf ist angemeldet – das Update wartet auf ihn, bevor es sichert');
+pruefe($status === 302 && preg_match('/^Location:\s*\/login\s*$/mi', $roh) === 1 && str_contains(browser('/login', $w)['text'], $imSystem)
+    && browser('/dashboard', $w)['status'] === 302, '14.4: Sperre nach dem Warten noch einmal gefragt → Hinweis, nicht angemeldet');
+gleich($stand(), $vorher, '14.4: nichts geschrieben');
+pruefe(!$angemeldet(), '14.4: nach dem Ende der Anfrage nicht mehr angemeldet');
+
+// 14.5 Verbinden: vorbereiten ist ein POST (abgewiesen), der Start nennt das Update – das bestätigte Kennwort bleibt
+$sperre(false);
+$idp->benutzer($person('sub-verbinder-' . $kennung, 'verbinder-dort'));
+$vd = $kennwortAnmelden($kennung . '-verbinder', $pw);
+$sperre(true);
+$r = $senden($vd, '/profil/sso/verbinden', ['kennwort' => $pw]);
+$profil = browser('/profil', $vd);
+pruefe($r['status'] === 302 && $r['ziel'] === '/profil' && str_contains($profil['text'], $gesperrt) && !str_contains($profil['text'], 'href="/login/sso/verbinden"'),
+    '14.5: Kennwort fürs Verbinden während der Sperre → abgewiesen wie jedes Formular');
+$sperre(false);
+$senden($vd, '/profil/sso/verbinden', ['kennwort' => $pw]);
+$sperre(true);
+$r = browser('/login/sso/verbinden', $vd, 'GET', [], ['Sec-Fetch-Site: same-origin']);
+$profil = browser('/profil', $vd);
+pruefe($r['status'] === 302 && $r['ziel'] === '/profil' && str_contains($profil['text'], 'Gerade läuft ein Update – nicht verbunden.')
+    && str_contains($profil['text'], 'href="/login/sso/verbinden"'), '14.5: Start des Verbindens während der Sperre → Hinweis, „Weiter zu Authentik“ bleibt');
+$sperre(false);
+$r = browser('/login/sso/verbinden', $vd, 'GET', [], ['Sec-Fetch-Site: same-origin']);
+$auth = str_starts_with($r['ziel'], $idpBasis . '/') ? browser($r['ziel'], $vd) : ['ziel' => ''];
+pruefe(str_starts_with($auth['ziel'], $basis . '/login/sso/rueckruf?'), '14.5: nach dem Update geht es ohne neues Kennwort weiter zum Anbieter');
+$sperre(true);
+$vorher = $stand();
+$rueck = browser($auth['ziel'], $vd);
+$profil = browser('/profil', $vd);
+pruefe($rueck['ziel'] === '/profil' && str_contains($profil['text'], 'Gerade läuft ein Update – nicht verbunden.') && Konten::identitaet($verbinder) === null,
+    '14.5: Rückruf des Verbindens während der Sperre → nicht verbunden, Hinweis im Profil');
+gleich($stand(), $vorher, '14.5: nichts geschrieben');
+$sperre(false);
+
+// 14.6 Bestätigen (Token anzeigen): der Start nennt das Update, Lesen geht
+$sperre(true);
+gleich(browser('/system/schnittstelle', $sd)['status'], 200, '14.6: Schnittstelle lesbar während der Sperre');
+$r = browser($tLink, $sd, 'GET', [], ['Sec-Fetch-Site: same-origin']);
+pruefe($r['status'] === 302 && $r['ziel'] === '/system/schnittstelle'
+    && str_contains(browser('/system/schnittstelle', $sd)['text'], 'Gerade läuft ein Update – Bestätigen über Authentik ist in etwa einer Minute wieder möglich.'),
+    '14.6: Bestätigen über den Anmeldedienst während der Sperre → Hinweis, kein Vorgang');
+
+// 14.7 Einstellungen: lesen ja, ändern nein (503 bzw. Hinweis), „Prüfen“ auch nicht
+$vorher = $stand();
+$r = browser('/system/sso/optionen', $kd14, 'POST', ['_token' => token(browser('/system/sso', $kd14)['text']), 'scopes' => 'openid', 'gruppen_claim' => 'roles',
+    'pflichtgruppen' => '', 'inaktiv_tage' => '0'], ['Accept: application/json']);
+pruefe($r['status'] === 503 && (json_decode($r['text'], true)['wartung'] ?? false) === true && preg_match('/^Retry-After: 30\r?$/mi', $r['kopf']) === 1,
+    '14.7: /system/sso/optionen mit JSON → 503 wartung');
+foreach (['/system/sso/optionen' => ['scopes' => 'openid', 'gruppen_claim' => 'roles', 'pflichtgruppen' => '', 'inaktiv_tage' => '0'],
+    '/system/sso/pruefen' => [], '/system/sso/schalten' => ['an' => '0']] as $pfad => $felder) {
+    $r = $senden($kd14, $pfad, $felder, '/system/sso');
+    pruefe($r['status'] === 302 && $r['ziel'] === '/system/sso' && str_contains(browser('/system/sso', $kd14)['text'], $gesperrt), '14.7: ' . $pfad . ' → Hinweis, zurück zur Seite');
+}
+gleich($stand(), $vorher, '14.7: nichts geändert');
+
+// 14.8 Abmelden einer SSO-Sitzung und /abgemeldet gehen auch während der Sperre
+$sperre(false);
+$idp->benutzer($person('sub-upd-' . $kennung, 'upd-dort', [$gruppe]));
+[, , $rueck] = $ssoAnmelden($w, '/dashboard');
+$sperre(true);
+$r = $abmelden($w);
+$ab = browser('/abgemeldet', $w);
+pruefe($rueck !== null && $r['ziel'] === '/abgemeldet' && $ab['status'] === 200 && str_contains($ab['text'], 'Auch bei Authentik abmelden'),
+    '14.8: Abmelden während der Sperre → /abgemeldet mit dem Link zum Abmelden dort');
+$sperre(false);
+$abmelden($kd14);
 
 // ================================================================ 13. ohne PHP-Meldung
 foreach ([['/login', $dose()], ['/abgemeldet', $dose()], ['/profil', $adminDose], ['/profil', $u], ['/system/sso', $adminDose], ['/system/benutzer', $adminDose],

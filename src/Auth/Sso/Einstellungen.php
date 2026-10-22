@@ -5,6 +5,7 @@ namespace App\Auth\Sso;
 
 use App\Auth\Auth;
 use App\Auth\Zugriff;
+use App\Services\UpdateService;
 use App\Support\Audit;
 use App\Support\Config;
 use App\Support\Crypto;
@@ -744,6 +745,12 @@ final class Einstellungen
                 }
             }
             return ['ok' => false, 'message' => 'Nicht eingeschaltet – die Prüfung ist fehlgeschlagen: ' . $erster, 'befunde' => $p['befunde']];
+        }
+        // Geprüft wurde mit Warten auf den Anmeldedienst. Hat inzwischen ein
+        // Update begonnen, bleibt es aus – die Sicherung kennte das Einschalten
+        // nicht (auch für sso:an, das sich nicht wie ein POST anmeldet).
+        if (UpdateService::wartungAktiv()) {
+            return ['ok' => false, 'message' => 'Gerade läuft ein Update – nicht eingeschaltet. Bitte in etwa einer Minute noch einmal.', 'befunde' => $p['befunde']];
         }
         Settings::put(self::AKTIV, '1');
         Audit::log('einstellungen.sso', 'settings', '', ['aktiv' => true]);

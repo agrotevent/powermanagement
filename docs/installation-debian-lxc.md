@@ -358,8 +358,8 @@ Grenzwerte prüfen.
    runuser -u www-data -- php bin/power sso:an
    ```
 
-   Danach meldet `bin/power pruefen` eine Zeile `SSO: OK – …`.
-5. Vorher einen **Notzugang** anlegen (`bin/power user:add notfall admin`,
+   Danach meldet `runuser -u www-data -- php bin/power pruefen` eine Zeile `SSO: OK – …`.
+5. Vorher einen **Notzugang** anlegen (`runuser -u www-data -- php bin/power user:add notfall admin`,
    nie verknüpfen, Kennwort offline verwahren), wenn „nur SSO“ kommen soll.
 
 Prüfnachweise liegen als PDF (bis 10 MB) in der Datenbank. SQLite braucht
@@ -1755,7 +1755,8 @@ printf 'Authorization: Token %s\n' "$T" | curl -sG -H @- http://127.0.0.1:8086/q
 | Andere Instanz: „Zu viele Anfragen“ | Die Bremse in nginx (zehn je Sekunde und Adresse). Stehen alle Instanzen hinter demselben Proxy ohne `set_real_ip_from`, teilen sie sich die Bremse. |
 | Update bricht mit „could not read Username“ ab | Privates Repository ohne Token – `/etc/powermanagement/git.conf` anlegen (Abschnitt 3). |
 | Update meldet „lokale Änderungen“ | Jemand hat Dateien in `/opt/powermanagement` geändert. Sichern, dann `--erzwingen`. |
-| Anmeldung über SSO scheitert | `runuser -u www-data -- php bin/power sso:pruefen` zeigt jeden Schritt; die Meldungen und ihre Abhilfe stehen in [anmeldung-sso.md](anmeldung-sso.md#fehlersuche). Niemand kommt mehr hinein („nur SSO“, Authentik weg): `bin/power sso:aus --nur-sso`. |
+| Anmeldung über SSO scheitert | `runuser -u www-data -- php bin/power sso:pruefen` zeigt jeden Schritt; die Meldungen und ihre Abhilfe stehen in [anmeldung-sso.md](anmeldung-sso.md#fehlersuche). Niemand kommt mehr hinein („nur SSO“, Authentik weg): `cd /opt/powermanagement && runuser -u www-data -- php bin/power sso:aus --nur-sso` (als root lehnt `bin/power` ab). |
+| Anmeldeseite: „Gerade wird das System aktualisiert – die Anmeldung über Authentik ist in etwa einer Minute wieder möglich“ | Ein Update läuft (Schreibsperre); in der Zeit beginnt keine SSO-Anmeldung, die Anmeldung mit Kennwort (Notzugang) geht ([anmeldung-sso.md](anmeldung-sso.md#während-eines-updates)). Steht der Hinweis, obwohl kein Update läuft, blieb die Schreibsperre stehen – Zeile „Gerade läuft ein Update …“ unten. |
 | System → Update: „Die Update-Funktion ist … noch nicht eingerichtet“ (`update:stand`: „nicht eingerichtet“) | Noch das alte Update-Skript – einmal umsteigen (Abschnitt 10, *Erstes Update auf die Fassung mit Update-Funktion*). Sonst hat sich der Update-Dienst nie gemeldet: `systemctl status powermanagement-update.path powermanagement-update.timer`, `journalctl -a -u powermanagement-update -n 50`. Steht dort „Code nicht root-eigen …“, hat jemand in `/opt/powermanagement` Besitz oder Rechte geändert – `update-debian.sh --nur-abgleichen` setzt sie zurück. Fehlende Einheiten und Ordner holt `update-debian.sh` (ohne Option) nach. |
 | „Der Auftrag wird nicht übernommen“ | Die Pfad-Einheit hat nach zu vielen Starts aufgegeben (`start-limit-hit`) oder läuft nicht. Der Zeitgeber heilt das nach spätestens 15 Minuten; sofort: `systemctl reset-failed powermanagement-update.service powermanagement-update.path && systemctl restart powermanagement-update.path`. Steht in `storage/update/ist/helfer` die Zeile `pfad soll_ungueltig`, ist `storage/update/soll` kein gewöhnlicher Ordner, oder www-data darf darin nichts wegräumen (`ls -ld /opt/powermanagement/storage/update/soll` – gehört www-data, `drwxr-x---`); dann heilt der Update-Dienst die Pfad-Einheit nicht, sonst startete sie gleich wieder 20-mal. `update-debian.sh --nur-abgleichen` setzt Besitz und Rechte in `storage/` zurück und legt einen fehlenden Ordner neu an; einen Verweis oder eine Datei an seiner Stelle vorher als www-data entfernen. |
 | „Der Update-Dienst meldet sich seit … nicht“ | Der Zeitgeber weckt ihn sonst alle 15 Minuten: `systemctl status powermanagement-update.path powermanagement-update.timer`; ausgeschaltet? `systemctl enable --now powermanagement-update.path powermanagement-update.timer`. |

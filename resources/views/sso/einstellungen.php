@@ -121,7 +121,7 @@ $gruppenListe = static function (array $gruppen): string {
             </dl>
             <?php if ((int) $z['fremde_identitaeten'] > 0): ?>
                 <p class="notice warn mt"><?= (int) $z['fremde_identitaeten'] ?> Verknüpfung(en) gehören zu einem anderen Aussteller und gelten nicht –
-                    gehört er zur selben Authentik-Installation: <code>bin/power sso:aussteller-umstellen</code>.</p>
+                    gehört er zur selben Authentik-Installation: <code>runuser -u www-data -- php bin/power sso:aussteller-umstellen</code>.</p>
             <?php endif; ?>
 
             <h3 class="mt">Letzte Prüfung</h3>
@@ -430,7 +430,7 @@ $gruppenListe = static function (array $gruppen): string {
         <label class="check"><input type="checkbox" name="nur_sso" value="1"<?= !empty($schalter['nur_sso']) ? ' checked' : '' ?><?= $sperre ?>>
             Verknüpfte Konten melden sich nur über <?= View::e($name) ?> an</label>
         <p class="help">Konten ohne Verknüpfung (Kundenzugänge, Notzugang) bleiben bei Benutzername und Kennwort. Ausschalten geht jederzeit, auch auf
-            der Kommandozeile: <code>bin/power sso:aus --nur-sso</code>.</p>
+            der Kommandozeile (als Anwendungsbenutzer): <code>runuser -u www-data -- php bin/power sso:aus --nur-sso</code>.</p>
         <?php if (empty($schalter['nur_sso'])): ?>
             <ul class="liste-schlicht small sso-befund" aria-label="Vorbedingungen für „nur SSO“">
                 <?php foreach ($schutz['vorbedingungen'] as $b): ?>

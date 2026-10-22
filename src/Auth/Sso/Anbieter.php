@@ -412,6 +412,11 @@ final class Anbieter
             }
         }
 
+        // Ohne zweiten Blick auf die Schreibsperre eines Updates: Geschrieben
+        // werden nur Zwischenspeicher und das Ergebnis der Prüfung – nimmt sie
+        // ein Zurückrollen mit, holt die nächste Anmeldung bzw. Prüfung sie
+        // neu. Und gewartet wird höchstens auf drei Anfragen zu je ZEIT
+        // Sekunden; auf „Prüfen“ (ein POST, angemeldet) wartet das Update länger.
         if ($ok) {
             self::discoverySpeichern($d + ['am' => Einstellungen::jetzt()]);
             self::jwksSpeichern($schluessel);

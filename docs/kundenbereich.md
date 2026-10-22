@@ -406,7 +406,11 @@ Datenbank von vorher zurück, und was jemand eben gespeichert hat, wäre weg.
   gespeichert …“ in seinem eigenen Layout und führt zurück zum Konto bzw.
   zum selben Link (er bleibt gültig). Kennwörter hebt dabei niemand auf.
   Seiten, Abzeichen oder Hinweise des Updates gibt es im Kundenbereich nie;
-  Adressen des Personals beantwortet auch dann das Tor.
+  Adressen des Personals beantwortet auch dann das Tor. Wer sich über
+  Authentik anmeldet (Kunden über Gruppen), liest auf der Anmeldeseite
+  „Gerade wird das System aktualisiert – die Anmeldung über Authentik ist in
+  etwa einer Minute wieder möglich“ und meldet sich danach noch einmal an
+  ([anmeldung-sso.md](anmeldung-sso.md#während-eines-updates)).
 - **Die Kundenverwaltung** meldet „Gerade läuft ein Update …“ und führt
   zurück auf die Seite, von der das Formular kam – nach den Treffern der
   Eventworx-Suche, den Dateien am Vorgang oder einer Rückfrage (die es

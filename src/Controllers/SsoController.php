@@ -29,6 +29,13 @@ use App\Support\View;
  * Adresse des Rückrufs trägt Code und state, die Seite nach dem Abmelden
  * einen Link mit dem ID-Token als Hinweis.
  *
+ * Während eines Updates (Schreibsperre) beginnt kein Vorgang – Anmelden,
+ * Verbinden und Bestätigen melden das, statt zum Anmeldedienst zu schicken
+ * (Anmeldung::updateSperre); der Rückruf schreibt dann nichts (Code
+ * `update`). Lesen bleibt: /abgemeldet, Profil, die Einstellungsseite. Die
+ * POSTs hier (Verbinden vorbereiten, Lösen) weist schon
+ * UpdateService::wartungsSperre() ab.
+ *
  * Die eine Weiterleitung nach außen ist die zum Anmelde-Endpunkt des
  * Anbieters: Ihr Ziel kommt nur aus der geprüften Discovery (https, gleiche
  * Herkunft wie der Aussteller), nie aus der Anfrage. Alle anderen Ziele sind
@@ -52,6 +59,9 @@ final class SsoController extends Controller
         if (!Einstellungen::aktiv()) {
             Flash::error(Anmeldung::T_NICHT_EINGERICHTET);
             $this->redirect('/login');
+            return;
+        }
+        if ($this->updateAbweisen('anmelden', '/login')) {
             return;
         }
         $gebremst = Anmeldung::gebremst($request->ip());
@@ -81,7 +91,8 @@ final class SsoController extends Controller
         }
         $r = Anmeldung::rueckruf($_GET, $request->ip());
         if (!$r['ok']) {
-            Flash::error($r['meldung']);
+            // Während eines Updates nichts geschrieben – ein Hinweis wie bei einem abgewiesenen Formular.
+            $r['code'] === Anmeldung::UPDATE ? Flash::warning($r['meldung']) : Flash::error($r['meldung']);
         } elseif ($r['meldung'] !== '') {
             Flash::success($r['meldung']);
         }
@@ -136,7 +147,12 @@ final class SsoController extends Controller
             $this->redirect('/login?next=' . rawurlencode('/profil'));
             return;
         }
-        $fehler = Anmeldung::verbindenFehler() ?? Anmeldung::gebremst($request->ip())
+        $fehler = Anmeldung::verbindenFehler();
+        // Das bestätigte Kennwort bleibt dabei stehen (höchstens fünf Minuten).
+        if ($fehler === null && $this->updateAbweisen('verbinden', '/profil')) {
+            return;
+        }
+        $fehler ??= Anmeldung::gebremst($request->ip())
             ?? (Anmeldung::verbindenBestaetigt() ? null : 'Erst im Profil das Kennwort bestätigen, dann „Weiter zu ' . Einstellungen::name() . '“.');
         if ($fehler !== null) {
             Flash::error($fehler);
@@ -185,6 +201,9 @@ final class SsoController extends Controller
         }
         if (!Auth::check()) {
             $this->redirect('/login?next=' . rawurlencode($zurueck));
+            return;
+        }
+        if (Anmeldung::bestaetigenFehler($zweck) === null && $this->updateAbweisen($zweck, $fehlerZiel)) {
             return;
         }
         $fehler = Anmeldung::bestaetigenFehler($zweck)
@@ -283,6 +302,21 @@ final class SsoController extends Controller
     }
 
     private const KOPF = ['Cache-Control: no-store', 'Referrer-Policy: no-referrer'];
+
+    /**
+     * Während eines Updates: Hinweis und zurück nach $ziel, kein Vorgang beim
+     * Anmeldedienst – true, wenn abgewiesen.
+     */
+    private function updateAbweisen(string $zweck, string $ziel): bool
+    {
+        $meldung = Anmeldung::updateSperre($zweck);
+        if ($meldung === null) {
+            return false;
+        }
+        Flash::warning($meldung);
+        $this->redirect($ziel);
+        return true;
+    }
 
     /**
      * Kam der Link von dieser Seite? Sec-Fetch-Site same-origin oder none

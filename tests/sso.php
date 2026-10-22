@@ -67,6 +67,15 @@ declare(strict_types=1);
  *    ca_datei aus config.php bis Http, mit echtem curl gegen einen TLS-Server
  *    (openssl s_server): Verbindung über 127.0.0.1, Zertifikat und Name
  *    geprüft, ohne curl abgelehnt.
+ * O. Während eines Updates (Schreibsperre der Instanz): Meldungen je Zweck;
+ *    ein Rückruf, der während der Sperre ankommt, schreibt nichts und löst
+ *    den Code nicht ein (Vorgang verbraucht); beginnt das Update während des
+ *    Wartens, war er angemeldet und fragt danach noch einmal – kein Konto
+ *    (Anlage), keine Anfrage, kein Fehlschlag, nichts verknüpft, Kundenmodus
+ *    bleibt ohne Fehlversuch; Einschalten bleibt aus. Migration 017 nach der
+ *    Sicherung auf einer Datenbank wie auf main, Zurückrollen
+ *    (db_zuruecklegen), noch einmal migrieren; das Secret übersteht Update
+ *    und Zurückrollen.
  */
 
 require __DIR__ . '/hilfen/instanz.php';
@@ -91,6 +100,7 @@ use App\Kunden\Einrichtung;
 use App\Kunden\KundenService;
 use App\Messung\Http;
 use App\Services\BenutzerService;
+use App\Services\UpdateService;
 use App\Support\Config;
 use App\Support\Crypto;
 use App\Support\Database;
@@ -2245,6 +2255,276 @@ foreach ($gesichert as $k => $w) {
     Settings::put($k, $w);
 }
 pruefe(Einstellungen::aktiv() && Einstellungen::secretZustand() === 'hinterlegt', 'N.12: Einrichtung wiederhergestellt');
+
+// ================================================================ O. Während eines Updates
+// Die Schreibsperre der Instanz (storage/update/ist/wartung, wie
+// update-debian.sh sie setzt): Kein Vorgang beginnt, und kein Rückruf
+// schreibt – weder an der Tür noch nach dem Warten auf den Anmeldedienst,
+// auch kein Fehlschlag (Audit, Anfrage, Bremse, Fehlversuch des
+// Kundenmodus). Danach geht alles wieder.
+$abmelden();
+alsBenutzer(null);
+Http::$attrappe = $idp->http();
+$idp->zuruecksetzen();
+$upd = (string) Config::get('update.verzeichnis');
+pruefe($upd !== '' && str_starts_with($upd, $instanzOrdner . '/'), 'O: storage/update der Instanz');
+@mkdir($upd . '/ist', 0700, true);
+$sperre = static function (bool $an) use ($upd): void {
+    $pfad = $upd . '/ist/wartung';
+    $an ? file_put_contents($pfad, UpdateService::KOPF_WARTUNG . "\nseit " . time() . "\nkennung -\n") : @unlink($pfad);
+    UpdateService::vergessen();
+};
+/** Alle Tabellen der Instanz (ohne die Zwischenspeicher des Anmeldedienstes) als Prüfsumme. */
+$stand = static function (): string {
+    $teile = [];
+    foreach (array_column(Database::select("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name"), 'name') as $t) {
+        $zeilen = $t === 'settings'
+            ? Database::select('SELECT setting_key, setting_value FROM settings WHERE setting_key NOT IN (?, ?, ?, ?) ORDER BY setting_key',
+                [Einstellungen::DISCOVERY, Einstellungen::DISCOVERY_AM, Einstellungen::JWKS, Einstellungen::JWKS_AM])
+            : Database::select('SELECT * FROM "' . $t . '"');
+        $teile[] = $t . ':' . md5((string) json_encode($zeilen));
+    }
+    return md5(implode('|', $teile));
+};
+/** Hält eine Anfrage storage/update/.anfragen (angemeldet – das Update wartete auf sie)? */
+$angemeldet = static function () use ($upd): bool {
+    $h = fopen($upd . '/' . UpdateService::ANFRAGEN, 'c');
+    $frei = flock($h, LOCK_EX | LOCK_NB);
+    if ($frei) {
+        flock($h, LOCK_UN);
+    }
+    fclose($h);
+    return !$frei;
+};
+// Während des Wartens auf den Token-Endpunkt etwas tun (das Update beginnt) – und Einlösungen zählen.
+$httpO = $idp->http();
+$eingeloest = 0;
+$waehrend = null;
+Http::$attrappe = static function (string $m, string $url, array $o = []) use ($httpO, &$waehrend, &$eingeloest): array {
+    if (str_contains($url, '/token/')) {
+        $eingeloest++;
+        if ($waehrend !== null) {
+            $w = $waehrend;
+            $waehrend = null;
+            $w();
+        }
+    }
+    return $httpO($m, $url, $o);
+};
+
+// O.1 Meldungen und Start
+gleich(Anmeldung::updateSperre('anmelden'), null, 'O.1: ohne Sperre beginnt jeder Vorgang');
+$sperre(true);
+pruefe(str_contains((string) Anmeldung::updateSperre('anmelden'), 'Gerade wird das System aktualisiert – die Anmeldung über ' . Einstellungen::name())
+    && !str_contains((string) Anmeldung::updateSperre('anmelden'), 'Update'), 'O.1: Anmelden – Hinweis ohne das Wort „Update“ (auf der Anmeldeseite stehen auch Kunden)');
+pruefe(str_contains((string) Anmeldung::updateSperre('verbinden'), 'nicht verbunden') && str_contains((string) Anmeldung::updateSperre('kundenmodus:5'), 'Kundenmodus bleibt an')
+    && str_contains((string) Anmeldung::updateSperre('token:5'), 'Bestätigen über'), 'O.1: Verbinden, Kundenmodus, Token – je ein eigener Hinweis');
+$sperre(false);
+
+// O.2 Der Rückruf kommt während der Sperre an (begonnen vorher): nichts geschrieben, der Vorgang ist verbraucht
+UpdateService::anfrageAbmelden();
+$vorher = $stand();
+$eingeloest = 0;
+$r = $ablauf($person($subPlaner, 'planer-dort', [$gruppeA]), [], 'anmelden', null, static function (array $q) use ($sperre): array {
+    $sperre(true);
+    return $q;
+});
+pruefe(!$r['ok'] && $r['code'] === Anmeldung::UPDATE && $r['ziel'] === '/login' && $r['meldung'] === Anmeldung::updateText('anmelden') && Auth::id() === null,
+    'O.2: Rückruf während der Sperre → update, zurück zur Anmeldung, nicht angemeldet');
+gleich($stand(), $vorher, 'O.2: nichts geschrieben (alle Tabellen, auch Audit und Bremse)');
+gleich($eingeloest, 0, 'O.2: der Code wurde nicht eingelöst');
+pruefe(!$angemeldet(), 'O.2: abgewiesen – das Update wartet nicht auf diese Anfrage');
+$sperre(false);
+gleich(Anmeldung::rueckruf($r['_zurueck'], $ip)['code'], 'state', 'O.2: derselbe Rückruf nach dem Update → state (der Vorgang galt einmal)');
+$r = $ablauf($person($subPlaner, 'planer-dort', [$gruppeA]));
+pruefe($r['ok'] && Auth::id() === $planer, 'O.2: nach dem Update noch einmal – angemeldet');
+$abmelden();
+
+// O.3 Das Update beginnt, während der Rückruf auf den Anbieter wartet
+UpdateService::anfrageAbmelden();
+$vorher = $stand();
+$warAngemeldet = null;
+$waehrend = static function () use ($sperre, $angemeldet, &$warAngemeldet): void {
+    $sperre(true);
+    $warAngemeldet = $angemeldet();
+};
+$r = $ablauf($person($subPlaner, 'planer-dort', [$gruppeA]));
+pruefe($r['code'] === Anmeldung::UPDATE && Auth::id() === null, 'O.3: Sperre während des Wartens → nach dem Warten noch einmal gefragt: update, nicht angemeldet');
+pruefe($warAngemeldet === true, 'O.3: der Rückruf war angemeldet, bevor er wartete – das Update wartet auf ihn, bevor es sichert');
+gleich($stand(), $vorher, 'O.3: nichts geschrieben (Rollen aus Gruppen, letzte Anmeldung, Identität, Audit)');
+UpdateService::anfrageAbmelden();
+$sperre(false);
+
+// O.4 Automatische Anlage, Anmeldeanfrage und ein Fehler des Anbieters – während der Sperre nichts davon gespeichert
+Settings::put(Einstellungen::ANLEGEN, '1');
+$vorher = $stand();
+$waehrend = static fn () => $sperre(true);
+$r = $ablauf($person('sub-upd-neu-' . $kennung, $kennung . '-updneu', [$gruppeA]));
+pruefe($r['code'] === Anmeldung::UPDATE && Database::first('SELECT id FROM users WHERE username = ?', [$kennung . '-updneu']) === null,
+    'O.4: automatische Anlage während der Sperre → kein Konto (seine ID wäre nach einem Zurückrollen wieder frei)');
+gleich($stand(), $vorher, 'O.4: Anlage – nichts geschrieben');
+$sperre(false);
+Settings::put(Einstellungen::ANLEGEN, '0');
+$vorher = $stand();
+$waehrend = static fn () => $sperre(true);
+$r = $ablauf($person('sub-upd-anfrage-' . $kennung, $kennung . '-updanfrage'));
+pruefe($r['code'] === Anmeldung::UPDATE && !str_contains($r['meldung'], 'Anfrage')
+    && Database::first('SELECT id FROM sso_anfragen WHERE subjekt = ?', ['sub-upd-anfrage-' . $kennung]) === null,
+    'O.4: unbekannte Person während der Sperre → keine Anmeldeanfrage, Meldung zum Update statt „Anfrage eingegangen“');
+gleich($stand(), $vorher, 'O.4: Anfrage – nichts geschrieben');
+$sperre(false);
+$fehl = $fehlschlaege();
+$waehrend = static fn () => $sperre(true);
+$r = $ablauf($person($subPlaner, 'planer-dort'), ['token_fehler' => 'invalid_grant']);
+pruefe($r['code'] === Anmeldung::UPDATE && $fehlschlaege() === $fehl, 'O.4: Fehler des Anbieters während der Sperre → update, kein Fehlschlag fürs Audit und die Bremse');
+$sperre(false);
+UpdateService::anfrageAbmelden();
+
+// O.5 Verbinden und Kundenmodus entsperren: nichts verknüpft, der Kundenmodus bleibt, kein Fehlversuch
+$verbO = BenutzerService::anlegen($kennung . '-updverb', $pw, 'planung', false);
+pruefe(Auth::attempt($kennung . '-updverb', $pw, $ip)['ok'] && Auth::anmeldeweg() === 'kennwort', 'O.5: mit Kennwort angemeldet');
+$vorher = $stand();
+$waehrend = static fn () => $sperre(true);
+$r = $ablauf($person('sub-updverb-' . $kennung, 'updverb-dort'), [], 'verbinden', $verbO);
+pruefe($r['code'] === Anmeldung::UPDATE && $r['ziel'] === '/profil' && Konten::identitaet($verbO) === null && Auth::id() === $verbO,
+    'O.5: Verbinden während der Sperre → nicht verknüpft, zurück ins Profil, die Sitzung bleibt');
+gleich($stand(), $vorher, 'O.5: Verbinden – nichts geschrieben');
+$sperre(false);
+$r = $ablauf($person('sub-updverb-' . $kennung, 'updverb-dort'), [], 'verbinden', $verbO);
+pruefe($r['ok'] && Konten::identitaet($verbO) !== null, 'O.5: nach dem Update verbunden');
+$abmelden();
+pruefe($ablauf($person($subPlaner, 'planer-dort'))['ok'], 'O.5: Planer über SSO angemeldet');
+$bericht = 900000 + random_int(1, 99999);
+$_SESSION[Kundenmodus::SITZUNG] = ['bericht' => $bericht, 'seit' => time(), 'fehl' => 0, 'bis' => 0, 'user' => $planer, 'name' => '', 'geraet' => 0];
+UpdateService::anfrageAbmelden();
+$vorher = $stand();
+foreach (['andere Person' => $person('sub-fremd-' . $kennung, 'fremd-dort'), 'dieselbe Identität' => $person($subPlaner, 'planer-dort')] as $wer => $p) {
+    $waehrend = static fn () => $sperre(true);
+    $r = $ablauf($p, [], 'kundenmodus:' . $bericht, $planer);
+    pruefe($r['code'] === Anmeldung::UPDATE && $r['ziel'] === '/berichte/' . $bericht . '/kunde' && Kundenmodus::aktiv() !== null
+        && (int) (Kundenmodus::aktiv()['fehl'] ?? -1) === 0 && Auth::id() === $planer, 'O.5: Kundenmodus entsperren (' . $wer . ') während der Sperre → bleibt gesperrt, kein Fehlversuch');
+    $sperre(false);
+}
+gleich($stand(), $vorher, 'O.5: Kundenmodus – nichts geschrieben (kein Ereignis)');
+$r = $ablauf($person($subPlaner, 'planer-dort'), [], 'kundenmodus:' . $bericht, $planer);
+pruefe($r['ok'] && Kundenmodus::aktiv() === null, 'O.5: nach dem Update entsperrt');
+Database::execute('DELETE FROM bericht_ereignisse WHERE bericht_id = ?', [$bericht]);
+$abmelden();
+UpdateService::anfrageAbmelden();
+
+// O.6 Einschalten prüft mit Warten – hat inzwischen ein Update begonnen, bleibt es aus
+Settings::put(Einstellungen::AKTIV, '0');
+$sperre(true);
+$r = Einstellungen::einschalten();
+pruefe(!$r['ok'] && str_contains($r['message'], 'Gerade läuft ein Update – nicht eingeschaltet') && !Einstellungen::schalter(Einstellungen::AKTIV),
+    'O.6: Einschalten während der Sperre → bleibt aus');
+$sperre(false);
+pruefe(Einstellungen::einschalten()['ok'] && Einstellungen::aktiv(), 'O.6: danach eingeschaltet');
+Http::$attrappe = $idp->http();
+$waehrend = null;
+
+// O.7 Migration 017 im Update: Die Sicherung (VACUUM INTO wie update-debian.sh)
+// entsteht vor den Migrationen, 017 läuft in Stufe 2 danach. Eine Datenbank wie
+// auf main (ohne 017, aber mit 018), gesichert, migriert, zurückgelegt
+// (db_zuruecklegen aus update-debian.sh), noch einmal migriert. Dazu das
+// verschlüsselte Client-Secret: übersteht Update und Zurückrollen.
+$sim = $instanzOrdner . '/update-sim';
+mkdir($sim . '/main', 0700, true);
+mkdir($sim . '/.schnappschuss', 0700, true);
+foreach (glob(APP_ROOT . '/database/migrations/*.sql') ?: [] as $datei) {
+    if (basename($datei) !== '017_sso.sql') {
+        copy($datei, $sim . '/main/' . basename($datei));
+    }
+}
+$simDb = $sim . '/database.sqlite';
+$snap = $sim . '/.schnappschuss/database.sqlite';
+$instanzDb = (string) Config::get('database.path');
+$aufDb = static function (string $pfad): void {
+    Config::set('database.path', $pfad);
+    Database::trennen();
+    Settings::vergessen();
+    Auth::vergessen();
+    Zugriff::vergessen();
+};
+$spalten = static fn (string $tabelle): array => array_column(Database::select('PRAGMA table_info("' . $tabelle . '")'), 'name');
+$tabelle = static fn (string $name): bool => Database::scalar("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?", [$name]) !== false;
+$sichern = static function () use ($simDb, $snap): void {
+    @unlink($snap);
+    $p = new PDO('sqlite:' . $simDb);
+    $p->exec('VACUUM INTO ' . $p->quote($snap));
+};
+file_put_contents($sim . '/zuruecklegen.sh', <<<'SH'
+    set -Eeuo pipefail
+    SCHNAPPSCHUSS="$1"; DB="$2"
+    as_app() { "$@"; }
+    eval "$(sed -n '/^db_zuruecklegen() {$/,/^}$/p' "$3")"
+    declare -F db_zuruecklegen > /dev/null || { echo 'db_zuruecklegen fehlt in update-debian.sh'; exit 9; }
+    db_zuruecklegen
+    SH);
+$zuruecklegen = static function () use ($sim, $snap, $simDb, $aufDb): int {
+    Database::trennen();   // wie PHP-FPM, der beim Zurückrollen steht
+    exec('bash ' . escapeshellarg($sim . '/zuruecklegen.sh') . ' ' . escapeshellarg($snap) . ' ' . escapeshellarg($simDb) . ' '
+        . escapeshellarg(APP_ROOT . '/deploy/update-debian.sh') . ' 2>&1', $aus, $rc);
+    $aufDb($simDb);
+    return $rc;
+};
+file_put_contents($sim . '/config.php', '<?php $c = require ' . var_export((string) getenv('POWERMANAGEMENT_CONFIG'), true)
+    . '; $c["database"]["path"] = ' . var_export($simDb, true) . '; return $c;');
+/** bin/power auf der nachgestellten Datenbank (wie update-debian.sh als App-Benutzer). */
+$simPower = static function (array $argumente) use ($sim): array {
+    $p = proc_open(array_merge([PHP_BINARY, APP_ROOT . '/bin/power'], $argumente), [0 => ['file', '/dev/null', 'r'], 1 => ['pipe', 'w'], 2 => ['pipe', 'w']],
+        $rohre, APP_ROOT, ['POWERMANAGEMENT_CONFIG' => $sim . '/config.php'] + getenv());
+    $aus = (string) stream_get_contents($rohre[1]) . (string) stream_get_contents($rohre[2]);
+    fclose($rohre[1]);
+    fclose($rohre[2]);
+    return ['rc' => proc_close($p), 'aus' => $aus];
+};
+$aufDb($simDb);
+$angewandt = Database::migrate($sim . '/main');
+pruefe(!in_array('017_sso.sql', $angewandt, true) && in_array('018_tanks.sql', $angewandt, true) && !$tabelle('sso_identitaeten')
+    && !in_array('nur_sso', $spalten('users'), true) && !in_array('quelle', $spalten('user_roles'), true), 'O.7: Datenbank wie auf main – 018 ja, 017 nicht');
+Database::insert('users', ['username' => $kennung . '-sim', 'password_hash' => password_hash($pw, PASSWORD_DEFAULT), 'created_at' => gmdate('c')]);
+Settings::put('pruefung.update_sim', 'vor dem Update ' . $kennung);
+$sichern();
+$r = $simPower(['migrate']);
+pruefe($r['rc'] === 0 && str_contains($r['aus'], '017_sso.sql') && !str_contains($r['aus'], '018_tanks.sql'), 'O.7: Stufe 2 nach der Sicherung: bin/power migrate wendet nur 017 an (nach 018)');
+$aufDb($simDb);
+pruefe($tabelle('sso_identitaeten') && $tabelle('sso_anfragen') && $tabelle('sso_zuordnungen') && in_array('nur_sso', $spalten('users'), true)
+    && in_array('quelle', $spalten('user_roles'), true), 'O.7: danach SSO-Tabellen und -Spalten da');
+// Was nach der Sicherung geschrieben wurde (hier: eine SSO-Verbindung), nimmt das Zurückrollen mit.
+$r = Einstellungen::verbindungSpeichern($iss, $client['id'], 'sim-' . $kennung . '-' . bin2hex(random_bytes(8)), 'Authentik', true);
+pruefe($r['ok'] && Einstellungen::secretZustand() === 'hinterlegt', 'O.7: nach der Migration eine Verbindung eingetragen');
+gleich($zuruecklegen(), 0, 'O.7: zurückgelegt (db_zuruecklegen aus update-debian.sh)');
+pruefe(!$tabelle('sso_identitaeten') && !in_array('nur_sso', $spalten('users'), true) && !in_array('quelle', $spalten('user_roles'), true)
+    && Database::scalar('SELECT name FROM migrations WHERE name = ?', ['017_sso.sql']) === false, 'O.7: nach dem Zurückrollen wieder ohne 017');
+pruefe(Database::scalar('SELECT id FROM users WHERE username = ?', [$kennung . '-sim']) !== false && Settings::get('pruefung.update_sim') === 'vor dem Update ' . $kennung
+    && Settings::get(Einstellungen::AUSSTELLER, '') === '' && Settings::get(Settings::GEHEIM_SSO_SECRET, '') === '',
+    'O.7: der Stand vor dem Update ist da, die Verbindung von danach nicht');
+$r = $simPower(['migrate']);
+$aufDb($simDb);
+pruefe($r['rc'] === 0 && str_contains($r['aus'], '017_sso.sql') && $tabelle('sso_identitaeten') && in_array('nur_sso', $spalten('users'), true),
+    'O.7: der nächste Versuch migriert 017 noch einmal sauber');
+
+// Das Secret übersteht ein Update (Sicherung, Migration ohne Neues, Prüfung) und ein Zurückrollen.
+$secret = 'sim-secret-' . $kennung . '-' . bin2hex(random_bytes(8));
+pruefe(Einstellungen::verbindungSpeichern($iss, $client['id'], $secret, 'Authentik', true)['ok'] && Einstellungen::secret() === $secret,
+    'O.7: Verbindung mit Secret eingetragen (verschlüsselt)');
+pruefe(!str_contains((string) Settings::get(Settings::GEHEIM_SSO_SECRET, ''), $secret), 'O.7: in der Datenbank nur verschlüsselt');
+$sichern();
+Database::trennen();
+$r = $simPower(['migrate']);
+$z = $simPower(['sso:zustand']);
+pruefe($r['rc'] === 0 && $z['rc'] === 0 && str_contains($z['aus'], 'hinterlegt (verschlüsselt') && !str_contains($z['aus'], $secret),
+    'O.7: nach dem Update liest bin/power das Secret (sso:zustand: hinterlegt), ohne es zu zeigen');
+$aufDb($simDb);
+$neuesSecret = 'sim-anders-' . bin2hex(random_bytes(8));
+Einstellungen::verbindungSpeichern($iss, $client['id'], $neuesSecret, 'Authentik', true);
+pruefe(Einstellungen::secret() === $neuesSecret, 'O.7: nach der Sicherung ein anderes Secret eingetragen');
+gleich($zuruecklegen(), 0, 'O.7: zurückgelegt');
+pruefe(Einstellungen::secret() === $secret && Einstellungen::secretZustand() === 'hinterlegt' && Einstellungen::aussteller() === $iss,
+    'O.7: nach dem Zurückrollen gilt das Secret der Sicherung – entschlüsselt, an dieselbe Verbindung gebunden');
+$aufDb($instanzDb);
+pruefe(Einstellungen::aktiv() && Einstellungen::secret() === $client['secret'], 'O.7: zurück auf der Datenbank der Instanz');
 
 // ================================================================ Geheimnisse
 $audit = Database::select("SELECT username, action, target_id, details FROM audit_log WHERE action LIKE 'einstellungen.sso%'");

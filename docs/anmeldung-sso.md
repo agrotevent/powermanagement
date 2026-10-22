@@ -128,12 +128,14 @@ Bezeichnungen wie in der englischen Oberfläche von Authentik (2025/2026).
    - **Einschalten** prüft noch einmal und schaltet nur bei Erfolg ein. Ab
      dann steht auf der Anmeldeseite „Mit Authentik anmelden“.
 3. Oder auf der Kommandozeile – das Secret **nur über die Standardeingabe**,
-   nie als Argument:
+   nie als Argument, und als Anwendungsbenutzer (als root bricht
+   `bin/power` ab):
 
    ```bash
-   printf '%s' "$SECRET" | bin/power sso:einrichten https://auth.example.com/application/o/powermanagement/ <client-id>
-   bin/power sso:pruefen
-   bin/power sso:an
+   cd /opt/powermanagement
+   printf '%s' "$SECRET" | runuser -u www-data -- php bin/power sso:einrichten https://auth.example.com/application/o/powermanagement/ <client-id>
+   runuser -u www-data -- php bin/power sso:pruefen
+   runuser -u www-data -- php bin/power sso:an
    ```
 
 ![System → Anmeldung (SSO): Zustand mit letzter Prüfung, Verbindung, Gruppen → Rollen, Anmeldeanfragen](bilder/sso-einstellungen.png)
@@ -308,9 +310,10 @@ Diese Schalter (Karte **Schutz**) ändert nur, wer **alle Rechte** hat.
   verloren):
 
   ```bash
-  bin/power sso:aus --nur-sso     # nur „nur SSO“ aus – SSO bleibt an
-  bin/power sso:aus               # SSO ganz aus
-  bin/power user:password <name> <kennwort>
+  cd /opt/powermanagement
+  runuser -u www-data -- php bin/power sso:aus --nur-sso     # nur „nur SSO“ aus – SSO bleibt an
+  runuser -u www-data -- php bin/power sso:aus               # SSO ganz aus
+  runuser -u www-data -- php bin/power user:password <name> <kennwort>
   ```
 
 Fällt Authentik aus, öffnet das nie still die Kennwort-Anmeldung – dafür
@@ -362,6 +365,11 @@ bestätigt („Der Anmeldedienst hat nicht neu angemeldet“).
 
 ## Kommandozeile
 
+Auf einer Installation als Anwendungsbenutzer:
+`cd /opt/powermanagement && runuser -u www-data -- php bin/power sso:…`.
+Als root bricht `bin/power` ab, solange `storage/` nicht root gehört (außer
+`hilfe`) – sonst gehörten Datenbank und Log danach root.
+
 ```text
 bin/power sso:zustand                        Verbindung, Schlüssel, Schalter, Verknüpfungen, Anfragen, Notzugänge – ohne Secret
 bin/power sso:pruefen                        Verbindung frisch prüfen; Exit 1 bei einem Fehler
@@ -387,6 +395,40 @@ gelten.
 
 Die Kommandozeile hat volles Vertrauen (wie `user:password`); im Audit steht
 sie als `cli`.
+
+## Während eines Updates
+
+Solange ein Update läuft (von der Sicherung bis zur Prüfung, meist 1–3
+Minuten; *System → Update*), nimmt PowerManagement keine Änderungen an. Für
+SSO heißt das:
+
+- **Anmelden über Authentik** geht in dieser Zeit nicht: Der Knopf führt
+  zurück zur Anmeldeseite mit „Gerade wird das System aktualisiert – die
+  Anmeldung über Authentik ist in etwa einer Minute wieder möglich“, ohne
+  erst zu Authentik zu schicken. Wer schon bei Authentik war, als das Update
+  begann, kommt mit demselben Hinweis zurück; danach einfach noch einmal
+  anmelden (der alte Rückruf gilt nicht mehr). Eine Anmeldung, die schon
+  lief, als das Update begann, wird noch fertig – das Update wartet auf sie,
+  bevor es sichert.
+- Geschrieben wird dabei nichts: kein Konto, keine Verknüpfung, keine
+  Anmeldeanfrage, keine Rollen aus Gruppen, kein Fehlversuch und kein Eintrag
+  im Audit. Ein Zurückrollen spielte sonst die Sicherung zurück – ein eben
+  angelegtes Konto wäre weg, eine Anfrage verschwunden, Rollen aus Gruppen
+  stünden mit dem Ende der vorigen Sitzung da.
+- **Verbinden** und **Bestätigen** (Kundenmodus entsperren, Token anzeigen)
+  melden dasselbe; der Kundenmodus bleibt an, ein eben bestätigtes Kennwort
+  fürs Verbinden gilt danach noch (fünf Minuten).
+- Die **Anmeldung mit Kennwort** (Notzugang, Kundenzugänge, Konten ohne „nur
+  SSO“), das **Abmelden** – auch der Link zum Abmelden bei Authentik – und
+  alles Lesen gehen weiter; laufende SSO-Sitzungen bleiben angemeldet.
+  *System → Anmeldung (SSO)* lässt sich ansehen, aber nicht ändern.
+- Einstellungen, Verknüpfungen und das verschlüsselte Client-Secret stehen in
+  der Datenbank und sind damit Teil der Sicherung: Ein Zurückrollen bringt
+  sie so zurück, wie sie vor dem Update waren. Migration 017 (SSO) läuft wie
+  jede andere nach der Sicherung.
+- Die automatischen Updates verschiebt SSO nie: Eine Anmeldung dauert
+  Sekunden und lässt sich wiederholen, Sitzungen überstehen den Neustart der
+  Dienste, und Authentik selbst ändert sich dabei nicht.
 
 ## Fehlersuche
 
@@ -468,6 +510,7 @@ OIDC-Tokens für `/api`, HS256/EdDSA/ES384 und verschlüsselte ID-Tokens.
 
 | Skript | prüft |
 |---|---|
-| `tests/sso.php` | ID-Token (RS256/ES256, `iss`/`aud`/`exp`/`iat`/`nonce`, `alg`-Verwechslung, Schlüsselwechsel), Discovery und Secret-Probe, Einstellungen, Verknüpfung nur über `iss`+`sub` (auch Groß/Klein), Anfragen, automatische Konten, Gruppen → Rollen und Kunden, Prüfkette, Sitzung (auch Änderungen während des Wartens auf Authentik), nur SSO und Notzugang (auch Enddaten), Bestätigen (mit MFA-Pflicht), Bremse, keine Geheimnisse, Kommandozeile, Wartung, `verbinden_ueber`/`ca_datei` mit echtem TLS (eigene Instanz, OIDC-Attrappe) |
-| `tests/sso-web.php` | im Browser-Ablauf: Anmeldung, `state` einmalig, Login-CSRF, HEAD verbraucht nichts, neue Sitzung, Abmelden mit `end_session`, Verbinden (erst das Kennwort), Anfrage, Einstellungsseite, nur SSO, Bestätigen für Kundenmodus und Token, Kundenzugang (eigene Instanz, zwei PHP-Server) |
+| `tests/sso.php` | ID-Token (RS256/ES256, `iss`/`aud`/`exp`/`iat`/`nonce`, `alg`-Verwechslung, Schlüsselwechsel), Discovery und Secret-Probe, Einstellungen, Verknüpfung nur über `iss`+`sub` (auch Groß/Klein), Anfragen, automatische Konten, Gruppen → Rollen und Kunden, Prüfkette, Sitzung (auch Änderungen während des Wartens auf Authentik), nur SSO und Notzugang (auch Enddaten), Bestätigen (mit MFA-Pflicht), Bremse, keine Geheimnisse, Kommandozeile, Wartung, `verbinden_ueber`/`ca_datei` mit echtem TLS, während eines Updates (nichts geschrieben, auch wenn das Update während des Wartens beginnt), Migration 017 nach der Sicherung und Zurückrollen, das Secret danach (eigene Instanz, OIDC-Attrappe) |
+| `tests/sso-web.php` | im Browser-Ablauf: Anmeldung, `state` einmalig, Login-CSRF, HEAD verbraucht nichts, neue Sitzung, Abmelden mit `end_session`, Verbinden (erst das Kennwort), Anfrage, Einstellungsseite, nur SSO, Bestätigen für Kundenmodus und Token, Kundenzugang, während eines Updates (Hinweise, nichts geschrieben, danach neu) (eigene Instanz, zwei PHP-Server) |
+| `tests/update.php` | `sso:*` als root abgelehnt (Wächter in `bin/power`), auch der Notausgang |
 | `tests/sitzung.php` | Rückruf, Start, „Prüfen“ und „Einschalten“ halten die Sitzung nicht, während sie auf den Anmeldedienst warten |

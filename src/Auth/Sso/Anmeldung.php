@@ -7,6 +7,7 @@ use App\Auth\Auth;
 use App\Auth\Zugriff;
 use App\Berichte\BerichtService;
 use App\Berichte\Kundenmodus;
+use App\Services\UpdateService;
 use App\Support\Audit;
 use App\Support\Config;
 use App\Support\Csrf;
@@ -48,6 +49,18 @@ use App\Support\Zeit;
  * Gezählt (auth.sso_fehlgeschlagen je Adresse) wird erst, wenn ein echter
  * Vorgang scheitert. Ins Log und ins Audit kommen nie Code, Tokens, Secret
  * oder rohe Claims.
+ *
+ * Während eines Updates (Schreibsperre, UpdateService::wartungAktiv())
+ * beginnt kein Vorgang, und kein Rückruf schreibt etwas in die Datenbank –
+ * weder Konto, Identität, Anfrage und Rollen noch Bremse, Fehlversuch oder
+ * Audit (Code `update`, waehrendUpdate()). Ein Zurückrollen spielte sonst
+ * die Sicherung zurück: ein angelegtes Konto wäre weg (und seine ID frei für
+ * das nächste), eine Anfrage verschwunden, Rollen aus Gruppen stünden mit dem
+ * Ende der vorigen Sitzung da – eine halbe Anmeldung. Die Kennwort-Anmeldung
+ * bleibt offen wie ohne SSO (wartungsSperre lässt POST /login durch): Sie
+ * schreibt nur, was ein Zurückrollen verlieren darf – Zähler, letzte
+ * Anmeldung, Audit; Rollen aus Gruppen, die sie entfernt, kämen höchstens
+ * bis zu ihrem gueltig_bis zurück, so lange, wie die SSO-Sitzung sie hatte.
  */
 final class Anmeldung
 {
@@ -74,6 +87,8 @@ final class Anmeldung
     public const T_NICHT_EINGERICHTET = 'Die Anmeldung über SSO ist nicht eingerichtet.';
     public const T_GEAENDERT = 'Die Anmeldung über SSO wurde inzwischen geändert oder ausgeschaltet – bitte erneut anmelden.';
     public const T_GEBREMST = 'Zu viele Fehlversuche – das Entsperren ist noch gebremst.';
+    /** Code eines Vorgangs, der wegen eines Updates nichts geschrieben hat. */
+    public const UPDATE = 'update';
 
     private const COOKIE_NEU_SEKUNDEN = 43200;
     /** Claims, die aus der Userinfo ergänzt werden dürfen – nie iss/sub/aud/azp/nonce/exp/iat/nbf/auth_time/amr/acr/sid. */
@@ -168,6 +183,17 @@ final class Anmeldung
             Logger::info('sso', ['schritt' => 'rueckruf', 'grund' => 'state']);
             return ['ok' => false, 'code' => 'state', 'zweck' => 'anmelden', 'ziel' => '/login', 'meldung' => self::T_STATE];
         }
+        // 1b. Update: Erst anmelden, dann fragen – wie ein POST an der Tür
+        // (UpdateService::wartungsSperre()). Wer vor der Schreibsperre
+        // hereinkam, auf den wartet das Update, bevor es sichert; wer danach
+        // kommt, schreibt nichts. Der Vorgang ist schon verbraucht: Nach dem
+        // Update beginnt man einfach neu (der Code des Anbieters wäre bis
+        // dahin ohnehin abgelaufen).
+        UpdateService::anfrageAnmelden();
+        if (UpdateService::wartungAktiv()) {
+            UpdateService::anfrageAbmelden();
+            return self::waehrendUpdate($v);
+        }
 
         $claims = [];
         $gruppen = [];
@@ -199,6 +225,14 @@ final class Anmeldung
             }
             // 8.–10. Einlösen, ID-Token, Userinfo – ohne Sitzungssperre.
             [$claims, $idToken] = self::ohneSitzungssperre(static fn (): array => self::tokenHolen($code, $v));
+            // Gewartet wurde auf den Anmeldedienst (bis zu 8 s je Anfrage) und
+            // danach auf die Sitzung, die ein anderer Reiter halten kann – das
+            // kann länger dauern, als das Update auf angemeldete Anfragen
+            // wartet (150 s). Also die Schreibsperre noch einmal, bevor
+            // irgendetwas geschrieben wird (wie LocationSync::updateBegonnen()).
+            if (UpdateService::wartungAktiv()) {
+                return self::waehrendUpdate($v);
+            }
             // Gewartet (bis zu 8 s je Anfrage): Was andere Anfragen inzwischen
             // geändert haben, gilt – SSO aus, eine neue Verbindung (Marke),
             // „Verwaltung per SSO“ aus, das Konto deaktiviert. Die Zwischenspeicher
@@ -457,6 +491,32 @@ final class Anmeldung
         }
     }
 
+    /**
+     * Läuft gerade ein Update (Schreibsperre)? Dann die Meldung für diesen
+     * Zweck, sonst null – für den Start (SsoController: Anmelden, Verbinden,
+     * Bestätigen), damit niemand erst zum Anmeldedienst geht und danach
+     * abgewiesen wird.
+     */
+    public static function updateSperre(string $zweck): ?string
+    {
+        return UpdateService::wartungAktiv() ? self::updateText($zweck) : null;
+    }
+
+    /**
+     * Die Meldung, wenn ein Update den Vorgang aufhält – je Zweck. Auf der
+     * Anmeldeseite ohne das Wort „Update“: Dort stehen auch Kunden.
+     */
+    public static function updateText(string $zweck): string
+    {
+        $name = Einstellungen::name();
+        return match (explode(':', $zweck, 2)[0]) {
+            'verbinden'   => 'Gerade läuft ein Update – nicht verbunden. In etwa einer Minute im Profil noch einmal „Mit ' . $name . ' verbinden“.',
+            'kundenmodus' => 'Gerade läuft ein Update – der Kundenmodus bleibt an. Entsperren ist in etwa einer Minute wieder möglich.',
+            'token'       => 'Gerade läuft ein Update – Bestätigen über ' . $name . ' ist in etwa einer Minute wieder möglich.',
+            default       => 'Gerade wird das System aktualisiert – die Anmeldung über ' . $name . ' ist in etwa einer Minute wieder möglich. Bitte dann noch einmal anmelden.',
+        };
+    }
+
     // ------------------------------------------------------------ Zwecke
 
     /** @param list<string> $gruppen */
@@ -672,6 +732,15 @@ final class Anmeldung
      */
     private static function fehlgeschlagen(SsoFehler $e, #[\SensitiveParameter] array $v, string $ip, array $claims, array $gruppen): array
     {
+        // Begann inzwischen ein Update, wird auch ein Fehlschlag nicht
+        // vermerkt (Audit, Anfrage, Bremse, Fehlversuch des Kundenmodus) – die
+        // Meldung ist dann die zum Update, sonst hieße es etwa „Anfrage
+        // eingegangen“, ohne dass eine gespeichert ist. Neue Vorgänge beginnen
+        // während der Sperre nicht (starten() über den Controller), also
+        // lassen sich so auch keine Fehlversuche umgehen.
+        if (UpdateService::wartungAktiv()) {
+            return self::waehrendUpdate($v, $e->pruefung);
+        }
         $name = $e->nameDort !== '' ? $e->nameDort : Konten::nameDort($claims);
         try {
             if ($e->anfrage && $claims !== []) {
@@ -714,6 +783,18 @@ final class Anmeldung
         }
         Logger::info('sso', ['schritt' => 'rueckruf', 'grund' => $e->pruefung, 'zweck' => self::basis($v)]);
         return ['ok' => false, 'code' => $e->pruefung, 'zweck' => self::basis($v), 'ziel' => self::fehlerZiel($v), 'meldung' => $e->getMessage()];
+    }
+
+    /**
+     * Ein Rückruf während eines Updates: nichts geschrieben (weder Datenbank
+     * noch Sitzung außer dem verbrauchten Vorgang), nur ins Log – mit dem
+     * Grund, aus dem er sonst gescheitert wäre ($statt).
+     */
+    private static function waehrendUpdate(#[\SensitiveParameter] array $v, ?string $statt = null): array
+    {
+        Logger::info('sso', ['schritt' => 'rueckruf', 'grund' => self::UPDATE, 'zweck' => self::basis($v)] + ($statt !== null ? ['statt' => $statt] : []));
+        return ['ok' => false, 'code' => self::UPDATE, 'zweck' => self::basis($v), 'ziel' => self::fehlerZiel($v),
+            'meldung' => self::updateText((string) ($v['zweck'] ?? 'anmelden'))];
     }
 
     /** anmelden | verbinden | kundenmodus | token */

@@ -1193,6 +1193,9 @@ auf Eventworx wartete, übernimmt nichts mehr und zeigt die Liste mit
 Auswahl und Angaben wieder – nach dem Update genügt ein Klick. Kunden im
 Kundenbereich lesen weiter; ein neues Kennwort speichern sie erst danach
 (sie sehen dazu einen eigenen Hinweis, nie etwas vom Update selbst).
+Anmelden über Authentik geht in dieser Zeit nicht – die Anmeldeseite sagt
+„in etwa einer Minute wieder möglich“ –, mit Kennwort schon; wer angemeldet
+ist, bleibt es ([anmeldung-sso.md](anmeldung-sso.md#während-eines-updates)).
 Andere Instanzen bekommen über die
 Schnittstelle dieselbe Antwort (HTTP 503) – wer dort sendet, schickt es nach
 einer Minute noch einmal. Geht etwas schief, kommt der alte Stand von selbst zurück –

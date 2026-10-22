@@ -616,7 +616,9 @@ try {
         chown($baum . '/storage', 33);
         clearstatcache();
         $wwwData = function_exists('posix_getpwuid') ? (string) ((posix_getpwuid(33) ?: [])['name'] ?? '') : '';
-        foreach ([['pruefen'], ['update:stand'], ['migrate'], ['user:password', 'jemand', 'Geheim-Kennwort-2026']] as $befehl) {
+        // Auch die Befehle der Anmeldung über SSO – der Notausgang sso:aus --nur-sso eingeschlossen – nur als Anwendungsbenutzer.
+        foreach ([['pruefen'], ['update:stand'], ['migrate'], ['user:password', 'jemand', 'Geheim-Kennwort-2026'], ['sso:aus', '--nur-sso'], ['sso:zustand'],
+            ['sso:einrichten', 'https://auth.example.com/application/o/pm/', 'Geheim-Kennwort-Client']] as $befehl) {
             [$rc, $aus] = $baumPower($befehl);
             pruefe($rc === 1 && str_contains($aus, 'runuser -u ' . ($wwwData !== '' ? $wwwData : 'www-data') . ' -- php bin/power ' . $befehl[0]),
                 'Wächter: als root, storage/ gehört UID 33 → ' . $befehl[0] . ' abgelehnt (' . trim($aus) . ')');
@@ -624,6 +626,7 @@ try {
         }
         [$rc, $aus] = $baumPower(['hilfe']);
         pruefe($rc === 0 && str_contains($aus, 'bin/power install') && str_contains($aus, 'runuser -u www-data'), 'Wächter: hilfe geht auch als root');
+        pruefe(str_contains($aus, 'bin/power sso:aus [--nur-sso]') && str_contains($aus, 'bin/power update:starten'), 'Wächter: die Hilfe nennt sso:* und update:*');
         clearstatcache();
         pruefe(!file_exists($baumDb) && array_values(array_diff(scandir($baum . '/storage'), ['.', '..'])) === [],
             'Wächter: nichts in storage/ angelegt, auch nicht mit hilfe (keine Datenbank, kein Log)');

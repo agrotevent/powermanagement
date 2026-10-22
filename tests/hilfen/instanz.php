@@ -6,9 +6,9 @@ declare(strict_types=1);
  *
  * Prüfskripte, die Einstellungen ändern (etwa sso.*), laufen nicht in der
  * Datenbank der Arbeitskopie, sondern in einer eigenen: Temp-Ordner, eigene
- * SQLite-Datenbank, eigene config.php (aus config/config.php bzw. der Vorlage,
- * mit frischem app.key, ohne Demo-Modus und mit den Überschreibungen des
- * Skripts). Gesichert oder zurückgeschrieben wird nichts – die Instanz wird
+ * SQLite-Datenbank, eigenes storage/update, eigene config.php (aus
+ * config/config.php bzw. der Vorlage, mit frischem app.key, ohne Demo-Modus
+ * und mit den Überschreibungen des Skripts). Gesichert oder zurückgeschrieben wird nichts – die Instanz wird
  * am Ende weggeräumt. Gewählt wird sie über POWERMANAGEMENT_CONFIG (nur auf
  * der Kommandozeile und im eingebauten Server, siehe src/bootstrap.php).
  *
@@ -40,9 +40,12 @@ function eigeneInstanz(string $kennung, array $ueberschreiben = []): array
         instanzWegraeumen($dir);
     });
     $vorlage = is_file($wurzel . '/config/config.php') ? $wurzel . '/config/config.php' : $wurzel . '/config/config.example.php';
+    // Auch storage/update der Instanz (Schreibsperre, Anmeldung der Anfragen):
+    // ein Prüfskript, das ein Update spielt, legt nie etwas in die Arbeitskopie.
     $eigene = [
         'app'      => ['key' => 'base64:' . base64_encode(random_bytes(32)), 'demo' => false],
         'database' => ['driver' => 'sqlite', 'path' => $dir . '/datenbank.sqlite'],
+        'update'   => ['verzeichnis' => $dir . '/update'],
     ];
     $config = $dir . '/config.php';
     file_put_contents($config, "<?php\n// Eigene Instanz eines Prüfskripts – wird am Ende gelöscht.\n"
