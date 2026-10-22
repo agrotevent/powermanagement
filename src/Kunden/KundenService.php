@@ -822,6 +822,14 @@ final class KundenService
      * Eine Kennung gehört höchstens einem Kunden, ein Vorgang auch. Mit
      * $stammdaten kommt eine fehlende Kundennummer aus Eventworx.
      *
+     * Update: Hier wird nicht noch einmal nach der Schreibsperre gefragt.
+     * Gewartet wird nur auf job/<id> – höchstens zwei Versuche (Nachlesen
+     * bei data:null) zu je 12 s und je bis 2 s Drossel, also unter 30 s. So
+     * lange wartet ein Update allemal auf die Anfrage, die sich an der Tür
+     * angemeldet hat (wartung_an, 150 s): Was sie schreibt, steht vor der
+     * Sicherung in der Datenbank. Länger wartet nur das Übernehmen von
+     * Dateien (Pruefnachweise::eventworxUebernehmen()).
+     *
      * @return array{ok:bool,message:string,bestaetigen?:bool,id?:int}
      */
     public static function vorgangVerknuepfen(int $kundeId, string $jobId, bool $bestaetigt, bool $stammdaten): array

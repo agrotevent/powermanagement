@@ -5,6 +5,7 @@ namespace App\Services;
 
 use App\Auth\Zugriff;
 use App\Messung\Http;
+use App\Support\Anfragezeit;
 use App\Support\Audit;
 use App\Support\Crypto;
 use App\Support\Database;
@@ -384,6 +385,21 @@ final class PartnerService
                 $zeit = self::DATEI_ZEITLIMIT;
             }
         }
+        /*
+         * Je Anfrage dorthin gilt ZEITLIMIT bzw. DATEI_ZEITLIMIT – und
+         * zusammen nie mehr, als der Anfrage hier noch bleibt (Anfragezeit):
+         * Übernehmen holt die Location und dann jede Plandatei einzeln.
+         * Sonst gäbe nginx auf, und die Meldung käme nicht mehr an.
+         */
+        $frist = (int) floor(Anfragezeit::hoechstens((float) $zeit));
+        $fristUm = sprintf('Die Zeit für diese Anfrage ist um (zusammen höchstens %d Sekunden, danach gibt der Webserver auf) – '
+            . 'nichts weiter von dort geholt. Noch einmal versuchen; über eine sehr langsame Leitung die Pläne dort kleiner exportieren.',
+            Anfragezeit::SEKUNDEN);
+        if ($frist < 2) {
+            return $fehler(0, $fristUm);
+        }
+        $knapp = $frist < $zeit;
+        $zeit = $frist;
         $optionen['zeit'] = $zeit;
         // Bis zu ZEITLIMIT bzw. DATEI_ZEITLIMIT Sekunden – so lange stünden
         // sonst alle anderen Anfragen desselben Browsers an der Sitzung an.
@@ -392,6 +408,10 @@ final class PartnerService
         if (!$a['ok']) {
             if ((int) ($a['nummer'] ?? 0) === Http::ZU_GROSS) {
                 return $fehler((int) $a['status'], 'Die Antwort von dort ist zu groß – abgebrochen. ' . (string) $a['fehler']);
+            }
+            // CURLE_OPERATION_TIMEDOUT an der Frist der ganzen Anfrage
+            if ($knapp && (int) ($a['nummer'] ?? 0) === 28) {
+                return $fehler(0, $fristUm);
             }
             return $fehler(0, self::verbindungsfehler((int) ($a['nummer'] ?? 0), (string) $a['fehler'], $url, $zeit));
         }

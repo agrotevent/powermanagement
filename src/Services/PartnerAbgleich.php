@@ -62,6 +62,13 @@ final class PartnerAbgleich
     /** Plandatei dort: wie MasterAdmin sie nennt; webp kann PowerManagement nicht anzeigen. */
     private const PLANDATEI = '#^plaene/[a-z0-9-]+\.(pdf|png|jpe?g|svg|webp)$#';
 
+    /**
+     * Platz im Körper einer Sendung, der für Location und Feststrom (JSON)
+     * frei bleibt – die Plandateien (base64) teilen sich den Rest von
+     * VorschlagService::MAX_KOERPER.
+     */
+    private const PLATZ_FUER_JSON = 4 * 1024 * 1024;
+
     // ---------------------------------------------------------------- Liste
 
     /**
@@ -732,6 +739,16 @@ final class PartnerAbgleich
         $groesse = 0;
         $gesendet = [];
         $dateiFuerSha = [];
+        /*
+         * Grundrisse, die nicht in eine Sendung passen. Die Schnittstelle
+         * nimmt wie MasterAdmin höchstens 30 MiB je Datei und 48 MiB je
+         * Körper an (ApiBestand::MAX_DATEI_BYTES, VorschlagService::MAX_KOERPER);
+         * hier dürfen Pläne bis 100 MB groß sein. So einer bleibt hier und
+         * dort, wie er ist – der Rest geht trotzdem hinüber, und die Meldung
+         * sagt, welcher fehlt. Früher scheiterte daran die ganze Sendung.
+         */
+        $ausgelassen = [];
+        $planFehlt = [];
         foreach ($hier['location']['etagen'] as $e) {
             $dk = $nachDort[(string) $e['schluessel']] ?? null;
             $gegen = $dk !== null ? ($dortEtagen[$dk] ?? null) : null;
@@ -761,21 +778,36 @@ final class PartnerAbgleich
                     'sha256'       => $sha,
                 ];
                 $dortSha = is_array($gegen['plan'] ?? null) && is_string($gegen['plan']['sha256'] ?? null) ? strtolower($gegen['plan']['sha256']) : '';
-                if ($dortSha !== $sha && !isset($dateien[$datei])) {
+                if (isset($ausgelassen[$sha])) {
+                    // Dieselbe Datei für eine weitere Etage – auch hier nicht.
+                    $etage['plan'] = null;
+                } elseif ($dortSha !== $sha && !isset($dateien[$datei])) {
                     $pfad = (string) ($hier['dateien'][(string) $e['plan']['datei']] ?? '');
                     $bytes = $pfad !== '' ? (int) @filesize($pfad) : 0;
                     if ($bytes <= 0) {
                         return $nein(sprintf('Der Grundriss von „%s“ ließ sich hier nicht lesen – nichts geschickt.', (string) $e['name']));
                     }
-                    if ($bytes > ApiBestand::MAX_DATEI_BYTES) {
-                        return $nein(sprintf('Der Grundriss von „%s“ ist zu groß zum Zurückschicken (%.1f MiB, höchstens %d MiB) – nichts geschickt.',
-                            (string) $e['name'], $bytes / 1048576, intdiv(ApiBestand::MAX_DATEI_BYTES, 1048576)));
+                    $alsText = (int) ceil($bytes / 3) * 4;
+                    if ($bytes > ApiBestand::MAX_DATEI_BYTES || $groesse + $alsText > VorschlagService::MAX_KOERPER - self::PLATZ_FUER_JSON) {
+                        // Ohne Plan heißt dort „Grundriss unverändert“ – bei
+                        // MasterAdmin wie hier (plan: null löscht nichts).
+                        $ausgelassen[$sha] = sprintf('„%s“ (%s)', (string) $e['name'], SiteService::mb($bytes, true));
+                        $etage['plan'] = null;
+                    } else {
+                        $dateien[$datei] = base64_encode((string) file_get_contents($pfad));
+                        $groesse += strlen($dateien[$datei]);
                     }
-                    $dateien[$datei] = base64_encode((string) file_get_contents($pfad));
-                    $groesse += strlen($dateien[$datei]);
                 }
             }
-            if (array_key_exists('referenz', $e)) {
+            /*
+             * Ohne ihren Plan auch ohne Maßstab und Georeferenz: Beide sind am
+             * Plan hier gemessen, dort läge aber weiter der alte – „referenz“
+             * und „georeferenz“ fehlen, und das heißt dort „unverändert“.
+             */
+            $ohnePlan = is_array($e['plan']) && $etage['plan'] === null;
+            if ($ohnePlan) {
+                $planFehlt[(string) $e['schluessel']] = true;
+            } elseif (array_key_exists('referenz', $e)) {
                 $etage['referenz'] = $e['referenz'];
             }
             $etagen[] = $etage;
@@ -802,7 +834,7 @@ final class PartnerAbgleich
         if ($pm) {
             $geo = [];
             foreach ((array) $hier['strom']['georeferenz'] as $hk => $g) {
-                if (isset($gesendet[(string) $hk]) && is_array($g)) {
+                if (isset($gesendet[(string) $hk]) && !isset($planFehlt[(string) $hk]) && is_array($g)) {
                     $geo[$gesendet[(string) $hk]] = $g;
                 }
             }
@@ -929,6 +961,15 @@ final class PartnerAbgleich
         ];
         $was = sprintf('%d Etage(n)%s', count($etagen), $mitFeststrom ? sprintf(', %d Feststromanschluss/-anschlüsse, %d feste(s) Kabel', $anlagenZahl, $leitungenZahl) : '');
         $hinweis = $dortEntfernt > 0 ? sprintf(' %d Eintrag/Einträge, die es dort nicht mehr gibt, blieben hier und gingen nicht mit.', $dortEntfernt) : '';
+        if ($ausgelassen !== []) {
+            $details['ausgelassen'] = count($ausgelassen);
+            $hinweis .= sprintf(' Nicht mitgeschickt – größer, als die Schnittstelle annimmt (höchstens %s je Plan, %s zusammen): Grundriss von %s.'
+                . ' Dort bleibt der bisherige, mit seinem Maßstab und seiner Georeferenz; den Plan dort von Hand hinterlegen oder kleiner exportieren.'
+                . ' Bis dahin gilt der Standort hier als geändert – Übernehmen fragt vorher nach.',
+                // zusammen: was als base64 in den Körper passt, umgerechnet auf die Dateien
+                SiteService::mb(ApiBestand::MAX_DATEI_BYTES), SiteService::mb(intdiv((VorschlagService::MAX_KOERPER - self::PLATZ_FUER_JSON) * 3, 4)),
+                implode(', ', $ausgelassen));
+        }
         if ($uebernommen) {
             // Den Stand von dort nur übernehmen, wenn er auf dem aufsetzte, den
             // hier zuletzt geholt wurde – nach „erzwingen“ kann es dort mehr
@@ -938,7 +979,16 @@ final class PartnerAbgleich
             if ($passte && is_string($stand) && preg_match('/^[0-9a-f]{1,64}$/', $stand) === 1) {
                 Database::execute('UPDATE sites SET partner_stand = ?, partner_at = ? WHERE id = ?', [$stand, gmdate('c'), $siteId]);
             }
-            Database::execute('UPDATE sites SET partner_hash = ? WHERE id = ?', [self::hierStand($siteId, true), $siteId]);
+            /*
+             * Der Fingerabdruck hier gilt als „dort angekommen“ – aber nur,
+             * wenn alles mitging. Fehlt ein Plan (zu groß), läge dort der
+             * alte: Mit dem neuen Fingerabdruck hieße das „aktuell“, und das
+             * nächste Übernehmen holte ohne Rückfrage den alten Plan zurück.
+             * So bleibt es bei „hier geändert“ (bzw. „beide“).
+             */
+            if ($ausgelassen === []) {
+                Database::execute('UPDATE sites SET partner_hash = ? WHERE id = ?', [self::hierStand($siteId, true), $siteId]);
+            }
             Audit::log('api.partner.hochgeladen', 'site', (string) $siteId, $details + ($passte ? [] : ['erzwungen' => true]));
             return ['ok' => true, 'uebernommen' => true, 'id' => $id,
                 'message' => sprintf('Bei „%s“ übernommen (%s).', (string) $partner['name'], $was)

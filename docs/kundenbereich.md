@@ -261,9 +261,13 @@ Person ihn **freigibt** – und nur mit unversehrter Datei.
 ### Von Hand
 
 - **Nur PDF** (beginnt mit `%PDF-`), höchstens **10 MB**. Gleiche Bytes
-  liegen nur einmal in der Datenbank. Was größer ist als die Grenze des
-  Servers (`post_max_size`, im Container 66 MB), verwirft PHP ganz – dann
-  steht da „Sicherheitstoken ungültig“ statt einer Größenmeldung.
+  liegen nur einmal in der Datenbank. Eine größere Datei hält schon der
+  Browser beim Auswählen an (Meldung unter dem Feld). Ohne JavaScript lehnt
+  die App sie mit der Größe ab – bis 16 MB: Mehr lässt nginx außerhalb von
+  `/standorte/grundriss` und `/api/` nicht durch und antwortet dann selbst
+  mit 413. Ohne nginx davor gilt `post_max_size` (im Container 105M);
+  darüber verwirft PHP den Körper ganz, und die App meldet die Größe statt
+  „Sicherheitstoken ungültig“.
 - **Angaben aus dem Protokoll** trägt eine Person ein – das PDF wird nicht
   ausgewertet: Gerät/Bezeichnung (Pflicht), Inventar- und Seriennummer,
   **geprüft am** (Pflicht, nicht in der Zukunft), **nächste Prüfung**,
@@ -381,6 +385,49 @@ einmal in der Stunde (Neuladen ist kein neuer Abruf). Andere Seitenaufrufe
 „zuletzt angesehen“ bzw. „zuletzt als PDF geladen“, am Nachweis „zuletzt
 geladen“; hat ein **anderer** Kunde den Bericht aufgerufen, warnt die Karte.
 
+Während eines Updates (unten) stehen Abrufe zusätzlich im Protokoll des
+Servers (`storage/logs/app.log`: „kundenbereich.abruf während eines
+Updates“, nur Kennungen und Prüfsumme). Rollt das Update zurück, kommt die
+Datenbank von vor der Sicherung zurück – ohne die drei Spuren aus diesen
+Minuten; die Zeile im Protokoll bleibt.
+
+## Während eines Updates
+
+Ein Update (*System → Update*, automatisch oder auf der Konsole,
+[installation-debian-lxc.md](installation-debian-lxc.md#10--update))
+sperrt für 1–3 Minuten jede Änderung – ein Zurückrollen legte sonst die
+Datenbank von vorher zurück, und was jemand eben gespeichert hat, wäre weg.
+
+- **Kunden** sehen davon nur, was sie betrifft: Übersicht, Locations,
+  Protokolle und Prüfnachweise lesen und laden sie weiter (bis auf einen
+  Moment, in dem die Dienste neu starten). Ein neues Kennwort – im Konto
+  oder über den Einrichtungslink – wird nicht gespeichert; der
+  Kundenbereich meldet „Gerade wird das System aktualisiert – nichts
+  gespeichert …“ in seinem eigenen Layout und führt zurück zum Konto bzw.
+  zum selben Link (er bleibt gültig). Kennwörter hebt dabei niemand auf.
+  Seiten, Abzeichen oder Hinweise des Updates gibt es im Kundenbereich nie;
+  Adressen des Personals beantwortet auch dann das Tor.
+- **Die Kundenverwaltung** meldet „Gerade läuft ein Update …“ und führt
+  zurück auf die Seite, von der das Formular kam – nach den Treffern der
+  Eventworx-Suche, den Dateien am Vorgang oder einer Rückfrage (die es
+  nicht als eigene Seite gibt) auf den Kunden. Was schon vor der Sperre
+  lief, darf vor der Sicherung zu Ende schreiben (das Update wartet bis zu
+  150 s): Vorgänge **verknüpfen** wartet kürzer auf Eventworx (unter 30 s)
+  und schreibt also rechtzeitig. **Prüfnachweise aus Eventworx übernehmen**
+  wartet oft länger (je Datei bis 30 s) und fragt vor jedem Schreiben noch
+  einmal: Hat das Update inzwischen begonnen, übernimmt es nichts mehr und
+  zeigt die Liste mit Auswahl und Angaben wieder – nach dem Update genügt
+  *Gewählte übernehmen*. Was davor übernommen war, bleibt. Beim **Hochladen**
+  kommt die Datei bei nginx an, bevor die Anwendung sie sieht; geprüft wird
+  danach, gespeichert gleich darauf.
+- **Automatische Updates** verschiebt der Kundenbereich nicht: Kunden lesen
+  nur, und angemeldet sind sie oft tagelang – ein Update fände sonst nie ein
+  Fenster. Verschoben wird wie sonst bei einem Aufbau oder Schaltvorgängen.
+- **Daten:** Die Prüfnachweise liegen in der Datenbank. Sicherung und
+  Schnappschuss vor dem Update enthalten sie also (der freie Platz muss für
+  zweimal die Datenbank reichen), ein Zurückrollen bringt sie vollständig
+  zurück, und Migrationen des Kundenbereichs (016) gehen mit.
+
 ## Kunde beenden und löschen
 
 - **Beenden**: *aktiv* ausschalten (oder „Zugänge enden am“). Alle Zugänge
@@ -419,6 +466,7 @@ Rechtsberatung**.
 | Prüfnachweise und Dateien | `aufbewahren_bis` oder Löschen des Kunden; eine Datei, sobald sie niemand mehr nutzt |
 | Abrufe | mit dem Dokument bzw. dem Kunden |
 | Audit-Log | 400 Tage (`wartung`) |
+| Sicherungen vor einem Update (`storage/backups/vor-update-*.tar.gz`) | die letzten fünf – sie enthalten die ganze Datenbank, also auch Prüfnachweise und Zugänge; was gelöscht ist, steht dort noch, bis die Sicherung herausfällt |
 | Einrichtungslinks | Einlösen; abgelaufene macht `wartung` unbrauchbar |
 
 **Fehlzuordnung (Art. 33/34).** Hat ein Kunde ein fremdes Protokoll oder
@@ -536,7 +584,8 @@ gefragt.
 | Skript | prüft |
 |---|---|
 | `tests/kundenbereich.php` | Kundenzugänge ohne Rechte, Tor über alle Routen (auch die Tank-Routen, dazu mit echten Tank-IDs), keine Tanks (nicht unter den festen Anschlüssen, nicht über `Zugriff`, nicht auf den Seiten, `tank:liste` abgelehnt), Freigaben nur am Kunden, mehrere Veranstalter je Gelände, Locations und Pläne, Protokolle nur über die Zuordnung, gleiche 404 für Fremdes, PDF-Kopfzeilen und Abrufe (auch der Leseansicht), Einrichtungslink, Zugänge nur von dem, der alles sieht, Kundenmodus neben dem Kundenbereich (Kundenzugänge nie im Kundenmodus), Kontowechsel im selben Browser, Kunde beendet, Benutzer- und Kundenverwaltung |
-| `tests/pruefnachweise.php` | Upload nur PDF, Dubletten, Angaben (kein Tanksensor), Sichtbarkeit, Gültigkeit in der Mietzeit, Aufbewahrung, Integrität (auch Heilen und Datensätze ohne Kunden), Übernahme aus Eventworx (auch mit gleichzeitigem Löschen) |
+| `tests/pruefnachweise.php` | Upload nur PDF, Dubletten, Angaben (kein Tanksensor), Sichtbarkeit, Gültigkeit in der Mietzeit, Aufbewahrung, Integrität (auch Heilen und Datensätze ohne Kunden), Übernahme aus Eventworx (auch mit gleichzeitigem Löschen und einem Update, das währenddessen beginnt) |
+| `tests/update.php` | Kundenbereich während eines Updates: lesen und laden geht, Abrufe auch im Protokoll des Servers, Kennwort und Einrichtungslink abgewiesen (Meldung im Kundenbereich, zurück zum Konto bzw. Link, 503 für JSON), Tor vor der Sperre, nie Abzeichen oder Seiten des Updates; Kundenverwaltung zurück auf die nächste Seite; Verknüpfen und Übernehmen mit dem echten `wartung_an` |
 | `tests/eventworx.php` | Dateien am Vorgang, Verknüpfen, Lese-Probe |
 | `tests/sitzung.php` | Suche, Verknüpfen und Dateiliste halten die Sitzung nicht; Kundenmodus während des Wartens; Formulare mit `data-laeuft-seite` |
 | `tests/web.php`, `tests/sicherheit.php`, `tests/berichte.php`, `tests/zeitfenster.php`, `tests/schnittstelle.php` | Seiten der Kundenverwaltung, Rechte, Zuordnung am Bericht, Freigaben am Kunden, keine Tokens für Kundenzugänge |

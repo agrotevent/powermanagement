@@ -269,7 +269,7 @@ Diese Schalter (Karte **Schutz**) ändert nur, wer **alle Rechte** hat.
 
 - **Verwaltung per SSO** (Vorgabe aus): Konten mit Verwaltungsrechten
   (alle Rechte, „Benutzer verwalten“, „Einstellungen“, „Anmeldung über
-  SSO“, „Schnittstelle“) melden sich **nur mit Kennwort** an, und Rollen mit
+  SSO“, „Schnittstelle“, „PowerManagement aktualisieren“) melden sich **nur mit Kennwort** an, und Rollen mit
   solchen Rechten lassen sich keiner Gruppe zuordnen – sonst beherrschte,
   wer Authentik beherrscht, auch PowerManagement. Ausschalten beendet ihre
   SSO-Sitzungen und entfernt solche Rollen aus Gruppen sofort.

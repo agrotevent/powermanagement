@@ -297,7 +297,8 @@ der Typ lässt sich kopieren und löschen. Fehlerhafte Einträge aus der
 Vorlage korrigiert man also einfach im Katalog. Ein gelöschter Typ ist beim
 nächsten Import wieder *neu*.
 
-Auf der Kommandozeile:
+Auf der Kommandozeile (auf einer Installation als Anwendungsbenutzer,
+`runuser -u www-data -- php bin/power …` – als root bricht `bin/power` ab):
 
 ```bash
 php bin/power katalog:import resources/kataloge/bss-strombibel.json --pruefen   # nur ansehen
@@ -933,7 +934,29 @@ er nutzt. Was dazu am Broker passiert, steht in
 ## Standorte und Location-Abgleich
 
 **Standorte** verwaltet Standorte, Etagen und Grundrisse. Pläne kommen als
-PDF (wird serverseitig gerastert und gekachelt), PNG/JPG oder SVG.
+PDF (wird serverseitig gerastert und gekachelt), PNG/JPG oder SVG – **bis
+100 MB** je Datei. Das Formular nennt die Grenze, und der Browser meldet
+eine zu große Datei schon beim Auswählen, bevor sie über die Leitung geht.
+Größere PDFs werden meist deutlich kleiner, wenn eingebettete Bilder mit
+geringerer Auflösung exportiert werden.
+
+- **Aufbereiten:** Der Server rechnet jeden Plan einmal in Kacheln (höchstens
+  50 Megapixel, also etwa 7 000 × 7 000 Pixel). Ein gewöhnlicher Plan ist
+  beim Hochladen gleich fertig. Bei großen Plänen antwortet der Upload nach
+  rund einer halben Minute und rechnet im Hintergrund weiter – gemessen
+  ein bis vier Minuten für eine Seite mit 100 MB, länger für viele Seiten.
+  Bis dahin zeichnet der Browser den Plan selbst (langsamer, weniger
+  scharf); danach die Karte neu laden. Pläne aus dem Location-Abgleich oder
+  von einer anderen Instanz rechnet immer der Hintergrund; mehrere große
+  Pläne kommen nacheinander dran.
+- **Ersetzen:** Ein neuer Plan auf einer Etage ersetzt den alten; wird der
+  alte von keiner Etage mehr genutzt, löscht der Server ihn samt Kacheln.
+- **Große Bilder:** PNG und JPEG über 50 Megapixel rechnet der Server mit
+  poppler herunter, ohne sie ganz in den Speicher zu laden. Dafür muss ein
+  JPEG *nicht progressiv* und in RGB oder Graustufen gespeichert sein, ein
+  PNG ohne Transparenz und ohne Zeilensprung (interlaced); über 400
+  Megapixel nimmt der Upload kein Bild an. Was nicht passt, lehnt der Upload
+  mit dem Grund ab – anders speichern, verkleinern oder als PDF hochladen.
 
 **Location-Abgleich** arbeitet mit demselben Git-Repository wie MasterAdmin
 (`locations/<schlüssel>/location.json` und `plaene/`):
@@ -962,6 +985,12 @@ PDF (wird serverseitig gerastert und gekachelt), PNG/JPG oder SVG.
 
 Adresse und Token des Repositorys stehen unter **System → Einstellungen →
 Location- und Verteiler-Abgleich**.
+
+Grundrisse wandern beim Hochladen mit ins Repository. Über **50 MB** gibt es
+dazu einen Hinweis: GitHub warnt ab dieser Größe, und jede Fassung bleibt
+für immer in der Geschichte des Repositorys, die jede Installation beim
+Holen mitnimmt. Über **100 MB** nimmt GitHub keine Datei an – dann lädt
+PowerManagement gar nicht erst hoch und sagt, welcher Plan zu groß ist.
 
 ## Andere Instanzen (Schnittstelle)
 
@@ -993,6 +1022,14 @@ geändert*:
 - Zurück geht es je nach Befugnis bei A: **Hochladen** (A übernimmt gleich,
   aber nur, wenn sich dort seit dem letzten Übernehmen nichts geändert hat)
   oder **Als Vorschlag schicken** (bei A bestätigt es jemand).
+- Die Schnittstelle nimmt wie MasterAdmin **höchstens 30 MB je Plan** an
+  (zusammen rund 33 MB je Sendung). Ein größerer Grundriss geht beim
+  Zurückschicken nicht mit: Der Rest wird geschickt, dort bleibt der
+  bisherige Plan samt seinem Maßstab und seiner Georeferenz (die hier sind
+  am neuen Plan gemessen), und die Meldung nennt ihn. Hier gilt der
+  Standort danach weiter als *hier geändert* – **Übernehmen** fragt also
+  nach, bevor es den alten Plan von dort zurückholt. Übernehmen geht dagegen bis
+  100 MB – Pläne holt B als Datei, nicht im Körper einer Sendung.
 
 Vorschläge prüft A unter **Standorte → Änderungsvorschläge**: je Etage, was
 sich ändern würde, dann **Annehmen** (gewählte Etagen und Teile) oder
@@ -1117,3 +1154,76 @@ und Kennwort – mit „nur SSO“ eingeklappt („Mit Benutzername und Kennwort
   verknüpft ist (und unter welchem Namen dort); wann es zuletzt über SSO
   kam, steht im Formular des Kontos. Dort lässt es sich lösen, seine
   SSO-Sitzungen beenden und auf „nur über SSO“ stellen.
+
+## Update
+
+**System → Update** bringt PowerManagement auf den neuesten Stand – ohne
+Konsole. Die Seite braucht das Recht *PowerManagement aktualisieren*, das
+von sich aus nur die Administration hat ([rechte.md](rechte.md#update)).
+Gibt es Neues, steht am Menüeintrag *Update* eine Zahl; ein gelbes oder
+rotes **!** meldet eine Störung (Update gescheitert, Update-Dienst still,
+Auftrag hängt). Auf dem Handy, wo die Seitenleiste zu ist, steht dasselbe
+Zeichen oben in der Kopfleiste.
+
+![System → Update: installierter Stand, vier neue Stände mit Betreff, Aktualisieren, Automatische Updates und Verlauf](bilder/update.png)
+
+| Karte | zeigt |
+|-------|-------|
+| **Stand** | installierter Stand (Datum, Kurz-Hash, Betreff, Zweig), verfügbar: *Aktuell*, *n Änderungen*, *Suche fehlgeschlagen*, *Lokale Änderungen*, *Verlauf nicht linear*; wann zuletzt gesucht wurde. **Jetzt suchen** fragt das Repository. |
+| **Was neu ist** | die neuen Stände mit Datum und Betreff (verlinkt, wenn das Repository auf GitHub liegt), dazu Kennzeichen: Datenbank wird erweitert, Einrichtung ändert sich, Node-RED-Flows ändern sich, und Hinweise zu diesem Update (aus den Commits, Zeile `Update-Hinweis:`) |
+| **Aktualisieren** | was passiert, wie lange das letzte Update dauerte, und **Jetzt aktualisieren** – genau auf den angezeigten Stand |
+| **Fortschritt** | Schritt *n von 12* mit Namen, Laufzeit und die letzten Zeilen des Protokolls; danach das Ergebnis mit Grund und das ganze Protokoll. Solange etwas läuft oder bis eine Stunde danach steht die Karte oben. |
+| **Automatische Updates** | Modus, Zeitfenster, Karenzzeit, *Pausieren bis*, nächstes Fenster, was zuletzt automatisch geschah |
+| **Verlauf** | die letzten Updates: Zeit, Auslöser (von Hand mit Namen, automatisch, Konsole, Update-Dienst), Ergebnis, Stand vorher → nachher, Dauer |
+| **Auf der Konsole** | die Befehle für ein Update auf der Konsole, mit den Pfaden dieser Installation |
+
+**Aktualisieren.** Vorher werden Datenbank und Konfiguration gesichert.
+Messung und Schalten sind etwa 1–3 Minuten unterbrochen, die Shellys kurz
+getrennt, die Oberfläche ist einen Moment nicht erreichbar (die Seite
+meldet „Dienste starten neu …“ und macht von selbst weiter). Solange das
+Update läuft, nimmt die Oberfläche keine Änderungen an: Speichern meldet
+„Gerade läuft ein Update – Änderungen sind in etwa einer Minute wieder
+möglich“. Übergabeberichte speichern danach von selbst noch einmal, die
+Eingaben bleiben solange auf dem Gerät. Eine Peilung oder Betankung, die
+beim Start des Updates schon auf den Rohwert des Sensors wartete, trägt
+das Update noch ein, bevor es sichert; im Kartenpanel bleibt eine
+abgewiesene Eingabe stehen und lässt sich nach einer Minute noch einmal
+abschicken. „Prüfnachweise aus Eventworx übernehmen“, das beim Start noch
+auf Eventworx wartete, übernimmt nichts mehr und zeigt die Liste mit
+Auswahl und Angaben wieder – nach dem Update genügt ein Klick. Kunden im
+Kundenbereich lesen weiter; ein neues Kennwort speichern sie erst danach
+(sie sehen dazu einen eigenen Hinweis, nie etwas vom Update selbst).
+Andere Instanzen bekommen über die
+Schnittstelle dieselbe Antwort (HTTP 503) – wer dort sendet, schickt es nach
+einer Minute noch einmal. Geht etwas schief, kommt der alte Stand von selbst zurück –
+Code, Datenbank und Einrichtung. Läuft gerade ein Aufbau oder wurde in den
+letzten 30 Minuten geschaltet, nennt die Seite das und verlangt das
+Kästchen **Trotzdem jetzt aktualisieren**. Ist der Knopf gesperrt, steht
+der Grund darunter (lokale Änderungen im Code, Verlauf nicht linear, ein
+Update läuft schon …) – solche Fälle gehen nur über die Konsole.
+
+**Automatische Updates.** Drei Modi:
+
+- *Aus* – gesucht wird nur auf Knopfdruck.
+- *Nur suchen und anzeigen* (Vorgabe) – etwa alle sechs Stunden nachsehen;
+  neue Stände zeigt das Abzeichen, eingespielt wird nur von Hand.
+- *Automatisch einspielen* – dazu im **Zeitfenster** von selbst
+  aktualisieren: an den gewählten Wochentagen ab *Beginn* für die gewählte
+  *Dauer* (Vorgabe 04:00, zwei Stunden), höchstens einmal am Tag.
+
+Die **Karenzzeit** (Vorgabe 24 Stunden) lässt nur Stände zu, die schon so
+lange veröffentlicht sind – ein fehlerhafter Stand kann bis dahin noch
+ersetzt werden. Nie während eines Aufbaus oder Betriebs an irgendeinem
+Standort und nicht, wenn in den letzten 30 Minuten geschaltet wurde: Dann
+wird verschoben und im Fenster erneut geprüft – ebenso, solange der Server
+Kacheln für einen großen Grundriss rechnet (meist Minuten). **Pausieren bis** hält die
+Automatik bis einschließlich des gewählten Tages an, etwa über ein
+Veranstaltungswochenende. Ein Stand, der zurückgerollt werden musste, wird
+nicht automatisch wiederholt – erst ein neuerer oder *Jetzt aktualisieren*.
+Wird 14 Tage lang nur verschoben, meldet die Seite das (oft ein Aufbau, der
+nie beendet wurde).
+
+Auf der Konsole geht dasselbe mit
+`runuser -u www-data -- php bin/power update:starten --warten`; Einzelheiten,
+Abschalten und Notfälle stehen in der
+[Installationsanleitung, Abschnitt 10](installation-debian-lxc.md#10--update).

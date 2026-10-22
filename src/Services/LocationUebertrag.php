@@ -134,6 +134,16 @@ final class LocationUebertrag
             }
         }
 
+        // Die Schreibsperre eines Updates noch einmal unmittelbar vor dem
+        // Schreiben: Wer hierher kommt, hat oft lange auf eine andere Instanz
+        // gewartet (je Plandatei bis PartnerService::DATEI_ZEITLIMIT) – länger,
+        // als das Update auf laufende Anfragen wartet (wartung_an). Was jetzt
+        // noch geschrieben würde, käme nach der Sicherung, und ein
+        // Zurückrollen verwürfe es still.
+        if (UpdateService::wartungAktiv()) {
+            return ['wartung' => true] + $fehler(UpdateService::NICHTS_UEBERNOMMEN);
+        }
+
         // ---------------------------------------------------- übersetzen und anwenden
         $pdo = Database::pdo();
         $eigeneTransaktion = !$pdo->inTransaction();

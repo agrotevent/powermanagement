@@ -219,6 +219,46 @@ Umstellung sperrt den gemeinsamen Zugang darauf – das lässt sich nicht auf
 einen Standort begrenzen. Kennwörter werden nie gespeichert und nie
 protokolliert; das Audit-Log nennt nur Gerät und Schritt.
 
+## Update
+
+**System → Update** braucht das Recht „PowerManagement aktualisieren“
+(`system.update`). Die Befehle `bin/power update:*` prüfen kein Recht –
+maßgeblich ist, wer auf der Konsole als Anwendungsbenutzer arbeiten darf
+(auf einer Installation lehnt `bin/power` als root ab, mit allen Befehlen). Von
+sich aus hat das Recht nur die Rolle *Administration*; bestehende Rollen
+bekommen es nicht nachträglich, und vergeben kann es nur, wer es selbst hat.
+Ein Update startet die Dienste neu – Messung und Schalten sind für alle
+Standorte 1–3 Minuten unterbrochen. Für die Anmeldung über SSO zählt es zu
+den Verwaltungsrechten: Eine Rolle damit lässt sich einer Gruppe nur mit
+„Verwaltung per SSO“ zuordnen, und Konten damit melden sich sonst nur mit
+Kennwort an ([Rollen aus Authentik-Gruppen](#rollen-aus-authentik-gruppen)).
+
+Kundenzugänge (Kundenbereich) bekommen das Recht nie – sie haben keine
+Rechte, und das Tor lässt sie nicht nach *System → Update*. Abzeichen und
+Hinweise zum Update sieht nur, wer das Recht hat; im Kundenbereich gibt
+es keine. Läuft ein Update, lesen Kunden weiter; ein Kennwort, das sie
+in dieser Zeit ändern wollen, wird nicht gespeichert, und der Kundenbereich
+sagt ihnen das.
+
+Das Recht ist bewusst eng: Es erlaubt, nach neuen Ständen zu suchen, einen
+Stand **vorwärts** auf dem ausgecheckten Zweig einzuspielen – genau den
+angezeigten – und die automatischen Updates einzustellen. Einen anderen
+Zweig, einen älteren Stand, `--erzwingen` oder `--flows-ersetzen` gibt es
+nur als root auf der Konsole. Dafür braucht niemand root oder das Token für
+das Repository: Die Oberfläche legt nur einen Auftrag ab, den der
+Update-Dienst (root) prüft und ausführt. root kann Updates aus der
+Oberfläche ganz oder nur das automatische Einspielen abschalten
+(`/etc/powermanagement/update.conf`,
+[Installationsanleitung, Abschnitt 10](installation-debian-lxc.md#10--update)) –
+daran ändert kein Recht in der Oberfläche etwas.
+
+Im Audit-Log steht, wer einen Auftrag gestellt hat
+(`system.update.anfordern`, auch von der Konsole und mit „trotz Betrieb“),
+das Ergebnis jedes Laufs (`system.update.ergebnis`), wer die automatischen
+Updates eingestellt hat (`system.update.automatik`) und was die Automatik
+angefordert oder verschoben hat. Das Protokoll auf der Seite nennt keine
+Zugangsdaten: Tokens und Benutzerteile in Adressen sind geschwärzt.
+
 ## Bereiche
 
 Einen Bereich sieht, wer seinen Standort sieht. In die Summe kommen aber nur
@@ -382,7 +422,8 @@ Rollen auch aus **Gruppen beim Anmeldedienst** kommen:
   vergeben dürfte. Eine Rolle mit „alle Rechte“ nur mit allen Rechten, eine
   mit einer Freigabe auf „alles“ ebenso.
 - **Verwaltende Rollen** (mit „alle Rechte“, „Benutzer verwalten“,
-  „Einstellungen“, „Anmeldung über SSO einrichten“ oder „Schnittstelle“)
+  „Einstellungen“, „Anmeldung über SSO einrichten“, „Schnittstelle“ oder
+  „PowerManagement aktualisieren“)
   lassen sich nur zuordnen, wenn „Verwaltung per SSO“ an ist; sonst
   übergeht die Anmeldung sie (Audit `sso.rolle_uebergangen`), und Konten
   mit solchen Rechten melden sich nur mit Kennwort an. Wer in Authentik

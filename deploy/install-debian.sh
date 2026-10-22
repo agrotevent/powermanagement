@@ -21,9 +21,26 @@
 # Das Skript ist wiederholbar: Erledigtes wird übersprungen, erzeugte
 # Kennwörter stehen in /etc/powermanagement/zugaenge.txt und werden beim
 # nächsten Lauf wiederverwendet. Eigene Änderungen an den Node-RED-Flows,
-# an config/config.php und an der Datenbank bleiben unangetastet.
+# an config/config.php und an der Datenbank bleiben unangetastet – auch
+# Titel und Zugänge, die in der Oberfläche geändert wurden: In eine
+# vorhandene Datenbank trägt das Skript nur ein, was dort noch fehlt. Nur den
+# Zugang der Anwendung zum Broker im Container schreibt es jedes Mal neu; er
+# muss zur Kennwortdatei passen, die jeder Lauf schreibt.
 
 set -euo pipefail
+
+# Auch ohne Login-Shell lauffähig (systemd-run, Dienst): ohne HOME brach git
+# ab (Befund 24). Die umask des Aufrufers gilt nie – Code, Einheiten und
+# Vorlagen, die hier entstehen, müssen für andere lesbar sein.
+: "${HOME:=/root}"
+export HOME
+umask 022
+# git fragt nie nach (niemand tippt), und ein hängender Abruf bricht ab.
+export GIT_TERMINAL_PROMPT=0 GIT_HTTP_LOW_SPEED_LIMIT=1000 GIT_HTTP_LOW_SPEED_TIME=60
+
+# Die Optionen, wie sie kamen – für den Neustart mit einer neueren Fassung
+# dieses Skripts (siehe „Anwendung nach … bringen“).
+PM_ARGS=("$@")
 
 ZIEL="/opt/powermanagement"
 APP_USER="www-data"
@@ -67,7 +84,8 @@ hilfe() {
     cat <<HILFE
 Aufruf: $0 [Optionen]
 
-  --name=<titel>          Titel der Oberfläche
+  --name=<titel>          Titel der Oberfläche (bei vorhandener Datenbank nur,
+                          solange keiner eingetragen ist)
   --repo=<git-url>        Git-Repository, aus dem installiert wird. Ohne Angabe:
                           der Checkout, in dem dieses Skript liegt, oder GIT_REPO
                           aus /etc/powermanagement/git.conf
@@ -205,8 +223,15 @@ if [[ ! "$INFLUX_DB" =~ ^[A-Za-z0-9_.-]+$ ]]; then
     exit 1
 fi
 
-schritt() { printf '\n\033[1;34m==> %s\033[0m\n' "$1"; }
-hinweis() { printf '\033[1;33m    %s\033[0m\n' "$1" >&2; }
+# Farben nur am Terminal – in Protokolldateien und im Journal stünden sonst
+# Steuerzeichen.
+if [[ -t 1 && -z "${NO_COLOR:-}" ]]; then
+    F_S=$'\033[1;34m'; F_H=$'\033[1;33m'; F_0=$'\033[0m'
+else
+    F_S=""; F_H=""; F_0=""
+fi
+schritt() { printf '\n%s==> %s%s\n' "$F_S" "$1" "$F_0"; }
+hinweis() { printf '%s    %s%s\n' "$F_H" "$1" "$F_0" >&2; }
 
 if [[ -r /etc/os-release ]]; then
     # shellcheck disable=SC1091
@@ -224,10 +249,91 @@ if [[ ! -d /run/systemd/system ]] || ! command -v systemctl >/dev/null 2>&1; the
     exit 1
 fi
 
+# Nie gleichzeitig mit einem Update (deploy/update-debian.sh): beide
+# schreiben dieselben Dateien und starten dieselben Dienste neu. Dieselbe
+# Sperre wie dort – ein laufendes Update darf zu Ende kommen. Nach dem
+# Neustart mit einer neueren Fassung (unten) ist sie geerbt: fd 9 bleibt
+# über exec offen und gesperrt.
+install -d -m 750 "$ETC"
+if [[ "${PM_UPDATE_SPERRE:-}" == "geerbt" ]]; then
+    if ! flock -n 9 2>/dev/null; then
+        echo "PM_UPDATE_SPERRE=geerbt, aber die Sperre (fd 9) fehlt." >&2
+        exit 1
+    fi
+else
+    exec 9>>"$ETC/update.lock"
+    chmod 600 "$ETC/update.lock"
+    if ! flock -n 9; then
+        echo "    Warte auf ein laufendes Update …"
+        if ! flock -w 900 9; then
+            echo "Ein Update läuft – später erneut." >&2
+            exit 1
+        fi
+    fi
+fi
+# Ein unterbrochenes Update (Marke von deploy/update-debian.sh) rollt der
+# Update-Dienst noch zurück – auf den Stand von damals, samt Datenbank. Was
+# diese Installation jetzt einspielte, ginge dabei verloren: erst zurückrollen.
+if [[ -e /var/lib/powermanagement/update/offen ]]; then
+    echo "Ein früheres Update wurde unterbrochen und ist noch nicht zurückgerollt." >&2
+    echo "Erst: $ZIEL/deploy/update-debian.sh --wiederaufnehmen – dann diesen Aufruf wiederholen." >&2
+    exit 1
+fi
+
+# Sammler, Wartung, Node-RED, der MQTT-Helfer und der Update-Zeitplan laufen
+# gehärtet (PrivateTmp, ProtectSystem) und brauchen dafür eigene
+# Mount-Namensräume. Ein LXC ohne „nesting“ kann sie nicht einrichten – die
+# Dienste scheitern dann mit 226/NAMESPACE, ohne dass ein Schritt hier
+# fehlschlägt (Befund 11). Nur ein Hinweis, kein Abbruch: der Rest der
+# Installation gelingt trotzdem, und ein zweiter Lauf soll nicht an einer
+# Probe scheitern, die nichts kaputt macht.
+NAMENSRAEUME="ja"
+NAMENSRAEUME_TEXT="Der Container kann keine Namensräume einrichten (Proxmox: pct set <CTID> --features nesting=1, Container neu starten) – Sammler, Wartung, Node-RED, MQTT-Helfer und Update-Zeitplan brauchen sie."
+if ! timeout 60 systemd-run --quiet --wait --collect -p PrivateTmp=yes -p ProtectSystem=strict /bin/true >/dev/null 2>&1; then
+    NAMENSRAEUME="nein"
+    hinweis "$NAMENSRAEUME_TEXT"
+fi
+
 # Befehl als Anwendungsbenutzer im Anwendungsverzeichnis ausführen.
-# runuser gibt es auf Debian immer; sudo nicht zwingend.
+# runuser gibt es auf Debian immer; sudo nicht zwingend. Die Sperren (fd 8,
+# fd 9) bekommt er nicht mit: ein Prozess, der den Deskriptor erbt und
+# weiterläuft, hielte sie fest.
 as_app() {
-    (cd "$ZIEL" && runuser -u "$APP_USER" -- "$@")
+    (cd "$ZIEL" && runuser -u "$APP_USER" -- "$@") 8>&- 9>&-
+}
+
+# git als root: safe.directory gilt nur für den einen Aufruf – keine globale
+# Einstellung (ohne HOME bräche „git config --global“ ab, und ein Eintrag
+# bliebe für immer stehen). Hooks aus .git laufen nie (core.hooksPath).
+#   git_in <verzeichnis> <git-argumente…>      g <git-argumente…>  (= git_in "$ZIEL")
+git_in() {
+    local verzeichnis="$1"
+    shift
+    git -c safe.directory="$verzeichnis" -c core.hooksPath=/dev/null -C "$verzeichnis" "$@"
+}
+g() {
+    git_in "$ZIEL" "$@"
+}
+
+# Ausgaben von git ohne Benutzerteil in Adressen – stünden Zugangsdaten in
+# einer Remote-Adresse, kämen sie sonst ins Protokoll.
+ohne_zugangsdaten() { sed -E 's#(://)[^/@[:space:]]+@#\1#g'; }
+
+# apt unbeaufsichtigt: auf die dpkg-Sperre warten (apt-daily und
+# unattended-upgrades laufen im Hintergrund), bei geänderten Conffiles nie
+# fragen, sondern die vorhandene Fassung behalten. „apt-get update“ wartet
+# trotz Lock::Timeout nicht auf die Sperre der Paketlisten – daher die Schleife.
+APT=(apt-get -o DPkg::Lock::Timeout=600 -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold)
+apt_holen() {
+    local n=0
+    until "${APT[@]}" update -qq; do
+        if (( ++n >= 20 )); then
+            echo "apt-get update scheitert weiter – Netz und Paketquellen prüfen." >&2
+            return 1
+        fi
+        hinweis "apt ist belegt oder nicht erreichbar – neuer Versuch in 15 s"
+        sleep 15
+    done
 }
 
 # Ein Verzeichnis in storage/ anlegen – als Anwendungsbenutzer, nicht als
@@ -337,9 +443,21 @@ vorlage_uebernehmen() {
     elif cmp -s "$quelle" "$ziel"; then
         VORLAGE_ERGEBNIS="gleich"
     elif [[ "$erzwingen" == "ja" ]]; then
-        cp -p "$ziel" "$ziel.vor-$(date +%Y%m%d-%H%M%S)"
+        # Umbenennen statt „cp -p“: cp folgte als root einem Verweis, den der
+        # Besitzer des Ordners (nodered) unter dem Namen der Sicherung angelegt
+        # hat, und überschriebe dessen Ziel (Befund 8). rename folgt keinem
+        # Verweis; install legt die Datei unten neu an.
+        mv -fT -- "$ziel" "$ziel.vor-$(date +%Y%m%d-%H%M%S)"
         VORLAGE_ERGEBNIS="ersetzt"
     elif [[ -f "$merk" ]] && cmp -s "$merk" "$ziel"; then
+        VORLAGE_ERGEBNIS="ersetzt"
+    elif [[ -f "$neu" && ! -L "$neu" ]] && cmp -s "$neu" "$ziel"; then
+        # Die daneben gelegte neue Fassung ganz übernommen („cp …-neu“, wie
+        # die Hinweise es anbieten): ausgeliefert, nicht von Hand verändert.
+        # Der Merker stand noch auf der Fassung davor – ohne diesen Fall
+        # bliebe die Datei beim nächsten Update, das die Vorlage ändert, als
+        # „verändert“ stehen. Kein Verweis: -neu liegt teils in Ordnern, die
+        # nicht root gehören (Node-RED).
         VORLAGE_ERGEBNIS="ersetzt"
     else
         install -o "${besitzer%%:*}" -g "${besitzer##*:}" -m "$modus" "$quelle" "$neu"
@@ -460,15 +578,7 @@ git_zugang_ablegen() {
 
 git_helper_setzen() {
     [[ -f "$GIT_STORE" ]] || return 0
-    git -C "$ZIEL" config credential.helper "store --file=$GIT_STORE"
-}
-
-# git verweigert Arbeitsverzeichnisse, die einem anderen Benutzer gehören
-# („dubious ownership"). Ein Checkout, den jemand als normaler Benutzer
-# geholt hat, würde root sonst nicht anfassen.
-git_sicher() {
-    git config --global --get-all safe.directory 2>/dev/null | grep -qxF "$1" \
-        || git config --global --add safe.directory "$1"
+    g config credential.helper "store --file=$GIT_STORE"
 }
 
 # ================================================================ Pakete
@@ -477,7 +587,7 @@ export DEBIAN_FRONTEND=noninteractive
 # needrestart (falls vorhanden) soll nicht mitten im Lauf Dienste neu starten
 # oder nachfragen – das Skript startet seine Dienste selbst.
 export NEEDRESTART_MODE=l NEEDRESTART_SUSPEND=1
-apt-get update -qq
+apt_holen
 
 PAKETE=(
     nginx php-fpm php-cli php-sqlite3 php-gd php-curl php-mbstring php-xml
@@ -492,7 +602,7 @@ PAKETE=(
 [[ "$MIT_MOSQUITTO" == "ja" ]] && PAKETE+=(mosquitto)
 # Node-RED 4 braucht Node.js ≥ 18; Debian 13 bringt 20 mit.
 [[ "$MIT_NODERED" == "ja" ]] && PAKETE+=(nodejs npm)
-apt-get install -y --no-install-recommends "${PAKETE[@]}" >/dev/null
+"${APT[@]}" install -y --no-install-recommends "${PAKETE[@]}" >/dev/null
 
 PHP_VERSION="$(php -r 'echo PHP_MAJOR_VERSION.".".PHP_MINOR_VERSION;')"
 # Die FPM-Version kann von der CLI-Version abweichen (Reste einer älteren
@@ -539,8 +649,7 @@ if [[ -n "$GIT_CRED_FILE" ]]; then
     [[ "$ZWEIG_GESETZT" == "nein" && -n "$GIT_CONF_BRANCH" ]] && ZWEIG="$GIT_CONF_BRANCH" && ZWEIG_GESETZT="ja"
     ZUGANG_FUER="$REPO"
     if [[ -z "$ZUGANG_FUER" && -n "$CHECKOUT" && -d "$CHECKOUT/.git" ]]; then
-        git_sicher "$CHECKOUT"
-        ZUGANG_FUER="$(git -C "$CHECKOUT" remote get-url origin 2>/dev/null || true)"
+        ZUGANG_FUER="$(git_in "$CHECKOUT" remote get-url origin 2>/dev/null || true)"
     fi
     git_zugang_ablegen "$ZUGANG_FUER"
 fi
@@ -550,19 +659,41 @@ mkdir -p "$(dirname "$ZIEL")"
 if [[ -d "$ZIEL/.git" ]]; then
     # Vorhandene Installation: auf den Stand des Zweigs bringen, aber nur
     # vorwärts – lokale Änderungen und abweichende Stände fasst das
-    # Update-Skript an, nicht die Installation.
-    git_sicher "$ZIEL"
+    # Update-Skript an, nicht die Installation. Ohne --zweig bleibt der
+    # ausgecheckte Zweig – nicht still main (Befund 3).
+    if [[ "$ZWEIG_GESETZT" == "nein" ]]; then
+        ZWEIG="$(g symbolic-ref --short -q HEAD || echo main)"
+    fi
     git_helper_setzen
-    if GIT_TERMINAL_PROMPT=0 git -C "$ZIEL" fetch --quiet origin "$ZWEIG" 2>/dev/null; then
-        git -C "$ZIEL" checkout --quiet "$ZWEIG" 2>/dev/null || true
-        if ! git -C "$ZIEL" merge --ff-only --quiet "origin/$ZWEIG" 2>/dev/null; then
+    STAND_VORHER="$(g rev-parse HEAD)"
+    if timeout 600 git -c safe.directory="$ZIEL" -c core.hooksPath=/dev/null -C "$ZIEL" \
+        fetch --quiet origin "$ZWEIG" 2>/dev/null; then
+        if ! AUSCHECKEN="$(g checkout --quiet "$ZWEIG" 2>&1)"; then
+            hinweis "Der Zweig $ZWEIG lässt sich in $ZIEL nicht auschecken – der Stand bleibt, wie er ist:"
+            printf '%s\n' "$AUSCHECKEN" | sed 's/^/      /' >&2
+        elif ! g merge --ff-only --quiet "origin/$ZWEIG" 2>/dev/null; then
             hinweis "$ZIEL lässt sich nicht einfach vorspulen (lokale Änderungen?) – bleibt, wie es ist."
             hinweis "Aktualisieren mit: $ZIEL/deploy/update-debian.sh"
+        elif [[ -z "${PM_NEU_GESTARTET:-}" && "$(g rev-parse HEAD)" != "$STAND_VORHER" ]] \
+            && g merge-base --is-ancestor "$STAND_VORHER" HEAD \
+            && ! g diff --quiet "$STAND_VORHER" HEAD -- deploy/install-debian.sh; then
+            # bash liest ein laufendes Skript Stück für Stück aus der Datei,
+            # die es beim Start geöffnet hat – git hat sie eben ersetzt, nicht
+            # überschrieben. Ohne Neustart liefe der Rest dieses Laufs noch in
+            # der alten Fassung (Befunde 1, 7, 13, 16). Nur vorwärts: eine
+            # ältere Fassung startet nie. Die Sperre (fd 9) geht mit.
+            if bash -n "$ZIEL/deploy/install-debian.sh"; then
+                echo "    Stand: $(g log -1 --format='%h %s')"
+                echo "    Neue Fassung des Installationsskripts – neu gestartet."
+                exec env PM_NEU_GESTARTET=1 PM_UPDATE_SPERRE=geerbt \
+                    /bin/bash "$ZIEL/deploy/install-debian.sh" ${PM_ARGS[@]+"${PM_ARGS[@]}"}
+            fi
+            hinweis "Die neue Fassung von deploy/install-debian.sh ist fehlerhaft (bash -n) – dieser Lauf bleibt bei der bisherigen."
         fi
     else
         hinweis "Repository nicht erreichbar – vorhandener Stand in $ZIEL wird verwendet."
     fi
-    echo "    Stand: $(git -C "$ZIEL" log -1 --format='%h %s')"
+    echo "    Stand: $(g log -1 --format='%h %s')"
 elif [[ -n "$REPO" ]]; then
     if [[ -e "$ZIEL" && -n "$(ls -A "$ZIEL" 2>/dev/null)" ]]; then
         echo "$ZIEL ist nicht leer und kein Git-Arbeitsverzeichnis – dorthin wird nicht geklont." >&2
@@ -570,7 +701,8 @@ elif [[ -n "$REPO" ]]; then
     fi
     KLON_ZUGANG=()
     [[ -f "$GIT_STORE" ]] && KLON_ZUGANG=(-c "credential.helper=store --file=$GIT_STORE")
-    if ! GIT_TERMINAL_PROMPT=0 git ${KLON_ZUGANG[@]+"${KLON_ZUGANG[@]}"} clone --quiet --branch "$ZWEIG" "$REPO" "$ZIEL"; then
+    if ! git ${KLON_ZUGANG[@]+"${KLON_ZUGANG[@]}"} -c core.hooksPath=/dev/null \
+        clone --quiet --branch "$ZWEIG" "$REPO" "$ZIEL"; then
         echo "Das Repository ließ sich nicht klonen." >&2
         echo "Ist es privat? Dann ein Token hinterlegen:" >&2
         echo "  install -d -m 750 $ETC" >&2
@@ -579,7 +711,7 @@ elif [[ -n "$REPO" ]]; then
         exit 1
     fi
     git_helper_setzen
-    echo "    Geklont: $(git -C "$ZIEL" log -1 --format='%h %s')"
+    echo "    Geklont: $(g log -1 --format='%h %s')"
 elif [[ -n "$CHECKOUT" && "$CHECKOUT" == "$(cd "$ZIEL" 2>/dev/null && pwd -P)" ]]; then
     echo "    Das Skript liegt bereits in $ZIEL – wird so verwendet."
 elif [[ -n "$CHECKOUT" && -d "$CHECKOUT/.git" ]]; then
@@ -590,20 +722,28 @@ elif [[ -n "$CHECKOUT" && -d "$CHECKOUT/.git" ]]; then
         echo "$ZIEL ist nicht leer und kein Git-Arbeitsverzeichnis – dorthin wird nicht geklont." >&2
         exit 1
     fi
-    git_sicher "$CHECKOUT"
-    git clone --quiet "$CHECKOUT" "$ZIEL"
-    git_sicher "$ZIEL"
+    # Der Checkout gehört womöglich einem anderen Benutzer – dann verweigert
+    # git ihn („dubious ownership“). Die Ausnahme gilt nur für diesen Klon:
+    # -c für clone selbst und eigens für upload-pack, das clone für den
+    # Checkout startet (dorthin reicht git -c nicht weiter). --no-local:
+    # Objekte kopieren statt fest verlinken – sonst übereignete das chown
+    # unten auch die Dateien im Checkout root.
+    KLON_SICHER=(-c "safe.directory=$CHECKOUT" -c "safe.directory=$CHECKOUT/.git")
+    printf -v UPLOAD_PACK '%q ' git "${KLON_SICHER[@]}" upload-pack
+    git "${KLON_SICHER[@]}" -c core.hooksPath=/dev/null \
+        clone --quiet --no-local --upload-pack="$UPLOAD_PACK" "$CHECKOUT" "$ZIEL"
     if [[ "$ZWEIG_GESETZT" == "ja" ]]; then
-        git -C "$ZIEL" checkout --quiet "$ZWEIG"
+        g checkout --quiet "$ZWEIG"
     fi
-    URSPRUNG="$(git -C "$CHECKOUT" remote get-url origin 2>/dev/null || true)"
+    URSPRUNG="$(git_in "$CHECKOUT" remote get-url origin 2>/dev/null || true)"
     if [[ -n "$URSPRUNG" ]]; then
-        git -C "$ZIEL" remote set-url origin "$URSPRUNG"
+        g remote set-url origin "$URSPRUNG"
         git_helper_setzen
-        GIT_TERMINAL_PROMPT=0 git -C "$ZIEL" fetch --quiet origin 2>/dev/null \
-            || hinweis "$URSPRUNG gerade nicht erreichbar – Updates holen es später."
+        timeout 600 git -c safe.directory="$ZIEL" -c core.hooksPath=/dev/null -C "$ZIEL" \
+            fetch --quiet origin 2>/dev/null \
+            || hinweis "$(printf '%s' "$URSPRUNG" | ohne_zugangsdaten) gerade nicht erreichbar – Updates holen es später."
     fi
-    echo "    Aus $CHECKOUT übernommen: $(git -C "$ZIEL" log -1 --format='%h %s')"
+    echo "    Aus $CHECKOUT übernommen: $(g log -1 --format='%h %s')"
 elif [[ -n "$CHECKOUT" ]]; then
     # Entpacktes Archiv ohne .git – kopieren. Updates per git gehen dann
     # nicht; das sagt die Zusammenfassung.
@@ -618,6 +758,16 @@ else
     exit 1
 fi
 
+# Läuft eine Kopie von anderswo (etwa ein früher heruntergeladenes
+# /root/install-debian.sh), die nicht der Fassung in $ZIEL entspricht? Dann
+# führt dieser Lauf womöglich veraltete Schritte aus.
+if [[ -f "$ZIEL/deploy/install-debian.sh" \
+      && "$SKRIPT_DIR" != "$(cd "$ZIEL/deploy" 2>/dev/null && pwd -P)" ]] \
+    && ! cmp -s -- "${BASH_SOURCE[0]}" "$ZIEL/deploy/install-debian.sh"; then
+    hinweis "Dieses Skript (${BASH_SOURCE[0]}) weicht von $ZIEL/deploy/install-debian.sh ab –"
+    hinweis "beim nächsten Mal besser jenes aufrufen."
+fi
+
 # Der Quellcode gehört root – die Anwendung (www-data) kann ihn nicht
 # verändern. Schreiben darf sie nur in storage/.
 # Lesbar für alle (www-data muss den Code lesen), schreibbar nur für root.
@@ -630,10 +780,15 @@ install -d -o "$APP_USER" -g "$APP_USER" -m 750 "$ZIEL/storage"
 # die Rechte daran nicht setzen. -R folgt keinen Verweisen (-P ist die
 # Vorgabe) und ändert nur die Einträge selbst.
 chown -R -P "$APP_USER:$APP_USER" "$ZIEL/storage"
-# mqtt/: Soll und Ergebnis der eigenen MQTT-Zugänge (deploy/mqtt-zugaenge.sh)
-for d in logs plans demo cache inventar sessions backups mqtt mqtt/soll mqtt/ist; do
+# mqtt/: Soll und Ergebnis der eigenen MQTT-Zugänge (deploy/mqtt-zugaenge.sh);
+# update/: Aufträge an den Update-Dienst (soll) und dessen Rückmeldungen (ist)
+for d in logs plans demo cache inventar sessions backups mqtt mqtt/soll mqtt/ist update update/soll update/ist; do
     app_verzeichnis "$ZIEL/storage/$d"
 done
+# Nur für root: Marke eines laufenden Updates, Kopie der alten Fassung,
+# Verlauf (/var/lib/…) und die Protokolle der Updates (/var/log/…)
+install -d -m 750 /var/log/powermanagement
+install -d -m 700 /var/log/powermanagement/update /var/lib/powermanagement/update
 
 HOST_IP="$(primary_ip)"
 if [[ "$PORT" == "80" ]]; then
@@ -652,12 +807,23 @@ else
     # über „bin/power einstellung" in die Datenbank und ist damit auch in
     # der Oberfläche änderbar.
     APP_KEY="base64:$(openssl rand -base64 32)"
-    PM_SCHLUESSEL="$APP_KEY" php -r '
+    # Die Datei hat die richtigen Rechte, bevor der Schlüssel hineinkommt –
+    # mit umask 022 wäre sie sonst kurz für alle lesbar (Befund 12).
+    # file_put_contents behält Besitzer und Modus. Erst fertig geschrieben
+    # kommt sie an ihren Platz: ein abgebrochener Lauf hinterlässt keine leere
+    # config.php, die der nächste für vorhanden hielte.
+    CONFIG_NEU="$ZIEL/config/.config.php.neu"
+    install -o root -g "$APP_USER" -m 640 /dev/null "$CONFIG_NEU"
+    if ! PM_SCHLUESSEL="$APP_KEY" php -r '
         $inhalt = file_get_contents($argv[1]);
         $neu = str_replace("base64:CHANGEME000000000000000000000000000000000000", getenv("PM_SCHLUESSEL"), $inhalt, $anzahl);
         if ($anzahl !== 1) { fwrite(STDERR, "Platzhalter für app.key nicht gefunden\n"); exit(1); }
-        file_put_contents($argv[2], $neu);
-    ' "$ZIEL/config/config.example.php" "$CONFIG"
+        if (file_put_contents($argv[2], $neu) !== strlen($neu)) { fwrite(STDERR, "config.php ließ sich nicht schreiben\n"); exit(1); }
+    ' "$ZIEL/config/config.example.php" "$CONFIG_NEU"; then
+        rm -f "$CONFIG_NEU"
+        exit 1
+    fi
+    mv -f "$CONFIG_NEU" "$CONFIG"
     echo "    Neuer app.key erzeugt – er verschlüsselt die hinterlegten Zugänge. Mit sichern!"
 fi
 chown "root:$APP_USER" "$CONFIG"
@@ -801,8 +967,8 @@ if [[ "$MIT_INFLUX" == "ja" ]]; then
         rm -rf "$GNUPG_TMP"
         echo 'deb [signed-by=/etc/apt/keyrings/influxdata-archive.gpg] https://repos.influxdata.com/debian stable main' \
             > /etc/apt/sources.list.d/influxdata.list
-        apt-get update -qq
-        apt-get install -y --no-install-recommends influxdb2 influxdb2-cli >/dev/null
+        apt_holen
+        "${APT[@]}" install -y --no-install-recommends influxdb2 influxdb2-cli >/dev/null
     fi
     # Keine Nutzungsstatistik an InfluxData schicken.
     if [[ -f /etc/influxdb/config.toml ]] && ! grep -q '^reporting-disabled' /etc/influxdb/config.toml; then
@@ -979,7 +1145,7 @@ if [[ "$MIT_NODERED" == "ja" ]]; then
         PM_KENNWORT="$NODERED_ADMIN_KENNWORT" php -r '
             $h = password_hash(getenv("PM_KENNWORT"), PASSWORD_BCRYPT);
             echo "\$2b\$" . substr($h, 4), "\n";' \
-            | runuser -u nodered -- sh -c 'umask 077; rm -f -- "$1"; cat > "$1"' _ "$HASH_DATEI"
+            | runuser -u nodered -- sh -c 'umask 077; rm -f -- "$1"; cat > "$1"' _ "$HASH_DATEI" 9>&-
     fi
     zugang_setzen NODERED_ADMIN_BENUTZER admin
 
@@ -1000,8 +1166,10 @@ if [[ "$MIT_NODERED" == "ja" ]]; then
         behalten) hinweis "Die Flows in Node-RED wurden verändert und bleiben, wie sie sind."
                   hinweis "Die mitgelieferte Fassung liegt unter $NODERED_DIR/flows.powermanagement-neu.json"
                   hinweis "(im Editor: Menü → Importieren) – oder erneut mit --flows-ersetzen aufrufen."
-                  hinweis "Eigene MQTT-Zugänge der Shellys brauchen die neuen Flows (Schutzliste pm/status/mqtt-zugaenge,"
-                  hinweis "Antworten unter <präfix>/pm-nodered/rpc)." ;;
+                  hinweis "Tanksensoren brauchen die neuen Flows – als Voltmeter (Plus Uni, Add-on) und am Gen1 Uni (adc) kommen sonst"
+                  hinweis "keine Rohwerte an, als Analog-Eingang nur eingang, ohne x und ohne Erkennung von Sensorfehlern."
+                  hinweis "Eigene MQTT-Zugänge der Shellys ebenso (Schutzliste pm/status/mqtt-zugaenge, Antworten unter"
+                  hinweis "<präfix>/pm-nodered/rpc)." ;;
     esac
 
     # Zugang zum Broker in flows_cred.json unter der festen ID des Broker-
@@ -1025,7 +1193,7 @@ if [[ "$MIT_NODERED" == "ja" ]]; then
         try { fs.unlinkSync(datei + ".neu"); } catch (e) {}
         fs.writeFileSync(datei + ".neu", JSON.stringify(d, null, 4) + "\n", { mode: 0o600, flag: "wx" });
         fs.renameSync(datei + ".neu", datei);
-    '
+    ' 9>&-
 
     # Umgebung für den Dienst. Werte in einfachen Anführungszeichen: so
     # nimmt systemd sie wörtlich.
@@ -1088,6 +1256,10 @@ rm -f "$SITE_NEU"
 if [[ "$VORLAGE_ERGEBNIS" == "behalten" ]]; then
     hinweis "$SITE ist von Hand verändert und bleibt so. Die neue Fassung liegt unter"
     hinweis "/etc/nginx/powermanagement.powermanagement-neu (Unterschiede: diff -u $SITE /etc/nginx/powermanagement.powermanagement-neu)."
+    if ! grep -q 'location = /standorte/grundriss' "$SITE"; then
+        hinweis "Darin fehlt der Block für Grundrisse bis 100 MB (location = /standorte/grundriss, client_max_body_size 105m) –"
+        hinweis "von dort übernehmen, sonst lehnt nginx große Pläne ab."
+    fi
 fi
 ln -sf "$SITE" /etc/nginx/sites-enabled/powermanagement
 rm -f /etc/nginx/sites-enabled/default
@@ -1111,25 +1283,43 @@ systemctl reload nginx || systemctl restart nginx
 # ================================================================ Datenbank
 schritt "Datenbank anlegen und Administrator erzeugen"
 ADMIN_KENNWORT=""
-if [[ -f "$ZIEL/storage/database.sqlite" ]]; then
-    as_app php "$ZIEL/bin/power" migrate
-    echo "    Datenbank vorhanden – nur Migrationen ausgeführt"
+# Dass die Datenbankdatei existiert, heißt nicht, dass es einen Administrator
+# gibt (Befund 2): Jeder Aufruf der Anwendung legt sie an, auch leer – etwa
+# die Anmeldeseite, sobald nginx sie ausliefert –, und ein abgebrochenes
+# „bin/power install“ hinterlässt sie halb fertig. Maßgeblich ist, ob es
+# Benutzer gibt. Gibt es welche, legt das Skript niemanden an – auch keinen
+# Administrator, den jemand bewusst entfernt oder umbenannt hat.
+DATENBANK_VORHER="nein"
+[[ -f "$ZIEL/storage/database.sqlite" ]] && DATENBANK_VORHER="ja"
+as_app php "$ZIEL/bin/power" migrate
+BENUTZER_ZAHL="$(as_app php -r 'require "src/bootstrap.php"; echo (int) App\Support\Database::scalar("SELECT COUNT(*) FROM users");')" || BENUTZER_ZAHL=""
+if [[ ! "$BENUTZER_ZAHL" =~ ^[0-9]+$ ]]; then
+    echo "Die Benutzer in der Datenbank ließen sich nicht zählen – Ausgabe oben prüfen." >&2
+    exit 1
+fi
+if (( BENUTZER_ZAHL > 0 )); then
+    echo "    Datenbank vorhanden ($BENUTZER_ZAHL Benutzer) – nur Migrationen ausgeführt"
 else
+    [[ "$DATENBANK_VORHER" == "ja" ]] && hinweis "Die Datenbank hat noch keine Benutzer – der Administrator wird jetzt angelegt."
     ADMIN_KENNWORT="$(zufall 16)"
     # Kennwort über die Standardeingabe – so steht es nicht in der Prozessliste.
     # Bei der ersten Anmeldung muss es geändert werden.
     INSTALL_ARGS=(install "$ADMIN_USER" --stdin)
     [[ -n "$TITEL" ]] && INSTALL_ARGS+=("--name=$TITEL")
-    printf '%s\n' "$ADMIN_KENNWORT" | as_app php "$ZIEL/bin/power" "${INSTALL_ARGS[@]}" | grep -v 'Passwort:' || true
-    if [[ ! -f "$ZIEL/storage/database.sqlite" ]]; then
-        echo "Die Datenbank wurde nicht angelegt – Ausgabe oben prüfen." >&2
+    # Ein Fehler darf nicht untergehen: sonst stünde ein Erstkennwort in der
+    # Zusammenfassung, zu dem es keinen Benutzer gibt.
+    if ! AUSGABE="$(printf '%s\n' "$ADMIN_KENNWORT" | as_app php "$ZIEL/bin/power" "${INSTALL_ARGS[@]}" 2>&1)"; then
+        printf '%s\n' "$AUSGABE" | grep -v 'Passwort:' >&2 || true
+        echo "bin/power install ist fehlgeschlagen – Ausgabe oben prüfen, dann das Skript noch einmal aufrufen." >&2
         exit 1
     fi
-    zugang_setzen OBERFLAECHE_BENUTZER "$ADMIN_USER"
-    zugang_setzen OBERFLAECHE_KENNWORT "$ADMIN_KENNWORT"
-fi
-if [[ -n "$TITEL" && -z "$ADMIN_KENNWORT" ]]; then
-    as_app php "$ZIEL/bin/power" titel "$TITEL" >/dev/null
+    printf '%s\n' "$AUSGABE" | grep -v 'Passwort:' || true
+    if grep -qx 'Administrator angelegt:' <<< "$AUSGABE"; then
+        zugang_setzen OBERFLAECHE_BENUTZER "$ADMIN_USER"
+        zugang_setzen OBERFLAECHE_KENNWORT "$ADMIN_KENNWORT"
+    else
+        ADMIN_KENNWORT=""
+    fi
 fi
 
 # ================================================================ Einstellungen
@@ -1137,22 +1327,49 @@ schritt "Zugänge in die Anwendung eintragen"
 # Zugangsdaten landen verschlüsselt in der Datenbank (mit app.key).
 # Werte über die Standardeingabe: Tokens und Kennwörter erscheinen so nicht
 # in der Prozessliste.
+#
+# In eine vorhandene Datenbank (es gibt Benutzer) nur, was dort noch fehlt
+# (Befund 4): Titel, InfluxDB und MQTT lassen sich in der Oberfläche ändern
+# (System → Einstellungen) – ein weiterer Lauf mit denselben Optionen setzte
+# sie sonst still zurück. „immer“: nur der Zugang zum Broker im Container.
+BEHALTEN=()
 einstellung() {
-    printf '%s\n' "$2" | as_app php "$ZIEL/bin/power" einstellung "$1" --stdin >/dev/null
-    echo "    $1"
+    local ausgabe args=(einstellung "$1" --stdin)
+    if (( BENUTZER_ZAHL > 0 )) && [[ "${3:-}" != "immer" ]]; then
+        args+=(--nur-wenn-leer)
+    fi
+    ausgabe="$(printf '%s\n' "$2" | as_app php "$ZIEL/bin/power" "${args[@]}")"
+    case "$ausgabe" in
+        "$1 bleibt"*)      echo "    $1 – bleibt, in der Anwendung anders eingetragen"; BEHALTEN+=("$1") ;;
+        "$1 unverändert"*) echo "    $1 (unverändert)" ;;
+        *)                 echo "    $1" ;;
+    esac
 }
+# Bei einer neuen Datenbank hat „bin/power install --name“ den Titel gesetzt.
+if [[ -n "$TITEL" ]] && (( BENUTZER_ZAHL > 0 )); then
+    einstellung app.name "$TITEL"
+fi
 einstellung influx.url "$INFLUX_URL"
 einstellung influx.database "$INFLUX_DB"
 einstellung influx.org "$INFLUX_ORG"
 [[ -n "$INFLUX_TOKEN_PM" ]] && einstellung influx.token "$INFLUX_TOKEN_PM"
 einstellung mqtt.host "$MQTT_HOST"
 einstellung mqtt.port "$MQTT_PORT"
-[[ -n "$MQTT_PM_BENUTZER" ]] && einstellung mqtt.username "$MQTT_PM_BENUTZER"
-[[ -n "$MQTT_PM_KENNWORT" ]] && einstellung mqtt.password "$MQTT_PM_KENNWORT"
+# Das Kennwort von „powermanagement“ am Broker im Container setzt jeder Lauf
+# in dessen Kennwortdatei – die Anwendung muss dasselbe haben. Zeigt mqtt.host
+# (aus der Oberfläche) auf einen anderen Broker, bleibt dessen Zugang.
+MQTT_ZUGANG=""
+if [[ "$MIT_MOSQUITTO" == "ja" && " ${BEHALTEN[*]} " != *" mqtt.host "* ]]; then
+    MQTT_ZUGANG="immer"
+fi
+[[ -n "$MQTT_PM_BENUTZER" ]] && einstellung mqtt.username "$MQTT_PM_BENUTZER" "$MQTT_ZUGANG"
+[[ -n "$MQTT_PM_KENNWORT" ]] && einstellung mqtt.password "$MQTT_PM_KENNWORT" "$MQTT_ZUGANG"
 
 # ================================================================ Dienste
 schritt "Sammler, Wartung und Protokolle einrichten"
-DIENSTE=(powermanagement-sammler.service powermanagement-wartung.service powermanagement-wartung.timer)
+DIENSTE=(powermanagement-sammler.service powermanagement-wartung.service powermanagement-wartung.timer
+    powermanagement-update.service powermanagement-update.path powermanagement-update.timer
+    powermanagement-update-zeitplan.service powermanagement-update-zeitplan.timer)
 # Eigene MQTT-Zugänge: der Helfer läuft bei jeder Änderung des Solls (.path)
 # und alle zwei Minuten (.timer) – nur mit dem Broker hier im Container.
 [[ "$MIT_MOSQUITTO" == "ja" ]] && DIENSTE+=(powermanagement-mqtt-zugaenge.service
@@ -1188,6 +1405,15 @@ NODERED_APP=$NODERED_APP
 NODERED_DIR=$NODERED_DIR
 KONF
 chmod 644 "$INSTALLATION_CONF"
+
+# Update-Dienst erst jetzt einschalten: der Helfer liest installation.conf
+# nicht, aber update-debian.sh, das er startet. Die Pfad-Einheit nimmt
+# Aufträge der Oberfläche an, der Zeitgeber weckt den Dienst regelmäßig
+# (Lebenszeichen, Stand, Wiederanlauf). Einmal gleich starten – erstes
+# Lebenszeichen für die Oberfläche. Der Zeitplan (automatische Updates, als
+# Anwendungsbenutzer) läuft alle fünf Minuten von selbst.
+systemctl enable --quiet --now powermanagement-update.path powermanagement-update.timer powermanagement-update-zeitplan.timer
+systemctl start --no-block powermanagement-update.service || true
 
 # ================================================================ Prüfen
 schritt "Prüfen"
@@ -1309,6 +1535,12 @@ else
     echo
     echo "  InfluxDB:     $INFLUX_URL (vorhanden), Datenbank $INFLUX_DB"
 fi
+if (( ${#BEHALTEN[@]} > 0 )); then
+    echo
+    echo "  Beibehalten:  ${BEHALTEN[*]}"
+    echo "                (in der Anwendung anders eingetragen – Optionen dieses Aufrufs gelten"
+    echo "                dafür nur bei einer neuen Datenbank; ändern unter System → Einstellungen)"
+fi
 echo
 if [[ "$PRUEF_RC" -eq 0 ]]; then
     echo "  Prüfung:      in Ordnung (bin/power pruefen)"
@@ -1326,5 +1558,9 @@ if [[ "$DEFAULT_KONFLIKT" == "ja" ]]; then
     echo "  Hinweis: Eine andere nginx-Seite ist default_server auf Port $PORT."
     echo "  PowerManagement ist dann über http://$SERVER_NAME erreichbar – oder mit --port"
     echo "  einen eigenen Port wählen."
+fi
+if [[ "$NAMENSRAEUME" == "nein" ]]; then
+    echo
+    echo "  Hinweis: $NAMENSRAEUME_TEXT"
 fi
 echo

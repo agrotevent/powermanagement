@@ -25,6 +25,21 @@ use App\Support\Session;
  * eventworxUebernehmen übernimmt die gewählten. Beides wartet auf Eventworx
  * und hält dabei die Sitzung nicht; die Liste steht direkt in der Antwort,
  * die Sitzung merkt sich nur Kennungen, Namen und Zeiten der Dateien.
+ *
+ * Update: Jeder POST hier geht durch UpdateService::wartungsSperre() –
+ * während der Schreibsperre Meldung und zurück, vorher angemeldet, sodass
+ * das Update vor der Sicherung bis zu 150 s auf ihn wartet. Übernehmen
+ * wartet oft länger auf Eventworx und fragt die Sperre vor jedem Schreiben
+ * noch einmal (in Pruefnachweise::eventworxUebernehmen); hat das Update
+ * inzwischen begonnen, steht die Liste mit Auswahl und Angaben wieder da.
+ * Hochladen fragt nicht noch einmal: Die Datei kommt bei nginx an, bevor
+ * PHP startet (fastcgi_request_buffering), die Tür prüft danach, und
+ * gespeichert ist sie gleich darauf – ohne Warten dazwischen. Die Dateiliste
+ * (eventworx) fragt auch nicht noch einmal: Sie merkt sich die Dateien nur in
+ * der Sitzung, schreibt aber nach dem Warten auf Eventworx
+ * kunden_vorgaenge.dokumente_am – nach höchstens 42 s (job/<id> zweimal,
+ * file/list, je bis 12 s und 2 s Drossel). So lange wartet das Update
+ * allemal (150 s; nachgerechnet in tests/pruefnachweise.php).
  */
 final class PruefnachweiseController extends Controller
 {
@@ -152,9 +167,11 @@ final class PruefnachweiseController extends Controller
             $this->redirect('/login');
             return;
         }
-        if (!$r['ok'] && (!empty($r['angaben']) || $dateien === [])) {
-            // Die Angaben passen nicht: die gezeigte Liste noch einmal, mit den Eingaben – ohne Eventworx zu fragen.
-            Flash::error($r['message']);
+        if (!$r['ok'] && (!empty($r['angaben']) || !empty($r['wartung']) || $dateien === [])) {
+            // Die Angaben passen nicht – oder während des Wartens auf Eventworx hat ein
+            // Update begonnen: die gezeigte Liste noch einmal, mit den Eingaben – ohne
+            // Eventworx zu fragen. Nach dem Update genügt „Gewählte übernehmen“.
+            !empty($r['wartung']) ? Flash::warning($r['message']) : Flash::error($r['message']);
             $this->kandidaten($kunde, $vorgang, Pruefnachweise::gemerkteKandidaten($id, $vid), false, '',
                 $angaben + ['freigeben' => $freigeben ? 1 : 0, 'gewaehlt' => $dateien]);
             return;

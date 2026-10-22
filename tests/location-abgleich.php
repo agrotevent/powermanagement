@@ -21,6 +21,8 @@ use App\Services\MesspunktService;
 use App\Services\PlanGeoService;
 use App\Services\SchutzService;
 use App\Services\SiteService;
+use App\Services\UpdateService;
+use App\Support\Anfragezeit;
 use App\Support\Config;
 use App\Support\Database;
 use App\Support\Programm;
@@ -55,6 +57,7 @@ $alterZweig = Settings::get('inventory.branch');
 $siteId = null;
 $kopieId = null;
 $inventarId = null;
+$pdfSiteId = null;
 try {
     mkdir($tmp, 0775, true);
     $sh('git init -q --bare -b main ' . escapeshellarg($fern));
@@ -124,7 +127,7 @@ try {
         'anzahl' => 2, 'modell' => 'HK-A3', 'punkte' => '[[70,10],[72,12]]', 'farbe' => '', 'notizen' => '', 'created_at' => gmdate('c'), 'updated_at' => gmdate('c')]);
 
     $hoch = LocationSync::locationHochladen($siteId, 'pruefung');
-    pruefe($hoch['ok'], 'hochgeladen: ' . $hoch['message']);
+    pruefe($hoch['ok'] && !str_contains($hoch['message'], 'Hinweis: Der Grundriss'), 'hochgeladen (kleiner Plan, ohne Hinweis zur Größe): ' . $hoch['message']);
     $strom = json_decode($sh('git --git-dir=' . escapeshellarg($fern) . ' show main:locations/lager/strom.json'), true);
     gleich($strom['format'] ?? null, 2, 'strom.json im Format 2');
     $namen = array_column($strom['anlagen'] ?? [], 'name');
@@ -165,6 +168,141 @@ try {
     $loc = json_decode($sh('git --git-dir=' . escapeshellarg($fern) . ' show main:locations/lager/location.json'), true);
     gleich(count($loc['etagen']), 2, 'neue Etage in location.json ergänzt');
     gleich(count($loc['etagen'][0]['dosen']), 2, 'Dosen bleiben dabei erhalten');
+
+    // Ein Update beginnt, während auf das Repository gewartet wird. Holen und
+    // Hochladen dürfen zusammen bis zu 285 s dauern (Anfragezeit), auf eine
+    // laufende Anfrage wartet ein Update aber höchstens 150 s, dann sichert es
+    // die Datenbank. Danach fragen sie die Schreibsperre noch einmal: vor dem
+    // ersten Schreiben (nichts übernommen, nichts geschoben) und nach dem Push
+    // (dort ist es, hier fehlt nur der Vermerk – das nächste Hochladen trägt
+    // ihn nach). Die Sperre hier in einem eigenen storage/update.
+    $updOrdner = $tmp . '/update';
+    mkdir($updOrdner . '/ist', 0775, true);
+    $demoVorher = Config::isDemo();
+    Config::set('app.demo', false);   // im Demo-Modus gibt es keine Schreibsperre
+    Config::set('update.verzeichnis', $updOrdner);
+    $sperre = static function (bool $an) use ($updOrdner): void {
+        $an ? file_put_contents($updOrdner . '/ist/wartung', UpdateService::KOPF_WARTUNG . "\nseit " . time() . "\nkennung -\n")
+            : @unlink($updOrdner . '/ist/wartung');
+    };
+    $fernKopf = static fn (): string => trim($sh('git --git-dir=' . escapeshellarg($fern) . ' rev-parse main'));
+    $vermerk = static fn (): array => Database::first('SELECT synced_at, synced_commit FROM sites WHERE id = ?', [$siteId]) ?? [];
+    $auditZahl = static fn (string $aktion): int => (int) Database::scalar('SELECT COUNT(*) FROM audit_log WHERE action = ?', [$aktion]);
+    $hausName = (string) Database::scalar('SELECT name FROM objekte WHERE id = ?', [$an]);
+    $kopfVorher = $fernKopf();
+    $vermerkVorher = $vermerk();
+    $uebVorher = $auditZahl('location.uebernehmen');
+    $hochVorher = $auditZahl('location.hochladen');
+    $sperre(true);
+    $erg = LocationSync::uebernehmen('lager');
+    pruefe(!$erg['ok'] && ($erg['wartung'] ?? false) === true && $erg['message'] === UpdateService::NICHTS_UEBERNOMMEN
+        && $auditZahl('location.uebernehmen') === $uebVorher && $vermerk() === $vermerkVorher, 'Update beginnt beim Holen: nichts übernommen, mit „wartung“');
+    Database::execute('UPDATE objekte SET name = ? WHERE id = ?', [$hausName . ' (Update)', $an]);
+    $erg = LocationSync::locationHochladen($siteId, 'pruefung');
+    pruefe(!$erg['ok'] && ($erg['wartung'] ?? false) === true && $erg['message'] === UpdateService::NICHTS_HOCHGELADEN
+        && $fernKopf() === $kopfVorher && $vermerk() === $vermerkVorher, 'Update beginnt beim Holen: nichts hochgeladen, nichts geschoben');
+    $sperre(false);
+    // Jetzt beginnt das Update erst während des Push (eine Attrappe vor git setzt die Sperre).
+    $echtGit = (string) Programm::finden('git', ['--version']);
+    $gitAttrappe = $tmp . '/git-attrappe';
+    mkdir($gitAttrappe, 0700, true);
+    file_put_contents($gitAttrappe . '/git', "#!/bin/sh\nif [ \"\$1\" = push ]; then printf '%s\\nseit %s\\nkennung -\\n' "
+        . escapeshellarg(UpdateService::KOPF_WARTUNG) . ' "$(date +%s)" > ' . escapeshellarg($updOrdner . '/ist/wartung') . "; fi\nexec " . escapeshellarg($echtGit) . ' "$@"' . "\n");
+    chmod($gitAttrappe . '/git', 0700);
+    $pfadVorher = (string) getenv('PATH');
+    putenv('PATH=' . $gitAttrappe . ':' . $pfadVorher);
+    Programm::vergessen();
+    $erg = LocationSync::locationHochladen($siteId, 'pruefung');
+    putenv('PATH=' . $pfadVorher);
+    Programm::vergessen();
+    pruefe($erg['ok'] && ($erg['wartung'] ?? false) === true && str_contains($erg['message'], 'ist hochgeladen') && str_contains($erg['message'], UpdateService::VERMERK_FEHLT)
+        && $fernKopf() !== $kopfVorher && is_file($updOrdner . '/ist/wartung'), 'Update beginnt beim Push: dort angekommen, Meldung nennt den fehlenden Vermerk – ' . $erg['message']);
+    pruefe($vermerk() === $vermerkVorher && $auditZahl('location.hochladen') === $hochVorher, 'Update beginnt beim Push: hier weder Vermerk noch Audit');
+    $sperre(false);
+    // Nach dem Update – Minuten später – noch einmal hochladen, wie die
+    // Meldung sagt. strom.json trägt die Zeit („stand“), also gibt es einen
+    // neuen Commit; erst in der nächsten Sekunde, sonst hinge die Prüfung
+    // davon ab, ob beide Läufe in dieselbe Sekunde fallen (dann „schon
+    // derselbe Stand“, ebenfalls mit Vermerk).
+    time_sleep_until(floor(microtime(true)) + 1.05);
+    $kopfVorher = $fernKopf();
+    $erg = LocationSync::locationHochladen($siteId, 'pruefung');
+    pruefe($erg['ok'] && !isset($erg['wartung']) && str_contains($erg['message'], 'ist hochgeladen') && $fernKopf() !== $kopfVorher
+        && ($vermerk()['synced_commit'] ?? '') !== ($vermerkVorher['synced_commit'] ?? '')
+        && str_starts_with($fernKopf(), (string) ($vermerk()['synced_commit'] ?? '-')), 'nach dem Update noch einmal hochgeladen: der Vermerk ist nachgetragen – ' . $erg['message']);
+    gleich($auditZahl('location.hochladen'), $hochVorher + 1, 'nach dem Update noch einmal hochgeladen: mit Audit');
+    pruefe(!str_contains(UpdateService::VERMERK_FEHLT, 'schon derselbe Stand'), 'die Meldung verspricht kein „schon derselbe Stand“ (strom.json trägt die Zeit)');
+    Database::execute('UPDATE objekte SET name = ? WHERE id = ?', [$hausName, $an]);
+    pruefe(LocationSync::locationHochladen($siteId, 'pruefung')['ok'], 'Name wieder wie vorher hochgeladen');
+
+    // bin/power location:uebernehmen – empfohlen über eine langsame Leitung –
+    // kachelt einen PDF-Grundriss hier und jetzt, bei 100 MB Minuten lang.
+    // Die Kommandozeile meldet sich beim Update nicht an, es wartet nicht auf
+    // sie: Vermerk und Audit stehen deshalb vor dem Kacheln, und das Kacheln
+    // hält die Sperre von nacheinander() – kein Bau daneben, und die Automatik
+    // sieht ihn (rechnetImHintergrund(), verschoben:kacheln). Eine Attrappe
+    // von pdftoppm sichert beim ersten Aufruf die Datenbank und setzt die
+    // Schreibsperre – wie ein Update, das mitten im Kacheln beginnt.
+    if (!\App\Services\PdfRasterService::verfuegbar() || !extension_loaded('gd')) {
+        fwrite(STDOUT, "  (ohne poppler-utils oder gd: location:uebernehmen mitten im Kacheln übersprungen)\n");
+    } else {
+        require_once __DIR__ . '/hilfen/grundriss-dateien.php';
+        $pdfKey = 'halle-pdf-' . bin2hex(random_bytes(3));
+        $git($mo, 'pull -q origin main');
+        mkdir($mo . '/locations/' . $pdfKey . '/plaene', 0775, true);
+        pruefPdf($mo . '/locations/' . $pdfKey . '/plaene/eg.pdf', 1);
+        file_put_contents($mo . '/locations/' . $pdfKey . '/location.json', json_encode([
+            'format' => 1, 'art' => 'location', 'schluessel' => $pdfKey, 'name' => 'Prüfung Halle ' . $pdfKey, 'adresse' => '', 'notizen' => '',
+            'etagen' => [['schluessel' => 'eg', 'name' => 'EG', 'ebene' => 0, 'reihenfolge' => 0, 'massstab' => '', 'notizen' => '',
+                'plan' => ['datei' => 'plaene/eg.pdf', 'typ' => 'pdf', 'seite' => 1, 'originalname' => 'eg.pdf']]],
+        ], JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE));
+        $git($mo, 'add -A');
+        $git($mo, 'commit -q -m "Halle mit PDF-Grundriss"');
+        $git($mo, 'push -q origin main');
+
+        $schnapp = $tmp . '/sicherung-mitten-im-kacheln.sqlite';
+        $hgStand = $tmp . '/hintergrund-beim-kacheln';
+        $popplerAttrappe = $tmp . '/poppler-attrappe';
+        mkdir($popplerAttrappe, 0700, true);
+        file_put_contents($popplerAttrappe . '/pdftoppm', "#!/bin/sh\nif [ ! -e " . escapeshellarg($schnapp) . " ]; then\n  "
+            . escapeshellarg(PHP_BINARY) . " -r '\$p = new PDO(\"sqlite:\" . \$argv[1]); \$p->exec(\"VACUUM INTO \" . \$p->quote(\$argv[2]));"
+            . " \$h = fopen(\$argv[3], \"r\"); echo \$h !== false && !flock(\$h, LOCK_SH | LOCK_NB) ? \"gehalten\" : \"frei\";' "
+            . escapeshellarg((string) Config::get('database.path')) . ' ' . escapeshellarg($schnapp) . ' '
+            . escapeshellarg(\App\Services\PlanTileService::hintergrundSperre()) . ' > ' . escapeshellarg($hgStand) . "\n"
+            . "  printf '%s\\nseit %s\\nkennung -\\n' " . escapeshellarg(UpdateService::KOPF_WARTUNG) . ' "$(date +%s)" > ' . escapeshellarg($updOrdner . '/ist/wartung') . "\n"
+            . "fi\nexec " . escapeshellarg((string) Programm::finden('pdftoppm', ['-v'])) . ' "$@"' . "\n");
+        chmod($popplerAttrappe . '/pdftoppm', 0700);
+        $pfadVorher = (string) getenv('PATH');
+        putenv('PATH=' . $popplerAttrappe . ':' . $pfadVorher);
+        Programm::vergessen();
+        $uebVorher = $auditZahl('location.uebernehmen');
+        $erg = LocationSync::uebernehmen($pdfKey);
+        putenv('PATH=' . $pfadVorher);
+        Programm::vergessen();
+        $pdfSite = Database::first('SELECT id, synced_commit FROM sites WHERE sync_key = ?', [$pdfKey]);
+        $pdfSiteId = (int) ($pdfSite['id'] ?? 0);
+        $pdfEtage = Database::first('SELECT * FROM floors WHERE site_id = ?', [$pdfSiteId]);
+        pruefe($erg['ok'] && $pdfEtage !== null && \App\Services\PlanTileService::meta($pdfEtage) !== null && is_file($schnapp) && UpdateService::wartungAktiv(),
+            'location:uebernehmen mit PDF: gekachelt, die Attrappe sicherte mitten darin und setzte die Sperre – ' . $erg['message']);
+        gleich((string) @file_get_contents($hgStand), 'gehalten', 'location:uebernehmen kachelt unter der Sperre von nacheinander() (die Automatik sieht es)');
+        $gesichert = new PDO('sqlite:' . $schnapp);
+        $q = $gesichert->prepare('SELECT synced_commit FROM sites WHERE id = ?');
+        $q->execute([$pdfSiteId]);
+        $commitGesichert = (string) $q->fetchColumn();
+        pruefe($commitGesichert !== '' && $commitGesichert === (string) ($pdfSite['synced_commit'] ?? ''),
+            'Sicherung mitten im Kacheln: der Vermerk steht darin (vor dem Kacheln geschrieben)');
+        $q = $gesichert->prepare("SELECT COUNT(*) FROM audit_log WHERE action = 'location.uebernehmen' AND target_id = ?");
+        $q->execute([(string) $pdfSiteId]);
+        gleich((int) $q->fetchColumn(), 1, 'Sicherung mitten im Kacheln: auch der Audit-Eintrag');
+        gleich($auditZahl('location.uebernehmen'), $uebVorher + 1, 'location:uebernehmen: ein Audit-Eintrag, nicht zwei');
+        $gesichert = null;
+        $sperre(false);
+        if ($pdfSiteId > 0) {
+            SiteService::deleteSite($pdfSiteId);   // mit Plandatei und Kacheln (planAufraeumen)
+        }
+        $pdfSiteId = null;
+    }
+    Config::set('app.demo', $demoVorher);
 
     // MasterAdmin ändert location.json (neue Dose) – strom.json bleibt
     $git($mo, 'pull -q origin main');
@@ -418,6 +556,71 @@ try {
     pruefe(strlen(LocationBundle::freierSchluessel('sites', str_repeat('Lager ', 20))) <= 64, 'freier Schlüssel höchstens 64 Zeichen');
     gleich(LocationBundle::freierSchluessel('floors', $marke . ' x', [$marke . '-x']), $marke . '-x-2', 'gerade vergebene Schlüssel zählen mit');
 
+    // Größen der Plandateien, die mit hochgehen (dünn belegte Dateien)
+    $fuenfzig = $tmp . '/fuenfzig.pdf';
+    $hundert = $tmp . '/hundert.pdf';
+    $klein = $tmp . '/klein.pdf';
+    foreach ([[$fuenfzig, LocationSync::GIT_DATEI_WARNUNG + 1], [$hundert, LocationSync::GIT_DATEI_HOECHSTENS + 1], [$klein, 1024]] as [$p, $n]) {
+        $f = fopen($p, 'wb');
+        ftruncate($f, $n);
+        fclose($f);
+    }
+    $daten = ['etagen' => [['schluessel' => 'halle', 'name' => 'Halle', 'plan' => ['datei' => 'plaene/halle.pdf']],
+        ['schluessel' => 'aussen', 'name' => 'Außen', 'plan' => ['datei' => 'plaene/aussen.pdf']]]];
+    $g = LocationSync::planGroessen(['plaene/halle.pdf' => $klein, 'plaene/aussen.pdf' => $klein], $daten);
+    gleich($g, ['fehler' => '', 'hinweis' => ''], 'Git: kleine Pläne ohne Hinweis');
+    $g = LocationSync::planGroessen(['plaene/halle.pdf' => $fuenfzig, 'plaene/aussen.pdf' => $klein], $daten);
+    pruefe($g['fehler'] === '' && str_contains($g['hinweis'], '„Halle“ (50,1 MB)') && str_contains($g['hinweis'], 'GitHub warnt'), 'Git: über 50 MB ein Hinweis – ' . $g['hinweis']);
+    $g = LocationSync::planGroessen(['plaene/halle.pdf' => $fuenfzig, 'plaene/aussen.pdf' => $hundert], $daten);
+    pruefe(str_contains($g['fehler'], '„Außen“ ist 100,1 MB groß – GitHub nimmt keine Datei über 100 MB an') && str_contains($g['fehler'], 'Nichts hochgeladen'),
+        'Git: über 100 MB ein Fehler vor dem Hochladen – ' . $g['fehler']);
+
+    // Größe der Pläne fürs Repository: über 100 MB nimmt GitHub keine Datei an –
+    // das wird vorher gesagt, und nichts geht hinaus; über 50 MB ein Hinweis.
+    // Die Datei ist dünn belegt (ein Loch statt Nullen auf der Platte).
+    $aussen = (int) Database::scalar('SELECT id FROM floors WHERE site_id = ? AND name = ?', [$siteId, 'Außenfläche']);
+    $grossName = 'pruefung-' . bin2hex(random_bytes(4)) . '.pdf';
+    $grossPfad = SiteService::planDir() . '/' . $grossName;
+    $griff = fopen($grossPfad, 'wb');
+    fwrite($griff, "%PDF-1.4\n");
+    ftruncate($griff, LocationSync::GIT_DATEI_HOECHSTENS + 1);
+    fclose($griff);
+    Database::update('floors', $aussen, ['plan_file' => $grossName, 'plan_type' => 'pdf', 'plan_page' => 1, 'plan_original_name' => 'aussen.pdf', 'plan_uploaded_at' => gmdate('c')]);
+    $dortVorher = LocationSync::fernerStand();
+    $hoch = LocationSync::locationHochladen($siteId, 'pruefung');
+    pruefe(!$hoch['ok'] && str_contains($hoch['message'], '„Außenfläche“ ist 100,1 MB groß – GitHub nimmt keine Datei über 100 MB an')
+        && LocationSync::fernerStand() === $dortVorher, 'Plan über 100 MB: vorher abgelehnt, nichts hochgeladen – ' . $hoch['message']);
+    $griff = fopen($grossPfad, 'r+');
+    ftruncate($griff, LocationSync::GIT_DATEI_WARNUNG + 1);
+    fclose($griff);
+    $hoch = LocationSync::locationHochladen($siteId, 'pruefung');
+    $loc = json_decode($sh('git --git-dir=' . escapeshellarg($fern) . ' show main:locations/lager/location.json'), true);
+    $planDort = (string) (array_column((array) ($loc['etagen'] ?? []), 'plan', 'name')['Außenfläche']['datei'] ?? '');
+    $groesseDort = $planDort !== '' ? (int) $sh('git --git-dir=' . escapeshellarg($fern) . ' cat-file -s ' . escapeshellarg('main:locations/lager/' . $planDort)) : 0;
+    pruefe($hoch['ok'] && str_contains($hoch['message'], 'Hinweis: Der Grundriss von „Außenfläche“ (50,1 MB) ist größer als 50 MB.')
+        && $groesseDort === LocationSync::GIT_DATEI_WARNUNG + 1, 'Plan über 50 MB: hochgeladen, mit Hinweis – ' . $hoch['message']);
+
+    // Die Frist der ganzen Anfrage (Anfragezeit): Jeder Git-Aufruf darf bis zu
+    // 280 s, Hochladen holt aber erst und schiebt dann – zusammen über dem,
+    // was nginx wartet (300 s). In der Oberfläche zählt deshalb die Zeit seit
+    // Beginn der Anfrage; ist sie um, scheitert es mit Meldung statt mit 504.
+    Anfragezeit::$beginn = microtime(true) - (Anfragezeit::SEKUNDEN - 20);
+    $knapp = Anfragezeit::hoechstens(280.0);
+    Anfragezeit::$beginn = null;
+    pruefe($knapp > 18 && $knapp <= 20 && Anfragezeit::hoechstens(280.0) === 280.0, sprintf('Frist: 20 s vor Schluss bekommt git noch %.1f s statt 280, auf der Kommandozeile 280', $knapp));
+    $dortVorher = LocationSync::fernerStand();
+    Database::update('floors', $aussen, ['notes' => 'nach der Frist']);
+    Anfragezeit::$beginn = microtime(true) - Anfragezeit::SEKUNDEN;
+    try {
+        $hoch = LocationSync::locationHochladen($siteId, 'pruefung');
+        $holen = LocationSync::uebernehmen('lager');
+    } finally {
+        Anfragezeit::$beginn = null;
+    }
+    pruefe(!$hoch['ok'] && str_contains($hoch['message'], 'länger, als eine Anfrage hier dauern darf (zusammen höchstens 285 Sekunden')
+        && LocationSync::fernerStand() === $dortVorher, 'Frist der Anfrage um: Hochladen meldet es, nichts hochgeladen – ' . $hoch['message']);
+    pruefe(!$holen['ok'] && str_contains($holen['message'], 'bin/power location:uebernehmen'), 'Frist der Anfrage um: Übernehmen meldet es, mit dem Weg über die Kommandozeile');
+
     // ------------------------------------------------ Tanks und Kraftstoffschläuche über die Schnittstelle
     // Ein fester Tank (Bodentank) ist feste Infrastruktur wie über Git: Er geht
     // mit „feststrom“ hinaus – ohne Anschlüsse, Schutzorgane und Messpunkte –,
@@ -486,6 +689,9 @@ try {
     gleich(LocationBundle::festeLeitungen(['format' => 2, 'leitungen' => [['schluessel' => 'x', 'art' => 'kraftstoff', 'fest' => true]]]), [],
         'ein Schlauch in einer Datei zählt nicht zu den festen Leitungen');
 } finally {
+    if ($pdfSiteId !== null && $pdfSiteId > 0) {
+        SiteService::deleteSite($pdfSiteId);
+    }
     if ($inventarId !== null) {
         foreach (Database::select('SELECT id FROM einsaetze WHERE inventar_id = ? AND bis IS NULL', [$inventarId]) as $e) {
             InventarService::beenden((int) $e['id']);

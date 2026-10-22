@@ -14,11 +14,23 @@ declare(strict_types=1);
  *                                   config/config.php, wird sie mit eigenem Schlüssel
  *                                   angelegt (--demo: im Demo-Modus, ohne InfluxDB/MQTT).
  *   bin/power migrate               Nur Migrationen ausführen (und Grundbestand ergänzen)
- *   bin/power einstellung <schlüssel> <wert> | --stdin
+ *   bin/power einstellung <schlüssel> <wert> | --stdin [--nur-wenn-leer]
  *                                   Einstellung setzen; influx.token, influx.password,
- *                                   mqtt.password und inventory.token werden verschlüsselt abgelegt
+ *                                   mqtt.password und inventory.token werden verschlüsselt abgelegt.
+ *                                   --nur-wenn-leer: nur, wenn noch nichts eingetragen ist
  *   bin/power pruefen               Datenbank, InfluxDB, MQTT und Node-RED prüfen – mit SSO
  *                                   auch die Verbindung zum Anmeldedienst
+ *   bin/power update:stand          Update-Funktion: installierter und verfügbarer Stand, letzter Lauf
+ *   bin/power update:suchen [--warten]
+ *                                   Nach neuen Ständen suchen (Auftrag an den Update-Dienst)
+ *   bin/power update:starten [--warten] [--trotz-betrieb] [--ziel=<commit>]
+ *                                   Aktualisieren wie in der Oberfläche; --warten zeigt den
+ *                                   Fortschritt, Exit wie update-debian.sh (0/1/2/3). Als
+ *                                   Anwendungsbenutzer: runuser -u www-data -- php bin/power …
+ *   bin/power update:automatik [aus|suchen|einspielen] [--tage=1,2,…] [--beginn=HH:MM]
+ *             [--dauer=MIN] [--karenz=STD] [--pause-bis=JJJJ-MM-TT|--pause-bis=]
+ *                                   Automatische Updates einstellen (ohne Modus: anzeigen)
+ *   bin/power update:zeitplan       Updates planen (alle 5 min per Timer, als Anwendungsbenutzer)
  *   bin/power sammler [--einmal] [--gespraechig]
  *                                   Modbus-Geräte und Clouds abfragen (Dauerdienst)
  *   bin/power user:add <name> <rolle> [passwort]
@@ -26,7 +38,10 @@ declare(strict_types=1);
  *                                   (ein Konto „nur über SSO“ meldet sich damit erst an, wenn
  *                                   „nur SSO“ am Konto bzw. sso:aus --nur-sso aus ist)
  *   bin/power titel "Titel" [untertitel] [kürzel]
- *   bin/power plan:kacheln [--neu]  Kacheln aller Grundrisse berechnen
+ *   bin/power plan:kacheln [--neu] [--etage=<id>,…]
+ *                                   Kacheln aller (oder dieser) Grundrisse berechnen – so
+ *                                   rechnet auch der Upload große Pläne im Hintergrund weiter;
+ *                                   läuft schon einer, wird gewartet (nie zwei nebeneinander)
  *   bin/power location:liste        Locations im gemeinsamen Repository anzeigen
  *   bin/power location:uebernehmen <schlüssel>
  *   bin/power verteiler:liste       Verteiler hier und im Repository mit ihrem Stand
@@ -113,8 +128,53 @@ declare(strict_types=1);
  *                                   Kundenbereichs unbrauchbar machen, fällige Prüfnachweise
  *                                   melden, abgelaufene Rollen aus SSO-Gruppen und alte
  *                                   Anmeldeanfragen löschen, mit sso.inaktiv_tage Konten „nur
- *                                   über SSO“ ohne Anmeldung deaktivieren (täglich per Timer)
+ *                                   über SSO“ ohne Anmeldung deaktivieren, Liegengebliebenes
+ *                                   von Grundrissen (Zwischendateien, Pläne und Kacheln ohne
+ *                                   Etage, älter als ein Tag) entfernen, fehlende Kacheln
+ *                                   nachrechnen (täglich per Timer)
+ *
+ * Auf einer Installation als Anwendungsbenutzer: runuser -u www-data -- php bin/power …
+ * Als root bricht bin/power ab, solange storage/ nicht root gehört (außer hilfe).
  */
+
+/*
+ * Nicht als root, wenn storage/ jemand anderem gehört (Befund 10): Schon
+ * bootstrap.php öffnete die SQLite als root – root-eigene -wal/-shm, ein
+ * root-eigenes storage/logs/app.log –, und Befehle wie verteiler:liste oder
+ * plan:kacheln legten root-eigene Arbeitskopien und Kacheln an. Danach
+ * scheitert die Oberfläche. Deshalb vor dem require, für alle Befehle außer
+ * der Hilfe – die kommt dann ohne bootstrap.php. Ein Checkout, dessen
+ * storage/ root gehört (Entwicklung, CI als root), bleibt erlaubt. Im Hinweis
+ * nur der Befehl, nie die Argumente – dort kann ein Kennwort stehen.
+ */
+$hilfe = static function (): string {
+    // Der erste Doc-Kommentar dieser Datei (oben).
+    preg_match('#/\*\*(.*?)\*/#s', (string) file_get_contents(__FILE__), $m);
+    return trim((string) preg_replace('/^\s*\* ?/m', '', $m[1] ?? ''));
+};
+(static function (array $argv, callable $hilfe): void {
+    if (!function_exists('posix_geteuid') || posix_geteuid() !== 0) {
+        return;
+    }
+    $befehl = (string) ($argv[1] ?? 'hilfe');
+    $storage = dirname(__DIR__) . '/storage';
+    clearstatcache();
+    $besitzer = is_dir($storage) ? @fileowner($storage) : @fileowner(dirname(__DIR__));
+    if ($besitzer === 0) {
+        return;
+    }
+    if (in_array($befehl, ['hilfe', 'help', '--help', '-h'], true)) {
+        fwrite(STDOUT, $hilfe() . PHP_EOL);
+        exit(0);
+    }
+    $konto = is_int($besitzer) && function_exists('posix_getpwuid') ? (posix_getpwuid($besitzer) ?: [])['name'] ?? '' : '';
+    $name = preg_match('/^[a-z_][a-z0-9_-]{0,31}$/', (string) $konto) === 1 ? (string) $konto : '';
+    $befehl = preg_match('/^[a-z][a-z0-9:-]{0,40}$/', $befehl) === 1 ? $befehl : '…';
+    fwrite(STDERR, 'Fehler: bin/power nicht als root – storage/ gehört ' . ($name !== '' ? $name : 'einem anderen Benutzer')
+        . '. Bitte als Anwendungsbenutzer: runuser -u ' . ($name !== '' ? $name : 'www-data') . ' -- php bin/power ' . $befehl
+        . (count($argv) > 2 ? ' …' : '') . PHP_EOL);
+    exit(1);
+})($argv, $hilfe);
 
 require dirname(__DIR__) . '/src/bootstrap.php';
 
@@ -162,7 +222,7 @@ $befehl = array_shift($argumente) ?? 'hilfe';
 $optionen = [];
 $werte = [];
 // Optionen mit Wert gehen als --name=wert oder --name wert.
-$mitWert = ['fassung', 'name', 'email', 'stock', 'job', 'serie'];
+$mitWert = ['fassung', 'etage', 'name', 'email', 'stock', 'job', 'serie'];
 for ($i = 0; $i < count($argumente); $i++) {
     $a = $argumente[$i];
     if (str_starts_with($a, '--')) {
@@ -274,7 +334,7 @@ switch ($befehl) {
             $wert = $eingabe();
         }
         if ($schluessel === null || $wert === null) {
-            $fehler('Aufruf: bin/power einstellung <schlüssel> <wert>   (oder --stdin)');
+            $fehler('Aufruf: bin/power einstellung <schlüssel> <wert>   (oder --stdin)   [--nur-wenn-leer]');
         }
         $geheim = [
             'influx.token'    => Settings::GEHEIM_INFLUX_TOKEN,
@@ -282,6 +342,19 @@ switch ($befehl) {
             'mqtt.password'   => Settings::GEHEIM_MQTT_KENNWORT,
             'inventory.token' => Settings::GEHEIM_REPO_TOKEN,
         ];
+        // --nur-wenn-leer (Installationsskript bei vorhandener Datenbank): Was
+        // schon eingetragen ist – etwa in der Oberfläche –, bleibt. Gemeldet
+        // wird nur, ob es derselbe Wert ist, nie der Wert.
+        if (isset($optionen['nur-wenn-leer']) && (isset($geheim[$schluessel]) || array_key_exists($schluessel, Settings::OVERRIDABLE))) {
+            $bisher = isset($geheim[$schluessel])
+                ? Crypto::decrypt(Settings::get($geheim[$schluessel], ''))
+                : (string) Settings::get($schluessel, '');
+            if ($bisher !== '') {
+                $gleich = $bisher === (isset($geheim[$schluessel]) ? trim($wert) : $wert);
+                $aus($schluessel . ($gleich ? ' unverändert.' : ' bleibt – schon anders eingetragen.'));
+                break;
+            }
+        }
         if (isset($geheim[$schluessel])) {
             Settings::geheimnisSetzen($geheim[$schluessel], $wert);
             $aus($schluessel . ' verschlüsselt abgelegt.');
@@ -297,6 +370,7 @@ switch ($befehl) {
         $ok = true;
         $aus('Datenbank:  ' . Database::driver() . ', ' . (int) Database::scalar('SELECT COUNT(*) FROM users') . ' Benutzer, '
             . (int) Database::scalar('SELECT COUNT(*) FROM objekte WHERE ist_vorlage = 0') . ' Anlagen');
+        $aus('Update:     ' . \App\Services\UpdateService::kurzStand());
         if (Crypto::schluesselFehler() !== null) {
             $aus('Schlüssel:  ' . Crypto::schluesselFehler());
             $ok = false;
@@ -354,6 +428,9 @@ switch ($befehl) {
                 : 'zuletzt ' . date('d.m.Y H:i:s', intdiv($pipeline['zeit'], 1000)) . ', ' . (int) $pipeline['geschrieben'] . ' Zeilen, ' . (int) $pipeline['fehler'] . ' Fehler'));
         }
         exit($ok ? 0 : 1);
+
+    case 'update:stand': case 'update:suchen': case 'update:starten': case 'update:automatik': case 'update:zeitplan':
+        exit(\App\Services\UpdateKonsole::ausfuehren($befehl, $werte, $optionen, $aus, $fehler));
 
     case 'sammler':
         if (Config::isDemo()) {
@@ -423,13 +500,32 @@ switch ($befehl) {
         break;
 
     case 'plan:kacheln':
-        foreach (SiteService::allFloors() as $etage) {
-            if ((string) $etage['plan_file'] === '') {
-                continue;
+        // --etage=3,4: nur diese – so startet der Upload den Rest im Hintergrund
+        // (PlanTileService::imHintergrund), mit Zeitstempel fürs Protokoll.
+        $nur = null;
+        if (isset($optionen['etage'])) {
+            $nur = array_values(array_filter(array_map('intval', explode(',', (string) $optionen['etage'])), static fn (int $id): bool => $id > 0));
+            if ($nur === []) {
+                $fehler('--etage braucht eine oder mehrere Nummern, z. B. --etage=3,4.');
             }
-            $ergebnis = PlanTileService::bauen($etage, isset($optionen['neu']));
-            $aus($etage['site_name'] . ' / ' . $etage['name'] . ': ' . $ergebnis['message']);
         }
+        $stempel = static fn (): string => $nur !== null ? gmdate('Y-m-d\TH:i:s\Z') . ' ' : '';
+        $neu = isset($optionen['neu']);
+        // Nie zwei Bauten nebeneinander (Speicher) – der nächste wartet; die
+        // Etagen erst danach lesen, inzwischen kann eine gelöscht sein.
+        PlanTileService::nacheinander(static function () use ($nur, $neu, $aus, $stempel): void {
+            foreach (SiteService::allFloors() as $etage) {
+                if ((string) $etage['plan_file'] === '' || ($nur !== null && !in_array((int) $etage['id'], $nur, true))) {
+                    continue;
+                }
+                $start = microtime(true);
+                $ergebnis = PlanTileService::bauen($etage, $neu);
+                $aus($stempel() . $etage['site_name'] . ' / ' . $etage['name'] . ': ' . $ergebnis['message']
+                    . ($nur !== null ? sprintf(' (%.0f s)', microtime(true) - $start) : ''));
+            }
+        }, static function (string $satz) use ($aus, $stempel, $nur): void {
+            $aus($stempel() . ($nur !== null ? 'Etage ' . implode(', ', $nur) . ': ' : '') . $satz);
+        });
         break;
 
     case 'location:liste':
@@ -1136,15 +1232,19 @@ switch ($befehl) {
         foreach (Pruefnachweise::wartungHinweise() as $meldung) {
             $aus($meldung);
         }
-        // SSO: abgelaufene Rollen aus Gruppen, alte Anmeldeanfragen, inaktive Konten „nur über SSO“
+        // SSO: abgelaufene Rollen aus Gruppen, alte Anmeldeanfragen, inaktive
+        // Konten „nur über SSO“ – vor den Grundrissen, die Minuten rechnen können.
         Audit::akteur('wartung');
         foreach (SsoKonten::wartung() as $meldung) {
+            $aus($meldung);
+        }
+        // Grundrisse: Liegengebliebenes weg (Zwischendateien abgebrochener
+        // Bauten, Pläne und Kacheln ohne Etage), dann fehlende Kacheln nachrechnen.
+        foreach ([...PlanTileService::wartung(), ...PlanTileService::fehlendeNachrechnen()] as $meldung) {
             $aus($meldung);
         }
         break;
 
     default:
-        $kopf = file_get_contents(__FILE__);
-        preg_match('#/\*\*(.*?)\*/#s', (string) $kopf, $m);
-        $aus(trim(preg_replace('/^\s*\* ?/m', '', $m[1] ?? '')));
+        $aus($hilfe());
 }

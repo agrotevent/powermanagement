@@ -9,6 +9,9 @@
  * lädt die Seite neu und zeigt „Bitte geben Sie das Gerät zurück“.
  *
  * Ein Autosave gibt es hier nicht. Texte aus Antworten nur per textContent.
+ * Läuft gerade ein Update (503 mit wartung), bleibt die Unterschrift stehen
+ * und geht nach Retry-After (30 s) mit demselben Schlüssel noch einmal
+ * hinaus, solange der Dialog offen ist.
  *
  * Beim Laden meldet die Seite allen anderen Tabs dieses Browsers, dass der
  * Kundenmodus läuft (BroadcastChannel, ersatzweise localStorage) – app.js
@@ -24,6 +27,7 @@
     var berichtId = wurzel.dataset.kunde;
     var ADRESSE = '/berichte/' + berichtId + '/kunde';
     var ZEIT = 30000;
+    var WARTUNG_PAUSE = 30000;   // Retry-After der Schreibsperre eines Updates
 
     // Andere Tabs sperren (dort steht womöglich ein anderer Bericht mit Kundendaten).
     try {
@@ -106,6 +110,19 @@
                 if (r.status === 200 && r.erg.ok) {
                     window.PMUnterschrift.schluesselLoeschen(SCHLUESSEL);
                     neuLaden('Vielen Dank – unterschrieben.');
+                    return;
+                }
+                if (r.status === 503 && r.erg.wartung) {
+                    // Gerade läuft ein Update: Die Unterschrift bleibt stehen und
+                    // geht gleich noch einmal hinaus (derselbe Schlüssel – nichts
+                    // doppelt). „Abbrechen“ hält das an.
+                    unterschrift.meldung('Einen Moment bitte – das System wird gerade aktualisiert. Die Unterschrift bleibt stehen '
+                        + 'und wird in etwa einer halben Minute noch einmal gesendet.', false);
+                    var uhr = window.setTimeout(function () {
+                        laufend = null;
+                        if (dlg.hasAttribute('open')) { senden(werte); } else { unterschrift.laeuft(false); }
+                    }, WARTUNG_PAUSE);
+                    laufend = { abbrechen: function () { window.clearTimeout(uhr); } };
                     return;
                 }
                 unterschrift.laeuft(false);

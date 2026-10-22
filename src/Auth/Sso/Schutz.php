@@ -32,7 +32,11 @@ use App\Support\Zeit;
  */
 final class Schutz
 {
-    public const VERWALTEND = ['*', 'system.users.manage', 'settings.manage', 'sso.manage', 'api.manage'];
+    /**
+     * Rechte, die das System für alle ändern. `system.update` (Update-Funktion)
+     * gehört dazu: Es spielt einen neuen Stand ein und startet alle Dienste neu.
+     */
+    public const VERWALTEND = ['*', 'system.users.manage', 'settings.manage', 'sso.manage', 'api.manage', 'system.update'];
     public const MFA = ['mfa', 'sc'];
 
     public const T_DEAKTIVIERT = 'Dieses Konto ist deaktiviert.';

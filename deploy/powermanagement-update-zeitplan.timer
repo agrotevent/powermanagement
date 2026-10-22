@@ -1,0 +1,16 @@
+# /etc/systemd/system/powermanagement-update-zeitplan.timer
+#
+# Alle fünf Minuten planen: ob gesucht oder eingespielt wird, entscheidet der Lauf
+# selbst (Modus, Fenster, Karenz, Aufbau, Schaltvorgänge) – meist tut er nichts.
+
+[Unit]
+Description=PowerManagement: Updates alle fünf Minuten planen
+
+[Timer]
+OnCalendar=*:0/5
+AccuracySec=30s
+# Kein Nachholen: ob das Fenster offen ist, prüft der Lauf selbst.
+Persistent=false
+
+[Install]
+WantedBy=timers.target

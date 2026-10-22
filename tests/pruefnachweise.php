@@ -50,6 +50,7 @@ use App\Services\BenutzerService;
 use App\Services\Eventworx;
 use App\Services\InventarService;
 use App\Services\SiteService;
+use App\Services\UpdateService;
 use App\Support\Config;
 use App\Support\Database;
 use App\Support\Settings;
@@ -71,7 +72,7 @@ $inventar = [];
 $auditVorher = (int) Database::scalar('SELECT COALESCE(MAX(id), 0) FROM audit_log');
 $jahreVorher = Settings::get('kundenbereich.nachweise_jahre');
 $zoneVorher = (string) Config::get('app.timezone', 'Europe/Berlin');
-$konfigVorher = ['app.demo' => Config::get('app.demo'), 'eventworx.basis' => Config::get('eventworx.basis')];
+$konfigVorher = ['app.demo' => Config::get('app.demo'), 'eventworx.basis' => Config::get('eventworx.basis'), 'update.verzeichnis' => Config::get('update.verzeichnis')];
 $ewxVorher = [];
 foreach ([Eventworx::EINSTELLUNG_HOST, Eventworx::EINSTELLUNG_TOKEN_HOST, Settings::GEHEIM_EVENTWORX_TOKEN] as $s) {
     $ewxVorher[$s] = Settings::get($s);
@@ -460,7 +461,7 @@ try {
     $port = freierPort();
     $serverFehler = (string) tempnam(sys_get_temp_dir(), 'pm-pn-fehler-');
     $dosen[] = $serverFehler;
-    // Größere Uploads als die Vorgabe des eingebauten Servers (2 MB) – wie unter FPM (64 MB).
+    // Größere Uploads als die Vorgabe des eingebauten Servers (2 MB) – wie unter FPM (100 MB).
     hintergrund([PHP_BINARY, '-d', 'upload_max_filesize=16M', '-d', 'post_max_size=20M', '-S', '127.0.0.1:' . $port, '-t', dirname(__DIR__) . '/public'],
         ['PHP_CLI_SERVER_WORKERS' => '4'], $serverFehler);
     for ($i = 0; $i < 50 && !erreichbar('127.0.0.1', $port); $i++) {
@@ -479,6 +480,10 @@ try {
         && str_contains($seite['text'], 'id="nachweis-' . $n1 . '"') && str_contains($seite['text'], 'sieht der Kunde') && !str_contains($seite['text'], 'onclick='),
         'Reiter Prüfnachweise: Liste, Formular zum Hinterlegen');
     pruefe(str_contains($seite['text'], 'Prüfnachweise (2)'), 'Reiter mit der Zahl, die der Kunde sieht');
+    // Die Grenze prüft schon der Browser (app.js, data-max-bytes): Über 16 MB
+    // käme sonst nicht die Meldung der App, sondern die 413-Seite von nginx.
+    pruefe(preg_match('#<input id="nn-datei" type="file" name="datei"[^>]*\sdata-max-bytes="' . Pruefnachweise::MAX_BYTES . '" data-max-text="10 MB">#', $seite['text']) === 1,
+        'Dateifeld mit der Grenze für den Browser (10 MB)');
     $token = csrfAus($seite['text']);
     $zahl = static fn (): int => (int) Database::scalar('SELECT COUNT(*) FROM pruefnachweise WHERE kunde_id = ?', [$k1]);
     $vorher = $zahl();
@@ -899,6 +904,86 @@ try {
     }
     $r = KundenService::vorgangVerknuepfen($kunden['k10'], $jobE, true, false);
     pruefe($r['ok'], 'danach: der Vorgang lässt sich mit einem anderen Kunden verknüpfen (nichts sperrt ihn): ' . $r['message']);
+
+    // Ein Update beginnt, während Übernehmen auf Eventworx wartet (bis zu Minuten – länger,
+    // als das Update auf laufende Anfragen wartet): vor jedem Schreiben noch einmal nach der
+    // Schreibsperre gefragt. Was davor übernommen ist, bleibt; danach nichts mehr.
+    $vE10 = (int) ($r['id'] ?? 0);
+    $updOrdner = sys_get_temp_dir() . '/' . $kennung . '-update';
+    @mkdir($updOrdner . '/ist', 0700, true);
+    Config::set('update.verzeichnis', $updOrdner);
+    $sperre = static function (bool $an) use ($updOrdner): void {
+        $an ? file_put_contents($updOrdner . '/ist/wartung', UpdateService::KOPF_WARTUNG . "\nseit " . time() . "\nkennung -\n") : @unlink($updOrdner . '/ist/wartung');
+    };
+    $dW1 = $neueDatei('Vor dem Update.pdf');
+    $dW2 = $neueDatei('Im Update.pdf');
+    Pruefnachweise::dateienMerken($kunden['k10'], $vE10, Pruefnachweise::eventworxKandidaten($kunden['k10'], $vE10)['dateien']);
+    $waehrend = static function (string $pfad) use ($dW2, $sperre): void {
+        if ($pfad === 'file/' . $dW2) {
+            $sperre(true);   // das Update setzt die Schreibsperre, während die zweite Datei kommt
+        }
+    };
+    $r = Pruefnachweise::eventworxUebernehmen($kunden['k10'], $vE10, [$dW1, $dW2], $ewxAngaben(), false);
+    $waehrend = null;
+    pruefe($r['ok'] && ($r['wartung'] ?? false) === true && count($r['ids']) === 1 && $nachweisZuDatei($dW1) === 1 && $nachweisZuDatei($dW2) === 0
+        && str_contains($r['message'], 'die übrigen nicht übernommen'),
+        'Update beginnt während der zweiten Datei: die erste übernommen, die zweite nicht, mit Hinweis: ' . $r['message']);
+    $ewxPfade = [];
+    $waehrend = static function (string $pfad) use ($sperre): void {
+        if ($pfad === 'file/list') {
+            $sperre(true);
+        }
+    };
+    $sperre(false);
+    $r = Pruefnachweise::eventworxUebernehmen($kunden['k10'], $vE10, [$dW2], $ewxAngaben(), false);
+    $waehrend = null;
+    pruefe(!$r['ok'] && ($r['wartung'] ?? false) === true && $r['message'] === UpdateService::NICHTS_UEBERNOMMEN && $nachweisZuDatei($dW2) === 0,
+        'Update beginnt während Eventworx die Liste liefert: nichts übernommen, „wartung“ – ' . $r['message']);
+    $sperre(false);
+    $r = Pruefnachweise::eventworxUebernehmen($kunden['k10'], $vE10, [$dW2], $ewxAngaben(), false);
+    pruefe($r['ok'] && !isset($r['wartung']) && $nachweisZuDatei($dW2) === 1, 'nach dem Update: dieselbe Wahl übernommen (Gegenprobe) – ' . $r['message']);
+
+    // „Dateien am Vorgang“ schreibt nach dem Warten auf Eventworx dokumente_am, ohne noch
+    // einmal nach der Sperre zu fragen. Das trägt nur, weil es ein POST ist (an der Tür
+    // angemeldet) und höchstens so lange wartet, wie der Kommentar sagt (42 s) –
+    // kürzer, als das Update auf angemeldete Anfragen wartet (ANFRAGEN_WARTEN).
+    $sperre(false);
+    Database::update('kunden_vorgaenge', $vE10, ['dokumente_am' => null]);
+    $waehrend = static function (string $pfad) use ($sperre): void {
+        if ($pfad === 'file/list') {
+            $sperre(true);
+        }
+    };
+    $kand = Pruefnachweise::eventworxKandidaten($kunden['k10'], $vE10);
+    $waehrend = null;
+    pruefe($kand['ok'] && UpdateService::wartungAktiv() && Database::scalar('SELECT dokumente_am FROM kunden_vorgaenge WHERE id = ?', [$vE10]) !== null,
+        'Dateien am Vorgang, Update beginnt während der Liste: dokumente_am trotzdem geschrieben (die Anfrage ist angemeldet, das Update wartet)');
+    $sperre(false);
+    pruefe(preg_match("#\\\$router->post\('/kunden/\{id\}/nachweise/eventworx', \[PruefnachweiseController::class, 'eventworx'\]#",
+        (string) file_get_contents(dirname(__DIR__) . '/public/index.php')) === 1, 'Dateien am Vorgang ist ein POST (an der Tür angemeldet)');
+    // Längstes Warten: job/<id> zweimal (Nachlesen bei data:null), dann file/list – je
+    // die ganze Zeit der Anfrage und die längste Drossel davor.
+    $attrappeVorher = Http::$attrappe;
+    $ewxZeiten = [];
+    $nullEinmal = true;
+    Http::$attrappe = static function (string $methode, string $url, array $optionen) use ($attrappeVorher, &$ewxZeiten, &$nullEinmal, $jobE): array {
+        $ewxZeiten[] = (int) ($optionen['zeit'] ?? 0);
+        if ($nullEinmal && str_ends_with((string) parse_url($url, PHP_URL_PATH), '/job/' . $jobE)) {
+            $nullEinmal = false;
+            return ['ok' => true, 'status' => 200, 'fehler' => '', 'rumpf' => '{"success":true,"data":null}'];
+        }
+        return ($attrappeVorher)($methode, $url, $optionen);
+    };
+    Eventworx::vergessen();
+    $kand = Pruefnachweise::eventworxKandidaten($kunden['k10'], $vE10);
+    Http::$attrappe = $attrappeVorher;
+    $laengstens = array_sum($ewxZeiten) + count($ewxZeiten) * (float) (new ReflectionClassConstant(Eventworx::class, 'HOECHSTENS_WARTEN'))->getValue();
+    $anfragenWarten = preg_match('/^ANFRAGEN_WARTEN=([0-9]+)$/m', (string) file_get_contents(dirname(__DIR__) . '/deploy/update-debian.sh'), $mw) === 1 ? (int) $mw[1] : 0;
+    pruefe($kand['ok'] && count($ewxZeiten) === 3 && $laengstens <= 42.0 && $laengstens < $anfragenWarten,
+        sprintf('Dateien am Vorgang wartet höchstens %.0f s auf Eventworx (%d Anfragen) – wie im Kommentar, unter ANFRAGEN_WARTEN (%d s)', $laengstens, count($ewxZeiten), $anfragenWarten));
+    Config::set('update.verzeichnis', $konfigVorher['update.verzeichnis']);
+    @rmdir($updOrdner . '/ist');
+    @rmdir($updOrdner);
     // Bliebe doch etwas ohne Kunden zurück (per SQL), meldet es die Prüfung.
     $waise = Database::insert('kunden_vorgaenge', ['kunde_id' => 999999999, 'ewx_host' => $ewxHost, 'ewx_id' => bin2hex(random_bytes(12)), 'ewx_art' => 'order',
         'ewx_nummer' => 'AU-0', 'ewx_kunde_ref' => '', 'titel' => $kennung, 'verknuepft_am' => gmdate('c')]);

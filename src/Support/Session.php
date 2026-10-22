@@ -23,6 +23,9 @@ final class Session
             'httponly' => true,
             'samesite' => 'Lax',
         ]);
+        // Abgelaufene Sitzungsdateien wegräumen lassen – vor session_start(),
+        // dort läuft die GC.
+        self::aufraeumenEinstellen();
         session_start();
 
         $idle = (int) Config::get('security.idle_timeout', 3600);
@@ -266,6 +269,49 @@ final class Session
     {
         if (session_status() === PHP_SESSION_ACTIVE) {
             session_regenerate_id(true);
+        }
+    }
+
+    /**
+     * Die Müllabfuhr der Sitzungsdateien einstellen (Befund 9). Debian
+     * schaltet sie ab (session.gc_probability = 0) und räumt per Cron nur das
+     * gemeinsame /var/lib/php/sessions – das eigene Verzeichnis des Pools
+     * (storage/sessions) räumte niemand, und jede Anfrage ohne Cookie
+     * (Anmeldeseite, Monitoring) ließ dort eine Datei zurück.
+     *
+     * Wie lange eine Datei bleibt, folgt der Konfiguration, keiner festen
+     * Zahl: Nach idle_timeout ohne Anfrage ist eine Sitzung zu Ende, nach
+     * max_session ohnehin – es gilt die längere der beiden Grenzen. Ohne jede
+     * Grenze (beide 0) wird nichts weggeräumt. Ist die GC schon eingeschaltet,
+     * bleibt ihr Takt; sonst räumt jeder tausendste Start auf.
+     *
+     * Nur im eigenen Verzeichnis: Eines, in das jeder schreiben darf
+     * (/var/lib/php/sessions, /tmp), teilen sich mehrere Anwendungen – dort
+     * gälte unsere Lebensdauer auch für fremde Sitzungen, es räumt sein
+     * Besitzer, und lesen darf PHP es meist nicht (jede GC endete mit einer
+     * Meldung).
+     */
+    private static function aufraeumenEinstellen(): void
+    {
+        // „N;/pfad“ bzw. „N;MODUS;/pfad“: der Ordner steht zuletzt.
+        $pfad = (string) ini_get('session.save_path');
+        $trenner = strrpos($pfad, ';');
+        $pfad = $trenner === false ? $pfad : substr($pfad, $trenner + 1);
+        if ($pfad === '') {
+            $pfad = sys_get_temp_dir();
+        }
+        if (!is_dir($pfad) || !is_readable($pfad) || (fileperms($pfad) & 0002) !== 0) {
+            return;
+        }
+        $dauer = max((int) Config::get('security.idle_timeout', 3600), (int) Config::get('security.max_session', 43200));
+        if ($dauer <= 0) {
+            ini_set('session.gc_probability', '0');
+            return;
+        }
+        ini_set('session.gc_maxlifetime', (string) $dauer);
+        if ((int) ini_get('session.gc_probability') <= 0) {
+            ini_set('session.gc_probability', '1');
+            ini_set('session.gc_divisor', '1000');
         }
     }
 }

@@ -1,0 +1,15 @@
+# /etc/systemd/system/powermanagement-update.timer
+#
+# Sicherheitsnetz: Lebenszeichen und Stand für die Oberfläche, liegengebliebene Aufträge,
+# ein unterbrochenes Update (Marke „offen“) nach dem Start zurückrollen.
+
+[Unit]
+Description=PowerManagement: Update-Dienst regelmäßig wecken
+
+[Timer]
+OnBootSec=2min
+OnUnitInactiveSec=15min
+AccuracySec=1min
+
+[Install]
+WantedBy=timers.target

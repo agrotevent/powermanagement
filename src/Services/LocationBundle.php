@@ -3,6 +3,7 @@ declare(strict_types=1);
 
 namespace App\Services;
 
+use App\Support\Anfragezeit;
 use App\Support\Config;
 use App\Support\Database;
 use App\Tanks\TankService;
@@ -332,7 +333,13 @@ final class LocationBundle
         if ($alt !== null && (string) $alt['plan_file'] === $name && (int) $alt['plan_page'] === $seite && is_file($ziel)) {
             return 'gleich';
         }
-        if (!is_file($ziel) && !copy($quelle, $ziel)) {
+        if (is_file($ziel)) {
+            // Liegt die Datei noch von früher da (A → B → A), gilt sie ab
+            // jetzt als frisch: Die Wartung räumt nur Pläne weg, die seit
+            // einem Tag keine Etage nutzt (PlanTileService::wartung()) – und
+            // diese Übernahme ist vielleicht noch nicht eingetragen.
+            @touch($ziel);
+        } elseif (!copy($quelle, $ziel)) {
             return '';
         }
         $typ = strtolower(trim(is_scalar($plan['typ'] ?? null) ? (string) $plan['typ'] : ''));
@@ -353,16 +360,50 @@ final class LocationBundle
     /**
      * Kacheln für übernommene Pläne bauen (ohne auf einen laufenden Bau zu warten).
      *
+     * In einer Web-Anfrage (Git- und Partner-Abgleich, Vorschlag annehmen,
+     * direktes Schreiben über die Schnittstelle) gar nicht selbst: Ein Plan
+     * mit 100 MB braucht Minuten, und solange hielte die Anfrage die Sitzung
+     * und liefe in die Frist von nginx (Anfragezeit). Die Pläne gehen gleich
+     * an einen eigenen Prozess (PlanTileService::imHintergrund), der sie
+     * nacheinander rechnet. Auf der Kommandozeile ohne Frist hier und jetzt –
+     * aber wie dort unter PlanTileService::nacheinander(): kein zweiter Bau
+     * daneben (je großer Plan 150–200 MB), und die Automatik der Updates
+     * sieht ihn (rechnetImHintergrund()) und verschiebt. Aufrufer mit
+     * Vermerk oder Audit tragen die vorher ein (LocationSync::uebernehmen()).
+     *
      * @param list<int> $etagenIds
+     * @return list<int> die Etagen, die im Hintergrund gerechnet werden
      */
-    public static function kachelnBauen(array $etagenIds): void
+    public static function kachelnBauen(array $etagenIds): array
     {
+        $faellig = [];
         foreach (array_unique(array_map('intval', $etagenIds)) as $etageId) {
             $etage = SiteService::floor($etageId);
             if ($etage !== null && PlanTileService::lohnt((string) SiteService::planPath($etage))) {
-                PlanTileService::bauen($etage, true, false);
+                $faellig[$etageId] = $etage;
             }
         }
+        if ($faellig === []) {
+            return [];
+        }
+        if (Anfragezeit::imWeb()) {
+            PlanTileService::imHintergrund(array_keys($faellig));
+            return array_keys($faellig);
+        }
+        foreach (array_keys($faellig) as $etageId) {
+            PlanTileService::nacheinander(static function () use ($etageId): void {
+                // Während auf einen anderen Bau gewartet wurde, kann die Etage weg sein.
+                $etage = SiteService::floor($etageId);
+                if ($etage !== null) {
+                    PlanTileService::bauen($etage, true, false);
+                }
+            }, static function (string $satz): void {
+                if (defined('STDERR')) {
+                    fwrite(STDERR, $satz . "\n");
+                }
+            });
+        }
+        return [];
     }
 
     /**

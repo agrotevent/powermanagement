@@ -7,13 +7,19 @@ use App\Auth\Zugriff;
 use App\Services\SiteService;
 use App\Support\Flash;
 use App\Support\Request;
+use App\Support\Session;
 
 final class StandortController extends Controller
 {
     public function index(Request $request): void
     {
+        // Was PHP hier wirklich annimmt (höchstens SiteService::MAX_UPLOAD_BYTES) –
+        // das Formular nennt es, und der Browser prüft vor dem Hochladen dagegen.
+        $grenze = SiteService::uploadGrenze();
         $this->view('standorte/index', [
-            'standorte' => Zugriff::standorteFiltern(SiteService::all()),
+            'standorte'    => Zugriff::standorteFiltern(SiteService::all()),
+            'uploadGrenze' => $grenze,
+            'uploadText'   => SiteService::mb($grenze),
         ]);
     }
 
@@ -101,10 +107,13 @@ final class StandortController extends Controller
             $this->redirect('/standorte');
             return;
         }
-        $ergebnis = SiteService::uploadPlan($siteId, $_FILES['plan'], [
+        $optionen = [
             'floor_ids'   => $request->arr('floor_ids'),
             'neue_etagen' => $request->bool('neue_etagen'),
-        ]);
+        ];
+        // Kacheln rechnen dauert bis zu SiteService::KACHELZEIT_IM_UPLOAD –
+        // so lange warten andere Reiter nicht auf die Sitzung.
+        $ergebnis = Session::ohneSperre(static fn (): array => SiteService::uploadPlan($siteId, $_FILES['plan'], $optionen));
         $ergebnis['ok'] ? Flash::success($ergebnis['message']) : Flash::error($ergebnis['message']);
         $this->redirect('/standorte');
     }

@@ -3,6 +3,10 @@ declare(strict_types=1);
 
 namespace App\Services;
 
+use App\Support\Database;
+use App\Support\Logger;
+use App\Support\Programm;
+
 /**
  * Kacheln für Grundrisse.
  *
@@ -27,6 +31,14 @@ namespace App\Services;
  * Server, bleibt es beim Zeichnen im Browser – dann aber mit begrenzter
  * Zoomtiefe, siehe quelle().
  *
+ * PNG und JPEG über MAX_PIXEL gehen denselben Weg: als einseitiges PDF
+ * (BildPdf) zu poppler, das sie streifenweise liest und herunterrechnet –
+ * gd packte sie sonst ganz aus.
+ *
+ * Mit Plänen bis 100 MB dauert das Minuten. Der Upload rechnet deshalb nur
+ * eine Weile selbst (bauen() mit Frist) und gibt den Rest an einen eigenen
+ * Prozess (imHintergrund()); was dabei liegen bleibt, holt die Wartung nach.
+ *
  * SVG bleibt ungekachelt – es skaliert von sich aus verlustfrei.
  */
 final class PlanTileService
@@ -37,8 +49,27 @@ final class PlanTileService
     /** Darunter lohnt das Kacheln nicht – das Bild kommt am Stück. */
     public const AB_PIXELN = 1600;
 
-    /** Obergrenze, damit ein riesiger Scan den Server nicht lahmlegt. */
+    /**
+     * Größe des gerechneten Plans – und bis hierher schneidet gd ein Bild.
+     *
+     * gd packt ein Bild ganz aus, außerhalb von memory_limit (Debians
+     * php-gd nutzt die libgd des Systems): gemessen 228 MB im PHP-Prozess
+     * für ein JPEG mit 49 Megapixeln, 371 MB für ein PNG mit 50. Größere
+     * Bilder gehen über poppler (BildPdf) und werden auf diese Fläche
+     * heruntergerechnet.
+     */
     public const MAX_PIXEL = 50000000;
+
+    /**
+     * Größtes Bild, das überhaupt noch aufbereitet wird (Pixel).
+     *
+     * poppler liest es für jeden Streifen ganz (gemessen 4–8 Sekunden je
+     * Aufruf bei 139 Megapixeln) – das wächst mit der Fläche. 400
+     * Megapixel sind ein Scan von 20 000 × 20 000 Pixeln, mehr als ein
+     * A0-Plan in 600 dpi. Darüber ist es eher eine Bombe (ein weißes PNG
+     * mit 40 000 × 40 000 Pixeln hat keine 5 MB) als ein Grundriss.
+     */
+    public const MAX_PIXEL_QUELLE = 400_000_000;
 
     /**
      * Zusätzliche Zoomstufen, wenn ein PDF im Browser gezeichnet wird.
@@ -58,6 +89,17 @@ final class PlanTileService
 
     /** Mehr Kachelzeilen als das hat kein Plan, der unter MAX_PIXEL bleibt. */
     private const MAX_ZEILEN = 512;
+
+    /**
+     * Fläche eines Streifens, den poppler auf einmal rendert (Pixel).
+     *
+     * gd hält ihn als Truecolor-Bild samt Lesepuffer – rund 7 Byte je
+     * Pixel, außerhalb von memory_limit (Debians php-gd nutzt die libgd
+     * des Systems). 16 Megapixel sind so rund 110 MB im PHP-Prozess und
+     * rund 50 MB Bitmap bei poppler; dafür muss poppler eine Seite nur
+     * noch ein Viertel bis ein Siebtel so oft lesen.
+     */
+    public const STREIFEN_PIXEL = 16_000_000;
 
     /**
      * Längste Kante, auf die ein Plan gerechnet wird.
@@ -203,7 +245,29 @@ final class PlanTileService
      */
     public static function laeuft(array $floor): bool
     {
-        $pfad = self::planDir($floor) . '/.sperre';
+        return self::ordnerGesperrt(self::planDir($floor));
+    }
+
+    /** Hält jemand die Sperrdatei dieses Kachelordners (siehe laeuft())? */
+    private static function ordnerGesperrt(string $ordner): bool
+    {
+        return self::gehalten($ordner . '/.sperre');
+    }
+
+    /**
+     * Rechnet gerade ein Prozess im Hintergrund (bin/power plan:kacheln, die
+     * Wartung) – hält er die Sperre von nacheinander()? Wer nur darauf
+     * wartet, hält sie nicht. Für die Automatik der Updates: Sie verschiebt
+     * dann (UpdateAutomatik::lage()).
+     */
+    public static function rechnetImHintergrund(): bool
+    {
+        return self::gehalten(self::hintergrundSperre());
+    }
+
+    /** Hält jemand diese Sperrdatei exklusiv (flock)? Ohne Datei: nein. */
+    private static function gehalten(string $pfad): bool
+    {
         if (!is_file($pfad)) {
             return false;
         }
@@ -248,8 +312,20 @@ final class PlanTileService
         if ($ext === 'pdf' && !PdfRasterService::verfuegbar()) {
             return PdfRasterService::werkzeug()['hinweis'];
         }
+        // Ein Bild über MAX_PIXEL rechnet poppler (BildPdf) – gd allein nicht.
+        if (in_array($ext, ['png', 'jpg', 'jpeg'], true) && self::ueberGd($path) && !PdfRasterService::verfuegbar()) {
+            return 'Bilder über ' . intdiv(self::MAX_PIXEL, 1_000_000) . ' Megapixel bereitet der Server mit poppler auf. '
+                . PdfRasterService::werkzeug()['hinweis'];
+        }
 
         return null;
+    }
+
+    /** Ist das Bild zu groß, um es mit gd ganz auszupacken (über MAX_PIXEL)? */
+    public static function ueberGd(string $path): bool
+    {
+        $masse = self::masse($path);
+        return $masse !== null && $masse['breite'] * $masse['hoehe'] > self::MAX_PIXEL;
     }
 
     /** Lohnt sich das Kacheln für diese Datei? */
@@ -275,7 +351,9 @@ final class PlanTileService
             return false;
         }
         if ($masse['breite'] * $masse['hoehe'] > self::MAX_PIXEL) {
-            return false;
+            // Über poppler (BildPdf), wenn das Bild sich dafür eignet und
+            // nicht größer ist als MAX_PIXEL_QUELLE.
+            return $masse['breite'] * $masse['hoehe'] <= self::MAX_PIXEL_QUELLE && BildPdf::pruefen($path)['ok'];
         }
         return max($masse['breite'], $masse['hoehe']) >= self::AB_PIXELN;
     }
@@ -287,9 +365,14 @@ final class PlanTileService
      * Aufrufe werden über eine Sperrdatei abgefangen – beim ersten Aufruf
      * der Seite lädt sonst jede Kachelanfrage den Bau erneut an.
      *
-     * @return array{ok:bool,message:string,kacheln:int,meta:?array}
+     * $bis (microtime): Wer nur bis dahin warten kann – der Upload –, bekommt
+     * danach 'abgebrochen' => true zurück, bevor poppler den nächsten
+     * Streifen rechnet. Was schon geschnitten war, ist dann wieder weg; den
+     * Plan rechnet imHintergrund() von vorn.
+     *
+     * @return array{ok:bool,message:string,kacheln:int,meta:?array,abgebrochen?:bool}
      */
-    public static function bauen(array $floor, bool $neu = false, bool $warten = true): array
+    public static function bauen(array $floor, bool $neu = false, bool $warten = true, ?float $bis = null): array
     {
         $quelle = SiteService::planPath($floor);
         if ($quelle === null) {
@@ -305,7 +388,10 @@ final class PlanTileService
             return ['ok' => false, 'message' => $hindernis, 'kacheln' => 0, 'meta' => null];
         }
         if (!self::lohnt($quelle)) {
-            return ['ok' => false, 'message' => 'Für diese Datei werden keine Kacheln gebraucht.', 'kacheln' => 0, 'meta' => null];
+            // Ein Bild über MAX_PIXEL, das poppler nicht nehmen kann, braucht
+            // sehr wohl Kacheln – es bekommt nur keine. Dann das Warum.
+            $grund = self::ueberGd($quelle) ? SiteService::bildPruefen($quelle) : null;
+            return ['ok' => false, 'message' => $grund ?? 'Für diese Datei werden keine Kacheln gebraucht.', 'kacheln' => 0, 'meta' => null];
         }
 
         $ordner = self::planDir($floor);
@@ -333,21 +419,99 @@ final class PlanTileService
         }
 
         try {
-            return self::schneiden($floor, $quelle, $ordner);
+            /*
+             * Ohne kacheln.json liegt hier höchstens der Rest eines Baus, der
+             * getötet wurde – sein finally lief nicht mehr: php-fpm angehalten
+             * (ein Update rollt zurück; mit ihm enden die Bauten, die der
+             * Upload in den Hintergrund gab), der OOM-Killer, ein Neustart.
+             * Dann von vorn, in einem leeren Ordner. Sonst blieben Kacheln
+             * liegen, die nicht zu dieser Pyramide gehören (anderes Raster,
+             * eine andere Fassung des Codes), unter einer kacheln.json, die
+             * nicht weiß, dass es sie gibt. Mit kacheln.json (neu rechnen)
+             * bleibt die alte Pyramide zu sehen, bis die neue fertig ist.
+             */
+            if (self::meta($floor) === null) {
+                self::teilbauWeg($floor);
+            }
+            $ergebnis = self::schneiden($floor, $quelle, $ordner, $bis);
         } finally {
             flock($sperre, LOCK_UN);
             fclose($sperre);
         }
+
+        /*
+         * Wurde die Etage gelöscht (oder bekam sie einen anderen Plan),
+         * während hier gerechnet wurde – im Hintergrund dauert das Minuten –,
+         * hat SiteService die Kacheln schon weggeräumt; geschrieben wurde
+         * danach weiter, der Ordner entstand neu. Ohne Etage, die auf ihn
+         * zeigt, kommt er wieder weg.
+         */
+        if (self::verwaist($floor)) {
+            self::aufraeumen($floor);
+            return ['ok' => false, 'message' => 'Den Plan gibt es nicht mehr – die Etage wurde gelöscht oder hat einen anderen bekommen.', 'kacheln' => 0, 'meta' => null];
+        }
+        return $ergebnis;
     }
 
-    private static function schneiden(array $floor, string $quelle, string $ordner): array
+    /**
+     * Zeigt keine Etage mehr auf die Kacheln dieser Etage (Plandatei und,
+     * bei einem PDF, Seite)? Gefragt wird die Datenbank, nicht $floor –
+     * der kann älter sein als die Etage.
+     */
+    public static function verwaist(array $floor): bool
+    {
+        $datei = basename((string) ($floor['plan_file'] ?? ''));
+        if ($datei === '') {
+            return false;
+        }
+        $ordner = self::planDir($floor);
+        foreach (Database::select('SELECT plan_file, plan_page FROM floors WHERE plan_file = ?', [$datei]) as $f) {
+            if (self::planDir($f) === $ordner) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /** Ein abgebrochener oder gescheiterter Bau: Zoomstufen und kacheln.json weg. */
+    private static function teilbauWeg(array $floor): void
+    {
+        // Erst das meta – ohne es zeigt die Karte keine Kacheln mehr an,
+        // die gleich darauf fehlen; der Bau beginnt beim nächsten Mal von vorn.
+        @unlink(self::metaPfad($floor));
+        foreach (glob(self::planDir($floor) . '/[0-9]*', GLOB_ONLYDIR) ?: [] as $teil) {
+            self::verzeichnisWeg($teil);
+        }
+    }
+
+    private static function schneiden(array $floor, string $quelle, string $ordner, ?float $bis = null): array
     {
         $start  = microtime(true);
         $ext    = strtolower(pathinfo($quelle, PATHINFO_EXTENSION));
         if ($ext === 'pdf') {
-            return self::schneidenPdf($floor, $quelle, $ordner, $start);
+            return self::schneidenPdf($floor, $quelle, $ordner, $start, 'png', null, $bis);
         }
         $format = $ext === 'png' ? 'png' : 'jpg';
+
+        /*
+         * Über MAX_PIXEL nicht mit gd: das Bild käme ganz in den Speicher
+         * (4 Byte je Pixel, außerhalb von memory_limit). Stattdessen als
+         * einseitiges PDF zu poppler, das es streifenweise liest und auf
+         * MAX_PIXEL herunterrechnet – siehe BildPdf.
+         */
+        if (self::ueberGd($quelle)) {
+            $huelle = PdfRasterService::tempName('bild') . '.pdf';
+            try {
+                if (!BildPdf::schreiben($quelle, $huelle)) {
+                    return ['ok' => false, 'message' => 'Das Bild ließ sich nicht für poppler aufbereiten. ' . BildPdf::pruefen($quelle)['grund'], 'kacheln' => 0, 'meta' => null];
+                }
+                $masse = self::masse($quelle) ?? ['breite' => 1, 'hoehe' => 1];
+                return self::schneidenPdf(['plan_page' => 1] + $floor, $huelle, $ordner, $start, $format, basename($quelle), $bis,
+                    $masse['hoehe'] / max(1, $masse['breite']));
+            } finally {
+                @unlink($huelle);
+            }
+        }
 
         $bild = $format === 'png' ? @imagecreatefrompng($quelle) : @imagecreatefromjpeg($quelle);
         if (!$bild instanceof \GdImage) {
@@ -410,15 +574,25 @@ final class PlanTileService
      * Zerlegt einen PDF-Grundriss in Kacheln.
      *
      * Gearbeitet wird streifenweise: poppler rendert die volle Breite und
-     * eine Kachelhöhe, daraus wird eine Kachelzeile geschnitten, dann
-     * kommt der nächste Streifen. So hängt der Speicherbedarf an der
-     * Breite des Plans, nicht an seiner Fläche – bei 6144 px sind das rund
-     * 8 MB statt rund 100 MB für die ganze Seite.
+     * einige Kachelzeilen (höchstens STREIFEN_PIXEL), daraus werden die
+     * Kacheln geschnitten, dann kommt der nächste Streifen. So hängt der
+     * Speicherbedarf an der Fläche eines Streifens, nicht an der des Plans.
+     *
+     * $name: Name der Plandatei für meta.json, wenn $quelle nur eine Hülle
+     * ist (BildPdf); $verhaeltnis: Höhe/Breite, wenn es schon feststeht.
      *
      * @return array{ok:bool,message:string,kacheln:int,meta:?array}
      */
-    private static function schneidenPdf(array $floor, string $quelle, string $ordner, float $start): array
-    {
+    private static function schneidenPdf(
+        array $floor,
+        string $quelle,
+        string $ordner,
+        float $start,
+        string $format = 'png',
+        ?string $name = null,
+        ?float $bis = null,
+        ?float $verhaeltnis = null
+    ): array {
         $seite = max(1, (int) ($floor['plan_page'] ?? 1));
 
         /*
@@ -430,7 +604,11 @@ final class PlanTileService
          * der Seite, gedeckelt durch MAX_KANTE und die Flächengrenze.
          */
         $kante = self::zielKante($quelle, $seite);
-        $masse = PdfRasterService::masse($quelle, $seite, $kante);
+        // Das Seitenverhältnis einmal aus der Probe – jede weitere Probe
+        // hieße, die ganze Seite noch einmal zu lesen (bei einem
+        // 100-MB-Plan Sekunden). Bei einem eingehüllten Bild steht es fest.
+        $verhaeltnis ??= PdfRasterService::verhaeltnis($quelle, $seite);
+        $masse = $verhaeltnis !== null ? PdfRasterService::masseAus($verhaeltnis, $kante) : null;
         if ($masse === null) {
             return [
                 'ok'      => false,
@@ -453,16 +631,15 @@ final class PlanTileService
         if ($masse['breite'] * $masse['hoehe'] > self::MAX_PIXEL) {
             $faktor = sqrt(self::MAX_PIXEL / ($masse['breite'] * $masse['hoehe']));
             $kante  = max(1024, (int) floor($kante * $faktor));
-            $masse  = PdfRasterService::masse($quelle, $seite, $kante) ?? $masse;
+            $masse  = PdfRasterService::masseAus($verhaeltnis, $kante);
         }
 
         // Sicherheitsnetz, falls die Schätzung noch immer darüber liegt.
         while ($masse['breite'] * $masse['hoehe'] > self::MAX_PIXEL && $kante > 1024) {
             $kante = (int) ($kante * 0.9);
-            $masse = PdfRasterService::masse($quelle, $seite, $kante) ?? $masse;
+            $masse = PdfRasterService::masseAus($verhaeltnis, $kante);
         }
 
-        $format  = 'png';
         $breite  = $masse['breite'];
         $hoehe   = $masse['hoehe'];
         $maxZ    = self::maxZoom($breite, $hoehe);
@@ -470,20 +647,57 @@ final class PlanTileService
         $zeilen  = (int) ceil($hoehe / self::KACHEL);
         $anzahl  = 0;
 
-        for ($y = 0; $y < $zeilen; $y++) {
+        /*
+         * Mehrere Kachelzeilen je Aufruf von poppler.
+         *
+         * poppler liest und deutet bei jedem Aufruf die ganze Seite, ganz
+         * gleich, wie schmal der Ausschnitt ist. Gemessen an einem
+         * Vektorplan mit 104 MB (eine A0-Seite) dauerte jeder Aufruf rund
+         * 11 Sekunden – mit einer Kachelzeile je Aufruf waren das 33
+         * Streifen und 380 Sekunden, länger als nginx auf eine Antwort
+         * wartet. Ein eingebetteter Scan (94 MB JPEG, 139 Megapixel) wird
+         * bei jedem Aufruf ganz ausgepackt: 4,4 Sekunden je Streifen.
+         *
+         * Ein Streifen ist deshalb so hoch, wie STREIFEN_PIXEL es erlaubt.
+         * Der Speicher hängt an der Fläche des Streifens, nicht an der des
+         * Plans. Braucht poppler für einen Streifen länger als seine
+         * Zeitgrenze, wird er halbiert und noch einmal versucht – ein
+         * schwerer Vektorplan scheitert so nicht an der Höhe der Streifen.
+         */
+        $jeStreifen   = self::zeilenJeStreifen($breite, $zeilen);
+        $streifenHoch = $jeStreifen * self::KACHEL;
+
+        $y = 0;
+        while ($y < $zeilen) {
+            if ($bis !== null && microtime(true) > $bis) {
+                // Der Aufrufer wartet nicht länger (Upload): ein halber Plan
+                // hilft niemandem, also weg damit – imHintergrund() rechnet ihn.
+                self::teilbauWeg($floor);
+                return ['ok' => false, 'abgebrochen' => true, 'message' => 'Die Zeit im Upload ist um – der Plan wird im Hintergrund fertig gerechnet.', 'kacheln' => 0, 'meta' => null];
+            }
+            $nummer   = $y + 1;
             $ziel     = PdfRasterService::tempName('streifen');
             $streifen = PdfRasterService::streifen(
                 $quelle,
                 $seite,
                 $kante,
                 $y * self::KACHEL,
-                self::KACHEL,
+                $streifenHoch,
                 $ziel
             );
 
             if (!$streifen['ok']) {
                 PdfRasterService::aufraeumen($ziel);
-                return ['ok' => false, 'message' => 'Streifen ' . ($y + 1) . ': ' . $streifen['message'], 'kacheln' => 0, 'meta' => null];
+                if (!empty($streifen['zeit']) && $jeStreifen > 1) {
+                    $jeStreifen   = max(1, intdiv($jeStreifen, 2));
+                    $streifenHoch = $jeStreifen * self::KACHEL;
+                    continue;
+                }
+                // Was bis hierher geschnitten ist, passt zu keiner Pyramide.
+                if ($anzahl > 0) {
+                    self::teilbauWeg($floor);
+                }
+                return ['ok' => false, 'message' => 'Streifen ab Zeile ' . $nummer . ': ' . $streifen['message'], 'kacheln' => 0, 'meta' => null];
             }
 
             /*
@@ -492,7 +706,7 @@ final class PlanTileService
              * als angefordert, ist also genau das – und keine Kachelzeile.
              * Dann sind wir am unteren Rand angekommen.
              */
-            if ($streifen['hoehe'] > self::KACHEL) {
+            if ($streifen['hoehe'] > $streifenHoch) {
                 PdfRasterService::aufraeumen($ziel);
                 $zeilen = $y;
                 break;
@@ -501,32 +715,45 @@ final class PlanTileService
             $bild = @imagecreatefrompng($streifen['pfad']);
             PdfRasterService::aufraeumen($ziel);
             if (!$bild instanceof \GdImage) {
-                return ['ok' => false, 'message' => 'Streifen ' . ($y + 1) . ' ließ sich nicht lesen.', 'kacheln' => 0, 'meta' => null];
+                if ($anzahl > 0) {
+                    self::teilbauWeg($floor);
+                }
+                return ['ok' => false, 'message' => 'Streifen ab Zeile ' . $nummer . ' ließ sich nicht lesen.', 'kacheln' => 0, 'meta' => null];
             }
 
             $streifenBreite = imagesx($bild);
             $streifenHoehe  = imagesy($bild);
-            for ($x = 0; $x < $spalten; $x++) {
-                $links = $x * self::KACHEL;
-                if ($links >= $streifenBreite) {
-                    break;
+            $reihen         = (int) ceil($streifenHoehe / self::KACHEL);
+            for ($r = 0; $r < $reihen && $y + $r < $zeilen; $r++) {
+                for ($x = 0; $x < $spalten; $x++) {
+                    $links = $x * self::KACHEL;
+                    if ($links >= $streifenBreite) {
+                        break;
+                    }
+                    $kachel = self::leer($format);
+                    imagecopy(
+                        $kachel,
+                        $bild,
+                        0,
+                        0,
+                        $links,
+                        $r * self::KACHEL,
+                        min(self::KACHEL, $streifenBreite - $links),
+                        min(self::KACHEL, $streifenHoehe - $r * self::KACHEL)
+                    );
+                    self::schreiben($kachel, $ordner, $maxZ, $x, $y + $r, $format);
+                    imagedestroy($kachel);
+                    $anzahl++;
                 }
-                $kachel = self::leer($format);
-                imagecopy(
-                    $kachel,
-                    $bild,
-                    0,
-                    0,
-                    $links,
-                    0,
-                    min(self::KACHEL, $streifenBreite - $links),
-                    min(self::KACHEL, $streifenHoehe)
-                );
-                self::schreiben($kachel, $ordner, $maxZ, $x, $y, $format);
-                imagedestroy($kachel);
-                $anzahl++;
             }
             imagedestroy($bild);
+
+            // Kürzer als verlangt: das war der untere Rand.
+            if ($streifenHoehe < $streifenHoch) {
+                $zeilen = min($zeilen, $y + $reihen);
+                break;
+            }
+            $y += $jeStreifen;
         }
 
         if ($anzahl === 0) {
@@ -542,7 +769,7 @@ final class PlanTileService
             'kachel'   => self::KACHEL,
             'format'   => $format,
             'kacheln'  => $anzahl,
-            'quelle'   => basename($quelle),
+            'quelle'   => $name ?? basename($quelle),
             'seite'    => $seite,
             'kante'    => $kante,
             'gebaut'   => gmdate('c'),
@@ -552,10 +779,257 @@ final class PlanTileService
 
         return [
             'ok'      => true,
-            'message' => sprintf('%d Kacheln in %d Stufen aus dem PDF berechnet.', $anzahl, $maxZ + 1),
+            'message' => $name === null
+                ? sprintf('%d Kacheln in %d Stufen aus dem PDF berechnet.', $anzahl, $maxZ + 1)
+                : sprintf('%d Kacheln in %d Stufen berechnet (auf %s × %s Pixel verkleinert).', $anzahl, $maxZ + 1,
+                    number_format($breite, 0, ',', '.'), number_format($hoehe, 0, ',', '.')),
             'kacheln' => $anzahl,
             'meta'    => $meta,
         ];
+    }
+
+    /**
+     * Kacheln in einem eigenen Prozess rechnen lassen – für den Upload, der
+     * nicht länger warten kann (SiteService::KACHELZEIT_IM_UPLOAD).
+     *
+     * Ein eigener Prozess statt Weiterrechnen nach der Antwort: Der Pool
+     * zählt mit max_execution_time (300 s, als php_admin_value –
+     * set_time_limit() greift dort nicht) die Rechenzeit der ganzen Anfrage,
+     * und ein PDF mit 60 Seiten braucht mehr. `bin/power plan:kacheln` läuft
+     * auf der Kommandozeile ohne diese Grenze, als derselbe Benutzer, und
+     * hält keinen PHP-FPM-Arbeiter fest.
+     *
+     * Die Ausgabe geht nach storage/logs/kacheln.log: /dev/null darf PHP
+     * unter open_basedir nicht öffnen, und ein geschlossenes Rohr beendete
+     * den Prozess bei der ersten Zeile. Stirbt er (php-fpm neu gestartet),
+     * rechnet die nächtliche Wartung nach (`bin/power wartung`).
+     *
+     * @param list<int> $etagenIds
+     */
+    public static function imHintergrund(array $etagenIds): bool
+    {
+        $ids = array_values(array_unique(array_filter(array_map('intval', $etagenIds), static fn (int $id): bool => $id > 0)));
+        if ($ids === []) {
+            return true;
+        }
+        // Unter php-fpm ist PHP_BINARY php-fpm selbst – gebraucht wird php.
+        $php = in_array(PHP_SAPI, ['cli', 'cli-server'], true) ? PHP_BINARY : Programm::finden('php', ['-v']);
+        if ($php === null || $php === '') {
+            Logger::info('Kacheln im Hintergrund: php (Kommandozeile) nicht gefunden – bleibt für bin/power plan:kacheln.');
+            return false;
+        }
+        $wurzel = dirname(__DIR__, 2);
+        $log = $wurzel . '/storage/logs/kacheln.log';
+        $prozess = @proc_open(
+            [$php, $wurzel . '/bin/power', 'plan:kacheln', '--etage=' . implode(',', $ids)],
+            [0 => ['pipe', 'r'], 1 => ['file', $log, 'a'], 2 => ['file', $log, 'a']],
+            $rohre
+        );
+        if (!is_resource($prozess)) {
+            Logger::info('Kacheln im Hintergrund: bin/power ließ sich nicht starten.');
+            return false;
+        }
+        fclose($rohre[0]);
+        // Nicht warten: Das Kind läuft weiter, wenn diese Anfrage endet –
+        // PHP räumt den Griff ohne Warten weg (waitpid mit WNOHANG).
+        return true;
+    }
+
+    /**
+     * Grundrisse ohne Kacheln nachrechnen – für die nächtliche Wartung.
+     *
+     * Der Upload rechnet große Pläne in einem eigenen Prozess weiter
+     * (imHintergrund). Starb der – php-fpm beim Update neu gestartet, der
+     * Container neu gebootet –, fehlen die Kacheln bis hierher. Wer gerade
+     * rechnet, wird nicht gestört; was nicht gekachelt wird (SVG, kleine
+     * Bilder), fällt gar nicht erst auf.
+     *
+     * @return list<string> eine Zeile je Etage, für die etwas getan wurde
+     */
+    public static function fehlendeNachrechnen(): array
+    {
+        $meldungen = [];
+        foreach (SiteService::allFloors() as $etage) {
+            $pfad = SiteService::planPath($etage);
+            if ($pfad === null || self::meta($etage) !== null || !self::lohnt($pfad) || self::laeuft($etage)) {
+                continue;
+            }
+            // Wie im Hintergrund nie neben einem anderen Bau (nacheinander()).
+            $ergebnis = self::nacheinander(static function () use ($etage): ?array {
+                // Während gewartet wurde, kann die Etage gelöscht oder schon gerechnet sein.
+                $jetzt = SiteService::floor((int) $etage['id']);
+                return $jetzt === null || self::meta($jetzt) !== null ? null : self::bauen($jetzt, false, false);
+            });
+            if ($ergebnis === null) {
+                continue;
+            }
+            $meldungen[] = ($ergebnis['ok'] ? 'Kacheln nachgerechnet: ' : 'Kacheln fehlen weiter: ')
+                . $etage['site_name'] . ' / ' . $etage['name'] . ' – ' . $ergebnis['message'];
+        }
+        return $meldungen;
+    }
+
+    /** Wo die Prozesse im Hintergrund aufeinander warten (nacheinander()). */
+    public static function hintergrundSperre(): string
+    {
+        return self::dir() . '/.hintergrund';
+    }
+
+    /**
+     * $arbeit rechnen, aber nie neben einem anderen Bau im Hintergrund – für
+     * bin/power plan:kacheln (so rechnet imHintergrund()) und die Wartung.
+     *
+     * Jeder Bau eines großen Plans hält gemessen 150–200 MB im PHP-Prozess
+     * (gd außerhalb von memory_limit, auf der Kommandozeile ohnehin ohne
+     * Grenze) und 70–210 MB bei pdftoppm. Lädt jemand Halle für Halle vier
+     * große Pläne hoch, liefen sonst vier solcher Prozesse nebeneinander –
+     * über 1 GB, in einem Container mit 2 GB samt InfluxDB ein Fall für den
+     * OOM-Killer –, und jeder einzelne würde langsamer. pm.max_children
+     * zählt sie nicht: Sie laufen außerhalb des Pools.
+     *
+     * Die Sperre ist ein flock auf hintergrundSperre(): Der nächste wartet,
+     * bis der vorige fertig ist; stirbt einer, ist sie frei. $warten bekommt
+     * eine Zeile, wenn gewartet werden muss.
+     *
+     * @template T
+     * @param callable():T $arbeit
+     * @param (callable(string):void)|null $warten
+     * @return T
+     */
+    public static function nacheinander(callable $arbeit, ?callable $warten = null): mixed
+    {
+        // Zum Sperren genügt Lesen – auch wenn root die Datei einmal angelegt hat.
+        $griff = @fopen(self::hintergrundSperre(), 'c') ?: @fopen(self::hintergrundSperre(), 'r');
+        if ($griff === false) {
+            // Ohne Sperrdatei lieber rechnen als gar nicht – der Bau selbst
+            // meldet, wenn der Ordner nicht beschreibbar ist.
+            return $arbeit();
+        }
+        try {
+            if (!flock($griff, LOCK_EX | LOCK_NB)) {
+                if ($warten !== null) {
+                    $warten('Ein anderer Prozess rechnet gerade Kacheln – es geht weiter, sobald er fertig ist.');
+                }
+                flock($griff, LOCK_EX);
+            }
+            return $arbeit();
+        } finally {
+            flock($griff, LOCK_UN);
+            fclose($griff);
+        }
+    }
+
+    /** So heißen Plandateien, die der Upload und der Abgleich ablegen (site3_…, sync12_…). */
+    private const PLANDATEI_NAME = '/^[a-z]+\d+_[0-9a-f]{16}\.(pdf|png|jpe?g|svg)$/';
+
+    /** … und ihre Kachelordner (bei einem PDF mit der Seite). */
+    private const KACHELORDNER_NAME = '/^[a-z]+\d+_[0-9a-f]{16}(_s\d+)?$/';
+
+    /**
+     * Was beim Kacheln liegen geblieben ist – für die nächtliche Wartung.
+     *
+     *  - Zwischendateien in kacheln/.tmp (die Hülle eines großen Bildes,
+     *    Streifen von poppler): Wird ein Bau getötet – systemctl restart
+     *    php-fpm beendet auch die Prozesse im Hintergrund –, räumt sein
+     *    finally nicht mehr auf; bei einem Bild mit 100 MB sind das je Mal
+     *    über 100 MB.
+     *  - Plandateien, auf die keine Etage mehr zeigt: Der Git- und
+     *    Partner-Abgleich ersetzt einen Plan in einer Transaktion, die noch
+     *    scheitern kann – den alten löscht er deshalb nicht selbst.
+     *  - Kachelordner ohne Etage: die Seite eines PDF, deren Etage gelöscht
+     *    wurde, ein ersetzter Plan.
+     *
+     * Nur was seit $alter Sekunden unverändert ist: Was gerade entsteht (ein
+     * Upload zwischen Ablegen und Eintragen, eine Übernahme vor dem Commit),
+     * bleibt – ebenso ein Ordner, an dem gerade gerechnet wird. Andere Namen
+     * als die, die PowerManagement selbst vergibt, werden nie angefasst.
+     *
+     * @return list<string> je Art eine Zeile, wenn etwas weg ist
+     */
+    public static function wartung(int $alter = 86400): array
+    {
+        $grenze = time() - $alter;
+        $meldungen = [];
+        $zeile = static function (string $was, int $zahl, int $bytes) use (&$meldungen): void {
+            if ($zahl > 0) {
+                $meldungen[] = sprintf('Aufgeräumt: %d %s (%s).', $zahl, $was, SiteService::mb($bytes));
+            }
+        };
+
+        $zahl = $bytes = 0;
+        foreach (glob(self::dir() . '/.tmp/*') ?: [] as $datei) {
+            clearstatcache(true, $datei);
+            if (is_file($datei) && (int) filemtime($datei) < $grenze) {
+                $groesse = (int) filesize($datei);
+                if (@unlink($datei)) {
+                    $zahl++;
+                    $bytes += $groesse;
+                }
+            }
+        }
+        $zeile('Zwischendatei(en) vom Kacheln, älter als ein Tag', $zahl, $bytes);
+
+        $dateien = $ordner = [];
+        foreach (Database::select("SELECT plan_file, plan_page FROM floors WHERE plan_file <> ''") as $f) {
+            $dateien[basename((string) $f['plan_file'])] = true;
+            $ordner[basename(self::planDir($f))] = true;
+        }
+
+        $zahl = $bytes = 0;
+        foreach (scandir(SiteService::planDir()) ?: [] as $name) {
+            $pfad = SiteService::planDir() . '/' . $name;
+            clearstatcache(true, $pfad);
+            if (preg_match(self::PLANDATEI_NAME, $name) !== 1 || isset($dateien[$name]) || !is_file($pfad) || is_link($pfad)
+                || (int) filemtime($pfad) >= $grenze) {
+                continue;
+            }
+            $groesse = (int) filesize($pfad);
+            if (@unlink($pfad)) {
+                $zahl++;
+                $bytes += $groesse;
+            }
+        }
+        $zeile('Plandatei(en) ohne Etage', $zahl, $bytes);
+
+        $zahl = $bytes = 0;
+        foreach (glob(self::dir() . '/*', GLOB_ONLYDIR) ?: [] as $pfad) {
+            $name = basename($pfad);
+            clearstatcache(true, $pfad);
+            if (preg_match(self::KACHELORDNER_NAME, $name) !== 1 || isset($ordner[$name]) || is_link($pfad)
+                || (int) filemtime($pfad) >= $grenze || self::ordnerGesperrt($pfad)) {
+                continue;
+            }
+            $groesse = 0;
+            foreach (new \RecursiveIteratorIterator(new \RecursiveDirectoryIterator($pfad, \FilesystemIterator::SKIP_DOTS)) as $eintrag) {
+                $groesse += $eintrag->isFile() ? (int) $eintrag->getSize() : 0;
+            }
+            self::verzeichnisWeg($pfad);
+            if (!is_dir($pfad)) {
+                $zahl++;
+                $bytes += $groesse;
+            }
+        }
+        $zeile('Kachelordner ohne Etage', $zahl, $bytes);
+
+        return $meldungen;
+    }
+
+    /**
+     * Wie viele Kachelzeilen ein Streifen umfasst.
+     *
+     * Höchstens so viele, wie in STREIFEN_PIXEL passen – und nie die ganze
+     * Seite bis auf weniger als zwei Zeilen. Der Grund ist die Eigenheit
+     * von poppler, hinter dem Seitenende die ganze Seite zu liefern: ist
+     * ein Streifen niedriger als die Seite, verrät ihn genau das (er kommt
+     * höher zurück als verlangt). Wäre er so hoch wie die Seite, sähe die
+     * ganze Seite aus wie ein gewöhnlicher Streifen. Die geschätzte Höhe
+     * liegt höchstens ein halbes Prozent daneben – zwei Zeilen Abstand
+     * reichen bis weit über MAX_KANTE.
+     */
+    public static function zeilenJeStreifen(int $breite, int $zeilen): int
+    {
+        $je = max(1, intdiv(self::STREIFEN_PIXEL, max(1, $breite) * self::KACHEL));
+        return $zeilen > 2 ? max(1, min($je, $zeilen - 2)) : 1;
     }
 
     // ------------------------------------------- Kacheln aus dem Browser

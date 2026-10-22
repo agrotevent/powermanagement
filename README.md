@@ -182,7 +182,13 @@ printf '%s' "$SECRET" | bin/power sso:einrichten <aussteller> <client-id> [--nam
 bin/power sso:verknuepfungen [<benutzer>]   ·   bin/power sso:loesen <benutzer> --ja   ·   bin/power sso:aussteller-umstellen <neu> --ja
 bin/power demo:seed [--reset]
 bin/power wartung
+bin/power update:stand   ·   bin/power update:suchen|update:starten [--warten]   ·   bin/power update:automatik [aus|suchen|einspielen]
 ```
+
+Auf einer Installation immer als Anwendungsbenutzer:
+`runuser -u www-data -- php bin/power …`. Als root bricht `bin/power` ab,
+solange `storage/` nicht root gehört – sonst entstünden dort root-eigene
+Dateien, an denen die Oberfläche scheitert.
 
 ## Prüfungen
 

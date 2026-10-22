@@ -32,6 +32,7 @@ declare(strict_types=1);
 
 require __DIR__ . '/hilfen/pruefung.php';
 
+use App\Auth\ApiZugang;
 use App\Auth\Zugriff;
 use App\Services\AnlagenService;
 use App\Services\ApiZugaenge;
@@ -44,7 +45,9 @@ use App\Services\PlanGeoService;
 use App\Services\PlanMassstabService;
 use App\Services\SchutzService;
 use App\Services\SiteService;
+use App\Services\UpdateService;
 use App\Services\VorschlagService;
+use App\Support\Config;
 use App\Support\Database;
 use App\Support\Fingerabdruck;
 
@@ -554,6 +557,34 @@ try {
     pruefe($bildA() === $vorher && $zeilen() === $zahl, '409: nichts gespeichert, nichts geändert');
     $r = $senden($tSchreib, $direkt + ['erzwingen' => true]);
     pruefe($r['status'] === 201 && ($r['json']['uebernommen'] ?? null) === true && (float) AnlagenService::find($ha)['plan_x'] === 67.0, 'mit „erzwingen“: übernommen');
+    // Die Schreibsperre eines Updates erst beim Schreiben bemerkt (das Update
+    // begann, während der Körper ankam): „wartung“ – der ApiController
+    // antwortet dann 503 mit Retry-After wie an der Tür –, nichts gespeichert.
+    // Im eigenen Prozess: die Sperre gilt nur hier (update.verzeichnis; im
+    // Demo-Modus gibt es keine).
+    $sperrOrdner = sys_get_temp_dir() . '/pm-vorschlag-sperre-' . bin2hex(random_bytes(4));
+    mkdir($sperrOrdner . '/ist', 0700, true);
+    file_put_contents($sperrOrdner . '/ist/wartung', UpdateService::KOPF_WARTUNG . "\nseit " . time() . "\nkennung -\n");
+    $gesperrt = $direkt + ['erzwingen' => true];
+    $gesperrt['strom']['anlagen'][$iHaS]['x'] = 69.0;
+    $vorher = $bildA();
+    $zahl = $zeilen();
+    $demo = Config::get('app.demo');
+    Config::set('app.demo', false);
+    Config::set('update.verzeichnis', $sperrOrdner);
+    try {
+        $r = VorschlagService::einreichen((array) ApiZugang::pruefen('Bearer ' . $tSchreib['token'], '127.0.0.1'), $halleKey, $gesperrt);
+    } finally {
+        Config::set('app.demo', $demo);
+        Config::set('update.verzeichnis', '');
+        UpdateService::vergessen();
+        @unlink($sperrOrdner . '/ist/wartung');
+        @rmdir($sperrOrdner . '/ist');
+        @rmdir($sperrOrdner);
+    }
+    pruefe(($r['wartung'] ?? false) === true && ($r['ok'] ?? true) === false && $bildA() === $vorher && $zeilen() === $zahl
+        && (float) AnlagenService::find($ha)['plan_x'] === 67.0,
+        'direkt schreiben, Schreibsperre erst beim Schreiben bemerkt: „wartung“ (503), nichts gespeichert – ' . (string) ($r['message'] ?? ''));
     $ohneBasis = $direkt;
     unset($ohneBasis['basis']);
     $ohneBasis['strom']['anlagen'][$iHaS]['x'] = 68.0;

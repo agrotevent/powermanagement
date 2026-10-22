@@ -27,9 +27,9 @@ use App\Support\Programm;
  * Canvas-Grenze – das läuft in jedem Browser.
  *
  * Gerechnet wird streifenweise: poppler rendert einen Ausschnitt über die
- * volle Breite und eine Kachelhöhe, der wird geschnitten, dann der
- * nächste. Damit liegt nie mehr als ein Streifen im Speicher (bei 6144 px
- * Breite rund 8 MB) statt der ganzen Seite (rund 100 MB).
+ * volle Breite und einige Kachelzeilen, der wird geschnitten, dann der
+ * nächste. Damit liegt nie mehr als ein Streifen im Speicher (höchstens
+ * PlanTileService::STREIFEN_PIXEL) statt der ganzen Seite.
  */
 final class PdfRasterService
 {
@@ -109,7 +109,10 @@ final class PdfRasterService
      * höher zurückkommt als angefordert, ist deshalb kein Streifen, sondern
      * genau dieser Fall – der Aufrufer muss ihn verwerfen.
      *
-     * @return array{ok:bool,pfad:?string,breite:int,hoehe:int,message:string}
+     * 'zeit' ist true, wenn poppler die Zeitgrenze überschritten hat – ein
+     * niedrigerer Streifen kann dann noch gehen.
+     *
+     * @return array{ok:bool,pfad:?string,breite:int,hoehe:int,message:string,zeit?:bool}
      */
     public static function streifen(
         string $pdf,
@@ -143,7 +146,7 @@ final class PdfRasterService
 
         $ergebnis = self::starten($argumente);
         if (!$ergebnis['ok']) {
-            return ['ok' => false, 'pfad' => null, 'breite' => 0, 'hoehe' => 0, 'message' => $ergebnis['message']];
+            return ['ok' => false, 'pfad' => null, 'breite' => 0, 'hoehe' => 0, 'message' => $ergebnis['message'], 'zeit' => !empty($ergebnis['zeit'])];
         }
 
         // poppler hängt die Seitennummer an: ziel-1.png, ziel-01.png, …
@@ -178,15 +181,29 @@ final class PdfRasterService
      */
     public static function masse(string $pdf, int $seite, int $kante = self::KANTE): ?array
     {
+        $verhaeltnis = self::verhaeltnis($pdf, $seite);
+        return $verhaeltnis === null ? null : self::masseAus($verhaeltnis, $kante);
+    }
+
+    /** Höhe durch Breite der Seite – aus der Briefmarke (siehe masse()). */
+    public static function verhaeltnis(string $pdf, int $seite): ?float
+    {
         $ziel = self::tempName('masse');
         $klein = self::streifen($pdf, $seite, 256, 0, 4096, $ziel);
+        self::aufraeumen($ziel);
         if (!$klein['ok'] || $klein['breite'] === 0) {
-            self::aufraeumen($ziel);
             return null;
         }
-        $verhaeltnis = $klein['hoehe'] / $klein['breite'];
-        self::aufraeumen($ziel);
+        return $klein['hoehe'] / $klein['breite'];
+    }
 
+    /**
+     * Maße der auf $kante gerechneten Seite aus ihrem Verhältnis (Höhe/Breite).
+     *
+     * @return array{breite:int,hoehe:int}
+     */
+    public static function masseAus(float $verhaeltnis, int $kante): array
+    {
         // Quer wie hoch: die lange Kante bekommt die Zielauflösung.
         if ($verhaeltnis <= 1.0) {
             $breite = $kante;
@@ -275,7 +292,7 @@ final class PdfRasterService
      * er will, er wird nie interpretiert.
      *
      * @param list<string> $argumente
-     * @return array{ok:bool,ausgabe:string,message:string}
+     * @return array{ok:bool,ausgabe:string,message:string,zeit?:bool}
      */
     private static function starten(array $argumente): array
     {
@@ -326,7 +343,7 @@ final class PdfRasterService
                 fclose($rohre[2]);
                 proc_close($prozess);
                 Logger::info('PDF-Rastern abgebrochen: ' . basename((string) $argumente[0]) . ' brauchte länger als ' . self::ZEITGRENZE . ' s.');
-                return ['ok' => false, 'ausgabe' => '', 'message' => 'Das PDF ließ sich nicht in ' . self::ZEITGRENZE . ' Sekunden verarbeiten.'];
+                return ['ok' => false, 'ausgabe' => '', 'zeit' => true, 'message' => 'Das PDF ließ sich nicht in ' . self::ZEITGRENZE . ' Sekunden verarbeiten.'];
             }
         }
         stream_set_blocking($rohre[1], true);

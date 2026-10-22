@@ -371,7 +371,9 @@ function griff(string $url, ?array $felder = null, bool|string|null $json = null
     ]);
     if ($felder !== null) {
         curl_setopt($c, CURLOPT_POST, true);
-        curl_setopt($c, CURLOPT_POSTFIELDS, http_build_query($felder));
+        // Mit einer Datei (CURLFile) als multipart/form-data wie ein Formular mit enctype.
+        $mitDatei = array_filter($felder, static fn ($w): bool => $w instanceof CURLFile) !== [];
+        curl_setopt($c, CURLOPT_POSTFIELDS, $mitDatei ? $felder : http_build_query($felder));
     }
     return $c;
 }
@@ -1232,6 +1234,56 @@ if ($geprueft > 0) {
     $entsperren('wartende Meldung');
 }
 
+// ------------------------------------------------------------ Grundriss hochladen, während er Kacheln rechnet
+// Der Upload kachelt bis zu SiteService::KACHELZEIT_IM_UPLOAD (30 s) selbst –
+// ohne die Sitzung zu halten (Session::ohneSperre()), sonst stünden so lange
+// alle anderen Reiter. poppler ist dafür ein Wrapper vorn im PATH: Das erste
+// Rastern wartet so lange, wie in der Datei steht, danach geht es wie sonst.
+// Währenddessen legt ein zweiter Reiter auf demselben Standort eine Etage an.
+$echtesPdftoppm = App\Support\Programm::finden('pdftoppm', ['-v']);
+if ($echtesPdftoppm === null || !extension_loaded('gd')) {
+    fwrite(STDOUT, "sitzung: Grundriss-Upload übersprungen – poppler-utils oder gd fehlt\n");
+} else {
+    require_once __DIR__ . '/hilfen/grundriss-dateien.php';
+    $rasterVerzoegerung = $ordner . '/raster-verzoegerung';
+    file_put_contents($rasterVerzoegerung, '3');
+    file_put_contents($ordner . '/bin/pdftoppm', "#!/bin/sh\nd=\$(cat " . escapeshellarg($rasterVerzoegerung) . ")\n"
+        . "if [ \"\$1\" != -v ] && [ \"\$d\" != 0 ]; then echo 0 > " . escapeshellarg($rasterVerzoegerung) . "; sleep \"\$d\"; fi\n"
+        . 'exec ' . escapeshellarg($echtesPdftoppm) . " \"\$@\"\n");
+    chmod($ordner . '/bin/pdftoppm', 0700);
+    $planStandort = 'Plan im Upload ' . $kennung;
+    preg_match('/name="_token" value="([^"]+)"/', holen($basis . '/standorte')['text'], $m);
+    $token = $m[1] ?? '';
+    gleich(holen($basis . '/standorte/speichern', ['_token' => $token, 'name' => $planStandort])['status'], 302, 'Grundriss: Standort angelegt');
+    $planSite = (int) ($abfrage('SELECT id FROM sites WHERE name = ?', [$planStandort])[0]['id'] ?? 0);
+    $planPdf = $ordner . '/halle.pdf';
+    pruefPdf($planPdf, 1);
+    $lauf = waehrendLangsam([[$basis . '/standorte/grundriss', ['_token' => $token, 'site_id' => (string) $planSite, 'neue_etagen' => '1',
+        'plan' => new CURLFile($planPdf, 'application/pdf', 'halle.pdf')], WIE_APP_JS]],
+        $basis . '/standorte/etage', ['_token' => $token, 'site_id' => (string) $planSite, 'name' => 'Zweiter Reiter', 'level_no' => '1']);
+    gleich($lauf['antwort']['status'], 302, 'zweiter Reiter: Etage anlegen, während der Upload Kacheln rechnet');
+    pruefe($lauf['dauer'] < 1.5, sprintf('Grundriss-Upload hält die Sitzung nicht, während er Kacheln rechnet (%.1f s)', $lauf['dauer']));
+    $upload = $lauf['langsam'][0];
+    preg_match('/^location:\s*(\S+)/mi', $upload['kopf'], $m);
+    gleich([$upload['status'], parse_url($m[1] ?? '', PHP_URL_PATH)], [302, '/standorte'], 'Grundriss-Upload (wie von app.js) leitet nach dem Kacheln weiter, statt JSON zu liefern');
+    pruefe(!sitzungsCookie($upload['kopf']), 'Grundriss-Upload: die wieder geöffnete Sitzung schickt kein zweites Sitzungscookie');
+    gleich(trim((string) file_get_contents($rasterVerzoegerung)), '0', 'poppler hat gewartet (der Wrapper lief)');
+    $planEtagen = $abfrage('SELECT id, name, plan_file, plan_page FROM floors WHERE site_id = ? ORDER BY name', [$planSite]);
+    gleich(array_column($planEtagen, 'name'), ['Grundriss', 'Zweiter Reiter'], 'beide Etagen da: die des Uploads und die des zweiten Reiters');
+    $planDatei = (string) ($planEtagen[0]['plan_file'] ?? '');
+    $kachelOrdner = $wurzel . '/storage/plans/kacheln/' . pathinfo($planDatei, PATHINFO_FILENAME) . '_s1';
+    pruefe($planDatei !== '' && is_file($kachelOrdner . '/kacheln.json'), 'Grundriss im Upload gekachelt');
+    $danach = holen($basis . '/standorte');
+    pruefe(str_contains($danach['text'], 'Grundriss hinterlegt') && str_contains($danach['text'], 'Kacheln berechnet'), 'Meldung des Uploads nach dem Kacheln kommt an');
+    pruefe(str_contains($danach['text'], 'Etage gespeichert.'), 'Meldung des zweiten Reiters aus der Wartezeit bleibt erhalten');
+    file_put_contents($rasterVerzoegerung, '0');
+    @unlink($ordner . '/bin/pdftoppm');
+    preg_match('/name="_token" value="([^"]+)"/', $danach['text'], $m);
+    $token = $m[1] ?? $token;
+    gleich(holen($basis . '/standorte/loeschen', ['_token' => $token, 'id' => (string) $planSite])['status'], 302, 'Grundriss: Standort wieder gelöscht');
+    pruefe($planDatei !== '' && !is_file($wurzel . '/storage/plans/' . $planDatei) && !is_dir($kachelOrdner), 'Plan und Kacheln mit dem Standort weg');
+}
+
 // Grundrisse der übernommenen Standorte (andere Instanz, Repository) aus storage/plans.
 foreach ($abfrage('SELECT f.plan_file FROM floors f JOIN sites s ON s.id = f.site_id WHERE s.partner_id = ? OR s.sync_key = ?', [$partnerId, $gitLocation]) as $f) {
     $plan = $wurzel . '/storage/plans/' . basename((string) $f['plan_file']);
@@ -1287,6 +1339,15 @@ if ($node === '') {
     pruefe(($ab['neuladen']['anfragen'] ?? 0) === 1 && ($ab['neuladen']['neuGeladen'] ?? 0) === 1 && ($ab['neuladen']['vorherGesperrt'] ?? false) === true
         && ($ab['neuladen']['knopfGesperrt'] ?? true) === false && ($ab['neuladen']['hinweis'] ?? 'x') === '' && ($ab['neuladen']['linkDanachAbgefangen'] ?? true) === false,
         'Formular mit data-laeuft: Neuladen nach dem fetch abgebrochen → wieder frei, „Repository abfragen“ geht danach durch');
+    $g = $b['grundriss'] ?? [];
+    $zg = $g['nachZuGross'] ?? [];
+    pruefe(($g['anfang'] ?? null) === '' && ($g['zuGrossAbgefangen'] ?? false) === true && ($zg['anfragen'] ?? 1) === 0 && ($zg['knopfGesperrt'] ?? true) === false
+        && ($zg['text'] ?? '') === 'Los' && ($zg['hinweis'] ?? 'x') === '' && str_contains((string) ($zg['gueltigkeit'] ?? ''), 'höchstens 1000 Bytes')
+        && ($zg['meldung'] ?? '') === ($zg['gueltigkeit'] ?? '-') && ($zg['fokussiert'] ?? false) === true,
+        'Grundriss-Upload: eine zu große Datei hält das Formular an, bevor data-laeuft sperrt – kein fetch, Knopf frei, kein „läuft“, die Meldung am Feld');
+    pruefe(($g['passtAbgefangen'] ?? false) === true && ($g['anfragen'] ?? 0) === 1 && ($g['adresse'] ?? '') === '/standorte/grundriss' && ($g['neuGeladen'] ?? 0) === 1
+        && ($g['gueltigkeit'] ?? 'x') === '' && ($g['meldungVersteckt'] ?? false) === true,
+        'Grundriss-Upload: danach eine passende Datei – per fetch hinaus und neu geladen, die Meldung weg');
     pruefe(($b['live_kundenmodus']['neuGeladen'] ?? 0) === 1, 'live.js: 423 mit „kundenmodus“ → neu laden, also zur Kundenseite');
     pruefe(($b['live_abgelaufen']['neuGeladen'] ?? 1) === 0 && ($b['live_abgelaufen']['stand'] ?? '') === 'Sitzung abgelaufen', 'live.js: 401 → nur die Meldung, kein Neuladen');
 }

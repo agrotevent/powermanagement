@@ -47,6 +47,16 @@ final class Database
         return self::$pdo = $pdo;
     }
 
+    /**
+     * Die Verbindung schließen – für Befehle, die lange warten, während ein
+     * Update die Datenbankdatei austauschen kann. Eine offene Verbindung zur
+     * alten Datei löschte beim Schließen womöglich die -wal der neuen.
+     */
+    public static function trennen(): void
+    {
+        self::$pdo = null;
+    }
+
     public static function driver(): string
     {
         return (string) Config::get('database.driver', 'sqlite');
