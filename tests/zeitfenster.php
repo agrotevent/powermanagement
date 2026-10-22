@@ -127,6 +127,19 @@ try {
     pruefe(!Auth::can('steuern'), 'abgelaufene Rolle gibt kein Recht mehr');
     Database::delete('freigaben', $f3);
 
+    // Rolle aus einer SSO-Gruppe (quelle = 'sso', gilt bis Ende der SSO-Sitzung):
+    // dieselbe Gültigkeit – für das Recht und für Freigaben an der Rolle.
+    Database::execute('DELETE FROM user_roles WHERE user_id = ? AND role_id = ?', [$userId, $technik]);
+    Database::insert('user_roles', ['user_id' => $userId, 'role_id' => $technik, 'gueltig_ab' => null, 'gueltig_bis' => Zeit::iso($jetzt + 3600), 'quelle' => 'sso']);
+    $fRolle = (int) Database::insert('freigaben', ['subject_type' => 'role', 'subject_id' => $technik, 'ziel_art' => 'site', 'ziel_id' => $siteId,
+        'ziel_kanal' => '', 'darf_bearbeiten' => 0, 'darf_steuern' => 0, 'notiz' => $name, 'created_by' => 'test', 'created_at' => gmdate('c')]);
+    alsBenutzer($userId);
+    pruefe(Auth::can('steuern') && Zugriff::siehtStandort($siteId), 'Rolle aus einer SSO-Gruppe: Recht und Freigabe an der Rolle gelten');
+    Database::execute("UPDATE user_roles SET gueltig_bis = ? WHERE user_id = ? AND quelle = 'sso'", [Zeit::iso($jetzt - 60), $userId]);
+    alsBenutzer($userId);
+    pruefe(!Auth::can('steuern') && !Zugriff::siehtStandort($siteId), 'Rolle aus einer SSO-Gruppe abgelaufen: weder Recht noch Freigabe an der Rolle');
+    Database::delete('freigaben', $fRolle);
+
     // Kontoablauf
     $user = Database::first('SELECT * FROM users WHERE id = ?', [$userId]);
     pruefe(Auth::kontoZeitraum($user) === null, 'unbefristetes Konto gilt');

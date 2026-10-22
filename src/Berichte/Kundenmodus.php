@@ -28,7 +28,10 @@ use App\Support\Session;
  * dort kein anderer Kundenmodus (fremdAmGeraet()).
  *
  * Entsperrt wird mit dem Kennwort dessen, der den Kundenmodus gestartet hat
- * (Auth::kennwortBestaetigen). Falsche Versuche zählen nur in der Sitzung –
+ * (Auth::kennwortBestaetigen), oder – ist sein Konto mit dem Anmeldedienst
+ * verknüpft und darf es sich dort anmelden – über eine frische Anmeldung
+ * dort mit derselben Identität (GET /login/sso/bestaetigen, Rückruf; ein
+ * Konto „nur über SSO“ nur so). Falsche Versuche zählen nur in der Sitzung –
  * das Konto wird nicht gesperrt, der Prüfer stünde sonst draußen ohne
  * Zugang da. Ab dem fünften Fehlversuch wird das Entsperren gebremst (eine
  * Minute, dann jeweils doppelt so lange, höchstens 15 Minuten); abgemeldet
@@ -113,12 +116,17 @@ final class Kundenmodus
         return self::erlaubt($methode, $pfad, $sperre['bericht']) ? null : $sperre['bericht'];
     }
 
-    /** Ist dieser Weg im Kundenmodus offen? Nur mit genau der ID des Berichts. */
+    /**
+     * Ist dieser Weg im Kundenmodus offen? Nur mit genau der ID des Berichts –
+     * und das Entsperren über den Anmeldedienst (Start und Rückruf): welcher
+     * Zweck dort gilt, prüfen sie selbst (nur kundenmodus:<dieser Bericht>,
+     * SsoController::bestaetigen, Anmeldung::rueckruf).
+     */
     public static function erlaubt(string $methode, string $pfad, int $berichtId): bool
     {
         $bericht = '/berichte/' . $berichtId;
         $offen = [
-            'GET'  => [$bericht . '/kunde', $bericht . '/pdf', '/manifest'],
+            'GET'  => [$bericht . '/kunde', $bericht . '/pdf', '/manifest', '/login/sso/bestaetigen', '/login/sso/rueckruf'],
             'POST' => [$bericht . '/kunde/unterschreiben', $bericht . '/kunde/beenden'],
         ];
         return in_array($pfad, $offen[strtoupper($methode)] ?? [], true);

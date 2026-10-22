@@ -51,6 +51,8 @@ final class Settings
     public const GEHEIM_REPO_TOKEN     = 'inventory.token_enc';
     /** API-Token für Eventworx – gilt nur für `eventworx.token_host` (App\Services\Eventworx). */
     public const GEHEIM_EVENTWORX_TOKEN = 'eventworx.token_enc';
+    /** Client-Secret der Anmeldung über SSO – gilt nur für `sso.secret_fuer` (App\Auth\Sso\Einstellungen). */
+    public const GEHEIM_SSO_SECRET = 'sso.client_secret_enc';
 
     private static ?array $cache = null;
 

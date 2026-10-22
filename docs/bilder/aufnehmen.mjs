@@ -24,12 +24,18 @@
  * Demo-Vorgangs (Eventworx wird im Demo-Modus nie gefragt); übernommen wird
  * nichts, geladen auch nicht – im Kundenbereich gibt es danach keinen Abruf.
  *
+ * Für die Anmeldung über SSO (Anmeldeseite, System → Anmeldung (SSO))
+ * schaltet das Skript die Demo-Verbindung zu Authentik vorübergehend ein –
+ * mit Platzhalter-Secret und Zwischenspeicher, ohne Netz – und startet dafür
+ * einen eigenen PHP-Server mit app.url auf derselben Datenbank; danach
+ * stehen alle sso.*-Einstellungen wieder wie vorher.
+ *
  * Für den Verteiler-Abgleich braucht es ein Repository. Das Skript legt sich
  * dafür ein eigenes an (git init --bare im Temp-Ordner) – kein Token, kein
  * Netz, auf GitHub landet nichts. Deshalb muss der Server diese Arbeitskopie
  * ausliefern (php und git im PATH). Die Einstellungen und Abgleich-Vermerke
  * der Installation stehen danach wieder wie vorher; zwei Notizen im Inventar
- * bleiben geändert (der Teil läuft zuletzt).
+ * bleiben geändert (der Teil läuft als letzter an dieser Installation).
  *
  * Für die Schnittstelle (andere Instanzen) startet das Skript eine zweite
  * Instanz B: derselbe Code mit eigener Konfiguration und Datenbank im
@@ -41,6 +47,11 @@
  * Standorte, B samt Datenbank und die Plandateien, die B im gemeinsamen
  * storage/plans abgelegt hat; die Abgleich-Schlüssel des Geländes stehen
  * wie vorher. Gezeigt wird nie ein Token im Klartext.
+ *
+ * System → Update zeigt eine dritte Instanz U (wie B, dazu eigenes
+ * storage/update und .git im Temp-Ordner): Die Dateien des Update-Dienstes
+ * schreibt das Skript mit den letzten Commits dieser Arbeitskopie selbst –
+ * es läuft kein Update. Danach ist U samt Temp-Ordner wieder weg.
  */
 import { execFileSync, spawn } from 'child_process';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs';
@@ -598,6 +609,95 @@ return $c;
     await ctx.close();
 }
 
+// ------------------------------------------------------------ Anmeldung über SSO
+{
+    // Die Demo trägt Authentik nur ein (aus, ohne Secret). Für die Bilder
+    // gilt vorübergehend: eingeschaltet, ein Platzhalter-Secret für genau
+    // diese Verbindung, Discovery und Schlüssel im Zwischenspeicher und eine
+    // gelungene Prüfung – ins Netz geht nichts, geklickt wird nicht. Ein
+    // eigener PHP-Server mit app.url (https, ohne die gibt es keinen Knopf)
+    // auf derselben Datenbank. Danach stehen alle sso.*-Einstellungen wie vorher.
+    const php = (code, ...argumente) => execFileSync('php', ['-r', `require 'src/bootstrap.php'; ${code}`, ...argumente], { cwd: wurzel, encoding: 'utf8' });
+    const tmp = mkdtempSync(join(tmpdir(), 'pm-bilder-sso-'));
+    const sicherung = join(tmp, 'vorher.json');
+    const konfig = join(tmp, 'config.php');
+    writeFileSync(konfig, `<?php
+$c = require ${phpText(join(wurzel, 'config/config.php'))};
+$c['app']['url'] = 'https://pm.example.com';
+return $c;
+`);
+    const port = await freierPort();
+    let server = null;
+    php(`use App\\Auth\\Sso\\Einstellungen as E; use App\\Support\\Database as D; use App\\Support\\Settings as S;
+        $vorher = [];
+        foreach (D::select("SELECT setting_key, setting_value FROM settings WHERE setting_key LIKE 'sso.%'") as $z) { $vorher[$z['setting_key']] = $z['setting_value']; }
+        file_put_contents($argv[1], json_encode($vorher));
+        $iss = (string) S::get(E::AUSSTELLER, '');
+        if ($iss === '') { fwrite(STDERR, "Kein Aussteller – erst bin/power demo:seed\n"); exit(1); }
+        $basis = 'https://' . parse_url($iss, PHP_URL_HOST);
+        $k = openssl_pkey_new(['private_key_type' => OPENSSL_KEYTYPE_RSA, 'private_key_bits' => 2048]);
+        $kid = substr(hash('sha256', 'demo-signing-key'), 0, 32);
+        S::geheimnisSetzen(S::GEHEIM_SSO_SECRET, 'bilder-platzhalter-' . bin2hex(random_bytes(16)));
+        S::put(E::SECRET_FUER, hash('sha256', $iss . "\n" . E::clientId()));
+        S::put(E::DISCOVERY, json_encode(['issuer' => $iss, 'authorization_endpoint' => $basis . '/application/o/authorize/',
+            'token_endpoint' => $basis . '/application/o/token/', 'userinfo_endpoint' => $basis . '/application/o/userinfo/',
+            'jwks_uri' => $iss . 'jwks/', 'end_session_endpoint' => $iss . 'end-session/', 'algs' => ['RS256'], 'auth_methode' => 'basic', 's256' => true], JSON_UNESCAPED_SLASHES));
+        S::put(E::DISCOVERY_AM, (string) (time() - 1800));
+        S::put(E::JWKS, json_encode([['kid' => $kid, 'kty' => 'RSA', 'alg' => 'RS256', 'pem' => openssl_pkey_get_details($k)['key']]], JSON_UNESCAPED_SLASHES));
+        S::put(E::JWKS_AM, (string) (time() - 1800));
+        S::put(E::GEPRUEFT_AM, (string) (time() - 1800));
+        S::put(E::BEFUND, json_encode(array_map(static fn (string $t): array => ['ok' => true, 'text' => $t], [
+            'Aussteller: ' . $iss, 'Rückruf-Adresse: https://pm.example.com/login/sso/rueckruf', 'Discovery gelesen – Endpunkte auf ' . parse_url($iss, PHP_URL_HOST),
+            'Signatur: RS256', 'PKCE mit S256 angeboten', 'Client-Anmeldung am Token-Endpunkt: client_secret_basic', 'Abmelden beim Anmeldedienst wird angeboten',
+            '1 Signaturschlüssel: ' . $kid . ' (RSA)', 'Client-Zugang angenommen (Probe: invalid_grant)']), JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE));
+        S::put(E::AKTIV, '1');`, sicherung);
+    try {
+        server = spawn('php', ['-S', `127.0.0.1:${port}`, '-t', 'public'], { cwd: wurzel, env: { ...process.env, POWERMANAGEMENT_CONFIG: konfig }, stdio: 'ignore' });
+        const url = `http://127.0.0.1:${port}`;
+        for (let i = 0; i < 100; i++) {
+            try {
+                if ((await fetch(url + '/login')).ok) {
+                    break;
+                }
+            } catch {
+                // noch nicht da
+            }
+            await new Promise((r) => setTimeout(r, 100));
+        }
+        // Die Anmeldeseite am Telefon, wie sie jemand sieht, der nicht angemeldet ist
+        const ctx = await browser.newContext({ viewport: HANDY, deviceScaleFactor: 1, locale: 'de-DE', timezoneId: 'Europe/Berlin', hasTouch: true, isMobile: true });
+        const page = await ctx.newPage();
+        page.on('pageerror', (e) => fehler.push(page.url() + ': ' + e.message));
+        await oeffnen(page, '/login', 300, url);
+        if (!(await page.locator('a.sso-knopf').count())) {
+            fehler.push('Anmeldung über SSO: kein Knopf auf der Anmeldeseite');
+        }
+        await foto(page, 'anmeldung-sso');
+        await ctx.close();
+
+        // Die Einstellungsseite als Administrator
+        const admin = await sitzung(DESKTOP, {}, { url });
+        await oeffnen(admin.page, '/system/sso', 400, url);
+        // bis einschließlich der Anmeldeanfragen
+        await oben(admin.page, 'sso-einstellungen', await admin.page.evaluate(() => {
+            const h = [...document.querySelectorAll('h2')].find((e) => e.textContent.trim() === 'Schutz');
+            return h ? Math.round(h.closest('.card').getBoundingClientRect().top + window.scrollY) - 16 : 2400;
+        }));
+        await admin.ctx.close();
+    } finally {
+        if (server !== null) {
+            server.kill('SIGTERM');
+        }
+        php(`use App\\Support\\Database as D; use App\\Support\\Settings as S; $v = json_decode((string) file_get_contents($argv[1]), true);
+            if (!is_array($v)) { return; }
+            foreach (D::select("SELECT setting_key FROM settings WHERE setting_key LIKE 'sso.%'") as $z) {
+                if (!array_key_exists($z['setting_key'], $v)) { S::forget($z['setting_key']); }
+            }
+            foreach ($v as $k => $w) { $w === null ? S::forget($k) : S::put($k, (string) $w); }`, sicherung);
+        rmSync(tmp, { recursive: true, force: true });
+    }
+}
+
 // ------------------------------------------------------------ Verteiler-Abgleich
 {
     const php = (code, ...argumente) => execFileSync('php', ['-r', `require 'src/bootstrap.php'; ${code}`, ...argumente], { cwd: wurzel, encoding: 'utf8' });
@@ -660,6 +760,101 @@ return $c;
             if (is_dir($k) && trim((string) shell_exec('git -C ' . escapeshellarg($k) . ' remote get-url origin 2>/dev/null')) === $argv[2]) {
                 exec('rm -rf ' . escapeshellarg($k));
             }`, sicherung, repo);
+        rmSync(tmp, { recursive: true, force: true });
+    }
+}
+
+// ------------------------------------------------------------ Update (zuletzt)
+{
+    /*
+     * System → Update zeigt im Demo-Modus nur einen Hinweis. Für das Bild
+     * startet das Skript eine eigene Instanz U wie B: eigene Datenbank,
+     * eigenes storage/update und ein eigenes .git im Temp-Ordner. Was sonst
+     * der Update-Dienst schreibt (Lebenszeichen, Stand, Verlauf), schreibt
+     * das Skript selbst – mit den letzten Commits dieser Arbeitskopie. Es
+     * läuft kein Update, und an der Installation ändert sich nichts.
+     */
+    const tmp = mkdtempSync(join(tmpdir(), 'pm-bilder-update-'));
+    const uConfig = join(tmp, 'u.php');
+    const umgebungU = { ...process.env, POWERMANAGEMENT_CONFIG: uConfig };
+    const portU = await freierPort();
+    const u = { url: `http://127.0.0.1:${portU}`, name: 'admin', wort: 'Update-Bilder-2026!' };
+    const commits = execFileSync('git', ['-C', wurzel, 'log', '--no-merges', '-n', '6', '--format=%H %ct %s'], { encoding: 'utf8' })
+        .trim().split('\n').map((z) => {
+            const [h, t, ...s] = z.split(' ');
+            return { h, t: Number(t), s: s.join(' ') };
+        });
+    let server = null;
+    try {
+        if (commits.length < 6) {
+            throw new Error('Update: zu wenige Commits in der Arbeitskopie');
+        }
+        writeFileSync(uConfig, `<?php
+$c = require ${phpText(join(wurzel, 'config/config.php'))};
+$c['app']['demo'] = false;
+$c['app']['url'] = ${phpText(u.url)};
+$c['database'] = ['driver' => 'sqlite', 'path' => ${phpText(join(tmp, 'u.sqlite'))}] + $c['database'];
+$c['update']['verzeichnis'] = ${phpText(join(tmp, 'update'))};
+$c['update']['git_verzeichnis'] = ${phpText(join(tmp, 'git'))};
+return $c;
+`);
+        execFileSync('php', ['bin/power', 'install', u.name, u.wort, '--ohne-wechsel'], { cwd: wurzel, env: umgebungU, stdio: 'ignore' });
+        // Installiert ist der fünftletzte Commit, verfügbar der neueste; davor
+        // ein Update von Hand vor drei Tagen.
+        const [installiert, alt] = [commits[4], commits[5]];
+        const neu = commits.slice(0, 4);
+        execFileSync('php', ['-r', `require 'src/bootstrap.php'; use App\\Services\\UpdateService as U;
+            [, $tmp, $daten, $von] = $argv;
+            $d = json_decode($daten, true);
+            $jetzt = time();
+            foreach (['update/soll', 'update/ist', 'git/refs/heads'] as $o) { mkdir($tmp . '/' . $o, 0750, true); }
+            file_put_contents($tmp . '/git/HEAD', "ref: refs/heads/main\\n");
+            file_put_contents($tmp . '/git/refs/heads/main', $d['installiert']['h'] . "\\n");
+            file_put_contents($tmp . '/update/ist/helfer', U::KOPF_HELFER . "\\nzeit {$jetzt}\\nfassung {$d['installiert']['h']}\\noberflaeche ja\\nautomatik ja\\noffen nein\\npfad ok\\n");
+            $erst = $d['neu'][0];
+            $stand = U::KOPF_STAND . "\\nerzeugt {$jetzt}\\nabruf ok\\nabruf_zeit " . ($jetzt - 1500) . "\\nzweig main\\n"
+                . "quelle https://github.com/agrotevent/powermanagement\\ninstalliert {$d['installiert']['h']} {$d['installiert']['t']}\\n"
+                . 'installiert_betreff ' . $d['installiert']['s'] . "\\nverfuegbar {$erst['h']} {$erst['t']}\\nneu " . count($d['neu']) . "\\n"
+                . "linear ja\\nlokal_geaendert nein\\nmigrationen nein\\neinrichtung ja\\nflows nein\\n";
+            foreach ($d['neu'] as $c) { $stand .= "ziel_kandidat {$c['h']} {$c['t']}\\n"; }
+            foreach ($d['neu'] as $c) { $stand .= "commit {$c['h']} {$c['t']} {$c['s']}\\n"; }
+            file_put_contents($tmp . '/update/ist/stand', $stand . "weitere 0\\n");
+            // Das letzte Update: im Verlauf und als zuletzt gelaufener Lauf
+            $beginn = $jetzt - 3 * 86400;
+            $kennung = bin2hex(random_bytes(16));
+            $sicherung = 'vor-update-' . date('Ymd-His', $beginn) . '.tar.gz';
+            file_put_contents($tmp . '/update/ist/verlauf', U::KOPF_VERLAUF . "\\neintrag {$beginn} " . ($beginn + 143) . " {$kennung}"
+                . " hand {$von} aktualisieren eingespielt - {$d['alt']['h']} {$d['installiert']['h']} {$sicherung}\\n");
+            file_put_contents($tmp . '/update/ist/lauf', U::KOPF_LAUF . "\\nkennung {$kennung}\\naktion aktualisieren\\nausloeser hand\\nvon {$von}\\n"
+                . "zustand fertig\\nergebnis eingespielt\\ngrund -\\nschritt 12 12 Prüfen\\nbeginn {$beginn}\\npuls " . ($beginn + 143) . "\\nende " . ($beginn + 143)
+                . "\\nalt {$d['alt']['h']}\\nneu {$d['installiert']['h']}\\nziel {$d['installiert']['h']}\\nsicherung {$sicherung}\\npruefung ok\\ninvocation -\\nprotokoll -\\n");
+            touch($tmp . '/update/zeitplan');`, tmp, JSON.stringify({ installiert, alt, neu }), u.name], { cwd: wurzel, env: umgebungU });
+
+        server = spawn('php', ['-S', `127.0.0.1:${portU}`, '-t', 'public'], { cwd: wurzel, env: umgebungU, stdio: 'ignore' });
+        for (let i = 0; i < 100; i++) {
+            try {
+                if ((await fetch(u.url + '/login')).ok) {
+                    break;
+                }
+            } catch {
+                // noch nicht da
+            }
+            await new Promise((r) => setTimeout(r, 100));
+        }
+        const su = await sitzung(DESKTOP, {}, u);
+        await oeffnen(su.page, '/system/update', 600, u.url);
+        const text = await su.page.locator('main').innerText();
+        for (const z of ['Jetzt suchen', 'Jetzt aktualisieren', 'Automatische Updates', neu[0].s.slice(0, 30)]) {
+            if (!text.includes(z)) {
+                fehler.push('Update: „' + z + '“ fehlt auf der Seite');
+            }
+        }
+        await foto(su.page, 'update', { fullPage: true });
+        await su.ctx.close();
+    } finally {
+        if (server !== null) {
+            server.kill('SIGTERM');
+        }
         rmSync(tmp, { recursive: true, force: true });
     }
 }

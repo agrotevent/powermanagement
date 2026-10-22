@@ -140,8 +140,10 @@ final class Router
             // Profil führte zur Kundenseite, die zum Profil, im Kreis, und
             // entsperren ließe sich nie. Erst entsperren (mit dem vorläufigen
             // Kennwort), danach geht es zum Profil. Kundenzugänge haben keinen
-            // Kundenmodus (Kundenmodus::aktiv() ist für sie null).
-            if (Auth::check() && (int) (Auth::user()['must_change_password'] ?? 0) === 1
+            // Kundenmodus (Kundenmodus::aktiv() ist für sie null). Eine
+            // Sitzung über SSO braucht kein Kennwort von hier – sie kennt es
+            // nicht und hat es nicht benutzt.
+            if (Auth::check() && (int) (Auth::user()['must_change_password'] ?? 0) === 1 && Auth::anmeldeweg() !== 'sso'
                 && !in_array($path, self::OHNE_NEUES_KENNWORT, true)
                 && ($kundenzugang || Kundenmodus::aktiv() === null)) {
                 // Das Konto im Kundenbereich sagt es selbst (ein Hinweis, nicht zwei).
@@ -196,6 +198,23 @@ final class Router
         }
 
         Response::notFound($methodMismatch ? 'Methode nicht erlaubt.' : 'Seite nicht gefunden.');
+    }
+
+    /**
+     * Gibt es unter diesem Pfad eine Seite (eine GET-Route)? Die Antwort auf
+     * ein Formular ist oft keine – die Treffer einer Suche, die Dateien am
+     * Vorgang, eine Rückfrage stehen unter der Adresse des POST. Wer nach
+     * einer abgewiesenen Änderung „zurück“ schickt, sucht damit die nächste
+     * Seite (UpdateService::wartungsSperre()).
+     */
+    public function hatSeite(string $pfad): bool
+    {
+        foreach ($this->routes as $route) {
+            if ($route['method'] === 'GET' && preg_match($route['pattern'], $pfad) === 1) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**

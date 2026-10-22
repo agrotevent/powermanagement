@@ -34,15 +34,26 @@ final class Http
      *   verbindung Sekunden für den Verbindungsaufbau (Vorgabe min(5, zeit))
      *   max        größte Antwort in Bytes – darüber wird abgebrochen
      *              (nummer = ZU_GROSS), statt alles in den Speicher zu laden
+     *   verbinden_ueber  „host:port:ziel:zielport“ – die Verbindung geht an
+     *              ziel:zielport, Name, SNI und Zertifikatsprüfung bleiben bei
+     *              host (curl CONNECT_TO; für SSO ohne Hairpin-NAT)
+     *   ca_datei   eigene CA (PEM) statt der des Systems (curl CAINFO)
+     *
+     * verbinden_ueber und ca_datei gibt es nur mit php-curl – auf dem Weg über
+     * PHP-Streams kommt `ok: false` zurück, statt still woandershin oder mit
+     * der falschen CA zu verbinden.
      *
      * `ok` heißt nur: es kam eine Antwort – auch 4xx/5xx. `nummer` ist die
      * curl-Fehlernummer (0 ohne Fehler und bei PHP-Streams), damit der
      * Aufrufer sagen kann, *was* nicht ging (Name unbekannt, abgewiesen …).
      *
-     * @param array{kopf?:array<string,string>,rumpf?:string,zeit?:int,verbindung?:int,max?:int} $optionen
+     * $optionen ist #[\SensitiveParameter]: Kopfzeilen und Rumpf tragen Tokens
+     * und Secrets (Eventworx, SSO) – sie gehören in keinen Stack-Trace.
+     *
+     * @param array{kopf?:array<string,string>,rumpf?:string,zeit?:int,verbindung?:int,max?:int,verbinden_ueber?:string,ca_datei?:string} $optionen
      * @return array{ok:bool,status:int,rumpf:string,fehler:string,nummer:int}
      */
-    public static function anfrage(string $methode, string $url, array $optionen = []): array
+    public static function anfrage(string $methode, string $url, #[\SensitiveParameter] array $optionen = []): array
     {
         if (is_callable(self::$attrappe)) {
             $antwort = (self::$attrappe)($methode, $url, $optionen);
@@ -65,6 +76,15 @@ final class Http
         $zeit = max(1, (int) ($optionen['zeit'] ?? 10));
         $verbindung = isset($optionen['verbindung']) ? min(max(1, (int) $optionen['verbindung']), $zeit) : min(5, $zeit);
         $max = isset($optionen['max']) && (int) $optionen['max'] > 0 ? (int) $optionen['max'] : null;
+        $ueber = (string) ($optionen['verbinden_ueber'] ?? '');
+        $ca = (string) ($optionen['ca_datei'] ?? '');
+        // Wie bei den Kopfzeilen: nichts, was curl als zweite Angabe läse.
+        if ($ueber !== '' && preg_match('/^[A-Za-z0-9.:\[\]-]{1,300}$/', $ueber) !== 1) {
+            return ['ok' => false, 'status' => 0, 'rumpf' => '', 'fehler' => 'Ungültige Angabe für verbinden_ueber.', 'nummer' => 0];
+        }
+        if (preg_match('/[\x00-\x1F\x7F]/', $ca) === 1) {
+            return ['ok' => false, 'status' => 0, 'rumpf' => '', 'fehler' => 'Ungültige Angabe für ca_datei.', 'nummer' => 0];
+        }
         $zuGross = static fn (int $status): array => [
             'ok' => false, 'status' => $status, 'rumpf' => '', 'nummer' => self::ZU_GROSS,
             'fehler' => 'Die Antwort ist größer als ' . self::groesse((int) $max) . ' – abgebrochen.',
@@ -84,6 +104,14 @@ final class Http
             ]);
             if (isset($optionen['rumpf'])) {
                 curl_setopt($ch, CURLOPT_POSTFIELDS, (string) $optionen['rumpf']);
+            }
+            if ($ueber !== '') {
+                curl_setopt($ch, CURLOPT_CONNECT_TO, [$ueber]);
+            }
+            // CAINFO unterliegt open_basedir – ein false heißt: die Datei darf PHP nicht lesen.
+            if ($ca !== '' && !curl_setopt($ch, CURLOPT_CAINFO, $ca)) {
+                curl_close($ch);
+                return ['ok' => false, 'status' => 0, 'rumpf' => '', 'fehler' => 'Die CA-Datei lässt sich nicht verwenden (open_basedir?).', 'nummer' => 0];
             }
             $abgebrochen = false;
             if ($max !== null) {
@@ -113,6 +141,9 @@ final class Http
             return ['ok' => true, 'status' => $status, 'rumpf' => (string) $rumpf, 'fehler' => '', 'nummer' => 0];
         }
 
+        if ($ueber !== '' || $ca !== '') {
+            return ['ok' => false, 'status' => 0, 'rumpf' => '', 'fehler' => 'Für diese Einstellung ist php-curl nötig.', 'nummer' => 0];
+        }
         // PHP-Streams folgen Umleitungen von Haus aus – und nähmen dabei
         // die Kopfzeilen mit. Hier also ausdrücklich nicht.
         $kontext = stream_context_create(['http' => [

@@ -299,7 +299,8 @@ der Typ lässt sich kopieren und löschen. Fehlerhafte Einträge aus der
 Vorlage korrigiert man also einfach im Katalog. Ein gelöschter Typ ist beim
 nächsten Import wieder *neu*.
 
-Auf der Kommandozeile:
+Auf der Kommandozeile (auf einer Installation als Anwendungsbenutzer,
+`runuser -u www-data -- php bin/power …` – als root bricht `bin/power` ab):
 
 ```bash
 php bin/power katalog:import resources/kataloge/bss-strombibel.json --pruefen   # nur ansehen
@@ -1195,3 +1196,107 @@ Audit-Log*) zeichnet Anmeldungen, Änderungen und Schaltvorgänge auf.
   weiter als bis zum Profil.
 - Steht ein TLS-Proxy davor, der kein `X-Forwarded-Proto` schickt, erzwingt
   `security.cookie_secure => true` das Sitzungs-Cookie nur über HTTPS.
+
+**Anmeldung über SSO (Authentik)**
+
+Ist die Anmeldung über einen Anmeldedienst eingerichtet
+([anmeldung-sso.md](anmeldung-sso.md)), steht auf der Anmeldeseite oben
+**Mit Authentik anmelden**, darunter weiter die Anmeldung mit Benutzername
+und Kennwort – mit „nur SSO“ eingeklappt („Mit Benutzername und Kennwort
+(Kunden, Notzugang)“).
+
+<img src="bilder/anmeldung-sso.png" alt="Anmeldeseite mit „Mit Authentik anmelden“" width="260">
+
+- Im **Profil** verbindet *Mit Authentik verbinden* das eigene Konto: erst
+  das Kennwort noch einmal, dann *Weiter zu Authentik* und dort einmal neu
+  anmelden; danach geht die Anmeldung auch darüber. Lösen geht dort auch –
+  außer bei Konten „nur über SSO“.
+- Rollen aus Gruppen stehen im Profil und in der Benutzerverwaltung als
+  „über Gruppe“ – sie gelten bis zum Ende der Sitzung über SSO. Was sichtbar
+  ist, regeln weiter die Freigaben hier.
+- Nach dem **Abmelden** einer Sitzung über SSO – oder einer Sitzung, in der
+  über Authentik bestätigt oder verbunden wurde – bietet eine Zwischenseite
+  *Auch bei Authentik abmelden* an – auf geteilten Tablets wichtig.
+- Wer unbekannt ist, landet als **Anmeldeanfrage** unter *System →
+  Anmeldung (SSO)*; die Verwaltung verknüpft sie mit einem Konto oder legt
+  eines an.
+- In der **Benutzerverwaltung** zeigt die Spalte *Anmeldung*, ob ein Konto
+  verknüpft ist (und unter welchem Namen dort); wann es zuletzt über SSO
+  kam, steht im Formular des Kontos. Dort lässt es sich lösen, seine
+  SSO-Sitzungen beenden und auf „nur über SSO“ stellen.
+
+## Update
+
+**System → Update** bringt PowerManagement auf den neuesten Stand – ohne
+Konsole. Die Seite braucht das Recht *PowerManagement aktualisieren*, das
+von sich aus nur die Administration hat ([rechte.md](rechte.md#update)).
+Gibt es Neues, steht am Menüeintrag *Update* eine Zahl; ein gelbes oder
+rotes **!** meldet eine Störung (Update gescheitert, Update-Dienst still,
+Auftrag hängt). Auf dem Handy, wo die Seitenleiste zu ist, steht dasselbe
+Zeichen oben in der Kopfleiste.
+
+![System → Update: installierter Stand, vier neue Stände mit Betreff, Aktualisieren, Automatische Updates und Verlauf](bilder/update.png)
+
+| Karte | zeigt |
+|-------|-------|
+| **Stand** | installierter Stand (Datum, Kurz-Hash, Betreff, Zweig), verfügbar: *Aktuell*, *n Änderungen*, *Suche fehlgeschlagen*, *Lokale Änderungen*, *Verlauf nicht linear*; wann zuletzt gesucht wurde. **Jetzt suchen** fragt das Repository. |
+| **Was neu ist** | die neuen Stände mit Datum und Betreff (verlinkt, wenn das Repository auf GitHub liegt), dazu Kennzeichen: Datenbank wird erweitert, Einrichtung ändert sich, Node-RED-Flows ändern sich, und Hinweise zu diesem Update (aus den Commits, Zeile `Update-Hinweis:`) |
+| **Aktualisieren** | was passiert, wie lange das letzte Update dauerte, und **Jetzt aktualisieren** – genau auf den angezeigten Stand |
+| **Fortschritt** | Schritt *n von 12* mit Namen, Laufzeit und die letzten Zeilen des Protokolls; danach das Ergebnis mit Grund und das ganze Protokoll. Solange etwas läuft oder bis eine Stunde danach steht die Karte oben. |
+| **Automatische Updates** | Modus, Zeitfenster, Karenzzeit, *Pausieren bis*, nächstes Fenster, was zuletzt automatisch geschah |
+| **Verlauf** | die letzten Updates: Zeit, Auslöser (von Hand mit Namen, automatisch, Konsole, Update-Dienst), Ergebnis, Stand vorher → nachher, Dauer |
+| **Auf der Konsole** | die Befehle für ein Update auf der Konsole, mit den Pfaden dieser Installation |
+
+**Aktualisieren.** Vorher werden Datenbank und Konfiguration gesichert.
+Messung und Schalten sind etwa 1–3 Minuten unterbrochen, die Shellys kurz
+getrennt, die Oberfläche ist einen Moment nicht erreichbar (die Seite
+meldet „Dienste starten neu …“ und macht von selbst weiter). Solange das
+Update läuft, nimmt die Oberfläche keine Änderungen an: Speichern meldet
+„Gerade läuft ein Update – Änderungen sind in etwa einer Minute wieder
+möglich“. Übergabeberichte speichern danach von selbst noch einmal, die
+Eingaben bleiben solange auf dem Gerät. Eine Peilung oder Betankung, die
+beim Start des Updates schon auf den Rohwert des Sensors wartete, trägt
+das Update noch ein, bevor es sichert; im Kartenpanel bleibt eine
+abgewiesene Eingabe stehen und lässt sich nach einer Minute noch einmal
+abschicken. „Prüfnachweise aus Eventworx übernehmen“, das beim Start noch
+auf Eventworx wartete, übernimmt nichts mehr und zeigt die Liste mit
+Auswahl und Angaben wieder – nach dem Update genügt ein Klick. Kunden im
+Kundenbereich lesen weiter; ein neues Kennwort speichern sie erst danach
+(sie sehen dazu einen eigenen Hinweis, nie etwas vom Update selbst).
+Anmelden über Authentik geht in dieser Zeit nicht – die Anmeldeseite sagt
+„in etwa einer Minute wieder möglich“ –, mit Kennwort schon; wer angemeldet
+ist, bleibt es ([anmeldung-sso.md](anmeldung-sso.md#während-eines-updates)).
+Andere Instanzen bekommen über die
+Schnittstelle dieselbe Antwort (HTTP 503) – wer dort sendet, schickt es nach
+einer Minute noch einmal. Geht etwas schief, kommt der alte Stand von selbst zurück –
+Code, Datenbank und Einrichtung. Läuft gerade ein Aufbau oder wurde in den
+letzten 30 Minuten geschaltet, nennt die Seite das und verlangt das
+Kästchen **Trotzdem jetzt aktualisieren**. Ist der Knopf gesperrt, steht
+der Grund darunter (lokale Änderungen im Code, Verlauf nicht linear, ein
+Update läuft schon …) – solche Fälle gehen nur über die Konsole.
+
+**Automatische Updates.** Drei Modi:
+
+- *Aus* – gesucht wird nur auf Knopfdruck.
+- *Nur suchen und anzeigen* (Vorgabe) – etwa alle sechs Stunden nachsehen;
+  neue Stände zeigt das Abzeichen, eingespielt wird nur von Hand.
+- *Automatisch einspielen* – dazu im **Zeitfenster** von selbst
+  aktualisieren: an den gewählten Wochentagen ab *Beginn* für die gewählte
+  *Dauer* (Vorgabe 04:00, zwei Stunden), höchstens einmal am Tag.
+
+Die **Karenzzeit** (Vorgabe 24 Stunden) lässt nur Stände zu, die schon so
+lange veröffentlicht sind – ein fehlerhafter Stand kann bis dahin noch
+ersetzt werden. Nie während eines Aufbaus oder Betriebs an irgendeinem
+Standort und nicht, wenn in den letzten 30 Minuten geschaltet wurde: Dann
+wird verschoben und im Fenster erneut geprüft – ebenso, solange der Server
+Kacheln für einen großen Grundriss rechnet (meist Minuten). **Pausieren bis** hält die
+Automatik bis einschließlich des gewählten Tages an, etwa über ein
+Veranstaltungswochenende. Ein Stand, der zurückgerollt werden musste, wird
+nicht automatisch wiederholt – erst ein neuerer oder *Jetzt aktualisieren*.
+Wird 14 Tage lang nur verschoben, meldet die Seite das (oft ein Aufbau, der
+nie beendet wurde).
+
+Auf der Konsole geht dasselbe mit
+`runuser -u www-data -- php bin/power update:starten --warten`; Einzelheiten,
+Abschalten und Notfälle stehen in der
+[Installationsanleitung, Abschnitt 10](installation-debian-lxc.md#10--update).

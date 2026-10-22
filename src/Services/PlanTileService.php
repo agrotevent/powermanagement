@@ -496,9 +496,21 @@ final class PlanTileService
     }
 
     /**
-     * Hält jemand diese Sperrdatei? Nachgesehen mit einer geteilten Sperre
-     * für einen Augenblick – darum holt sperreHolen() eine kurz belegte
-     * Sperre trotzdem.
+     * Rechnet gerade ein Prozess Kacheln – hält er die Sperre von
+     * nacheinander()? Das tun der Prozess im Hintergrund (plan:kacheln
+     * --auftraege) und die Wartung je Plan, solange sie rechnen, ebenso
+     * bin/power plan:kacheln; wer nur darauf wartet, hält sie nicht. Für die
+     * Automatik der Updates: Sie verschiebt dann (UpdateAutomatik::lage()).
+     */
+    public static function rechnetImHintergrund(): bool
+    {
+        return self::gehalten(self::hintergrundSperre());
+    }
+
+    /**
+     * Hält jemand diese Sperrdatei exklusiv (flock)? Ohne Datei: nein.
+     * Nachgesehen mit einer geteilten Sperre für einen Augenblick – darum
+     * holt sperreHolen() eine kurz belegte Sperre trotzdem.
      */
     private static function gehalten(string $pfad): bool
     {
@@ -730,6 +742,19 @@ final class PlanTileService
             // Wer die Sperre hält, ist allein: Bauordner sind Reste getöteter
             // Bauten, Abgelöstes über GNADE kann weg.
             self::wegraeumen($ordner, self::GNADE, 0);
+            /*
+             * Ohne kacheln.json sind Stufen direkt im Planordner der Rest
+             * eines Baus von vor den Fassungsordnern, der getötet wurde – sein
+             * finally lief nicht mehr: php-fpm angehalten (ein Update rollt
+             * zurück; mit ihm enden die Bauten, die der Upload in den
+             * Hintergrund gab), der OOM-Killer, ein Neustart. Sie gehören zu
+             * keiner Pyramide (anderes Raster, eine andere Fassung des Codes)
+             * und belegten bis zum nächsten Aufräumen Platz, den plattePruefen()
+             * diesem Bau abzöge. Gerechnet wird ohnehin in einen eigenen Ordner.
+             */
+            if ($jetzt === null) {
+                self::teilbauWeg($ordner);
+            }
 
             /*
              * Was die vorhandene Pyramide schon festgelegt hat, bleibt: die
@@ -875,6 +900,21 @@ final class PlanTileService
         self::jsonSchreiben($ziel . '/kacheln.json', $vorher);
         @touch($ziel . '/.abgeloest');
         return true;
+    }
+
+    /**
+     * Stufen direkt im Planordner wegräumen – ohne kacheln.json die Reste
+     * eines getöteten Baus von vor den Fassungsordnern (siehe bauen()). Der
+     * Aufrufer hält die Sperre.
+     */
+    private static function teilbauWeg(string $ordner): void
+    {
+        foreach (scandir($ordner) ?: [] as $name) {
+            $pfad = $ordner . '/' . $name;
+            if (preg_match(self::STUFENORDNER, $name) === 1 && is_dir($pfad) && !is_link($pfad)) {
+                self::verzeichnisWeg($pfad);
+            }
+        }
     }
 
     /**

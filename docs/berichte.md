@@ -81,6 +81,14 @@ nicht, geht dieselbe Eingabe beim nächsten Mal noch einmal hinaus – der
 Server erkennt sie (gleicher Inhalt, gleiches Konto) und antwortet
 „gespeichert“ statt mit einem Konflikt.
 
+Läuft gerade ein **Update** (System → Update, etwa eine Minute), nimmt der
+Server nichts an. Die Leiste zeigt „Update läuft“, die Eingaben bleiben auf
+dem Gerät, und nach einer halben Minute wird noch einmal gespeichert – von
+selbst, bis es durch ist. Eine Unterschrift (Prüfer oder Kunde) bleibt im
+Dialog stehen und geht dann noch einmal hinaus, ohne doppelt anzukommen.
+Wird die Seite mitten im Update neu geladen, wartet sie mit dem Übernehmen
+der Eingaben vom Gerät, bis das Update vorbei ist.
+
 Haben zwei Geräte denselben Bericht offen, überschreibt keines still das
 andere: Das zweite meldet „Auf einem anderen Gerät geändert – bitte neu
 laden“ und bietet die eigenen Eingaben danach wieder an. Nach dem Abmelden
@@ -289,10 +297,13 @@ andere Adresse führt zurück zur Kundenseite. Andere Tabs desselben
 Browsers leeren sich und gehen ebenfalls zur Kundenseite. Nach der
 Unterschrift steht da „Vielen Dank – bitte geben Sie das Gerät an …
 zurück“ – an den, der den Kundenmodus gestartet hat; entsperrt wird mit
-**dessen Kennwort**. Ist der Bericht einem Kunden mit eigenem Zugang
+**dessen Kennwort** – oder, ist Anmeldung über SSO eingerichtet, mit **Mit
+Authentik entsperren**: eine neue Anmeldung dort, und nur dieselbe Person
+entsperrt ([anmeldung-sso.md](anmeldung-sso.md#bestätigen-über-authentik)).
+Konten „nur über SSO“ haben kein Kennwortfeld. Ist der Bericht einem Kunden mit eigenem Zugang
 zugeordnet ([kundenbereich.md](kundenbereich.md)), steht dort außerdem
-„Der Bericht steht ab sofort in Ihrem Kundenbereich bereit.“ Ab fünf falschen Versuchen wird das Entsperren
-gebremst (eine Minute, dann jeweils doppelt so lange, höchstens 15
+„Der Bericht steht ab sofort in Ihrem Kundenbereich bereit.“ Ab fünf falschen Versuchen (auch über SSO mit einer anderen Person) wird
+das Entsperren gebremst (eine Minute, dann jeweils doppelt so lange, höchstens 15
 Minuten); abgemeldet wird nicht, und das Konto selbst wird nicht gesperrt.
 Das Kennwortfeld füllt der Browser nicht von selbst aus – sonst entsperrte
 ein Tipp des Kunden das Gerät.

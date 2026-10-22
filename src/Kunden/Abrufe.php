@@ -5,8 +5,10 @@ namespace App\Kunden;
 
 use App\Auth\Auth;
 use App\Berichte\BerichtService;
+use App\Services\UpdateService;
 use App\Support\Audit;
 use App\Support\Database;
+use App\Support\Logger;
 
 /**
  * Wer hat welches Dokument im Kundenbereich geladen oder angesehen
@@ -24,6 +26,13 @@ use App\Support\Database;
  * Andere Seitenaufrufe (Listen, Locations) werden nicht festgehalten. Eine
  * Ansicht desselben Protokolls durch denselben Zugang höchstens einmal je
  * Stunde – ein Neuladen ist kein neuer Abruf.
+ *
+ * Während eines Updates bleibt Lesen offen, Abrufe also auch. Rollt das
+ * Update zurück, kommt die Datenbank von vor der Sicherung zurück – und mit
+ * ihr fehlten die drei Spuren eines Abrufs aus diesen Minuten. Darum steht
+ * ein Abruf während der Schreibsperre zusätzlich im Protokoll des Servers
+ * (storage/logs/app.log, nur Kennungen und Prüfsumme), das ein Zurückrollen
+ * nicht anfasst.
  */
 final class Abrufe
 {
@@ -56,6 +65,12 @@ final class Abrufe
             'am'       => gmdate('c'),
         ]);
         Audit::log('kundenbereich.abruf', $art, (string) $zielId, ['art' => $art, 'ziel_id' => $zielId]);
+        if (UpdateService::wartungAktiv()) {
+            Logger::info('kundenbereich.abruf während eines Updates (fehlt in der Datenbank, falls es zurückrollt)', [
+                'kunde_id' => $kundeId, 'user_id' => isset($user['id']) ? (int) $user['id'] : null, 'art' => $art, 'ziel_id' => $zielId,
+                'sha256' => is_string($sha256) && preg_match('/^[0-9a-f]{64}$/', $sha256) === 1 ? $sha256 : null, 'am' => gmdate('c'),
+            ]);
+        }
         if (in_array($art, self::BERICHT, true) && isset($user['id'])) {
             BerichtService::imKundenbereich($zielId, (int) $user['id'], $art === 'bericht');
         }

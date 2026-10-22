@@ -1,0 +1,35 @@
+# /etc/systemd/system/powermanagement-update-zeitplan.service
+#
+# Plant Updates: sucht regelmäßig nach neuen Ständen und legt im Zeitfenster
+# einen Auftrag zum Einspielen an (bin/power update:zeitplan, einmaliger Lauf,
+# gestartet von powermanagement-update-zeitplan.timer). Als Anwendungsbenutzer –
+# nur PHP sieht Aufbau und Schaltvorgänge; ausführen tut es der Update-Dienst
+# (powermanagement-update.path → .service), der den Auftrag noch einmal prüft.
+#
+# Sandbox wie der Sammler: braucht Namensräume (im LXC „nesting“). Fehlen sie,
+# scheitert der Lauf mit 226/NAMESPACE, und die Oberfläche meldet einen stillen
+# Zeitplan.
+#
+# Platzhalter: __APP_USER__, __APP_DIR__
+
+[Unit]
+Description=PowerManagement: Updates planen (suchen, im Zeitfenster einspielen)
+
+[Service]
+Type=oneshot
+User=__APP_USER__
+Group=__APP_USER__
+WorkingDirectory=__APP_DIR__
+ExecStart=/usr/bin/php __APP_DIR__/bin/power update:zeitplan
+TimeoutStartSec=2min
+SyslogIdentifier=powermanagement-update-zeitplan
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=__APP_DIR__/storage
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+CapabilityBoundingSet=

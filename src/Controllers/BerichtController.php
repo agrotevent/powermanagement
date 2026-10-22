@@ -4,6 +4,9 @@ declare(strict_types=1);
 namespace App\Controllers;
 
 use App\Auth\Auth;
+use App\Auth\Sso\Anmeldung;
+use App\Auth\Sso\Einstellungen as SsoEinstellungen;
+use App\Auth\Sso\Schutz;
 use App\Auth\Zugriff;
 use App\Berichte\BerichtSchema;
 use App\Berichte\BerichtService;
@@ -469,7 +472,7 @@ final class BerichtController extends Controller
             // Kundenmodus::ausweg()): nur das Entsperren – sonst führte jeder
             // Weg ins Leere.
             $this->view('berichte/kunde-gesperrt', ['id' => $id, 'modus' => $modus, 'title' => 'Gerät gesperrt',
-                'firma' => Einstellungen::wert('firma.name')], 'layout/kunde');
+                'firma' => Einstellungen::wert('firma.name'), 'sso' => self::entsperrenSso($id)], 'layout/kunde');
             return;
         }
         $b = $this->bericht($request, $params);
@@ -493,6 +496,8 @@ final class BerichtController extends Controller
             'firma'          => (string) ($inhalt['auftragnehmer']['name'] ?? Einstellungen::wert('firma.name')),
             // Ist der Bericht einem Kunden mit eigenem Zugang zugeordnet, findet er ihn nach dem Abschluss im Kundenbereich.
             'imKundenbereich' => $b['kunde_id'] !== null && KundenService::aktiveZugaenge((int) $b['kunde_id']) > 0,
+            // Entsperren auch über den Anmeldedienst (verknüpftes Konto, das sich dort anmelden darf).
+            'sso'            => self::entsperrenSso((int) $b['id']),
             'scripts'        => ['/assets/js/unterschrift.js', '/assets/js/bericht-kunde.js'],
         ], 'layout/kunde');
     }
@@ -524,6 +529,9 @@ final class BerichtController extends Controller
      * Ein Fehler zählt nur in der Sitzung (das Konto bleibt offen); ab dem
      * fünften wird das Entsperren gebremst – abgemeldet wird nie, sonst
      * stünde dem Kunden die Anmeldeseite (mit gespeichertem Kennwort) offen.
+     * Ein Konto „nur über SSO“ entsperrt nur über den Anmeldedienst
+     * (/login/sso/bestaetigen) – ein Kennwort gilt dafür nie, auch das
+     * richtige nicht; geprüft wird dann gar nichts, also zählt es auch nicht.
      */
     public function kundeBeenden(Request $request, array $params): void
     {
@@ -535,12 +543,17 @@ final class BerichtController extends Controller
         }
         $warten = Kundenmodus::wartezeit();
         if ($warten > 0) {
-            Flash::error('Zu viele falsche Kennwörter – Entsperren erst in ' . self::dauer($warten) . ' wieder möglich.');
+            Flash::error('Zu viele Fehlversuche – Entsperren erst in ' . self::dauer($warten) . ' wieder möglich.');
             $this->redirect('/berichte/' . $id . '/kunde');
             return;
         }
-        if ($modus['user'] === (int) Auth::id() && Auth::kennwortBestaetigen(is_string($_POST['kennwort'] ?? null) ? $_POST['kennwort'] : '')) {
-            BerichtService::ereignis($id, 'kundenmodus_ende');
+        if ($modus['user'] === (int) Auth::id() && Schutz::nurSso((array) Auth::user())) {
+            Flash::error('Dieses Konto entsperrt nur über ' . SsoEinstellungen::name() . ' – bitte „Mit ' . SsoEinstellungen::name() . ' entsperren“.');
+            $this->redirect('/berichte/' . $id . '/kunde');
+            return;
+        }
+        if ($modus['user'] === (int) Auth::id() && Auth::kennwortBestaetigen($id, is_string($_POST['kennwort'] ?? null) ? $_POST['kennwort'] : '')) {
+            BerichtService::ereignis($id, 'kundenmodus_ende', ['weg' => 'kennwort']);
             Kundenmodus::beenden();
             Session::regenerate();
             Csrf::erneuern();
@@ -563,6 +576,25 @@ final class BerichtController extends Controller
         $rest = Kundenmodus::HOECHSTENS_FEHL - $fehl;
         Flash::error('Kennwort falsch – noch ' . $rest . ($rest === 1 ? ' Versuch' : ' Versuche') . ', dann wird das Entsperren gebremst.');
         $this->redirect('/berichte/' . $id . '/kunde');
+    }
+
+    /**
+     * Für das Entsperren auf der Kundenseite: Name des Anmeldedienstes, ob
+     * der Link „Mit … entsperren“ angeboten wird (Anmeldung::bestaetigenFehler –
+     * SSO an, Konto verknüpft, darf sich dort anmelden, Kundenmodus genau
+     * dieses Berichts) und ob das Konto nur über SSO entsperrt (dann ohne
+     * Kennwortfeld).
+     *
+     * @return array{name:string, link:bool, nur_sso:bool}
+     */
+    private static function entsperrenSso(int $id): array
+    {
+        $user = Auth::user();
+        return [
+            'name'    => SsoEinstellungen::name(),
+            'link'    => Anmeldung::bestaetigenFehler('kundenmodus:' . $id) === null,
+            'nur_sso' => $user !== null && Schutz::nurSso($user),
+        ];
     }
 
     private static function dauer(int $sekunden): string

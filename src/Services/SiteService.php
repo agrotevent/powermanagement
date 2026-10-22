@@ -9,6 +9,7 @@ use App\Kunden\KundenService;
 use App\Support\Anfragezeit;
 use App\Support\Audit;
 use App\Support\Database;
+use App\Support\Logger;
 use App\Support\Response;
 
 /**
@@ -364,6 +365,26 @@ final class SiteService
         self::planAufraeumen($vorher);
 
         /*
+         * Alles, was der Upload in die Datenbank schreibt, steht hier – vor
+         * dem Kacheln. Beginnt währenddessen ein Update, wartet es auf diese
+         * Anfrage höchstens 150 s (wartung_an in deploy/update-debian.sh),
+         * bevor es die Datenbank sichert; was danach noch geschrieben würde,
+         * verwürfe ein Zurückrollen still. Das Kacheln dauert bis zu
+         * KACHELZEIT_IM_UPLOAD und darüber hinaus, was poppler für einen
+         * Aufruf braucht (je bis PdfRasterService::ZEITGRENZE, mehrere vor
+         * dem ersten Streifen). Bis hierher sind es dagegen Sekunden: nginx
+         * hat die Datei gepuffert, bevor PHP beginnt, und gezählt wird ohne
+         * poppler. Die Kacheln selbst sind Dateien – sie passen auch nach
+         * einem Zurückrollen zur Etage, die vor der Sicherung eingetragen war.
+         */
+        Audit::log('plan.upload', 'site', (string) $siteId, [
+            'file'   => $file['name'],
+            'bytes'  => (int) $file['size'],
+            'pages'  => $pages,
+            'floors' => $floorIds,
+        ]);
+
+        /*
          * Pläne gleich in Kacheln zerlegen – dann ist der erste Aufruf der
          * Karte so schnell wie jeder weitere.
          *
@@ -428,6 +449,9 @@ final class SiteService
             : $klemmt;
 
         if ($spaeter !== []) {
+            // Ins Protokoll, nicht ins Audit: das ist geschrieben (oben), und
+            // der Bau im Hintergrund schreibt seine Zeilen nach kacheln.log.
+            Logger::info('Grundriss: Kacheln im Hintergrund', ['standort' => $siteId, 'etagen' => $spaeter]);
             $wieviele = count($spaeter) > 1 ? count($spaeter) . ' Seiten' : 'diesen Plan';
             $kacheln .= PlanTileService::imHintergrund($spaeter)
                 ? sprintf(' Die Kacheln für %s rechnet der Server im Hintergrund weiter – bei so einem Plan einige Minuten.'
@@ -445,13 +469,6 @@ final class SiteService
                 . ' gezeichnet (mit begrenzter Zoomtiefe). Schärfer wird er nach'
                 . ' apt-get install -y poppler-utils und bin/power plan:kacheln.';
         }
-
-        Audit::log('plan.upload', 'site', (string) $siteId, [
-            'file'   => $file['name'],
-            'bytes'  => (int) $file['size'],
-            'pages'  => $pages,
-            'floors' => $floorIds,
-        ] + ($spaeter !== [] ? ['im_hintergrund' => $spaeter] : []));
 
         // Ausdrücklich sagen, wo der Grundriss jetzt liegt – sonst sucht ihn
         // der Benutzer auf der falschen Etage.

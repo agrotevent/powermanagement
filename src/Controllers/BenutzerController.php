@@ -3,6 +3,10 @@ declare(strict_types=1);
 
 namespace App\Controllers;
 
+use App\Auth\Auth;
+use App\Auth\Sso\Einstellungen;
+use App\Auth\Sso\Konten;
+use App\Auth\Sso\Schutz;
 use App\Kunden\Kundenbereich;
 use App\Messung\Datenquellen;
 use App\Services\AnlagenService;
@@ -34,6 +38,13 @@ final class BenutzerController extends Controller
                 $zuweisungen[(int) $z['role_id']] = $z;
             }
         }
+        // Anmeldung über SSO: Abzeichen in der Liste, Abschnitt im Formular –
+        // der Abschnitt auch ohne Einrichtung, wenn das Konto schon verknüpft
+        // ist oder nur über SSO darf (sonst ließe es sich nicht mehr lösen).
+        $nurSsoGlobal = Einstellungen::schalter(Einstellungen::NUR_SSO) && Einstellungen::aktiv();
+        $identitaet = $benutzer !== null
+            ? Database::first('SELECT weg, name_dort, zuletzt_am, angelegt_am, aussteller FROM sso_identitaeten WHERE user_id = ? ORDER BY id LIMIT 1', [$bearbeiten])
+            : null;
         $this->view('benutzer/index', [
             'alle'        => BenutzerService::alle(),
             'kundenzugaenge' => BenutzerService::kundenzugaenge(),
@@ -41,6 +52,18 @@ final class BenutzerController extends Controller
             'benutzer'    => $benutzer,
             'neu'         => $request->bool('neu'),
             'zuweisungen' => $zuweisungen,
+            'sso'         => [
+                'eingerichtet' => Einstellungen::eingerichtet(),
+                'aktiv'        => Einstellungen::aktiv(),
+                'name'         => Einstellungen::name(),
+                'nur_sso'      => $nurSsoGlobal,
+                // Notzugang ist abgeleitet und heißt nur bei „nur SSO“ so.
+                'notzugaenge'  => $nurSsoGlobal ? array_map('intval', array_column(Schutz::notzugaenge(), 'id')) : [],
+                'anfragen'     => Auth::can('sso.manage') ? (int) Database::scalar('SELECT COUNT(*) FROM sso_anfragen') : 0,
+            ],
+            'identitaet'  => $identitaet === null ? null : $identitaet + [
+                'anderer_aussteller' => !hash_equals(Einstellungen::aussteller(), (string) $identitaet['aussteller']),
+            ],
         ]);
     }
 
@@ -83,6 +106,41 @@ final class BenutzerController extends Controller
         };
         $ergebnis['ok'] ? Flash::success($ergebnis['message']) : Flash::error($ergebnis['message']);
         $this->redirect('/system/benutzer');
+    }
+
+    /**
+     * POST /system/benutzer/{id}/sso – Anmeldung über SSO an einem Konto des
+     * Personals: aktion=loesen (Verknüpfung lösen; seine SSO-Sitzungen und
+     * Rollen aus Gruppen enden) oder aktion=sitzungen (nur die laufenden
+     * SSO-Sitzungen beenden). Nur, wer das Konto verwalten darf
+     * (darfVerwalten); Kundenzugänge pflegt die Kundenverwaltung. zurueck=sso
+     * führt zurück zu System → Anmeldung (SSO), sonst zum Konto.
+     */
+    public function sso(Request $request, array $params): void
+    {
+        $id = ctype_digit((string) ($params['id'] ?? '')) ? (int) $params['id'] : 0;
+        $aktion = is_string($_POST['aktion'] ?? null) ? $_POST['aktion'] : '';
+        $ziel = ($_POST['zurueck'] ?? null) === 'sso' ? '/system/sso#verknuepft' : '/system/benutzer?id=' . $id;
+        $konto = BenutzerService::find($id);
+        $name = Einstellungen::name();
+        $ergebnis = match (true) {
+            $konto === null                       => ['ok' => false, 'message' => 'Diesen Benutzer gibt es nicht.'],
+            Kundenbereich::istKundenzugang($konto) => ['ok' => false, 'message' => BenutzerService::KUNDENZUGANG],
+            !BenutzerService::darfVerwalten($id)  => ['ok' => false, 'message' => self::UEBER_MIR],
+            Database::scalar('SELECT id FROM sso_identitaeten WHERE user_id = ?', [$id]) === false
+                => ['ok' => false, 'message' => 'Dieses Konto ist mit keiner Anmeldung bei ' . $name . ' verknüpft.'],
+            $aktion === 'loesen' => Konten::loesen($id)
+                ? ['ok' => true, 'message' => 'Verknüpfung von „' . $konto['username'] . '“ gelöst; seine Sitzungen über ' . $name . ' sind beendet.'
+                    . ((int) $konto['nur_sso'] === 1 ? ' Das Konto meldet sich nur über SSO an – ohne Verknüpfung erst wieder mit einem Kennwort (Häkchen „nur über SSO“ aus).' : '')]
+                : ['ok' => false, 'message' => 'Es gab nichts zu lösen.'],
+            $aktion === 'sitzungen' => (static function () use ($id, $konto, $name): array {
+                Konten::sitzungenBeenden($id);
+                return ['ok' => true, 'message' => 'Die Sitzungen von „' . $konto['username'] . '“ über ' . $name . ' sind beendet.'];
+            })(),
+            default => ['ok' => false, 'message' => 'Unbekannte Aktion.'],
+        };
+        $ergebnis['ok'] ? Flash::success($ergebnis['message']) : Flash::error($ergebnis['message']);
+        $this->redirect($ziel);
     }
 
     public function entsperren(Request $request): void

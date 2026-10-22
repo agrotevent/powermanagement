@@ -1,10 +1,13 @@
 <?php
 /**
- * Konto des Kundenzugangs: Angaben (nur lesen), Kennwort ändern,
- * Datenschutzhinweis (Art. 13 DSGVO, Text aus den Einstellungen).
+ * Konto des Kundenzugangs: Angaben (nur lesen), Kennwort ändern – bei einem
+ * Zugang aus der Anmeldung über SSO stattdessen „Anmeldung über …“ (sein
+ * Kennwort gibt es nur beim Anmeldedienst) –, Datenschutzhinweis (Art. 13
+ * DSGVO, Text aus den Einstellungen).
  *
  * @var array<string,mixed> $kunde
  * @var array<string,mixed> $konto
+ * @var array{name:string, identitaet:?array<string,mixed>}|null $sso nur bei einem Zugang „nur über SSO“
  * @var string $datenschutz KundenEinstellungen::datenschutz() – als Text
  */
 use App\Support\Csrf;
@@ -33,6 +36,22 @@ $mussAendern = (int) ($konto['must_change_password'] ?? 0) === 1;
         </div>
     </section>
 
+    <?php if (!empty($sso)): ?>
+    <section class="card">
+        <div class="card-head"><h2>Anmeldung über <?= View::e((string) $sso['name']) ?></h2></div>
+        <div class="card-body">
+            <p>Sie melden sich über <?= View::e((string) $sso['name']) ?> an. Ein Kennwort gibt es hier nicht – Ihr Kennwort ändern Sie dort.</p>
+            <?php if (!empty($sso['identitaet'])): ?>
+                <dl class="kb-felder">
+                    <dt>Verbunden seit</dt><dd><?= View::e(Zeit::anzeige((string) $sso['identitaet']['angelegt_am'])) ?></dd>
+                    <?php if ((string) $sso['identitaet']['name_dort'] !== ''): ?><dt>Name dort</dt><dd><?= View::e((string) $sso['identitaet']['name_dort']) ?></dd><?php endif; ?>
+                    <dt>Letzte Anmeldung dort</dt><dd><?= View::e(Zeit::anzeige($sso['identitaet']['zuletzt_am'] ?? null)) ?></dd>
+                </dl>
+            <?php endif; ?>
+            <p class="help">Beim Abmelden können Sie sich auch bei <?= View::e((string) $sso['name']) ?> abmelden – auf einem gemeinsam genutzten Gerät bitte immer.</p>
+        </div>
+    </section>
+    <?php else: ?>
     <form method="post" action="/kundenbereich/konto/kennwort" class="card kb-formular">
         <?= Csrf::field() ?>
         <div class="card-head"><h2>Kennwort ändern</h2></div>
@@ -47,6 +66,7 @@ $mussAendern = (int) ($konto['must_change_password'] ?? 0) === 1;
             <button class="btn btn-primary" type="submit">Kennwort ändern</button>
         </div>
     </form>
+    <?php endif; ?>
 
     <section class="card kb-breit" id="datenschutz" aria-labelledby="kb-datenschutz-titel">
         <div class="card-head"><h2 id="kb-datenschutz-titel">Datenschutzhinweis</h2></div>

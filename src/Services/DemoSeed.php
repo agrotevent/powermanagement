@@ -4,6 +4,9 @@ declare(strict_types=1);
 namespace App\Services;
 
 use App\Auth\Auth;
+use App\Auth\Sso\Einstellungen as SsoEinstellungen;
+use App\Auth\Sso\Konten as SsoKonten;
+use App\Auth\Sso\Kundenbereich as SsoKunden;
 use App\Berichte\BerichtService;
 use App\Berichte\Einstellungen;
 use App\Berichte\Pruefgeraete;
@@ -12,6 +15,7 @@ use App\Kunden\Pruefnachweise;
 use App\Messung\Datenquellen;
 use App\Support\Config;
 use App\Support\Database;
+use App\Support\Settings;
 use App\Support\Zeit;
 use App\Tanks\TankService;
 
@@ -20,8 +24,10 @@ use App\Tanks\TankService;
  * Kraftstoffschlauch, Speicher, Verteilungen mit Sicherungen und RCDs, Kabel,
  * Kabelbrücken, Messgeräte, Benutzer mit zeitlich begrenzten Freigaben,
  * Prüfgeräte, drei Übergabeberichte (abgeschlossen, vom Prüfer unterschrieben,
- * Entwurf) und zwei Kunden mit eigenem Kundenbereich (Locations, Protokolle,
- * Prüfnachweise – nichts von den Tanks).
+ * Entwurf), zwei Kunden mit eigenem Kundenbereich (Locations, Protokolle,
+ * Prüfnachweise – nichts von den Tanks) und eine eingetragene, aber
+ * ausgeschaltete Anmeldung über Authentik (Gruppen, eine Verknüpfung, eine
+ * Anmeldeanfrage).
  *
  * Der Tank des Aggregats (QUADRO-AG 3000 aus dem mitgelieferten Katalog)
  * misst mit dem Tanksensor TS-01 seit drei Tagen; vorgestern bzw. gestern um
@@ -55,8 +61,13 @@ final class DemoSeed
             // Ohne Unterabfrage auf users im DELETE FROM users: MySQL lehnt das ab (Fehler 1093).
             $konten = "username IN ('veranstalter', 'technik', 'muster-events', 'stadtmarketing') OR kunde_id IS NOT NULL";
             Database::execute('DELETE FROM user_roles WHERE user_id IN (SELECT id FROM users WHERE ' . $konten . ')');
+            // Wie BenutzerService::loeschen und KundenService::loeschen: Verknüpfungen
+            // gehen mit dem Konto, Kundengruppen mit dem Kunden.
+            Database::execute('DELETE FROM sso_identitaeten WHERE user_id IN (SELECT id FROM users WHERE ' . $konten . ')');
+            Database::execute("DELETE FROM sso_zuordnungen WHERE art = 'kunde'");
             Database::execute('DELETE FROM users WHERE ' . $konten);
             Database::execute('DELETE FROM kunden');
+            self::ssoZuruecksetzen();
             @unlink(dirname(__DIR__, 2) . '/storage/demo/schalter.json');
         } elseif (Database::first("SELECT id FROM sites WHERE sync_key = 'demo-festival'") !== null) {
             return 'Das Demo-Gelände gibt es schon (mit --reset neu anlegen).';
@@ -405,6 +416,9 @@ final class DemoSeed
         // ---- Kundenbereich: zwei Veranstalter auf demselben Gelände
         self::kundenbereich($siteId, $technik, $pd6307, $berichte);
 
+        // ---- Anmeldung über SSO: eingetragen, aber aus (ohne Secret)
+        $sso = self::sso($technik);
+
         return 'Demo-Gelände angelegt: ' . (int) Database::scalar('SELECT COUNT(*) FROM objekte WHERE ist_vorlage = 0') . ' Anlagen (davon '
             . (int) Database::scalar('SELECT COUNT(*) FROM objekte WHERE ist_vorlage = 0 AND fest = 1') . ' Feststromanschlüsse, '
             . (int) Database::scalar("SELECT COUNT(*) FROM objekte WHERE ist_vorlage = 0 AND art = 'tank'") . ' Tanks), '
@@ -419,7 +433,81 @@ final class DemoSeed
             . 'Zugänge: veranstalter / Veranstalter2026! (nur Festivalwoche), technik / Technik2026!! (schaltet nur das Licht, unterschreibt Übergabeberichte als Prüfer); '
             . 'Kundenbereich: muster-events / Kundenbereich2026! (Sommerfestival: Location, Protokoll, Prüfnachweise), '
             . 'stadtmarketing / Stadtmarketing2026! (dasselbe Gelände erst in einem Monat).'
+            . ($sso ? ' SSO: Authentik eingetragen, aber aus (kein Secret) – mit Gruppen, einer Verknüpfung (technik) und einer Anmeldeanfrage.' : '')
             . (Config::isDemo() ? '' : ' Hinweis: app.demo ist aus – ohne InfluxDB bleiben die Messwerte leer.');
+    }
+
+    /** Der Aussteller der Demo – nur mit ihm legt bzw. räumt die Demo SSO-Daten an bzw. weg. */
+    public const SSO_AUSSTELLER = 'https://auth.example.com/application/o/powermanagement/';
+
+    /**
+     * Anmeldung über SSO zum Ansehen: Authentik eingetragen (Aussteller,
+     * Client-ID), aber **aus** und ohne Secret – im Demo-Modus geht keine
+     * Anfrage hinaus. Gruppen → Rollen (pm-planung, pm-technik), mit
+     * Kundenbereich eine Kundengruppe (sso.kunden bleibt aus), eine
+     * Verknüpfung für „technik“ und eine Anmeldeanfrage. Eine echte
+     * Einrichtung (anderer Aussteller) bleibt unberührt – dann nichts davon.
+     */
+    private static function sso(int $technik): bool
+    {
+        $aussteller = (string) Settings::get(SsoEinstellungen::AUSSTELLER, '');
+        if ($aussteller !== '' && $aussteller !== self::SSO_AUSSTELLER) {
+            return false;
+        }
+        Settings::put(SsoEinstellungen::AKTIV, '0');
+        Settings::put(SsoEinstellungen::NAME, 'Authentik');
+        Settings::put(SsoEinstellungen::AUSSTELLER, self::SSO_AUSSTELLER);
+        Settings::put(SsoEinstellungen::CLIENT_ID, 'demo-powermanagement');
+        $jetzt = time();
+        $ziele = [
+            ['pm-planung', 'rolle', (int) Database::scalar("SELECT id FROM roles WHERE role_key = 'planung'")],
+            ['pm-technik', 'rolle', (int) Database::scalar("SELECT id FROM roles WHERE role_key = 'technik'")],
+        ];
+        $muster = Database::scalar("SELECT id FROM kunden WHERE kundennummer = 'K-10023'");
+        if (SsoKunden::verfuegbar() && $muster !== false && $muster !== null) {
+            $ziele[] = ['pm-kunde-muster-events', 'kunde', (int) $muster];
+        }
+        foreach ($ziele as [$gruppe, $art, $ziel]) {
+            if ($ziel > 0 && Database::first('SELECT id FROM sso_zuordnungen WHERE gruppe = ? AND art = ? AND ziel_id = ?', [$gruppe, $art, $ziel]) === null) {
+                Database::insert('sso_zuordnungen', ['gruppe' => $gruppe, 'art' => $art, 'ziel_id' => $ziel, 'created_by' => 'demo', 'created_at' => Zeit::iso($jetzt - 20 * 86400)]);
+            }
+        }
+        // Subjekte wie bei Authentik („hashed user ID“): 64 Hex-Zeichen.
+        $sub = hash('sha256', 'demo-technik');
+        if (Database::first('SELECT id FROM sso_identitaeten WHERE user_id = ?', [$technik]) === null) {
+            Database::insert('sso_identitaeten', [
+                'user_id' => $technik, 'schluessel' => SsoKonten::schluessel(self::SSO_AUSSTELLER, $sub), 'aussteller' => self::SSO_AUSSTELLER,
+                'subjekt' => $sub, 'weg' => 'freischaltung', 'name_dort' => 'technik@example.com',
+                'gruppen' => json_encode(['pm-personal', 'pm-technik']), 'angelegt_von' => 'demo',
+                'angelegt_am' => Zeit::iso($jetzt - 14 * 86400), 'zuletzt_am' => Zeit::iso($jetzt - 26 * 3600), 'abgemeldet_am' => null,
+            ]);
+        }
+        $sub = hash('sha256', 'demo-erika');
+        $schluessel = SsoKonten::schluessel(self::SSO_AUSSTELLER, $sub);
+        if (Database::first('SELECT id FROM sso_anfragen WHERE schluessel = ?', [$schluessel]) === null) {
+            Database::insert('sso_anfragen', [
+                'schluessel' => $schluessel, 'aussteller' => self::SSO_AUSSTELLER, 'subjekt' => $sub,
+                'name_dort' => 'erika.beispiel', 'voller_name' => 'Erika Beispiel', 'email' => 'erika.beispiel@example.com', 'email_bestaetigt' => 0,
+                'gruppen' => json_encode(['pm-personal', 'pm-planung']), 'grund' => 'kein_konto', 'anzahl' => 2,
+                'erste_am' => Zeit::iso($jetzt - 3 * 3600), 'letzte_am' => Zeit::iso($jetzt - 40 * 60),
+            ]);
+        }
+        return true;
+    }
+
+    /**
+     * Zum --reset: Verknüpfungen, Anfragen und pm-Gruppen der Demo weg – nur,
+     * wenn der Aussteller der der Demo ist. Eine echte Einrichtung bleibt.
+     */
+    private static function ssoZuruecksetzen(): void
+    {
+        if (Settings::get(SsoEinstellungen::AUSSTELLER) !== self::SSO_AUSSTELLER) {
+            return;
+        }
+        Database::execute('DELETE FROM sso_identitaeten WHERE aussteller = ?', [self::SSO_AUSSTELLER]);
+        Database::execute('DELETE FROM sso_anfragen WHERE aussteller = ?', [self::SSO_AUSSTELLER]);
+        Database::execute("DELETE FROM user_roles WHERE quelle = 'sso'");
+        Database::execute("DELETE FROM sso_zuordnungen WHERE gruppe LIKE 'pm-%'");
     }
 
     /**

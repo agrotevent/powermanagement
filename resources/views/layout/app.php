@@ -63,6 +63,13 @@ try {
                     <span class="sr-only">Messgeräte in der Auswertung</span>
                 </a>
             <?php endif; ?>
+            <?php $updateHinweis = empty($demoMode) && View::can('system.update') ? \App\Services\UpdateService::navHinweis() : null; ?>
+            <?php if ($updateHinweis !== null): ?>
+                <a class="update-zeichen <?= View::e($updateHinweis['stufe']) ?>" href="/system/update" title="<?= View::e($updateHinweis['text']) ?>">
+                    <span aria-hidden="true">⟳</span> <span class="zahl"><?= isset($updateHinweis['zahl']) ? (int) $updateHinweis['zahl'] : '!' ?></span>
+                    <span class="sr-only"><?= View::e($updateHinweis['text']) ?></span>
+                </a>
+            <?php endif; ?>
             <div class="userbox">
                 <div class="avatar"><?= View::e($initials) ?></div>
                 <div class="userbox-name">
@@ -76,6 +83,10 @@ try {
             </div>
         </header>
         <main class="content">
+            <?php if ($user !== null && \App\Auth\Auth::anmeldeweg() === 'notzugang'): ?>
+                <div class="notzugang" role="alert"><strong>Angemeldet über den Notzugang</strong> – nur für den Notfall.
+                    Diese Anmeldung steht im Audit und im Fehlerprotokoll; im Alltag über SSO anmelden.</div>
+            <?php endif; ?>
             <?= View::partial('partials/flash', ['flashes' => $flashes ?? []]) ?>
             <?= $content ?>
         </main>

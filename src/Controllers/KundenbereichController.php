@@ -4,6 +4,9 @@ declare(strict_types=1);
 namespace App\Controllers;
 
 use App\Auth\Auth;
+use App\Auth\Sso\Einstellungen as SsoEinstellungen;
+use App\Auth\Sso\Konten as SsoKonten;
+use App\Auth\Sso\Schutz as SsoSchutz;
 use App\Berichte\Einstellungen;
 use App\Kunden\Abrufe;
 use App\Kunden\Einrichtung;
@@ -258,7 +261,12 @@ final class KundenbereichController extends Controller
         if ($kunde === null) {
             return;
         }
-        $this->seite('kundenbereich/konto', ['kunde' => $kunde, 'konto' => Auth::user(), 'datenschutz' => KundenEinstellungen::datenschutz()]);
+        $konto = (array) Auth::user();
+        // Ein Zugang aus der Anmeldung über SSO hat hier kein Kennwort – er ändert es beim Anmeldedienst.
+        $sso = SsoSchutz::nurSso($konto)
+            ? ['name' => SsoEinstellungen::name(), 'identitaet' => SsoKonten::identitaet((int) $konto['id'])]
+            : null;
+        $this->seite('kundenbereich/konto', ['kunde' => $kunde, 'konto' => $konto, 'sso' => $sso, 'datenschutz' => KundenEinstellungen::datenschutz()]);
     }
 
     public function hilfe(Request $request): void
@@ -276,11 +284,16 @@ final class KundenbereichController extends Controller
         ]);
     }
 
-    /** Eigenes Kennwort ändern – derselbe Weg wie im Profil (Auth::kennwortAendern). */
+    /** Eigenes Kennwort ändern – derselbe Weg wie im Profil (Auth::kennwortAendern); nie für einen Zugang nur über SSO. */
     public function kennwort(Request $request): void
     {
         $kunde = $this->kunde($request);
         if ($kunde === null) {
+            return;
+        }
+        if (SsoSchutz::nurSso((array) Auth::user())) {
+            Flash::error('Ihr Zugang meldet sich über ' . SsoEinstellungen::name() . ' an – ein Kennwort gibt es hier nicht. Ändern Sie es dort.');
+            $this->redirect(Kundenbereich::KONTO);
             return;
         }
         $ergebnis = Auth::kennwortAendern(

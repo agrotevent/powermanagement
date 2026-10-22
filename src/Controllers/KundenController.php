@@ -4,6 +4,8 @@ declare(strict_types=1);
 namespace App\Controllers;
 
 use App\Auth\Auth;
+use App\Auth\Sso\Einstellungen as SsoEinstellungen;
+use App\Auth\Sso\Konten as SsoKonten;
 use App\Auth\Zugriff;
 use App\Berichte\BerichtService;
 use App\Kunden\Abrufe;
@@ -146,7 +148,7 @@ final class KundenController extends Controller
         $this->einmalig($kunde, $r);
     }
 
-    /** Ein Zugang: aktion = speichern | link | kennwort | entsperren | loeschen. */
+    /** Ein Zugang: aktion = speichern | link | kennwort | entsperren | sso_sitzungen | loeschen. */
     public function zugang(Request $request, array $params): void
     {
         header('Cache-Control: no-store');
@@ -169,6 +171,7 @@ final class KundenController extends Controller
             'link'       => KundenService::zugangLink($id, $uid),
             'kennwort'   => KundenService::zugangKennwort($id, $uid),
             'entsperren' => KundenService::zugangEntsperren($id, $uid),
+            'sso_sitzungen' => KundenService::zugangSsoSitzungen($id, $uid),
             'loeschen'   => KundenService::zugangLoeschen($id, $uid),
             default      => ['ok' => false, 'message' => 'Unbekannte Aktion.'],
         };
@@ -373,6 +376,17 @@ final class KundenController extends Controller
             $daten['darfAusgeben'] = KundenService::darfZugangAusgeben($id);
             $daten['einmal'] = EinmalMarke::ausgeben(self::EINMAL);
             $daten['adresse'] = KundenEinstellungen::adresse();
+            // Kundengruppen der Anmeldung über SSO (017): sehen mit „Kunden pflegen“,
+            // ändern nur mit „SSO einrichten“ (die Routen unter /system/sso).
+            $gruppen = SsoKonten::kundengruppen($id);
+            $daten['sso'] = [
+                'zeigen'  => $gruppen !== [] || SsoEinstellungen::eingerichtet() || array_filter(array_column($daten['zugaenge'], 'sso')) !== [],
+                'name'    => SsoEinstellungen::name(),
+                'an'      => SsoEinstellungen::aktiv() && SsoEinstellungen::schalter(SsoEinstellungen::KUNDEN),
+                'kunden'  => SsoEinstellungen::schalter(SsoEinstellungen::KUNDEN),
+                'gruppen' => $gruppen,
+                'pflegen' => Auth::can('sso.manage'),
+            ];
         } elseif ($tab === 'freigaben') {
             $alles = BenutzerService::darfFreigabeVergeben('site', false);
             $daten['freigaben'] = KundenService::freigaben($id);

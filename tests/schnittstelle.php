@@ -492,6 +492,26 @@ try {
     $r = ui($basis, $admin['dose'], 'POST', '/system/schnittstelle/' . $uiId . '/anzeigen', ['kennwort' => 'falsch-' . $kennwort, '_token' => $admin['token']]);
     pruefe($r['status'] === 302 && !str_contains($r['text'], $tUi), 'falsches Kennwort: kein Token');
     gleich([$zaehle('api.token.anzeigen_abgelehnt', $uiId), $zaehle('api.token.angezeigt', $uiId)], [1, 1], 'falsches Kennwort: abgelehnt im Audit-Log');
+    // Ein Konto „nur über SSO“: kein Token ohne Bestätigung über den
+    // Anmeldedienst – auch nicht mit dem richtigen Kennwort (Auth::bestaetigen).
+    Database::update('users', $benutzer['admin'], ['nur_sso' => 1]);
+    alsBenutzer($benutzer['admin']);
+    $_SESSION = [];
+    $r = ApiZugaenge::klartext($uiId, $kennwort);
+    pruefe(!$r['ok'] && !isset($r['token']) && str_contains($r['message'], 'nur über'), 'Konto „nur über SSO“: mit dem richtigen Kennwort kein Token');
+    $r = ApiZugaenge::klartext($uiId, '');
+    pruefe(!$r['ok'] && !isset($r['token']), 'Konto „nur über SSO“: ohne Bestätigung kein Token');
+    // Bestätigt über den Anmeldedienst (das legt der Rückruf in die Sitzung): für genau diesen Zugang, einmal.
+    $_SESSION[\App\Auth\Sso\Anmeldung::BESTAETIGT] = ['zweck' => 'token:' . ($uiId + 1), 'user_id' => $benutzer['admin'], 'am' => time()];
+    pruefe(!ApiZugaenge::klartext($uiId, '')['ok'], 'Bestätigung für einen anderen Zugang: kein Token');
+    $_SESSION[\App\Auth\Sso\Anmeldung::BESTAETIGT] = ['zweck' => 'token:' . $uiId, 'user_id' => $benutzer['admin'], 'am' => time()];
+    $r = ApiZugaenge::klartext($uiId, '');
+    pruefe($r['ok'] && ($r['token'] ?? '') === $tUi, 'nach der Bestätigung über den Anmeldedienst: das Token, ohne Kennwort');
+    pruefe(!ApiZugaenge::klartext($uiId, '')['ok'], '… genau einmal');
+    gleich([$zaehle('api.token.anzeigen_abgelehnt', $uiId), $zaehle('api.token.angezeigt', $uiId)], [5, 2], 'Anzeigen und Ablehnungen im Audit-Log');
+    Database::update('users', $benutzer['admin'], ['nur_sso' => 0]);
+    $_SESSION = [];
+    alsBenutzer(null);
     $r = ui($basis, $verwalter['dose'], 'POST', '/system/schnittstelle/' . $uiId . '/anzeigen', ['kennwort' => $kennwort, '_token' => $verwalter['token']]);
     pruefe($r['status'] === 403 && !str_contains($r['text'], $tUi), 'Anzeigen ohne „Alle Standorte …“: 403');
 
@@ -521,7 +541,7 @@ try {
     gleich(a('GET', '/api/v1/info', $tUi)['status'], 401, 'widerrufen: die Schnittstelle lehnt ab');
     $r = ui($basis, $admin['dose'], 'POST', '/system/schnittstelle/' . $uiId . '/anzeigen', ['kennwort' => $kennwort, '_token' => $admin['token']]);
     pruefe($r['status'] === 302 && !str_contains($r['text'], $tUi), 'nach dem Widerrufen: Anzeigen zeigt nichts');
-    gleich($zaehle('api.token.angezeigt', $uiId), 1, '… und schreibt kein „angezeigt“');
+    gleich($zaehle('api.token.angezeigt', $uiId), 2, '… und schreibt kein „angezeigt“ (es bleibt bei den zwei von oben)');
     ui($basis, $verwalter['dose'], 'POST', '/system/schnittstelle/' . $uiId . '/loeschen', ['_token' => $verwalter['token']]);
     pruefe(ApiZugaenge::find($uiId) !== null, 'löschen ohne „Alle Standorte …“: nein');
     $r = ui($basis, $admin['dose'], 'POST', '/system/schnittstelle/' . $uiId . '/loeschen', ['_token' => $admin['token']]);

@@ -205,23 +205,25 @@ try {
     gleich(TankService::rohJetzt(AnlagenService::find($tank), Database::first('SELECT * FROM messpunkte WHERE id = ?', [$mp]))['roh'] ?? null, 1.5,
         'rohJetzt: der letzte Rohwert vom Server (auch außerhalb der Grenzen – die Rechnung entscheidet)');
     // Verbrauch je Tag: ein Shelly, der nur bei Änderung meldet – alle 2,5 h 0,1 V weniger (≈ 42,4 l, also ≈ 17 l/h),
-    // gestern gegen 10 Uhr +3,0 V (≈ 1.273 l) mit Lieferschein. Stille ist keine Lücke.
+    // vorgestern gegen 10 Uhr +3,0 V (≈ 1.273 l) mit Lieferschein. Stille ist keine Lücke.
+    // Vorgestern, nicht gestern: die Meldungen enden 2 h vor jetzt (dann beginnt der erste Sensor). Zwischen
+    // 0 und 2 Uhr fehlte „gestern“ so sein Ende – vorgestern liegt zu jeder Uhrzeit ganz in den Meldungen.
     $mpTage = Database::insert('messpunkte', ['objekt_id' => $tank, 'geraet' => $uni, 'kanal' => 'voltmeter:103', 'rolle' => 'fuellstand', 'bezeichnung' => $kennung . '-tage',
-        'gueltig_ab' => Zeit::iso($jetzt - 3 * 86400), 'gueltig_bis' => Zeit::iso($jetzt - 2 * 3600), 'created_at' => gmdate('c')]);
-    TankService::fassungAnlegen(Database::first('SELECT * FROM messpunkte WHERE id = ?', [$mpTage]), $r, 'einsatz', Zeit::iso($jetzt - 3 * 86400), true);
-    $gestern = (new DateTimeImmutable('@' . $jetzt))->setTimezone(Zeit::zone())->modify('-1 day');
-    $zehn = $gestern->setTime(10, 0)->getTimestamp();
+        'gueltig_ab' => Zeit::iso($jetzt - 4 * 86400), 'gueltig_bis' => Zeit::iso($jetzt - 2 * 3600), 'created_at' => gmdate('c')]);
+    TankService::fassungAnlegen(Database::first('SELECT * FROM messpunkte WHERE id = ?', [$mpTage]), $r, 'einsatz', Zeit::iso($jetzt - 4 * 86400), true);
+    $tag = (new DateTimeImmutable('@' . $jetzt))->setTimezone(Zeit::zone())->modify('-2 days');
+    $zehn = $tag->setTime(10, 0)->getTimestamp();
     $meldungen = [];
     // Ab 7,5 V: nach dem Sprung höchstens ≈ 9,1 V (≈ 102 % des Nennvolumens) – über 105 % wäre der Wert unplausibel, eine Lücke.
-    for ($k = 0, $t = $jetzt - 3 * 86400 + 600; $t < $jetzt - 2 * 3600; $k++, $t += 9000) {
+    for ($k = 0, $t = $jetzt - 4 * 86400 + 600; $t < $jetzt - 2 * 3600; $k++, $t += 9000) {
         $meldungen[] = $tz($t, 'u=' . number_format(7.5 - 0.1 * $k + ($t >= $zehn ? 3.0 : 0.0), 2, '.', '') . ',sensorfehler=0', 'voltmeter:103');
     }
     Influx::schreiben($meldungen, $fehler);
     $lieferschein = Database::insert('tank_ereignisse', ['objekt_id' => $tank, 'messpunkt_id' => $mpTage, 'art' => 'betankung', 'zeit' => Zeit::iso($zehn), 'liter' => 1273.0,
         'lieferschein' => $kennung, 'von' => $kennung, 'created_at' => gmdate('c')]);
-    $d = TankService::tage(AnlagenService::find($tank), $jetzt - 2 * 86400, $jetzt, $fehler, $mpTage);
-    $g = array_column($d['tage'], null, 'tag')[$gestern->format('Y-m-d')] ?? [];
-    $tagLaenge = ($gestern->setTime(0, 0)->modify('+1 day')->getTimestamp() - $gestern->setTime(0, 0)->getTimestamp()) / 3600;
+    $d = TankService::tage(AnlagenService::find($tank), $jetzt - 3 * 86400, $jetzt, $fehler, $mpTage);
+    $g = array_column($d['tage'], null, 'tag')[$tag->format('Y-m-d')] ?? [];
+    $tagLaenge = ($tag->setTime(0, 0)->modify('+1 day')->getTimestamp() - $tag->setTime(0, 0)->getTimestamp()) / 3600;
     nahe($g['verbrauch_l'] ?? null, 0.1 * 152.6497 * 2.78 / 2.5 * $tagLaenge, 42.4, 'Verbrauch je Tag aus Meldungen nur bei Änderung (alle 2,5 h): ≈ 17 l/h ('
         . var_export($g['verbrauch_l'] ?? null, true) . ', ' . (string) $fehler . ')');
     gleich([$g['betankt_l'] ?? null, $g['stunden'] ?? null, array_column($d['betankungen'], 'quelle'), array_column($d['betankungen'], 'ereignisse')],

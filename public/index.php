@@ -26,6 +26,8 @@ use App\Controllers\ManifestController;
 use App\Controllers\PruefgeraeteController;
 use App\Controllers\MqttZugaengeController;
 use App\Controllers\SchnittstelleController;
+use App\Controllers\SsoController;
+use App\Controllers\SsoEinstellungenController;
 use App\Controllers\StandortController;
 use App\Controllers\StatistikController;
 use App\Controllers\SteckerController;
@@ -60,6 +62,29 @@ $router->post('/login', [AuthController::class, 'login']);
 $router->post('/logout', [AuthController::class, 'logout']);
 $router->get('/profil', [AuthController::class, 'profile']);
 $router->post('/profil/passwort', [AuthController::class, 'changePassword']);
+
+// ---------------------------------------------------------------- Anmeldung über SSO (OpenID Connect)
+/*
+ * Optional. Start, Verbinden und Bestätigen sind Links (GET), keine
+ * Formulare: CSP form-action 'self' gälte in Chromium sonst auch für die
+ * Weiterleitung zum Anbieter. Der Rückruf kommt als GET (response_mode=query,
+ * das Sitzungs-Cookie ist SameSite=Lax) und ist durch state (Sitzung,
+ * einmalig), PKCE und nonce geschützt – ein CSRF-Token gibt es dort nicht.
+ * Ziele außerhalb dieser Seite kommen nur aus der geprüften Discovery. Ohne
+ * Recht an der Route: Start und Rückruf gehen ohne Anmeldung, /abgemeldet nur
+ * abgemeldet; Verbinden (erst das Kennwort per POST, dann der Link) und
+ * Bestätigen (nur von dieser Seite, Sec-Fetch-Site) und Lösen im Profil
+ * prüfen die Anmeldung selbst. HEAD verbraucht nirgends etwas. Bestätigen und Rückruf
+ * sind auch im Kundenmodus offen (Kundenmodus::erlaubt) – dort nur für das
+ * Entsperren genau dieses Berichts.
+ */
+$router->get('/login/sso', [SsoController::class, 'start']);
+$router->get('/login/sso/rueckruf', [SsoController::class, 'rueckruf']);
+$router->post('/profil/sso/verbinden', [SsoController::class, 'verbindenVorbereiten']);  // angemeldet mit Kennwort; Kennwort noch einmal
+$router->get('/login/sso/verbinden', [SsoController::class, 'verbinden']);      // danach, höchstens fünf Minuten
+$router->get('/login/sso/bestaetigen', [SsoController::class, 'bestaetigen']);  // angemeldet; Step-up
+$router->get('/abgemeldet', [SsoController::class, 'abgemeldet']);
+$router->post('/profil/sso/loesen', [SsoController::class, 'profilLoesen']);
 
 // ---------------------------------------------------------------- Kundenbereich
 /*
@@ -313,12 +338,20 @@ $router->get('/system/benutzer', [BenutzerController::class, 'index'], 'system.u
 $router->post('/system/benutzer/speichern', [BenutzerController::class, 'speichern'], 'system.users.manage');
 $router->post('/system/benutzer/loeschen', [BenutzerController::class, 'loeschen'], 'system.users.manage');
 $router->post('/system/benutzer/entsperren', [BenutzerController::class, 'entsperren'], 'system.users.manage');
+// Anmeldung über SSO am Konto: Verknüpfung lösen, SSO-Sitzungen beenden (+ darfVerwalten).
+$router->post('/system/benutzer/{id}/sso', [BenutzerController::class, 'sso'], 'system.users.manage');
 $router->get('/system/freigaben', [BenutzerController::class, 'freigaben'], 'system.users.manage');
 $router->post('/system/freigaben/speichern', [BenutzerController::class, 'freigabeSpeichern'], 'system.users.manage');
 $router->post('/system/freigaben/loeschen', [BenutzerController::class, 'freigabeLoeschen'], 'system.users.manage');
 $router->get('/system/rollen', [BenutzerController::class, 'rollen'], 'system.users.manage');
 $router->post('/system/rollen/speichern', [BenutzerController::class, 'rolleSpeichern'], 'system.users.manage');
 $router->post('/system/rollen/loeschen', [BenutzerController::class, 'rolleLoeschen'], 'system.users.manage');
+// Update aus der Oberfläche: nur ein Auftrag an den root-Helfer (storage/update/soll), nie ein Prozess.
+$router->get('/system/update', [\App\Controllers\UpdateController::class, 'index'], 'system.update');
+$router->get('/system/update/stand', [\App\Controllers\UpdateController::class, 'stand'], 'system.update');
+foreach (['suchen', 'starten', 'automatik'] as $aktion) {
+    $router->post('/system/update/' . $aktion, [\App\Controllers\UpdateController::class, $aktion], 'system.update');
+}
 
 $router->get('/system/einstellungen', [EinstellungenController::class, 'index'], 'settings.manage');
 $router->post('/system/einstellungen/speichern', [EinstellungenController::class, 'speichern'], 'settings.manage');
@@ -334,6 +367,23 @@ $router->post('/system/einstellungen/eventworx', [EinstellungenController::class
 $router->post('/system/einstellungen/eventworx/pruefen', [EinstellungenController::class, 'eventworxPruefen'], 'settings.manage');
 // Kundenbereich: Datenschutzhinweis, Ansprechpartner, Gültigkeit der Einrichtungslinks, Aufbewahrung der Prüfnachweise.
 $router->post('/system/einstellungen/kundenbereich', [EinstellungenController::class, 'kundenbereich'], 'settings.manage');
+
+// Anmeldung über SSO (OpenID Connect): Verbindung, Prüfen, Ein-/Ausschalten,
+// Optionen, Schutz, Kunden, Gruppen → Rollen/Kunden, Anmeldeanfragen. Gruppen
+// Rollen zuordnen und Anfragen freischalten zusätzlich nur mit „Benutzer
+// verwalten“ und nur, was man selbst vergeben bzw. verwalten darf
+// (App\Auth\Sso\Konten); Kundenzugänge über Gruppen und Kundengruppen nur mit
+// „Kunden pflegen“ und nur für Kunden, deren Zugänge man ausgeben dürfte; den
+// Schutz (Verwaltung per SSO, MFA, „nur SSO“) nur mit allen Rechten. Feste
+// Pfade vor {id}.
+$router->get('/system/sso', [SsoEinstellungenController::class, 'index'], 'sso.manage');
+foreach (['verbindung', 'pruefen', 'schalten', 'optionen', 'schutz', 'kunden', 'zuordnung'] as $aktion) {
+    $router->post('/system/sso/' . $aktion, [SsoEinstellungenController::class, $aktion], 'sso.manage');
+}
+$router->post('/system/sso/zuordnung/{id}/loeschen', [SsoEinstellungenController::class, 'zuordnungLoeschen'], 'sso.manage');
+$router->post('/system/sso/anfrage/{id}/freischalten', [SsoEinstellungenController::class, 'anfrageFreischalten'], 'sso.manage');
+$router->post('/system/sso/anfrage/{id}/anlegen', [SsoEinstellungenController::class, 'anfrageAnlegen'], 'sso.manage');
+$router->post('/system/sso/anfrage/{id}/verwerfen', [SsoEinstellungenController::class, 'anfrageVerwerfen'], 'sso.manage');
 
 // Schnittstelle (API): Zugänge für andere Instanzen. Anlegen, Ändern,
 // Anzeigen und Löschen zusätzlich nur mit „Alle Standorte …“ (prüft der
@@ -366,5 +416,10 @@ foreach (['annehmen', 'ablehnen'] as $aktion) {
 }
 
 $router->get('/audit', [AuditController::class, 'index'], 'audit.view');
+
+// Während eines Updates (Sicherung bis Prüfung) keine Änderungen: ein Zurückrollen spielte
+// die Datenbank von vorher zurück und verlöre sie. Vor dispatch() und nach allen Routen:
+// zurück geht es auf die nächste Seite, die es als GET gibt (Router::hatSeite()).
+\App\Services\UpdateService::wartungsSperre($router);
 
 $router->dispatch($anfrage);

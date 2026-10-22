@@ -6,8 +6,8 @@
  *
  * @var int $id
  * @var array $modus
+ * @var array{name:string, link:bool, nur_sso:bool} $sso
  */
-use App\Support\Csrf;
 use App\Support\View;
 
 $name = trim((string) ($modus['name'] ?? ''));
@@ -23,12 +23,7 @@ $kennwortVon = $name !== '' ? 'Kennwort von ' . $name : 'Kennwort des Prüfers';
     <section class="card kunde-entsperren">
         <div class="card-head"><h2>Für den Prüfer: Gerät entsperren</h2></div>
         <div class="card-body">
-            <form method="post" action="/berichte/<?= (int) $id ?>/kunde/beenden" class="inline-form">
-                <?= Csrf::field() ?>
-                <input type="password" name="kennwort" required autocomplete="new-password" aria-label="<?= View::e($kennwortVon) ?>"
-                       placeholder="<?= View::e($kennwortVon) ?>">
-                <button class="btn" type="submit">Entsperren</button>
-            </form>
+            <?= View::partial('berichte/_entsperren', ['id' => (int) $id, 'kennwortVon' => $kennwortVon, 'sso' => $sso ?? null]) ?>
         </div>
     </section>
 </div>

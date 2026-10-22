@@ -6,6 +6,7 @@ namespace App\Kunden;
 use App\Auth\Auth;
 use App\Services\Eventworx;
 use App\Services\EventworxFehler;
+use App\Services\UpdateService;
 use App\Support\Audit;
 use App\Support\Database;
 use App\Support\Logger;
@@ -456,6 +457,12 @@ final class Pruefnachweise
      * Jede Datei sagt, ob sie schon übernommen ist (für diesen oder einen
      * anderen Kunden).
      *
+     * Update: dokumente_am wird ohne neue Frage nach der Schreibsperre
+     * geschrieben. Davor wartet es höchstens 42 s auf Eventworx (job/<id>
+     * zweimal – Nachlesen bei data:null –, dann file/list, je bis 12 s und
+     * bis 2 s Drossel). So lange wartet ein Update allemal auf die Anfrage,
+     * die sich an der Tür angemeldet hat (wartung_an, 150 s).
+     *
      * @return array{ok:bool,message:string,vorgang?:array<string,mixed>,dateien:list<array<string,mixed>>,mehr:bool}
      */
     public static function eventworxKandidaten(int $kundeId, int $vorgangId): array
@@ -545,9 +552,16 @@ final class Pruefnachweise
      * Bezeichnung gilt der Dateiname. Ein Fehler bei einer Datei bricht nur
      * diese ab.
      *
+     * Update: Bis zum Schreiben kann es Minuten dauern (Vorgang und Liste je
+     * bis 12 s, jede Datei bis 30 s, dazu die Drossel – bei fünf Dateien
+     * über 150 s, so lange wartet ein Update höchstens auf laufende
+     * Anfragen). Vor jeder Datei, die geschrieben würde, also die
+     * Schreibsperre noch einmal: Ist sie gesetzt, hört es auf („wartung“);
+     * was davor übernommen ist, stand vor der Sicherung in der Datenbank.
+     *
      * @param list<mixed> $dateiIds
      * @param array<string,mixed> $angaben
-     * @return array{ok:bool,message:string,ids?:list<int>,fehler?:list<string>,angaben?:bool}
+     * @return array{ok:bool,message:string,ids?:list<int>,fehler?:list<string>,angaben?:bool,wartung?:bool}
      */
     public static function eventworxUebernehmen(int $kundeId, int $vorgangId, array $dateiIds, array $angaben, bool $freigeben): array
     {
@@ -595,6 +609,7 @@ final class Pruefnachweise
         }
         $liste = array_column($frisch['dateien'], null, 'id');
         $ids = [];
+        $wartung = false;
         foreach ($offen as $d) {
             $name = isset($liste[$d]) ? (string) $liste[$d]['name'] : $gemerkt[$d]['name'];
             if (!isset($liste[$d])) {
@@ -616,6 +631,13 @@ final class Pruefnachweise
             if ($pdf !== null) {
                 $fehler[] = $name . ': ' . $pdf;
                 continue;
+            }
+            // Die Schreibsperre eines Updates unmittelbar vor dem Schreiben (siehe oben):
+            // Was jetzt noch käme, stünde nach der Sicherung, und ein Zurückrollen
+            // verwürfe es still – wie bei LocationUebertrag::anwenden().
+            if (UpdateService::wartungAktiv()) {
+                $wartung = true;
+                break;
             }
             $jetzt = gmdate('c');
             $dateiName = self::dateiname($name);
@@ -681,10 +703,15 @@ final class Pruefnachweise
         }
         $text = $ids === [] ? 'Nichts übernommen.' : (count($ids) === 1 ? 'Ein Prüfnachweis' : count($ids) . ' Prüfnachweise') . ' aus Eventworx übernommen'
             . ($freigeben ? ' und für den Kunden freigegeben.' : ' – als Entwurf; der Kunde sieht sie erst nach der Freigabe.');
-        if ($uebrig > 0) {
+        if ($wartung) {
+            // Nichts übernommen: die Liste mit den Eingaben noch einmal (PruefnachweiseController).
+            $text = $ids === [] ? UpdateService::NICHTS_UEBERNOMMEN
+                : $text . ' Gerade läuft ein Update – die übrigen nicht übernommen, bitte in etwa einer Minute noch einmal wählen.';
+        } elseif ($uebrig > 0) {
             $text .= ' Höchstens ' . self::EWX_JE_ANFRAGE . ' Dateien je Durchgang – ' . $uebrig . ' bitte danach noch einmal wählen.';
         }
-        return ['ok' => $ids !== [], 'message' => trim($text . ($fehler !== [] ? ' ' . implode(' ', $fehler) : '')), 'ids' => $ids, 'fehler' => $fehler];
+        return ['ok' => $ids !== [], 'message' => trim($text . ($fehler !== [] ? ' ' . implode(' ', $fehler) : '')), 'ids' => $ids, 'fehler' => $fehler]
+            + ($wartung ? ['wartung' => true] : []);
     }
 
     /**

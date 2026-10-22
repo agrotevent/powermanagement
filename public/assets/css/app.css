@@ -541,9 +541,10 @@ legend { font-size: .75rem; font-weight: 650; color: var(--text-muted); padding:
 .list-select li.active { background: var(--primary-light); }
 .list-select li.active a { color: var(--primary-dark); font-weight: 600; }
 
-.kv { display: grid; grid-template-columns: 145px 1fr; gap: .3rem .8rem; font-size: .82rem; }
+.kv { display: grid; grid-template-columns: 145px minmax(0, 1fr); gap: .3rem .8rem; font-size: .82rem; }
 .kv dt { color: var(--text-muted); }
-.kv dd { margin: 0; font-weight: 500; }
+/* Lange Adressen (Aussteller, Rückruf) brechen um, statt aus der Karte zu ragen. */
+.kv dd { margin: 0; font-weight: 500; min-width: 0; overflow-wrap: anywhere; }
 
 pre.cmd {
     background: #0f172a; color: #e2e8f0; padding: .7rem .85rem; border-radius: 8px;
@@ -637,6 +638,32 @@ a.btn[aria-disabled="true"] { opacity: .5; cursor: progress; }
 .login-card { width: 100%; max-width: 380px; background: #fff; border-radius: 14px; padding: 1.75rem; box-shadow: 0 20px 45px rgba(15, 23, 42, .35); }
 .login-card .brand { display: flex; align-items: center; gap: .65rem; margin-bottom: 1.25rem; }
 .login-card .logo { width: 40px; height: 40px; border-radius: 10px; background: linear-gradient(135deg, #2563eb, #0ea5e9); color: #fff; display: grid; place-items: center; font-weight: 700; }
+
+/* Anmeldung über SSO: der Knopf (ein Link) oben, „oder“ als Trennlinie,
+   bei „nur SSO“ das Kennwortformular eingeklappt – ohne JavaScript, mit
+   Tippflächen von mindestens 44 px. */
+.sso-knopf { min-height: 44px; display: flex; align-items: center; justify-content: center; text-align: center; }
+.oder { display: flex; align-items: center; gap: .6rem; margin: 1rem 0; color: var(--text-muted); font-size: .78rem; }
+.oder::before, .oder::after { content: ""; flex: 1; border-top: 1px solid var(--border); }
+details.lokal > summary {
+    min-height: 44px; display: flex; align-items: center; gap: .4rem; cursor: pointer;
+    font-size: .84rem; color: var(--text-muted); list-style: none;
+}
+details.lokal > summary::-webkit-details-marker { display: none; }
+details.lokal > summary::before { content: "▸"; }
+details.lokal[open] > summary::before { content: "▾"; }
+details.lokal[open] > summary { margin-bottom: .5rem; }
+.text-ok { color: var(--success); }
+.text-bad { color: var(--danger); }
+.sso-befund li { padding: .2rem 0; }
+details.sso-neu > summary { cursor: pointer; min-height: 32px; display: flex; align-items: center; font-size: .82rem; }
+.sso-kopieren { display: flex; gap: .4rem; align-items: center; }
+.sso-kopieren input { flex: 1; min-width: 0; font-family: "JetBrains Mono", monospace; font-size: .76rem; }
+/* Angemeldet über den Notzugang (bei „nur SSO“): auf jeder Seite, nicht zu übersehen. */
+.notzugang {
+    border: 2px solid var(--danger); background: var(--danger-light); color: #7f1d1d;
+    border-radius: 8px; padding: .6rem .85rem; margin-bottom: .9rem; font-size: .84rem;
+}
 
 .demo-flag {
     background: #fef3c7; color: #92400e; padding: .15rem .5rem; border-radius: 6px;
@@ -998,7 +1025,7 @@ input[type=password], input[type=number], input[type=email], select, textarea {
     .card-head { flex-wrap: wrap; row-gap: .4rem; }
     .card-head .spacer { flex-basis: 100%; height: 0; }
     .btn-row { gap: .4rem; }
-    .kv { grid-template-columns: 120px 1fr; }
+    .kv { grid-template-columns: 120px minmax(0, 1fr); }
     .port-grid { grid-template-columns: repeat(auto-fill, minmax(96px, 1fr)); }
     .panel-ports { grid-template-columns: repeat(auto-fill, minmax(86px, 1fr)); }
 
@@ -1020,7 +1047,7 @@ input[type=password], input[type=number], input[type=email], select, textarea {
 @media (max-width: 420px) {
     .content { padding: .7rem .7rem 4rem; }
     .card-body { padding: .8rem; }
-    .kv { grid-template-columns: 1fr; gap: 0 0; }
+    .kv { grid-template-columns: minmax(0, 1fr); gap: 0 0; }
     .kv dt { margin-top: .35rem; }
 }
 
@@ -1747,3 +1774,60 @@ input[type=password], input[type=number], input[type=email], select, textarea {
 .zugangsdaten dt { font-weight: 600; }
 .zugangsdaten dd { margin: 0; display: flex; flex-wrap: wrap; gap: .4rem; align-items: center; }
 .zugangsdaten code { font-size: 1rem; word-break: break-all; padding: .2rem .4rem; background: var(--surface-alt, var(--border)); border-radius: 4px; }
+
+/* ---------------------------------------------------------- System → Update */
+
+/* Hinweis am Menüeintrag („3“ neue Stände, „!“) und als Punkt am Gruppentitel. */
+.nav-hinweis {
+    margin-left: auto; min-width: 1.25rem; height: 1.25rem; padding: 0 .35rem;
+    border-radius: 999px; display: inline-grid; place-items: center;
+    font-size: .68rem; font-weight: 700; line-height: 1; font-variant-numeric: tabular-nums;
+    background: var(--primary); color: #fff;
+}
+.nav-hinweis.warn { background: var(--warning); }
+.nav-hinweis.bad { background: var(--danger); }
+.nav-punkt {
+    width: 7px; height: 7px; border-radius: 50%; flex: 0 0 7px;
+    background: var(--primary);
+}
+.nav-punkt.warn { background: var(--warning); }
+.nav-punkt.bad { background: var(--danger); }
+/* Offen steht der Hinweis am Eintrag – der Punkt nur bei zugeklappter Gruppe. */
+.nav-group.offen .nav-punkt { display: none; }
+/* Schmal gestellt: ein Punkt oben rechts am Kästchen. */
+html.menue-schmal .nav-item { position: relative; }
+html.menue-schmal .nav-hinweis {
+    position: absolute; top: 3px; right: 9px; min-width: 9px; width: 9px; height: 9px;
+    padding: 0; font-size: 0; overflow: hidden;
+}
+
+/* Das Zeichen in der Kopfleiste: auf dem Handy ist die Seitenleiste zu. */
+.update-zeichen.primary { background: var(--primary-light); color: var(--primary-dark); border-color: #93c5fd; }
+.update-zeichen.primary:hover { background: #bfdbfe; }
+.update-zeichen.bad { background: var(--danger-light); color: var(--danger); border-color: #fca5a5; }
+.update-zeichen.bad:hover { background: #fecaca; }
+
+.update-balken { margin: .2rem 0 .4rem; }
+.update-protokoll {
+    max-height: 22rem; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere;
+    margin: .8rem 0 0; padding: .6rem .75rem; font-size: .76rem; line-height: 1.45;
+    background: #0f172a; color: #e2e8f0; border-radius: 8px;
+}
+.update-protokoll.lang { max-height: 36rem; }
+.update-befehl {
+    white-space: pre-wrap; overflow-wrap: anywhere; margin: .5rem 0 0;
+    padding: .5rem .7rem; font-size: .78rem; background: var(--surface-alt, #f8fafc);
+    border: 1px solid var(--border); border-radius: 6px; color: var(--text);
+}
+details.update-konsole > summary { cursor: pointer; list-style: none; }
+details.update-konsole > summary::-webkit-details-marker { display: none; }
+details.update-konsole:not([open]) > summary { border-bottom: 0; }
+
+/* Automatische Updates: Wochentage nebeneinander, Erklärung unter dem Modus. */
+.update-automatik .check .help { display: block; margin-top: .1rem; }
+.update-tage { display: flex; flex-wrap: wrap; gap: .2rem 1.1rem; margin-bottom: .6rem; }
+.update-tage .check { margin-bottom: .2rem; }
+.update-automatik input[type=time] {
+    width: 100%; padding: .45rem .6rem; border: 1px solid var(--border); border-radius: 8px;
+    font-family: inherit; font-size: .84rem; background: #fff; color: var(--text);
+}

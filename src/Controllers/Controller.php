@@ -82,14 +82,24 @@ abstract class Controller
         Response::json($data, $status);
     }
 
-    /** Antwort als JSON oder als Meldung mit Weiterleitung – je nachdem, wer fragt. */
+    /**
+     * Antwort als JSON oder als Meldung mit Weiterleitung – je nachdem, wer
+     * fragt. „wartung“: Während des Wartens (Repository, andere Instanz) hat
+     * ein Update begonnen – als Hinweis, abgewiesen wie an der Tür mit 503
+     * (UpdateService::wartungsSperre()).
+     */
     protected function antwort(Request $request, array $ergebnis, string $ziel): void
     {
+        $wartung = !empty($ergebnis['wartung']);
         if ($request->wantsJson()) {
-            $this->json($ergebnis, !empty($ergebnis['ok']) ? 200 : 422);
+            if ($wartung && empty($ergebnis['ok'])) {
+                header('Retry-After: 30');
+            }
+            $this->json($ergebnis, !empty($ergebnis['ok']) ? 200 : ($wartung ? 503 : 422));
             return;
         }
-        !empty($ergebnis['ok']) ? Flash::success((string) $ergebnis['message']) : Flash::error((string) $ergebnis['message']);
+        $wartung ? Flash::warning((string) $ergebnis['message'])
+            : (!empty($ergebnis['ok']) ? Flash::success((string) $ergebnis['message']) : Flash::error((string) $ergebnis['message']));
         $this->redirect($ziel);
     }
 

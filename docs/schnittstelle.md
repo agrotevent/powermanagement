@@ -108,8 +108,14 @@ curl -i -H 'Authorization: Bearer mtma_…' https://strom.example/api/v1/info
   und nur, wer das Token genau so selbst anlegen dürfte: jede seiner
   Befugnisse vergeben und – ist es gebunden – den Benutzer verwalten. Sonst
   bekäme er Befugnisse in die Hand, die er hier selbst nicht hat; der Knopf
-  fehlt dann. Jeder Abruf steht im Audit-Log (`api.token.angezeigt`, ein
-  falsches Kennwort als `api.token.anzeigen_abgelehnt`). Gespeichert ist es
+  fehlt dann. Wer sich nur über SSO anmeldet
+  ([anmeldung-sso.md](anmeldung-sso.md#bestätigen-über-authentik)),
+  bestätigt stattdessen mit **Mit Authentik bestätigen** (neue Anmeldung
+  dort, dieselbe Person, fünf Minuten, einmal) und tippt dann auf *Token
+  jetzt anzeigen*; Verwaltungskonten nur mit „Verwaltung per SSO“. Jeder
+  Abruf steht im Audit-Log (`api.token.angezeigt`, ein falsches Kennwort
+  oder eine fehlende Bestätigung als `api.token.anzeigen_abgelehnt` und
+  `auth.bestaetigung_fehlversuch` mit dem Zweck `token:<id>`). Gespeichert ist es
   als SHA-256 (darüber wird angemeldet) und mit `app.key` verschlüsselt, nie
   im Klartext.
 - **Ändern** passt Befugnisse, Standorte, Bindung und Ablauf an; das Token
@@ -469,6 +475,7 @@ Antworten:
 | 422 | Vorschlag abgelehnt (Format, Etage, Datei, Prüfsumme …); beim direkten Schreiben auch unbekannte Steckertypen (`"stecker":[…]`). Gespeichert wird dann nichts. |
 | 429 | zehn offene Vorschläge dieses Zugangs oder 60 Sendungen in der letzten Stunde; von nginx auch bei mehr als zehn Anfragen in der Sekunde |
 | 500 | unerwarteter Fehler (Details im Log von A) |
+| 503 | bei A läuft gerade ein Update: `{"ok":false,"wartung":true,"message":"…"}` mit `Retry-After: 30` – nichts angenommen, nach einer halben Minute noch einmal senden. Lesen geht auch währenddessen |
 
 ## Verhältnis zum Location-Abgleich (Git)
 

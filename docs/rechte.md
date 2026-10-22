@@ -220,6 +220,46 @@ Umstellung sperrt den gemeinsamen Zugang darauf – das lässt sich nicht auf
 einen Standort begrenzen. Kennwörter werden nie gespeichert und nie
 protokolliert; das Audit-Log nennt nur Gerät und Schritt.
 
+## Update
+
+**System → Update** braucht das Recht „PowerManagement aktualisieren“
+(`system.update`). Die Befehle `bin/power update:*` prüfen kein Recht –
+maßgeblich ist, wer auf der Konsole als Anwendungsbenutzer arbeiten darf
+(auf einer Installation lehnt `bin/power` als root ab, mit allen Befehlen). Von
+sich aus hat das Recht nur die Rolle *Administration*; bestehende Rollen
+bekommen es nicht nachträglich, und vergeben kann es nur, wer es selbst hat.
+Ein Update startet die Dienste neu – Messung und Schalten sind für alle
+Standorte 1–3 Minuten unterbrochen. Für die Anmeldung über SSO zählt es zu
+den Verwaltungsrechten: Eine Rolle damit lässt sich einer Gruppe nur mit
+„Verwaltung per SSO“ zuordnen, und Konten damit melden sich sonst nur mit
+Kennwort an ([Rollen aus Authentik-Gruppen](#rollen-aus-authentik-gruppen)).
+
+Kundenzugänge (Kundenbereich) bekommen das Recht nie – sie haben keine
+Rechte, und das Tor lässt sie nicht nach *System → Update*. Abzeichen und
+Hinweise zum Update sieht nur, wer das Recht hat; im Kundenbereich gibt
+es keine. Läuft ein Update, lesen Kunden weiter; ein Kennwort, das sie
+in dieser Zeit ändern wollen, wird nicht gespeichert, und der Kundenbereich
+sagt ihnen das.
+
+Das Recht ist bewusst eng: Es erlaubt, nach neuen Ständen zu suchen, einen
+Stand **vorwärts** auf dem ausgecheckten Zweig einzuspielen – genau den
+angezeigten – und die automatischen Updates einzustellen. Einen anderen
+Zweig, einen älteren Stand, `--erzwingen` oder `--flows-ersetzen` gibt es
+nur als root auf der Konsole. Dafür braucht niemand root oder das Token für
+das Repository: Die Oberfläche legt nur einen Auftrag ab, den der
+Update-Dienst (root) prüft und ausführt. root kann Updates aus der
+Oberfläche ganz oder nur das automatische Einspielen abschalten
+(`/etc/powermanagement/update.conf`,
+[Installationsanleitung, Abschnitt 10](installation-debian-lxc.md#10--update)) –
+daran ändert kein Recht in der Oberfläche etwas.
+
+Im Audit-Log steht, wer einen Auftrag gestellt hat
+(`system.update.anfordern`, auch von der Konsole und mit „trotz Betrieb“),
+das Ergebnis jedes Laufs (`system.update.ergebnis`), wer die automatischen
+Updates eingestellt hat (`system.update.automatik`) und was die Automatik
+angefordert oder verschoben hat. Das Protokoll auf der Seite nennt keine
+Zugangsdaten: Tokens und Benutzerteile in Adressen sind geschwärzt.
+
 ## Bereiche
 
 Einen Bereich sieht, wer seinen Standort sieht. In die Summe kommen aber nur
@@ -359,6 +399,45 @@ Dazu gilt jeweils:
   ansehen“ hat.
 - Rechte vergibt auch hier nur, wer sie selbst hat.
 
+## Rollen aus Authentik-Gruppen
+
+Mit der Anmeldung über SSO ([anmeldung-sso.md](anmeldung-sso.md)) können
+Rollen auch aus **Gruppen beim Anmeldedienst** kommen:
+
+- Unter *System → Anmeldung (SSO) → Gruppen → Rollen* wird je Gruppe eine
+  Rolle zugeordnet. Bei jeder Anmeldung über SSO bekommt das Konto genau
+  die Rollen seiner Gruppen – als eigene Zuweisung mit der **Quelle
+  „über Gruppe“** und *bis* = Ende dieser Sitzung (höchstens
+  `security.max_session`, ohne sie 12 Stunden). Fehlt eine Gruppe beim
+  nächsten Mal, fehlt die Rolle. Eine Anmeldung **mit Kennwort** entfernt
+  sie, Ausschalten von SSO auch.
+- In der Benutzerverwaltung stehen sie ausgegraut; dort lassen sie sich
+  nicht abwählen, und Speichern lässt sie stehen.
+- Rollen, die ein Konto **von Hand** hat, bleiben immer unberührt.
+- **Freigaben kommen nie aus Gruppen.** Sollen alle aus `pm-technik` einen
+  Standort sehen, bekommt die Rolle die Freigabe – mit allen Zeitfenstern
+  wie sonst auch. Wer eine Gruppe nur für einen Kunden oder ein Gelände
+  will, legt eine eigene Rolle mit Rollen-Freigaben an.
+- **Rechte vergibt nur, wer sie hat** – auch hier: Eine Gruppe einer Rolle
+  zuordnen darf nur, wer „Benutzer verwalten“ hat und die Rolle selbst
+  vergeben dürfte. Eine Rolle mit „alle Rechte“ nur mit allen Rechten, eine
+  mit einer Freigabe auf „alles“ ebenso.
+- **Verwaltende Rollen** (mit „alle Rechte“, „Benutzer verwalten“,
+  „Einstellungen“, „Anmeldung über SSO einrichten“, „Schnittstelle“ oder
+  „PowerManagement aktualisieren“)
+  lassen sich nur zuordnen, wenn „Verwaltung per SSO“ an ist; sonst
+  übergeht die Anmeldung sie (Audit `sso.rolle_uebergangen`), und Konten
+  mit solchen Rechten melden sich nur mit Kennwort an. Wer in Authentik
+  Gruppen pflegt, vergibt damit Rollen hier.
+
+| Recht | erlaubt | ab Werk |
+|---|---|---|
+| „Anmeldung über SSO einrichten …“ (`sso.manage`) | *System → Anmeldung (SSO)*: Verbindung, Prüfen, Ein-/Ausschalten, Optionen (zu einem anderen Anmeldedienst umstellen, solange es Zuordnungen gibt, nur, wer jede davon selbst anlegen dürfte); zusammen mit „Benutzer verwalten“ Gruppen → Rollen und Anmeldeanfragen (nur Rollen, die man selbst vergeben darf; nur Konten, die man verwalten darf); mit „Kunden pflegen“ die Kundengruppen. „Verwaltung per SSO“, zweiter Faktor und „nur SSO“ nur mit allen Rechten | nur Administration (`*`) |
+
+Lösen, „Sitzungen beenden“ und „nur über SSO“ am Konto gehen in der
+Benutzerverwaltung mit „Benutzer verwalten“ – für Konten, die man verwalten
+darf, auch ohne `sso.manage`.
+
 ## Demo-Zugänge
 
 Im Demo-Modus legt `bin/power demo:seed` diese Beispielkonten an:
@@ -366,6 +445,6 @@ Im Demo-Modus legt `bin/power demo:seed` diese Beispielkonten an:
 | Benutzer | Kennwort | zeigt |
 |----------|----------|-------|
 | `veranstalter` | `Veranstalter2026!` | Rolle Kunde. Freigabe nur für das Festivalgelände und nur für die Festivalwoche. Konto läuft nach 10 Tagen ab. |
-| `technik` | `Technik2026!!` | Rolle Elektrotechnik. Bearbeiten auf dem Festivalgelände (auch peilen und betanken), schalten nur beim Shelly der Geländebeleuchtung. Mit Prüfer-Qualifikation: unterschreibt Übergabeberichte. |
+| `technik` | `Technik2026!!` | Rolle Elektrotechnik. Bearbeiten auf dem Festivalgelände (auch peilen und betanken), schalten nur beim Shelly der Geländebeleuchtung. Mit Prüfer-Qualifikation: unterschreibt Übergabeberichte. Mit einer (Demo-)Anmeldung bei Authentik verknüpft – SSO selbst ist in der Demo aus. |
 | `muster-events` | `Kundenbereich2026!` | Kundenzugang von „Muster Events GmbH & Co. KG“: im Kundenbereich das Festivalgelände während des Sommerfestivals, ein Protokoll, Prüfnachweise. |
 | `stadtmarketing` | `Stadtmarketing2026!` | Kundenzugang von „Stadtmarketing Musterstadt e. V.“: dasselbe Gelände erst in einem Monat, nichts von Muster Events. |
