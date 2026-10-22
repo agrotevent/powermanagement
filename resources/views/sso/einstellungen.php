@@ -99,7 +99,7 @@ $gruppenListe = static function (array $gruppen): string {
                 <dd><?php if ($z['abmelde_rueckkehr'] !== ''): ?>
                         <div class="sso-kopieren"><input id="sso-rueckkehr" readonly value="<?= View::e((string) $z['abmelde_rueckkehr']) ?>" aria-label="Rücksprung nach dem Abmelden">
                             <button class="btn btn-sm btn-ghost" type="button" data-kopieren="#sso-rueckkehr">kopieren</button></div>
-                        <div class="help">Optional, als Redirect URI vom Typ <em>Logout</em> – dann unten „Rücksprung ist eingetragen“ anhaken.</div>
+                        <div class="help">Optional, als Redirect URI vom Typ <em>Post Logout</em> – dann unten „Rücksprung ist eingetragen“ anhaken.</div>
                     <?php else: ?><span class="muted">erst mit app.url</span><?php endif; ?></dd>
                 <dt>Signatur</dt>
                 <dd><?= $z['algs'] !== [] ? View::e(implode(', ', $z['algs'])) : '<span class="muted">noch nicht geprüft</span>' ?></dd>
@@ -249,6 +249,7 @@ $gruppenListe = static function (array $gruppen): string {
                             <input id="sso-gruppe" name="gruppe" maxlength="150" required spellcheck="false" placeholder="pm-planung"></div>
                         <div class="field"><label for="sso-rolle">Rolle</label>
                             <select id="sso-rolle" name="ziel_id" required>
+                                <option value="">Rolle wählen …</option>
                                 <?php foreach ($waehlbar as $r): ?>
                                     <option value="<?= (int) $r['id'] ?>"><?= View::e($r['name']) ?><?= $r['freigaben'] > 0 ? ' (' . (int) $r['freigaben'] . ' Freigaben)' : '' ?></option>
                                 <?php endforeach; ?>
@@ -320,6 +321,7 @@ $gruppenListe = static function (array $gruppen): string {
                                 <input id="sso-kgruppe" name="gruppe" maxlength="150" required spellcheck="false" autocapitalize="off" placeholder="pm-kunde-…"></div>
                             <div class="field"><label for="sso-kunde">Kunde</label>
                                 <select id="sso-kunde" name="ziel_id" required>
+                                    <option value="">Kunde wählen …</option>
                                     <?php foreach ($kunden['waehlbar'] as $k): ?>
                                         <option value="<?= (int) $k['id'] ?>"><?= View::e($k['name']) ?></option>
                                     <?php endforeach; ?>

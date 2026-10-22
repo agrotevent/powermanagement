@@ -998,7 +998,7 @@ switch ($befehl) {
         }
         Audit::akteur('cli');
         $name = isset($optionen['name']) && is_string($optionen['name']) ? $optionen['name'] : SsoEinstellungen::name();
-        $r = SsoEinstellungen::verbindungSpeichern($aussteller, $clientId, $secret, $name);
+        $r = SsoEinstellungen::verbindungSpeichern($aussteller, $clientId, $secret, $name, true);
         unset($secret);
         if (!$r['ok']) {
             $fehler($r['message']);

@@ -89,9 +89,34 @@ final class SsoController extends Controller
     }
 
     /**
+     * POST /profil/sso/verbinden – vor dem Verbinden das Kennwort des Kontos
+     * noch einmal (Anmeldung::verbindenVorbereiten). Danach zeigt das Profil
+     * fünf Minuten lang den Link „Weiter zu …“ (der Start selbst bleibt ein
+     * Link: Ein Formular, das zum Anmeldedienst weiterleitet, verböte CSP
+     * form-action 'self').
+     */
+    public function verbindenVorbereiten(Request $request): void
+    {
+        $this->ohneSpeichern();
+        if (!Auth::check()) {
+            $this->redirect('/login?next=' . rawurlencode('/profil'));
+            return;
+        }
+        $fehler = Anmeldung::verbindenVorbereiten(is_string($_POST['kennwort'] ?? null) ? $_POST['kennwort'] : '');
+        if ($fehler !== null) {
+            Flash::error($fehler);
+            $this->redirect('/profil');   // die Meldung steht oben
+            return;
+        }
+        Flash::success('Kennwort bestätigt – jetzt „Weiter zu ' . Einstellungen::name() . '“ und dort neu anmelden (innerhalb von fünf Minuten).');
+        $this->redirect('/profil#sso');
+    }
+
+    /**
      * GET /login/sso/verbinden – im Profil das angemeldete Konto (Sitzung mit
-     * Kennwort) mit einer Anmeldung beim Anmeldedienst verbinden. Ein Link
-     * (kein Formular, CSP form-action), darum nur von dieser Seite aus
+     * Kennwort) mit einer Anmeldung beim Anmeldedienst verbinden, nachdem das
+     * Kennwort eben bestätigt wurde (verbindenVorbereiten; verbraucht). Ein
+     * Link (kein Formular, CSP form-action), darum nur von dieser Seite aus
      * (Sec-Fetch-Site, wenn der Browser es schickt) – eine fremde Seite löste
      * sonst die Verknüpfung mit ihrer eigenen Anmeldung dort aus. Verlangt
      * beim Anmeldedienst eine neue Anmeldung (prompt=login, max_age=0).
@@ -111,7 +136,8 @@ final class SsoController extends Controller
             $this->redirect('/login?next=' . rawurlencode('/profil'));
             return;
         }
-        $fehler = Anmeldung::verbindenFehler() ?? Anmeldung::gebremst($request->ip());
+        $fehler = Anmeldung::verbindenFehler() ?? Anmeldung::gebremst($request->ip())
+            ?? (Anmeldung::verbindenBestaetigt() ? null : 'Erst im Profil das Kennwort bestätigen, dann „Weiter zu ' . Einstellungen::name() . '“.');
         if ($fehler !== null) {
             Flash::error($fehler);
             $this->redirect('/profil');
@@ -125,6 +151,7 @@ final class SsoController extends Controller
             $this->redirect('/profil');
             return;
         }
+        Anmeldung::verbindenBestaetigt(true);   // einmal
         self::zumAnbieter($adresse);
     }
 
@@ -226,6 +253,12 @@ final class SsoController extends Controller
     public function abgemeldet(Request $request): void
     {
         $this->ohneSpeichern();
+        if ($request->method() === 'HEAD') {
+            // Der Router behandelt HEAD wie GET – ein Abruf ohne Seite (Werkzeug,
+            // Vorschau, Erweiterung) verbrauchte sonst den einmaligen Hinweis.
+            $this->redirect(Auth::check() ? Auth::landingPath() : '/login');
+            return;
+        }
         if (Auth::check()) {
             $this->redirect(Auth::landingPath());
             return;

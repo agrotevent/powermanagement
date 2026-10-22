@@ -72,14 +72,16 @@ $router->post('/profil/passwort', [AuthController::class, 'changePassword']);
  * einmalig), PKCE und nonce geschützt – ein CSRF-Token gibt es dort nicht.
  * Ziele außerhalb dieser Seite kommen nur aus der geprüften Discovery. Ohne
  * Recht an der Route: Start und Rückruf gehen ohne Anmeldung, /abgemeldet nur
- * abgemeldet; Verbinden und Bestätigen (nur von dieser Seite, Sec-Fetch-Site)
- * und Lösen im Profil prüfen die Anmeldung selbst. Bestätigen und Rückruf
+ * abgemeldet; Verbinden (erst das Kennwort per POST, dann der Link) und
+ * Bestätigen (nur von dieser Seite, Sec-Fetch-Site) und Lösen im Profil
+ * prüfen die Anmeldung selbst. HEAD verbraucht nirgends etwas. Bestätigen und Rückruf
  * sind auch im Kundenmodus offen (Kundenmodus::erlaubt) – dort nur für das
  * Entsperren genau dieses Berichts.
  */
 $router->get('/login/sso', [SsoController::class, 'start']);
 $router->get('/login/sso/rueckruf', [SsoController::class, 'rueckruf']);
-$router->get('/login/sso/verbinden', [SsoController::class, 'verbinden']);      // angemeldet mit Kennwort
+$router->post('/profil/sso/verbinden', [SsoController::class, 'verbindenVorbereiten']);  // angemeldet mit Kennwort; Kennwort noch einmal
+$router->get('/login/sso/verbinden', [SsoController::class, 'verbinden']);      // danach, höchstens fünf Minuten
 $router->get('/login/sso/bestaetigen', [SsoController::class, 'bestaetigen']);  // angemeldet; Step-up
 $router->get('/abgemeldet', [SsoController::class, 'abgemeldet']);
 $router->post('/profil/sso/loesen', [SsoController::class, 'profilLoesen']);

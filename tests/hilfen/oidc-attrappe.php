@@ -63,8 +63,9 @@ final class OidcAttrappe
      * Sonderzeichen %+:/~ und „%41“ (prüft die Kodierung der Basic-Anmeldung:
      * ohne rawurlencode käme beim Anmeldedienst „A“ an).
      *
-     * @param list<string> $redirectUris leer: die erste benutzte gilt (wie Authentik)
-     * @param list<string> $logoutUris   Rücksprung nach dem Abmelden (Typ „Logout“)
+     * @param list<string> $redirectUris die eingetragenen Rückruf-Adressen (Strict); leer: jede Anmeldung
+     *                                  scheitert (wie Authentik 2026.x – redirect_uri_no_match)
+     * @param list<string> $logoutUris   Rücksprung nach dem Abmelden (Typ „Post Logout“)
      */
     public static function einrichten(string $ordner, string $basis, array $redirectUris = [], array $logoutUris = []): self
     {
@@ -389,12 +390,11 @@ final class OidcAttrappe
                 $eintrag['fehler'] = 'client_id';
                 return ['status' => 400, 'kopf' => ['Content-Type' => 'text/html'], 'rumpf' => '<h1>Application not found</h1>'];
             }
-            if ($redirect === null || ($z['redirect_uris'] !== [] && !in_array($redirect, $z['redirect_uris'], true))) {
+            // Wie Authentik (views/authorize.py check_redirect_uri): nur eine eingetragene
+            // Adresse (Strict, genau gleich) – ohne Eintrag gar keine.
+            if ($redirect === null || !in_array($redirect, $z['redirect_uris'], true)) {
                 $eintrag['fehler'] = 'redirect_uri';
                 return ['status' => 400, 'kopf' => ['Content-Type' => 'text/html'], 'rumpf' => '<h1>Redirect URI Error</h1>'];
-            }
-            if ($z['redirect_uris'] === []) {
-                $z['redirect_uris'] = [$redirect];   // wie Authentik: die erste benutzte gilt
             }
             $zurueck = function (array $p) use ($redirect, $q, $s): array {
                 $p['state'] = $q['state'] ?? '';

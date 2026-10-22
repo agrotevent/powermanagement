@@ -142,10 +142,12 @@ $ssoName = (string) $sso['name'];
             </tbody>
         </table>
     </div>
+    <?php // Darunter nur, wenn es etwas zu sagen gibt – sind Kundenzugänge über Gruppen aus, steht das schon oben. ?>
+    <?php if (!$sso['pflegen'] || $sso['kunden']): ?>
     <div class="card-body">
         <?php if (!$sso['pflegen']): ?>
             <p class="muted mb0">Kundengruppen ordnet zu, wer die Anmeldung über SSO einrichten darf.</p>
-        <?php elseif ($sso['kunden'] && $kundeOffen && $darfAusgeben): ?>
+        <?php elseif ($kundeOffen && $darfAusgeben): ?>
             <form method="post" action="/system/sso/zuordnung">
                 <?= Csrf::field() ?>
                 <input type="hidden" name="art" value="kunde">
@@ -156,8 +158,13 @@ $ssoName = (string) $sso['name'];
                 <button class="btn btn-primary" type="submit">Gruppe zuordnen</button>
                 <p class="help mt mb0">Genau so, wie <?= View::e($ssoName) ?> die Gruppe nennt. Eine Gruppe gehört zu genau einem Kunden – und ist nie zugleich eine Personalgruppe.</p>
             </form>
+        <?php elseif (!$kundeOffen): ?>
+            <p class="muted mb0">Neue Kundengruppen gibt es erst, wenn der Kunde wieder aktiv ist.</p>
+        <?php else: ?>
+            <p class="muted mb0">Kundengruppen ordnet zu, wer selbst alles sieht, was der Kunde sieht – wie beim Zugang von Hand.</p>
         <?php endif; ?>
     </div>
+    <?php endif; ?>
 </div>
 <?php endif; ?>
 

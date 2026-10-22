@@ -34,7 +34,8 @@ final class Einstellungen
         PFLICHTGRUPPEN = 'sso.pflichtgruppen', ANLEGEN = 'sso.anlegen', ADMINS = 'sso.admins', MFA = 'sso.mfa_verwaltung',
         NUR_SSO = 'sso.nur_sso', KUNDEN = 'sso.kunden', RUECKKEHR = 'sso.abmelde_rueckkehr', INAKTIV_TAGE = 'sso.inaktiv_tage',
         MARKE = 'sso.marke', DISCOVERY = 'sso.discovery', DISCOVERY_AM = 'sso.discovery_am', JWKS = 'sso.jwks',
-        JWKS_AM = 'sso.jwks_am', JWKS_NEU_AM = 'sso.jwks_neu_am', GEPRUEFT_AM = 'sso.geprueft_am', BEFUND = 'sso.befund';
+        JWKS_AM = 'sso.jwks_am', JWKS_NEU_AM = 'sso.jwks_neu_am', GEPRUEFT_AM = 'sso.geprueft_am', BEFUND = 'sso.befund',
+        DISCOVERY_NEU_AM = 'sso.discovery_neu_am';
 
     public const VORGABE_NAME = 'Authentik';
     public const VORGABE_SCOPES = 'openid profile email';
@@ -231,6 +232,19 @@ final class Einstellungen
         return $marke;
     }
 
+    /**
+     * Ist SSO noch an und die Einrichtung dieselbe wie bei $marke (dem Start
+     * eines Vorgangs)? Liest die Einstellungen frisch – nicht aus dem
+     * Zwischenspeicher dieser Anfrage: Der Rückruf hat womöglich lange auf
+     * den Anmeldedienst gewartet, und inzwischen hat jemand SSO ausgeschaltet
+     * oder die Verbindung geändert.
+     */
+    public static function unveraendert(string $marke): bool
+    {
+        Settings::vergessen();
+        return preg_match('/^[0-9a-f]{16}$/', $marke) === 1 && self::aktiv() && hash_equals(self::marke(), $marke);
+    }
+
     public static function markeErneuern(): void
     {
         Settings::put(self::MARKE, bin2hex(random_bytes(8)));
@@ -346,9 +360,17 @@ final class Einstellungen
      * aus und laufende SSO-Sitzungen enden (Marke); ein bisheriges Secret gilt
      * dann nicht mehr und wird entfernt, wenn kein neues mitkommt.
      *
+     * Eine neue Verbindung, während es Zuordnungen von Gruppen gibt, nur von
+     * jemandem, der jede davon selbst anlegen dürfte (Konten::
+     * zuordnungRechtFehler): Der andere Anmeldedienst vergäbe über sie Rollen
+     * und Kundenzugänge – mit „SSO einrichten“ allein wären das Rechte, die
+     * man nicht vergeben darf. Die Kommandozeile ($kommandozeile, root auf
+     * dem Server) prüft das nicht.
+     *
      * @return array{ok:bool,message:string,warnung?:bool}
      */
-    public static function verbindungSpeichern(string $aussteller, string $clientId, #[\SensitiveParameter] string $secret, string $name): array
+    public static function verbindungSpeichern(string $aussteller, string $clientId, #[\SensitiveParameter] string $secret, string $name,
+        bool $kommandozeile = false): array
     {
         $aussteller = trim($aussteller);
         $clientId = trim($clientId);
@@ -381,6 +403,12 @@ final class Einstellungen
         $hatteSecret = (string) Settings::get(Settings::GEHEIM_SSO_SECRET, '') !== '';
         $warAktiv = self::schalter(self::AKTIV);
         $neueVerbindung = $aussteller !== self::aussteller() || $clientId !== self::clientId();
+        if ($neueVerbindung && !$kommandozeile) {
+            $fehler = self::verbindungRechtFehler();
+            if ($fehler !== null) {
+                return ['ok' => false, 'message' => $fehler];
+            }
+        }
         Settings::put(self::AUSSTELLER, $aussteller);
         Settings::put(self::CLIENT_ID, $clientId);
         Settings::put(self::NAME, $name);
@@ -389,7 +417,7 @@ final class Einstellungen
         $warnung = false;
         $meldungen = ['Verbindung gespeichert.'];
         if ($neueVerbindung) {
-            foreach ([self::DISCOVERY, self::DISCOVERY_AM, self::JWKS, self::JWKS_AM, self::JWKS_NEU_AM, self::GEPRUEFT_AM, self::BEFUND] as $k) {
+            foreach ([self::DISCOVERY, self::DISCOVERY_AM, self::DISCOVERY_NEU_AM, self::JWKS, self::JWKS_AM, self::JWKS_NEU_AM, self::GEPRUEFT_AM, self::BEFUND] as $k) {
                 Settings::forget($k);
             }
             Settings::put(self::AKTIV, '0');
@@ -441,6 +469,36 @@ final class Einstellungen
             $meldungen[] = $fremde . ' Verknüpfung(en) gehören zu einem anderen Aussteller – bin/power sso:aussteller-umstellen.';
         }
         return ['ok' => true, 'message' => implode(' ', $meldungen), 'warnung' => $warnung];
+    }
+
+    /**
+     * Darf der Angemeldete die Verbindung zu einem anderen Anmeldedienst
+     * umstellen? null = ja (keine Zuordnungen, oder er dürfte jede selbst
+     * anlegen), sonst die Meldung mit der ersten Gruppe, die er nicht dürfte.
+     * Zuordnungen auf eine Rolle, die es nicht mehr gibt, vergeben nichts.
+     */
+    public static function verbindungRechtFehler(): ?string
+    {
+        try {
+            $alle = Database::select('SELECT z.gruppe, z.art, z.ziel_id FROM sso_zuordnungen z ORDER BY z.id');
+        } catch (\Throwable) {
+            return null;   // vor der Migration
+        }
+        foreach ($alle as $z) {
+            $art = (string) $z['art'];
+            $ziel = (int) $z['ziel_id'];
+            if ($art === 'rolle' && Database::scalar('SELECT id FROM roles WHERE id = ?', [$ziel]) === false) {
+                continue;
+            }
+            $f = Konten::zuordnungRechtFehler($art, $ziel);
+            if ($f !== null) {
+                return 'Zu einem anderen Anmeldedienst (Aussteller oder Client-ID) wechselt nur, wer jede der ' . count($alle)
+                    . ' Zuordnungen von Gruppen selbst anlegen dürfte – sonst vergäbe der andere Anmeldedienst über sie Rollen bzw.'
+                    . ' Kundenzugänge, die du nicht vergeben darfst. Gruppe „' . $z['gruppe'] . '“: ' . $f
+                    . ' Erst die Zuordnungen entfernen oder die Verbindung von jemandem mit diesen Rechten ändern lassen.';
+            }
+        }
+        return null;
     }
 
     /**

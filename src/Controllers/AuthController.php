@@ -67,14 +67,16 @@ final class AuthController extends Controller
 
     /**
      * Abmelden – hier. Danach eine neue, leere Sitzung: In der zerstörten
-     * ginge „Abgemeldet.“ verloren. War es eine Sitzung über SSO, verlangt
-     * die nächste SSO-Anmeldung in diesem Browser eine neue Anmeldung beim
-     * Anmeldedienst (geteilte Tablets), und /abgemeldet bietet einmal den
-     * Link zum Abmelden dort an – wenn er es anbietet.
+     * ginge „Abgemeldet.“ verloren. War es eine Sitzung über SSO – oder hat
+     * sich in dieser Sitzung jemand beim Anmeldedienst angemeldet (Bestätigen,
+     * Verbinden; Anmeldung::BEIM_ANBIETER) –, verlangt die nächste
+     * SSO-Anmeldung in diesem Browser eine neue Anmeldung beim Anmeldedienst
+     * (geteilte Tablets), und /abgemeldet bietet einmal den Link zum
+     * Abmelden dort an – wenn er es anbietet.
      */
     public function logout(Request $request): void
     {
-        $sso = Auth::anmeldeweg() === 'sso';
+        $sso = Auth::anmeldeweg() === 'sso' || Session::get(Anmeldung::BEIM_ANBIETER) === true;
         $hinweis = $sso ? Session::get(Anmeldung::HINWEIS) : null;
         Auth::logout();
         Session::neu();
@@ -139,6 +141,8 @@ final class AuthController extends Controller
             'seit'          => $weg === 'sso' ? (int) Session::get('angemeldet', 0) : null,
             'nur_sso'       => Schutz::nurSso($user),
             'verbinden'     => Anmeldung::verbindenFehler() === null,
+            // Kennwort eben bestätigt: der Link zum Anmeldedienst (sonst erst das Formular).
+            'verbinden_bereit' => Anmeldung::verbindenBestaetigt(),
             // Verwaltungskonten: anmelden über SSO erst mit „Verwaltung per SSO“.
             'verwaltung'    => Schutz::darfPerSso($user) === 'verwaltung',
         ];

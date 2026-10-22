@@ -19,8 +19,10 @@ declare(strict_types=1);
  * D. Start: Parameter (redirect_uri nie aus Host), höchstens fünf Vorgänge,
  *    prompt/max_age, Ziel nach der Anmeldung.
  * E. Rückruf: state einmalig und ohne Audit, Marke, iss, angemeldete
- *    Sitzung, Fehler des Anbieters, Token-Endpunkt (basic/post), ID-Token,
- *    Userinfo, Bremse je Adresse.
+ *    Sitzung, SSO aus / neue Marke / „Verwaltung per SSO“ aus, während der
+ *    Rückruf wartet (nichts geschrieben), Fehler des Anbieters,
+ *    Token-Endpunkt (basic/post), ID-Token, Schlüsselwechsel RSA → EC
+ *    (Discovery gedrosselt neu), Userinfo, Bremse je Adresse.
  * F. Verknüpfung nur über iss+sub (auch Groß/Klein), Anmeldeanfragen
  *    (merken, freischalten, anlegen, verwerfen, höchstens 200), automatische
  *    Anlage (nur mit zugeordneter Gruppe, Name frei).
@@ -28,7 +30,9 @@ declare(strict_types=1);
  *    Pflichtgruppe, Verwaltung nur mit sso.admins, MFA.
  * H. Rollen aus Gruppen: hinzu/weg, keine zweite Zeile, Benutzerverwaltung,
  *    Ablauf (auch Rollen-Freigaben), Kennwort-Anmeldung, Zuordnung löschen,
- *    *-Rolle übergangen, zuordnungFehler, Gruppe „123“.
+ *    *-Rolle übergangen, zuordnungFehler, Gruppe „123“, dieselbe Gruppe in
+ *    anderer Schreibweise, eine neue Verbindung nur mit den Rechten aller
+ *    Zuordnungen.
  * I. Sitzung: sitzungGilt (Marke, Sitzungen beendet, Dauer, aus, sso.admins,
  *    Lösen), kennwortVerboten, „nur SSO“ und Notzugang.
  * J. Schutz speichern: nur mit allen Rechten; „nur SSO“ nur mit SSO-Sitzung,
@@ -36,10 +40,12 @@ declare(strict_types=1);
  *    MFA-Pflicht nicht aus einer SSO-Sitzung ohne zweiten Faktor; Kennwort-
  *    Anmeldung danach (verknüpft abgelehnt, Notzugang laut, Kunde normal);
  *    der letzte Notzugang bleibt; sso.admins aus nimmt verwaltende Rollen
- *    aus Gruppen; bin/power sso:aus --nur-sso.
+ *    aus Gruppen; der letzte (dauerhafte) Notzugang auch nicht auf Termin;
+ *    bin/power sso:aus --nur-sso.
  * K. Bestätigen (Step-up): token:<id> einmal, 300 s, nur dieser Zweck und
  *    dieses Konto; andere Person, nicht neu angemeldet, Verwaltung ohne
- *    sso.admins (W7); Auth::bestaetigen mit Kennwort bzw. nie bei nur_sso;
+ *    sso.admins (W7), MFA-Pflicht; danach „beim Anmeldedienst angemeldet“
+ *    (fürs Abmelden); Auth::bestaetigen mit Kennwort bzw. nie bei nur_sso;
  *    Kundenmodus entsperren (Fehlversuche zählen, Bremse vor dem Netz).
  * L. Kunden über Gruppen (nur mit Kundenbereich): sso.kunden und
  *    Kundengruppen nur mit kunden.manage und nur für Kunden, deren Zugänge man
@@ -108,7 +114,8 @@ Einstellungen::$uhr = static function () use (&$uhr): int {
     return $uhr;
 };
 OidcAttrappe::$uhr = Einstellungen::$uhr;
-$idp = OidcAttrappe::einrichten($instanzOrdner . '/oidc', 'https://idp.example.test');
+$idp = OidcAttrappe::einrichten($instanzOrdner . '/oidc', 'https://idp.example.test', ['https://pm.example.test/login/sso/rueckruf'],
+    ['https://pm.example.test/login']);
 Http::$attrappe = $idp->http();
 $iss = $idp->aussteller();
 $client = $idp->client();
@@ -502,7 +509,7 @@ $a = $authorize(['prompt' => 'login', 'max_age' => '0']);
 $letzter = array_values(array_filter($idp->protokoll(), static fn (array $e): bool => $e['pfad'] === 'authorize'));
 pruefe(end($letzter)['prompt'] === 'login' && end($letzter)['max_age'] === '0', 'Attrappe protokolliert prompt und max_age');
 $a = $authorize(['redirect_uri' => 'https://evil.example/']);
-pruefe($a['status'] === 400 && !isset($a['kopf']['Location']), 'Attrappe: andere als die zuerst benutzte Rückruf-Adresse → 400 ohne Weiterleitung');
+pruefe($a['status'] === 400 && !isset($a['kopf']['Location']), 'Attrappe: eine andere als die eingetragene Rückruf-Adresse → 400 ohne Weiterleitung');
 $e = $idp->bearbeiten('GET', '/application/o/' . OidcAttrappe::SLUG . '/end-session/', ['id_token_hint' => $t['id_token'], 'client_id' => $client['id']], [], []);
 $letzter = array_values(array_filter($idp->protokoll(), static fn (array $e): bool => $e['pfad'] === 'end-session'));
 pruefe($e['status'] === 200 && end($letzter)['hint_ok'] === true, 'Attrappe: end-session prüft id_token_hint');
@@ -917,6 +924,54 @@ pruefe($r['code'] === 'angemeldet' && Auth::id() === $planer && Database::select
     'angemeldete Sitzung beim Zweck anmelden → angemeldet, kein Konto verändert');
 $abmelden();
 
+// E.2b Geändert, während der Rückruf auf den Anmeldedienst wartet – von einem
+// anderen Prozess, also am Zwischenspeicher der Einstellungen dieser Anfrage
+// vorbei (direkt in der Datenbank).
+$httpIdp = $idp->http();
+$waehrend = null;
+Http::$attrappe = static function (string $m, string $url, array $o = []) use ($httpIdp, &$waehrend): array {
+    if ($waehrend !== null && str_contains($url, '/token/')) {
+        $w = $waehrend;
+        $waehrend = null;
+        $w();
+    }
+    return $httpIdp($m, $url, $o);
+};
+$ssoZeilen = static fn (): int => (int) Database::scalar("SELECT COUNT(*) FROM user_roles WHERE quelle = 'sso'");
+$direkt = static fn (string $schluessel, string $wert) => Database::execute('UPDATE settings SET setting_value = ? WHERE setting_key = ?', [$wert, $schluessel]);
+Database::execute("DELETE FROM user_roles WHERE quelle = 'sso'");
+$waehrend = static function () use ($direkt): void {
+    // wie Einstellungen::ausschalten() in einer anderen Anfrage
+    $direkt(Einstellungen::AKTIV, '0');
+    Database::execute("DELETE FROM user_roles WHERE quelle = 'sso'");
+};
+$r = $ablauf($person($subPlaner, 'planer-dort', [$gruppeA]));
+pruefe($r['code'] === 'einrichtung' && Auth::id() === null && $ssoZeilen() === 0,
+    'E.2: SSO aus, während der Rückruf auf den Token-Endpunkt wartet → einrichtung, keine Rolle aus Gruppen geschrieben');
+Settings::put(Einstellungen::AKTIV, '1');
+$marke = Einstellungen::marke();
+$waehrend = static fn () => $direkt(Einstellungen::MARKE, bin2hex(random_bytes(8)));
+$r = $ablauf($person($subPlaner, 'planer-dort', [$gruppeA]));
+pruefe($r['code'] === 'einrichtung' && Auth::id() === null && $ssoZeilen() === 0, 'E.2: neue Verbindung (Marke) während des Wartens → einrichtung');
+Settings::put(Einstellungen::MARKE, $marke);
+// „Verwaltung per SSO“ aus, während gewartet wird: die verwaltende Rolle aus der Gruppe kommt nicht (wieder).
+Settings::put(Einstellungen::ADMINS, '1');
+alsBenutzer($admin);
+$gruppeV = 'pm-verwaltung-' . $kennung;
+pruefe(Konten::zuordnungSpeichern($gruppeV, 'rolle', $rolleVerwalter)['ok'], 'E.2: Gruppe → verwaltende Rolle (mit „Verwaltung per SSO“)');
+alsBenutzer(null);
+$abmelden();
+$waehrend = static fn () => $direkt(Einstellungen::ADMINS, '0');
+$r = $ablauf($person($subPlaner, 'planer-dort', [$gruppeV]));
+pruefe(Database::scalar("SELECT id FROM user_roles WHERE user_id = ? AND role_id = ? AND quelle = 'sso'", [$planer, $rolleVerwalter]) === false
+    && !Auth::can('system.users.manage'), 'E.2: „Verwaltung per SSO“ aus während des Wartens → die verwaltende Rolle aus der Gruppe kommt nicht');
+$waehrend = null;
+$abmelden();
+Database::execute('DELETE FROM sso_zuordnungen WHERE gruppe = ?', [$gruppeV]);
+Database::execute("DELETE FROM user_roles WHERE quelle = 'sso'");
+Http::$attrappe = $httpIdp;
+Settings::vergessen();
+
 // E.3 Fehler des Anbieters
 $r = $ablauf(null, ['authorize_fehler' => 'access_denied', 'authorize_beschreibung' => '<script>alert(1)</script>' . str_repeat('x', 300)]);
 pruefe($r['code'] === 'abgebrochen' && mb_strlen($r['meldung']) <= 200 && str_starts_with($r['meldung'], 'Authentik meldet: <script>'),
@@ -949,6 +1004,33 @@ foreach (['signatur_kaputt' => true, 'nonce' => 'falsch', 'aud' => 'fremd', 'exp
     $r = $ablauf(null, [$was => $wert]);
     pruefe(!$r['ok'] && Auth::id() === null, 'ID-Token mit ' . $was . ' → abgelehnt (' . $r['code'] . ')');
 }
+
+// E.4b Signing Key in Authentik auf eine andere Art gewechselt (RSA → EC): Die
+// gespeicherte Discovery (bis 24 h) nennt nur RS256 – sie wird dann einmal neu
+// geholt, gedrosselt wie das JWKS; ein alg, das wir nie annehmen, nie.
+Anbieter::discovery(true);
+gleich(Anbieter::discovery()['algs'], ['RS256'], 'E.4: Discovery im Zwischenspeicher nur mit RS256');
+$ec = ['discovery' => ['id_token_signing_alg_values_supported' => ['ES256']], 'alg' => 'ES256'];
+$n = $anfragen('discovery');
+$r = $ablauf($person($subPlaner, 'planer-dort'), $ec);
+pruefe($r['ok'] && Auth::id() === $planer && $anfragen('discovery') === $n + 1 && Anbieter::discovery()['algs'] === ['ES256'],
+    'E.4: ID-Token mit ES256, gespeichert nur RS256 → Discovery einmal neu, angemeldet');
+$abmelden();
+Anbieter::discovery(true);
+$n = $anfragen('discovery');
+$r = $ablauf(null, $ec);
+pruefe($r['code'] === 'alg' && Auth::id() === null && $anfragen('discovery') === $n, 'E.4: … innerhalb von 300 s nicht noch einmal (alg, keine Anfrage)');
+$uhr += Anbieter::JWKS_NEU_FRUEHESTENS + 1;
+$r = $ablauf(null, $ec);
+pruefe($r['ok'] && $anfragen('discovery') === $n + 1, 'E.4: … nach 300 s wieder');
+$abmelden();
+$uhr += Anbieter::JWKS_NEU_FRUEHESTENS + 1;
+Anbieter::discovery(true);
+$n = $anfragen('discovery');
+$r = $ablauf(null, ['alg' => 'HS256']);
+pruefe($r['code'] === 'alg' && $anfragen('discovery') === $n, 'E.4: HS256 → alg, ohne die Discovery neu zu holen');
+$uhr -= 2 * (Anbieter::JWKS_NEU_FRUEHESTENS + 1);
+Settings::forget(Einstellungen::DISCOVERY_NEU_AM);
 
 // E.5 Userinfo
 $n = $anfragen('userinfo');
@@ -1268,6 +1350,33 @@ gleich($ssoRollen($planer), [$rolleA], 'Gruppe „123“ gibt die Rolle (nie als
 gleich(Konten::gruppen(['groups' => [123, '123', ' 123 ', 'a', "b\x01", str_repeat('g', 151), ['x'], 'a']]), ['123', 'a'],
     'gruppen(): nur Strings, getrimmt, ohne Steuerzeichen/Überlänge/Doppelte');
 $abmelden();
+// H.9 Dieselbe Gruppe in anderer Schreibweise für dasselbe Ziel: Der eindeutige
+// Index vergleicht unter MariaDB ohne Groß/Klein – vorher ablehnen statt 500.
+alsBenutzer($admin);
+$r = Konten::zuordnungSpeichern(strtoupper($gruppeA), 'rolle', $rolleA);
+pruefe(!$r['ok'] && str_contains($r['message'], 'Schreibweise „' . $gruppeA . '“')
+    && (int) Database::scalar('SELECT COUNT(*) FROM sso_zuordnungen WHERE LOWER(gruppe) = LOWER(?)', [$gruppeA]) === 1,
+    'H.9: dieselbe Gruppe in anderer Schreibweise für dieselbe Rolle → abgelehnt');
+gleich(Konten::zuordnungFehler(strtoupper($gruppeA), 'rolle', $rolle('planung')), null, 'H.9: … für eine andere Rolle zuordenbar');
+// H.10 Zu einem anderen Anmeldedienst umstellen, während es Zuordnungen gibt, nur,
+// wer jede davon selbst anlegen dürfte – sonst vergäbe dessen Gruppe die Rollen.
+$einrichterRolle = (int) BenutzerService::rolleSpeichern(null, $kennung . '-einrichter', 'Prüfung', ['sso.manage', 'dashboard.view'])['id'];
+$einrichter = BenutzerService::anlegen($kennung . '-einrichter', $pw, (string) Database::scalar('SELECT role_key FROM roles WHERE id = ?', [$einrichterRolle]), false);
+$verbindung = static fn (): array => [Einstellungen::aussteller(), Einstellungen::clientId(), Einstellungen::secretZustand(), Einstellungen::marke(),
+    Einstellungen::aktiv()];
+$stand = $verbindung();
+alsBenutzer($einrichter);
+$r = Einstellungen::verbindungSpeichern('https://idp-fremd.example.test/application/o/pm/', $client['id'], str_repeat('s', 24), 'Authentik');
+pruefe(!$r['ok'] && str_contains($r['message'], 'anderen Anmeldedienst') && str_contains($r['message'], 'Benutzer verwalten') && $verbindung() === $stand,
+    'H.10: nur „SSO einrichten“, Zuordnungen da: anderer Aussteller → abgelehnt, nichts geändert');
+$r = Einstellungen::verbindungSpeichern($iss, $client['id'] . '-anders', '', 'Authentik');
+pruefe(!$r['ok'] && $verbindung() === $stand, 'H.10: … ebenso eine andere Client-ID');
+$r = Einstellungen::verbindungSpeichern($iss, $client['id'], '', 'Authentik');
+pruefe($r['ok'] && $verbindung() === $stand, 'H.10: dieselbe Verbindung (nur Beschriftung) → gespeichert');
+alsBenutzer($admin);
+gleich(Einstellungen::verbindungRechtFehler(), null, 'H.10: die Administration dürfte umstellen');
+alsBenutzer(null);
+$abmelden();
 
 // ================================================================ I. Sitzung
 $ablauf($person($subPlaner, 'planer-dort'));
@@ -1436,6 +1545,27 @@ gleich(BenutzerService::speichern($admin, $daten, [])['message'], Schutz::T_LETZ
 gleich(BenutzerService::loeschen($admin)['message'], Schutz::T_LETZTER_NOTZUGANG, 'J.3: … löschen → abgelehnt');
 pruefe(BenutzerService::speichern($admin, ['full_name' => 'Notfall ' . $kennung] + $daten, [$adminRolle => ['aktiv' => 1]])['ok']
     && Schutz::letzterNotzugang($admin), 'J.3: andere Änderungen am letzten Notzugang gehen');
+// Auch nicht auf Termin: ein Enddatum am Konto oder an der Rolle mit allen Rechten.
+$morgen = date('Y-m-d', time() + 86400);
+gleich(BenutzerService::speichern($admin, ['gueltig_bis' => $morgen] + $daten, [$adminRolle => ['aktiv' => 1]])['message'], Schutz::T_LETZTER_NOTZUGANG,
+    'J.3: … ein Enddatum am Konto → abgelehnt');
+gleich(BenutzerService::speichern($admin, $daten, [$adminRolle => ['aktiv' => 1, 'bis' => $morgen]])['message'], Schutz::T_LETZTER_NOTZUGANG,
+    'J.3: … ein Enddatum an der Rolle mit allen Rechten → abgelehnt');
+pruefe(Database::scalar('SELECT gueltig_bis FROM users WHERE id = ?', [$admin]) === null
+    && Database::scalar("SELECT gueltig_bis FROM user_roles WHERE user_id = ? AND role_id = ? AND quelle = 'hand'", [$admin, $adminRolle]) === null,
+    'J.3: … beides nicht gespeichert');
+// Zwei Notzugänge lassen sich nicht nacheinander auslaufen lassen: Es zählt nur einer ohne Enddatum.
+$notfall2 = BenutzerService::anlegen($kennung . '-notfall2', $pw, 'admin', false);
+pruefe(!Schutz::letzterNotzugang($admin) && Schutz::notzugangDauerhaft((array) BenutzerService::find($notfall2)), 'J.3: mit einem zweiten Notzugang ist der erste nicht mehr der letzte');
+pruefe(BenutzerService::speichern($admin, ['gueltig_bis' => $morgen] + $daten, [$adminRolle => ['aktiv' => 1]])['ok']
+    && Schutz::notzugangWirksam((array) BenutzerService::find($admin)) && !Schutz::notzugangDauerhaft((array) BenutzerService::find($admin)),
+    'J.3: … er bekommt ein Enddatum (wirksam, aber nicht dauerhaft)');
+$daten2 = ['username' => $kennung . '-notfall2', 'is_active' => 1, 'nur_sso_feld' => '1'];
+$rolle2 = (int) Database::scalar("SELECT role_id FROM user_roles WHERE user_id = ? AND quelle = 'hand'", [$notfall2]);
+pruefe(Schutz::letzterNotzugang($notfall2) && BenutzerService::speichern($notfall2, ['gueltig_bis' => $morgen] + $daten2, [$rolle2 => ['aktiv' => 1]])['message']
+    === Schutz::T_LETZTER_NOTZUGANG, 'J.3: … dann ist der zweite der letzte – ihm ein Enddatum → abgelehnt');
+pruefe(BenutzerService::speichern($admin, $daten, [$adminRolle => ['aktiv' => 1]])['ok'] && BenutzerService::loeschen($notfall2)['ok']
+    && Schutz::letzterNotzugang($admin), 'J.3: Enddatum wieder weg, der zweite gelöscht – der erste ist wieder der letzte');
 alsBenutzer(null);
 if ($andere !== []) {
     Database::execute('UPDATE users SET is_active = 1 WHERE id IN (' . implode(',', $andere) . ')');
@@ -1494,6 +1624,21 @@ pruefe(Auth::attempt($kennung . '-verwalter', $pw, $ip)['ok'] && !$schalter(Eins
 pruefe(str_contains((string) Anmeldung::bestaetigenFehler('token:5'), 'Verwaltung per SSO'), 'K.2: Verwaltungskonto: Bestätigen über SSO nicht angeboten (W7)');
 $r = $ablauf($person($subVerwalter, 'verwalter-dort'), [], 'token:5', $verwalter);
 pruefe($r['code'] === 'verwaltung' && !Anmeldung::bestaetigt('token:5', false), 'K.2: … und im Rückruf abgelehnt (verwaltung)');
+// Mit „Verwaltung per SSO“ und MFA-Pflicht: Bestätigen nur mit zweitem Faktor – dieselbe Schranke wie beim Anmelden (S12).
+Settings::put(Einstellungen::ADMINS, '1');
+Settings::put(Einstellungen::MFA, '1');
+gleich(Anmeldung::bestaetigenFehler('token:5'), null, 'K.2: mit „Verwaltung per SSO“: Bestätigen über SSO angeboten');
+unset($_SESSION[Anmeldung::BEIM_ANBIETER], $_SESSION[Anmeldung::HINWEIS]);
+$r = $ablauf($person($subVerwalter, 'verwalter-dort', [], ['amr' => ['pwd']]), [], 'token:5', $verwalter);
+pruefe($r['code'] === 'mfa' && !Anmeldung::bestaetigt('token:5', false) && !isset($_SESSION[Anmeldung::BEIM_ANBIETER]),
+    'K.2: MFA-Pflicht, dort nur mit Kennwort angemeldet (amr pwd) → mfa, nicht bestätigt');
+$r = $ablauf($person($subVerwalter, 'verwalter-dort', [], ['amr' => ['pwd', 'mfa']]), [], 'token:5', $verwalter);
+pruefe($r['ok'] && Anmeldung::bestaetigt('token:5'), 'K.2: … mit zweitem Faktor bestätigt');
+// Die Kennwort-Sitzung hat sich dabei beim Anmeldedienst angemeldet – beim Abmelden hier zählt das wie eine SSO-Sitzung.
+pruefe(Auth::anmeldeweg() === 'kennwort' && ($_SESSION[Anmeldung::BEIM_ANBIETER] ?? null) === true && is_string($_SESSION[Anmeldung::HINWEIS] ?? null),
+    'K.2: nach dem Bestätigen in einer Kennwort-Sitzung: „beim Anmeldedienst angemeldet“ und der Hinweis fürs Abmelden dort');
+Settings::put(Einstellungen::MFA, '0');
+Settings::put(Einstellungen::ADMINS, '0');
 // K.3 Auth::bestaetigen mit Kennwort
 pruefe(!Auth::bestaetigen('token:5', ''), 'K.3: ohne Kennwort und ohne Step-up → falsch');
 pruefe(Auth::bestaetigen('token:5', $pw), 'K.3: mit richtigem Kennwort (nicht nur_sso) → wahr');

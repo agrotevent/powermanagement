@@ -140,9 +140,20 @@ $ssoRollen = array_values(array_filter($roles, static fn (array $r): bool => ($r
                 <?php endif; ?>
             <?php else: ?>
                 <p>Dieses Konto ist nicht mit <?= View::e($sso['name']) ?> verknüpft.</p>
-                <?php if ($sso['verbinden']): ?>
-                    <p><a class="btn btn-primary" href="/login/sso/verbinden">Mit <?= View::e($sso['name']) ?> verbinden</a></p>
-                    <p class="help">Bei <?= View::e($sso['name']) ?> einmal neu anmelden – danach geht die Anmeldung hier auch darüber.
+                <?php if ($sso['verbinden'] && $sso['verbinden_bereit']): ?>
+                    <p><a class="btn btn-primary" href="/login/sso/verbinden">Weiter zu <?= View::e($sso['name']) ?></a></p>
+                    <p class="help">Das Kennwort ist bestätigt. Jetzt bei <?= View::e($sso['name']) ?> einmal neu anmelden (innerhalb von fünf Minuten) –
+                        danach geht die Anmeldung hier auch darüber.</p>
+                <?php elseif ($sso['verbinden']): ?>
+                    <form method="post" action="/profil/sso/verbinden">
+                        <?= Csrf::field() ?>
+                        <div class="field">
+                            <label for="sso-verbinden-kennwort">Kennwort dieses Kontos</label>
+                            <input id="sso-verbinden-kennwort" type="password" name="kennwort" autocomplete="current-password" required>
+                        </div>
+                        <button class="btn btn-primary" type="submit">Mit <?= View::e($sso['name']) ?> verbinden</button>
+                    </form>
+                    <p class="help">Erst das Kennwort, dann bei <?= View::e($sso['name']) ?> einmal neu anmelden – danach geht die Anmeldung hier auch darüber.
                         Benutzername und E-Mail-Adresse verknüpfen nie von selbst.</p>
                 <?php elseif ($sso['weg'] === 'notzugang'): ?>
                     <p class="small muted">Ein Notzugang wird nie verknüpft.</p>

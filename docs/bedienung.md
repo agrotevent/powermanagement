@@ -1100,17 +1100,20 @@ und Kennwort – mit „nur SSO“ eingeklappt („Mit Benutzername und Kennwort
 
 <img src="bilder/anmeldung-sso.png" alt="Anmeldeseite mit „Mit Authentik anmelden“" width="260">
 
-- Im **Profil** verbindet *Mit Authentik verbinden* das eigene Konto (einmal
-  dort neu anmelden); danach geht die Anmeldung auch darüber. Lösen geht
-  dort auch – außer bei Konten „nur über SSO“.
+- Im **Profil** verbindet *Mit Authentik verbinden* das eigene Konto: erst
+  das Kennwort noch einmal, dann *Weiter zu Authentik* und dort einmal neu
+  anmelden; danach geht die Anmeldung auch darüber. Lösen geht dort auch –
+  außer bei Konten „nur über SSO“.
 - Rollen aus Gruppen stehen im Profil und in der Benutzerverwaltung als
   „über Gruppe“ – sie gelten bis zum Ende der Sitzung über SSO. Was sichtbar
   ist, regeln weiter die Freigaben hier.
-- Nach dem **Abmelden** einer Sitzung über SSO bietet eine Zwischenseite
+- Nach dem **Abmelden** einer Sitzung über SSO – oder einer Sitzung, in der
+  über Authentik bestätigt oder verbunden wurde – bietet eine Zwischenseite
   *Auch bei Authentik abmelden* an – auf geteilten Tablets wichtig.
 - Wer unbekannt ist, landet als **Anmeldeanfrage** unter *System →
   Anmeldung (SSO)*; die Verwaltung verknüpft sie mit einem Konto oder legt
   eines an.
 - In der **Benutzerverwaltung** zeigt die Spalte *Anmeldung*, ob ein Konto
-  verknüpft ist und wann es zuletzt über SSO kam; dort lässt es sich lösen,
-  seine SSO-Sitzungen beenden und auf „nur über SSO“ stellen.
+  verknüpft ist (und unter welchem Namen dort); wann es zuletzt über SSO
+  kam, steht im Formular des Kontos. Dort lässt es sich lösen, seine
+  SSO-Sitzungen beenden und auf „nur über SSO“ stellen.

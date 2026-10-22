@@ -327,17 +327,21 @@ final class BenutzerService
             return ['ok' => false, 'message' => 'Das eigene Konto lässt sich nicht deaktivieren.'];
         }
         // Nur SSO: den letzten Notzugang nicht deaktivieren, nicht auf nur_sso
-        // stellen, ihm nicht den Zeitraum und nicht „*“ nehmen.
+        // stellen, ihm nicht den Zeitraum und nicht „*“ nehmen – auch nicht
+        // auf Termin: kein Enddatum am Konto, „*“ aus einer Rolle ohne Ende
+        // (sonst verschwände er an jenem Tag still).
         if ($id && Schutz::letzterNotzugang($id)) {
             $danach = array_merge($vorher, $felder);
             $stern = false;
             foreach ($rollen as $rolleId => $zuweisung) {
                 if (is_array($zuweisung) && !empty($zuweisung['aktiv']) && in_array('*', self::rollenRechte((int) $rolleId), true)
-                    && Zeit::imFenster(time(), Zeit::ausEingabe((string) ($zuweisung['ab'] ?? '')), Zeit::ausEingabe((string) ($zuweisung['bis'] ?? ''), true))) {
+                    && Zeit::ausEingabe((string) ($zuweisung['bis'] ?? ''), true) === null
+                    && Zeit::imFenster(time(), Zeit::ausEingabe((string) ($zuweisung['ab'] ?? '')), null)) {
                     $stern = true;
                 }
             }
-            if ((int) $danach['is_active'] !== 1 || (int) $danach['nur_sso'] === 1 || Auth::zugangSperre($danach) !== null || !$stern) {
+            if ((int) $danach['is_active'] !== 1 || (int) $danach['nur_sso'] === 1 || Auth::zugangSperre($danach) !== null
+                || Zeit::ts($danach['gueltig_bis'] === null ? null : (string) $danach['gueltig_bis']) !== null || !$stern) {
                 return ['ok' => false, 'message' => Schutz::T_LETZTER_NOTZUGANG];
             }
         }

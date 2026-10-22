@@ -15,12 +15,14 @@ declare(strict_types=1);
  *   3. Ablauf Start → Anbieter → Rückruf → Ziel; no-store, no-referrer,
  *      neue Sitzungs-ID.
  *   4. Derselbe Rückruf zweimal; ein Rückruf aus einer anderen Dose
- *      (Login-CSRF) meldet niemanden an.
+ *      (Login-CSRF) meldet niemanden an; HEAD auf Start und Rückruf
+ *      verbraucht nichts (auch nicht auf Verbinden, Bestätigen, /abgemeldet).
  *   5. Abmelden mit SSO: /abgemeldet mit Link zum Abmelden beim Anbieter
  *      (id_token_hint, Rücksprung), einmal; danach prompt=login.
- *   6. Verbinden im Profil: nur von dieser Seite (Sec-Fetch-Site), danach
+ *   6. Verbinden im Profil: erst das Kennwort (einmal, fünf Minuten, Bremse
+ *      nach fünf falschen), nur von dieser Seite (Sec-Fetch-Site), danach
  *      per SSO angemeldet; eine zweite Verknüpfung derselben Identität geht
- *      nicht; Lösen im Profil.
+ *      nicht; Abmelden danach wie aus einer SSO-Sitzung; Lösen im Profil.
  *   7. Anmeldeanfrage: unbekannte Person → Anfrage → freischalten → Anmeldung.
  *   8. Einstellungsseite: Rechte, Secret nie im HTML, „Prüfen“, ohne Token
  *      ändert keine neue Route etwas; Lösen und Sitzungen beenden in der
@@ -28,7 +30,8 @@ declare(strict_types=1);
  *      Formular abgelehnt.
  *   9. Nur SSO: einschalten aus einer SSO-Sitzung (Eintippen), danach endet
  *      eine Kennwort-Sitzung eines verknüpften Kontos, seine Kennwort-
- *      Anmeldung wird abgelehnt, der Notzugang meldet sich mit Hinweis an.
+ *      Anmeldung wird abgelehnt, der Notzugang meldet sich mit Hinweis an;
+ *      im Profil weder Lösen noch Kennwort ändern.
  *  10. Kundenmodus (Gerät gesperrt) eines Prüfers „nur über SSO“: kein
  *      Kennwortfeld, Link zum Entsperren; Kennwort zählt nicht; nicht neu
  *      angemeldet und andere Person → bleibt gesperrt; dieselbe Identität →
@@ -122,6 +125,8 @@ function browser(string $url, string $dose, string $methode = 'GET', array $feld
     if ($methode === 'POST') {
         curl_setopt($c, CURLOPT_POST, true);
         curl_setopt($c, CURLOPT_POSTFIELDS, http_build_query($felder));
+    } elseif ($methode === 'HEAD') {
+        curl_setopt($c, CURLOPT_NOBODY, true);
     }
     $roh = (string) curl_exec($c);
     $status = (int) curl_getinfo($c, CURLINFO_RESPONSE_CODE);
@@ -279,8 +284,14 @@ $r = $senden($adminDose, '/system/sso/schalten', ['an' => '1'], '/system/sso');
 $frisch();
 pruefe($r['status'] === 302 && \App\Auth\Sso\Einstellungen::aktiv() && str_contains(browser('/system/sso', $adminDose)['text'], 'ist eingeschaltet'),
     '8: eingeschaltet (nach frischer Prüfung)');
+// Die Auswahl der Rolle beginnt leer – sonst stünde dort die erste Rolle (Administration) vorgewählt.
+pruefe(preg_match('#<select id="sso-rolle" name="ziel_id" required>\s*<option value="">Rolle wählen …</option>#u', browser('/system/sso', $adminDose)['text']) === 1,
+    '8: Gruppen → Rollen: die Auswahl beginnt mit „Rolle wählen …“');
 $gruppe = 'pm-planung-' . $kennung;
 $planungId = (int) Database::scalar("SELECT id FROM roles WHERE role_key = 'planung'");
+$r = $senden($adminDose, '/system/sso/zuordnung', ['gruppe' => 'pm-leer-' . $kennung, 'ziel_id' => ''], '/system/sso');
+pruefe($r['status'] === 302 && Database::scalar('SELECT id FROM sso_zuordnungen WHERE gruppe = ?', ['pm-leer-' . $kennung]) === false
+    && str_contains(browser('/system/sso', $adminDose)['text'], 'Diese Rolle gibt es nicht.'), '8: ohne gewählte Rolle → abgelehnt');
 $r = $senden($adminDose, '/system/sso/zuordnung', ['gruppe' => $gruppe, 'ziel_id' => (string) $planungId], '/system/sso');
 pruefe($r['status'] === 302 && Database::scalar('SELECT ziel_id FROM sso_zuordnungen WHERE gruppe = ?', [$gruppe]) !== false
     && str_contains(browser('/system/sso', $adminDose)['text'], '<code>' . $gruppe . '</code>'), '8: Gruppe → Rolle zugeordnet und in der Liste');
@@ -388,9 +399,24 @@ $r = browser($authX['ziel'], $x);
 pruefe($r['status'] === 302 && $r['ziel'] === '/login' && str_contains(browser('/login', $x)['text'], 'abgelaufen oder wurde schon benutzt')
     && browser('/dashboard', $x)['status'] === 302, '4: dieselbe Rückruf-Adresse erneut → /login mit Meldung');
 
+// HEAD verbraucht nichts (der Router behandelt HEAD wie GET): kein Vorgang beim
+// Start, der Rückruf bleibt für das GET danach gültig.
+$h = $dose();
+browser('/login', $h);
+$r = browser('/login/sso?next=/dashboard', $h, 'HEAD');
+pruefe($r['status'] === 302 && $r['ziel'] === '/login', '4: HEAD /login/sso → /login, kein Vorgang beim Anbieter');
+$authH = browser(browser('/login/sso?next=/dashboard', $h)['ziel'], $h);
+$r = browser($authH['ziel'], $h, 'HEAD');
+pruefe($r['status'] === 302 && $r['ziel'] === '/login' && browser('/dashboard', $h)['status'] === 302, '4: HEAD auf den Rückruf → /login, niemand angemeldet');
+$r = browser($authH['ziel'], $h);
+pruefe($r['status'] === 302 && $r['ziel'] === '/dashboard' && browser('/dashboard', $h)['status'] === 200, '4: … das GET danach meldet an (der Vorgang galt noch)');
+$abmelden($h);
+
 // ================================================================ 5. Abmelden mit SSO
 $r = $abmelden($planerDose);
 pruefe($r['status'] === 302 && $r['ziel'] === '/abgemeldet' && keks($planerDose, 'pm_sso_neu') === '1', '5: Abmelden einer SSO-Sitzung → /abgemeldet, pm_sso_neu');
+$r = browser('/abgemeldet', $planerDose, 'HEAD');
+pruefe($r['status'] === 302 && $r['ziel'] === '/login', '5: HEAD /abgemeldet → /login, der Hinweis bleibt');
 $ab = browser('/abgemeldet', $planerDose);
 $link = preg_match('#href="(' . preg_quote($idpBasis, '#') . '/application/o/pm-test/end-session/\?[^"]+)"#', $ab['text'], $m) === 1 ? html_entity_decode($m[1], ENT_QUOTES) : '';
 pruefe($ab['status'] === 200 && $link !== '' && is_string(query($link)['id_token_hint'] ?? null) && (query($link)['client_id'] ?? null) === $client['id']
@@ -421,17 +447,41 @@ Settings::put(\App\Auth\Sso\Einstellungen::RUECKKEHR, '0');
 // ================================================================ 6. Verbinden
 $v = $kennwortAnmelden($kennung . '-verbinder', $pw);
 $profil = browser('/profil', $v);
-pruefe(str_contains($profil['text'], 'href="/login/sso/verbinden"') && str_contains($profil['text'], 'nicht mit Authentik verknüpft'), '6: Profil ohne Verknüpfung: Link „verbinden“');
+pruefe(str_contains($profil['text'], 'action="/profil/sso/verbinden"') && str_contains($profil['text'], 'id="sso-verbinden-kennwort"')
+    && !str_contains($profil['text'], 'href="/login/sso/verbinden"') && str_contains($profil['text'], 'nicht mit Authentik verknüpft'),
+    '6: Profil ohne Verknüpfung: erst das Kennwort (Formular), noch kein Link');
 gleich(phpMeldung($profil['text']), null, '13: /profil ohne Identität ohne PHP-Meldung');
 $n = count($protokoll('authorize'));
 $r = browser('/login/sso/verbinden', $v, 'GET', [], ['Sec-Fetch-Site: cross-site']);
 pruefe($r['status'] === 403 && $r['ziel'] === '' && !str_contains($r['text'], 'action="/logout"'), '6: Verbinden mit Sec-Fetch-Site: cross-site → 403');
 gleich(browser('/login/sso/verbinden', $dose(), 'GET', [], ['Sec-Fetch-Site: same-origin'])['ziel'], '/login?next=%2Fprofil', '6: Verbinden ohne Anmeldung → /login?next=/profil');
+// Eine offene Kennwort-Sitzung allein reicht nicht – erst das Kennwort.
+$r = browser('/login/sso/verbinden', $v, 'GET', [], ['Sec-Fetch-Site: same-origin']);
+pruefe($r['status'] === 302 && $r['ziel'] === '/profil' && str_contains(browser('/profil', $v)['text'], 'Erst im Profil das Kennwort bestätigen'),
+    '6: Verbinden ohne bestätigtes Kennwort → zurück ins Profil, kein Vorgang beim Anbieter');
+$r = $senden($v, '/profil/sso/verbinden', ['kennwort' => 'falsch-' . $pw]);
+$profil = browser('/profil', $v);
+pruefe($r['status'] === 302 && $r['ziel'] === '/profil' && str_contains($profil['text'], 'Das Kennwort stimmt nicht.')
+    && !str_contains($profil['text'], 'href="/login/sso/verbinden"'), '6: falsches Kennwort → abgelehnt, kein Link');
+gleich(json_decode((string) Database::scalar("SELECT details FROM audit_log WHERE action = 'auth.bestaetigung_fehlversuch' AND target_id = ? ORDER BY id DESC LIMIT 1",
+    [(string) $verbinder]), true), ['zweck' => 'verbinden'], '6: der Fehlversuch steht im Audit (Zweck verbinden)');
+$r = $senden($v, '/profil/sso/verbinden', ['kennwort' => $pw]);
+$profil = browser('/profil', $v);
+pruefe($r['status'] === 302 && $r['ziel'] === '/profil#sso' && str_contains($profil['text'], 'href="/login/sso/verbinden"')
+    && str_contains($profil['text'], 'Weiter zu Authentik') && !str_contains($profil['text'], 'id="sso-verbinden-kennwort"'),
+    '6: richtiges Kennwort → „Weiter zu Authentik“ (Link)');
+gleich(phpMeldung($profil['text']), null, '13: /profil mit bestätigtem Kennwort ohne PHP-Meldung');
+gleich(count($protokoll('authorize')), $n, '6: bis hier kein Vorgang beim Anbieter');
+// HEAD verbraucht nichts (der Router behandelt HEAD wie GET).
+$r = browser('/login/sso/verbinden', $v, 'HEAD', [], ['Sec-Fetch-Site: same-origin']);
+pruefe($r['status'] === 302 && $r['ziel'] === '/profil', '6: HEAD auf Verbinden → /profil, kein Vorgang');
 $idp->benutzer($person('sub-verbinder-' . $kennung, 'verbinder-dort'));
 $r = browser('/login/sso/verbinden', $v, 'GET', [], ['Sec-Fetch-Site: same-origin']);
 $q = query($r['ziel']);
 pruefe($r['status'] === 302 && str_starts_with($r['ziel'], $idpBasis . '/application/o/authorize/?') && ($q['prompt'] ?? null) === 'login' && ($q['max_age'] ?? null) === '0',
-    '6: Verbinden mit same-origin → Anbieter mit prompt=login und max_age=0');
+    '6: Verbinden mit same-origin (nach dem HEAD noch bestätigt) → Anbieter mit prompt=login und max_age=0');
+$r2 = browser('/login/sso/verbinden', $v, 'GET', [], ['Sec-Fetch-Site: same-origin']);
+pruefe($r2['status'] === 302 && $r2['ziel'] === '/profil', '6: die Bestätigung gilt einmal – ein zweiter Start → zurück ins Profil');
 $auth = browser($r['ziel'], $v);
 $rueck = browser($auth['ziel'], $v);
 $profil = browser('/profil', $v);
@@ -441,12 +491,25 @@ pruefe(!str_contains($profil['text'], 'angemeldet über Authentik') && str_conta
 gleich(phpMeldung($profil['text']), null, '13: /profil mit Identität ohne PHP-Meldung');
 gleich((string) (Konten::identitaet($verbinder)['weg'] ?? ''), 'profil', '6: Verknüpfung mit Weg „profil“');
 $z = $kennwortAnmelden($kennung . '-erika', $pw);
+$senden($z, '/profil/sso/verbinden', ['kennwort' => $pw]);
 $r = browser('/login/sso/verbinden', $z);
 $rueck = browser(browser($r['ziel'], $z)['ziel'], $z);
 pruefe($rueck['ziel'] === '/profil' && str_contains(browser('/profil', $z)['text'], 'schon mit einem anderen Konto verknüpft') && Konten::identitaet($erika) === null,
     '6: ein zweites Konto mit derselben Identität → „schon verknüpft“');
+// Fünf falsche Kennwörter bremsen das Verbinden dieses Kontos – auch das richtige gilt dann nicht.
+for ($i = 0; $i < 5; $i++) {
+    $senden($z, '/profil/sso/verbinden', ['kennwort' => 'falsch-' . $i . $pw]);
+}
+$senden($z, '/profil/sso/verbinden', ['kennwort' => $pw]);
+$profil = browser('/profil', $z);
+pruefe(str_contains($profil['text'], 'Zu viele falsche Kennwörter') && !str_contains($profil['text'], 'href="/login/sso/verbinden"'),
+    '6: nach fünf falschen Kennwörtern gebremst, auch mit dem richtigen kein Link');
 $abmelden($z);
-$abmelden($v);
+// Die Kennwort-Sitzung hat sich beim Verbinden bei Authentik angemeldet: Abmelden wie nach einer SSO-Sitzung.
+$r = $abmelden($v);
+pruefe($r['status'] === 302 && $r['ziel'] === '/abgemeldet' && keks($v, 'pm_sso_neu') === '1',
+    '6: Abmelden nach dem Verbinden (Kennwort-Sitzung) → /abgemeldet, pm_sso_neu');
+pruefe(str_contains(browser('/abgemeldet', $v)['text'], 'Auch bei Authentik abmelden'), '6: … mit dem Link zum Abmelden bei Authentik');
 $v = $dose();
 [, , $rueck] = $ssoAnmelden($v, '/profil');
 $profil = browser('/profil', $v);
@@ -569,6 +632,20 @@ pruefe(!str_contains(browser('/dashboard', $chefDose)['text'], 'class="notzugang
 gleich(json_decode((string) Database::scalar("SELECT details FROM audit_log WHERE action = 'auth.login' AND user_id = ? ORDER BY id DESC LIMIT 1", [$notfall]), true)['weg'] ?? null,
     'notzugang', '9: Audit auth.login mit Weg notzugang');
 $abmelden($nd);
+// Mit „nur SSO“ löst ein verknüpftes Konto die Verknüpfung nicht selbst und
+// ändert kein Kennwort – sonst meldete es sich danach wieder mit dem alten an.
+$hash = (string) Database::scalar('SELECT password_hash FROM users WHERE id = ?', [$chef]);
+$profil = browser('/profil', $chefDose);
+pruefe($profil['status'] === 200 && !str_contains($profil['text'], 'Verknüpfung lösen') && !str_contains($profil['text'], 'Passwort ändern')
+    && !str_contains($profil['text'], 'name="current_password"'), '9: „nur SSO“: Profil ohne „Verknüpfung lösen“ und „Passwort ändern“');
+$r = $senden($chefDose, '/profil/sso/loesen');
+pruefe($r['status'] === 302 && $r['ziel'] === '/profil' && Konten::identitaet($chef) !== null
+    && str_contains(browser('/profil', $chefDose)['text'], 'lösen kann die Verknüpfung nur die Benutzerverwaltung'), '9: „nur SSO“: Lösen im Profil → abgelehnt, verknüpft');
+$neuesPw = 'Pruefung-' . bin2hex(random_bytes(5)) . '!B2';
+$r = $senden($chefDose, '/profil/passwort', ['current_password' => $pw, 'new_password' => $neuesPw, 'new_password_repeat' => $neuesPw]);
+pruefe($r['status'] === 302 && $r['ziel'] === '/profil' && (string) Database::scalar('SELECT password_hash FROM users WHERE id = ?', [$chef]) === $hash
+    && str_contains(browser('/profil', $chefDose)['text'], '<div class="flash error">Dieses Konto meldet sich nur über Authentik an.</div>'),
+    '9: „nur SSO“: Passwort ändern → abgelehnt, das Kennwort bleibt');
 $r = $senden($chefDose, '/system/sso/schutz', ['admins' => '1'], '/system/sso');
 pruefe($r['status'] === 302 && !$schalter(\App\Auth\Sso\Einstellungen::NUR_SSO) && $schalter(\App\Auth\Sso\Einstellungen::ADMINS), '9: „nur SSO“ wieder aus');
 $abmelden($chefDose);
@@ -679,6 +756,9 @@ foreach (['ohne Bestätigung' => [], 'mit dem Kennwort' => ['kennwort' => $pw]] 
     $r = $senden($sd, $anzeigen, $felder, '/system/schnittstelle');
     pruefe($r['status'] === 302 && !str_contains($r['text'], $tokenKlar), '11: „Anzeigen“ ' . $wie . ' → abgelehnt');
 }
+$n = count($protokoll('authorize'));
+$r = browser($tLink, $sd, 'HEAD', [], ['Sec-Fetch-Site: same-origin']);
+pruefe($r['status'] === 302 && $r['ziel'] === '/system/schnittstelle', '11: HEAD auf Bestätigen → zurück, kein Vorgang beim Anbieter');
 [, , $rueck] = $bestaetigen($sd, $tLink);
 $seite = browser('/system/schnittstelle', $sd);
 pruefe($rueck !== null && $rueck['ziel'] === '/system/schnittstelle' && str_contains($seite['text'], 'Token jetzt anzeigen') && !str_contains($seite['text'], $tokenKlar),
@@ -709,10 +789,17 @@ if (!\App\Auth\Sso\Kundenbereich::verfuegbar()) {
     pruefe(str_contains($seite['text'], 'id="kunden"') && str_contains($seite['text'], 'nur mit „Kunden pflegen“ änderbar')
         && str_contains($seite['text'], 'name="kunden" value="1" disabled>') && !str_contains($seite['text'], 'id="sso-kunde"'), '12: Kunden-Karte ohne kunden.manage nur lesend');
     $abmelden($svd);
+    // Kundenzugänge über Gruppen noch aus: die Karte auf der Kundenseite ohne leeren Abschnitt.
+    $seite = browser($kundenSeite, $adminDose);
+    $karte = (string) strstr((string) strstr($seite['text'], 'id="sso-gruppen"'), 'id="neuer-zugang"', true);
+    pruefe($seite['status'] === 200 && $karte !== '' && str_contains($karte, 'Kundenzugänge über Authentik sind aus')
+        && preg_match('#<div class="card-body">\s*</div>#', $karte) !== 1, '12: Kundenseite mit sso.kunden aus: Hinweis, kein leerer Abschnitt');
     // Administrator: einschalten, Kundengruppe auf der Kundenseite zuordnen
     $r = $senden($adminDose, '/system/sso/kunden', ['kunden' => '1'], '/system/sso');
     $frisch();
     pruefe($r['status'] === 302 && $r['ziel'] === '/system/sso#kunden' && $schalter(\App\Auth\Sso\Einstellungen::KUNDEN), '12: sso.kunden als Administrator an');
+    pruefe(preg_match('#<select id="sso-kunde" name="ziel_id" required>\s*<option value="">Kunde wählen …</option>#u', browser('/system/sso', $adminDose)['text']) === 1,
+        '12: Gruppen → Kunden: die Auswahl beginnt mit „Kunde wählen …“');
     $seite = browser($kundenSeite, $adminDose);
     pruefe($seite['status'] === 200 && str_contains($seite['text'], 'id="sso-gruppen"') && str_contains($seite['text'], 'name="art" value="kunde"')
         && str_contains($seite['text'], 'name="zurueck" value="kunde"'), '12: Kundenseite (Zugänge) mit Abschnitt „Anmeldung über Authentik“ und Formular');

@@ -390,7 +390,7 @@ Rollen auch aus **Gruppen beim Anmeldedienst** kommen:
 
 | Recht | erlaubt | ab Werk |
 |---|---|---|
-| „Anmeldung über SSO einrichten …“ (`sso.manage`) | *System → Anmeldung (SSO)*: Verbindung, Prüfen, Ein-/Ausschalten, Optionen; zusammen mit „Benutzer verwalten“ Gruppen → Rollen und Anmeldeanfragen (nur Rollen, die man selbst vergeben darf; nur Konten, die man verwalten darf); mit „Kunden pflegen“ die Kundengruppen. „Verwaltung per SSO“, zweiter Faktor und „nur SSO“ nur mit allen Rechten | nur Administration (`*`) |
+| „Anmeldung über SSO einrichten …“ (`sso.manage`) | *System → Anmeldung (SSO)*: Verbindung, Prüfen, Ein-/Ausschalten, Optionen (zu einem anderen Anmeldedienst umstellen, solange es Zuordnungen gibt, nur, wer jede davon selbst anlegen dürfte); zusammen mit „Benutzer verwalten“ Gruppen → Rollen und Anmeldeanfragen (nur Rollen, die man selbst vergeben darf; nur Konten, die man verwalten darf); mit „Kunden pflegen“ die Kundengruppen. „Verwaltung per SSO“, zweiter Faktor und „nur SSO“ nur mit allen Rechten | nur Administration (`*`) |
 
 Lösen, „Sitzungen beenden“ und „nur über SSO“ am Konto gehen in der
 Benutzerverwaltung mit „Benutzer verwalten“ – für Konten, die man verwalten

@@ -1188,9 +1188,11 @@ try {
         aufruf($basis, $dose, 'POST', '/logout', ['_token' => token(aufruf($basis, $dose, 'GET', '/profil')['text'])]);
     }
     // Anmeldung über SSO, solange sie aus ist: Start und Rückruf führen zur
-    // Anmeldung mit Meldung (no-store, no-referrer), HEAD verbraucht nichts,
-    // /abgemeldet ohne Hinweis führt zur Anmeldung. „Abgemeldet.“ kommt an
-    // (neue Sitzung nach dem Abmelden).
+    // Anmeldung mit Meldung (no-store, no-referrer), auch ein HEAD auf den
+    // Rückruf, /abgemeldet ohne Hinweis führt zur Anmeldung. „Abgemeldet.“
+    // kommt an (neue Sitzung nach dem Abmelden). Dass HEAD bei
+    // eingeschaltetem SSO nichts verbraucht (Start, Rückruf, Verbinden,
+    // Bestätigen, /abgemeldet), prüft tests/sso-web.php.
     $ohneSso = tempnam(sys_get_temp_dir(), 'pm-web-');
     $dosen[] = $ohneSso;
     $r = aufruf($basis, $ohneSso, 'GET', '/login/sso?next=/karte');

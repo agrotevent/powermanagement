@@ -55,8 +55,9 @@ Bezeichnungen wie in der englischen Oberfläche von Authentik (2025/2026).
    - **Redirect URIs:**
      - ein Eintrag *Strict* mit `https://pm.example.com/login/sso/rueckruf`
        (die Adresse steht zum Kopieren unter *System → Anmeldung (SSO)*).
-       Bleibt das Feld leer, merkt sich Authentik die erste benutzte Adresse.
-     - optional ein zweiter vom Typ *Logout* mit `https://pm.example.com/login`
+       Das Feld muss ausgefüllt sein – ohne Eintrag lehnt Authentik jede
+       Anmeldung ab (`redirect_uri_no_match`).
+     - optional ein zweiter vom Typ *Post Logout* mit `https://pm.example.com/login`
        für den Rücksprung nach dem Abmelden – dann hier „Rücksprung nach dem
        Abmelden ist eingetragen“ anhaken.
      - Das Feld *Logout URI* (Back-Channel) bleibt leer.
@@ -86,8 +87,9 @@ Bezeichnungen wie in der englischen Oberfläche von Authentik (2025/2026).
    Authentik einen zweiten Faktor meldet (`amr` = `mfa`). Eine Anmeldung nur
    mit Passkey meldet Authentik anders – sie zählt hier **nicht** als
    zweiter Faktor.
-5. **Issuer kopieren**: *Applications → Providers → PowerManagement →
-   OpenID Configuration Issuer*, etwa
+5. **Issuer kopieren**: *Applications → Providers → Provider for
+   PowerManagement* (so nennt der Assistent den Provider) *→ OpenID
+   Configuration Issuer*, etwa
    `https://auth.example.com/application/o/powermanagement/` – **mit** „/“ am
    Ende.
 6. **Proxy vor Authentik**: Er gibt `Host` und `X-Forwarded-Proto: https`
@@ -114,7 +116,11 @@ Bezeichnungen wie in der englischen Oberfläche von Authentik (2025/2026).
    - Karte **Verbindung**: Aussteller (Issuer), Client-ID, Client-Secret und
      die Beschriftung des Knopfs („Mit Authentik anmelden“). Das Secret liegt
      verschlüsselt und gilt nur für genau diesen Aussteller und diese
-     Client-ID; ändern sich die, ist es neu einzugeben.
+     Client-ID; ändern sich die, ist es neu einzugeben. Gibt es schon
+     Zuordnungen von Gruppen, stellt die Verbindung auf einen anderen
+     Anmeldedienst nur um, wer jede dieser Zuordnungen selbst anlegen dürfte
+     (sonst vergäbe der neue Anmeldedienst über sie Rollen, die man nicht
+     vergeben darf); die Kommandozeile ist davon frei.
    - **Verbindung prüfen**: holt die Discovery und die Schlüssel frisch und
      probiert den Client-Zugang mit einem erfundenen Code aus (Authentik
      antwortet dann „invalid_grant“ – das heißt: Client-ID und Secret
@@ -140,7 +146,7 @@ Bezeichnungen wie in der englischen Oberfläche von Authentik (2025/2026).
 | Gruppen-Claim | `groups` | oder `entitlements`, `roles` |
 | Pflichtgruppen | leer | Personal muss in mindestens einer sein; leer = keine Prüfung hier (dann in Authentik binden, wer hinein darf) |
 | Unbekannte automatisch anlegen | aus | siehe [Konten verbinden](#konten-verbinden) |
-| Rücksprung nach dem Abmelden eingetragen | aus | nur anhaken, wenn die *Logout*-Redirect-URI in Authentik steht |
+| Rücksprung nach dem Abmelden eingetragen | aus | nur anhaken, wenn die Redirect-URI vom Typ *Post Logout* in Authentik steht |
 | Konten ohne SSO-Anmeldung deaktivieren nach … Tagen | 0 (nie) | die Wartung deaktiviert Konten „nur über SSO“, die sich so lange nicht angemeldet haben |
 
 **Nur in `config/config.php`** (bestimmt, wohin das Secret geht – darum nie
@@ -171,9 +177,15 @@ jemandem gleich wählt), übernähme sonst ein Konto hier. Authentik setzt
 
 Drei Wege:
 
-1. **Selbst im Profil**: Wer mit Kennwort angemeldet ist, tippt unter
-   *Profil → Anmeldung über Authentik* auf **Mit Authentik verbinden** und
-   meldet sich dort einmal neu an. Danach geht die Anmeldung auch darüber.
+1. **Selbst im Profil**: Wer mit Kennwort angemeldet ist, gibt unter
+   *Profil → Anmeldung über Authentik* sein **Kennwort noch einmal** ein,
+   tippt auf **Mit Authentik verbinden**, dann (innerhalb von fünf Minuten)
+   auf **Weiter zu Authentik** und meldet sich dort einmal neu an. Danach
+   geht die Anmeldung auch darüber. Das Kennwort verlangt PowerManagement,
+   weil eine offene Sitzung allein nicht reicht: Wer an einem liegen
+   gelassenen Tablet säße, hängte sonst seine eigene Anmeldung bei Authentik
+   dauerhaft an das fremde Konto. Fünf falsche Kennwörter bremsen das
+   Verbinden dieses Kontos (wie die Anmeldung, `security.lockout_*`).
 2. **Anmeldeanfrage**: Meldet sich jemand an, den PowerManagement nicht
    kennt, steht dort „Für diese Anmeldung gibt es hier noch kein Konto …“,
    und unter *System → Anmeldung (SSO) → Anmeldeanfragen* erscheint eine
@@ -275,7 +287,7 @@ Diese Schalter (Karte **Schutz**) ändert nur, wer **alle Rechte** hat.
   „nur über SSO“ stellen. Einschalten geht nur:
   - aus einer Sitzung, die selbst über SSO angemeldet ist (es geht also),
   - mit „Verwaltung per SSO“ und einer erfolgreichen letzten Prüfung,
-  - mit mindestens einem **Notzugang**,
+  - mit mindestens einem **Notzugang** ohne Enddatum,
   - mit eingetipptem „nur SSO“.
 - **Notzugang** ist kein eigener Schalter, sondern abgeleitet: ein aktives
   Konto mit allen Rechten, das mit keiner Anmeldung verknüpft ist und nicht
@@ -288,7 +300,10 @@ Diese Schalter (Karte **Schutz**) ändert nur, wer **alle Rechte** hat.
   Nie verknüpfen, das Kennwort offline verwahren. Seine Anmeldung ist
   laut: Hinweis auf jeder Seite, Weg `notzugang` im Audit, ein Eintrag im
   Fehlerprotokoll. Den **letzten** Notzugang zu verknüpfen, zu
-  deaktivieren oder zu löschen wird abgelehnt, solange „nur SSO“ an ist.
+  deaktivieren, zu löschen, ihm alle Rechte zu nehmen oder ein Enddatum zu
+  geben (am Konto oder an seiner Rolle) wird abgelehnt, solange „nur SSO“
+  an ist. Als „letzter“ zählt er, solange es keinen anderen Notzugang
+  **ohne Enddatum** gibt – ein befristeter verschwindet an seinem Tag still.
 - **Notausgang**, wenn niemand mehr hereinkommt (Authentik weg, Notzugang
   verloren):
 
@@ -303,8 +318,10 @@ gibt es Notzugang und Notausgang.
 
 ## Abmelden
 
-- **Abmelden** beendet die Sitzung hier wie bisher. War sie über SSO,
-  kommt danach eine Zwischenseite: „Sie sind hier abgemeldet. Bei Authentik
+- **Abmelden** beendet die Sitzung hier wie bisher. War sie über SSO – oder
+  wurde in ihr über Authentik bestätigt oder verbunden (dann ist im Browser
+  ebenfalls eine Sitzung bei Authentik offen) –, kommt danach eine
+  Zwischenseite: „Sie sind hier abgemeldet. Bei Authentik
   sind Sie womöglich noch angemeldet“ – mit **Auch bei Authentik abmelden**
   (ein Link zum `end_session_endpoint` von Authentik, mit Rücksprung zur
   Anmeldeseite, wenn er eingetragen ist). Neu laden führt zur Anmeldeseite.
@@ -337,9 +354,10 @@ Sitzung:
 
 Eine Bestätigung gilt einmal und fünf Minuten lang, nur für diesen Zweck
 und dieses Konto. Für Verwaltungskonten gilt dieselbe Schranke wie bei der
-Anmeldung (nur mit „Verwaltung per SSO“). Fehlversuche stehen im Audit als
+Anmeldung (nur mit „Verwaltung per SSO“, mit der MFA-Pflicht nur mit
+zweitem Faktor). Fehlversuche stehen im Audit als
 `auth.bestaetigung_fehlversuch` mit dem Zweck (`kundenmodus:<id>`,
-`token:<id>`). Ignoriert der Anbieter die neue Anmeldung, wird nie still
+`token:<id>`, `verbinden` für ein falsches Kennwort beim Verbinden). Ignoriert der Anbieter die neue Anmeldung, wird nie still
 bestätigt („Der Anmeldedienst hat nicht neu angemeldet“).
 
 ## Kommandozeile
@@ -388,6 +406,7 @@ Secret.
 | Anmeldecode nicht angenommen (`token`) | Rückruf-Adresse nicht *Strict* eingetragen, Grant fehlt, Code zu alt | Adresse aus *System → Anmeldung (SSO)* kopieren, Grant *Authorization Code* erlauben |
 | Die Uhr … geht falsch (`exp`, `iat`, `nbf`) | Zeitabweichung über 60 s | Zeitsynchronisation (chrony auf dem Host) |
 | Das Anmeldetoken ist ungültig (`kid`, `signatur`) | Schlüssel in Authentik gewechselt | „Verbindung prüfen“ (lädt die Schlüssel neu) |
+| Das Anmeldetoken ist ungültig (`alg`) | Signing Key in Authentik auf eine andere Art gewechselt (RSA ↔ EC) – die gespeicherte Discovery kennt das Verfahren noch nicht | geht meist von selbst: die Discovery wird dann einmal neu geholt (frühestens alle 5 Minuten); sonst „Verbindung prüfen“ |
 | noch kein Konto (`kein_konto`, `name`) | unbekannt, Anlage aus oder Name hier vergeben | Anfrage freischalten |
 | Für PowerManagement fehlt die Gruppe (`pflichtgruppe`) | nicht in einer Pflichtgruppe | Gruppe in Authentik |
 | Verwaltungskonten melden sich mit Kennwort an (`verwaltung`) | „Verwaltung per SSO“ aus | Kennwort nutzen oder Schalter |
@@ -449,6 +468,6 @@ OIDC-Tokens für `/api`, HS256/EdDSA/ES384 und verschlüsselte ID-Tokens.
 
 | Skript | prüft |
 |---|---|
-| `tests/sso.php` | ID-Token (RS256/ES256, `iss`/`aud`/`exp`/`iat`/`nonce`, `alg`-Verwechslung, Schlüsselwechsel), Discovery und Secret-Probe, Einstellungen, Verknüpfung nur über `iss`+`sub` (auch Groß/Klein), Anfragen, automatische Konten, Gruppen → Rollen und Kunden, Prüfkette, Sitzung, nur SSO und Notzugang, Bestätigen, Bremse, keine Geheimnisse, Kommandozeile, Wartung, `verbinden_ueber`/`ca_datei` mit echtem TLS (eigene Instanz, OIDC-Attrappe) |
-| `tests/sso-web.php` | im Browser-Ablauf: Anmeldung, `state` einmalig, Login-CSRF, neue Sitzung, Abmelden mit `end_session`, Verbinden, Anfrage, Einstellungsseite, nur SSO, Bestätigen für Kundenmodus und Token, Kundenzugang (eigene Instanz, zwei PHP-Server) |
+| `tests/sso.php` | ID-Token (RS256/ES256, `iss`/`aud`/`exp`/`iat`/`nonce`, `alg`-Verwechslung, Schlüsselwechsel), Discovery und Secret-Probe, Einstellungen, Verknüpfung nur über `iss`+`sub` (auch Groß/Klein), Anfragen, automatische Konten, Gruppen → Rollen und Kunden, Prüfkette, Sitzung (auch Änderungen während des Wartens auf Authentik), nur SSO und Notzugang (auch Enddaten), Bestätigen (mit MFA-Pflicht), Bremse, keine Geheimnisse, Kommandozeile, Wartung, `verbinden_ueber`/`ca_datei` mit echtem TLS (eigene Instanz, OIDC-Attrappe) |
+| `tests/sso-web.php` | im Browser-Ablauf: Anmeldung, `state` einmalig, Login-CSRF, HEAD verbraucht nichts, neue Sitzung, Abmelden mit `end_session`, Verbinden (erst das Kennwort), Anfrage, Einstellungsseite, nur SSO, Bestätigen für Kundenmodus und Token, Kundenzugang (eigene Instanz, zwei PHP-Server) |
 | `tests/sitzung.php` | Rückruf, Start, „Prüfen“ und „Einschalten“ halten die Sitzung nicht, während sie auf den Anmeldedienst warten |

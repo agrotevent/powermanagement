@@ -109,6 +109,24 @@ final class IdToken
     }
 
     /**
+     * Nur `alg` aus dem Kopf – ungeprüft, ohne Signatur. Für die Frage, ob
+     * nach einer Ablehnung `alg` die Discovery neu geholt werden soll; null,
+     * wenn das Format nicht taugt.
+     */
+    public static function kopfAlg(#[\SensitiveParameter] string $jwt): ?string
+    {
+        if (strlen($jwt) > self::MAX_LAENGE || preg_match('/^([A-Za-z0-9_-]+)\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/', $jwt, $m) !== 1) {
+            return null;
+        }
+        try {
+            $alg = self::objekt(self::b64($m[1]))['alg'] ?? null;
+        } catch (SsoFehler) {
+            return null;
+        }
+        return is_string($alg) ? $alg : null;
+    }
+
+    /**
      * base64url streng: nur [A-Za-z0-9_-], ohne Auffüllung, Länge mod 4 ≠ 1
      * und kanonisch (wieder kodiert genau gleich) – sonst SsoFehler('format').
      */

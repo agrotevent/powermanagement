@@ -71,6 +71,32 @@ final class Anbieter
     }
 
     /**
+     * Die Discovery außer der Reihe frisch holen und speichern – wenn ein
+     * ID-Token mit einem Verfahren kommt, das der Zwischenspeicher nicht nennt
+     * (Schlüsselwechsel beim Anmeldedienst, etwa RSA → EC). Frühestens alle
+     * JWKS_NEU_FRUEHESTENS Sekunden, global (wie das JWKS): Viele Tokens mit
+     * fremdem alg lösen keine Flut von Abrufen aus – und ein alg, das wir nie
+     * annehmen, fragt der Aufrufer gar nicht erst nach. null: gedrosselt oder
+     * der Anmeldedienst antwortet nicht brauchbar (der Zwischenspeicher bleibt).
+     */
+    public static function discoveryAuffrischen(): ?array
+    {
+        $jetzt = Einstellungen::jetzt();
+        $zuletzt = (string) Settings::get(Einstellungen::DISCOVERY_NEU_AM, '');
+        if (ctype_digit($zuletzt) && $jetzt - (int) $zuletzt < self::JWKS_NEU_FRUEHESTENS && $jetzt >= (int) $zuletzt) {
+            Logger::info('sso', ['schritt' => 'discovery', 'grund' => 'alg unbekannt, neu holen gedrosselt']);
+            return null;
+        }
+        Settings::put(Einstellungen::DISCOVERY_NEU_AM, (string) $jetzt);
+        try {
+            return self::discovery(true);
+        } catch (SsoFehler $e) {
+            Logger::info('sso', ['schritt' => 'discovery', 'grund' => 'alg unbekannt, neu holen: ' . $e->pruefung]);
+            return null;
+        }
+    }
+
+    /**
      * Reine Prüfung einer Discovery-Antwort – wirft SsoFehler('discovery', …).
      *
      * @return array{issuer:string,authorization_endpoint:string,token_endpoint:string,userinfo_endpoint:?string,jwks_uri:string,end_session_endpoint:?string,algs:list<string>,auth_methode:'basic'|'post',s256:?bool}

@@ -4,6 +4,7 @@ declare(strict_types=1);
 namespace App\Auth\Sso;
 
 use App\Auth\Auth;
+use App\Auth\Zugriff;
 use App\Berichte\BerichtService;
 use App\Berichte\Kundenmodus;
 use App\Support\Audit;
@@ -13,6 +14,7 @@ use App\Support\Database;
 use App\Support\Logger;
 use App\Support\Response;
 use App\Support\Session;
+use App\Support\Settings;
 use App\Support\Zeit;
 
 /**
@@ -30,7 +32,11 @@ use App\Support\Zeit;
  * JWKS, Userinfo – je bis 8 s): Die Sitzung wird dafür geschlossen und
  * danach wieder geöffnet (Session::ohneSperre). Hat sich in der Zwischenzeit
  * jemand in einem anderen Reiter an- oder abgemeldet, ist sie danach zu –
- * dann wird nichts geschrieben, auch kein Konto (Code `sitzung`).
+ * dann wird nichts geschrieben, auch kein Konto (Code `sitzung`). Danach
+ * werden Einrichtung (frisch aus der Datenbank, nicht aus dem
+ * Zwischenspeicher dieser Anfrage) und Sitzung noch einmal geprüft: Wer
+ * während des Wartens SSO ausschaltet oder die Verbindung ändert, bekommt
+ * keine Rolle und kein Konto mehr zurück (Code `einrichtung`).
  *
  * Zwecke: anmelden; verbinden (Profil, angemeldet mit Kennwort);
  * kundenmodus:<Bericht> und token:<Zugang> (Bestätigung mit frischer
@@ -52,11 +58,21 @@ final class Anmeldung
     public const HINWEIS = 'sso_hinweis';
     /** Sitzung: frische Bestätigung {zweck, user_id, am}. */
     public const BESTAETIGT = 'sso_bestaetigt';
+    /**
+     * Sitzung: In diesem Browser ist jemand beim Anmeldedienst angemeldet –
+     * auch in einer Kennwort-Sitzung nach Bestätigen oder Verbinden. Beim
+     * Abmelden hier gibt es dann prompt=login für die nächste SSO-Anmeldung
+     * (pm_sso_neu) und den Link zum Abmelden dort (geteilte Tablets).
+     */
+    public const BEIM_ANBIETER = 'sso_idp';
+    /** Sitzung: das Kennwort für „Verbinden“ eben bestätigt {user_id, am} – einmal, höchstens BESTAETIGT_SEKUNDEN. */
+    public const VERBINDEN = 'sso_verbinden';
 
     public const T_STATE = 'Die Anmeldung ist abgelaufen oder wurde schon benutzt – bitte erneut anmelden.';
     public const T_INTERN = 'Die Anmeldung über SSO ist fehlgeschlagen – Details im Log.';
     public const T_SITZUNG = 'Während der Anmeldung hat sich in einem anderen Fenster jemand an- oder abgemeldet – bitte erneut anmelden.';
     public const T_NICHT_EINGERICHTET = 'Die Anmeldung über SSO ist nicht eingerichtet.';
+    public const T_GEAENDERT = 'Die Anmeldung über SSO wurde inzwischen geändert oder ausgeschaltet – bitte erneut anmelden.';
     public const T_GEBREMST = 'Zu viele Fehlversuche – das Entsperren ist noch gebremst.';
 
     private const COOKIE_NEU_SEKUNDEN = 43200;
@@ -163,9 +179,7 @@ final class Anmeldung
                 return ['ok' => false, 'code' => 'gebremst', 'zweck' => self::basis($v), 'ziel' => self::fehlerZiel($v), 'meldung' => $gebremst];
             }
             // 3. Einrichtung unverändert.
-            if (!Einstellungen::aktiv() || !hash_equals(Einstellungen::marke(), (string) $v['marke'])) {
-                throw new SsoFehler('einrichtung', 'Die Anmeldung über SSO wurde inzwischen geändert oder ausgeschaltet – bitte erneut anmelden.');
-            }
+            self::einrichtungPruefen($v);
             // 4. Zweck passt zur Sitzung.
             self::zweckPruefen($v);
             // 5. iss im Rückruf (RFC 9207) – Authentik schickt ihn nicht.
@@ -185,6 +199,16 @@ final class Anmeldung
             }
             // 8.–10. Einlösen, ID-Token, Userinfo – ohne Sitzungssperre.
             [$claims, $idToken] = self::ohneSitzungssperre(static fn (): array => self::tokenHolen($code, $v));
+            // Gewartet (bis zu 8 s je Anfrage): Was andere Anfragen inzwischen
+            // geändert haben, gilt – SSO aus, eine neue Verbindung (Marke),
+            // „Verwaltung per SSO“ aus, das Konto deaktiviert. Die Zwischenspeicher
+            // dieser Anfrage kennen nur den Stand von vorher; also frisch lesen
+            // und Schritt 3 und 4 noch einmal, bevor irgendetwas geschrieben wird.
+            Settings::vergessen();
+            Auth::vergessen();
+            Zugriff::vergessen();
+            self::einrichtungPruefen($v);
+            self::zweckPruefen($v);
             // 11. Gruppen.
             $gruppen = Konten::gruppen($claims);
             $name = Konten::nameDort($claims);
@@ -192,8 +216,8 @@ final class Anmeldung
             // 12. Nach Zweck.
             return match (self::basis($v)) {
                 'anmelden'  => self::anmelden($v, $claims, $gruppen, $idToken, $ip),
-                'verbinden' => self::verbinden($claims, $gruppen),
-                default     => self::bestaetigen($v, $claims),
+                'verbinden' => self::verbinden($claims, $gruppen, $idToken),
+                default     => self::bestaetigen($v, $claims, $idToken),
             };
         } catch (SsoFehler $e) {
             return self::fehlgeschlagen($e, $v, $ip, $claims, $gruppen);
@@ -309,6 +333,67 @@ final class Anmeldung
     }
 
     /**
+     * Verbinden vorbereiten (POST im Profil): das Kennwort des angemeldeten
+     * Kontos noch einmal. Eine neue Art der Anmeldung an ein Konto zu hängen
+     * ist mindestens so heikel wie ein Token anzuzeigen – sonst hängte, wer
+     * eine offene Kennwort-Sitzung hat (Tablet, gestohlenes Cookie), seine
+     * eigene Identität beim Anmeldedienst dauerhaft an fremde Konten; die
+     * Verknüpfung überlebte jeden Kennwortwechsel. prompt=login beweist nur,
+     * dass sich dort irgendwer frisch angemeldet hat.
+     *
+     * Gelingt es, merkt sich die Sitzung das (VERBINDEN, höchstens
+     * BESTAETIGT_SEKUNDEN, nur dieses Konto); der Start (GET
+     * /login/sso/verbinden, ein Link wegen CSP form-action) verbraucht es.
+     * Ein falsches Kennwort zählt nicht gegen das Konto (wie
+     * Auth::bestaetigen), steht aber im Audit und bremst das Verbinden
+     * dieses Kontos nach `security.lockout_attempts` Fehlversuchen für
+     * `security.lockout_minutes`. null = vorbereitet, sonst die Meldung.
+     */
+    public static function verbindenVorbereiten(#[\SensitiveParameter] string $kennwort): ?string
+    {
+        $fehler = self::verbindenFehler();
+        if ($fehler !== null) {
+            return $fehler;
+        }
+        $user = (array) Auth::user();
+        $id = (int) $user['id'];
+        // Die Bremse rechnet wie die der Kennwort-Anmeldung mit der Uhr des Servers (die Zeiten im Audit).
+        $fenster = 60 * max(1, (int) Config::get('security.lockout_minutes', 15));
+        $versuche = array_column(Database::select(
+            "SELECT created_at FROM audit_log WHERE action = 'auth.bestaetigung_fehlversuch' AND target_type = 'user' AND target_id = ?
+             AND details LIKE ? AND created_at > ? ORDER BY created_at",
+            [(string) $id, '%"zweck":"verbinden"%', gmdate('c', time() - $fenster)]
+        ), 'created_at');
+        if (count($versuche) >= max(1, (int) Config::get('security.lockout_attempts', 5))) {
+            $min = max(1, (int) ceil(((int) Zeit::ts((string) $versuche[0]) + $fenster - time()) / 60));
+            return "Zu viele falsche Kennwörter – Verbinden geht in {$min} Minute(n) wieder.";
+        }
+        if ($kennwort === '' || !password_verify($kennwort, (string) ($user['password_hash'] ?? ''))) {
+            Audit::log('auth.bestaetigung_fehlversuch', 'user', (string) $id, ['zweck' => 'verbinden']);
+            return 'Das Kennwort stimmt nicht.';
+        }
+        Session::put(self::VERBINDEN, ['user_id' => $id, 'am' => Einstellungen::jetzt()]);
+        return null;
+    }
+
+    /**
+     * Hat das angemeldete Konto sein Kennwort für „Verbinden“ eben bestätigt
+     * (höchstens BESTAETIGT_SEKUNDEN)? $verbrauchen: danach weg.
+     */
+    public static function verbindenBestaetigt(bool $verbrauchen = false): bool
+    {
+        $b = Session::get(self::VERBINDEN);
+        $id = Auth::id();
+        $jetzt = Einstellungen::jetzt();
+        $am = is_array($b) ? (int) ($b['am'] ?? 0) : 0;
+        $ok = is_array($b) && $id !== null && (int) ($b['user_id'] ?? 0) === $id && $jetzt >= $am && $jetzt - $am <= self::BESTAETIGT_SEKUNDEN;
+        if ($verbrauchen || (is_array($b) && !$ok)) {
+            Session::forget(self::VERBINDEN);
+        }
+        return $ok;
+    }
+
+    /**
      * Darf das angemeldete Konto diesen Zweck jetzt über den Anmeldedienst
      * bestätigen (Step-up, §6.8)? null = ja, sonst die Meldung.
      *
@@ -377,7 +462,7 @@ final class Anmeldung
     /** @param list<string> $gruppen */
     private static function anmelden(#[\SensitiveParameter] array $v, array $claims, array $gruppen, #[\SensitiveParameter] string $idToken, string $ip): array
     {
-        $r = Konten::aufloesen($claims, $gruppen);
+        $r = Konten::aufloesen($claims, $gruppen, (string) $v['marke']);
         $user = $r['user'];
         Auth::sitzungStarten($user, $ip, 'sso', [
             'ident'     => (int) $r['identitaet']['id'],
@@ -386,10 +471,7 @@ final class Anmeldung
             'name'      => Konten::nameDort($claims),
             'mfa'       => Schutz::mitZweitemFaktor($claims),
         ]);
-        // Nur für das Abmelden beim Anmeldedienst (id_token_hint) – und nur, wenn er es anbietet.
-        if ((Anbieter::discoveryGespeichert()['end_session_endpoint'] ?? null) !== null) {
-            Session::put(self::HINWEIS, $idToken);
-        }
+        self::beimAnbieterMerken($idToken);
         self::cookieNeuLoeschen();
         Logger::info('sso', ['schritt' => 'rueckruf', 'grund' => 'ok', 'zweck' => 'anmelden']);
         $ziel = Kundenbereich::istKundenzugang($user) ? Auth::landingPath() : ($v['ziel'] ?? null);
@@ -399,7 +481,7 @@ final class Anmeldung
     }
 
     /** Zweck „verbinden“: das angemeldete Konto (Kennwort-Sitzung) mit dieser Identität verknüpfen. @param list<string> $gruppen */
-    private static function verbinden(array $claims, array $gruppen): array
+    private static function verbinden(array $claims, array $gruppen, #[\SensitiveParameter] string $idToken): array
     {
         $iss = Einstellungen::aussteller();
         $sub = (string) $claims['sub'];
@@ -415,6 +497,7 @@ final class Anmeldung
             Database::execute('DELETE FROM sso_anfragen WHERE schluessel = ?', [Konten::schluessel($iss, $sub)]);
         });
         Audit::log('sso.verknuepft', 'user', (string) $userId, ['user_id' => $userId, 'weg' => 'profil']);
+        self::beimAnbieterMerken($idToken);
         Logger::info('sso', ['schritt' => 'rueckruf', 'grund' => 'ok', 'zweck' => 'verbinden']);
         return ['ok' => true, 'code' => 'ok', 'zweck' => 'verbinden', 'ziel' => '/profil', 'meldung' => 'Mit ' . Einstellungen::name() . ' verbunden.'];
     }
@@ -424,7 +507,7 @@ final class Anmeldung
      * angemeldeten Kontos, frisch angemeldet (auth_time, schon in tokenHolen
      * geprüft), dieselbe Schranke wie beim Anmelden (W7).
      */
-    private static function bestaetigen(#[\SensitiveParameter] array $v, array $claims): array
+    private static function bestaetigen(#[\SensitiveParameter] array $v, array $claims, #[\SensitiveParameter] string $idToken): array
     {
         $user = (array) Auth::user();
         $ident = Konten::identitaet((int) $user['id']);
@@ -438,6 +521,10 @@ final class Anmeldung
                 'kunden_aus' => Schutz::T_KUNDEN_AUS,
                 default      => Schutz::T_KUNDE_LOKAL,
             });
+        }
+        // Wie beim Anmelden: ein Verwaltungskonto mit MFA-Pflicht bestätigt nur mit zweitem Faktor.
+        if (Schutz::mfaFehlt($user, $claims)) {
+            throw new SsoFehler('mfa', Schutz::T_MFA);
         }
         [$art, $id] = explode(':', (string) $v['zweck'], 2);
         $id = (int) $id;
@@ -453,12 +540,14 @@ final class Anmeldung
             Kundenmodus::beenden();
             Session::regenerate();
             Csrf::erneuern();
+            self::beimAnbieterMerken($idToken);
             Logger::info('sso', ['schritt' => 'rueckruf', 'grund' => 'ok', 'zweck' => 'kundenmodus']);
             $b = Auth::can('berichte.view') ? BerichtService::find($id) : null;
             return ['ok' => true, 'code' => 'ok', 'zweck' => 'kundenmodus', 'meldung' => 'Kundenmodus beendet.',
                 'ziel' => $b !== null && BerichtService::sichtbar($b) ? '/berichte/' . $id : Auth::landingPath()];
         }
         Session::put(self::BESTAETIGT, ['zweck' => (string) $v['zweck'], 'user_id' => (int) $user['id'], 'am' => Einstellungen::jetzt()]);
+        self::beimAnbieterMerken($idToken);
         Logger::info('sso', ['schritt' => 'rueckruf', 'grund' => 'ok', 'zweck' => $art]);
         return ['ok' => true, 'code' => 'ok', 'zweck' => $art, 'ziel' => self::fehlerZiel($v), 'meldung' => 'Bestätigt.'];
     }
@@ -475,14 +564,34 @@ final class Anmeldung
     {
         $t = Anbieter::codeEinloesen($code, (string) $v['verifier']);
         $d = Anbieter::discovery();
-        $claims = IdToken::pruefen($t['id_token'], [
+        $soll = [
             'aussteller' => Einstellungen::aussteller(),
             'client_id'  => Einstellungen::clientId(),
             'algs'       => $d['algs'],
             'nonce'      => (string) $v['nonce'],
             'jetzt'      => Einstellungen::jetzt(),
             'auth_nach'  => $v['zweck'] === 'anmelden' ? null : (int) $v['at'] - IdToken::SPIEL,
-        ], Anbieter::schluessel(...));
+        ];
+        try {
+            $claims = IdToken::pruefen($t['id_token'], $soll, Anbieter::schluessel(...));
+        } catch (SsoFehler $e) {
+            // Signiert der Anmeldedienst mit einem Verfahren, das wir annehmen,
+            // das die gespeicherte Discovery (bis 24 h alt) aber nicht nennt,
+            // wurde dort wohl der Schlüssel gewechselt (Signing Key RSA → EC).
+            // Dann die Discovery einmal neu – gedrosselt wie das JWKS – und mit
+            // ihren Verfahren noch einmal prüfen; sonst bliebe die Anmeldung
+            // bis zum Ablauf des Zwischenspeichers gesperrt.
+            $alg = IdToken::kopfAlg($t['id_token']);
+            if ($e->pruefung !== 'alg' || $alg === null || !in_array($alg, Anbieter::ALGS, true) || in_array($alg, $d['algs'], true)) {
+                throw $e;
+            }
+            $neu = Anbieter::discoveryAuffrischen();
+            if ($neu === null || !in_array($alg, $neu['algs'], true)) {
+                throw $e;
+            }
+            $d = $neu;
+            $claims = IdToken::pruefen($t['id_token'], ['algs' => $d['algs']] + $soll, Anbieter::schluessel(...));
+        }
         $profil = array_merge(self::PROFIL, [Einstellungen::gruppenClaim()]);
         $fehlt = array_filter(['preferred_username', 'name', 'email', Einstellungen::gruppenClaim()],
             static fn (string $k): bool => !array_key_exists($k, $claims)) !== [];
@@ -499,6 +608,28 @@ final class Anmeldung
             }
         }
         return [$claims, $t['id_token']];
+    }
+
+    /**
+     * Ein Vorgang ist gelungen: In diesem Browser ist jetzt jemand beim
+     * Anmeldedienst angemeldet (BEIM_ANBIETER) – und das ID-Token bleibt als
+     * id_token_hint für das Abmelden dort, wenn der Anmeldedienst es anbietet.
+     * Sonst nirgends.
+     */
+    private static function beimAnbieterMerken(#[\SensitiveParameter] string $idToken): void
+    {
+        Session::put(self::BEIM_ANBIETER, true);
+        if ((Anbieter::discoveryGespeichert()['end_session_endpoint'] ?? null) !== null) {
+            Session::put(self::HINWEIS, $idToken);
+        }
+    }
+
+    /** SSO an und dieselbe Einrichtung (Marke) wie beim Start – sonst SsoFehler('einrichtung'). */
+    private static function einrichtungPruefen(#[\SensitiveParameter] array $v): void
+    {
+        if (!Einstellungen::unveraendert((string) ($v['marke'] ?? ''))) {
+            throw new SsoFehler('einrichtung', self::T_GEAENDERT);
+        }
     }
 
     /** Zweck „anmelden“ nur abgemeldet; die anderen nur für das Konto, das sie gestartet hat; im Kundenmodus nur dessen Entsperren. */

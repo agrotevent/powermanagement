@@ -142,6 +142,20 @@ final class Schutz
         }
     }
 
+    /**
+     * Fehlt für dieses Konto der zweite Faktor, den `sso.mfa_verwaltung`
+     * verlangt? Für die Bestätigung (Step-up, S12: dieselbe Schranke wie beim
+     * Anmelden) – ein Verwaltungskonto zeigte sonst ein Token der Schnittstelle
+     * nach einer Anmeldung dort nur mit Kennwort. Die Rechte jetzt (von Hand
+     * und aus Gruppen), wie in sitzungGilt().
+     */
+    public static function mfaFehlt(array $user, array $claims): bool
+    {
+        return Einstellungen::schalter(Einstellungen::MFA) && !Kundenbereich::istKundenzugang($user)
+            && (self::verwaltend(Auth::rechteVon((int) $user['id'])) || self::hatSystemrolle((int) $user['id']))
+            && !self::mitZweitemFaktor($claims);
+    }
+
     /** Hat die Anmeldung beim Anmeldedienst einen zweiten Faktor (amr ∩ MFA)? */
     public static function mitZweitemFaktor(array $claims): bool
     {
@@ -226,6 +240,29 @@ final class Schutz
         return in_array('*', Auth::rechteVon((int) $user['id']), true);
     }
 
+    /**
+     * Ein Notzugang, der bleibt: wirksam (notzugangWirksam), das Konto ohne
+     * Ende (gueltig_bis) und „*“ aus einer Rolle von Hand ohne Ende. Ein
+     * Notzugang mit Enddatum verschwindet an diesem Tag still – danach käme
+     * bei „nur SSO“ niemand mehr ohne den Anmeldedienst herein.
+     */
+    public static function notzugangDauerhaft(array $user): bool
+    {
+        if (!self::notzugangWirksam($user) || Zeit::ts(isset($user['gueltig_bis']) ? (string) $user['gueltig_bis'] : null) !== null) {
+            return false;
+        }
+        foreach (Database::select(
+            "SELECT role_id, gueltig_ab, gueltig_bis FROM user_roles WHERE user_id = ? AND quelle = 'hand'", [(int) $user['id']]
+        ) as $z) {
+            if (Zeit::ts($z['gueltig_bis'] === null ? null : (string) $z['gueltig_bis']) === null
+                && Zeit::imFenster(time(), $z['gueltig_ab'] === null ? null : (string) $z['gueltig_ab'], null)
+                && in_array('*', BenutzerService::rollenRechte((int) $z['role_id']), true)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     /** @return list<array<string,mixed>> alle wirksamen Notzugänge */
     public static function notzugaenge(): array
     {
@@ -236,10 +273,19 @@ final class Schutz
         return array_values(array_filter($konten, [self::class, 'notzugangWirksam']));
     }
 
+    /** @return list<array<string,mixed>> die Notzugänge, die bleiben (ohne Enddatum, notzugangDauerhaft) */
+    public static function notzugaengeDauerhaft(): array
+    {
+        return array_values(array_filter(self::notzugaenge(), [self::class, 'notzugangDauerhaft']));
+    }
+
     /**
      * Nähme eine Änderung an diesem Konto (verknüpfen, deaktivieren, löschen,
-     * „*“ nehmen, nur_sso setzen) den letzten Notzugang, während „nur SSO“
-     * eingeschaltet ist?
+     * „*“ nehmen, nur_sso setzen, ein Enddatum) den letzten Notzugang, während
+     * „nur SSO“ eingeschaltet ist? Zählt nur, was bleibt: Ist dieses Konto ein
+     * Notzugang und gibt es außer ihm keinen dauerhaften, ist es der letzte –
+     * zwei Notzugänge mit Enddatum lassen sich also nicht nacheinander
+     * auslaufen lassen.
      */
     public static function letzterNotzugang(int $userId): bool
     {
@@ -250,7 +296,7 @@ final class Schutz
         if ($user === null || !self::notzugangWirksam($user)) {
             return false;
         }
-        foreach (self::notzugaenge() as $n) {
+        foreach (self::notzugaengeDauerhaft() as $n) {
             if ((int) $n['id'] !== $userId) {
                 return false;
             }
@@ -271,7 +317,7 @@ final class Schutz
     {
         $admins ??= Einstellungen::schalter(Einstellungen::ADMINS);
         $name = Einstellungen::name();
-        $notzugaenge = count(self::notzugaenge());
+        $notzugaenge = count(self::notzugaengeDauerhaft());
         return [
             ['ok' => Auth::can('*'), 'text' => 'Du hast alle Rechte.',
                 'fehlt' => 'nur wer alle Rechte hat, schaltet „nur SSO“ ein.'],
@@ -282,7 +328,7 @@ final class Schutz
             ['ok' => $admins, 'text' => '„Verwaltung per SSO“ ist an.',
                 'fehlt' => 'erst „Verwaltung per SSO“ einschalten.'],
             ['ok' => $notzugaenge > 0, 'text' => $notzugaenge > 0 ? 'Notzugang vorhanden (' . $notzugaenge . ').' : 'Notzugang vorhanden.',
-                'fehlt' => 'es gibt keinen Notzugang – erst ein aktives Konto mit allen Rechten ohne Verknüpfung anlegen (bin/power user:add notfall admin) und das Kennwort sicher verwahren.'],
+                'fehlt' => 'es gibt keinen Notzugang – erst ein aktives Konto mit allen Rechten ohne Verknüpfung und ohne Enddatum anlegen (bin/power user:add notfall admin) und das Kennwort sicher verwahren.'],
         ];
     }
 

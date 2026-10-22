@@ -44,6 +44,8 @@ final class Konten
     public const T_NAME = 'Für diese Anmeldung gibt es hier noch kein Konto, und der Benutzername beim Anmeldedienst ist hier schon vergeben oder ungültig. Die Verwaltung kann sie unter ‚Anmeldung (SSO)‘ freischalten – bitte Bescheid geben.';
     public const T_VERKNUEPFT = 'Diese Anmeldung ist schon mit einem anderen Konto verknüpft.';
     public const T_KUNDE_NIE = 'Kundenzugänge werden nie mit einer SSO-Anmeldung verknüpft – sie melden sich mit Benutzername und Kennwort an.';
+    public const T_KUNDEN_PFLEGEN = 'Gruppen Kunden zuordnen darf nur, wer Kunden pflegen darf.';
+    public const T_ALLE_RECHTE = 'Die Rolle mit allen Rechten ordnet nur zu, wer selbst alle Rechte hat – und erst mit ‚Verwaltung per SSO‘.';
     public const T_ANFRAGE_KUNDE = 'Diese Anmeldung ist beim Anmeldedienst in einer Kundengruppe – sie wird bei der nächsten Anmeldung selbst ein Kundenzugang, nie ein Konto des Personals. Ist ihr Benutzername hier schon vergeben, ihn beim Anmeldedienst ändern oder hier freimachen.';
 
     // ------------------------------------------------------------ Identitäten
@@ -188,19 +190,29 @@ final class Konten
      * Identität: Der zweite scheitert an UNIQUE (schluessel) und findet sie
      * beim einmaligen Wiederholen.
      *
+     * $marke (die des Vorgangs): Zu Beginn der Transaktion noch einmal frisch
+     * prüfen, dass SSO an und die Einrichtung dieselbe ist – sonst wird
+     * nichts angelegt und keine Rolle geschrieben (SsoFehler einrichtung).
+     *
      * @param list<string> $gruppen
      * @return array{user:array, identitaet:array, angelegt:bool, rollen:array{hinzu:list<int>,weg:list<int>}}
      * @throws SsoFehler
      */
-    public static function aufloesen(array $claims, array $gruppen): array
+    public static function aufloesen(array $claims, array $gruppen, ?string $marke = null): array
     {
+        $jetzt = static function () use ($claims, $gruppen, $marke): array {
+            if ($marke !== null && !Einstellungen::unveraendert($marke)) {
+                throw new SsoFehler('einrichtung', Anmeldung::T_GEAENDERT, false, self::nameDort($claims));
+            }
+            return self::aufloesenJetzt($claims, $gruppen);
+        };
         try {
-            return Database::transaktion(static fn (): array => self::aufloesenJetzt($claims, $gruppen));
+            return Database::transaktion($jetzt);
         } catch (\PDOException $e) {
             if ((string) $e->getCode() !== '23000') {
                 throw $e;
             }
-            return Database::transaktion(static fn (): array => self::aufloesenJetzt($claims, $gruppen));
+            return Database::transaktion($jetzt);
         }
     }
 
@@ -407,6 +419,14 @@ final class Konten
         }
         foreach ($alle as $z) {
             if ((string) $z['gruppe'] !== $gruppe) {
+                // Dieselbe Gruppe in anderer Schreibweise für dasselbe Ziel: Der
+                // eindeutige Index (gruppe, art, ziel_id) vergleicht unter MariaDB
+                // ohne Groß/Klein – das Speichern scheiterte dort an ihm.
+                if ((string) $z['art'] === $art && (int) $z['ziel_id'] === $zielId
+                    && mb_strtolower((string) $z['gruppe']) === mb_strtolower($gruppe)) {
+                    return 'Diese Zuordnung gibt es schon in der Schreibweise „' . $z['gruppe'] . '“. Gruppennamen gelten hier mit Groß/Klein'
+                        . ' – heißt die Gruppe beim Anmeldedienst jetzt anders, die alte Zuordnung erst entfernen.';
+                }
                 continue;
             }
             if ((string) $z['art'] !== $art) {
@@ -424,13 +444,52 @@ final class Konten
                 return 'Kundengruppen gibt es erst mit „Kundenzugänge über Gruppen“.';
             }
             if (!Auth::can('kunden.manage')) {
-                return 'Gruppen Kunden zuordnen darf nur, wer Kunden pflegen darf.';
+                return self::T_KUNDEN_PFLEGEN;
             }
             if (Kundenbereich::kunde($zielId) === null) {
                 return 'Diesen Kunden gibt es nicht, oder er ist nicht aktiv.';
             }
-            // Jedes Gruppenmitglied bekommt einen Zugang dieses Kunden – wie ein
-            // Zugang von Hand nur von jemandem, der alles sieht, was der Kunde sieht.
+            return self::zuordnungRechtFehler('kunde', $zielId);
+        }
+        $rolle = Database::first('SELECT id, is_system FROM roles WHERE id = ?', [$zielId]);
+        if ($rolle === null) {
+            return 'Diese Rolle gibt es nicht.';
+        }
+        $fehler = self::zuordnungRechtFehler('rolle', $zielId);
+        if ($fehler !== null) {
+            return $fehler;
+        }
+        $rechte = BenutzerService::rollenRechte($zielId);
+        $admins = Einstellungen::schalter(Einstellungen::ADMINS);
+        if (((int) $rolle['is_system'] === 1 || in_array('*', $rechte, true)) && !$admins) {
+            return self::T_ALLE_RECHTE;
+        }
+        if (Schutz::verwaltend($rechte) && !$admins) {
+            return 'Mitglieder könnten sich mit dieser Rolle nicht anmelden – erst ‚Verwaltung per SSO‘ einschalten.';
+        }
+        return null;
+    }
+
+    /**
+     * Dürfte der Angemeldete diese Zuordnung selbst anlegen – nur seine
+     * Rechte, nicht ob es sie schon gibt oder ein Schalter an ist? null = ja,
+     * sonst die Meldung. Für zuordnungFehler() und für den Wechsel zu einem
+     * anderen Anmeldedienst (Einstellungen::verbindungSpeichern): Wer die
+     * Verbindung umstellt, lässt einen anderen Anmeldedienst über alle
+     * bestehenden Zuordnungen Rollen und Kundenzugänge vergeben.
+     *
+     * Rolle: Benutzer verwalten, alle Rechte der Rolle selbst haben
+     * (darfVergeben); die Rolle mit allen Rechten (Systemrolle oder „*“) und
+     * Rollen mit Freigaben auf alles oder mit „schalten“ nur mit allen
+     * Rechten. Kunde: Kunden pflegen und die Zugänge dieses Kunden ausgeben
+     * dürfen (wie ein Zugang von Hand – jedes Gruppenmitglied bekommt einen).
+     */
+    public static function zuordnungRechtFehler(string $art, int $zielId): ?string
+    {
+        if ($art === 'kunde') {
+            if (!Auth::can('kunden.manage')) {
+                return self::T_KUNDEN_PFLEGEN;
+            }
             return Kundenbereich::darfZugangAusgeben($zielId) ? null
                 : 'Eine Kundengruppe gibt Zugänge aus – zuordnen darf sie nur, wer selbst alles sieht, was der Kunde sieht (wie beim Zugang von Hand).';
         }
@@ -445,13 +504,9 @@ final class Konten
         if (!BenutzerService::darfVergeben($rechte)) {
             return 'Die Rolle „' . $rolle['name'] . '“ hat Rechte, die du selbst nicht hast – zuordnen darf sie nur, wer sie alle hat.';
         }
-        $admins = Einstellungen::schalter(Einstellungen::ADMINS);
         $alleRechte = in_array('*', Auth::permissions(), true);
-        if (((int) $rolle['is_system'] === 1 || in_array('*', $rechte, true)) && !($alleRechte && $admins)) {
-            return 'Die Rolle mit allen Rechten ordnet nur zu, wer selbst alle Rechte hat – und erst mit ‚Verwaltung per SSO‘.';
-        }
-        if (Schutz::verwaltend($rechte) && !$admins) {
-            return 'Mitglieder könnten sich mit dieser Rolle nicht anmelden – erst ‚Verwaltung per SSO‘ einschalten.';
+        if (((int) $rolle['is_system'] === 1 || in_array('*', $rechte, true)) && !$alleRechte) {
+            return self::T_ALLE_RECHTE;
         }
         foreach (Database::select("SELECT ziel_art, darf_steuern FROM freigaben WHERE subject_type = 'role' AND subject_id = ?", [$zielId]) as $f) {
             if (((string) $f['ziel_art'] === 'alles' || (int) $f['darf_steuern'] === 1) && !$alleRechte) {
@@ -469,8 +524,17 @@ final class Konten
         if ($fehler !== null) {
             return ['ok' => false, 'message' => $fehler];
         }
-        $id = Database::insert('sso_zuordnungen', ['gruppe' => $gruppe, 'art' => $art, 'ziel_id' => $zielId,
-            'created_by' => mb_substr(Auth::name(), 0, 64), 'created_at' => gmdate('c')]);
+        try {
+            $id = Database::insert('sso_zuordnungen', ['gruppe' => $gruppe, 'art' => $art, 'ziel_id' => $zielId,
+                'created_by' => mb_substr(Auth::name(), 0, 64), 'created_at' => gmdate('c')]);
+        } catch (\PDOException $e) {
+            // Der eindeutige Index – unter MariaDB nach der Kollation (ohne
+            // Groß/Klein, ohne Akzente) – oder eine gleichzeitige Anfrage.
+            if ((string) $e->getCode() !== '23000') {
+                throw $e;
+            }
+            return ['ok' => false, 'message' => 'Diese Zuordnung gibt es schon (in dieser oder einer ähnlichen Schreibweise der Gruppe).'];
+        }
         Audit::log('sso.zuordnung', 'sso_zuordnung', (string) $id, ['gruppe' => $gruppe, 'art' => $art, 'ziel_id' => $zielId, 'aktion' => 'angelegt']);
         $ergebnis = ['ok' => true, 'message' => 'Gruppe „' . $gruppe . '“ zugeordnet.', 'id' => $id];
         $freigaben = $art === 'rolle'

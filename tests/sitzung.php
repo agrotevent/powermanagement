@@ -1313,7 +1313,7 @@ $idp->benutzer(['sub' => $ssoSub, 'preferred_username' => 'pruefer-dort', 'name'
 $zweitName = 'zweit-' . $kennung;
 $einrichtung = inB($ordner . '/config.php', 'use App\\Auth\\Sso\\Einstellungen; use App\\Auth\\Sso\\Konten; use App\\Services\\BenutzerService; use App\\Support\\Database; use App\\Support\\Settings;
 $v = Einstellungen::verbindungSpeichern(' . var_export($idp->aussteller(), true) . ', ' . var_export($idp->client()['id'], true) . ', '
-    . var_export($idp->client()['secret'], true) . ', "Authentik");
+    . var_export($idp->client()['secret'], true) . ', "Authentik", true);   // wie bin/power sso:einrichten
 // Das Konto „pruefer“ hat alle Rechte – per SSO also nur mit „Verwaltung per SSO“.
 Settings::put(Einstellungen::ADMINS, "1");
 $e = Einstellungen::einschalten();

@@ -164,7 +164,7 @@ final class Auth
         Session::put('angemeldet', time());
         Session::put('anmeldeweg', $weg);
         // Was zu einer früheren SSO-Sitzung gehörte, gilt für diese nicht.
-        foreach (['sso', 'sso_hinweis', 'sso_bestaetigt', 'sso_abgemeldet'] as $schluessel) {
+        foreach (['sso', 'sso_hinweis', 'sso_bestaetigt', 'sso_abgemeldet', 'sso_idp', 'sso_verbinden'] as $schluessel) {
             Session::forget($schluessel);
         }
         if ($weg === 'sso') {
