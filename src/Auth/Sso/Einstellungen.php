@@ -467,7 +467,8 @@ final class Einstellungen
         }
         if ($fremde > 0) {
             $warnung = true;
-            $meldungen[] = $fremde . ' Verknüpfung(en) gehören zu einem anderen Aussteller – bin/power sso:aussteller-umstellen.';
+            $meldungen[] = $fremde . ' Verknüpfung(en) gehören zu einem anderen Aussteller – gehört er zur selben Authentik-Installation: '
+                . 'runuser -u www-data -- php bin/power sso:aussteller-umstellen.';
         }
         return ['ok' => true, 'message' => implode(' ', $meldungen), 'warnung' => $warnung];
     }

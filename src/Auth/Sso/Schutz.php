@@ -37,6 +37,9 @@ final class Schutz
      * gehört dazu: Es spielt einen neuen Stand ein und startet alle Dienste neu.
      */
     public const VERWALTEND = ['*', 'system.users.manage', 'settings.manage', 'sso.manage', 'api.manage', 'system.update'];
+    /** Kurz für die Schutz-Karte („Verwaltung per SSO“) – dieselben Rechte in derselben Reihenfolge wie VERWALTEND. */
+    public const VERWALTEND_NAMEN = ['*' => 'alle Rechte', 'system.users.manage' => 'Benutzer', 'settings.manage' => 'Einstellungen',
+        'sso.manage' => 'SSO', 'api.manage' => 'Schnittstelle', 'system.update' => 'Update'];
     public const MFA = ['mfa', 'sc'];
 
     public const T_DEAKTIVIERT = 'Dieses Konto ist deaktiviert.';
@@ -332,7 +335,7 @@ final class Schutz
             ['ok' => $admins, 'text' => '„Verwaltung per SSO“ ist an.',
                 'fehlt' => 'erst „Verwaltung per SSO“ einschalten.'],
             ['ok' => $notzugaenge > 0, 'text' => $notzugaenge > 0 ? 'Notzugang vorhanden (' . $notzugaenge . ').' : 'Notzugang vorhanden.',
-                'fehlt' => 'es gibt keinen Notzugang – erst ein aktives Konto mit allen Rechten ohne Verknüpfung und ohne Enddatum anlegen (bin/power user:add notfall admin) und das Kennwort sicher verwahren.'],
+                'fehlt' => 'es gibt keinen Notzugang – erst ein aktives Konto mit allen Rechten ohne Verknüpfung und ohne Enddatum anlegen (runuser -u www-data -- php bin/power user:add notfall admin) und das Kennwort sicher verwahren.'],
         ];
     }
 

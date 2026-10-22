@@ -48,7 +48,9 @@ declare(strict_types=1);
  *      beginnen keinen Vorgang (Hinweis); ein Rückruf schreibt nichts – auch
  *      nicht, wenn das Update beginnt, während er wartet (dann ist er
  *      angemeldet) –, der Vorgang ist verbraucht, danach geht es neu; das
- *      bestätigte Kennwort fürs Verbinden bleibt; Kennwort-Anmeldung,
+ *      bestätigte Kennwort fürs Verbinden bleibt, wer dabei schon bei Authentik
+ *      angemeldet war, meldet sich hier ab wie aus einer SSO-Sitzung
+ *      (pm_sso_neu, danach prompt=login); Kennwort-Anmeldung,
  *      Abmelden, /abgemeldet und Lesen gehen; /system/sso ändert nichts (503
  *      bzw. Hinweis).
  * Dazu: Fehlertexte des Anbieters und Angaben aus Anfragen erscheinen nur
@@ -598,6 +600,8 @@ $schutzKarte = static fn (string $html): string => (string) strstr((string) strs
 pruefe($seite['status'] === 200 && str_contains($schutzKarte($seite['text']), 'nur mit allen Rechten änderbar')
     && preg_match('#name="admins" value="1" disabled>#', $seite['text']) === 1 && !str_contains($seite['text'], 'Schutz speichern'),
     '8: Schutz-Karte ohne alle Rechte nur lesend (Häkchen gesperrt, kein Knopf)');
+pruefe(str_contains($schutzKarte($seite['text']), 'Konten mit Verwaltungsrechten (alle Rechte, Benutzer, Einstellungen, SSO, Schnittstelle, Update) melden sich'),
+    '8: Schutz-Karte nennt jedes Verwaltungsrecht – auch „PowerManagement aktualisieren“ (Update)');
 $r = $senden($sv, '/system/sso/schutz', ['admins' => '1', 'nur_sso' => '1', 'bestaetigung' => 'nur SSO'], '/system/sso');
 pruefe($r['status'] === 403 && !$schalter(\App\Auth\Sso\Einstellungen::ADMINS) && !$schalter(\App\Auth\Sso\Einstellungen::NUR_SSO),
     '8: Schutz-Formular ohne alle Rechte → 403, nichts geändert');
@@ -1008,6 +1012,15 @@ pruefe($rueck['ziel'] === '/profil' && str_contains($profil['text'], 'Gerade lä
     '14.5: Rückruf des Verbindens während der Sperre → nicht verbunden, Hinweis im Profil');
 gleich($stand(), $vorher, '14.5: nichts geschrieben');
 $sperre(false);
+// Bei Authentik hat sich die Person trotzdem angemeldet (prompt=login): Abmelden hier wie nach dem
+// Verbinden – pm_sso_neu, die nächste SSO-Anmeldung in diesem Browser meldet dort neu an
+// (geteiltes Tablet). Ohne eingelösten Code kein ID-Token, also kein Link zum Abmelden dort.
+$r = $abmelden($vd);
+pruefe($r['status'] === 302 && $r['ziel'] === '/login' && keks($vd, 'pm_sso_neu') === '1',
+    '14.5: Abmelden nach dem abgewiesenen Rückruf → pm_sso_neu (bei Authentik angemeldet), ohne ID-Token kein /abgemeldet');
+$r = browser('/login/sso?next=/dashboard', $vd);
+pruefe($r['status'] === 302 && str_starts_with($r['ziel'], $idpBasis . '/') && (query($r['ziel'])['prompt'] ?? null) === 'login',
+    '14.5: … die nächste SSO-Anmeldung in diesem Browser mit prompt=login');
 
 // 14.6 Bestätigen (Token anzeigen): der Start nennt das Update, Lesen geht
 $sperre(true);

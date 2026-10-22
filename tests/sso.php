@@ -27,7 +27,9 @@ declare(strict_types=1);
  *    (merken, freischalten, anlegen, verwerfen, höchstens 200), automatische
  *    Anlage (nur mit zugeordneter Gruppe, Name frei).
  * G. Prüfkette: deaktiviert, Zeitraum, locked_until gilt nicht,
- *    Pflichtgruppe, Verwaltung nur mit sso.admins, MFA.
+ *    Pflichtgruppe, Verwaltung nur mit sso.admins (auch nur „PowerManagement
+ *    aktualisieren“; jedes Recht der Gruppe „System“ außer dem Audit-Log),
+ *    MFA.
  * H. Rollen aus Gruppen: hinzu/weg, keine zweite Zeile, Benutzerverwaltung,
  *    Ablauf (auch Rollen-Freigaben), Kennwort-Anmeldung, Zuordnung löschen,
  *    *-Rolle übergangen, zuordnungFehler, Gruppe „123“, dieselbe Gruppe in
@@ -45,8 +47,9 @@ declare(strict_types=1);
  * K. Bestätigen (Step-up): token:<id> einmal, 300 s, nur dieser Zweck und
  *    dieses Konto; andere Person, nicht neu angemeldet, Verwaltung ohne
  *    sso.admins (W7), MFA-Pflicht; danach „beim Anmeldedienst angemeldet“
- *    (fürs Abmelden); Auth::bestaetigen mit Kennwort bzw. nie bei nur_sso;
- *    Kundenmodus entsperren (Fehlversuche zählen, Bremse vor dem Netz).
+ *    (fürs Abmelden – auch nach einem gescheiterten, ohne ID-Token);
+ *    Auth::bestaetigen mit Kennwort bzw. nie bei nur_sso; Kundenmodus
+ *    entsperren (Fehlversuche zählen, Bremse vor dem Netz).
  * L. Kunden über Gruppen (nur mit Kundenbereich): sso.kunden und
  *    Kundengruppen nur mit kunden.manage und nur für Kunden, deren Zugänge man
  *    ausgeben dürfte; aus → kein Zugang; an → Kundenzugang (kunde_id, nur_sso,
@@ -73,7 +76,7 @@ declare(strict_types=1);
  *    Wartens, war er angemeldet und fragt danach noch einmal – kein Konto
  *    (Anlage), keine Anfrage, kein Fehlschlag, nichts verknüpft, Kundenmodus
  *    bleibt ohne Fehlversuch; Einschalten bleibt aus. Migration 017 nach der
- *    Sicherung auf einer Datenbank wie auf main, Zurückrollen
+ *    Sicherung auf einer Datenbank ohne 017 (018 angewandt), Zurückrollen
  *    (db_zuruecklegen), noch einmal migrieren; das Secret übersteht Update
  *    und Zurückrollen.
  */
@@ -84,6 +87,7 @@ require __DIR__ . '/hilfen/pruefung.php';
 require __DIR__ . '/hilfen/oidc-attrappe.php';
 
 use App\Auth\Auth;
+use App\Auth\Permissions;
 use App\Auth\Sso\Anbieter;
 use App\Auth\Sso\Anmeldung;
 use App\Auth\Sso\Einstellungen;
@@ -888,6 +892,10 @@ $rolleA = (int) BenutzerService::rolleSpeichern(null, $kennung . '-protokoll', '
 $rolleVerwalter = (int) BenutzerService::rolleSpeichern(null, $kennung . '-verwalter', 'Prüfung', ['system.users.manage'])['id'];
 $verwalter = BenutzerService::anlegen($kennung . '-verwalter', $pw, 'kunde', false);
 Database::insert('user_roles', ['user_id' => $verwalter, 'role_id' => $rolleVerwalter, 'gueltig_ab' => null, 'gueltig_bis' => null]);
+// Nur „PowerManagement aktualisieren“ – spielt einen neuen Stand ein und startet alle Dienste neu: Verwaltung (Schutz::VERWALTEND).
+$rolleUpdate = (int) BenutzerService::rolleSpeichern(null, $kennung . '-update', 'Prüfung', ['system.update'])['id'];
+$updater = BenutzerService::anlegen($kennung . '-updater', $pw, 'kunde', false);
+Database::insert('user_roles', ['user_id' => $updater, 'role_id' => $rolleUpdate, 'gueltig_ab' => null, 'gueltig_bis' => null]);
 $gruppeA = 'pm-protokoll-' . $kennung;
 pruefe(Konten::zuordnungSpeichern($gruppeA, 'rolle', $rolleA)['ok'], 'Zuordnung Gruppe → Rolle (als Administrator)');
 $zuordnungA = (int) Database::scalar('SELECT id FROM sso_zuordnungen WHERE gruppe = ?', [$gruppeA]);
@@ -897,8 +905,10 @@ $abmelden();
 // E.1 state
 $vorher = $fehlschlaege();
 $n = $anfragen('token');
+unset($_SESSION[Anmeldung::BEIM_ANBIETER]);
 $r = Anmeldung::rueckruf(['state' => str_repeat('a', 43), 'code' => 'x'], $ip);
 pruefe(!$r['ok'] && $r['code'] === 'state' && $r['ziel'] === '/login' && $r['meldung'] === Anmeldung::T_STATE, 'unbekannter state → state, zur Anmeldung');
+pruefe(!isset($_SESSION[Anmeldung::BEIM_ANBIETER]), 'unbekannter state: kein Vermerk „beim Anmeldedienst angemeldet“');
 gleich($fehlschlaege(), $vorher, 'unbekannter state: kein Audit-Eintrag');
 gleich($anfragen('token'), $n, 'unbekannter state: keine Token-Anfrage');
 gleich(Anmeldung::rueckruf(['state' => [$states[5]], 'code' => 'x'], $ip)['code'], 'state', 'state als Array zählt als fehlend');
@@ -920,6 +930,7 @@ Einstellungen::markeErneuern();
 $r = Anmeldung::rueckruf($abfrage($a['kopf']['Location']), $ip);
 pruefe($r['code'] === 'einrichtung' && $letzterFehlschlag()['grund'] === 'einrichtung' && $fehlschlaege() === $vorher + 1,
     'Marke zwischendurch neu → einrichtung (ab hier mit Audit)');
+pruefe(($_SESSION[Anmeldung::BEIM_ANBIETER] ?? null) === true, '… mit gültigem state zurück: „beim Anmeldedienst angemeldet“ auch ohne Erfolg');
 gleich($ablauf($person($subPlaner, 'planer-dort'), ['iss_param' => 'https://evil.example/'])['code'], 'iss', 'iss-Parameter fremd → iss');
 $abmelden();
 pruefe($ablauf(null, ['iss_param' => true])['ok'], 'iss-Parameter gleich dem Aussteller → angemeldet');
@@ -1234,8 +1245,14 @@ $subVerwalter = 'sub-verwalter-' . $kennung;
 Konten::verknuepfen($verwalter, $iss, $subVerwalter, 'cli', '', []);
 $r = $ablauf($person($subVerwalter, 'verwalter-dort'));
 pruefe($r['code'] === 'verwaltung' && $r['meldung'] === Schutz::T_VERWALTUNG && Auth::id() === null, 'Hand-Rolle mit system.users.manage, sso.admins aus → verwaltung');
+Konten::verknuepfen($updater, $iss, 'sub-updater-' . $kennung, 'cli', '', []);
+$r = $ablauf($person('sub-updater-' . $kennung, 'updater-dort'));
+pruefe($r['code'] === 'verwaltung' && Auth::id() === null, 'Hand-Rolle nur mit system.update (PowerManagement aktualisieren), sso.admins aus → verwaltung');
+gleich(array_values(array_diff(array_keys(Permissions::ALL['System']), ['audit.view'], Schutz::VERWALTEND)), [],
+    'jedes Recht der Gruppe „System“ außer dem Audit-Log zählt als Verwaltung');
+gleich(array_keys(Schutz::VERWALTEND_NAMEN), Schutz::VERWALTEND, 'die Schutz-Karte nennt jedes Verwaltungsrecht (VERWALTEND_NAMEN)');
 Settings::put(Einstellungen::ADMINS, '1');
-pruefe($ablauf()['ok'] && Auth::id() === $verwalter, 'sso.admins an → angemeldet');
+pruefe($ablauf($person($subVerwalter, 'verwalter-dort'))['ok'] && Auth::id() === $verwalter, 'sso.admins an → angemeldet');
 $abmelden();
 Settings::put(Einstellungen::MFA, '1');
 gleich($ablauf($person($subVerwalter, 'verwalter-dort', [], ['amr' => ['pwd']]))['code'], 'mfa', 'MFA-Pflicht, amr [pwd] → mfa');
@@ -1327,6 +1344,7 @@ pruefe(Konten::zuordnungFehler('pm-neu', 'rolle', $rolleA) !== null, 'Rolle, die
 alsBenutzer($admin);
 pruefe(str_contains((string) Konten::zuordnungFehler('pm-neu', 'rolle', $adminRolle), 'allen Rechten'), '*-Rolle ohne sso.admins → abgelehnt (auch mit *)');
 pruefe(str_contains((string) Konten::zuordnungFehler('pm-neu', 'rolle', $rolleVerwalter), 'Verwaltung per SSO'), 'verwaltende Rolle ohne sso.admins → abgelehnt');
+pruefe(str_contains((string) Konten::zuordnungFehler('pm-neu', 'rolle', $rolleUpdate), 'Verwaltung per SSO'), 'Rolle nur mit system.update ohne sso.admins → abgelehnt');
 Settings::put(Einstellungen::ADMINS, '1');
 pruefe(Konten::zuordnungFehler('pm-neu', 'rolle', $adminRolle) === null && Konten::zuordnungFehler('pm-neu', 'rolle', $rolleVerwalter) === null,
     'mit sso.admins und * zuordenbar');
@@ -1599,7 +1617,7 @@ alsBenutzer($admin);
 $r = Einstellungen::schutzSpeichern(['admins' => false], '');
 pruefe($r['ok'] && !$schalter(Einstellungen::ADMINS) && $ssoRollen($kundeKonto) === [$rolleA], 'J.5: sso.admins aus → verwaltende Rolle aus der Gruppe weg, die andere bleibt');
 gleich($letztesAudit('einstellungen.sso'), ['schalter' => ['admins' => false], 'sso_rollen' => 1], 'J.5: Audit mit der Zahl der entfernten Rollen');
-pruefe(in_array($rolleVerwalter, Schutz::verwaltendeRollen(), true) && !in_array($rolleA, Schutz::verwaltendeRollen(), true)
+pruefe(in_array($rolleVerwalter, Schutz::verwaltendeRollen(), true) && in_array($rolleUpdate, Schutz::verwaltendeRollen(), true) && !in_array($rolleA, Schutz::verwaltendeRollen(), true)
     && in_array((int) Database::scalar('SELECT id FROM roles WHERE is_system = 1'), Schutz::verwaltendeRollen(), true), 'J.5: verwaltende Rollen: Systemrolle und Verwaltungsrechte');
 alsBenutzer(null);
 Database::execute("DELETE FROM user_roles WHERE user_id = ? AND quelle = 'sso'", [$kundeKonto]);
@@ -1640,8 +1658,9 @@ Settings::put(Einstellungen::MFA, '1');
 gleich(Anmeldung::bestaetigenFehler('token:5'), null, 'K.2: mit „Verwaltung per SSO“: Bestätigen über SSO angeboten');
 unset($_SESSION[Anmeldung::BEIM_ANBIETER], $_SESSION[Anmeldung::HINWEIS]);
 $r = $ablauf($person($subVerwalter, 'verwalter-dort', [], ['amr' => ['pwd']]), [], 'token:5', $verwalter);
-pruefe($r['code'] === 'mfa' && !Anmeldung::bestaetigt('token:5', false) && !isset($_SESSION[Anmeldung::BEIM_ANBIETER]),
-    'K.2: MFA-Pflicht, dort nur mit Kennwort angemeldet (amr pwd) → mfa, nicht bestätigt');
+pruefe($r['code'] === 'mfa' && !Anmeldung::bestaetigt('token:5', false), 'K.2: MFA-Pflicht, dort nur mit Kennwort angemeldet (amr pwd) → mfa, nicht bestätigt');
+pruefe(($_SESSION[Anmeldung::BEIM_ANBIETER] ?? null) === true && !isset($_SESSION[Anmeldung::HINWEIS]),
+    'K.2: … beim Anmeldedienst angemeldet hat er sich trotzdem (fürs Abmelden hier: pm_sso_neu), ohne ID-Token als Hinweis');
 $r = $ablauf($person($subVerwalter, 'verwalter-dort', [], ['amr' => ['pwd', 'mfa']]), [], 'token:5', $verwalter);
 pruefe($r['ok'] && Anmeldung::bestaetigt('token:5'), 'K.2: … mit zweitem Faktor bestätigt');
 // Die Kennwort-Sitzung hat sich dabei beim Anmeldedienst angemeldet – beim Abmelden hier zählt das wie eine SSO-Sitzung.
@@ -2033,6 +2052,19 @@ $r = $ablauf($person($subPlaner, 'planer-dort'));
 pruefe(!$r['ok'] && Auth::id() !== $planer, 'N.6: Identität bei einem anderen Aussteller → die Anmeldung findet das Konto nicht');
 $abmelden();
 pruefe(str_contains($cli(['sso:zustand'])['aus'], 'bei einem anderen Aussteller – bin/power sso:aussteller-umstellen'), 'N.6: sso:zustand nennt die fremden Verknüpfungen');
+$r = Einstellungen::verbindungSpeichern($iss, $client['id'], '', Einstellungen::name());
+pruefe($r['ok'] && !empty($r['warnung']) && str_contains($r['message'], 'Verknüpfung(en) gehören zu einem anderen Aussteller')
+    && str_contains($r['message'], 'runuser -u www-data -- php bin/power sso:aussteller-umstellen'),
+    'N.6: „Verbindung speichern“ nennt sie auch – mit dem Befehl als Anwendungsbenutzer (als root bricht bin/power ab)');
+// Auch die übrigen Hinweise der Einrichtung auf bin/power (Seite, Vorbedingungen für „nur SSO“).
+$ohneRunuser = '/(?<!runuser -u www-data -- php )bin\/power/';
+$texte = ['Vorbedingungen' => implode("\n", array_merge(...array_map(static fn (array $b): array => [$b['text'], $b['fehlt']], Schutz::nurSsoVorbedingungen())))];
+foreach (glob(APP_ROOT . '/resources/views/sso/*.php') ?: [] as $datei) {
+    $texte['resources/views/sso/' . basename($datei)] = (string) file_get_contents($datei);
+}
+gleich(array_keys(array_filter($texte, static fn (string $t): bool => preg_match($ohneRunuser, $t) === 1)), [],
+    'N.6: Hinweise auf bin/power in Seite und Vorbedingungen als Anwendungsbenutzer (runuser -u www-data -- php bin/power …)');
+pruefe(str_contains($texte['Vorbedingungen'], 'runuser -u www-data -- php bin/power user:add notfall admin'), 'N.6: … etwa der Notzugang');
 $r = $cli(['sso:aussteller-umstellen', $iss]);
 pruefe($r['rc'] === 1 && str_contains($r['aus'], 'DERSELBEN') && str_contains($r['aus'], '1 Verknüpfung(en) bei ' . $alt)
     && (string) Database::scalar('SELECT aussteller FROM sso_identitaeten WHERE user_id = ?', [$planer]) === $alt,
@@ -2331,6 +2363,7 @@ $r = $ablauf($person($subPlaner, 'planer-dort', [$gruppeA]), [], 'anmelden', nul
 });
 pruefe(!$r['ok'] && $r['code'] === Anmeldung::UPDATE && $r['ziel'] === '/login' && $r['meldung'] === Anmeldung::updateText('anmelden') && Auth::id() === null,
     'O.2: Rückruf während der Sperre → update, zurück zur Anmeldung, nicht angemeldet');
+pruefe(($_SESSION[Anmeldung::BEIM_ANBIETER] ?? null) === true, 'O.2: nur in der Sitzung: „beim Anmeldedienst angemeldet“ (fürs Abmelden)');
 gleich($stand(), $vorher, 'O.2: nichts geschrieben (alle Tabellen, auch Audit und Bremse)');
 gleich($eingeloest, 0, 'O.2: der Code wurde nicht eingelöst');
 pruefe(!$angemeldet(), 'O.2: abgewiesen – das Update wartet nicht auf diese Anfrage');
@@ -2388,6 +2421,8 @@ $waehrend = static fn () => $sperre(true);
 $r = $ablauf($person('sub-updverb-' . $kennung, 'updverb-dort'), [], 'verbinden', $verbO);
 pruefe($r['code'] === Anmeldung::UPDATE && $r['ziel'] === '/profil' && Konten::identitaet($verbO) === null && Auth::id() === $verbO,
     'O.5: Verbinden während der Sperre → nicht verknüpft, zurück ins Profil, die Sitzung bleibt');
+pruefe(Auth::anmeldeweg() === 'kennwort' && ($_SESSION[Anmeldung::BEIM_ANBIETER] ?? null) === true && !isset($_SESSION[Anmeldung::HINWEIS]),
+    'O.5: … die Kennwort-Sitzung war dabei beim Anmeldedienst: Abmelden hier wie aus einer SSO-Sitzung (pm_sso_neu)');
 gleich($stand(), $vorher, 'O.5: Verbinden – nichts geschrieben');
 $sperre(false);
 $r = $ablauf($person('sub-updverb-' . $kennung, 'updverb-dort'), [], 'verbinden', $verbO);
@@ -2424,16 +2459,16 @@ Http::$attrappe = $idp->http();
 $waehrend = null;
 
 // O.7 Migration 017 im Update: Die Sicherung (VACUUM INTO wie update-debian.sh)
-// entsteht vor den Migrationen, 017 läuft in Stufe 2 danach. Eine Datenbank wie
-// auf main (ohne 017, aber mit 018), gesichert, migriert, zurückgelegt
+// entsteht vor den Migrationen, 017 läuft in Stufe 2 danach. Eine Datenbank
+// ohne 017, aber mit 018 (der Stand vor SSO), gesichert, migriert, zurückgelegt
 // (db_zuruecklegen aus update-debian.sh), noch einmal migriert. Dazu das
 // verschlüsselte Client-Secret: übersteht Update und Zurückrollen.
 $sim = $instanzOrdner . '/update-sim';
-mkdir($sim . '/main', 0700, true);
+mkdir($sim . '/ohne017', 0700, true);
 mkdir($sim . '/.schnappschuss', 0700, true);
 foreach (glob(APP_ROOT . '/database/migrations/*.sql') ?: [] as $datei) {
     if (basename($datei) !== '017_sso.sql') {
-        copy($datei, $sim . '/main/' . basename($datei));
+        copy($datei, $sim . '/ohne017/' . basename($datei));
     }
 }
 $simDb = $sim . '/database.sqlite';
@@ -2480,9 +2515,9 @@ $simPower = static function (array $argumente) use ($sim): array {
     return ['rc' => proc_close($p), 'aus' => $aus];
 };
 $aufDb($simDb);
-$angewandt = Database::migrate($sim . '/main');
+$angewandt = Database::migrate($sim . '/ohne017');
 pruefe(!in_array('017_sso.sql', $angewandt, true) && in_array('018_tanks.sql', $angewandt, true) && !$tabelle('sso_identitaeten')
-    && !in_array('nur_sso', $spalten('users'), true) && !in_array('quelle', $spalten('user_roles'), true), 'O.7: Datenbank wie auf main – 018 ja, 017 nicht');
+    && !in_array('nur_sso', $spalten('users'), true) && !in_array('quelle', $spalten('user_roles'), true), 'O.7: Datenbank ohne 017 – 018 ja, 017 nicht');
 Database::insert('users', ['username' => $kennung . '-sim', 'password_hash' => password_hash($pw, PASSWORD_DEFAULT), 'created_at' => gmdate('c')]);
 Settings::put('pruefung.update_sim', 'vor dem Update ' . $kennung);
 $sichern();

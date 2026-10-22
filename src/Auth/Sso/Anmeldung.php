@@ -73,7 +73,8 @@ final class Anmeldung
     public const BESTAETIGT = 'sso_bestaetigt';
     /**
      * Sitzung: In diesem Browser ist jemand beim Anmeldedienst angemeldet –
-     * auch in einer Kennwort-Sitzung nach Bestätigen oder Verbinden. Beim
+     * auch in einer Kennwort-Sitzung nach Bestätigen oder Verbinden, auch wenn
+     * der Rückruf danach scheiterte oder ein Update ihn abwies. Beim
      * Abmelden hier gibt es dann prompt=login für die nächste SSO-Anmeldung
      * (pm_sso_neu) und den Link zum Abmelden dort (geteilte Tablets).
      */
@@ -183,6 +184,15 @@ final class Anmeldung
             Logger::info('sso', ['schritt' => 'rueckruf', 'grund' => 'state']);
             return ['ok' => false, 'code' => 'state', 'zweck' => 'anmelden', 'ziel' => '/login', 'meldung' => self::T_STATE];
         }
+        // 1a. Mit einem gültigen state kommt dieser Browser vom Anmeldedienst
+        // zurück – dort ist jetzt meist jemand angemeldet (mit Code immer, ein
+        // Fehler kann nach der Anmeldung kommen). Das gilt auch, wenn der
+        // Vorgang gleich scheitert oder ein Update ihn abweist: Abmelden hier
+        // verlangt dann die neue Anmeldung dort (pm_sso_neu – geteilte Tablets,
+        // auch nach einem gescheiterten Bestätigen im Kundenmodus). Nur die
+        // Sitzung, also auch während eines Updates; die nächste Anmeldung
+        // (Auth::sitzungStarten) räumt es weg.
+        Session::put(self::BEIM_ANBIETER, true);
         // 1b. Update: Erst anmelden, dann fragen – wie ein POST an der Tür
         // (UpdateService::wartungsSperre()). Wer vor der Schreibsperre
         // hereinkam, auf den wartet das Update, bevor es sichert; wer danach
@@ -672,7 +682,8 @@ final class Anmeldung
 
     /**
      * Ein Vorgang ist gelungen: In diesem Browser ist jetzt jemand beim
-     * Anmeldedienst angemeldet (BEIM_ANBIETER) – und das ID-Token bleibt als
+     * Anmeldedienst angemeldet (BEIM_ANBIETER – nach Auth::sitzungStarten
+     * noch einmal, das räumt es weg) – und das ID-Token bleibt als
      * id_token_hint für das Abmelden dort, wenn der Anmeldedienst es anbietet.
      * Sonst nirgends.
      */
@@ -787,8 +798,8 @@ final class Anmeldung
 
     /**
      * Ein Rückruf während eines Updates: nichts geschrieben (weder Datenbank
-     * noch Sitzung außer dem verbrauchten Vorgang), nur ins Log – mit dem
-     * Grund, aus dem er sonst gescheitert wäre ($statt).
+     * noch Sitzung außer dem verbrauchten Vorgang und BEIM_ANBIETER), nur ins
+     * Log – mit dem Grund, aus dem er sonst gescheitert wäre ($statt).
      */
     private static function waehrendUpdate(#[\SensitiveParameter] array $v, ?string $statt = null): array
     {

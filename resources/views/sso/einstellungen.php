@@ -418,7 +418,7 @@ $gruppenListe = static function (array $gruppen): string {
     <div class="card-body">
         <label class="check"><input type="checkbox" name="admins" value="1"<?= !empty($schalter['admins']) ? ' checked' : '' ?><?= $sperre ?>>
             Verwaltung per SSO</label>
-        <p class="help">Konten mit Verwaltungsrechten (alle Rechte, Benutzer, Einstellungen, SSO, Schnittstelle) melden sich auch über <?= View::e($name) ?> an
+        <p class="help">Konten mit Verwaltungsrechten (<?= View::e(implode(', ', \App\Auth\Sso\Schutz::VERWALTEND_NAMEN)) ?>) melden sich auch über <?= View::e($name) ?> an
             und bestätigen dort; Rollen mit solchen Rechten lassen sich Gruppen zuordnen. Aus: nur mit Kennwort – ausschalten beendet ihre Sitzungen
             über <?= View::e($name) ?> und entfernt solche Rollen aus Gruppen sofort.</p>
         <label class="check"><input type="checkbox" name="mfa_verwaltung" value="1"<?= !empty($schalter['mfa_verwaltung']) ? ' checked' : '' ?><?= $sperre ?>>
@@ -444,7 +444,7 @@ $gruppenListe = static function (array $gruppen): string {
         <h3 class="mt">Notzugang</h3>
         <?php if ($schutz['notzugaenge'] === []): ?>
             <p class="notice warn">Kein Notzugang: ein aktives Konto mit allen Rechten, das mit keiner Anmeldung bei <?= View::e($name) ?> verknüpft ist.
-                Ohne ihn lässt sich „nur SSO“ nicht einschalten – anlegen mit <code>bin/power user:add notfall admin</code>, nie verknüpfen,
+                Ohne ihn lässt sich „nur SSO“ nicht einschalten – anlegen mit <code>runuser -u www-data -- php bin/power user:add notfall admin</code>, nie verknüpfen,
                 das Kennwort offline verwahren.</p>
         <?php else: ?>
             <p class="small">Melden sich auch bei „nur SSO“ mit Kennwort an – laut (Hinweis auf jeder Seite, Audit, Fehlerprotokoll):

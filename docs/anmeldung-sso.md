@@ -296,7 +296,8 @@ Diese Schalter (Karte **Schutz**) ändert nur, wer **alle Rechte** hat.
   „nur über SSO“. Anlegen:
 
   ```bash
-  bin/power user:add notfall admin
+  cd /opt/powermanagement
+  runuser -u www-data -- php bin/power user:add notfall admin
   ```
 
   Nie verknüpfen, das Kennwort offline verwahren. Seine Anmeldung ist
@@ -330,9 +331,12 @@ gibt es Notzugang und Notausgang.
   Anmeldeseite, wenn er eingetragen ist). Neu laden führt zur Anmeldeseite.
 - **Geteilte Tablets**: Die nächste SSO-Anmeldung in diesem Browser
   verlangt bei Authentik eine neue Anmeldung (`prompt=login`, 12 Stunden
-  lang) – so meldet ein Tipp nicht still den Vorgänger an. Für Tablets am
-  Stand empfiehlt sich in Authentik der Invalidation flow
-  `default-invalidation-flow`.
+  lang) – so meldet ein Tipp nicht still den Vorgänger an. Das gilt auch,
+  wenn ein Bestätigen oder Verbinden erst nach der Anmeldung bei Authentik
+  scheiterte (eine andere Person, ohne zweiten Faktor, während eines
+  Updates); nur die Zwischenseite fehlt dann, ihr Link braucht das ID-Token
+  einer gelungenen Anmeldung. Für Tablets am Stand empfiehlt sich in
+  Authentik der Invalidation flow `default-invalidation-flow`.
 - **Restrisiko Kundenmodus**: Während ein Kunde am Tablet unterschreibt, ist
   im Browser womöglich eine Sitzung bei Authentik offen. Über die
   Anmeldeseite von Authentik käme er in dessen Portal. Für Kiosk-Tablets
@@ -407,9 +411,10 @@ SSO heißt das:
   Anmeldung über Authentik ist in etwa einer Minute wieder möglich“, ohne
   erst zu Authentik zu schicken. Wer schon bei Authentik war, als das Update
   begann, kommt mit demselben Hinweis zurück; danach einfach noch einmal
-  anmelden (der alte Rückruf gilt nicht mehr). Eine Anmeldung, die schon
-  lief, als das Update begann, wird noch fertig – das Update wartet auf sie,
-  bevor es sichert.
+  anmelden (der alte Rückruf gilt nicht mehr). Ein Rückruf, der beim Beginn
+  des Updates noch auf Authentik wartet, kommt ebenfalls mit dem Hinweis
+  zurück; nur einer, der da schon schreibt, wird noch fertig (darauf wartet
+  das Update, bevor es sichert).
 - Geschrieben wird dabei nichts: kein Konto, keine Verknüpfung, keine
   Anmeldeanfrage, keine Rollen aus Gruppen, kein Fehlversuch und kein Eintrag
   im Audit. Ein Zurückrollen spielte sonst die Sicherung zurück – ein eben
@@ -417,7 +422,9 @@ SSO heißt das:
   stünden mit dem Ende der vorigen Sitzung da.
 - **Verbinden** und **Bestätigen** (Kundenmodus entsperren, Token anzeigen)
   melden dasselbe; der Kundenmodus bleibt an, ein eben bestätigtes Kennwort
-  fürs Verbinden gilt danach noch (fünf Minuten).
+  fürs Verbinden gilt danach noch (fünf Minuten). Wer sich dabei schon bei
+  Authentik angemeldet hat, bleibt es dort: Abmelden hier verlangt danach in
+  diesem Browser eine neue Anmeldung bei Authentik (siehe *Abmelden*).
 - Die **Anmeldung mit Kennwort** (Notzugang, Kundenzugänge, Konten ohne „nur
   SSO“), das **Abmelden** – auch der Link zum Abmelden bei Authentik – und
   alles Lesen gehen weiter; laufende SSO-Sitzungen bleiben angemeldet.
@@ -510,7 +517,7 @@ OIDC-Tokens für `/api`, HS256/EdDSA/ES384 und verschlüsselte ID-Tokens.
 
 | Skript | prüft |
 |---|---|
-| `tests/sso.php` | ID-Token (RS256/ES256, `iss`/`aud`/`exp`/`iat`/`nonce`, `alg`-Verwechslung, Schlüsselwechsel), Discovery und Secret-Probe, Einstellungen, Verknüpfung nur über `iss`+`sub` (auch Groß/Klein), Anfragen, automatische Konten, Gruppen → Rollen und Kunden, Prüfkette, Sitzung (auch Änderungen während des Wartens auf Authentik), nur SSO und Notzugang (auch Enddaten), Bestätigen (mit MFA-Pflicht), Bremse, keine Geheimnisse, Kommandozeile, Wartung, `verbinden_ueber`/`ca_datei` mit echtem TLS, während eines Updates (nichts geschrieben, auch wenn das Update während des Wartens beginnt), Migration 017 nach der Sicherung und Zurückrollen, das Secret danach (eigene Instanz, OIDC-Attrappe) |
-| `tests/sso-web.php` | im Browser-Ablauf: Anmeldung, `state` einmalig, Login-CSRF, HEAD verbraucht nichts, neue Sitzung, Abmelden mit `end_session`, Verbinden (erst das Kennwort), Anfrage, Einstellungsseite, nur SSO, Bestätigen für Kundenmodus und Token, Kundenzugang, während eines Updates (Hinweise, nichts geschrieben, danach neu) (eigene Instanz, zwei PHP-Server) |
+| `tests/sso.php` | ID-Token (RS256/ES256, `iss`/`aud`/`exp`/`iat`/`nonce`, `alg`-Verwechslung, Schlüsselwechsel), Discovery und Secret-Probe, Einstellungen, Verknüpfung nur über `iss`+`sub` (auch Groß/Klein), Anfragen, automatische Konten, Gruppen → Rollen und Kunden, Prüfkette, Sitzung (auch Änderungen während des Wartens auf Authentik), nur SSO und Notzugang (auch Enddaten), Bestätigen (mit MFA-Pflicht; auch gescheitert zählt fürs Abmelden), Verwaltungsrechte (auch „PowerManagement aktualisieren“), Bremse, keine Geheimnisse, Kommandozeile, Wartung, `verbinden_ueber`/`ca_datei` mit echtem TLS, während eines Updates (nichts geschrieben, auch wenn das Update während des Wartens beginnt), Migration 017 nach der Sicherung und Zurückrollen, das Secret danach (eigene Instanz, OIDC-Attrappe) |
+| `tests/sso-web.php` | im Browser-Ablauf: Anmeldung, `state` einmalig, Login-CSRF, HEAD verbraucht nichts, neue Sitzung, Abmelden mit `end_session`, Verbinden (erst das Kennwort), Anfrage, Einstellungsseite, nur SSO, Bestätigen für Kundenmodus und Token, Kundenzugang, während eines Updates (Hinweise, nichts geschrieben, Abmelden danach mit `prompt=login`, danach neu) (eigene Instanz, zwei PHP-Server) |
 | `tests/update.php` | `sso:*` als root abgelehnt (Wächter in `bin/power`), auch der Notausgang |
 | `tests/sitzung.php` | Rückruf, Start, „Prüfen“ und „Einschalten“ halten die Sitzung nicht, während sie auf den Anmeldedienst warten |
