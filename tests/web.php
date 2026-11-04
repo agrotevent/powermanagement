@@ -250,6 +250,42 @@ try {
             $seiten[] = str_starts_with($zusatz, '/bereiche') ? $zusatz : '/bereiche/' . $id . $zusatz;
         }
     }
+    // Geräteprüfung: Übersicht, Listen mit Filtern, Formulare, Import, Export,
+    // Prüfabläufe – dazu Prüflinge und Prüfungen aus der Demo, über Eigenschaften
+    // gewählt (mit Prüfbericht, von Hand mit Inventar, eines Kunden; eine
+    // Prüfung mit Korrektur, eine offene, eine nur mit Sichtprüfung).
+    array_push($seiten, '/geraetepruefung', '/geraetepruefung/prueflinge', '/geraetepruefung/prueflinge?besitzer=eigen',
+        '/geraetepruefung/prueflinge?faellig=faellig', '/geraetepruefung/prueflinge?faellig=ueberfaellig', '/geraetepruefung/prueflinge?faellig=ohne',
+        '/geraetepruefung/prueflinge?betrieb=alle', '/geraetepruefung/prueflinge?betrieb=ausser', '/geraetepruefung/prueflinge?suche=Verl',
+        '/geraetepruefung/prueflinge/neu', '/geraetepruefung/import', '/geraetepruefung/export', '/geraetepruefung/pruefablaeufe',
+        '/geraetepruefung/pruefungen', '/geraetepruefung/pruefungen?status=offen', '/geraetepruefung/pruefungen?status=unterschrieben',
+        '/geraetepruefung/pruefungen?ergebnis=nicht_bestanden', '/geraetepruefung/pruefungen?besitzer=eigen',
+        '/geraetepruefung/pruefungen?von=2026-01-01&bis=2026-12-31&suche=0001');
+    $gpPrueflinge = array_filter([
+        Database::scalar('SELECT p.id FROM gp_prueflinge p WHERE EXISTS (SELECT 1 FROM gp_berichte b WHERE b.pruefling_id = p.id AND b.fassung > 1) ORDER BY p.kennung LIMIT 1'),
+        Database::scalar('SELECT id FROM gp_prueflinge WHERE inventar_id IS NOT NULL ORDER BY kennung LIMIT 1'),
+        Database::scalar("SELECT id FROM gp_prueflinge WHERE kunde_id IS NOT NULL AND letztes_ergebnis = 'nicht_bestanden' ORDER BY kennung LIMIT 1"),
+        Database::scalar('SELECT id FROM gp_prueflinge WHERE ausser_betrieb = 1 ORDER BY kennung LIMIT 1'),
+    ]);
+    foreach (array_unique(array_map('intval', $gpPrueflinge)) as $id) {
+        array_push($seiten, '/geraetepruefung/prueflinge/' . $id, '/geraetepruefung/prueflinge/' . $id . '/bearbeiten');
+    }
+    $gpKunde = (int) Database::scalar('SELECT kunde_id FROM gp_prueflinge WHERE kunde_id IS NOT NULL ORDER BY kennung LIMIT 1');
+    if ($gpKunde > 0) {
+        array_push($seiten, '/geraetepruefung/prueflinge?besitzer=' . $gpKunde, '/geraetepruefung/prueflinge/neu?kunde=' . $gpKunde,
+            '/geraetepruefung/pruefungen?besitzer=' . $gpKunde, '/kunden/' . $gpKunde, '/kunden/' . $gpKunde . '?tab=nachweise');
+    }
+    $gpPruefungen = array_filter([
+        Database::scalar('SELECT pruefung_id FROM gp_berichte WHERE fassung > 1 ORDER BY nummer LIMIT 1'),
+        Database::scalar("SELECT p.id FROM gp_pruefungen p WHERE NOT EXISTS (SELECT 1 FROM gp_berichte b WHERE b.pruefung_id = p.id AND b.status = 'gueltig')
+            ORDER BY p.geprueft_am LIMIT 1"),
+        Database::scalar("SELECT id FROM gp_pruefungen WHERE sicht = 'maengel' ORDER BY geprueft_am LIMIT 1"),
+        Database::scalar("SELECT b.pruefung_id FROM gp_berichte b JOIN pruefnachweise n ON n.gp_bericht_id = b.id ORDER BY b.nummer LIMIT 1"),
+    ]);
+    foreach (array_unique(array_map('intval', $gpPruefungen)) as $id) {
+        $seiten[] = '/geraetepruefung/pruefungen/' . $id;
+    }
+    pruefe(count($gpPrueflinge) >= 3 && count($gpPruefungen) >= 3, 'Geräteprüfung: Prüflinge und Prüfungen aus der Demo gefunden (demo:seed)');
     foreach ($seiten as $pfad) {
         $r = aufruf($basis, $admin['dose'], 'GET', $pfad);
         pruefe($r['status'] === 200, 'Admin ' . $pfad . ' → ' . $r['status']);
@@ -258,6 +294,13 @@ try {
     }
     $csv = aufruf($basis, $admin['dose'], 'GET', '/statistik/csv?zeitraum=24h');
     pruefe($csv['status'] === 200 && str_contains($csv['kopf'], 'text/csv'), 'CSV-Export');
+    // Das gespeicherte PDF eines Prüfberichts der Geräteprüfung – genau die Bytes von der Unterschrift.
+    $gpBericht = Database::first("SELECT id, pdf_hash FROM gp_berichte WHERE status = 'gueltig' ORDER BY nummer LIMIT 1");
+    if ($gpBericht !== null) {
+        $r = aufruf($basis, $admin['dose'], 'GET', '/geraetepruefung/berichte/' . (int) $gpBericht['id'] . '/pdf');
+        pruefe($r['status'] === 200 && stripos($r['kopf'], 'Content-Type: application/pdf') !== false && str_starts_with($r['text'], '%PDF-')
+            && hash('sha256', $r['text']) === (string) $gpBericht['pdf_hash'], 'Geräteprüfung: PDF eines Prüfberichts mit den gespeicherten Bytes');
+    }
     $r = aufruf($basis, $admin['dose'], 'GET', '/gibt-es-nicht');
     pruefe($r['status'] === 404 && substr_count($r['text'], '<!DOCTYPE') === 1 && !str_contains($r['text'], 'action="/logout"'), 'unbekannte Adresse → 404, Fehlerseite ohne Layout');
     gleich(serverMeldungen($serverFehler), [], 'Admin: alle Seiten ohne PHP-Meldung im Fehlerprotokoll des Servers');

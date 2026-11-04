@@ -337,6 +337,20 @@ hinterlegen. Ob es dafür einen Weg gibt, zeigt die Lese-Probe
 schon in der Datenbank; ein später in Eventworx gelöschtes Dokument bleibt
 hier mit seiner Herkunft, bis das Personal es löscht.
 
+### Aus der Geräteprüfung
+
+Wer die Geräte selbst prüft ([geraetepruefung.md](geraetepruefung.md)),
+bekommt die Nachweise ohne Hochladen: Unterschreibt der Prüfer einen
+**bestandenen** Prüfbericht eines Geräts dieses Kunden, liegt er hier als
+**Entwurf** – mit dem gespeicherten PDF des Berichts und den Angaben aus
+ihm (Quelle „aus Geräteprüfung, Prüfbericht GP-…“). Ein nicht bestandener
+wird nie Nachweis. Ein Gerät aus dem eigenen Bestand gibt man an der
+Prüfung von Hand an einen Kunden. Bezeichnung, Nummern, Norm, Ergebnis und
+Daten stehen im unterschriebenen Bericht fest und lassen sich hier nicht
+ändern – nur Location, Vorgang, Mietzeit und Hinweis. Wird der Bericht
+korrigiert, zieht ein noch nicht freigegebener Nachweis zurück; einer, der
+schon freigegeben ist, bleibt, bis jemand ihn zurückzieht.
+
 ### Aufbewahrung
 
 Ein Nachweis bleibt bis zum 31.12. des Prüfjahres plus
@@ -581,7 +595,7 @@ bin/power wartung                            macht abgelaufene Einrichtungslinks
 
 | Zugang | Kennwort | zeigt |
 |---|---|---|
-| `muster-events` | `Kundenbereich2026!` | **Muster Events GmbH & Co. KG**: das Festivalgelände während des Sommerfestivals (Messdaten nur der Festivalwoche), das abgeschlossene Protokoll UB-…-0001, drei freigegebene Prüfnachweise (einer läuft in 20 Tagen ab, einer stammt aus dem Eventworx-Auftrag AU-1042). Ebenfalls beim Kunden, aber für ihn noch unsichtbar: UB-…-0002 (wartet auf die Unterschrift des Kunden) und ein Nachweis im Entwurf. |
+| `muster-events` | `Kundenbereich2026!` | **Muster Events GmbH & Co. KG**: das Festivalgelände während des Sommerfestivals (Messdaten nur der Festivalwoche), das abgeschlossene Protokoll UB-…-0001, drei freigegebene Prüfnachweise (einer läuft in 20 Tagen ab, einer stammt aus dem Eventworx-Auftrag AU-1042). Ebenfalls beim Kunden, aber für ihn noch unsichtbar: UB-…-0002 (wartet auf die Unterschrift des Kunden), ein Nachweis im Entwurf und einer aus der Geräteprüfung (Entwurf); dazu vier Prüflinge der Geräteprüfung und eine Anschrift für den Prüfbericht. |
 | `stadtmarketing` | `Stadtmarketing2026!` | **Stadtmarketing Musterstadt e. V.**: dasselbe Gelände erst für den Herbstmarkt in einem Monat – bis dahin nur unter „Demnächst“, und nichts von Muster Events. |
 
 Am Auftrag AU-1042 liegt in der Demo ein zweites Prüfprotokoll, das noch
