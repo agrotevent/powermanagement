@@ -7,8 +7,8 @@ alle 5 Sekunden, solange die Seite offen ist.
 
 Die Bilder zeigen das Demo-Gelände (`php bin/power demo:seed`): ein
 Festivalgelände mit Netzanschluss, Energiesäulen, Aggregat mit Tank,
-Speicher, Verteilern, einer Foodtruck-Meile, einem laufenden Aufbau und
-zwei Veranstaltern mit eigenem Kundenbereich.
+Speicher, Verteilern, einer Foodtruck-Meile, einem laufenden Aufbau,
+zwei Veranstaltern mit eigenem Kundenbereich und einer Geräteprüfung.
 
 ## Übersicht
 
@@ -413,6 +413,33 @@ Alles Weitere – Sichtbarkeit, mehrere Veranstalter auf einem Gelände,
 Prüfnachweise, Abrufe, Datenschutz – steht in
 [kundenbereich.md](kundenbereich.md).
 
+## Geräteprüfung
+
+Ortsveränderliche Geräte – eigene und die der Kunden – werden nach DGUV
+Vorschrift 3 mit dem Prüfgerät **BENNING ST 755+** geprüft. Gemessen und
+bewertet wird am Gerät; PowerManagement liest seine Datenbank und macht
+daraus unterschriebene Prüfberichte (*Kunden → Geräteprüfung*):
+
+1. **Importieren:** die Datenbank des Geräts (`.db` oder eine Sicherung
+   `…_Backup.001` von SD-Karte bzw. USB-Stick) hochladen, in der Vorschau
+   je Kunde im Gerät wählen, wohin seine Geräte gehören – zugeordnet wird
+   nie still –, dann übernehmen.
+2. **Prüflinge pflegen:** Stammdaten, Prüfablauf, Prüfintervall,
+   Inventarstück; die Liste zeigt, was fällig ist.
+3. **Exportieren:** eine Datei mit Kunden und Prüflingen für das Gerät
+   schreiben (ob das Gerät sie lädt, ist noch nicht mit einem echten Gerät
+   erprobt – vorher am Gerät sichern).
+4. **Unterschreiben:** einzeln oder gesammelt; jeder Prüfbericht wird mit
+   Nummer `GP-…` und PDF eingefroren, eine Korrektur ist eine neue Fassung.
+5. Bestandene Berichte von Kundengeräten liegen danach als **Prüfnachweis**
+   im Entwurf beim Kunden – sichtbar nach der Freigabe.
+
+![Prüflinge der Geräteprüfung mit letzter Prüfung und Fälligkeit](bilder/geraetepruefung-prueflinge.png)
+
+Alles Weitere – Import, Vorlage, Export und der erste Versuch am Gerät,
+Prüfabläufe und Zubehör, Inhalt der Prüfberichte, Integrität, Rechte,
+Datenschutz – steht in [geraetepruefung.md](geraetepruefung.md).
+
 ## Inventar
 
 Im **Inventar** (*Anlagen → Inventar*) stehen die Geräte aus dem Lager, in
@@ -462,6 +489,11 @@ dort steckte. Schalten lässt sich ein Shelly nur dort, wo er jetzt steckt.
 Pflegen darf das Inventar, wer das Recht *Inventar pflegen* hat (Rolle
 Stromplanung); ansehen, wer Datenquellen sehen darf. Einsetzen und Abbauen
 darf, wer die Anlage bearbeiten darf.
+
+Ist ein Stück als Prüfling der [Geräteprüfung](#geräteprüfung) verknüpft,
+zeigt seine Seite die Karte **DGUV V3** mit letzter Prüfung, Ergebnis und
+Fälligkeit (in der Demo ZS-63-02); sonst bietet sie *Als Prüfling anlegen*
+an. Tanksensoren sind nie Prüflinge.
 
 ## Tanks und Kraftstoff
 

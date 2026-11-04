@@ -4,6 +4,8 @@ declare(strict_types=1);
 namespace App\Kunden;
 
 use App\Auth\Auth;
+use App\Geraetepruefung\PruefberichtPdf;
+use App\Geraetepruefung\PruefberichtService;
 use App\Services\Eventworx;
 use App\Services\EventworxFehler;
 use App\Services\UpdateService;
@@ -49,6 +51,14 @@ use App\Support\Zeit;
  * Eventworx gibt es hier höchstens einmal (auch nie für zwei Kunden). Der
  * Kundenbereich selbst fragt Eventworx nie.
  *
+ * Aus der Geräteprüfung (ausGeraetepruefung) kommt ein unterschriebener,
+ * bestandener Prüfbericht – beim Unterschreiben eines Kundengeräts von
+ * selbst, sonst von Hand – immer als Entwurf, mit dem gespeicherten PDF
+ * des Berichts und den Angaben aus seinem eingefrorenen Inhalt (die sich
+ * hier nicht mehr ändern lassen, EINGEFROREN_AUS_BERICHT). Ein Bericht wird
+ * höchstens einmal Nachweis; wird er korrigiert, zieht ein noch nicht
+ * freigegebener Nachweis zurück.
+ *
  * Rechte prüft die Route (kunden.nachweise, ansehen kunden.view); jede
  * Nachweis-ID wird hier gegen den Kunden geprüft – fremd ist nicht
  * vorhanden. Im Audit stehen nur IDs, nie Dateinamen oder Kundennamen.
@@ -59,7 +69,14 @@ final class Pruefnachweise
 
     public const STATUS = ['entwurf' => 'Entwurf', 'freigegeben' => 'freigegeben', 'zurueckgezogen' => 'zurückgezogen'];
 
-    public const QUELLEN = ['hand' => 'von Hand hinterlegt', 'ewx_vorgang' => 'aus Eventworx'];
+    public const QUELLEN = ['hand' => 'von Hand hinterlegt', 'ewx_vorgang' => 'aus Eventworx', 'geraetepruefung' => 'aus Geräteprüfung'];
+
+    /**
+     * Bei einem Nachweis aus der Geräteprüfung stehen diese Angaben im
+     * unterschriebenen Prüfbericht – sie bleiben, wie sie übernommen wurden.
+     * Ändern lassen sich nur Location, Vorgang, Mietzeit und Hinweis.
+     */
+    public const EINGEFROREN_AUS_BERICHT = ['bezeichnung', 'inventarnummer', 'seriennummer', 'norm', 'ergebnis', 'geprueft_am', 'naechste_pruefung'];
 
     /** '' = nicht angegeben: ein Ergebnis gibt es nur, wenn es im Protokoll steht. */
     public const ERGEBNISSE = ['' => 'nicht angegeben', 'bestanden' => 'bestanden', 'maengel' => 'mit Mängeln'];
@@ -257,9 +274,29 @@ final class Pruefnachweise
         if ($n === null) {
             return ['ok' => false, 'message' => 'Diesen Prüfnachweis gibt es nicht.'];
         }
+        $ausBericht = (string) $n['quelle'] === 'geraetepruefung';
+        if ($ausBericht) {
+            // Fehlt ein eingefrorenes Feld im Formular, gilt der gespeicherte Wert.
+            foreach (self::EINGEFROREN_AUS_BERICHT as $feld) {
+                if (!array_key_exists($feld, $angaben)) {
+                    $angaben[$feld] = (string) ($n[$feld] ?? '');
+                }
+            }
+            $angaben['inventar_id'] = $n['inventar_id'] !== null ? (string) $n['inventar_id'] : '';
+        }
         $a = self::angaben($kundeId, $angaben, $n);
         if (!$a['ok']) {
             return $a;
+        }
+        if ($ausBericht) {
+            foreach (self::EINGEFROREN_AUS_BERICHT as $feld) {
+                if ((string) ($a['felder'][$feld] ?? '') !== (string) ($n[$feld] ?? '')) {
+                    return ['ok' => false, 'message' => 'Dieser Nachweis stammt aus einem unterschriebenen Prüfbericht der Geräteprüfung: '
+                        . 'Bezeichnung, Nummern, Norm, Ergebnis und Daten stehen dort fest. Ändern lassen sich hier nur Location, Vorgang, Mietzeit und Hinweis – '
+                        . 'eine Korrektur des Berichts ist eine neue Fassung.'];
+                }
+            }
+            $a['felder']['inventar_id'] = $n['inventar_id'] !== null ? (int) $n['inventar_id'] : null;
         }
         Database::update('pruefnachweise', $id, $a['felder'] + ['updated_at' => gmdate('c')]);
         Audit::log('kunden.nachweis_speichern', 'pruefnachweis', (string) $id, ['kunde_id' => $kundeId, 'nachweis_id' => $id]);
@@ -288,6 +325,10 @@ final class Pruefnachweise
             }
             if ((string) ($n['geprueft_am'] ?? '') === '' || trim((string) $n['bezeichnung']) === '') {
                 return ['ok' => false, 'message' => 'Erst Bezeichnung und Prüfdatum eintragen.'];
+            }
+            if ((string) $n['quelle'] === 'geraetepruefung' && !self::berichtGilt($n)) {
+                return ['ok' => false, 'message' => 'Der Prüfbericht dieses Nachweises ist nicht mehr gültig (Korrektur angefordert oder ersetzt) – '
+                    . 'freigegeben wird der Nachweis der neuen Fassung.'];
             }
             Database::update('pruefnachweise', $id, ['status' => 'freigegeben', 'freigegeben_von' => Auth::id(), 'freigegeben_am' => gmdate('c'), 'updated_at' => gmdate('c')]);
             $text = 'Prüfnachweis freigegeben – der Kunde sieht ihn jetzt.';
@@ -445,6 +486,136 @@ final class Pruefnachweise
         }
         $felder['hinweis'] = $hinweis;
         return ['ok' => true, 'message' => '', 'felder' => $felder + $daten + ['aufbewahren_bis' => self::aufbewahrenBis($daten['geprueft_am'])]];
+    }
+
+    // ------------------------------------------------------------ Aus der Geräteprüfung
+
+    /**
+     * Ein unterschriebener Prüfbericht der Geräteprüfung wird Prüfnachweis
+     * dieses Kunden (quelle 'geraetepruefung', `gp_bericht_id`) – nur ein
+     * gültiger (nicht ersetzter, keine Korrektur angefordert) mit Ergebnis
+     * „bestanden“; ein nicht bestandener nie. Gehört der Prüfling einem
+     * Kunden, nur diesem; einer aus dem eigenen Bestand jedem (etwa ein
+     * vermietetes Gerät). Die Bytes kommen nur aus dem gespeicherten PDF des
+     * Berichts (Prüfsumme nachgerechnet), die Angaben aus seinem eingefrorenen
+     * Inhalt; aus $angaben zählen nur Location, Vorgang, Mietzeit und Hinweis.
+     * Ein Bericht wird höchstens einmal Nachweis (eindeutiger Index).
+     *
+     * Status: Entwurf, außer mit $freigeben – der Kunde sieht ihn erst nach der
+     * Freigabe. Herkunft nur mit IDs, Nummer und Prüfsumme, nie Inhalte.
+     *
+     * @param array<string,mixed> $angaben
+     * @return array{ok:bool,message:string,id?:int}
+     */
+    public static function ausGeraetepruefung(int $kundeId, int $berichtId, array $angaben = [], bool $freigeben = false): array
+    {
+        if (KundenService::find($kundeId) === null) {
+            return ['ok' => false, 'message' => 'Diesen Kunden gibt es nicht.'];
+        }
+        $b = PruefberichtService::find($berichtId);
+        if ($b === null) {
+            return ['ok' => false, 'message' => 'Diesen Prüfbericht gibt es nicht.'];
+        }
+        if ((string) $b['status'] !== 'gueltig') {
+            return ['ok' => false, 'message' => 'Nur ein gültiger Prüfbericht wird Prüfnachweis – dieser ist ersetzt oder es ist eine Korrektur angefordert.'];
+        }
+        if ((string) $b['ergebnis'] !== 'bestanden') {
+            return ['ok' => false, 'message' => 'Nur ein bestandener Prüfbericht wird Prüfnachweis für den Kunden.'];
+        }
+        if ($b['kunde_id'] !== null && (int) $b['kunde_id'] !== $kundeId) {
+            return ['ok' => false, 'message' => 'Dieser Prüfbericht gehört zu einem Gerät eines anderen Kunden.'];
+        }
+        $bytes = PruefberichtService::pdfGespeichert($berichtId);
+        if ($bytes === null) {
+            return ['ok' => false, 'message' => 'Das gespeicherte PDF des Prüfberichts fehlt oder ist beschädigt (bin/power geraetepruefung:pruefen).'];
+        }
+        $pdf = self::pdfPruefen($bytes);
+        if ($pdf !== null) {
+            return ['ok' => false, 'message' => $pdf];
+        }
+        $i = $b['inhalt'];
+        $l = is_array($i['pruefling'] ?? null) ? $i['pruefling'] : [];
+        $p = is_array($i['pruefung'] ?? null) ? $i['pruefung'] : [];
+        $kennung = (string) ($l['kennung'] ?? '');
+        $bezeichnung = trim((string) ($l['bezeichnung'] ?? ''));
+        $fest = [
+            'bezeichnung'       => mb_strlen($bezeichnung) >= 2 ? $bezeichnung : 'Prüfling ' . $kennung,
+            'inventarnummer'    => mb_substr($kennung, 0, 80),
+            'seriennummer'      => mb_substr((string) ($l['seriennummer'] ?? ''), 0, 80),
+            'norm'              => mb_substr((string) ($p['norm'] ?? ''), 0, 120),
+            'ergebnis'          => 'bestanden',
+            'geprueft_am'       => (string) ($p['datum'] ?? ''),
+            'naechste_pruefung' => (string) ($i['naechste_pruefung'] ?? ''),
+        ];
+        $frei = array_intersect_key($angaben, array_flip(['site_id', 'vorgang_id', 'einsatz_von', 'einsatz_bis', 'hinweis']));
+        $a = self::angaben($kundeId, $fest + $frei, null);
+        if (!$a['ok']) {
+            return $a;
+        }
+        $a['felder']['inventar_id'] = null;
+        $sha = hash('sha256', $bytes);
+        $jetzt = gmdate('c');
+        $dateiName = PruefberichtPdf::dateiname($b);
+        try {
+            $id = (int) self::transaktion(static function () use ($kundeId, $berichtId, $b, $a, $bytes, $sha, $dateiName, $freigeben, $jetzt): int {
+                // Kunde, Vorgang und Bericht noch da – und der Bericht noch gültig?
+                if (!self::nochDa($kundeId, $a['felder']['vorgang_id'])
+                    || Database::scalar("SELECT id FROM gp_berichte WHERE id = ? AND status = 'gueltig'", [$berichtId]) === false) {
+                    return 0;
+                }
+                return Database::insert('pruefnachweise', $a['felder'] + [
+                    'kunde_id'        => $kundeId,
+                    'status'          => $freigeben ? 'freigegeben' : 'entwurf',
+                    'quelle'          => 'geraetepruefung',
+                    'gp_bericht_id'   => $berichtId,
+                    'datei_id'        => self::dateiSpeichern($bytes),
+                    'datei_name'      => $dateiName,
+                    'herkunft'        => json_encode(['art' => 'geraetepruefung', 'bericht_id' => $berichtId, 'nummer' => (string) $b['nummer'],
+                        'fassung' => (int) $b['fassung'], 'pdf_sha256' => $sha, 'user_id' => Auth::id(), 'am' => $jetzt], JSON_UNESCAPED_UNICODE),
+                    'erstellt_von'    => Auth::id(),
+                    'freigegeben_von' => $freigeben ? Auth::id() : null,
+                    'freigegeben_am'  => $freigeben ? $jetzt : null,
+                    'created_at'      => $jetzt,
+                ]);
+            });
+        } catch (\PDOException $e) {
+            // Eindeutig je Bericht: ein zweiter Klick oder ein gleichzeitiger Prozess war schneller.
+            if (Database::scalar('SELECT id FROM pruefnachweise WHERE gp_bericht_id = ?', [$berichtId]) !== false) {
+                return ['ok' => false, 'message' => 'Dieser Prüfbericht ist schon als Prüfnachweis hinterlegt.'];
+            }
+            throw $e;
+        }
+        if ($id === 0) {
+            return ['ok' => false, 'message' => 'Den Kunden, den gewählten Vorgang oder den gültigen Prüfbericht gibt es inzwischen nicht mehr – nichts hinterlegt.'];
+        }
+        Audit::log('kunden.nachweis_hochgeladen', 'pruefnachweis', (string) $id,
+            ['kunde_id' => $kundeId, 'nachweis_id' => $id, 'quelle' => 'geraetepruefung', 'gp_bericht_id' => $berichtId, 'freigegeben' => $freigeben]);
+        return ['ok' => true, 'id' => $id, 'message' => $freigeben ? 'Prüfnachweis aus dem Prüfbericht hinterlegt und für den Kunden freigegeben.'
+            : 'Prüfnachweis aus dem Prüfbericht als Entwurf hinterlegt – der Kunde sieht ihn erst nach der Freigabe.'];
+    }
+
+    /**
+     * Ein Prüfbericht der Geräteprüfung wurde durch eine Korrektur ersetzt:
+     * ein noch nicht freigegebener Nachweis daraus wird zurückgezogen, ein
+     * freigegebener bleibt (der Aufrufer weist darauf hin – zurückgezogen wird
+     * er von Hand, sobald der neue freigegeben ist). Läuft in der Transaktion
+     * des Aufrufers.
+     *
+     * @return array{zurueckgezogen:int,freigegeben:int}
+     */
+    public static function geraetepruefungErsetzt(int $berichtId): array
+    {
+        $zurueck = Database::execute("UPDATE pruefnachweise SET status = 'zurueckgezogen', updated_at = ? WHERE gp_bericht_id = ? AND status = 'entwurf'",
+            [gmdate('c'), $berichtId]);
+        $frei = (int) Database::scalar("SELECT COUNT(*) FROM pruefnachweise WHERE gp_bericht_id = ? AND status = 'freigegeben'", [$berichtId]);
+        return ['zurueckgezogen' => $zurueck, 'freigegeben' => $frei];
+    }
+
+    /** Ist der Prüfbericht eines Nachweises aus der Geräteprüfung gültig und bestanden? */
+    private static function berichtGilt(array $n): bool
+    {
+        $id = (int) ($n['gp_bericht_id'] ?? 0);
+        return $id > 0 && Database::scalar("SELECT id FROM gp_berichte WHERE id = ? AND status = 'gueltig' AND ergebnis = 'bestanden'", [$id]) !== false;
     }
 
     // ------------------------------------------------------------ Aus Eventworx
@@ -1098,6 +1269,11 @@ final class Pruefnachweise
     /** Woher ein Nachweis stammt – als Satzteil für Kunde und Personal. */
     public static function quelleText(array $n): string
     {
+        if ((string) $n['quelle'] === 'geraetepruefung') {
+            $herkunft = json_decode((string) ($n['herkunft'] ?? ''), true);
+            $nummer = is_array($herkunft) && is_string($herkunft['nummer'] ?? null) ? $herkunft['nummer'] : '';
+            return self::QUELLEN['geraetepruefung'] . (preg_match('/^[A-Z]{1,8}-\d{4}-\d{1,9}(-K\d{1,4})?$/', $nummer) === 1 ? ', Prüfbericht ' . $nummer : '');
+        }
         if ((string) $n['quelle'] !== 'ewx_vorgang') {
             return self::QUELLEN['hand'];
         }

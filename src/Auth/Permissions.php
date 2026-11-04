@@ -38,6 +38,15 @@ final class Permissions
             'kunden.manage'      => 'Kunden und Kundenzugänge pflegen, Übergabeberichte zuordnen, Vorgänge verknüpfen; Standorte freigeben und Zugänge ausgeben nur mit „Alle Standorte, Anlagen und Messdaten“',
             'kunden.nachweise'   => 'Prüfnachweise (DGUV V3) hochladen, aus Eventworx übernehmen, freigeben und zurückziehen',
         ],
+        // Prüflinge sind kein Standort-Bestand: wer „ansehen“ hat, sieht alle
+        // (eigene wie die der Kunden). Kundenzugänge erreichen die Seiten nie
+        // (Tor im Router); im Kundenbereich erscheint nur, was als Prüfnachweis
+        // freigegeben ist.
+        'Geräteprüfung' => [
+            'geraetepruefung.view'           => 'Geräteprüfung (DGUV V3): Prüflinge, Prüfungen und Prüfberichte ansehen und als PDF laden',
+            'geraetepruefung.manage'         => 'Prüflinge pflegen, Datenbank des Prüfgeräts importieren und exportieren, Vorlage und Prüfabläufe pflegen',
+            'geraetepruefung.unterschreiben' => 'Prüfberichte der Geräteprüfung als Prüfer unterschreiben und Korrekturen anlegen (nur mit vollem Namen und hinterlegter Qualifikation)',
+        ],
         'Karte & Standorte' => [
             'karte.view'         => 'Karte mit Grundriss ansehen',
             'plans.manage'       => 'Standorte, Etagen und Grundrisse pflegen, Maßstab setzen',
@@ -128,6 +137,7 @@ final class Permissions
                     'datenquellen.view', 'inventory.pull', 'inventar.manage',
                     'berichte.view', 'berichte.manage', 'berichte.eventworx',
                     'kunden.view', 'kunden.manage', 'kunden.nachweise',
+                    'geraetepruefung.view', 'geraetepruefung.manage',
                 ],
             ],
             'technik' => [
@@ -138,6 +148,7 @@ final class Permissions
                     'statistik.view', 'datenquellen.view', 'steuern', 'steuern.protokoll',
                     'berichte.view', 'berichte.manage', 'berichte.eventworx', 'berichte.pruefen',
                     'kunden.view', 'kunden.nachweise',
+                    'geraetepruefung.view', 'geraetepruefung.manage', 'geraetepruefung.unterschreiben',
                 ],
             ],
             // Keine Übergabeberichte: ein Gelände hat mehrere Veranstalter,

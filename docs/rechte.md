@@ -18,8 +18,8 @@ und Stromplanung haben es.
 | Rolle | gedacht für | Rechte (Auszug) |
 |-------|-------------|-----------------|
 | **Administration** | Betreiber | alles (`*`), auch die Schnittstelle zu anderen Instanzen |
-| **Stromplanung** | Planer im Büro | Anlagen, Stecker, Karte, Grundrisse, Kabel, Statistik und Export, Datenquellen ansehen, Inventar pflegen, Locations holen, Übergabeberichte anlegen und ausfüllen (mit Eventworx), Kunden und ihren Kundenbereich pflegen, Prüfnachweise hinterlegen. Sieht alle Standorte, **schaltet nicht**, **unterschreibt nicht als Prüfer**. |
-| **Elektrotechnik vor Ort** | Elektriker auf dem Gelände | Anlagen und Kabel dokumentieren, Statistik, Datenquellen ansehen, **schalten** und Schaltprotokoll, Übergabeberichte ausfüllen und **als Prüfer unterschreiben** – nur auf freigegebenen Standorten. Kunden ansehen und Prüfnachweise hinterlegen. |
+| **Stromplanung** | Planer im Büro | Anlagen, Stecker, Karte, Grundrisse, Kabel, Statistik und Export, Datenquellen ansehen, Inventar pflegen, Locations holen, Übergabeberichte anlegen und ausfüllen (mit Eventworx), Kunden und ihren Kundenbereich pflegen, Prüfnachweise hinterlegen, Geräteprüfung (Prüflinge, Import, Export). Sieht alle Standorte, **schaltet nicht**, **unterschreibt nicht als Prüfer**. |
+| **Elektrotechnik vor Ort** | Elektriker auf dem Gelände | Anlagen und Kabel dokumentieren, Statistik, Datenquellen ansehen, **schalten** und Schaltprotokoll, Übergabeberichte ausfüllen und **als Prüfer unterschreiben** – nur auf freigegebenen Standorten. Kunden ansehen und Prüfnachweise hinterlegen. Geräteprüfung mit Import und Export, Prüfberichte **als Prüfer unterschreiben**. |
 | **Kunde / Veranstalter** | Auftraggeber | Übersicht, Anlagen, Karte, Statistik und CSV-Export – nur Freigegebenes im freigegebenen Zeitraum. Keine Übergabeberichte (siehe unten). Der neuere Weg für Kunden ist der [Kundenbereich](#kunden--kundenbereich) – ohne Rolle. |
 
 Rollen und ihre Rechte lassen sich unter **System → Rollen & Rechte** anpassen oder
@@ -399,6 +399,44 @@ Dazu gilt jeweils:
   ansehen“ hat.
 - Rechte vergibt auch hier nur, wer sie selbst hat.
 
+## Geräteprüfung
+
+Die Geräteprüfung ([geraetepruefung.md](geraetepruefung.md)) hat eine
+eigene Gruppe mit drei Rechten:
+
+| Recht | erlaubt | ab Werk |
+|---|---|---|
+| „Geräteprüfung (DGUV V3): Prüflinge, Prüfungen und Prüfberichte ansehen und als PDF laden“ (`geraetepruefung.view`) | Übersicht, Prüflinge, Prüfungen, Prüfabläufe, PDFs der Prüfberichte; die Karte „DGUV V3“ am Inventarstück | Stromplanung, Elektrotechnik |
+| „Prüflinge pflegen, Datenbank des Prüfgeräts importieren und exportieren, Vorlage und Prüfabläufe pflegen“ (`geraetepruefung.manage`) | Prüflinge anlegen, ändern, löschen; Import mit Vorschau und Zuordnung, Vorlage, Export; Norm und Zubehör der Prüfabläufe | Stromplanung, Elektrotechnik |
+| „Prüfberichte der Geräteprüfung als Prüfer unterschreiben und Korrekturen anlegen …“ (`geraetepruefung.unterschreiben`) | unterschreiben (einzeln und gesammelt), Korrektur anfordern – nur mit **vollem Namen** und hinterlegter **Prüfer-Qualifikation** im Konto | Elektrotechnik |
+
+Dazu gilt:
+
+- **Prüflinge sind kein Standort-Bestand.** Freigaben spielen keine Rolle:
+  Wer „ansehen“ hat, sieht alle Prüflinge, Prüfungen und Berichte – die des
+  eigenen Bestands wie die der Kunden.
+- Beim Import **neue Kunden anlegen** und leere Kontaktfelder vorhandener
+  Kunden ergänzen braucht zusätzlich „Kunden pflegen“; ein
+  **Inventarstück** verknüpfen „Datenquellen ansehen“ (nie ein Tanksensor).
+- Einen Prüfbericht **als Prüfnachweis an einen Kunden geben** braucht
+  „Prüfnachweise (DGUV V3) …“ – auch der Entwurf, den das Unterschreiben
+  eines bestandenen Kundengeräts anlegt (ohne das Recht: Hinweis, nachholbar
+  auf der Seite der Prüfung); freigegeben wird er wie jeder Nachweis in der
+  Kundenverwaltung.
+- Unterschreiben braucht im Konto einen **vollen Namen** und eine
+  Prüfer-Qualifikation. Der Name beim Unterschreiben muss zum vollen Namen
+  des angemeldeten Kontos passen; wo laut Prüfgerät jemand anderes geprüft
+  hat, nur mit „Verantwortung übernehmen“.
+- Prüfgeräte und Zubehör (etwa den Messadapter MA 4) pflegt, wer
+  „Übergabeberichte anlegen …“ (`berichte.manage`) hat – unter
+  *Übergabeberichte → Prüfgeräte*; „Geräteprüfung pflegen“ wählt sie nur als
+  Zubehör eines Prüfablaufs.
+- **Kundenzugänge** erreichen keine Seite der Geräteprüfung (Tor im
+  Router), auch nicht mit einer Rolle per SQL. Sie sehen nur freigegebene
+  Prüfnachweise im Kundenbereich; die Rolle *Kunde / Veranstalter* hat keins
+  der drei Rechte.
+- Rechte vergibt auch hier nur, wer sie selbst hat.
+
 ## Rollen aus Authentik-Gruppen
 
 Mit der Anmeldung über SSO ([anmeldung-sso.md](anmeldung-sso.md)) können
@@ -445,6 +483,6 @@ Im Demo-Modus legt `bin/power demo:seed` diese Beispielkonten an:
 | Benutzer | Kennwort | zeigt |
 |----------|----------|-------|
 | `veranstalter` | `Veranstalter2026!` | Rolle Kunde. Freigabe nur für das Festivalgelände und nur für die Festivalwoche. Konto läuft nach 10 Tagen ab. |
-| `technik` | `Technik2026!!` | Rolle Elektrotechnik. Bearbeiten auf dem Festivalgelände (auch peilen und betanken), schalten nur beim Shelly der Geländebeleuchtung. Mit Prüfer-Qualifikation: unterschreibt Übergabeberichte. Mit einer (Demo-)Anmeldung bei Authentik verknüpft – SSO selbst ist in der Demo aus. |
+| `technik` | `Technik2026!!` | Rolle Elektrotechnik. Bearbeiten auf dem Festivalgelände (auch peilen und betanken), schalten nur beim Shelly der Geländebeleuchtung. Mit Prüfer-Qualifikation: unterschreibt Übergabeberichte und die Prüfberichte der Geräteprüfung (in der Demo schon einige, die übrigen Prüfungen sind offen). Mit einer (Demo-)Anmeldung bei Authentik verknüpft – SSO selbst ist in der Demo aus. |
 | `muster-events` | `Kundenbereich2026!` | Kundenzugang von „Muster Events GmbH & Co. KG“: im Kundenbereich das Festivalgelände während des Sommerfestivals, ein Protokoll, Prüfnachweise. |
 | `stadtmarketing` | `Stadtmarketing2026!` | Kundenzugang von „Stadtmarketing Musterstadt e. V.“: dasselbe Gelände erst in einem Monat, nichts von Muster Events. |

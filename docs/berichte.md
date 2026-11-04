@@ -466,7 +466,9 @@ sudo -u www-data php /opt/powermanagement/bin/power berichte:aufbewahrung --ausf
 
 Dazu die Firma „Muster Eventstrom GmbH“ (nur, wenn noch keine Firmendaten
 eingetragen sind), zwei Prüfgeräte (eines mit abgelaufener Kalibrierung) und
-das Konto `technik` mit Prüfer-Qualifikation.
+das Konto `technik` mit Prüfer-Qualifikation. Unter *Prüfgeräte* stehen
+außerdem der Gerätetester und ein Messadapter der
+[Geräteprüfung](geraetepruefung.md#demo).
 
 ## Prüfen
 

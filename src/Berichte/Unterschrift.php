@@ -3,6 +3,8 @@ declare(strict_types=1);
 
 namespace App\Berichte;
 
+use App\Support\Database;
+
 /**
  * Unterschriften der Übergabeberichte: nur Geometrie.
  *
@@ -33,6 +35,19 @@ final class Unterschrift
     public const ZU_KLEIN = 'Unterschrift zu klein oder leer – bitte größer unterschreiben.';
 
     private const STEUERZEICHEN = '/[\x00-\x1F\x7F\x{200B}-\x{200F}\x{202A}-\x{202E}\x{2060}-\x{2069}\x{FEFF}]/u';
+
+    /**
+     * Gibt es diese Striche (Kanon-Hash) schon – bei einem Übergabebericht
+     * (`bericht_unterschriften`) oder einem Prüfbericht der Geräteprüfung
+     * (`gp_unterschriften`)? Dieselben Striche gibt es nur einmal, in beide
+     * Richtungen: eine Kopie oder ein Wiederabspielen wird nie eine zweite
+     * Unterschrift.
+     */
+    public static function stricheBekannt(string $hash): bool
+    {
+        return Database::scalar('SELECT id FROM bericht_unterschriften WHERE striche_hash = ?', [$hash]) !== false
+            || Database::scalar('SELECT id FROM gp_unterschriften WHERE striche_hash = ?', [$hash]) !== false;
+    }
 
     /**
      * @return array{ok:bool, message:string, striche?:list<list<array{0:int,1:int}>>}

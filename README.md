@@ -93,6 +93,16 @@ Mehr Bilder in der [Bedienungsanleitung](docs/bedienung.md).
   Eventworx-Auftrag übernommen, immer durch eine Person freigegeben. Mehrere
   Veranstalter auf einem Gelände sehen nie etwas voneinander; jeder
   Download wird festgehalten.
+- **Geräteprüfung (DGUV V3)** mit dem Gerätetester **BENNING ST 755+**:
+  Datenbank des Geräts (SD-Karte/USB-Stick, auch Sicherungen) mit Vorschau
+  importieren – Kunden im Gerät werden nie still zugeordnet, hier
+  korrigierte Prüflinge nie still überschrieben –, Prüflinge (eigener
+  Bestand und Geräte der Kunden, optional mit Inventarstück) mit Fälligkeit
+  pflegen, eine Datei mit Kunden und Prüflingen für das Gerät schreiben
+  (Einstellungen des Geräts bleiben Byte für Byte). Prüfberichte einzeln
+  oder gesammelt unterschreiben, eingefroren mit Prüfsumme, Siegel und PDF;
+  bestandene Berichte von Kundengeräten werden Prüfnachweise im
+  Kundenbereich, sichtbar nach der Freigabe.
 - **Verteiler-Abgleich** über dasselbe Repository: Standard-Verteiler und
   Inventar (Verteiler und Zwischenstecker mit ihren Shellys), eine Datei je
   Verteiler. Je Verteiler steht, ob er hier, dort oder auf beiden Seiten
@@ -120,7 +130,7 @@ php -S 127.0.0.1:8080 -t public
 → <http://127.0.0.1:8080>, Anmeldung `admin` / `PowerAdmin2026!`. Weitere
 Demo-Konten: `veranstalter` / `Veranstalter2026!` (sieht nur die
 Festivalwoche) und `technik` / `Technik2026!!` (darf nur das Licht schalten,
-unterschreibt Übergabeberichte als Prüfer). Den Kundenbereich zeigen
+unterschreibt Übergabe- und Prüfberichte als Prüfer). Den Kundenbereich zeigen
 `muster-events` / `Kundenbereich2026!` und `stadtmarketing` /
 `Stadtmarketing2026!` – zwei Veranstalter auf demselben Gelände.
 
@@ -148,8 +158,9 @@ Update: **[docs/installation-debian-lxc.md](docs/installation-debian-lxc.md)**.
 | Datei | Inhalt |
 |-------|--------|
 | [docs/installation-debian-lxc.md](docs/installation-debian-lxc.md) | Installation, Update, Sicherung, Fehlersuche |
-| [docs/bedienung.md](docs/bedienung.md) | Übersicht, Karte, Anlagen, Verteilerplan, Aufbau und Abgleich, Übergabeberichte, Kunden, Inventar, Tanks und Kraftstoff, Auswertung, Bereiche, Materialliste, Schalten, Location- und Verteiler-Abgleich, andere Instanzen |
+| [docs/bedienung.md](docs/bedienung.md) | Übersicht, Karte, Anlagen, Verteilerplan, Aufbau und Abgleich, Übergabeberichte, Kunden, Geräteprüfung, Inventar, Tanks und Kraftstoff, Auswertung, Bereiche, Materialliste, Schalten, Location- und Verteiler-Abgleich, andere Instanzen |
 | [docs/berichte.md](docs/berichte.md) | Übergabeberichte: Ablauf vor Ort, Felder, Vorbelegung, Grenzwerte, Unterschrift und Beweiswert, Kundenmodus, Korrektur, Integrität, Datenschutz, Aufbewahrung |
+| [docs/geraetepruefung.md](docs/geraetepruefung.md) | Geräteprüfung (DGUV V3) mit dem BENNING ST 755+: Datenbank des Geräts, Import mit Vorschau und Zuordnung, Prüflinge, Export und der erste Versuch am Gerät, Prüfabläufe und Zubehör, Prüfberichte (Unterschrift, Korrektur, Integrität), Prüfnachweise, Rechte, Datenschutz |
 | [docs/kundenbereich.md](docs/kundenbereich.md) | Kundenbereich: Kunden und Zugänge, was Kunden sehen, mehrere Veranstalter je Gelände, Protokolle zuordnen, Prüfnachweise (DGUV V3), Abrufe, Datenschutz |
 | [docs/rechte.md](docs/rechte.md) | Rollen, Freigaben, Zeitfenster, Schaltrechte je Gerät, Kundenzugänge, Rollen aus Authentik-Gruppen |
 | [docs/anmeldung-sso.md](docs/anmeldung-sso.md) | Anmeldung über SSO (OpenID Connect, Authentik): Einrichtung dort und hier, Konten verbinden, Gruppen → Rollen und Kunden, nur SSO und Notzugang, Abmelden, Bestätigen, Fehlersuche, Datenschutz |
@@ -174,6 +185,7 @@ bin/power katalog:import <datei> [--ueberschreiben] [--pruefen]
 bin/power tank:liste --als=<benutzer> [--standort=<id>] [--warnungen]   ·   bin/power tank:rechnen <messpunkt-id> <rohwert>
 bin/power berichte:pruefen [<nummer> [--fassung=N]] [--pdf]   ·   bin/power berichte:pdf <nummer> <ziel.pdf> [--fassung=N]
 bin/power berichte:aufbewahrung [--ausfuehren]   ·   bin/power eventworx:pruefen
+bin/power geraetepruefung:pruefen [<nummer> [--fassung=N]] [--pdf]   ·   bin/power geraetepruefung:pdf <nummer> <ziel.pdf> [--fassung=N]
 bin/power eventworx:sonde [--job=OID] [--stock=OID] [--serie=…] [--json]
 bin/power kunden:liste   ·   bin/power kunden:zugang <kunde-id> <benutzer> [--kennwort] [--name=…] [--email=…]
 bin/power kunden:aufbewahrung [--ausfuehren]   ·   bin/power kunden:nachweise-pruefen
@@ -215,10 +227,12 @@ public/                   Einstieg index.php, CSS, JS (Leaflet, uPlot, pdf.js mi
 resources/views/          Vorlagen (PHP)
 resources/fonts/          Liberation Sans für die PDF (SIL OFL 1.1)
 resources/hilfe/          Hilfe-Seite des Kundenbereichs (Markdown)
+resources/benning/        Aufbau und Werksdaten der Datenbank des BENNING ST 755+ (ohne Kundendaten) für die erfundene Muster-Datenbank
 src/Auth/                 Anmeldung, Rechte, Freigaben/Zeitfenster (Zugriff), Tokens der Schnittstelle (ApiZugang)
 src/Auth/Sso/             Anmeldung über SSO: Einstellungen, Anbieter (Discovery, JWKS, Token), ID-Token-Prüfung, Konten, Schutz
 src/Berichte/             Übergabeberichte: Schema, Vorbelegung, Grenzwerte, Unterschrift, Kundenmodus, PDF-Layout
 src/Controllers/          Seiten, Schnittstelle /api/v1 (ApiController)
+src/Geraetepruefung/      Geräteprüfung: Datenbank des Prüfgeräts lesen (BenningDatei), Vorlage und Export (BenningVorlage), Import, Prüflinge, Prüfungen, Prüfberichte und ihr PDF
 src/Kunden/               Kundenbereich: Kunden, Zugänge, Einrichtungslink, was Kunden sehen (KundenSicht), Prüfnachweise, Abrufe
 src/Messung/              InfluxDB, MQTT, Modbus TCP, ComAp, VRM, Sammler, Steuerung, Demo
 src/Pdf/                  eigener PDF-Schreiber (Schrift als Teilmenge, Tabellen)

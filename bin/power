@@ -105,6 +105,13 @@ declare(strict_types=1);
  *                                   Das gespeicherte PDF eines abgeschlossenen Berichts herausschreiben
  *   bin/power berichte:aufbewahrung [--ausfuehren]
  *                                   Berichte über der Aufbewahrungsfrist zeigen, mit --ausfuehren löschen
+ *   bin/power geraetepruefung:pruefen [<nummer> [--fassung=N]] [--pdf]
+ *                                   Prüfberichte der Geräteprüfung nachrechnen: Inhalt, Unterschrift,
+ *                                   Kette, Siegel, PDF (--pdf: neu erzeugen und Byte für Byte
+ *                                   vergleichen). Ohne Nummer alle. Ausgabe ohne Kundendaten,
+ *                                   Exit 1 bei einem Befund
+ *   bin/power geraetepruefung:pdf <nummer> <ziel.pdf> [--fassung=N]
+ *                                   Das gespeicherte PDF eines Prüfberichts herausschreiben
  *   bin/power eventworx:pruefen     Verbindung zu Eventworx prüfen (nur lesend)
  *   bin/power eventworx:sonde [--stock=OID] [--job=OID] [--serie=TEXT] [--json]
  *                                   (auch eventworx:geraete-pruefen) Lese-Probe: was liefert die
@@ -1042,6 +1049,69 @@ switch ($befehl) {
         $aus(count($geloescht) . ' gelöscht.');
         break;
 
+    case 'geraetepruefung:pruefen':
+    case 'geraetepruefung:pdf':
+        // Ausgabe ohne Kundendaten: nur Nummer, Fassung, Stand und Befunde.
+        $gpBericht = static function (string $nummer) use ($optionen, $fehler): array {
+            $fassung = null;
+            if (isset($optionen['fassung'])) {
+                if (!is_string($optionen['fassung']) || !ctype_digit($optionen['fassung']) || (int) $optionen['fassung'] < 1) {
+                    $fehler('--fassung braucht eine Zahl ab 1.');
+                }
+                $fassung = (int) $optionen['fassung'];
+            }
+            $b = \App\Geraetepruefung\PruefberichtService::nachNummer($nummer, $fassung);
+            if ($b === null) {
+                $fehler('Einen Prüfbericht ' . ($fassung === null ? 'mit dieser Nummer' : 'mit dieser Nummer und Fassung') . ' gibt es nicht.');
+            }
+            return $b;
+        };
+        if ($befehl === 'geraetepruefung:pdf') {
+            if (count($werte) < 2) {
+                $fehler('Aufruf: bin/power geraetepruefung:pdf <nummer> <ziel.pdf> [--fassung=N]');
+            }
+            $b = $gpBericht((string) $werte[0]);
+            $bytes = \App\Geraetepruefung\PruefberichtService::pdfGespeichert((int) $b['id']);
+            if ($bytes === null) {
+                $fehler('Das gespeicherte PDF fehlt oder ist beschädigt (bin/power geraetepruefung:pruefen ' . $b['nummer'] . ').');
+            }
+            $ziel = (string) $werte[1];
+            // Nie eine vorhandene Datei überschreiben (auch keinen Link darauf).
+            $datei = @fopen($ziel, 'x');
+            if ($datei === false) {
+                $fehler(file_exists($ziel) || is_link($ziel) ? $ziel . ' gibt es schon.' : $ziel . ' lässt sich nicht anlegen.');
+            }
+            fwrite($datei, $bytes);
+            fclose($datei);
+            @chmod($ziel, 0640);
+            $aus($b['nummer'] . ' (Fassung ' . $b['fassung'] . ') → ' . $ziel . ', ' . number_format(strlen($bytes), 0, ',', '.') . ' Bytes, SHA-256 '
+                . hash('sha256', $bytes));
+            break;
+        }
+        $liste = isset($werte[0]) ? [$gpBericht((string) $werte[0])] : \App\Geraetepruefung\PruefberichtService::alle();
+        if ($liste === []) {
+            $aus('Keine Prüfberichte der Geräteprüfung.');
+            break;
+        }
+        $mitBefund = 0;
+        $hinweise = 0;
+        foreach ($liste as $b) {
+            $titel = sprintf('%s (Fassung %d, %s)', $b['nummer'], (int) $b['fassung'],
+                \App\Geraetepruefung\PruefberichtService::STATUS[$b['status']] ?? preg_replace('/[^a-z]/', '', (string) $b['status']));
+            $erg = \App\Geraetepruefung\PruefberichtService::integritaet((int) $b['id'], isset($optionen['pdf']));
+            $aus(($erg['ok'] ? 'OK       ' : 'BEFUND   ') . $titel);
+            foreach ($erg['befunde'] as $text) {
+                $aus('         - ' . $text);
+            }
+            foreach ($erg['hinweise'] as $text) {
+                $aus('         Hinweis: ' . $text);
+                $hinweise++;
+            }
+            $mitBefund += $erg['ok'] ? 0 : 1;
+        }
+        $aus(sprintf('%d geprüft, %d mit Befund%s.', count($liste), $mitBefund, $hinweise > 0 ? ', ' . $hinweise . ' Hinweis(e)' : ''));
+        exit($mitBefund > 0 ? 1 : 0);
+
     case 'eventworx:pruefen':
         $erg = Eventworx::verbindungTesten();
         $erg['ok'] ? $aus($erg['message']) : $fehler($erg['message']);
@@ -1349,6 +1419,11 @@ switch ($befehl) {
         $vorschauen = KatalogImport::aufraeumen();
         if ($vorschauen > 0) {
             $aus("Aufgeräumt: {$vorschauen} abgelaufene Vorschau(en) des Katalog-Imports.");
+        }
+        // Geräteprüfung: abgelaufene Vorschauen des Imports, liegengebliebene Kopien von Gerätedatenbanken
+        $gpVorschauen = \App\Geraetepruefung\GeraeteImport::aufraeumen();
+        if ($gpVorschauen > 0) {
+            $aus("Aufgeräumt: {$gpVorschauen} abgelaufene Datei(en) des Imports der Geräteprüfung.");
         }
         // Übergabeberichte nur melden – gelöscht wird mit berichte:aufbewahrung.
         foreach (BerichtService::wartungHinweise() as $meldung) {

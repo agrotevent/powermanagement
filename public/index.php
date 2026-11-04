@@ -16,6 +16,8 @@ use App\Controllers\DatenquellenController;
 use App\Controllers\InstanzenController;
 use App\Controllers\InventarController;
 use App\Controllers\EinstellungenController;
+use App\Controllers\GeraeteImportController;
+use App\Controllers\GeraetepruefungController;
 use App\Controllers\KarteController;
 use App\Controllers\KatalogImportController;
 use App\Controllers\KundenbereichController;
@@ -23,7 +25,9 @@ use App\Controllers\KundenController;
 use App\Controllers\PruefnachweiseController;
 use App\Controllers\LocationController;
 use App\Controllers\ManifestController;
+use App\Controllers\PruefberichteController;
 use App\Controllers\PruefgeraeteController;
+use App\Controllers\PrueflingeController;
 use App\Controllers\MqttZugaengeController;
 use App\Controllers\SchnittstelleController;
 use App\Controllers\SsoController;
@@ -148,6 +152,46 @@ $router->post('/kunden/{id}/nachweise/{nid}/speichern', [PruefnachweiseControlle
 $router->post('/kunden/{id}/nachweise/{nid}/status', [PruefnachweiseController::class, 'status'], 'kunden.nachweise');
 $router->post('/kunden/{id}/nachweise/{nid}/loeschen', [PruefnachweiseController::class, 'loeschen'], 'kunden.nachweise');
 $router->get('/kunden/{id}/nachweise/{nid}/datei', [PruefnachweiseController::class, 'datei'], 'kunden.view');
+
+// ---- Geräteprüfung
+/*
+ * DGUV V3 mit dem Prüfgerät BENNING ST 755+: Prüflinge (eigener Bestand und
+ * Geräte der Kunden), Import und Export der Datenbank des Prüfgeräts,
+ * Prüfabläufe, Prüfungen und Prüfberichte. Ansehen mit
+ * „geraetepruefung.view“, pflegen mit „geraetepruefung.manage“,
+ * unterschreiben mit „geraetepruefung.unterschreiben“ (dazu prüft der Service
+ * vollen Namen und Qualifikation des Kontos). Prüflinge hängen an keinem
+ * Standort – jede {id} prüft der Service selbst (fremd oder unbekannt = 404).
+ * Einen Bericht als Prüfnachweis an einen Kunden geben braucht
+ * „kunden.nachweise“ – auch den Entwurf, den das Unterschreiben anlegt (ohne
+ * das Recht prüft der Service es und legt keinen an). Feste Pfade vor {id}:
+ * {id} passt auf jedes Wort.
+ */
+$router->get('/geraetepruefung', [GeraetepruefungController::class, 'index'], 'geraetepruefung.view');
+$router->get('/geraetepruefung/prueflinge', [PrueflingeController::class, 'index'], 'geraetepruefung.view');
+$router->get('/geraetepruefung/prueflinge/neu', [PrueflingeController::class, 'neu'], 'geraetepruefung.manage');
+$router->post('/geraetepruefung/prueflinge/speichern', [PrueflingeController::class, 'speichern'], 'geraetepruefung.manage');
+$router->get('/geraetepruefung/prueflinge/{id}', [PrueflingeController::class, 'show'], 'geraetepruefung.view');
+$router->get('/geraetepruefung/prueflinge/{id}/bearbeiten', [PrueflingeController::class, 'bearbeiten'], 'geraetepruefung.manage');
+$router->post('/geraetepruefung/prueflinge/{id}/loeschen', [PrueflingeController::class, 'loeschen'], 'geraetepruefung.manage');
+// Import: hochladen → Vorschau (abgelegt unter storage/cache, Kennung in der
+// Sitzung) → übernehmen nur mit der Auswahl aus dem Formular, nie still.
+$router->get('/geraetepruefung/import', [GeraeteImportController::class, 'index'], 'geraetepruefung.manage');
+$router->post('/geraetepruefung/import/vorschau', [GeraeteImportController::class, 'vorschau'], 'geraetepruefung.manage');
+$router->post('/geraetepruefung/import/uebernehmen', [GeraeteImportController::class, 'uebernehmen'], 'geraetepruefung.manage');
+$router->post('/geraetepruefung/import/verwerfen', [GeraeteImportController::class, 'verwerfen'], 'geraetepruefung.manage');
+$router->get('/geraetepruefung/export', [GeraeteImportController::class, 'export'], 'geraetepruefung.manage');
+$router->post('/geraetepruefung/export', [GeraeteImportController::class, 'exportieren'], 'geraetepruefung.manage');
+$router->get('/geraetepruefung/pruefablaeufe', [GeraeteImportController::class, 'pruefablaeufe'], 'geraetepruefung.view');
+$router->post('/geraetepruefung/pruefablaeufe/{id}/speichern', [GeraeteImportController::class, 'pruefablaufSpeichern'], 'geraetepruefung.manage');
+// Prüfungen und Prüfberichte: Unterschreiben friert ein (Nummer, Inhalt,
+// Siegel, PDF in einem Schritt); eine Korrektur ist eine neue Fassung.
+$router->get('/geraetepruefung/pruefungen', [PruefberichteController::class, 'index'], 'geraetepruefung.view');
+$router->get('/geraetepruefung/pruefungen/{id}', [PruefberichteController::class, 'show'], 'geraetepruefung.view');
+$router->post('/geraetepruefung/unterschreiben', [PruefberichteController::class, 'unterschreiben'], 'geraetepruefung.unterschreiben');
+$router->post('/geraetepruefung/berichte/{id}/korrektur', [PruefberichteController::class, 'korrektur'], 'geraetepruefung.unterschreiben');
+$router->post('/geraetepruefung/berichte/{id}/nachweis', [PruefberichteController::class, 'nachweis'], 'kunden.nachweise');
+$router->get('/geraetepruefung/berichte/{id}/pdf', [PruefberichteController::class, 'pdf'], 'geraetepruefung.view');
 
 // ---------------------------------------------------------------- Übersicht
 $router->get('/', [DashboardController::class, 'start']);

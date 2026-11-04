@@ -2213,7 +2213,11 @@ final class BerichtService
             'message' => ($nummer !== '' ? $nummer . ': ' : '') . 'schon unterschrieben.'];
     }
 
-    /** Striche prüfen (Unterschrift::pruefen) und gegen Kopien: dieselben Striche gibt es nur einmal. */
+    /**
+     * Striche prüfen (Unterschrift::pruefen) und gegen Kopien: dieselben
+     * Striche gibt es nur einmal – auch nicht, wenn sie schon unter einem
+     * Prüfbericht der Geräteprüfung stehen.
+     */
     private static function strichePruefen(string $json): array
     {
         $p = Unterschrift::pruefen($json);
@@ -2221,7 +2225,7 @@ final class BerichtService
             return ['ok' => false, 'status' => 422, 'message' => $p['message']];
         }
         $hash = Kanon::hash(['s' => $p['striche']]);
-        if (Database::scalar('SELECT id FROM bericht_unterschriften WHERE striche_hash = ?', [$hash]) !== false) {
+        if (Unterschrift::stricheBekannt($hash)) {
             return ['ok' => false, 'status' => 422, 'message' => 'Diese Unterschrift gibt es schon – bitte neu unterschreiben.'];
         }
         return ['ok' => true, 'striche' => $p['striche'], 'hash' => $hash];

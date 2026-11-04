@@ -10,6 +10,11 @@ use App\Auth\Sso\Kundenbereich as SsoKunden;
 use App\Berichte\BerichtService;
 use App\Berichte\Einstellungen;
 use App\Berichte\Pruefgeraete;
+use App\Geraetepruefung\BenningMuster;
+use App\Geraetepruefung\BenningVorlage;
+use App\Geraetepruefung\GeraeteImport;
+use App\Geraetepruefung\PruefberichtService;
+use App\Geraetepruefung\Prueflinge;
 use App\Kunden\KundenService;
 use App\Kunden\Pruefnachweise;
 use App\Messung\Datenquellen;
@@ -25,7 +30,9 @@ use App\Tanks\TankService;
  * Kabelbrücken, Messgeräte, Benutzer mit zeitlich begrenzten Freigaben,
  * Prüfgeräte, drei Übergabeberichte (abgeschlossen, vom Prüfer unterschrieben,
  * Entwurf), zwei Kunden mit eigenem Kundenbereich (Locations, Protokolle,
- * Prüfnachweise – nichts von den Tanks) und eine eingetragene, aber
+ * Prüfnachweise – nichts von den Tanks), die Geräteprüfung (DGUV V3: eine
+ * importierte, erfundene Datenbank des BENNING ST 755+, Vorlage, Prüflinge,
+ * unterschriebene Prüfberichte samt Korrektur) und eine eingetragene, aber
  * ausgeschaltete Anmeldung über Authentik (Gruppen, eine Verknüpfung, eine
  * Anmeldeanfrage).
  *
@@ -47,7 +54,11 @@ final class DemoSeed
         if ($zuruecksetzen) {
             // Mit allen Berichten auch die Nummernzähler: die Demo beginnt wieder bei …-0001.
             // Der Kundenbereich vorneweg: Abrufe, Nachweise mit ihren Dateien, Vorgänge.
+            // Danach die Geräteprüfung (Kindtabellen zuerst, vor kunden, inventar und
+            // pruefgeraete, auf die sie verweisen) – auch ihre Nummernzähler.
             foreach (['kunden_abrufe', 'pruefnachweise', 'pruefnachweis_dateien', 'kunden_vorgaenge',
+                'gp_bericht_pdf', 'gp_berichte', 'gp_bericht_nummern', 'gp_unterschriften', 'gp_pruefungen', 'gp_importe', 'gp_exporte',
+                'gp_vorlagen', 'gp_kunden_zuordnung', 'gp_prueflinge', 'gp_pruefablaeufe',
                 'bericht_ereignisse', 'bericht_pdf', 'bericht_unterschriften', 'bericht_objekte', 'berichte', 'bericht_nummern', 'kundenmodus_geraete', 'pruefgeraete',
                 'tank_ereignisse', 'tank_kennlinien',
                 'aufbau_posten', 'aufbauten', 'einsaetze', 'inventar_messgeraete', 'inventar', 'bereich_mitglieder', 'bereiche', 'leitungen', 'messpunkte', 'anschluesse', 'schutzorgane', 'objekte', 'datenquellen', 'freigaben', 'floors', 'sites', 'schaltvorgaenge', 'mqtt_zugaenge'] as $tabelle) {
@@ -416,6 +427,9 @@ final class DemoSeed
         // ---- Kundenbereich: zwei Veranstalter auf demselben Gelände
         self::kundenbereich($siteId, $technik, $pd6307, $berichte);
 
+        // ---- Geräteprüfung (DGUV V3): Datenbank des Prüfgeräts importiert, Prüfberichte unterschrieben
+        self::geraetepruefung($technik, $zs6302);
+
         // ---- Anmeldung über SSO: eingetragen, aber aus (ohne Secret)
         $sso = self::sso($technik);
 
@@ -429,8 +443,11 @@ final class DemoSeed
             . (int) Database::scalar('SELECT COUNT(*) FROM objekte WHERE ist_vorlage = 1') . ' Katalog-Einträge, '
             . (int) Database::scalar('SELECT COUNT(*) FROM berichte') . ' Übergabeberichte, '
             . (int) Database::scalar('SELECT COUNT(*) FROM kunden') . ' Kunden mit '
-            . (int) Database::scalar('SELECT COUNT(*) FROM pruefnachweise') . ' Prüfnachweisen. '
-            . 'Zugänge: veranstalter / Veranstalter2026! (nur Festivalwoche), technik / Technik2026!! (schaltet nur das Licht, unterschreibt Übergabeberichte als Prüfer); '
+            . (int) Database::scalar('SELECT COUNT(*) FROM pruefnachweise') . ' Prüfnachweisen, Geräteprüfung mit '
+            . (int) Database::scalar('SELECT COUNT(*) FROM gp_prueflinge') . ' Prüflingen, '
+            . (int) Database::scalar('SELECT COUNT(*) FROM gp_pruefungen') . ' Prüfungen und '
+            . (int) Database::scalar('SELECT COUNT(*) FROM gp_berichte') . ' Prüfberichten. '
+            . 'Zugänge: veranstalter / Veranstalter2026! (nur Festivalwoche), technik / Technik2026!! (schaltet nur das Licht, unterschreibt Übergabe- und Prüfberichte als Prüfer); '
             . 'Kundenbereich: muster-events / Kundenbereich2026! (Sommerfestival: Location, Protokoll, Prüfnachweise), '
             . 'stadtmarketing / Stadtmarketing2026! (dasselbe Gelände erst in einem Monat).'
             . ($sso ? ' SSO: Authentik eingetragen, aber aus (kein Secret) – mit Gruppen, einer Verknüpfung (technik) und einer Anmeldeanfrage.' : '')
@@ -552,15 +569,7 @@ final class DemoSeed
         Pruefgeraete::speichern(null, ['fabrikat' => 'Benning', 'typ' => 'IT 130', 'seriennummer' => 'DEMO-0002',
             'kalibriert_bis' => $heute->modify('-2 months')->format('Y-m-d'), 'aktiv' => 1, 'notizen' => 'Erdungsmesser – Kalibrierung abgelaufen, zur Kalibrierung geben.']);
 
-        $striche = static function (string $wer, int $versatz = 0): string {
-            $s = json_decode((string) file_get_contents(dirname(__DIR__, 2) . '/resources/demo/unterschrift-' . $wer . '.json'), true);
-            foreach ($s['s'] as &$linie) {
-                foreach ($linie as &$p) {
-                    $p = [max(0, min(10000, $p[0] + $versatz)), max(0, min(10000, $p[1] + intdiv($versatz, 2)))];
-                }
-            }
-            return json_encode(['s' => $s['s']]);
-        };
+        $striche = static fn (string $wer, int $versatz = 0): string => self::striche($wer, $versatz);
         $anfrage = static fn (): string => bin2hex(random_bytes(16));
         // Querschnitt der Abgänge (innen) nach Steckverbinder.
         $querschnitt = ['CEE 63 A' => '16', 'CEE 32 A' => '6', 'CEE 16 A' => '2.5', 'Schuko' => '2.5'];
@@ -750,7 +759,11 @@ final class DemoSeed
             }
             return (int) $r['id'];
         };
+        // Anschrift und Ansprechpartner sind freiwillig – sie stehen nur im Prüfbericht der
+        // Geräteprüfung (Auftraggeber) und in der Datei für das Prüfgerät, nie im Kundenbereich.
         $muster = $kunde(['name' => 'Muster Events GmbH & Co. KG', 'kundennummer' => 'K-10023',
+            'strasse' => 'Musterstraße 1', 'plz' => '12345', 'ort' => 'Musterstadt', 'ansprechpartner' => 'Erika Musterfrau',
+            'ansprechpartner_abteilung' => 'Produktion', 'ansprechpartner_email' => 'erika.musterfrau@example.org',
             'notizen' => 'Demo: Veranstalter des Sommerfestivals 2026 – nur für das Personal, nie im Kundenbereich.']);
         $stadt = $kunde(['name' => 'Stadtmarketing Musterstadt e. V.', 'kundennummer' => 'K-10031', 'notizen' => 'Demo: Herbstmarkt auf der Nordwiese.']);
 
@@ -838,6 +851,163 @@ final class DemoSeed
         } finally {
             Auth::alsBenutzer(null);
         }
+    }
+
+    /**
+     * Wie die Demo die Datenbank ihres Prüfgeräts erfindet (BenningMuster):
+     * Prüfer und Firma wie in der Demo, Kunde 2 im Gerät mit der Kundennummer
+     * von Muster Events.
+     */
+    private const GERAET = ['start' => 1, 'pruefer' => 'Tom Technik', 'firma' => 'Muster Eventstrom GmbH', 'kunden_nummern' => [2 => 'K-10023']];
+
+    /**
+     * Die erfundene Datenbank des Prüfgeräts der Demo nach $ziel schreiben
+     * (BenningMuster mit den Fällen der Prüfskripte; Kunde 1 und 2 heißen im
+     * Gerät wie die eigene Firma und Muster Events). Mit $zusaetzlich kommen
+     * weitere Geräte mit Prüfungen dazu – „die nächste Prüfrunde“ für das Bild
+     * der Import-Vorschau (docs/bilder/aufnehmen.mjs). Die Prüfungen der Demo
+     * stehen darin gleich (gleicher Startwert) und gelten als „schon da“.
+     *
+     * @return array{kunden:int,geraete:int,pruefungen:int}
+     */
+    public static function geraeteDatenbank(string $ziel, int $zusaetzlich = 0): array
+    {
+        $m = BenningMuster::schreiben($ziel, self::GERAET + ['zusaetzlich' => $zusaetzlich, 'datum' => '2026-10-19 08:00:00']);
+        $pdo = new \PDO('sqlite:' . $ziel, null, null, [\PDO::ATTR_ERRMODE => \PDO::ERRMODE_EXCEPTION]);
+        $st = $pdo->prepare('UPDATE Kunden SET Kunden_Name = ?, Kunden_Strasse = ?, Kunden_PLZ = ?, Kunden_Wohnort = ? WHERE Kunden_Index = ?');
+        $st->execute(['Muster Eventstrom GmbH', 'Musterstraße 1', '12345', 'Musterstadt', 1]);
+        $st->execute(['Muster Events GmbH & Co. KG', 'Musterstraße 1', '12345', 'Musterstadt', 2]);
+        unset($st, $pdo);
+        return ['kunden' => $m['kunden'], 'geraete' => $m['geraete'], 'pruefungen' => $m['pruefungen']];
+    }
+
+    /**
+     * Die Geräteprüfung der Demo – über die Wege der Oberfläche, als
+     * „technik“ (Prüflinge pflegen, Prüfer-Qualifikation aus {@see berichte()}):
+     *
+     *  - Import der erfundenen Datenbank des Prüfgeräts ({@see geraeteDatenbank()}):
+     *    lesen → Vorschau → Zuordnung von Hand (Kunde 1 im Gerät → eigener
+     *    Bestand, Kunde 2 → Muster Events, Kunde 3 „Testbühne Nord e. V.“ →
+     *    nicht übernehmen), die Einstellungen des Geräts als Vorlage;
+     *  - unter „Prüfgeräte“ das Prüfgerät selbst (gleiche Seriennummer – der
+     *    Bericht nennt die Kalibrierung) und ein Messadapter als Zubehör der
+     *    Abläufe „24 PRCD-S+“ und „21 CEE Verlängerungsadapter“;
+     *  - ein Prüfling von Hand: der Zwischenstecker ZS-63-02 aus dem Inventar,
+     *    zuletzt vor gut elf Monaten geprüft (bald fällig);
+     *  - eine Sammelunterschrift über sieben Prüfungen (bestandene und nicht
+     *    bestandene; die bestandene Nachprüfung eines Geräts von Muster Events
+     *    wird dort Prüfnachweis im Entwurf), danach eine Korrektur: Bezeichnung
+     *    von 000101 ergänzt, Fassung 2 (-K1) unterschrieben – im Gerät steht der
+     *    Prüfling seitdem „hier anders“.
+     *
+     * Die übrigen Prüfungen bleiben offen (zum Ausprobieren von „Auswahl
+     * unterschreiben“). Alle Namen und Werte sind erfunden.
+     */
+    private static function geraetepruefung(int $technik, int $zs6302): void
+    {
+        $muster = (int) Database::scalar("SELECT id FROM kunden WHERE kundennummer = 'K-10023'");
+        $heute = new \DateTimeImmutable('today', Zeit::zone());
+        $datei = dirname(__DIR__, 2) . '/storage/cache/gp-demo-' . bin2hex(random_bytes(8)) . '.db';
+        $fehler = static function (string $was, array $r): never {
+            throw new \RuntimeException('Demo-Geräteprüfung, ' . $was . ': ' . (string) ($r['message'] ?? '')
+                . (is_array($r['fehler'] ?? null) ? ' ' . implode(' ', array_column($r['fehler'], 'message')) : ''));
+        };
+        Auth::alsBenutzer($technik);
+        try {
+            // ---- Import: lesen → Vorschau → Zuordnung (von Hand, nie still) → übernehmen
+            try {
+                self::geraeteDatenbank($datei);
+                $gelesen = GeraeteImport::lesen($datei, 'ST755-Demo.db');
+            } finally {
+                @unlink($datei);
+            }
+            if (!$gelesen['ok']) {
+                $fehler('lesen', $gelesen);
+            }
+            $paket = (array) $gelesen['paket'];
+            $zuordnung = GeraeteImport::zuordnungAus($paket, ['1' => 'eigen', '2' => 'k' . $muster, '3' => 'nicht']);
+            $stand = GeraeteImport::pruefen($paket, $zuordnung);
+            if (!$stand['ok']) {
+                $fehler('Vorschau', $stand);
+            }
+            $r = GeraeteImport::uebernehmen($paket, $zuordnung, [], [], true);
+            if (!$r['ok'] || !empty($r['nichts'])) {
+                $fehler('übernehmen', $r);
+            }
+
+            // ---- Prüfgerät und Zubehör unter „Prüfgeräte“
+            Pruefgeraete::speichern(null, ['fabrikat' => 'Benning', 'typ' => 'ST 755+', 'seriennummer' => BenningMuster::MESSGERAET_SN,
+                'norm' => 'DIN EN 61557-16 (VDE 0413-16)', 'kalibriert_bis' => $heute->modify('+10 months')->format('Y-m-d'), 'aktiv' => 1,
+                'notizen' => 'Gerätetester der Geräteprüfung – Seriennummer wie in seiner Datenbank, daher steht die Kalibrierung im Prüfbericht.']);
+            $adapter = (int) Pruefgeraete::speichern(null, ['fabrikat' => 'Benning', 'typ' => 'MA 4', 'seriennummer' => 'DEMO-0003', 'aktiv' => 1,
+                'notizen' => 'Messadapter – Zubehör, unter „Geräteprüfung → Prüfabläufe“ den Abläufen zugeordnet.'])['id'];
+            foreach (['61', '1009'] as $geraetId) {
+                $ablauf = Database::scalar('SELECT id FROM gp_pruefablaeufe WHERE geraet_id = ?', [$geraetId]);
+                if ($ablauf !== false && !BenningVorlage::pruefablaufSpeichern((int) $ablauf, ['norm' => '', 'zubehoer' => [$adapter]])['ok']) {
+                    throw new \RuntimeException('Demo-Geräteprüfung: Zubehör nicht gespeichert.');
+                }
+            }
+
+            // ---- Ein Prüfling von Hand, mit dem Inventar verknüpft
+            $r = Prueflinge::speichern(null, ['kennung' => 'ZS-63-02', 'kunde_id' => '', 'inventar_id' => (string) $zs6302,
+                'bezeichnung' => 'Messadapter CEE 63', 'schutzklasse' => '1',
+                'pruefablauf_id' => (string) Database::scalar('SELECT id FROM gp_pruefablaeufe WHERE geraet_id = ?', ['1010']),
+                'intervall_monate' => '12', 'leitungslaenge' => '1,5', 'querschnitt' => '16', 'leiter' => '5',
+                'letzte_pruefung' => $heute->modify('-11 months')->modify('-10 days')->format('Y-m-d'),
+                'bemerkung' => 'Zwischenstecker mit Shelly Pro 3EM – vor der letzten Saison anderswo geprüft.']);
+            if (!$r['ok']) {
+                $fehler('Prüfling', $r);
+            }
+
+            // ---- Prüfberichte: eine Sammelunterschrift, dann eine Korrektur
+            $pruefung = static function (?int $kunde, string $kennung, bool $erste = false): int {
+                $id = Database::scalar('SELECT u.id FROM gp_pruefungen u JOIN gp_prueflinge p ON p.id = u.pruefling_id WHERE p.eindeutig = ?
+                    ORDER BY u.geprueft_am ' . ($erste ? 'ASC' : 'DESC') . ', u.id LIMIT 1', [Prueflinge::eindeutig($kunde, $kennung)]);
+                if ($id === false) {
+                    throw new \RuntimeException('Demo-Geräteprüfung: keine Prüfung zu ' . $kennung . '.');
+                }
+                return (int) $id;
+            };
+            $unterschreiben = static function (array $ids, int $versatz) use ($fehler): void {
+                $r = PruefberichtService::unterschreiben($ids, ['striche' => self::striche('pruefer', $versatz), 'name' => 'Tom Technik',
+                    'ort' => 'Musterstadt', 'pruefart' => 'wiederholung', 'uebernehmen' => false, 'anfrage' => bin2hex(random_bytes(16))]);
+                if (!$r['ok']) {
+                    $fehler('unterschreiben', $r);
+                }
+            };
+            $erste = $pruefung(null, '000101');
+            $unterschreiben([$erste, $pruefung(null, '000102'), $pruefung(null, '000103'), $pruefung(null, '000107'), $pruefung(null, '000111'),
+                $pruefung($muster, '000104', true), $pruefung($muster, '000104')], 73);
+            $pruefling = Prueflinge::findEindeutig(null, '000101');
+            $r = $pruefling === null ? ['ok' => false, 'message' => '000101 fehlt'] : Prueflinge::speichern((int) $pruefling['id'], ['bezeichnung' => 'Nebelmaschine NM-1500 Pro']);
+            if (!$r['ok']) {
+                $fehler('Prüfling ändern', $r);
+            }
+            $r = PruefberichtService::korrektur((int) Database::scalar("SELECT id FROM gp_berichte WHERE pruefung_id = ? AND status = 'gueltig'", [$erste]),
+                'Bezeichnung um Typ und Modell ergänzt.');
+            if (!$r['ok']) {
+                $fehler('Korrektur', $r);
+            }
+            $unterschreiben([$erste], 111);
+        } finally {
+            Auth::alsBenutzer(null);
+        }
+    }
+
+    /**
+     * Erfundene Striche einer Unterschrift (resources/demo/unterschrift-<wer>.json),
+     * um $versatz verschoben – jede Unterschrift der Demo braucht eigene, sonst
+     * greift der Kopierschutz.
+     */
+    private static function striche(string $wer, int $versatz = 0): string
+    {
+        $s = json_decode((string) file_get_contents(dirname(__DIR__, 2) . '/resources/demo/unterschrift-' . $wer . '.json'), true);
+        foreach ($s['s'] as &$linie) {
+            foreach ($linie as &$p) {
+                $p = [max(0, min(10000, $p[0] + $versatz)), max(0, min(10000, $p[1] + intdiv($versatz, 2)))];
+            }
+        }
+        return (string) json_encode(['s' => $s['s']]);
     }
 
     /** Ein einseitiges Prüfprotokoll zu einem Demo-Nachweis – erfunden und so beschriftet. */

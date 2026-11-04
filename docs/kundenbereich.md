@@ -29,7 +29,7 @@ Drei Dinge heißen ähnlich und sind verschieden:
 
 | Begriff | Bedeutung |
 |---|---|
-| **Kunde** | Firma oder Verein, für den gearbeitet wird: Name, Kundennummer, aktiv, „Zugänge enden am“, Notizen (nur für das Personal). Keine Anschrift, kein Telefon – das steht im Bericht oder in Eventworx. |
+| **Kunde** | Firma oder Verein, für den gearbeitet wird: Name, Kundennummer, aktiv, „Zugänge enden am“, Notizen (nur für das Personal). Anschrift und Kontakt (Straße, PLZ, Ort, Telefon, Fax, E-Mail, Ansprechpartner mit Abteilung, Telefon und E-Mail) sind **freiwillig** und nur für die Geräteprüfung da: Sie stehen im Prüfbericht als Auftraggeber und in der Datei für das Prüfgerät – nie im Kundenbereich, nie im Audit. |
 | **Kundenzugang** | ein Konto mit Benutzername und Kennwort, das zu genau einem Kunden gehört. Ein Kunde kann mehrere haben (Produktionsleitung, Technik). Kundenzugänge haben **keine Rolle und keine Rechte** und stehen nicht in der Benutzerverwaltung. |
 | **Freigabe am Kunden** | „dieser Kunde sieht diesen Standort von … bis …, mit Messdaten von … bis …“. Gilt für alle Zugänge des Kunden; ein Widerruf genügt. Nur Standorte, nie „bearbeiten“ oder „schalten“. |
 | **Protokoll** | ein Übergabebericht, den das Personal dem Kunden ausdrücklich **zugeordnet** hat. |
@@ -337,6 +337,20 @@ hinterlegen. Ob es dafür einen Weg gibt, zeigt die Lese-Probe
 schon in der Datenbank; ein später in Eventworx gelöschtes Dokument bleibt
 hier mit seiner Herkunft, bis das Personal es löscht.
 
+### Aus der Geräteprüfung
+
+Wer die Geräte selbst prüft ([geraetepruefung.md](geraetepruefung.md)),
+bekommt die Nachweise ohne Hochladen: Unterschreibt der Prüfer einen
+**bestandenen** Prüfbericht eines Geräts dieses Kunden, liegt er hier als
+**Entwurf** – mit dem gespeicherten PDF des Berichts und den Angaben aus
+ihm (Quelle „aus Geräteprüfung, Prüfbericht GP-…“). Ein nicht bestandener
+wird nie Nachweis. Ein Gerät aus dem eigenen Bestand gibt man an der
+Prüfung von Hand an einen Kunden. Bezeichnung, Nummern, Norm, Ergebnis und
+Daten stehen im unterschriebenen Bericht fest und lassen sich hier nicht
+ändern – nur Location, Vorgang, Mietzeit und Hinweis. Wird der Bericht
+korrigiert, zieht ein noch nicht freigegebener Nachweis zurück; einer, der
+schon freigegeben ist, bleibt, bis jemand ihn zurückzieht.
+
 ### Aufbewahrung
 
 Ein Nachweis bleibt bis zum 31.12. des Prüfjahres plus
@@ -441,6 +455,11 @@ Datenbank von vorher zurück, und was jemand eben gespeichert hat, wäre weg.
   als Bestätigung. Weg sind dann seine Zugänge, Freigaben, Vorgänge,
   Prüfnachweise (mit den Dateien, die sonst niemand nutzt) und Abrufe.
   **Übergabeberichte bleiben** (Aufbewahrung), nur ohne Zuordnung.
+- Hat der Kunde **Prüflinge der Geräteprüfung**, wird er nicht gelöscht:
+  Prüflinge ohne Prüfungen lassen sich vorher löschen; geprüfte bleiben mit
+  ihren Prüfberichten (Aufbewahrung) und werden nie still zum eigenen
+  Bestand – der Kunde bleibt dann beendet. Anschrift und Kontakt lassen
+  sich jederzeit leeren.
 - Wird ein **Standort** gelöscht, gehen die Freigaben der Kunden darauf
   mit; Vorgänge und Nachweise bleiben, nur ohne Standort.
 
@@ -455,7 +474,7 @@ Rechtsberatung**.
 |---|---|
 | Rechtsgrundlage | Vertrag und Nachweispflichten (Art. 6 Abs. 1 lit. b und c DSGVO; BetrSichV, DGUV V3). Prüfernamen in den PDFs sind Pflichtangaben. |
 | Datenschutz durch Technik (Art. 25) | Standard „nichts sichtbar“; Locations nur ausdrücklich, mit Ende und Datenzeitraum; Dokumente nur nach Zuordnung bzw. Freigabe durch eine Person; Kunden geben nie fremde Kennungen ein; Eventworx nie vom Kunden ausgelöst. |
-| Datenminimierung (Art. 5 c) | Kunden ohne Anschrift und Telefon; aus Eventworx nur Kennungen, Nummer, Titel, Mietzeit, Kunden-Kennung und -Name zur Kontrolle und die gewählten Dateien – keine Preise, Positionen, Kontakte. |
+| Datenminimierung (Art. 5 c) | Anschrift und Kontakt am Kunden nur freiwillig und nur für die Geräteprüfung (Auftraggeber im Prüfbericht, Datei für das Prüfgerät) – nie im Kundenbereich, nie im Audit, nicht aus Eventworx übernommen; aus Eventworx nur Kennungen, Nummer, Titel, Mietzeit, Kunden-Kennung und -Name zur Kontrolle und die gewählten Dateien – keine Preise, Positionen, Kontakte. |
 | Sicherheit (Art. 32) | Tor im Router, gleiche 404 für Fremdes, `no-store`, Anmelde-Bremse, Einrichtungslink nur als HMAC, Geheimnisse nie in Log, Audit oder Antwort, Prüfskripte gegen das Durchprobieren von Kennungen. |
 | Transparenz (Art. 13) | Datenschutzhinweis auf Einrichtungsseite, Konto und im Fuß. |
 | Cookies (§ 25 TDDDG) | nur Sitzung und CSRF-Schutz. |
@@ -464,7 +483,7 @@ Rechtsberatung**.
 
 | Daten | bleiben bis |
 |---|---|
-| Kunde, Zugänge | Löschung durch das Personal; ein beendeter Kunde hat keinen Zugang |
+| Kunde (mit Anschrift und Kontakt), Zugänge | Löschung durch das Personal; ein beendeter Kunde hat keinen Zugang. Ein Kunde mit geprüften Prüflingen der Geräteprüfung bleibt (beendet) für die Aufbewahrung der Prüfberichte – Anschrift und Kontakt lassen sich leeren, der eingefrorene Prüfbericht behält seine Kopie |
 | Freigaben am Kunden | mit Kunde oder Standort; abgelaufene bleiben als Verlauf, wirken aber nicht |
 | Übergabeberichte | ihre Aufbewahrung ([berichte.md](berichte.md#aufbewahrung)); beim Löschen des Kunden nur ohne Zuordnung |
 | Prüfnachweise und Dateien | `aufbewahren_bis` oder Löschen des Kunden; eine Datei, sobald sie niemand mehr nutzt |
@@ -491,11 +510,11 @@ einen fremden Nachweis bekommen:
 | Feld | Eintrag |
 |---|---|
 | Bezeichnung | Kundenbereich (Bereitstellung von Prüfprotokollen und Prüfnachweisen) |
-| Zweck | Kunden ihre Übergabeberichte, Prüfnachweise und Locations bereitstellen |
+| Zweck | Kunden ihre Übergabeberichte, Prüfnachweise und Locations bereitstellen; Prüfberichte der Geräteprüfung (DGUV V3) mit dem Kunden als Auftraggeber erstellen |
 | Rechtsgrundlage | Art. 6 Abs. 1 lit. b und c DSGVO |
-| Betroffene | Ansprechpartner der Kunden (Zugänge), Prüfer (in den Dokumenten) |
-| Daten | Benutzername, Name, E-Mail, letzte Anmeldung, Abrufe mit Zeit; Inhalte der Dokumente |
-| Empfänger | der jeweilige Kunde; Auftragsverarbeiter Hosting und Eventworx |
+| Betroffene | Ansprechpartner der Kunden (Zugänge; freiwillig hinterlegte Kontaktpersonen), Prüfer (in den Dokumenten) |
+| Daten | Benutzername, Name, E-Mail, letzte Anmeldung, Abrufe mit Zeit; Inhalte der Dokumente; freiwillig Anschrift, Telefon, Fax, E-Mail und Ansprechpartner (Name, Abteilung, Telefon, E-Mail) des Kunden – für Prüfberichte und die Datei des Prüfgeräts |
+| Empfänger | der jeweilige Kunde; Auftragsverarbeiter Hosting und Eventworx; die Datei für das Prüfgerät bleibt beim Betreiber (Export von Hand) |
 | Löschfristen | siehe Tabelle oben |
 | Technische Maßnahmen | siehe „Sicherheit“ oben und [rechte.md](rechte.md) |
 
@@ -576,7 +595,7 @@ bin/power wartung                            macht abgelaufene Einrichtungslinks
 
 | Zugang | Kennwort | zeigt |
 |---|---|---|
-| `muster-events` | `Kundenbereich2026!` | **Muster Events GmbH & Co. KG**: das Festivalgelände während des Sommerfestivals (Messdaten nur der Festivalwoche), das abgeschlossene Protokoll UB-…-0001, drei freigegebene Prüfnachweise (einer läuft in 20 Tagen ab, einer stammt aus dem Eventworx-Auftrag AU-1042). Ebenfalls beim Kunden, aber für ihn noch unsichtbar: UB-…-0002 (wartet auf die Unterschrift des Kunden) und ein Nachweis im Entwurf. |
+| `muster-events` | `Kundenbereich2026!` | **Muster Events GmbH & Co. KG**: das Festivalgelände während des Sommerfestivals (Messdaten nur der Festivalwoche), das abgeschlossene Protokoll UB-…-0001, drei freigegebene Prüfnachweise (einer läuft in 20 Tagen ab, einer stammt aus dem Eventworx-Auftrag AU-1042). Ebenfalls beim Kunden, aber für ihn noch unsichtbar: UB-…-0002 (wartet auf die Unterschrift des Kunden), ein Nachweis im Entwurf und einer aus der Geräteprüfung (Entwurf); dazu vier Prüflinge der Geräteprüfung und eine Anschrift für den Prüfbericht. |
 | `stadtmarketing` | `Stadtmarketing2026!` | **Stadtmarketing Musterstadt e. V.**: dasselbe Gelände erst für den Herbstmarkt in einem Monat – bis dahin nur unter „Demnächst“, und nichts von Muster Events. |
 
 Am Auftrag AU-1042 liegt in der Demo ein zweites Prüfprotokoll, das noch

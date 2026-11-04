@@ -91,9 +91,11 @@ try {
     // bleiben mit Rand für die Formularfelder unter der Grenze der Site –
     // sonst käme statt der Meldung der App die 413-Seite von nginx.
     $siteGrenze = preg_match('#\n    client_max_body_size (\d+)m;#', $site, $m) === 1 ? (int) $m[1] * 1024 * 1024 : 0;
-    pruefe(Pruefnachweise::MAX_BYTES + 1024 * 1024 <= $siteGrenze && KatalogImport::GROESSE + 1024 * 1024 <= $siteGrenze,
-        sprintf('Prüfnachweise (%s) und Katalog-Import (%s) unter der Grenze der Site (%s)', SiteService::mb(Pruefnachweise::MAX_BYTES),
-            SiteService::mb(KatalogImport::GROESSE), SiteService::mb($siteGrenze)));
+    pruefe(Pruefnachweise::MAX_BYTES + 1024 * 1024 <= $siteGrenze && KatalogImport::GROESSE + 1024 * 1024 <= $siteGrenze
+        && \App\Geraetepruefung\BenningDatei::MAX_BYTES + 1024 * 1024 <= $siteGrenze,
+        sprintf('Prüfnachweise (%s), Katalog-Import (%s) und Datenbank des Prüfgeräts (%s) unter der Grenze der Site (%s)',
+            SiteService::mb(Pruefnachweise::MAX_BYTES), SiteService::mb(KatalogImport::GROESSE),
+            SiteService::mb(\App\Geraetepruefung\BenningDatei::MAX_BYTES), SiteService::mb($siteGrenze)));
 
     // ------------------------------------------------ Prüfung beim Hochladen
     $vorher = $planDateien();

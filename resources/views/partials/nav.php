@@ -47,6 +47,7 @@ $groups = [
     ],
     'Kunden' => [
         ['/kunden',               'Kunden & Kundenbereich', null, 'kunden.view'],
+        ['/geraetepruefung',      'Geräteprüfung',          null, 'geraetepruefung.view'],
     ],
     'System' => [
         ['/system/benutzer',      'Benutzer & Freigaben', null, 'system.users.manage'],

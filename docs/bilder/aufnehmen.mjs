@@ -24,6 +24,15 @@
  * Demo-Vorgangs (Eventworx wird im Demo-Modus nie gefragt); übernommen wird
  * nichts, geladen auch nicht – im Kundenbereich gibt es danach keinen Abruf.
  *
+ * Die Geräteprüfung nimmt das Skript als Administrator (Übersicht,
+ * Prüflinge, Import-Vorschau einer erfundenen Datenbank des Prüfgeräts – nur
+ * gelesen, danach verworfen) und als Prüfer `technik` auf (Prüfungen, eine
+ * Prüfung mit Messwerten); Blatt 1 eines Prüfberichts holt es über
+ * `bin/power geraetepruefung:pdf` und `pdftoppm`. Unterschrieben wird nichts.
+ *
+ * Nur einzelne Teile: `PM_TEILE=geraetepruefung` (kommagetrennt, Namen
+ * stehen bei `teil()` unten).
+ *
  * Für die Anmeldung über SSO (Anmeldeseite, System → Anmeldung (SSO))
  * schaltet das Skript die Demo-Verbindung zu Authentik vorübergehend ein –
  * mit Platzhalter-Secret und Zwischenspeicher, ohne Netz – und startet dafür
@@ -68,6 +77,12 @@ const benutzer = process.env.PM_BENUTZER || 'admin';
 const kennwort = process.env.PM_KENNWORT || 'PowerAdmin2026!';
 const ziel = dirname(fileURLToPath(import.meta.url));
 const wurzel = resolve(ziel, '../..');
+
+// Nur einzelne Teile aufnehmen, etwa nach einer Änderung an einer Seite:
+// PM_TEILE=geraetepruefung,kundenbereich (Vorgabe: alle). Teile: desktop, handy,
+// schnittstelle, berichte, kundenbereich, geraetepruefung, sso, verteiler, update.
+const teile = (process.env.PM_TEILE || '').split(',').map((t) => t.trim()).filter(Boolean);
+const teil = (name) => teile.length === 0 || teile.includes(name);
 
 const DESKTOP = { width: 1280, height: 820 };
 const HANDY = { width: 390, height: 844 };
@@ -173,7 +188,7 @@ $fehlt = $typ('bss-pd-32-soca', ['art' => 'verteilung', 'name' => 'PD 32 Socapex
 echo json_encode(['format' => 1, 'art' => 'verteiler-typen', 'quelle' => 'BSS Strombibel (Beispiel)', 'typen' => array_merge($neu, $typen, [$fehlt])], JSON_UNESCAPED_UNICODE);`;
 
 // ------------------------------------------------------------------ Desktop
-{
+if (teil('desktop')) {
     const { ctx, page } = await sitzung(DESKTOP);
     await oeffnen(page, '/dashboard', 1200);
     // bis einschließlich der Tanks
@@ -276,7 +291,7 @@ echo json_encode(['format' => 1, 'art' => 'verteiler-typen', 'quelle' => 'BSS St
 }
 
 // ------------------------------------------------------------------ Handy
-{
+if (teil('handy')) {
     // GPS mitten auf dem Gelände: aus der Georeferenz der Etage gerechnet.
     const { ctx, page } = await sitzung(HANDY);
     await oeffnen(page, '/karte', 1500);
@@ -317,7 +332,7 @@ echo json_encode(['format' => 1, 'art' => 'verteiler-typen', 'quelle' => 'BSS St
 }
 
 // ------------------------------------------------- Schnittstelle (andere Instanzen)
-{
+if (teil('schnittstelle')) {
     const wurzel = resolve(ziel, '../..');
     const tmp = mkdtempSync(join(tmpdir(), 'pm-bilder-api-'));
     const bConfig = join(tmp, 'b.php');
@@ -516,7 +531,7 @@ return $c;
 }
 
 // ------------------------------------------------------------ Übergabeberichte
-{
+if (teil('berichte')) {
     // Als Prüfer: das Demo-Konto „technik“ hat Qualifikation und „bearbeiten“ auf dem Gelände.
     const PRUEFER = { name: 'technik', wort: 'Technik2026!!' };
     const wurzel = resolve(ziel, '../..');
@@ -580,7 +595,7 @@ return $c;
 }
 
 // ------------------------------------------------------------ Kundenbereich
-{
+if (teil('kundenbereich')) {
     // Der Kunde: Übersicht und ein Protokoll am Telefon, Prüfnachweise am Rechner – nur ansehen, nichts laden.
     const KUNDE = { name: 'muster-events', wort: 'Kundenbereich2026!' };
     const handy = await sitzung(HANDY, { hasTouch: true, isMobile: true }, KUNDE);
@@ -609,8 +624,64 @@ return $c;
     await ctx.close();
 }
 
+// ------------------------------------------------------------ Geräteprüfung
+if (teil('geraetepruefung')) {
+    // Übersicht und Prüflinge als Administrator; die Import-Vorschau einer
+    // „nächsten Prüfrunde“ (die Datenbank des Prüfgeräts der Demo mit vier
+    // weiteren Geräten, DemoSeed::geraeteDatenbank) – übernommen wird nichts,
+    // die Vorschau wird danach verworfen. Prüfungen, eine Prüfung mit
+    // Messwerten und Blatt 1 ihres Prüfberichts (über die Kommandozeile) als
+    // Prüfer „technik“.
+    const PRUEFER = { name: 'technik', wort: 'Technik2026!!' };
+    const { ctx, page } = await sitzung(DESKTOP);
+    await oeffnen(page, '/geraetepruefung');
+    await foto(page, 'geraetepruefung', { fullPage: true });
+    await oeffnen(page, '/geraetepruefung/prueflinge');
+    await foto(page, 'geraetepruefung-prueflinge', { fullPage: true });
+
+    const tmp = mkdtempSync(join(tmpdir(), 'pm-bilder-'));
+    try {
+        const datei = join(tmp, 'ST755_Backup.001');
+        execFileSync('php', ['-r', `require 'src/bootstrap.php'; App\\Services\\DemoSeed::geraeteDatenbank(${phpText(datei)}, 4);`], { cwd: wurzel });
+        await oeffnen(page, '/geraetepruefung/import');
+        await page.setInputFiles('input[name=datei]', { name: 'ST755_Backup.001', mimeType: 'application/octet-stream', buffer: readFileSync(datei) });
+        await Promise.all([page.waitForNavigation(), page.locator('form[enctype] button[type=submit]').click()]);
+        await page.waitForLoadState('networkidle');
+        await page.waitForTimeout(400);
+        await page.locator('details.import-unterschiede summary').first().click();
+        await page.evaluate(() => window.scrollTo(0, 0));
+        await page.setViewportSize({ ...DESKTOP, height: await page.evaluate(() => document.documentElement.scrollHeight) });
+        await page.waitForTimeout(300);
+        await foto(page, 'geraetepruefung-import');
+        await page.setViewportSize(DESKTOP);
+        await Promise.all([page.waitForNavigation(), page.locator('button', { hasText: 'Vorschau verwerfen' }).click()]);
+    } finally {
+        rmSync(tmp, { recursive: true, force: true });
+    }
+    await ctx.close();
+
+    const pruefer = await sitzung(DESKTOP, {}, PRUEFER);
+    await oeffnen(pruefer.page, '/geraetepruefung/pruefungen');
+    await foto(pruefer.page, 'geraetepruefung-pruefungen', { fullPage: true });
+    // Der PRCD-S+ Adapter: sechs Messschritte, Zubehör am Prüfablauf, unterschrieben
+    await oeffnen(pruefer.page, '/geraetepruefung/pruefungen?suche=000107');
+    await oeffnen(pruefer.page, await pruefer.page.locator('a[href^="/geraetepruefung/pruefungen/"]').first().getAttribute('href'), 600);
+    await foto(pruefer.page, 'geraetepruefung-pruefung', { fullPage: true });
+    const nummer = (await pruefer.page.locator('td[data-label="Nummer"] strong').first().textContent()).trim();
+    await pruefer.ctx.close();
+
+    const pdf = mkdtempSync(join(tmpdir(), 'pm-bilder-'));
+    try {
+        execFileSync('php', ['bin/power', 'geraetepruefung:pdf', nummer, join(pdf, 'pruefbericht.pdf')], { cwd: wurzel });
+        execFileSync('pdftoppm', ['-png', '-r', '90', '-f', '1', '-l', '1', '-singlefile', join(pdf, 'pruefbericht.pdf'), join(ziel, 'geraetepruefung-pdf-1')]);
+        console.log('  geraetepruefung-pdf-1.png');
+    } finally {
+        rmSync(pdf, { recursive: true, force: true });
+    }
+}
+
 // ------------------------------------------------------------ Anmeldung über SSO
-{
+if (teil('sso')) {
     // Die Demo trägt Authentik nur ein (aus, ohne Secret). Für die Bilder
     // gilt vorübergehend: eingeschaltet, ein Platzhalter-Secret für genau
     // diese Verbindung, Discovery und Schlüssel im Zwischenspeicher und eine
@@ -699,7 +770,7 @@ return $c;
 }
 
 // ------------------------------------------------------------ Verteiler-Abgleich
-{
+if (teil('verteiler')) {
     const php = (code, ...argumente) => execFileSync('php', ['-r', `require 'src/bootstrap.php'; ${code}`, ...argumente], { cwd: wurzel, encoding: 'utf8' });
     const tmp = mkdtempSync(join(tmpdir(), 'pm-bilder-'));
     const repo = 'file://' + join(tmp, 'repo.git');
@@ -765,7 +836,7 @@ return $c;
 }
 
 // ------------------------------------------------------------ Update (zuletzt)
-{
+if (teil('update')) {
     /*
      * System → Update zeigt im Demo-Modus nur einen Hinweis. Für das Bild
      * startet das Skript eine eigene Instanz U wie B: eigene Datenbank,
