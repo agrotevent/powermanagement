@@ -19,7 +19,8 @@ declare(strict_types=1);
  * Tabelle, fehlende Tabelle und Spalte, zu viele Zeilen (echt und über
  * BenningDatei::$grenzen); berechnete Spalte (auch in einer unbekannten
  * Tabelle – ohne Speicheranstieg, quick_check läuft nicht), Funktions-DEFAULT,
- * Ausdrucks- und Teilindex, CHECK; Texte auf Spaltenlänge gekürzt; fremder
+ * Ausdrucks- und Teilindex, CHECK (auch mit Kommentar vor der Klammer);
+ * Texte auf Spaltenlänge gekürzt; fremder
  * Trigger und unbekannte Tabelle → lesbar, aber keine Vorlage; keine Kopie
  * bleibt in storage/cache.
  *
@@ -383,6 +384,13 @@ try {
         'Teil der Zeilen', 'Teilindex in Pruefung');
     $abgelehnt($kopie($m1['datei'], static fn (PDO $pdo) => $pdo->exec('CREATE TABLE Pruefregel (a INTEGER CHECK (a > 0))')),
         'Prüfbedingung', 'CHECK in einer Tabelle');
+    // Ein Kommentar zwischen CHECK und Klammer ist auch ein CHECK – beim Einfügen des Exports ausgewertet.
+    $abgelehnt($kopie($m1['datei'], static fn (PDO $pdo) => $pdo->exec("CREATE TABLE Pruefregel (a INTEGER, CHECK/**/(a > 0))")),
+        'Prüfbedingung', 'CHECK mit Kommentar vor der Klammer');
+    $abgelehnt($kopie($m1['datei'], static fn (PDO $pdo) => $pdo->exec("CREATE TABLE Pruefregel (a INTEGER, CHECK -- x\n (a > 0))")),
+        'Prüfbedingung', 'CHECK mit Zeilenkommentar vor der Klammer');
+    pruefe(str_contains(BenningVorlage::schemaPruefen([['type' => 'table', 'name' => 'Kunden', 'tbl_name' => 'Kunden',
+        'sql' => "CREATE TABLE Kunden (a INTEGER, CHECK/**/(a > 0))"]])['grund'], 'rechnet beim Schreiben'), '… und am Text des Schemas keine Vorlage');
     pruefe(BenningDatei::lesen($m1['datei'], 'x.db')['ok'], 'das Schema des Geräts (DEFAULT 0, Indizes über Spalten) bleibt lesbar');
     $reste = array_values(array_filter(glob($cache . '/gp-*.db*') ?: [], static fn (string $d): bool => !isset($cacheVorher[$d])));
     gleich($reste, [], 'keine Kopie bleibt in storage/cache');

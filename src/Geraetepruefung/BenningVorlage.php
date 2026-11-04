@@ -138,7 +138,7 @@ final class BenningVorlage
                 }
                 // Wie BenningDatei::schemaSicher() (dort über die PRAGMAs, die vor quick_check laufen):
                 // nichts, was beim Einfügen, VACUUM oder integrity_check rechnet.
-                if (preg_match('/\bCHECK\s*\(|\bGENERATED\s+ALWAYS\b|\bAS\s*\(|\bDEFAULT\s*\(/i', $sql) === 1) {
+                if (preg_match('/\bCHECK\b|\bGENERATED\s+ALWAYS\b|\bAS\s*\(|\bDEFAULT\s*\(/i', $sql) === 1) {
                     return $nein('Die Tabelle ' . $name . ' rechnet beim Schreiben (CHECK, berechnete Spalte oder DEFAULT-Ausdruck).');
                 }
                 if (!isset($bekannt[strtolower($name)]) && preg_match(self::LEEREN_MUSTER, $name) !== 1) {

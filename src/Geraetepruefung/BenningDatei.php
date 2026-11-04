@@ -269,7 +269,9 @@ final class BenningDatei
                 if (preg_match('/^\s*CREATE\s+VIRTUAL\s/i', $sql) === 1) {
                     throw $nein('Die Tabelle ' . $anzeige . ' ist eine virtuelle Tabelle.');
                 }
-                if (preg_match('/\bCHECK\s*\(/i', $sql) === 1) {
+                // Das Wort allein: „CHECK/**/(…)“ oder „CHECK--…\n(…)“ ist auch ein CHECK (Kommentare stehen im
+                // Schema, das Gerät schreibt selbst welche). Ein CHECK geht nur über dieses Schlüsselwort.
+                if (preg_match('/\bCHECK\b/i', $sql) === 1) {
                     throw $nein('Die Tabelle ' . $anzeige . ' hat eine Prüfbedingung (CHECK).');
                 }
                 foreach ($pdo->query('PRAGMA table_xinfo(' . $q($name) . ')')->fetchAll(\PDO::FETCH_ASSOC) as $s) {
