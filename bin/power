@@ -1350,6 +1350,11 @@ switch ($befehl) {
         if ($vorschauen > 0) {
             $aus("Aufgeräumt: {$vorschauen} abgelaufene Vorschau(en) des Katalog-Imports.");
         }
+        // Geräteprüfung: abgelaufene Vorschauen des Imports, liegengebliebene Kopien von Gerätedatenbanken
+        $gpVorschauen = \App\Geraetepruefung\GeraeteImport::aufraeumen();
+        if ($gpVorschauen > 0) {
+            $aus("Aufgeräumt: {$gpVorschauen} abgelaufene Datei(en) des Imports der Geräteprüfung.");
+        }
         // Übergabeberichte nur melden – gelöscht wird mit berichte:aufbewahrung.
         foreach (BerichtService::wartungHinweise() as $meldung) {
             $aus($meldung);
