@@ -65,6 +65,9 @@ final class Prueflinge
     /** Zahlen als Dezimaltext mit Punkt → Höchstlänge. */
     public const ZAHLEN = ['leitungslaenge' => 16, 'querschnitt' => 16, 'leiter' => 8, 'nennleistung' => 16];
 
+    /** Mit Prüfablauf Pflicht und größer 0 (dazu ein Intervall ab einem Monat) – sonst nimmt der Export den Prüfling nicht mit. */
+    public const PFLICHT_MIT_ABLAUF = ['leitungslaenge', 'querschnitt', 'leiter'];
+
     public const KENNUNG_LAENGE = 50;
 
     /** So heißt der eigene Bestand in Listen, Filtern und Formularen. */
@@ -292,7 +295,9 @@ final class Prueflinge
      * - `pruefablauf_id`: ein Prüfablauf aus der Vorlage; ein am Gerät
      *   ungültiger nur, wenn er schon eingetragen war.
      * - Zahlen (Leitungslänge, Querschnitt, Leiter, Nennleistung) als
-     *   Dezimaltext, Komma erlaubt; Intervall 0 bis 600 Monate.
+     *   Dezimaltext, Komma erlaubt; Intervall 0 bis 600 Monate. Mit
+     *   Prüfablauf sind Länge, Querschnitt und Leiter Pflicht und größer 0,
+     *   das Intervall mindestens 1 ({@see PFLICHT_MIT_ABLAUF}).
      * - `letzte_pruefung`, `naechste_pruefung` (JJJJ-MM-TT oder TT.MM.JJJJ)
      *   nur, solange es hier keine Prüfung gibt – sonst rechnet sie
      *   {@see faelligkeitNeu()}. Ohne nächste Prüfung, aber mit letzter und
@@ -395,9 +400,22 @@ final class Prueflinge
             $roh = $wert($feld);
             $text = Messarten::dezimal($roh);
             if ($text === null || strlen($text) > $laenge) {
-                return ['ok' => false, 'message' => '„' . self::ZAHLEN_NAMEN[$feld] . '“ ist keine Zahl (etwa „1,5“; leer lassen geht auch).'];
+                return ['ok' => false, 'message' => '„' . self::ZAHLEN_NAMEN[$feld] . '“ ist keine Zahl (etwa „1,5“).'];
             }
             $zeile[$feld] = $text;
+        }
+        // Mit Prüfablauf geht der Prüfling ans Prüfgerät, und das rechnet aus Länge, Querschnitt und
+        // Leiterzahl seine Grenzwerte (Schutzleiterwiderstand) – nie 0, nie leer, nie erfunden.
+        if ($ablaufId !== null) {
+            foreach (self::PFLICHT_MIT_ABLAUF as $feld) {
+                if (!Messarten::positiv($zeile[$feld])) {
+                    return ['ok' => false, 'message' => 'Mit Prüfablauf braucht der Prüfling „' . self::ZAHLEN_NAMEN[$feld]
+                        . '“ (größer 0) – daraus rechnet das Prüfgerät seine Grenzwerte.'];
+                }
+            }
+            if ($intervall < 1) {
+                return ['ok' => false, 'message' => 'Mit Prüfablauf braucht der Prüfling ein Prüfintervall von mindestens einem Monat.'];
+            }
         }
         $aus = $wert('ausser_betrieb');
         $zeile['ausser_betrieb'] = $aus === true || $aus === 1 || $aus === '1' || $aus === 'on';

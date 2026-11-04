@@ -88,7 +88,7 @@ final class GeraeteImportController extends Controller
         if ($fehler !== UPLOAD_ERR_OK || $tmp === '' || !is_uploaded_file($tmp)) {
             Flash::error(match ($fehler) {
                 UPLOAD_ERR_NO_FILE                        => 'Bitte die Datenbank des Prüfgeräts wählen.',
-                UPLOAD_ERR_INI_SIZE, UPLOAD_ERR_FORM_SIZE => 'Die Datei ist zu groß (höchstens 15 MB).',
+                UPLOAD_ERR_INI_SIZE, UPLOAD_ERR_FORM_SIZE => BenningDatei::zuGross(),
                 UPLOAD_ERR_PARTIAL                        => 'Der Upload wurde abgebrochen.',
                 default                                   => 'Der Upload hat nicht geklappt (Code ' . $fehler . ').',
             });
@@ -96,7 +96,7 @@ final class GeraeteImportController extends Controller
             return;
         }
         if ((int) ($datei['size'] ?? 0) > BenningDatei::MAX_BYTES || (int) filesize($tmp) > BenningDatei::MAX_BYTES) {
-            Flash::error('Die Datei ist größer als 15 MB – so groß wird keine Datenbank des Prüfgeräts.');
+            Flash::error(BenningDatei::zuGross());
             $this->redirect(self::START);
             return;
         }
@@ -190,7 +190,12 @@ final class GeraeteImportController extends Controller
             return;
         }
         GeraeteImport::verwerfen($bereit['kennung']);
-        Session::forget(GeraeteImport::SITZUNG);
+        // Ohne Sitzungssperre gewartet: Ein zweiter Reiter kann inzwischen eine neue Vorschau
+        // abgelegt haben – vergessen wird nur die eigene.
+        $jetzt = Session::get(GeraeteImport::SITZUNG);
+        if (is_array($jetzt) && ($jetzt['kennung'] ?? null) === $bereit['kennung']) {
+            Session::forget(GeraeteImport::SITZUNG);
+        }
         Flash::success((string) $ergebnis['message']);
         $this->redirect(self::START);
     }

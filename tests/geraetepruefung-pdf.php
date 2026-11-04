@@ -13,7 +13,9 @@ declare(strict_types=1);
  * A4 auf jeder Seite, Titel ohne Kundendaten, zwei eingebettete Teilschriften,
  * keine Bilder (Unterschrift ist ein Pfad), Texte (Kopf, Firma, Auftraggeber,
  * Prüfling, Norm, Messwerte mit Komma, Grenzwerte, Ergebnis groß, nächste
- * Prüfung, Unterschrift mit Name, Qualifikation, Ort und Datum), Fuß „Blatt x
+ * Prüfung, Unterschrift mit Name, Qualifikation, Ort und Datum; Kalibrierung
+ * und Zubehör „laut Verwaltung, Stand …“; der Firmenname nicht doppelt, wenn
+ * die Anschrift mit ihm beginnt), Fuß „Blatt x
  * von y“ mit Kurz-Prüfsumme auf jeder Seite, Tabellenkopf der Messungen auf
  * jeder Seite (80 Schritte), kein .notdef. Dazu: nicht bestanden, Korrektur
  * (Fassung 2 mit Grund), Verantwortung übernommen, ohne Messschritte.
@@ -100,8 +102,10 @@ $inhalt = [
         'pruefart_text' => 'Wiederholungsprüfung', 'norm' => 'DIN EN 50699 (VDE 0702)', 'ablauf_name' => '1 Geräte SK I', 'auftrag' => 'A-77',
         'ort' => 'Lager Süd', 'bemerkung' => 'Stecker erneuert', 'pruefer_geraet' => 'Erika Mustermann', 'prueffirma' => 'Muster Eventstrom GmbH'],
     'pruefgeraet' => ['bezeichnung' => 'BENNING ST 755+', 'fabrikat' => 'BENNING', 'typ' => 'ST 755+', 'seriennummer' => '500000000001',
-        'firmware' => '1.17 / 1.08.01', 'norm' => 'DIN EN 61557 (VDE 0413)', 'kalibriert_bis' => '2027-01-31'],
+        'firmware' => '1.17 / 1.08.01', 'norm' => 'DIN EN 61557 (VDE 0413)', 'kalibriert_bis' => '2027-01-31',
+        'kalibrierung_quelle' => 'laut Verwaltung, Stand 05.03.2026'],
     'zubehoer' => [['fabrikat' => 'BENNING', 'typ' => 'MA 4', 'seriennummer' => 'MA-0815', 'kalibriert_bis' => '']],
+    'zubehoer_quelle' => 'laut Verwaltung, Stand 05.03.2026',
     'sicht' => ['ergebnis' => 'ok', 'antworten' => [['frage' => '1', 'text' => 'Gehäuse unbeschädigt', 'bewertung' => 'ok'],
         ['frage' => '2', 'text' => 'Leitung und Knickschutz in Ordnung', 'bewertung' => 'ok']]],
     'schritte' => [
@@ -162,6 +166,11 @@ try {
         pruefe(str_contains($alles, $soll), 'Text: ' . $soll);
     }
     pruefe(!str_contains($alles, 'NICHT BESTANDEN') && !str_contains($alles, 'verantwortlich:'), 'bestanden, nicht übernommen');
+    gleich(substr_count(str_replace("\n", ' ', $alles), 'laut Verwaltung, Stand 05.03.2026'), 2, 'Kalibrierung und Zubehör: „laut Verwaltung, Stand …“');
+    $fuss1 = $text($datei, 1, ['x' => 0, 'y' => 768, 'W' => 596, 'H' => 74]);
+    pruefe(!str_contains($alles, 'Muster Eventstrom GmbH, Hauptstraße') && str_contains($alles, 'Hauptstraße 1, 12345 Musterstadt')
+        && substr_count($fuss1, 'Muster Eventstrom GmbH') === 1 && str_contains($fuss1, 'Hauptstraße 1'),
+        'Firmenname nicht doppelt, wenn die Anschrift mit ihm beginnt (Auftragnehmer und Fuß)');
 
     // ------------------------------------------------ viele Schritte: Kopf und Fuß auf jeder Seite
     $viele = $inhalt;

@@ -224,10 +224,13 @@ CREATE UNIQUE INDEX idx_gp_kunden_zuordnung ON gp_kunden_zuordnung (schluessel)
 -- kette_hash, siegel  Kette über Inhalt, Unterschrift und Konto; siegel =
 --                   HMAC darüber mit einem aus app.key abgeleiteten Schlüssel
 -- pruefer_id        users.id des Unterzeichners
--- Strang C: korrektur_grund, korrektur_von, korrektur_am – eine angeforderte
---                   Korrektur (status korrektur): die Prüfung ist wieder offen,
---                   beim nächsten Unterschreiben entsteht Fassung n+1 mit
---                   diesem Grund; nicht Teil der Kette (kein Inhalt)
+-- korrektur_grund, korrektur_von, korrektur_am  eine angeforderte Korrektur
+--                   (status korrektur): die Prüfung ist wieder offen, beim
+--                   nächsten Unterschreiben entsteht Fassung n+1 mit diesem
+--                   Grund; nicht Teil der Kette (kein Inhalt)
+-- korrektur_siegel  HMAC über Bericht, Fassung, Grund, Konto und Zeit der
+--                   Korrektur (Schlüssel wie siegel) – ohne ihn gilt eine per
+--                   SQL gesetzte „Korrektur angefordert“ als Befund
 CREATE TABLE gp_berichte (
     id {{PK}},
     pruefung_id INT NOT NULL,
@@ -254,6 +257,7 @@ CREATE TABLE gp_berichte (
     korrektur_grund VARCHAR(500) NOT NULL DEFAULT '',
     korrektur_von INT NULL,
     korrektur_am {{TS}} NULL,
+    korrektur_siegel VARCHAR(64) NOT NULL DEFAULT '',
     created_at {{TS}} NOT NULL
 ){{ENGINE}}
 ;--split

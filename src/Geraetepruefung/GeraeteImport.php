@@ -67,6 +67,31 @@ final class GeraeteImport
     /** Sitzungsschlüssel der Vorschau (Kennung und Dateiname). */
     public const SITZUNG = 'geraetepruefung_import';
 
+    /** Zahlen eines Imports (gp_importe.zahlen) → [Text für 1, Text für mehrere] – für die Übersicht ({@see zahlenText()}). */
+    public const ZAHL_NAMEN = [
+        'kunden_neu'             => ['Kunde angelegt', 'Kunden angelegt'],
+        'kunden_ergaenzt'        => ['Kunde ergänzt', 'Kunden ergänzt'],
+        'prueflinge_neu'         => ['Prüfling neu', 'Prüflinge neu'],
+        'prueflinge_ersetzt'     => ['Prüfling ersetzt', 'Prüflinge ersetzt'],
+        'prueflinge_gleich'      => ['Prüfling unverändert', 'Prüflinge unverändert'],
+        'prueflinge_behalten'    => ['Prüfling hier anders, behalten', 'Prüflinge hier anders, behalten'],
+        'prueflinge_veraendert'  => ['Prüfling seit der Vorschau geändert, behalten', 'Prüflinge seit der Vorschau geändert, behalten'],
+        'prueflinge_fehler'      => ['Prüfling mit Fehler übergangen', 'Prüflinge mit Fehler übergangen'],
+        'prueflinge_technik'     => ['Prüfling mit neuen Gerätedaten', 'Prüflinge mit neuen Gerätedaten'],
+        'prueflinge_ohne_ablauf' => ['Prüfling ohne den abweichenden Prüfablauf', 'Prüflinge ohne den abweichenden Prüfablauf'],
+        'inventar_verknuepft'    => ['Inventarstück verknüpft', 'Inventarstücke verknüpft'],
+        'pruefungen_neu'         => ['Prüfung neu', 'Prüfungen neu'],
+        'pruefungen_da'          => ['Prüfung schon da', 'Prüfungen schon da'],
+        'pruefungen_uebergangen' => ['Prüfung übergangen', 'Prüfungen übergangen'],
+        'ablaeufe_neu'           => ['Prüfablauf neu', 'Prüfabläufe neu'],
+        'ablaeufe_geaendert'     => ['Prüfablauf geändert', 'Prüfabläufe geändert'],
+        'ablaeufe_entfallen'     => ['Prüfablauf ungültig geworden', 'Prüfabläufe ungültig geworden'],
+        'ablaeufe_abweichend'    => ['Prüfablauf hier anders als im Prüfgerät', 'Prüfabläufe hier anders als im Prüfgerät'],
+    ];
+
+    /** Am Gerät angelegte Prüfabläufe haben IDs ab hier – jedes Prüfgerät vergibt sie selbst. */
+    public const EIGENE_ABLAEUFE_AB = 1000000;
+
     /**
      * Was der angemeldete Benutzer beim Übernehmen außerdem darf: Kunden aus
      * dem Gerät anlegen und leere Kontaktfelder füllen (Kunden pflegen),
@@ -208,12 +233,37 @@ final class GeraeteImport
         }
         $ablaufGeraet = [];
         $ablaufName = [];
-        foreach (Database::select('SELECT id, geraet_id, name FROM gp_pruefablaeufe') as $a) {
+        $ablaufHier = [];
+        foreach (Database::select('SELECT id, geraet_id, name, ablauf FROM gp_pruefablaeufe') as $a) {
             $ablaufGeraet[(int) $a['id']] = (string) $a['geraet_id'];
             $ablaufName[(string) $a['geraet_id']] = (string) $a['name'];
+            $ablaufHier[(string) $a['geraet_id']] = $a;
         }
+        // Am Gerät angelegte Prüfabläufe (ID ≥ 1 000 000) vergibt jedes Prüfgerät selbst: Dieselbe ID
+        // kann bei einem zweiten Gerät einen anderen Ablauf meinen. Ob es derselbe ist, sagen nur Name
+        // und Maske. Weicht er ab, bekommt ein Prüfling ihn nur, wenn die Datei Vorlage wird (dann gilt
+        // ihr Inhalt) – sonst bleibt er ohne ihn, nie still mit dem Ablauf eines anderen Geräts.
+        $abweichend = [];
         foreach ((array) ($paket['pruefablaeufe'] ?? []) as $a) {
-            $ablaufName[(string) $a['geraet_id']] ??= (string) $a['name'];
+            $gid = (string) $a['geraet_id'];
+            $ablaufName[$gid] ??= (string) $a['name'];
+            if (preg_match('/^\d{7,18}$/', $gid) === 1 && (int) $gid >= self::EIGENE_ABLAEUFE_AB && isset($ablaufHier[$gid])
+                && !BenningVorlage::ablaufPasst($ablaufHier[$gid], ['name' => (string) ($a['name'] ?? ''), 'ablauf' => (string) ($a['ablauf'] ?? '0')])) {
+                $abweichend[$gid] = (int) $ablaufHier[$gid]['id'];
+            }
+        }
+        foreach ($abweichend as $gid => $hierId) {
+            $gid = (string) $gid;
+            $nutzen = (int) Database::scalar('SELECT COUNT(*) FROM gp_prueflinge WHERE pruefablauf_id = ?', [$hierId]);
+            $datei = array_values(array_filter((array) $paket['pruefablaeufe'], static fn (array $a): bool => (string) $a['geraet_id'] === $gid))[0] ?? [];
+            $hinweise[] = 'Prüfablauf ' . $gid . ' heißt im Prüfgerät „' . Messarten::text($datei['name'] ?? '', 120) . '“, hier „'
+                . (string) $ablaufHier[$gid]['name'] . '“ – Name oder Prüfschritte weichen ab (am Gerät angelegte Abläufe vergibt jedes Prüfgerät selbst). '
+                . 'Ohne „als Vorlage übernehmen“ bleiben Prüflinge dieser Datei ohne ihn; mit Vorlage gilt der Ablauf der Datei'
+                . match (true) {
+                    $nutzen === 0 => '.',
+                    $nutzen === 1 => ' – auch für den 1 Prüfling hier, der ihn schon nutzt.',
+                    default       => ' – auch für die ' . $nutzen . ' Prüflinge hier, die ihn schon nutzen.',
+                };
         }
         $inventar = [];
         if ($erlaubt['inventar'] && isset($besitzer['eigen'])) {
@@ -233,11 +283,13 @@ final class GeraeteImport
             $inventar = array_diff_key($inventar, $doppelt);
         }
         $schonDa = self::vorhandeneSchluessel(array_map(static fn (array $p): string => (string) $p['schluessel'], $paket['pruefungen']));
+        $kennungJe = [];
 
         // ------------------------------------------------ Prüflinge
         $zeilen = [];
         $zahlen = ['prueflinge_neu' => 0, 'prueflinge_gleich' => 0, 'prueflinge_anders' => 0, 'prueflinge_fehler' => 0,
-            'pruefungen_neu' => 0, 'pruefungen_da' => 0, 'pruefungen_uebergangen' => $uebergangen['pruefungen'], 'geraete_uebergangen' => $uebergangen['geraete']];
+            'pruefungen_neu' => 0, 'pruefungen_da' => 0, 'pruefungen_uebergangen' => $uebergangen['pruefungen'], 'geraete_uebergangen' => $uebergangen['geraete'],
+            'ablaeufe_abweichend' => count($abweichend)];
         $gesehen = [];
         foreach ($gruppen as $schluessel => $gr) {
             $schluessel = (string) $schluessel;
@@ -290,6 +342,11 @@ final class GeraeteImport
             if ($zeile['ablauf_geraet_id'] !== '' && !isset($ablaufName[$zeile['ablauf_geraet_id']])) {
                 $zeile['hinweise'][] = 'Den Prüfablauf ' . $zeile['ablauf_geraet_id'] . ' kennt weder die Datei noch PowerManagement – der Prüfling bleibt ohne Prüfablauf.';
             }
+            $zeile['ablauf_abweichend'] = isset($abweichend[$zeile['ablauf_geraet_id']]);
+            if ($zeile['ablauf_abweichend']) {
+                $zeile['hinweise'][] = 'Der Prüfablauf ' . $zeile['ablauf_geraet_id'] . ' steht hier anders als im Prüfgerät – ohne „als Vorlage übernehmen“ '
+                    . 'bekommt der Prüfling ihn nicht' . ($gr['wahl'] !== 'neu' && isset($hier[$schluessel]) ? ' (er behält seinen bisherigen)' : '') . '.';
+            }
             $fehler = self::fehlerIn($zeile['daten']);
             $vorhanden = $gr['wahl'] === 'neu' ? null : ($hier[$schluessel] ?? null);
             if ($fehler !== null) {
@@ -316,14 +373,25 @@ final class GeraeteImport
                 }
             }
             if ($zeile['zustand'] !== 'fehler') {
+                $anderswo = [];
                 foreach ($pruefungen as $p) {
                     $s = (string) $p['schluessel'];
                     if (isset($schonDa[$s]) || isset($gesehen[$s])) {
                         $zeile['pruefungen_da']++;
+                        if (isset($schonDa[$s]) && $schonDa[$s] !== $zeile['id']) {
+                            $anderswo[$schonDa[$s]] = ($anderswo[$schonDa[$s]] ?? 0) + 1;
+                        }
                     } else {
                         $zeile['pruefungen_neu']++;
                         $gesehen[$s] = true;
                     }
+                }
+                foreach ($anderswo as $andererId => $n) {
+                    // Dieselbe Prüfung (Prüfgerät, Zeit, Schritte) hängt hier schon an einem anderen Prüfling –
+                    // sie bleibt dort; meist wurde die Kennung am Gerät geändert.
+                    $kennungJe[$andererId] ??= (string) (Database::scalar('SELECT kennung FROM gp_prueflinge WHERE id = ?', [$andererId]) ?: '?');
+                    $zeile['hinweise'][] = ($n === 1 ? '1 Prüfung ist' : $n . ' Prüfungen sind') . ' schon bei Prüfling „' . $kennungJe[$andererId]
+                        . '“ – Kennung am Gerät geändert? ' . ($n === 1 ? 'Sie bleibt' : 'Sie bleiben') . ' dort.';
                 }
             } else {
                 $zahlen['pruefungen_uebergangen'] += count($pruefungen);
@@ -475,7 +543,7 @@ final class GeraeteImport
             'prueflinge_gleich' => 0, 'prueflinge_behalten' => 0, 'prueflinge_veraendert' => 0, 'prueflinge_fehler' => 0,
             'prueflinge_technik' => 0, 'inventar_verknuepft' => 0, 'pruefungen_neu' => 0, 'pruefungen_da' => 0,
             'pruefungen_uebergangen' => (int) $stand['zahlen']['pruefungen_uebergangen'], 'ablaeufe_neu' => 0, 'ablaeufe_geaendert' => 0,
-            'ablaeufe_entfallen' => 0, 'vorlage' => 0];
+            'ablaeufe_entfallen' => 0, 'ablaeufe_abweichend' => (int) $stand['zahlen']['ablaeufe_abweichend'], 'prueflinge_ohne_ablauf' => 0, 'vorlage' => 0];
 
         $abgleich = BenningVorlage::ablaeufeAbgleichen((array) ($paket['pruefablaeufe'] ?? []), $vorlage);
         $z['ablaeufe_neu'] = $abgleich['neu'];
@@ -526,6 +594,11 @@ final class GeraeteImport
             $besitzer = $kundeId[(string) $zeile['kunde_ref']] ?? null;
             $daten = $zeile['daten'];
             $daten['pruefablauf_id'] = $zeile['ablauf_geraet_id'] !== '' ? ($ablaufId[$zeile['ablauf_geraet_id']] ?? null) : null;
+            // Ein Ablauf, der hier anders steht als in der Datei, gilt nur, wenn die Datei Vorlage wird.
+            $ohneAblauf = $zeile['ablauf_abweichend'] && !$vorlage;
+            if ($ohneAblauf) {
+                $daten['pruefablauf_id'] = null;
+            }
             $inventarId = null;
             if ($zeile['inventar'] !== null && $erlaubt['inventar'] && $besitzer === null && $zeile['besitzer'] === 'eigen'
                 && (string) ($inventar[$zeile['form']] ?? '') === (string) $zeile['inventar']['id'] && self::inventarFrei((int) $zeile['inventar']['id'])) {
@@ -537,6 +610,7 @@ final class GeraeteImport
                 $neu['naechste_pruefung'] = $daten['naechste_pruefung'] !== '' ? $daten['naechste_pruefung'] : null;
                 $id = Prueflinge::anlegen($neu);
                 $z['prueflinge_neu']++;
+                $z['prueflinge_ohne_ablauf'] += $ohneAblauf ? 1 : 0;
                 $z['inventar_verknuepft'] += $inventarId !== null ? 1 : 0;
             } else {
                 $id = (int) $zeile['id'];
@@ -547,7 +621,9 @@ final class GeraeteImport
                         foreach (self::STAMMDATEN as $feld) {
                             $aenderung[$feld] = $daten[$feld];
                         }
-                        $aenderung['pruefablauf_id'] = $daten['pruefablauf_id'];
+                        if (!$ohneAblauf) {
+                            $aenderung['pruefablauf_id'] = $daten['pruefablauf_id'];
+                        }
                         $z['prueflinge_ersetzt']++;
                     } elseif ($gewaehlt !== null) {
                         $z['prueflinge_veraendert']++;
@@ -663,8 +739,9 @@ final class GeraeteImport
     }
 
     /**
-     * Für `bin/power wartung`: abgelaufene Vorschauen und liegengebliebene
-     * Kopien von Gerätedatenbanken (abgebrochenes Lesen, Vorlage, Export) weg.
+     * Für `bin/power wartung`: abgelaufene Vorschauen, liegengebliebene
+     * Kopien von Gerätedatenbanken (abgebrochenes Lesen, Vorlage, Export) und
+     * alte Sperrdateien anderer Datenbanken weg.
      */
     public static function aufraeumen(?int $jetzt = null): int
     {
@@ -676,7 +753,35 @@ final class GeraeteImport
                 $weg++;
             }
         }
+        // Sperrdateien anderer Datenbanken (eigene Instanzen der Prüfskripte, umgezogene Datenbank):
+        // nur alte und nur, wenn gerade niemand sie hält. Die der eigenen Datenbank bleibt – wer
+        // sie gerade öffnen will, hielte sonst eine andere Sperre als der Nächste.
+        $eigene = basename(self::sperrdatei());
+        foreach (glob($ordner . '/gp-import-*.lock') ?: [] as $pfad) {
+            if (basename($pfad) === $eigene || !is_file($pfad) || $jetzt - (int) filemtime($pfad) <= self::VORSCHAU_DAUER) {
+                continue;
+            }
+            $griff = @fopen($pfad, 'r');
+            if ($griff === false) {
+                continue;
+            }
+            if (flock($griff, LOCK_EX | LOCK_NB)) {
+                $weg += @unlink($pfad) ? 1 : 0;
+                flock($griff, LOCK_UN);
+            }
+            fclose($griff);
+        }
         return $weg;
+    }
+
+    /**
+     * Ein Kunde wird gelöscht (in der Transaktion von KundenService::loeschen):
+     * seine gemerkten Zuordnungen gehen mit – Datensparsamkeit, wie die
+     * Kundengruppen der Anmeldung über SSO.
+     */
+    public static function kundeEntfernt(int $kundeId): int
+    {
+        return Database::execute('DELETE FROM gp_kunden_zuordnung WHERE kunde_id = ?', [$kundeId]);
     }
 
     /**
@@ -690,11 +795,32 @@ final class GeraeteImport
         foreach (Database::select('SELECT i.id, i.dateiname, i.groesse, i.messgeraet, i.messgeraet_sn, i.db_version, i.zahlen, i.created_at,
                 u.username FROM gp_importe i LEFT JOIN users u ON u.id = i.created_by ORDER BY i.id DESC LIMIT ' . max(1, min(100, $anzahl))) as $z) {
             $zahlen = json_decode((string) $z['zahlen'], true);
-            $z['zahlen'] = is_array($zahlen) ? array_map('intval', $zahlen) : [];
+            $z['zahlen'] = is_array($zahlen) ? array_filter($zahlen, static fn (mixed $v, mixed $k): bool => is_int($v) && is_string($k), ARRAY_FILTER_USE_BOTH) : [];
             $z['id'] = (int) $z['id'];
             $aus[] = $z;
         }
         return $aus;
+    }
+
+    /**
+     * Kurzer Text aus den Zahlen eines Imports (Übersicht): nur Zahlen über 0,
+     * mit deutschen Beschriftungen ({@see ZAHL_NAMEN}); Unbekanntes bleibt weg.
+     *
+     * @param array<string,int> $zahlen
+     */
+    public static function zahlenText(array $zahlen): string
+    {
+        $teile = [];
+        foreach (self::ZAHL_NAMEN as $k => [$eins, $viele]) {
+            $n = (int) ($zahlen[$k] ?? 0);
+            if ($n > 0) {
+                $teile[] = $n . ' ' . ($n === 1 ? $eins : $viele);
+            }
+        }
+        if ((int) ($zahlen['vorlage'] ?? 0) > 0) {
+            $teile[] = 'Einstellungen als Vorlage übernommen';
+        }
+        return $teile === [] ? 'nichts Neues' : implode(' · ', $teile);
     }
 
     /** Text einer Meldung aus den Zahlen eines Imports. */
@@ -730,6 +856,10 @@ final class GeraeteImport
         }
         if ($z['ablaeufe_neu'] + $z['ablaeufe_geaendert'] + $z['ablaeufe_entfallen'] > 0) {
             $teile[] = 'Prüfabläufe ' . $z['ablaeufe_neu'] . ' neu, ' . $z['ablaeufe_geaendert'] . ' geändert, ' . $z['ablaeufe_entfallen'] . ' ungültig';
+        }
+        if (($z['prueflinge_ohne_ablauf'] ?? 0) > 0) {
+            $teile[] = $mz((int) $z['prueflinge_ohne_ablauf'], 'Prüfling ohne Prüfablauf (er steht hier anders als im Prüfgerät)',
+                'Prüflinge ohne Prüfablauf (er steht hier anders als im Prüfgerät)');
         }
         if ($z['vorlage'] > 0) {
             $teile[] = 'Einstellungen des Geräts als Vorlage übernommen';
@@ -767,9 +897,16 @@ final class GeraeteImport
     /** Pfad der Sperrdatei (je Datenbank eine). */
     public static function sperrdatei(): string
     {
+        // Als Text und mit dem echten Pfad: Kommandozeile und Webserver schreiben denselben Pfad
+        // verschieden („config/../storage“, Verweis) – es muss trotzdem dieselbe Sperre sein.
         $datenbank = [];
         foreach (['driver', 'path', 'host', 'port', 'database'] as $k) {
-            $datenbank[$k] = Config::get('database.' . $k);
+            $wert = Config::get('database.' . $k);
+            $datenbank[$k] = is_scalar($wert) ? (string) $wert : '';
+        }
+        if ($datenbank['driver'] !== 'mysql' && $datenbank['path'] !== '') {
+            $echt = realpath($datenbank['path']);
+            $datenbank['path'] = $echt !== false ? $echt : $datenbank['path'];
         }
         $ordner = APP_ROOT . '/storage/cache';
         if (!is_dir($ordner)) {
@@ -1006,18 +1143,18 @@ final class GeraeteImport
     }
 
     /**
-     * Welche dieser Fingerabdrücke gibt es schon? (in Stücken – nie eine
-     * Abfrage mit 50 000 Platzhaltern)
+     * Welche dieser Fingerabdrücke gibt es schon, und an welchem Prüfling?
+     * (in Stücken – nie eine Abfrage mit 50 000 Platzhaltern)
      *
      * @param list<string> $schluessel
-     * @return array<string,true>
+     * @return array<string,int> Schlüssel → pruefling_id
      */
     private static function vorhandeneSchluessel(array $schluessel): array
     {
         $da = [];
         foreach (array_chunk(array_values(array_unique($schluessel)), 400) as $stueck) {
-            foreach (Database::select('SELECT schluessel FROM gp_pruefungen WHERE schluessel IN (' . implode(',', array_fill(0, count($stueck), '?')) . ')', $stueck) as $z) {
-                $da[(string) $z['schluessel']] = true;
+            foreach (Database::select('SELECT schluessel, pruefling_id FROM gp_pruefungen WHERE schluessel IN (' . implode(',', array_fill(0, count($stueck), '?')) . ')', $stueck) as $z) {
+                $da[(string) $z['schluessel']] = (int) $z['pruefling_id'];
             }
         }
         return $da;

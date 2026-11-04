@@ -45,7 +45,7 @@ final class Permissions
         'Geräteprüfung' => [
             'geraetepruefung.view'           => 'Geräteprüfung (DGUV V3): Prüflinge, Prüfungen und Prüfberichte ansehen und als PDF laden',
             'geraetepruefung.manage'         => 'Prüflinge pflegen, Datenbank des Prüfgeräts importieren und exportieren, Vorlage und Prüfabläufe pflegen',
-            'geraetepruefung.unterschreiben' => 'Prüfberichte der Geräteprüfung als Prüfer unterschreiben und Korrekturen anlegen (nur mit hinterlegter Qualifikation)',
+            'geraetepruefung.unterschreiben' => 'Prüfberichte der Geräteprüfung als Prüfer unterschreiben und Korrekturen anlegen (nur mit vollem Namen und hinterlegter Qualifikation)',
         ],
         'Karte & Standorte' => [
             'karte.view'         => 'Karte mit Grundriss ansehen',

@@ -42,6 +42,13 @@ declare(strict_types=1);
  * Kommandozeile: geraetepruefung:pruefen (Exit 0/1, ohne Kundendaten, --pdf,
  * eine Nummer), geraetepruefung:pdf (0640, nie überschreiben, --fassung).
  *
+ * G – Befunde der Prüfung: ohne vollen Namen im Konto kein Unterschreiben;
+ * Striche eines Prüfberichts am Übergabebericht → 422; Kalibrierung und
+ * Zubehör „laut Verwaltung, Stand …“, nach dem Prüftag geändert → Hinweis;
+ * Neuversuch eines alten Durchgangs nach einer Korrektur → keine Fassung mit
+ * der alten Unterschrift; Korrektur gesiegelt (per SQL gesetzt oder Grund
+ * geändert → Befund, nie eingefroren); ohne „Prüfnachweise“ kein Entwurf.
+ *
  * F – HTTP (eigener PHP-Server): Liste mit Filtern und Detail ohne
  * PHP-Meldung und ohne Inline-JS, fremde ID 404, Unterschreiben als JSON
  * (ohne Token 419, ohne Recht 403, Update-Sperre 503 mit wartung und
@@ -53,6 +60,7 @@ require __DIR__ . '/hilfen/instanz.php';
 inEigenerInstanz(__FILE__, ['app' => ['timezone' => 'Europe/Berlin']]);
 require __DIR__ . '/hilfen/pruefung.php';
 
+use App\Berichte\BerichtService;
 use App\Berichte\Kanon;
 use App\Geraetepruefung\Messarten;
 use App\Geraetepruefung\PruefberichtPdf;
@@ -95,7 +103,7 @@ $normal = static function (string $amGeraet, string $kennungGeraet, array $aende
             'werte' => [['name' => 'RPE Widerstand', 'wert' => '0.102 Ω', 'gueltig' => true]],
             'grenzwerte' => [['name' => 'R_PE max', 'wert' => '0.3 Ω']]]],
     ], $aenderung);
-    $p['schluessel'] = Pruefungen::schluessel($p, $kennungGeraet);
+    $p['schluessel'] = Pruefungen::schluessel($p);
     return $p;
 };
 $pruefung = static function (int $prueflingId, string $amGeraet, array $aenderung = []) use ($normal, &$angelegt): int {
@@ -148,6 +156,11 @@ try {
     $technik2 = $konto('technik2', 'technik', 'Tom Technik', 'Elektrofachkraft');
     $ohneQuali = $konto('ohne', 'technik', 'Olaf Ohne', '');
     $planung = $konto('planung', 'planung', 'Paula Planung', 'Elektrofachkraft');
+    $ohneName = $konto('ohnename', 'technik', '', 'Elektrofachkraft');
+    $rolleOhneNachweis = (int) BenutzerService::rolleSpeichern(null, $kennung . ' ohne Nachweise', '',
+        ['geraetepruefung.view', 'geraetepruefung.unterschreiben'])['id'];
+    $ohneNachweis = $konto('ohnenachweis', (string) Database::scalar('SELECT role_key FROM roles WHERE id = ?', [$rolleOhneNachweis]),
+        'Nora Nachweis', 'Elektrofachkraft');
     $kundeA = Database::insert('kunden', ['name' => $kennung . ' Kunde A', 'kundennummer' => $kennung . '-A', 'strasse' => 'Äußere Straße 12', 'plz' => '54321',
         'ort' => 'Süddorf', 'created_at' => gmdate('c')]);
     $kundeB = Database::insert('kunden', ['name' => $kennung . ' Kunde B', 'created_at' => gmdate('c')]);
@@ -186,6 +199,10 @@ try {
     alsBenutzer($ohneQuali);
     gleich(PruefberichtService::unterschreiben([$pEigen], $u($anfrage(), null, ['name' => 'Olaf Ohne']))['status'], 403, 'ohne Qualifikation → 403');
     pruefe(!PruefberichtService::darfUnterschreiben(), '… darfUnterschreiben() false');
+    alsBenutzer($ohneName);
+    // Ohne vollen Namen im Konto: kein freier Name – sonst entfiele mit dem Namen des Prüfers laut Gerät „Verantwortung übernehmen“.
+    gleich(PruefberichtService::unterschreiben([$pEigen], $u($anfrage()))['status'], 403, 'ohne vollen Namen im Konto → 403 (auch mit dem Namen laut Gerät)');
+    pruefe(!PruefberichtService::darfUnterschreiben() && str_contains(PruefberichtService::NUR_PRUEFER, 'vollen Namen'), '… darfUnterschreiben() false, Meldung nennt den Namen');
     alsBenutzer($technik);
     pruefe(PruefberichtService::darfUnterschreiben(), 'technik mit Qualifikation darf unterschreiben');
     $vorher = $zahl('gp_berichte') . '/' . $zahl('gp_unterschriften');
@@ -230,6 +247,9 @@ try {
     pruefe(hash_equals(hash_hmac('sha256', (string) $zeile['kette_hash'], Crypto::ableiten('pruefbericht-siegel-1')), (string) $zeile['siegel']),
         'Siegel = HMAC über die Kette (Schlüssel aus app.key)');
     $i = $b['inhalt'];
+    $stand = 'laut Verwaltung, Stand ' . (new DateTimeImmutable('now', new DateTimeZone('Europe/Berlin')))->format('d.m.Y');
+    gleich([$i['pruefgeraet']['kalibrierung_quelle'] ?? null, $i['zubehoer_quelle'] ?? null], [$stand, $stand],
+        'Kalibrierung und Zubehör gekennzeichnet: „laut Verwaltung, Stand <Datum der Unterschrift>“');
     gleich([$i['auftraggeber']['name'], $i['pruefling']['kennung'], $i['pruefling']['seriennummer'], $i['pruefung']['datum'], $i['pruefung']['uhrzeit'],
         $i['pruefung']['norm'], $i['pruefung']['pruefart'], $i['pruefgeraet']['seriennummer'], $i['pruefgeraet']['kalibriert_bis'], $i['zubehoer'][0]['typ'] ?? '',
         $i['naechste_pruefung'], $i['ergebnis'], $i['pruefer']['name'], $i['pruefer']['qualifikation'], $i['pruefer']['verantwortlich_uebernommen'],
@@ -276,6 +296,11 @@ try {
         'kette_hash' => str_repeat('0', 64), 'siegel' => str_repeat('0', 64), 'schluessel_id' => 'x', 'unterschrieben_am' => gmdate('c'), 'anfrage' => $anfrage()]);
     $e = PruefberichtService::unterschreiben([$pDanach], $u($anfrage(), $sFremd));
     pruefe($e['status'] === 422 && $bericht($pDanach) === null, 'Striche eines Übergabeberichts → 422');
+    // … und umgekehrt: die Striche eines Prüfberichts nimmt kein Übergabebericht an (BerichtService::strichePruefen).
+    $strichePruefen = new ReflectionMethod(BerichtService::class, 'strichePruefen');
+    $ub = $strichePruefen->invoke(null, $sEigen);
+    pruefe(!$ub['ok'] && $ub['status'] === 422 && str_contains($ub['message'], 'gibt es schon'), 'Striche eines Prüfberichts am Übergabebericht → 422');
+    pruefe($strichePruefen->invoke(null, unterschriftStriche())['ok'], '… neue Striche nimmt er an');
     $e = PruefberichtService::unterschreiben([$pEigen], $u($anfrage()));
     pruefe($e['status'] === 200 && !$e['ok'] && str_contains($e['fehler'][0]['message'] ?? '', 'Schon unterschrieben'), 'schon unterschrieben (andere Kennung) → Fehler je Prüfung');
 
@@ -425,6 +450,60 @@ try {
     [$aus, $rc] = $power(['geraetepruefung:pdf', $b['nummer'], $ziel]);
     pruefe($rc === 1 && str_contains($aus, 'gibt es schon'), 'geraetepruefung:pdf überschreibt nie');
     @unlink($ziel);
+
+    // ================================================ G – Befunde der Prüfung
+    // Prüfgerät nach dem Prüftag geändert (nachkalibriert): Stand der Unterschrift, gekennzeichnet, mit Hinweis.
+    $pKal = $pruefung($eigen, '2026-05-04 08:00:00');
+    Database::update('pruefgeraete', $st755, ['kalibriert_bis' => '2027-06-30', 'updated_at' => gmdate('c')]);
+    Database::update('pruefgeraete', $ma4, ['updated_at' => gmdate('c')]);
+    $e = PruefberichtService::unterschreiben([$pKal], $u($anfrage()));
+    $bKal = $bericht($pKal);
+    $kalHinweise = implode(' ', $bKal['inhalt']['hinweise'] ?? []);
+    pruefe($e['ok'] && $bKal['inhalt']['pruefgeraet']['kalibriert_bis'] === '2027-06-30' && $bKal['inhalt']['pruefgeraet']['kalibrierung_quelle'] === $stand
+        && str_contains($kalHinweise, 'Prüfgerät wurden nach dem Prüftag geändert') && str_contains($kalHinweise, 'Zubehör „BENNING MA 4“ wurden nach dem Prüftag geändert'),
+        'nach dem Prüftag geändertes Prüfgerät und Zubehör: Stand der Unterschrift mit Hinweis');
+    Database::execute('UPDATE pruefgeraete SET kalibriert_bis = ?, updated_at = NULL WHERE id = ?', ['2027-01-31', $st755]);
+    Database::execute('UPDATE pruefgeraete SET updated_at = NULL WHERE id = ?', [$ma4]);
+
+    // Neuversuch eines alten Durchgangs, nachdem jemand anderes eine Korrektur angefordert hat: keine Fassung mit der alten Unterschrift.
+    $pAlt1 = $pruefung($eigen, '2026-05-05 08:00:00');
+    $pAlt2 = $pruefung($eigen, '2026-05-05 09:00:00');
+    $aAlt = $anfrage();
+    $sAlt = unterschriftStriche();
+    pruefe(PruefberichtService::unterschreiben([$pAlt1, $pAlt2], $u($aAlt, $sAlt))['ok'], 'Durchgang über zwei Prüfungen');
+    alsBenutzer($technik2);
+    pruefe(PruefberichtService::korrektur($bericht($pAlt1)['id'], 'Bezeichnung ergänzt')['ok'], '… ein anderes Konto fordert eine Korrektur an');
+    alsBenutzer($technik);
+    $vorher = $zahl('gp_berichte');
+    $e = PruefberichtService::unterschreiben([$pAlt1, $pAlt2], $u($aAlt, $sAlt));
+    pruefe(!$e['ok'] && $e['unterschrieben'] === [$pAlt2] && str_contains($e['fehler'][0]['message'] ?? '', 'inzwischen eine Korrektur angefordert')
+        && $zahl('gp_berichte') === $vorher && $bericht($pAlt1)['status'] === 'korrektur' && $bericht($pAlt1)['fassung'] === 1,
+        'Neuversuch mit derselben Kennung: die Korrektur bleibt offen, keine Fassung 2 mit der alten Unterschrift');
+    pruefe(PruefberichtService::integritaet($bericht($pAlt1)['id'])['ok'], 'eine angeforderte Korrektur ist gesiegelt (in Ordnung)');
+
+    // „Korrektur angefordert“ per SQL: Befund, und ihr Grund wird nie eingefroren.
+    $bAlt2 = $bericht($pAlt2);
+    Database::execute("UPDATE gp_berichte SET status = 'korrektur', korrektur_grund = 'untergeschoben' WHERE id = ?", [$bAlt2['id']]);
+    pruefe($befund($bAlt2['id'], 'nicht gesiegelt'), 'Status „Korrektur angefordert“ per SQL → Befund');
+    $e = PruefberichtService::unterschreiben([$pAlt2], $u($anfrage()));
+    pruefe(!$e['ok'] && str_contains($e['fehler'][0]['message'] ?? '', 'nicht gesiegelt') && $bericht($pAlt2)['fassung'] === 1,
+        '… und beim Unterschreiben keine Fassung 2 mit dem untergeschobenen Grund');
+    Database::execute("UPDATE gp_berichte SET status = 'gueltig', korrektur_grund = '' WHERE id = ?", [$bAlt2['id']]);
+    pruefe(PruefberichtService::integritaet($bAlt2['id'])['ok'], 'zurückgesetzt → in Ordnung');
+    $bAlt1 = $bericht($pAlt1);
+    Database::execute('UPDATE gp_berichte SET korrektur_grund = ? WHERE id = ?', ['anderer Grund', $bAlt1['id']]);
+    pruefe($befund($bAlt1['id'], 'nicht gesiegelt'), 'Grund einer angeforderten Korrektur per SQL geändert → Befund');
+    Database::execute('UPDATE gp_berichte SET korrektur_grund = ? WHERE id = ?', ['Bezeichnung ergänzt', $bAlt1['id']]);
+
+    // Ohne „Prüfnachweise“: das Unterschreiben legt keinen Prüfnachweis an – Hinweis, nachholbar.
+    $pOhneNachweis = $pruefung($kundeP, '2026-05-06 08:00:00');
+    alsBenutzer($ohneNachweis);
+    $e = PruefberichtService::unterschreiben([$pOhneNachweis], $u($anfrage(), null, ['name' => 'Nora Nachweis', 'uebernehmen' => true]));
+    $bOhne = $bericht($pOhneNachweis);
+    pruefe($e['ok'] && $bOhne !== null && (int) Database::scalar('SELECT COUNT(*) FROM pruefnachweise WHERE gp_bericht_id = ?', [$bOhne['id']]) === 0
+        && str_contains(implode(' ', $e['hinweise']), 'kein Prüfnachweis für den Kunden angelegt'), 'ohne „Prüfnachweise“: kein Entwurf, Hinweis');
+    alsBenutzer($technik);
+    pruefe(Pruefnachweise::ausGeraetepruefung($kundeA, $bOhne['id'])['ok'], '… nachholbar von jemandem mit dem Recht');
 
     // ================================================ F – HTTP
     alsBenutzer(null);

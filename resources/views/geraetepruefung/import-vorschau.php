@@ -10,6 +10,7 @@
  */
 use App\Geraetepruefung\GeraeteImport;
 use App\Geraetepruefung\Prueflinge;
+use App\Kunden\Pruefnachweise;
 use App\Services\SiteService;
 use App\Support\Csrf;
 use App\Support\View;
@@ -55,7 +56,7 @@ $gleichAlle = count(array_filter($stand['prueflinge'], static fn (array $p): boo
 [$gleich, $gleichWeitere] = $zeigen(array_values(array_filter($stand['prueflinge'], static fn (array $p): bool => $p['zustand'] === 'gleich')));
 $anders = count(array_filter($stand['prueflinge'], static fn (array $p): bool => $p['zustand'] === 'anders'));
 $inventarVorschlaege = count(array_filter($stand['prueflinge'], static fn (array $p): bool => $p['inventar'] !== null));
-$datum = static fn (string $d): string => preg_match('/^(\d{4})-(\d{2})-(\d{2})$/', $d, $m) === 1 ? $m[3] . '.' . $m[2] . '.' . $m[1] : ($d !== '' ? $d : '–');
+$datum = static fn (string $d): string => $d !== '' ? Pruefnachweise::datum($d) : '–';
 ?>
 <div class="toolbar-zeile">
     <a class="btn btn-sm btn-ghost" href="/geraetepruefung">← Geräteprüfung</a>

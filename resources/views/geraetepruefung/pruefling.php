@@ -113,7 +113,7 @@ $stamm = [
             <div class="card-body">
                 <dl class="kv">
                     <dt>Letzte Prüfung</dt><dd><?= $p['letzte_pruefung'] !== null ? View::e(Pruefnachweise::datum((string) $p['letzte_pruefung'])) : '<span class="muted">–</span>' ?></dd>
-                    <dt>Ergebnis</dt><dd><?= View::partial('geraetepruefung/_pruefling-ergebnis', ['ergebnis' => (string) $p['letztes_ergebnis']]) ?></dd>
+                    <dt>Ergebnis</dt><dd><?= View::partial('geraetepruefung/_pruefling-ergebnis', ['ergebnis' => (string) $p['letztes_ergebnis'], 'geprueft' => $p['letzte_pruefung'] !== null]) ?></dd>
                     <dt>Nächste Prüfung</dt><dd><?= $p['naechste_pruefung'] !== null ? View::e(Pruefnachweise::datum((string) $p['naechste_pruefung'])) : '<span class="muted">–</span>' ?></dd>
                 </dl>
                 <?= View::partial('geraetepruefung/_pruefling-faelligkeit', ['f' => $faelligkeit, 'mitText' => true]) ?>

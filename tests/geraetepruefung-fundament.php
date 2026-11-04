@@ -34,8 +34,8 @@ declare(strict_types=1);
  * (Ergebnisse, Sequences, Schritte, Antworten, Prüfdatum; mehrdeutige
  * Kennung abgelehnt, mit Kundennummer eindeutig), Ziel vorhanden → abgelehnt.
  *
- * E – Pruefungen: schluessel() (Fragetext zählt nicht, Werte und Kennung schon,
- * Kennung getrimmt), anlegen() idempotent (zweimal → neu=false, derselbe
+ * E – Pruefungen: schluessel() (Fragetext und Kennung des Prüflings zählen
+ * nicht, Werte, Zeit, Prüfgerät, Ablauf und Antworten schon), anlegen() idempotent (zweimal → neu=false, derselbe
  * Schlüssel bei anderem Prüfling → der vorhandene), Formfehler (Schlüssel,
  * Zeit, Ergebnis, Gleitkomma), find() ohne Datei-Verweise, liste() mit Filtern,
  * fuerPruefling().
@@ -82,7 +82,7 @@ $normal = static function (string $amGeraet, string $kennungGeraet, array $aende
             'werte' => [['name' => 'RPE Widerstand', 'wert' => '0.102 Ω', 'gueltig' => true]],
             'grenzwerte' => [['name' => 'R_PE max', 'wert' => '0.3 Ω']]]],
     ], $aenderung);
-    $p['schluessel'] = Pruefungen::schluessel($p, $kennungGeraet);
+    $p['schluessel'] = Pruefungen::schluessel($p);
     return $p;
 };
 
@@ -570,16 +570,22 @@ try {
 
     // ================================================ E – Pruefungen
     $p1 = $normal('2026-03-02 10:00:00', ' ' . $kennung . '-E1');
-    gleich($p1['schluessel'], Pruefungen::schluessel($p1, $kennung . '-E1'), 'schluessel: Kennung getrimmt');
+    gleich($p1['schluessel'], $normal('2026-03-02 10:00:00', $kennung . '-E2')['schluessel'],
+        'schluessel: die Kennung des Prüflings zählt nicht (am Gerät umbenannt → dieselbe Prüfung)');
     $andererText = $p1;
     $andererText['sicht_antworten'][0]['text'] = 'umformuliert';
     $andererText['schritte'][0]['titel'] = 'anders';
     $andererText['ref'] = '99';
-    gleich(Pruefungen::schluessel($andererText, $kennung . '-E1'), $p1['schluessel'], 'schluessel: Fragetext, Titel und ref zählen nicht');
+    $andererText['geraet_ref'] = '98';
+    gleich(Pruefungen::schluessel($andererText), $p1['schluessel'], 'schluessel: Fragetext, Titel und Verweise der Datei zählen nicht');
     $andererWert = $p1;
     $andererWert['schritte'][0]['werte'][0]['wert'] = '0.103 Ω';
-    pruefe(Pruefungen::schluessel($andererWert, $kennung . '-E1') !== $p1['schluessel'], 'schluessel: ein anderer Wert zählt');
-    pruefe(Pruefungen::schluessel($p1, $kennung . '-E2') !== $p1['schluessel'], 'schluessel: die Kennung zählt');
+    pruefe(Pruefungen::schluessel($andererWert) !== $p1['schluessel'], 'schluessel: ein anderer Wert zählt');
+    pruefe(Pruefungen::schluessel(['am_geraet' => '2026-03-02 10:00:01'] + $p1) !== $p1['schluessel'], 'schluessel: die Zeit am Gerät zählt');
+    pruefe(Pruefungen::schluessel(['messgeraet_sn' => '500000000002'] + $p1) !== $p1['schluessel'], 'schluessel: das Prüfgerät zählt');
+    pruefe(Pruefungen::schluessel(['ablauf_name' => '2 Geräte SK II'] + $p1) !== $p1['schluessel'], 'schluessel: der Ablauf zählt');
+    pruefe(Pruefungen::schluessel(['sicht_antworten' => [['frage' => '1', 'text' => 'Sichtkontrolle', 'antwort' => 'nicht_ok']]] + $p1) !== $p1['schluessel'],
+        'schluessel: die Antworten der Sichtprüfung zählen');
     $a1 = Pruefungen::anlegen($eigen, $p1, null);
     $angelegt['pruefungen'][] = $a1['id'];
     gleich([$a1['neu'], $a1['pruefling_id']], [true, $eigen], 'anlegen: neu');

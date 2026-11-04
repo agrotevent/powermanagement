@@ -56,17 +56,21 @@ final class Pruefungen
 
     /**
      * Fingerabdruck einer Prüfung: sha256 über Kanon-JSON von
-     * [Seriennummer des Prüfgeräts, Zeit wie im Gerät, Kennung des Prüflings
-     * (getrimmt), Name des Ablaufs, Schritte (Art, ok, Werte mit Name, Wert,
-     * gültig), Antworten der Sichtprüfung (Frage, Antwort)].
+     * [Seriennummer des Prüfgeräts, Zeit wie im Gerät, Name des Ablaufs,
+     * Schritte (Art, ok, Werte mit Name, Wert, gültig), Antworten der
+     * Sichtprüfung (Frage, Antwort)].
      *
-     * Der Text der Fragen gehört bewusst nicht dazu: Wird eine Frage am Gerät
-     * umformuliert, bliebe eine schon importierte Prüfung sonst nicht dieselbe.
-     * Titel und Grenzwerte auch nicht – die rechnet PowerManagement selbst.
+     * Die Kennung des Prüflings gehört bewusst nicht dazu: Sie lässt sich am
+     * Gerät ändern, die Prüfung hängt dort am Gerät, nicht an der Kennung –
+     * nach einem Umbenennen bliebe eine schon importierte Prüfung sonst nicht
+     * dieselbe und käme doppelt. Ein Prüfgerät misst nie zweimal in derselben
+     * Sekunde. Der Text der Fragen auch nicht: Wird eine Frage am Gerät
+     * umformuliert, bliebe die Prüfung sonst nicht dieselbe. Titel und
+     * Grenzwerte auch nicht – die rechnet PowerManagement selbst.
      *
      * @param array<string,mixed> $pruefung Normalform
      */
-    public static function schluessel(array $pruefung, string $kennung): string
+    public static function schluessel(array $pruefung): string
     {
         $schritte = [];
         foreach (self::alsListe($pruefung['schritte'] ?? []) as $s) {
@@ -83,7 +87,6 @@ final class Pruefungen
         return Kanon::hash([
             (string) ($pruefung['messgeraet_sn'] ?? ''),
             (string) ($pruefung['am_geraet'] ?? ''),
-            trim($kennung),
             (string) ($pruefung['ablauf_name'] ?? ''),
             $schritte,
             $antworten,

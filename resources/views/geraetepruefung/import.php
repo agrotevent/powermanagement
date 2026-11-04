@@ -30,7 +30,8 @@ $subtitle = 'Datenbank des BENNING ST 755+ lesen – erst Vorschau, dann überne
                     <label for="gp-datei">Datenbank des Prüfgeräts</label>
                     <input id="gp-datei" type="file" name="datei" required
                            accept=".db,.001,.002,.003,.004,.005,.006,.007,.008,.009,application/vnd.sqlite3,application/x-sqlite3"
-                           data-max-bytes="<?= (int) BenningDatei::MAX_BYTES ?>" data-max-text="<?= View::e(SiteService::mb(BenningDatei::MAX_BYTES)) ?>">
+                           data-max-bytes="<?= (int) BenningDatei::MAX_BYTES ?>" data-max-text="<?= View::e(SiteService::mb(BenningDatei::MAX_BYTES)) ?>"
+                           data-max-rat="Das reicht für rund 10 000 Prüfungen – eine Sicherung mit gut 1 200 Prüfungen hat etwa 2 MB. Ist es die richtige Datei?">
                     <div class="help">Die Datei liegt auf der SD-Karte des Geräts (die <code>.db</code> oder eine Sicherung aus dem Ordner
                         „Backups“). Sie wird nur gelesen; übernommen wird erst nach der Vorschau.</div>
                 </div>

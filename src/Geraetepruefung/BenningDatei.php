@@ -17,7 +17,9 @@ namespace App\Geraetepruefung;
  * - gelesen wird eine eigene Kopie unter `storage/cache/gp-<32 hex>.db`
  *   (0600, ohne Journal daneben), nur lesend geöffnet
  *   (`SQLITE_OPEN_READONLY`, `query_only`, `trusted_schema=OFF`), erst nach
- *   `quick_check`; die Kopie verschwindet im `finally`. Nie über
+ *   {@see schemaSicher()} (nichts, was beim Prüfen rechnet: keine berechnete
+ *   Spalte, kein Ausdruck als DEFAULT, kein CHECK, kein Ausdrucks- oder
+ *   Teilindex) und `quick_check`; die Kopie verschwindet im `finally`. Nie über
  *   `Database::pdo()` – das ist die Datenbank der App;
  * - im Schema nur Tabellen, Indizes und Trigger (keine Ansicht, keine
  *   virtuelle Tabelle); die Pflichttabellen mit ihren Pflichtspalten,
@@ -36,8 +38,16 @@ namespace App\Geraetepruefung;
  */
 final class BenningDatei
 {
-    /** Größte Datei (eine Sicherung mit gut 1 200 Prüfungen hat 2 MB); 1 MiB unter der Grenze von nginx (16m). */
+    /**
+     * Größte Datei: 1 MiB unter der Grenze von nginx (16m). Eine Sicherung mit
+     * gut 1 200 Prüfungen hat 2 MB (rund 1,5 KB je Prüfung samt Gerät) – die
+     * Grenze reicht für rund 10 000 Prüfungen, nicht für alles, was
+     * {@see GRENZEN} zählen ließe.
+     */
     public const MAX_BYTES = 15 * 1024 * 1024;
+
+    /** Längster DEFAULT-Wert im Schema (das Gerät schreibt nur „0“). */
+    private const DEFAULT_LAENGE = 64;
 
     public const FORMAT = 1;
 
@@ -150,7 +160,7 @@ final class BenningDatei
             return self::abgelehnt('Die Datei ist leer.');
         }
         if ($groesse > self::MAX_BYTES) {
-            return self::abgelehnt('Die Datei ist größer als ' . self::mb(self::MAX_BYTES) . ' – so groß wird keine Datenbank des Prüfgeräts.');
+            return self::abgelehnt(self::zuGross());
         }
         $kopf = (string) file_get_contents($pfad, false, null, 0, 100);
         if (strlen($kopf) < 100 || !str_starts_with($kopf, "SQLite format 3\0")) {
@@ -192,9 +202,16 @@ final class BenningDatei
         }
     }
 
+    /** Meldung für eine Datei über {@see MAX_BYTES} (Upload und Lesen). */
+    public static function zuGross(): string
+    {
+        return 'Die Datei ist größer als die Grenze dieser Installation (' . self::mb(self::MAX_BYTES) . ', rund 10 000 Prüfungen).';
+    }
+
     /**
      * Eine fremde SQLite-Datei nur lesend öffnen (eigene Verbindung, nie die
-     * der App), nach `quick_check`. Für Vorlage und Prüfskripte ebenso.
+     * der App), nach {@see schemaSicher()} und `quick_check`. Für Vorlage und
+     * Prüfskripte ebenso.
      */
     public static function oeffnen(string $pfad): \PDO
     {
@@ -207,11 +224,81 @@ final class BenningDatei
         $pdo->exec('PRAGMA query_only = 1');
         $pdo->exec('PRAGMA trusted_schema = OFF');
         $pdo->exec('PRAGMA cell_size_check = ON');
+        self::schemaSicher($pdo);
         $pruefung = $pdo->query('PRAGMA quick_check')->fetchAll(\PDO::FETCH_COLUMN);
         if ($pruefung !== ['ok']) {
             throw new \DomainException('Die Datenbank ist beschädigt (quick_check meldet Fehler) – bitte eine andere Sicherung des Geräts nehmen.');
         }
         return $pdo;
+    }
+
+    /**
+     * Rechnet die Datei beim Prüfen oder Schreiben irgendwo? Vor `quick_check`
+     * (der jede berechnete Spalte jeder Zeile ausrechnet – im Speicher von
+     * SQLite, an `memory_limit` vorbei) und vor jedem INSERT, VACUUM und
+     * `integrity_check` abgelehnt wird – in **jeder** Tabelle, auch in
+     * unbekannten:
+     *
+     * - eine berechnete oder versteckte Spalte (`table_xinfo`: hidden ≠ 0 –
+     *   `table_info` zeigt sie gar nicht);
+     * - ein DEFAULT, der kein kurzes Literal ist (Zahl, Text in '…', NULL,
+     *   TRUE/FALSE, CURRENT_… – nie ein Ausdruck oder Funktionsaufruf);
+     * - ein CHECK in CREATE TABLE;
+     * - ein Index über einen Ausdruck (`index_xinfo`: cid = -2) oder mit WHERE.
+     *
+     * Gelesen wird dafür nur das Schema – gerechnet wird nichts. Das Schema des
+     * BENNING ST 755+ enthält nichts davon.
+     *
+     * @throws \DomainException mit dem Grund
+     */
+    public static function schemaSicher(\PDO $pdo): void
+    {
+        $nein = static fn (string $grund): \DomainException => new \DomainException(
+            'Der Aufbau passt nicht zu einer Datenbank des BENNING ST 755+: ' . $grund);
+        $master = $pdo->query('SELECT type, name, sql FROM sqlite_master LIMIT ' . (self::grenze('schema') + 1))->fetchAll(\PDO::FETCH_ASSOC);
+        if (count($master) > self::grenze('schema')) {
+            throw $nein('mehr als ' . self::grenze('schema') . ' Einträge im Schema.');
+        }
+        $q = static fn (string $name): string => '"' . str_replace('"', '""', $name) . '"';
+        foreach ($master as $m) {
+            $typ = (string) $m['type'];
+            $name = (string) $m['name'];
+            $sql = (string) ($m['sql'] ?? '');
+            $anzeige = Messarten::text($name, 60);
+            if ($typ === 'table') {
+                if (preg_match('/^\s*CREATE\s+VIRTUAL\s/i', $sql) === 1) {
+                    throw $nein('Die Tabelle ' . $anzeige . ' ist eine virtuelle Tabelle.');
+                }
+                if (preg_match('/\bCHECK\s*\(/i', $sql) === 1) {
+                    throw $nein('Die Tabelle ' . $anzeige . ' hat eine Prüfbedingung (CHECK).');
+                }
+                foreach ($pdo->query('PRAGMA table_xinfo(' . $q($name) . ')')->fetchAll(\PDO::FETCH_ASSOC) as $s) {
+                    if ((int) ($s['hidden'] ?? 0) !== 0) {
+                        throw $nein('Die Tabelle ' . $anzeige . ' hat eine berechnete Spalte.');
+                    }
+                    if ($s['dflt_value'] !== null && !self::literal((string) $s['dflt_value'])) {
+                        throw $nein('Die Tabelle ' . $anzeige . ' hat einen berechneten Vorgabewert (DEFAULT).');
+                    }
+                }
+            } elseif ($typ === 'index') {
+                if (preg_match('/\bWHERE\b/i', $sql) === 1) {
+                    throw $nein('Der Index ' . $anzeige . ' gilt nur für einen Teil der Zeilen (WHERE).');
+                }
+                foreach ($pdo->query('PRAGMA index_xinfo(' . $q($name) . ')')->fetchAll(\PDO::FETCH_ASSOC) as $s) {
+                    if ((int) $s['cid'] === -2) {
+                        throw $nein('Der Index ' . $anzeige . ' geht über einen Ausdruck.');
+                    }
+                }
+            }
+        }
+    }
+
+    /** Ein kurzes Literal als DEFAULT (höchstens {@see DEFAULT_LAENGE} Zeichen): Zahl, Text in '…', NULL, TRUE/FALSE, CURRENT_… – nie ein Ausdruck. */
+    private static function literal(string $wert): bool
+    {
+        $wert = trim($wert);
+        return strlen($wert) <= self::DEFAULT_LAENGE && preg_match(
+            "/^(?:[+-]?(?:\\d+(?:\\.\\d*)?|\\.\\d+)(?:[eE][+-]?\\d+)?|'(?:[^']|'')*'|NULL|TRUE|FALSE|CURRENT_(?:DATE|TIME|TIMESTAMP))$/i", $wert) === 1;
     }
 
     /**
@@ -657,7 +744,7 @@ final class BenningDatei
                 'sicht_antworten'  => $sicht,
                 'schritte'         => $liste,
             ];
-            $p = ['schluessel' => Pruefungen::schluessel($p, (string) $geraet['kennung'])] + $p;
+            $p = ['schluessel' => Pruefungen::schluessel($p)] + $p;
             $aus[] = $p;
         }
         $mehrzahl = static fn (int $n, string $eins, string $viele): string => $n . ' ' . ($n === 1 ? $eins : $viele);

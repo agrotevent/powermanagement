@@ -211,6 +211,13 @@ final class Messarten
         return $bruch === '' ? $ganz : $ganz . '.' . $bruch;
     }
 
+    /** Ist $wert eine Dezimalzahl größer 0 („1,5“, „0.75“ – nicht „“, „0“, „0,0“)? */
+    public static function positiv(mixed $wert): bool
+    {
+        $text = self::dezimal($wert);
+        return $text !== null && $text !== '' && preg_match('/[1-9]/', $text) === 1;
+    }
+
     /**
      * Für die Anzeige (Ansicht, PDF): Dezimalpunkt zwischen Ziffern → Komma.
      * „0.102 Ω“ → „0,102 Ω“, „>100.0 MΩ“ → „>100,0 MΩ“; anderes bleibt.

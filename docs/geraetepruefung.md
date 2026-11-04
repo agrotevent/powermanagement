@@ -79,15 +79,22 @@ wurde: die Datenbank selbst mit der Endung `.db`, Sicherungen im Ordner
 - **Welche Datei?** Die `.db` oder eine Sicherung daraus. Liest man beide
   ein, kommt jede Prüfung trotzdem nur einmal (Fingerabdruck, siehe
   [Import](#prüfungen-und-fingerabdruck)).
-- **Höchstens 15 MB** (eine Datenbank mit gut 1 200 Prüfungen hat etwa
-  2 MB). Eine größere Datei hält schon der Browser an.
+- **Höchstens 15 MB** – die Grenze dieser Installation (1 MB unter den 16 MB,
+  die nginx annimmt). Eine Datenbank mit gut 1 200 Prüfungen hat etwa 2 MB,
+  15 MB reichen für rund 10 000 Prüfungen. Eine größere Datei hält schon der
+  Browser an.
 - **Nur gelesen:** PowerManagement liest eine eigene Kopie, nur lesend, und
   löscht sie danach. Die Datei auf der Karte ändert es nie.
 - **Abgelehnt** wird, was keine SQLite-Datenbank ist, beschädigt ist, ein
   WAL-Journal braucht (dann fehlte ein Teil der Daten), statt Tabellen
   Ansichten enthält, Pflichttabellen oder -spalten nicht hat oder mehr als
   50 000 Geräte bzw. Prüfungen enthält – mit einer Meldung, ohne etwas zu
-  übernehmen.
+  übernehmen. Ebenso eine Datei, die beim Prüfen rechnen würde: eine
+  berechnete Spalte (in irgendeiner Tabelle), ein Ausdruck als Vorgabewert,
+  eine Prüfbedingung (CHECK), ein Index über einen Ausdruck oder nur über
+  einen Teil der Zeilen. Das Schema des ST 755+ enthält nichts davon; geprüft
+  wird, bevor SQLite die Datei überhaupt prüft, damit eine untergeschobene
+  Datei weder Speicher noch Rechenzeit verbraucht.
 - Gelesen werden Kunden, Geräte, Prüfungen (in der lesbaren Form des Geräts:
   Schritte mit Messwerten, wie das Gerät sie anzeigt, etwa „>100.0 MΩ“), die
   Antworten der Sichtprüfung, Prüfabläufe und Fragen. Zeiten des Geräts
@@ -150,16 +157,27 @@ Dazu:
 - Im eigenen Bestand schlägt die Vorschau ein **Inventarstück** mit
   derselben Kennung vor (angehakt, nie ein Tanksensor; nur mit
   „Datenquellen ansehen“).
+- **Am Gerät angelegte Prüfabläufe** (ID ab 1 000 000) vergibt jedes
+  Prüfgerät selbst – bei einem zweiten oder einem Austauschgerät kann
+  dieselbe ID einen anderen Ablauf meinen. Weichen Name oder Prüfschritte
+  vom Ablauf hier ab, sagt die Vorschau das (oben und am Prüfling). Ohne
+  „als Vorlage übernehmen“ bekommt ein Prüfling aus dieser Datei den Ablauf
+  nicht (ein vorhandener behält seinen); mit Vorlage gilt der Ablauf der
+  Datei – auch für die Prüflinge hier, die ihn schon nutzen (die Vorschau
+  nennt ihre Zahl).
 - Die Vorschau zeigt höchstens 300 schlichte Zeilen; Zeilen mit Haken,
   „hier anders“ und Fehlern immer.
 
 ### Prüfungen und Fingerabdruck
 
 Jede Prüfung bekommt einen **Fingerabdruck** aus Seriennummer des
-Prüfgeräts, Zeit im Gerät, Kennung, Prüfablauf, Schritten mit Werten und
-den Antworten der Sichtprüfung. Dieselbe Prüfung aus der `.db` und aus
-einer Sicherung ist dieselbe und kommt nur einmal; schon da bleibt da.
-Prüfungen ändern sich nach dem Import nie.
+Prüfgeräts, Zeit im Gerät, Prüfablauf, Schritten mit Werten und den
+Antworten der Sichtprüfung – **ohne** die Kennung des Prüflings. Dieselbe
+Prüfung aus der `.db` und aus einer Sicherung ist dieselbe und kommt nur
+einmal; schon da bleibt da. Wird die Kennung am Gerät geändert, bleibt eine
+schon importierte Prüfung beim bisherigen Prüfling; die Vorschau sagt dazu
+„Prüfung schon bei Prüfling … – Kennung am Gerät geändert?“. Prüfungen
+ändern sich nach dem Import nie.
 
 ### Vorlage für den Export
 
@@ -229,7 +247,10 @@ Fassungen.
   Prüfablauf geht der Prüfling nicht in die Datei für das Prüfgerät),
   **Prüfintervall** in Monaten (0 = keine Wiederholung), Leitungslänge,
   Querschnitt, Leiter, Nennleistung (Komma oder Punkt; die Zahlen stehen
-  ungerundet im Feld – unverändert speichern ändert nichts).
+  ungerundet im Feld – unverändert speichern ändert nichts). **Mit
+  Prüfablauf** sind Leitungslänge, Querschnitt und Leiterzahl Pflicht
+  (größer 0) und das Intervall mindestens ein Monat: Daraus rechnet das
+  Prüfgerät seine Grenzwerte (etwa den Schutzleiterwiderstand).
 - **Letzte und nächste Prüfung** von Hand nur, solange es hier keine
   Prüfung gibt (etwa eine Prüfung anderswo); leer = letzte plus Intervall.
   Danach rechnet sie PowerManagement aus den Prüfungen.
@@ -256,7 +277,7 @@ Einstellungen als Vorlage übernehmen.
 1. **Wer kommt in die Datei?** Eigener Bestand und Kunden anhaken (*alle*,
    *keine*). Je Besitzer stehen die Kundennummer, die er im Gerät bekommt,
    und die Zahl der Prüflinge – und wie viele davon ohne gültigen
-   Prüfablauf wegbleiben.
+   Prüfablauf oder ohne Leitungsangaben bzw. Intervall wegbleiben.
 2. **Dateiname** (Vorgabe `PowerManagement-<Datum>`, endet auf `.db`).
 3. **Datei schreiben** – der Browser lädt die Datei herunter.
 
@@ -268,14 +289,30 @@ In der Datei steht:
   Einstellungen und der Kundennummer `PM-EIGEN`, ein Kunde mit seiner
   Kundennummer – ohne eine (oder mit einer, die mit `PM-` beginnt oder
   länger als 50 Zeichen ist) mit `PM-K<id>`;
-- ihre **Prüflinge** mit Prüfablauf, Schutzklasse, Leitung, Intervall,
-  letzter und nächster Prüfung und den Fragen der Sichtprüfung (die aus dem
-  Gerät, sonst die der ersten Stufe); Texte auf die Länge gekürzt, die das
-  Gerät speichert (Bezeichnung 50 Zeichen);
+- ihre **Prüflinge** mit Prüfablauf (sein Name genau wie in der Vorlage),
+  Schutzklasse, Leitung, Intervall, letzter und nächster Prüfung und den
+  Fragen der Sichtprüfung (die aus dem Gerät, sonst die der ersten Stufe);
+  Texte auf die Länge gekürzt, die das Gerät speichert (Bezeichnung 50
+  Zeichen);
 - **keine Prüfungen** – das Gerät prüft neu.
 
-Ein Prüfling ohne Prüfablauf (oder mit einem, den die Vorlage nicht kennt)
-bleibt weg – im Gerät ließe er sich nicht prüfen. Die Datei enthält
+Weg bleiben – gezählt und in der Meldung genannt –:
+
+- ein Prüfling ohne gültigen Prüfablauf oder mit einem, den die Vorlage
+  nicht kennt – im Gerät ließe er sich nicht prüfen;
+- einer mit einem Prüfablauf, dessen Name oder Prüfschritte hier anders
+  stehen als in der Vorlage (etwa ein am Gerät angelegter Ablauf eines
+  anderen Prüfgeräts) – sonst prüfte das Gerät mit fremden Schritten; die
+  Datenbank des Geräts dann noch einmal mit „als Vorlage übernehmen“
+  importieren;
+- einer ohne Leitungslänge, Querschnitt oder Leiterzahl (größer 0) oder mit
+  Prüfintervall 0 – aus diesen Angaben rechnet das Gerät seine Grenzwerte,
+  und eine 0 oder ein erfundener Wert stünde dort als Vorgabe. Beim
+  Prüfling eintragen, dann noch einmal schreiben.
+
+Vor dem Schreiben prüft der Export das Schema der Vorlage wie der Import
+(nichts, was beim Einfügen rechnet), und eine Datei über 15 MB gibt er nicht
+heraus – so viel läse der Import nicht wieder ein. Die Datei enthält
 Kundendaten: Sie wird nie zwischengespeichert, und im Audit-Log stehen nur
 Zahlen.
 
@@ -324,14 +361,22 @@ pflegen“, *bearbeiten*) nur:
   Prüfbericht stehen sollen, etwa ein **Messadapter wie der BENNING MA 4**.
   Dafür den Adapter erst unter *Übergabeberichte → Prüfgeräte* eintragen
   (Fabrikat, Typ, Seriennummer, ggf. kalibriert bis – pflegen darf dort,
-  wer „Übergabeberichte … ausfüllen“ hat), dann beim Prüfablauf anhaken.
-  Das Zubehör steht in jedem Bericht, der danach mit diesem Ablauf
+  wer „Übergabeberichte anlegen …“ hat; die Seite *Prüfabläufe* verlinkt
+  sie nur dann, sonst nennt sie, wer es darf), dann beim Prüfablauf
+  anhaken. Das Zubehör steht in jedem Bericht, der danach mit diesem Ablauf
   unterschrieben wird.
 
 Steht das **Prüfgerät selbst** unter *Prüfgeräte* mit derselben
 Seriennummer wie in seiner Datenbank, nennt der Prüfbericht seine
 Kalibrierung; sonst steht dort ein Hinweis. Die Seite einer Prüfung zeigt
 das schon vor dem Unterschreiben (etwa „am Prüftag abgelaufen“).
+
+*Prüfgeräte* führt nur den Stand **jetzt**, keine Geschichte. Kalibrierung
+und Zubehör stehen deshalb im Bericht mit ihrer Quelle: **„laut Verwaltung,
+Stand <Datum der Unterschrift>“**. Wurde das Prüfgerät oder ein Zubehör
+nach dem Prüftag geändert (etwa nachkalibriert), steht ein Hinweis im
+Bericht, dass der Stand am Prüftag damit nicht belegt ist – und schon
+vorher auf der Seite der Prüfung.
 
 ## Prüfungen und Prüfberichte
 
@@ -347,9 +392,12 @@ Fassungen mit PDF.
 
 ### Unterschreiben – einzeln oder gesammelt
 
-Unterschreiben darf, wer „Prüfberichte unterschreiben“ hat **und** eine
-**Prüfer-Qualifikation** im Konto (Benutzerverwaltung, wie beim
-Übergabebericht).
+Unterschreiben darf, wer „Prüfberichte unterschreiben“ hat **und** im
+Konto einen **vollen Namen** und eine **Prüfer-Qualifikation**
+(Benutzerverwaltung, wie beim Übergabebericht). Ohne vollen Namen geht es
+nicht: Der Bericht nennt den Namen des Kontos, und ein frei eingetippter
+Name wie der des Prüfers laut Gerät übersprünge „Verantwortung
+übernehmen“.
 
 - **Einzeln:** an der Prüfung *Prüfbericht unterschreiben*.
 - **Gesammelt:** in der Liste Prüfungen anhaken (*alle offenen auswählen*),
@@ -374,8 +422,8 @@ Im Vollbild-Dialog stehen **Name in Druckbuchstaben** (muss zum vollen
 Namen des angemeldeten Kontos passen) und **Ort**, dann *Unterschreiben
 und einfrieren*. Gespeichert wird nur der **Linienzug** – keine Zeit, kein
 Druck (wie beim [Übergabebericht](berichte.md#prüfen-unterschrift-und-beweiswert));
-eine Unterschrift, die schon an einem anderen Bericht steht, wird
-abgelehnt. Läuft gerade ein Update, wartet der Dialog und schickt denselben
+eine Unterschrift, die schon an einem anderen Bericht steht – auch an einem
+Übergabebericht, und umgekehrt –, wird abgelehnt. Läuft gerade ein Update, wartet der Dialog und schickt denselben
 Teil nach einer halben Minute noch einmal.
 
 ### Was im Prüfbericht steht
@@ -389,7 +437,7 @@ Inhalt hält alles fest, was sich später ändern könnte:
 | Kopf | „Prüfprotokoll – ortsveränderliche elektrische Betriebsmittel (DGUV Vorschrift 3)“, Firma, Nummer und Fassung |
 | Auftrag | Auftragnehmer (Firmendaten aus *System → Einstellungen → Firma & Übergabeberichte*), Auftraggeber (eigener Bestand oder der Kunde mit Kundennummer und Anschrift) |
 | Prüfling | Kennung, Bezeichnung, Hersteller/Typ/Modell, Seriennummer, Schutzklasse, Leitung, Inventarnummer |
-| Prüfung | Prüfdatum und Uhrzeit, Prüfart, Norm, Prüfablauf, Prüfer laut Prüfgerät, Prüfgerät mit Seriennummer, Firmware und Kalibrierung, Zubehör, Auftrag, Ort, Bemerkung |
+| Prüfung | Prüfdatum und Uhrzeit, Prüfart, Norm, Prüfablauf, Prüfer laut Prüfgerät, Prüfgerät mit Seriennummer, Firmware und Kalibrierung, Zubehör (Kalibrierung und Zubehör „laut Verwaltung, Stand …“), Auftrag, Ort, Bemerkung |
 | Sichtprüfung | jede Frage mit Bewertung |
 | Messungen | je Schritt Messwerte, Grenzwerte und Bewertung wie vom Gerät |
 | Ergebnis | **bestanden** oder **nicht bestanden**, groß mit Symbol und Wort |
@@ -397,6 +445,7 @@ Inhalt hält alles fest, was sich später ändern könnte:
 | Unterschrift | Linienzug, Name, Qualifikation, Ort, Datum |
 
 Im Fuß jeder Seite: Firmendaten, Nummer, Kurz-Prüfsumme, „Blatt x von y“.
+Beginnt die Anschrift der Firma mit ihrem Namen, steht er nur einmal da.
 
 ![PDF eines Prüfberichts, Blatt 1: Auftrag, Prüfling, Prüfung mit Prüfgerät und Zubehör, Sichtprüfung, Messungen](bilder/geraetepruefung-pdf-1.png)
 
@@ -415,7 +464,12 @@ angefordert“, ihr PDF bleibt). Die nächste Unterschrift erzeugt
 und dem Grund; die alte heißt dann *ersetzt*. **Messwerte ändern sich
 nie** – sie kommen unverändert aus der Prüfung. Eine angeforderte
 Korrektur lässt sich nicht zurücknehmen; die Prüfung bleibt offen, bis
-jemand unterschreibt.
+jemand unterschreibt. Die Anforderung ist **gesiegelt** (Grund, Konto,
+Zeit): Eine per Datenbank gesetzte „Korrektur angefordert“ meldet die
+Integritätsprüfung, und ihr Grund kommt nie in eine Fassung. Ein Neuversuch
+eines älteren Durchgangs (nach einem Netzfehler) unterschreibt keine
+Fassung, die erst danach zur Korrektur ging – sie steht mit „bitte neu
+unterschreiben“ in der Fehlerliste.
 
 ### Integrität prüfen
 
@@ -431,7 +485,7 @@ runuser -u www-data -- php /opt/powermanagement/bin/power geraetepruefung:pdf GP
 `geraetepruefung:pruefen` meldet je Bericht *OK* oder die Befunde: Inhalt
 verändert, Striche verändert, Kette unterbrochen, Siegel ungültig, PDF
 verändert, ausgetauscht oder fehlend, Status passt nicht zu den Daten,
-Vorgänger fehlt. `--pdf` erzeugt das PDF neu und vergleicht Byte für Byte –
+Korrektur nicht gesiegelt, Vorgänger fehlt. `--pdf` erzeugt das PDF neu und vergleicht Byte für Byte –
 beim selben Erzeuger ist eine Abweichung ein Befund, bei einem älteren nur
 ein Hinweis. Nach einem Wechsel von `app.key` heißt es „Siegel mit anderem
 Schlüssel, nicht prüfbar“. Exitcode 1 bei einem Befund; die Ausgabe enthält
@@ -450,7 +504,9 @@ tragen das Einfrieren, die Prüfsumme, das Siegel und das gespeicherte PDF
   aus dem Bericht (Bezeichnung, Kennung als Inventarnummer, Seriennummer,
   Norm, Prüfdatum, nächste Prüfung), Quelle „aus Geräteprüfung“. Der Kunde
   sieht ihn erst, wenn ihn jemand im Reiter *Prüfnachweise* des Kunden
-  **freigibt**.
+  **freigibt**. Angelegt wird er nur, wenn der Unterzeichner
+  „Prüfnachweise (DGUV V3) …“ hat – sonst steht ein Hinweis da, und wer das
+  Recht hat, holt ihn auf der Seite der Prüfung nach.
 - **Nicht bestanden:** nie ein Prüfnachweis.
 - **Eigener Bestand** (etwa ein vermietetes Gerät): an der Prüfung *Als
   Prüfnachweis an einen Kunden geben* – Kunde wählen, Mietzeit und Hinweis
@@ -471,12 +527,12 @@ tragen das Einfrieren, die Prüfsumme, das Siegel und das gespeicherte PDF
 |---|---|---|
 | „Geräteprüfung (DGUV V3): … ansehen und als PDF laden“ (`geraetepruefung.view`) | Übersicht, Prüflinge, Prüfungen, Prüfabläufe, PDFs der Prüfberichte; die Karte „DGUV V3“ am Inventar | Stromplanung, Elektrotechnik |
 | „Prüflinge pflegen, Datenbank des Prüfgeräts importieren und exportieren …“ (`geraetepruefung.manage`) | Prüflinge anlegen, ändern, löschen; Import, Vorlage, Export; Norm und Zubehör der Prüfabläufe | Stromplanung, Elektrotechnik |
-| „Prüfberichte der Geräteprüfung als Prüfer unterschreiben …“ (`geraetepruefung.unterschreiben`) | unterschreiben (einzeln und gesammelt), Korrektur anfordern – nur mit **Prüfer-Qualifikation** im Konto | Elektrotechnik |
+| „Prüfberichte der Geräteprüfung als Prüfer unterschreiben …“ (`geraetepruefung.unterschreiben`) | unterschreiben (einzeln und gesammelt), Korrektur anfordern – nur mit **vollem Namen** und **Prüfer-Qualifikation** im Konto | Elektrotechnik |
 
 Dazu: Neue Kunden aus dem Gerät anlegen und leere Kontaktfelder ergänzen
 braucht „Kunden pflegen“, ein Inventarstück wählen „Datenquellen ansehen“,
 einen Bericht als Prüfnachweis an einen Kunden geben „Prüfnachweise
-(DGUV V3) …“. Prüflinge hängen an keinem Standort: Wer „ansehen“ hat, sieht
+(DGUV V3) …“ – auch der Entwurf, den das Unterschreiben anlegt. Prüflinge hängen an keinem Standort: Wer „ansehen“ hat, sieht
 alle – eigene wie die der Kunden. **Kundenzugänge** erreichen die Seiten
 nie (Tor im Router); sie sehen nur freigegebene Prüfnachweise im
 Kundenbereich. Rechte vergibt nur, wer sie selbst hat
@@ -541,8 +597,8 @@ unterschreiben* als `technik` / `Technik2026!!`.
 | Skript | prüft |
 |---|---|
 | `tests/geraetepruefung-fundament.php` | Migration, Rechte, Messarten, die erfundene Gerätedatenbank (`BenningMuster`), Prüfungen und Prüflinge im Kern |
-| `tests/geraetepruefung-import.php` | Lesen, Ablehnen, Vorlage, Import mit Zuordnung und „hier anders“, Export und Re-Import, die Seiten |
+| `tests/geraetepruefung-import.php` | Lesen, Ablehnen (auch Schemata, die beim Prüfen rechnen), Vorlage, Import mit Zuordnung und „hier anders“, abweichende Prüfabläufe eines zweiten Geräts, umbenannte Prüflinge, Export (übergangen ohne Leitungsangaben oder passenden Ablauf) und Re-Import, die Seiten |
 | `tests/geraetepruefung-prueflinge.php` | Prüflinge pflegen, Fälligkeit, Löschen, Inventar, Kundenfelder, die Seiten |
-| `tests/geraetepruefung-berichte.php` | Unterschreiben (einzeln, gesammelt, idempotent), Korrektur, Prüfnachweis, Integrität, Kommandozeile, die Seiten |
+| `tests/geraetepruefung-berichte.php` | Unterschreiben (einzeln, gesammelt, idempotent, voller Name), Kalibrierung „laut Verwaltung“, Korrektur (gesiegelt, kein alter Neuversuch), Prüfnachweis, Integrität, Kommandozeile, die Seiten |
 | `tests/geraetepruefung-pdf.php` | PDF der Prüfberichte (mit poppler-utils) |
 | `tests/web.php`, `tests/sicherheit.php`, `tests/grundrisse.php` | alle Seiten ohne PHP-Meldung, Rechte vergeben, Ansichten ohne Inline-JS, Upload-Grenze |

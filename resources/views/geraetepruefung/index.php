@@ -9,11 +9,12 @@
  * @var list<array<string,mixed>> $faellig Prueflinge::liste(faellig)
  * @var list<array<string,mixed>> $offen Pruefungen::liste(offen)
  * @var int $offenAnzahl
- * @var list<array{id:int,created_at:string,messgeraet:string,messgeraet_sn:string,zahlen:array<string,int>}> $importe
+ * @var list<array<string,mixed>> $importe GeraeteImport::letzte() – angezeigt nur Zeit, Prüfgerät und Zahlen
  * @var bool $pflegen
  * @var bool $unterschreiben
  * @var bool $leer noch gar keine Prüflinge
  */
+use App\Geraetepruefung\GeraeteImport;
 use App\Geraetepruefung\Messarten;
 use App\Kunden\Pruefnachweise;
 use App\Support\View;
@@ -21,12 +22,6 @@ use App\Support\Zeit;
 
 $title = 'Geräteprüfung';
 $subtitle = 'Ortsveränderliche elektrische Betriebsmittel nach DGUV Vorschrift 3 – mit dem Prüfgerät BENNING ST 755+';
-// Bekannte Zahlen eines Imports; was der Import sonst zählt, steht mit seinem Schlüssel da.
-$zahlNamen = [
-    'pruefungen_neu' => 'neue Prüfungen', 'pruefungen_da' => 'Prüfungen schon da', 'prueflinge_neu' => 'neue Prüflinge',
-    'prueflinge_ersetzt' => 'Prüflinge ersetzt', 'prueflinge_gleich' => 'Prüflinge unverändert', 'kunden_neu' => 'neue Kunden',
-    'uebergangen' => 'übergangen',
-];
 ?>
 <div class="toolbar-zeile">
     <a class="btn btn-sm btn-primary" href="/geraetepruefung/prueflinge">Prüflinge</a>
@@ -96,7 +91,7 @@ $zahlNamen = [
             </table>
         </div>
         <?php if ($offenAnzahl > count($offen)): ?>
-            <div class="card-body small"><a href="/geraetepruefung/pruefungen?offen=1">Alle <?= (int) $offenAnzahl ?> offenen Prüfungen</a></div>
+            <div class="card-body small"><a href="/geraetepruefung/pruefungen?status=offen">Alle <?= (int) $offenAnzahl ?> offenen Prüfungen</a></div>
         <?php endif; ?>
     </section>
 </div>
@@ -112,14 +107,9 @@ $zahlNamen = [
             <?php endif; ?>
             <?php foreach ($importe as $i): ?>
                 <tr>
-                    <td data-label="Wann"><?= View::e(Zeit::anzeige($i['created_at'])) ?></td>
-                    <td data-label="Prüfgerät" class="small"><?= View::e(trim($i['messgeraet'] . ($i['messgeraet_sn'] !== '' ? ' · Nr. ' . $i['messgeraet_sn'] : '')) ?: '–') ?></td>
-                    <td data-label="Ergebnis" class="small"><?php
-                        $teile = [];
-                        foreach ($i['zahlen'] as $k => $n) {
-                            $teile[] = $n . ' ' . ($zahlNamen[$k] ?? str_replace('_', ' ', $k));
-                        }
-                        echo View::e($teile === [] ? '–' : implode(' · ', $teile)); ?></td>
+                    <td data-label="Wann"><?= View::e(Zeit::anzeige((string) $i['created_at'])) ?></td>
+                    <td data-label="Prüfgerät" class="small"><?= View::e(trim((string) $i['messgeraet'] . ((string) $i['messgeraet_sn'] !== '' ? ' · Nr. ' . $i['messgeraet_sn'] : '')) ?: '–') ?></td>
+                    <td data-label="Ergebnis" class="small"><?= View::e(GeraeteImport::zahlenText($i['zahlen'])) ?></td>
                 </tr>
             <?php endforeach; ?>
             </tbody>

@@ -7,6 +7,7 @@ use App\Auth\Auth;
 use App\Auth\Zugriff;
 use App\Berichte\BerichtService;
 use App\Berichte\Unterschrift;
+use App\Geraetepruefung\GeraeteImport;
 use App\Geraetepruefung\Prueflinge;
 use App\Services\BenutzerService;
 use App\Services\Eventworx;
@@ -333,6 +334,9 @@ final class KundenService
                 // Gruppe zeigte sonst auf eine ID, die ein neuer Kunde bekommen kann.
                 $ssoGruppen = Database::execute("DELETE FROM sso_zuordnungen WHERE art = 'kunde' AND ziel_id = ?", [$id]);
                 Database::execute('DELETE FROM kunden_vorgaenge WHERE kunde_id = ?', [$id]);
+                // Gemerkte Zuordnungen „Kunde im Prüfgerät → dieser Kunde“ (Geräteprüfung):
+                // ein Pseudonym über Name bzw. Kundennummer im Gerät – mit dem Kunden weg.
+                GeraeteImport::kundeEntfernt($id);
                 // Nachweise mit ihren Abrufen; gleiche Bytes liegen nur einmal da –
                 // eine Datei, die noch ein anderer Nachweis nutzt, bleibt.
                 Pruefnachweise::kundeEntfernt($id);

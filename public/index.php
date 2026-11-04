@@ -160,10 +160,12 @@ $router->get('/kunden/{id}/nachweise/{nid}/datei', [PruefnachweiseController::cl
  * Prüfabläufe, Prüfungen und Prüfberichte. Ansehen mit
  * „geraetepruefung.view“, pflegen mit „geraetepruefung.manage“,
  * unterschreiben mit „geraetepruefung.unterschreiben“ (dazu prüft der Service
- * die Qualifikation des Kontos). Prüflinge hängen an keinem Standort – jede
- * {id} prüft der Service selbst (fremd oder unbekannt = 404). Einen Bericht als
- * Prüfnachweis an einen Kunden geben braucht „kunden.nachweise“. Feste Pfade
- * vor {id}: {id} passt auf jedes Wort.
+ * vollen Namen und Qualifikation des Kontos). Prüflinge hängen an keinem
+ * Standort – jede {id} prüft der Service selbst (fremd oder unbekannt = 404).
+ * Einen Bericht als Prüfnachweis an einen Kunden geben braucht
+ * „kunden.nachweise“ – auch den Entwurf, den das Unterschreiben anlegt (ohne
+ * das Recht prüft der Service es und legt keinen an). Feste Pfade vor {id}:
+ * {id} passt auf jedes Wort.
  */
 $router->get('/geraetepruefung', [GeraetepruefungController::class, 'index'], 'geraetepruefung.view');
 $router->get('/geraetepruefung/prueflinge', [PrueflingeController::class, 'index'], 'geraetepruefung.view');

@@ -104,14 +104,16 @@ $zurueck = $id === null ? '/geraetepruefung/prueflinge' : '/geraetepruefung/prue
                 <div class="help"><?= $ablaeufe === [] ? 'Noch keine Prüfabläufe – sie kommen mit der ersten importierten Datenbank des Prüfgeräts. ' : '' ?>Ohne Prüfablauf geht der Prüfling nicht in die Datei für das Prüfgerät.</div></div>
             <div class="field"><label for="pf-intervall">Prüfintervall (Monate)</label>
                 <input id="pf-intervall" name="intervall_monate" type="number" min="0" max="<?= (int) Prueflinge::INTERVALL_HOECHSTENS ?>" step="1" inputmode="numeric" value="<?= View::e($w('intervall_monate')) ?>">
-                <div class="help">0 = keine Wiederholung.</div></div>
+                <div class="help">0 = keine Wiederholung (mit Prüfablauf mindestens 1).</div></div>
         </div>
         <div class="field-row">
             <?php foreach (Prueflinge::ZAHLEN_NAMEN as $feld => $name): ?>
-                <div class="field"><label for="pf-<?= View::e($feld) ?>"><?= View::e($name) ?></label>
+                <div class="field"><label for="pf-<?= View::e($feld) ?>"><?= View::e($name) ?><?= in_array($feld, Prueflinge::PFLICHT_MIT_ABLAUF, true) ? ' *' : '' ?></label>
                     <input id="pf-<?= View::e($feld) ?>" name="<?= View::e($feld) ?>" inputmode="decimal" maxlength="<?= (int) Prueflinge::ZAHLEN[$feld] ?>" value="<?= View::e(View::zahlFeld($w($feld))) ?>"></div>
             <?php endforeach; ?>
         </div>
+        <p class="help">* Pflicht (größer 0), sobald ein Prüfablauf gewählt ist: Aus Länge, Querschnitt und Leiterzahl rechnet das Prüfgerät
+            seine Grenzwerte – ohne sie kommt der Prüfling nicht in die Datei für das Prüfgerät.</p>
         <?php if ($pruefungen === 0): ?>
             <div class="field-row">
                 <div class="field"><label for="pf-letzte">Letzte Prüfung</label>

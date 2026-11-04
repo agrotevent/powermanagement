@@ -51,7 +51,7 @@ final class PruefberichteController extends Controller
             'liste'       => $liste,
             'filter'      => $filter,
             'pruefer'     => PruefberichtService::prueferNamen(),
-            'kunden'      => PruefberichtService::kundenMitPrueflingen(),
+            'kunden'      => Prueflinge::kundenMitPrueflingen(),
             'unterschrift' => self::unterschriftDaten(),
             'scripts'     => ['/assets/js/unterschrift.js', '/assets/js/geraetepruefung.js'],
         ]);
@@ -75,7 +75,7 @@ final class PruefberichteController extends Controller
             && $aktuell['nachweis_id'] === null && Auth::can('kunden.nachweise');
         // Kalibrierung des Prüfgeräts (gleiche Seriennummer unter „Prüfgeräte“) – vor dem Unterschreiben sehen, was der Bericht nennen wird.
         $sn = (string) $pruefung['messgeraet_sn'];
-        $pruefgeraet = $sn !== '' ? Database::first('SELECT fabrikat, typ, kalibriert_bis FROM pruefgeraete WHERE seriennummer = ? ORDER BY aktiv DESC, id DESC LIMIT 1', [$sn]) : null;
+        $pruefgeraet = $sn !== '' ? Database::first('SELECT fabrikat, typ, kalibriert_bis, updated_at FROM pruefgeraete WHERE seriennummer = ? ORDER BY aktiv DESC, id DESC LIMIT 1', [$sn]) : null;
         $this->view('geraetepruefung/pruefung', [
             'pruefung'         => $pruefung,
             'pruefgeraet'      => $pruefgeraet,

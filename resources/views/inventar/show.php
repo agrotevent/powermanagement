@@ -114,7 +114,7 @@ if ($ts && $item['eigenschaften'] !== []) {
                     <dl class="kv">
                         <dt>Prüfling</dt><dd><a class="mono" href="/geraetepruefung/prueflinge/<?= (int) $gp['id'] ?>"><?= View::e((string) $gp['kennung']) ?></a></dd>
                         <dt>Letzte Prüfung</dt><dd><?= $gp['letzte_pruefung'] !== null ? View::e(Pruefnachweise::datum((string) $gp['letzte_pruefung'])) : '<span class="muted">–</span>' ?></dd>
-                        <dt>Ergebnis</dt><dd><?= View::partial('geraetepruefung/_pruefling-ergebnis', ['ergebnis' => (string) $gp['letztes_ergebnis']]) ?></dd>
+                        <dt>Ergebnis</dt><dd><?= View::partial('geraetepruefung/_pruefling-ergebnis', ['ergebnis' => (string) $gp['letztes_ergebnis'], 'geprueft' => $gp['letzte_pruefung'] !== null]) ?></dd>
                         <dt>Nächste Prüfung</dt><dd><?= $gp['naechste_pruefung'] !== null ? View::e(Pruefnachweise::datum((string) $gp['naechste_pruefung'])) : '<span class="muted">–</span>' ?></dd>
                     </dl>
                     <?= View::partial('geraetepruefung/_pruefling-faelligkeit', ['f' => $gp['faelligkeit'], 'mitText' => true]) ?>

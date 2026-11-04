@@ -182,7 +182,8 @@ document.addEventListener('DOMContentLoaded', function () {
      * für die Meldung) – beim Grundriss die Grenze, die der Server
      * wirklich annimmt (SiteService::uploadGrenze), beim Prüfnachweis
      * Pruefnachweise::MAX_BYTES (über 16 MB stünde sonst die englische
-     * 413-Seite von nginx da). Geprüft wird beim Auswählen, also bevor
+     * 413-Seite von nginx da); `data-max-rat` ersetzt den Rat für PDF und
+     * Pläne (Geräteprüfung: Datenbank des Prüfgeräts). Geprüft wird beim Auswählen, also bevor
      * 100 MB über eine langsame Leitung gehen, um dann abgewiesen zu
      * werden. Die Meldung steht unter dem Feld, und setCustomValidity hält
      * das Formular an.
@@ -210,9 +211,11 @@ document.addEventListener('DOMContentLoaded', function () {
             var satz = '';
             Array.prototype.forEach.call(feld.files || [], function (datei) {
                 if (satz === '' && grenze > 0 && datei.size > grenze) {
+                    // `data-max-rat`: eigener Rat zum Feld (leer = keiner); sonst der für PDF und Pläne.
+                    var rat = typeof feld.dataset.maxRat === 'string' ? feld.dataset.maxRat
+                        : 'Ein PDF wird meist deutlich kleiner, wenn eingebettete Bilder mit geringerer Auflösung exportiert werden.';
                     satz = '„' + datei.name + '“ ist ' + groesse(datei.size) + ' groß – hochladen lassen sich höchstens '
-                        + (feld.dataset.maxText || groesse(grenze)) + '. Ein PDF wird meist deutlich kleiner, wenn eingebettete Bilder'
-                        + ' mit geringerer Auflösung exportiert werden.';
+                        + (feld.dataset.maxText || groesse(grenze)) + '.' + (rat !== '' ? ' ' + rat : '');
                 }
             });
             feld.setCustomValidity(satz);

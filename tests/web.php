@@ -292,6 +292,29 @@ try {
         $meldung = phpMeldung($r['text']);
         pruefe($meldung === null, 'Admin ' . $pfad . ' ohne PHP-Meldung ' . (string) $meldung);
     }
+    // Übersicht der Geräteprüfung mit mehr offenen Prüfungen, als sie zeigt: der Link führt auf die Liste
+    // nur der offenen (status=offen) – eigener Prüfling mit 16 Prüfungen, danach weg.
+    $gpLink = \App\Geraetepruefung\Prueflinge::anlegen(['kennung' => $kennung . '-offen', 'bezeichnung' => 'Prüfling für den Link']);
+    try {
+        for ($n = 0; $n < 16; $n++) {
+            $am = sprintf('2026-02-%02d 08:00:00', $n + 1);
+            $p = ['ref' => '1', 'geraet_ref' => '1', 'geprueft_am' => (string) \App\Geraetepruefung\Messarten::zeitLesen($am), 'am_geraet' => $am,
+                'pruefer' => '', 'prueffirma' => '', 'ort' => '', 'auftrag' => '', 'bemerkung' => '', 'ablauf_name' => '', 'ablauf_geraet_id' => '',
+                'messgeraet' => '', 'messgeraet_sn' => $kennung, 'firmware' => '', 'ergebnis' => 'bestanden', 'sicht' => '',
+                'geraet_ergebnis' => ['messung' => true, 'sicht' => true], 'sicht_antworten' => [], 'schritte' => []];
+            \App\Geraetepruefung\Pruefungen::anlegen($gpLink, ['schluessel' => \App\Geraetepruefung\Pruefungen::schluessel($p)] + $p);
+        }
+        $r = aufruf($basis, $admin['dose'], 'GET', '/geraetepruefung');
+        pruefe(str_contains($r['text'], 'href="/geraetepruefung/pruefungen?status=offen"') && !str_contains($r['text'], 'offen=1'),
+            'Geräteprüfung: Übersicht verlinkt „Alle … offenen Prüfungen“ mit status=offen');
+        $gueltig = (int) Database::scalar("SELECT pruefung_id FROM gp_berichte WHERE status = 'gueltig' ORDER BY nummer LIMIT 1");
+        $r = aufruf($basis, $admin['dose'], 'GET', '/geraetepruefung/pruefungen?status=offen');
+        pruefe($r['status'] === 200 && $gueltig > 0 && !str_contains($r['text'], 'href="/geraetepruefung/pruefungen/' . $gueltig . '"')
+            && str_contains($r['text'], $kennung . '-offen'), '… und die Liste dort zeigt nur offene Prüfungen');
+    } finally {
+        Database::execute('DELETE FROM gp_pruefungen WHERE pruefling_id = ?', [$gpLink]);
+        Database::delete('gp_prueflinge', $gpLink);
+    }
     $csv = aufruf($basis, $admin['dose'], 'GET', '/statistik/csv?zeitraum=24h');
     pruefe($csv['status'] === 200 && str_contains($csv['kopf'], 'text/csv'), 'CSV-Export');
     // Das gespeicherte PDF eines Prüfberichts der Geräteprüfung – genau die Bytes von der Unterschrift.

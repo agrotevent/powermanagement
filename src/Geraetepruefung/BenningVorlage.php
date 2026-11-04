@@ -37,7 +37,11 @@ use App\Support\Zeit;
  *
  * Export: Kopie der aktiven Vorlage unter storage/cache, Kunden, Hersteller,
  * Geräte und ihre Fragen hinein – sonst bleibt alles Byte für Byte (Pruefung,
- * Grenzwerte, Systemdaten, DbInfos). Der eigene Bestand heißt im Gerät
+ * Grenzwerte, Systemdaten, DbInfos). Vorlage und Export öffnen ihre Kopie
+ * erst nach {@see BenningDatei::schemaSicher()} (nichts im Schema, was beim
+ * Einfügen, VACUUM oder integrity_check rechnet). Ein Prüfling kommt nur mit
+ * einem Prüfablauf, der zur Vorlage passt, und mit Leitungsangaben und
+ * Prüfintervall in die Datei ({@see schreiben()}). Der eigene Bestand heißt im Gerät
  * `PM-EIGEN`, ein Kunde ohne Kundennummer `PM-K<id>` – daran erkennt der
  * nächste Import die Kunden wieder, die Prüflinge an ihrer Kennung.
  */
@@ -109,7 +113,9 @@ final class BenningVorlage
      * als Vorlage? Nur Tabellen, Indizes und Trigger mit Namen aus
      * Buchstaben, Ziffern und _, nur bekannte Tabellen ({@see LEEREN},
      * {@see BEHALTEN}), keine virtuellen, alle aus {@see PFLICHT}, Trigger
-     * nur nach dem Muster des Geräts.
+     * nur nach dem Muster des Geräts, kein CHECK, keine berechnete Spalte,
+     * kein DEFAULT-Ausdruck, kein Teil- oder Ausdrucksindex (wie
+     * {@see BenningDatei::schemaSicher()}, hier am Text des Schemas).
      *
      * @param list<array<string,mixed>> $master
      * @return array{moeglich:bool,grund:string}
@@ -130,6 +136,11 @@ final class BenningVorlage
                 if (preg_match('/^\s*CREATE\s+VIRTUAL\s/i', $sql) === 1) {
                     return $nein('Die Tabelle ' . $name . ' ist eine virtuelle Tabelle.');
                 }
+                // Wie BenningDatei::schemaSicher() (dort über die PRAGMAs, die vor quick_check laufen):
+                // nichts, was beim Einfügen, VACUUM oder integrity_check rechnet.
+                if (preg_match('/\bCHECK\s*\(|\bGENERATED\s+ALWAYS\b|\bAS\s*\(|\bDEFAULT\s*\(/i', $sql) === 1) {
+                    return $nein('Die Tabelle ' . $name . ' rechnet beim Schreiben (CHECK, berechnete Spalte oder DEFAULT-Ausdruck).');
+                }
                 if (!isset($bekannt[strtolower($name)]) && preg_match(self::LEEREN_MUSTER, $name) !== 1) {
                     return $nein('Die Tabelle ' . $name . ' ist unbekannt – sie könnte Kunden- oder Prüfdaten enthalten.');
                 }
@@ -138,7 +149,11 @@ final class BenningVorlage
                 if (preg_match(self::TRIGGER, $sql) !== 1) {
                     return $nein('Der Trigger ' . $name . ' tut mehr, als einen Zeitstempel zu schreiben.');
                 }
-            } elseif ($typ !== 'index') {
+            } elseif ($typ === 'index') {
+                if (preg_match('/\bWHERE\b/i', $sql) === 1 || ($sql !== '' && preg_match('/\bON\s+\S+\s*\((?:[^()]|\([^()]*\))*\(/is', $sql) === 1)) {
+                    return $nein('Der Index ' . $name . ' gilt nur für einen Teil der Zeilen oder geht über einen Ausdruck.');
+                }
+            } else {
                 return $nein('Im Schema steht „' . $name . '“ vom Typ ' . Messarten::text($typ, 20) . '.');
             }
         }
@@ -221,10 +236,10 @@ final class BenningVorlage
             }
             $pdo = null;
             clearstatcache(true, $kopie);
-            $bytes = (string) file_get_contents($kopie);
-            if (strlen($bytes) > self::MAX_BYTES) {
+            if ((int) filesize($kopie) > self::MAX_BYTES) {
                 return $nein('Die bereinigte Vorlage ist größer als 2 MB.');
             }
+            $bytes = (string) file_get_contents($kopie);
             if (strlen($bytes) < 100 || ord($bytes[18]) !== 1 || ord($bytes[19]) !== 1) {
                 return $nein('Der Kopf der bereinigten Vorlage ist ungültig.');
             }
@@ -502,22 +517,32 @@ final class BenningVorlage
      * und jeder Kunde, je mit der Zahl seiner Prüflinge und wie viele davon
      * ohne gültigen Prüfablauf übergangen würden.
      *
-     * @return list<array{wert:string,name:string,kundennummer:string,prueflinge:int,ohne_ablauf:int}>
+     * Dazu, wie viele trotz gültigem Prüfablauf ohne Leitungsangaben oder
+     * Prüfintervall übergangen würden ({@see angabenVollstaendig()}).
+     *
+     * @return list<array{wert:string,name:string,kundennummer:string,prueflinge:int,ohne_ablauf:int,ohne_angaben:int}>
      */
     public static function besitzer(): array
     {
         $zahlen = [];
-        foreach (Database::select('SELECT p.kunde_id, COUNT(*) AS n,
-                SUM(CASE WHEN a.id IS NULL OR a.ungueltig = 1 THEN 1 ELSE 0 END) AS ohne
-            FROM gp_prueflinge p LEFT JOIN gp_pruefablaeufe a ON a.id = p.pruefablauf_id GROUP BY p.kunde_id') as $z) {
-            $zahlen[$z['kunde_id'] === null ? 'eigen' : (string) (int) $z['kunde_id']] = [(int) $z['n'], (int) $z['ohne']];
+        foreach (Database::select('SELECT p.kunde_id, p.leitungslaenge, p.querschnitt, p.leiter, p.intervall_monate,
+                CASE WHEN a.id IS NULL OR a.ungueltig = 1 THEN 1 ELSE 0 END AS ohne
+            FROM gp_prueflinge p LEFT JOIN gp_pruefablaeufe a ON a.id = p.pruefablauf_id') as $z) {
+            $k = $z['kunde_id'] === null ? 'eigen' : (string) (int) $z['kunde_id'];
+            $zahlen[$k] ??= [0, 0, 0];
+            $zahlen[$k][0]++;
+            if ((int) $z['ohne'] === 1) {
+                $zahlen[$k][1]++;
+            } elseif (!self::angabenVollstaendig($z)) {
+                $zahlen[$k][2]++;
+            }
         }
         $aus = [['wert' => 'eigen', 'name' => self::eigenName(), 'kundennummer' => self::EIGEN,
-            'prueflinge' => $zahlen['eigen'][0] ?? 0, 'ohne_ablauf' => $zahlen['eigen'][1] ?? 0]];
+            'prueflinge' => $zahlen['eigen'][0] ?? 0, 'ohne_ablauf' => $zahlen['eigen'][1] ?? 0, 'ohne_angaben' => $zahlen['eigen'][2] ?? 0]];
         foreach (Database::select('SELECT id, name, kundennummer FROM kunden ORDER BY name, id') as $k) {
             $id = (string) (int) $k['id'];
             $aus[] = ['wert' => $id, 'name' => (string) $k['name'], 'kundennummer' => self::kundennummerImGeraet($k),
-                'prueflinge' => $zahlen[$id][0] ?? 0, 'ohne_ablauf' => $zahlen[$id][1] ?? 0];
+                'prueflinge' => $zahlen[$id][0] ?? 0, 'ohne_ablauf' => $zahlen[$id][1] ?? 0, 'ohne_angaben' => $zahlen[$id][2] ?? 0];
         }
         return $aus;
     }
@@ -619,10 +644,18 @@ final class BenningVorlage
             }
             $pdo = null;
             clearstatcache(true, $pfad);
+            // Was der Import nicht wieder lesen könnte, kommt nicht hinaus – und nie ungeprüft in den Speicher.
+            if ((int) filesize($pfad) > BenningDatei::MAX_BYTES) {
+                return ['ok' => false, 'message' => 'Die Datei für das Prüfgerät würde größer als ' . (int) (BenningDatei::MAX_BYTES / 1048576)
+                    . ' MB – bitte weniger Besitzer auf einmal wählen.'];
+            }
             $aus = (string) file_get_contents($pfad);
             if (strlen($aus) < 100 || ord($aus[18]) !== 1 || ord($aus[19]) !== 1) {
                 return ['ok' => false, 'message' => 'Der Kopf der geschriebenen Datei ist ungültig.'];
             }
+        } catch (\DomainException $e) {
+            // storage/cache nicht beschreibbar oder voll, Vorlage beschädigt – Text für den Benutzer
+            return ['ok' => false, 'message' => $e->getMessage()];
         } catch (\PDOException $e) {
             error_log('Geräteprüfung, Export: ' . $e->getMessage());
             return ['ok' => false, 'message' => 'Die Datei für das Prüfgerät ließ sich nicht schreiben.'];
@@ -647,6 +680,14 @@ final class BenningVorlage
         if ($zahlen['ohne_ablauf'] > 0) {
             $teile[] = $zahlen['ohne_ablauf'] . ' ohne gültigen Prüfablauf übergangen';
         }
+        if ($zahlen['ablauf_abweichend'] > 0) {
+            $teile[] = $zahlen['ablauf_abweichend'] . ' mit einem Prüfablauf, der hier anders steht als in der Vorlage (Name oder Prüfschritte), übergangen'
+                . ' – die Datenbank des Prüfgeräts noch einmal mit „als Vorlage übernehmen“ importieren';
+        }
+        if ($zahlen['ohne_angaben'] > 0) {
+            $teile[] = $zahlen['ohne_angaben'] . ' ohne Leitungslänge, Querschnitt, Leiterzahl oder Prüfintervall übergangen'
+                . ' – aus ihnen rechnet das Gerät seine Grenzwerte; bitte beim Prüfling eintragen';
+        }
         $dateiname = Response::sichererDateiname(trim((string) preg_replace('/\.db$/i', '', trim($name))), 'PowerManagement') . '.db';
         return ['ok' => true, 'message' => 'Datei für das Prüfgerät geschrieben: ' . implode('; ', $teile) . '.', 'bytes' => $aus,
             'dateiname' => $dateiname, 'zahlen' => $zahlen, 'id' => $id];
@@ -655,8 +696,16 @@ final class BenningVorlage
     /**
      * Kunden, Hersteller, Geräte und Fragen in die offene Kopie der Vorlage.
      *
+     * Übergangen (und gezählt) wird ein Prüfling ohne gültigen Prüfablauf
+     * (`ohne_ablauf`), mit einem Prüfablauf, dessen Name oder Maske hier
+     * anders steht als in der Zeile `Pruefung` der Vorlage (`ablauf_abweichend`
+     * – etwa ein am Gerät angelegter Ablauf ≥ 1 000 000 eines anderen
+     * Prüfgeräts) und einer ohne Leitungslänge, Querschnitt, Leiterzahl
+     * (> 0) oder Prüfintervall (≥ 1 Monat) (`ohne_angaben`): Aus ihnen rechnet
+     * das Gerät seine Grenzwerte – nie 0 und nie ein erfundener Ersatz.
+     *
      * @param array<string,array<string,mixed>|null> $liste 'eigen' => null, Kunden-ID => Kunde
-     * @return array{kunden:int,prueflinge:int,ohne_ablauf:int,ausser_betrieb:int}
+     * @return array{kunden:int,prueflinge:int,ohne_ablauf:int,ablauf_abweichend:int,ohne_angaben:int,ausser_betrieb:int}
      */
     private static function schreiben(\PDO $pdo, array $liste): array
     {
@@ -683,13 +732,16 @@ final class BenningVorlage
         };
         // Dezimaltext für REAL-Spalten: PDO kennt keinen Gleitkomma-Typ, die REAL-Affinität der
         // Spalte macht aus „1.5“ die Zahl 1.5 (gerechnet wird nie mit float – nichts gerundet).
-        $real =static fn (string $dezimal, bool $leerNull = false): ?string => $dezimal === '' ? ($leerNull ? null : '0') : $dezimal;
+        // Leer: Nennleistung 0 (so schreibt das Gerät „nicht angegeben“), U_Ausgang NULL. Länge,
+        // Querschnitt und Leiter sind nie leer – ohne sie bleibt der Prüfling weg (angabenVollstaendig).
+        $real = static fn (string $dezimal, bool $leerNull = false): ?string => $dezimal === '' ? ($leerNull ? null : '0') : $dezimal;
         $jetzt = (new \DateTimeImmutable('now', Zeit::zone()))->format('Y-m-d H:i:s');
         $heute = (new \DateTimeImmutable('now', Zeit::zone()))->format('Y-m-d') . ' 00:00:00';
 
+        // Prüfabläufe der Vorlage: Name genau so, wie das Gerät ihn schreibt, und die Maske.
         $vorlageAblaeufe = [];
-        foreach ($pdo->query('SELECT CAST(Pruefung_ID AS TEXT) AS id FROM Pruefung')->fetchAll(\PDO::FETCH_COLUMN) as $id) {
-            $vorlageAblaeufe[(string) $id] = true;
+        foreach ($pdo->query('SELECT CAST(Pruefung_ID AS TEXT) AS id, Pruefung_Name AS name, CAST(Pruefung_Ablauf AS TEXT) AS ablauf FROM Pruefung')->fetchAll() as $a) {
+            $vorlageAblaeufe[(string) $a['id']] = ['name' => is_scalar($a['name']) ? (string) $a['name'] : '', 'ablauf' => self::maskeText($a['ablauf'])];
         }
         $ablaeufe = [];
         foreach (Database::select('SELECT id, geraet_id, name, ablauf, ungueltig FROM gp_pruefablaeufe') as $a) {
@@ -713,7 +765,7 @@ final class BenningVorlage
             $letzte[(int) $z['pruefling_id']] = (string) $z['am'];
         }
 
-        $zahlen = ['kunden' => 0, 'prueflinge' => 0, 'ohne_ablauf' => 0, 'ausser_betrieb' => 0];
+        $zahlen = ['kunden' => 0, 'prueflinge' => 0, 'ohne_ablauf' => 0, 'ablauf_abweichend' => 0, 'ohne_angaben' => 0, 'ausser_betrieb' => 0];
         $pdo->exec('BEGIN');
         try {
             $kundenIndex = 0;
@@ -741,8 +793,17 @@ final class BenningVorlage
 
                 foreach (Prueflinge::fuerBesitzer($kunde === null ? null : (int) $wert) as $p) {
                     $ablauf = $p['pruefablauf_id'] === null ? null : ($ablaeufe[(int) $p['pruefablauf_id']] ?? null);
-                    if ($ablauf === null || (int) $ablauf['ungueltig'] === 1 || !isset($vorlageAblaeufe[(string) $ablauf['geraet_id']])) {
+                    $inVorlage = $ablauf === null ? null : ($vorlageAblaeufe[(string) $ablauf['geraet_id']] ?? null);
+                    if ($ablauf === null || (int) $ablauf['ungueltig'] === 1 || $inVorlage === null) {
                         $zahlen['ohne_ablauf']++;
+                        continue;
+                    }
+                    if (!self::ablaufPasst($ablauf, $inVorlage)) {
+                        $zahlen['ablauf_abweichend']++;
+                        continue;
+                    }
+                    if (!self::angabenVollstaendig($p)) {
+                        $zahlen['ohne_angaben']++;
                         continue;
                     }
                     $technik = is_array($p['technik']) ? $p['technik'] : [];
@@ -769,15 +830,15 @@ final class BenningVorlage
                     }
                     $werte += [
                         'Geraete_Pruefablauf'             => (int) $maske,
-                        'Geraete_Pruefablauf_Name'        => self::geraetText((string) $ablauf['name'], 50),
+                        'Geraete_Pruefablauf_Name'        => $inVorlage['name'],
                         'Geraete_Pruefablauf_Index'       => (int) $ablauf['geraet_id'],
                         'Geraete_Pruefdatum'              => $pruefdatum,
                         'Geraete_Datum_Naechste_Pruefung' => $naechste,
                         'Geraete_Pruefintervall'          => (int) $p['intervall_monate'],
                         'Geraete_SK'                      => (int) $p['schutzklasse'],
-                        'Geraete_Leitungslaenge'          => $real((string) $p['leitungslaenge']),
-                        'Geraete_Leitungsquerschnitt'     => $real((string) $p['querschnitt']),
-                        'Geraete_Anz_Leiter'              => $real((string) $p['leiter']),
+                        'Geraete_Leitungslaenge'          => (string) $p['leitungslaenge'],
+                        'Geraete_Leitungsquerschnitt'     => (string) $p['querschnitt'],
+                        'Geraete_Anz_Leiter'              => (string) $p['leiter'],
                         'Geraete_Nennleistung'            => $real((string) $p['nennleistung']),
                         'Geraete_U_Ausgang'               => $real((string) ($technik['u_ausgang'] ?? ''), true),
                         'manufacturerId'                  => $herstellerId,
@@ -813,6 +874,40 @@ final class BenningVorlage
 
     // ------------------------------------------------------------ Hilfen
 
+    /**
+     * Passt ein Prüfablauf von hier (gp_pruefablaeufe) zur Zeile `Pruefung`
+     * der Vorlage – gleicher Name (gesäubert wie beim Import) und gleiche
+     * Maske? Sonst schriebe der Export einem Prüfling die Schritte eines
+     * anderen Ablaufs zu (am Gerät angelegte Abläufe ≥ 1 000 000 vergibt
+     * jedes Prüfgerät selbst).
+     *
+     * @param array<string,mixed> $hier
+     * @param array{name:string,ablauf:string} $vorlage
+     */
+    public static function ablaufPasst(array $hier, array $vorlage): bool
+    {
+        $name = Messarten::text($vorlage['name'], 120);
+        $name = $name !== '' ? $name : 'Ablauf ' . $hier['geraet_id'];
+        return $name === (string) $hier['name'] && $vorlage['ablauf'] === self::maskeText($hier['ablauf'] ?? '0');
+    }
+
+    /**
+     * Hat der Prüfling, was das Gerät für seine Grenzwerte braucht:
+     * Leitungslänge, Querschnitt und Leiterzahl größer 0, Prüfintervall
+     * mindestens ein Monat?
+     *
+     * @param array<string,mixed> $p
+     */
+    public static function angabenVollstaendig(array $p): bool
+    {
+        foreach (['leitungslaenge', 'querschnitt', 'leiter'] as $feld) {
+            if (!Messarten::positiv((string) ($p[$feld] ?? ''))) {
+                return false;
+            }
+        }
+        return (int) ($p['intervall_monate'] ?? 0) >= 1;
+    }
+
     /** Eine Kopie zum Schreiben öffnen (nur Kopien unter storage/cache – nie die Datei von außen, nie die App-Datenbank). */
     private static function schreibbar(string $pfad): \PDO
     {
@@ -824,6 +919,9 @@ final class BenningVorlage
         // Die Trigger des Geräts (nur nach dem geprüften Muster) laufen auch so.
         $pdo->exec('PRAGMA trusted_schema = OFF');
         $pdo->exec('PRAGMA cell_size_check = ON');
+        // Nichts, was beim Prüfen, Einfügen, VACUUM oder integrity_check rechnet
+        // (berechnete Spalten, DEFAULT-Ausdrücke, CHECK, Ausdrucks- und Teilindizes).
+        BenningDatei::schemaSicher($pdo);
         if ($pdo->query('PRAGMA quick_check')->fetchAll(\PDO::FETCH_COLUMN) !== ['ok']) {
             throw new \DomainException('Die Datenbank ist beschädigt (quick_check meldet Fehler).');
         }

@@ -13,6 +13,7 @@ use App\Kunden\Pruefnachweise;
 use App\Support\Audit;
 use App\Support\Crypto;
 use App\Support\Database;
+use App\Support\Zeit;
 
 /**
  * Prüfberichte der Geräteprüfung (Tabellen `gp_berichte`,
@@ -36,9 +37,13 @@ use App\Support\Database;
  * vom Import nur abgeleitet und einheitlich gehalten).
  *
  * Rechte: sehen mit `geraetepruefung.view`, unterschreiben und Korrektur mit
- * `geraetepruefung.unterschreiben` und einer Prüfer-Qualifikation im Konto.
- * Kundenzugänge nie (sie erreichen nur Prüfnachweise im Kundenbereich). Im
- * Audit stehen nur IDs und Nummern.
+ * `geraetepruefung.unterschreiben`, einem vollen Namen und einer
+ * Prüfer-Qualifikation im Konto. Den Prüfnachweis eines bestandenen
+ * Kundengeräts legt das Unterschreiben nur an, wenn der Unterzeichner
+ * `kunden.nachweise` hat (sonst Hinweis; nachholbar auf der Seite der
+ * Prüfung). Eine Korrektur ist gesiegelt ({@see korrektur()}). Kundenzugänge
+ * nie (sie erreichen nur Prüfnachweise im Kundenbereich). Im Audit stehen
+ * nur IDs und Nummern.
  *
  * Update: Unterschreiben wartet auf nichts außerhalb (kein Netz, kein Gerät)
  * – ein Stück aus höchstens 25 Prüfungen samt PDF ist in Sekunden fertig, weit
@@ -62,13 +67,14 @@ final class PruefberichtService
     /** Idempotenzschlüssel eines Durchgangs. */
     public const ANFRAGE = '/^[A-Za-z0-9-]{16,64}$/';
 
-    public const NUR_PRUEFER = 'Unterschreiben darf nur, wer „Prüfberichte unterschreiben“ hat und eine Prüfer-Qualifikation im Konto '
-        . '(Benutzerverwaltung).';
+    public const NUR_PRUEFER = 'Unterschreiben darf nur, wer „Prüfberichte unterschreiben“ hat und im Konto einen vollen Namen und eine '
+        . 'Prüfer-Qualifikation (Benutzerverwaltung).';
 
     /** HMAC-Schlüssel der Siegel (abgeleitet aus app.key) und Tags der Ketten. */
     private const SIEGEL_ZWECK = 'pruefbericht-siegel-1';
     private const KETTE_TAG = 'PM-GP-1';
     private const PDF_TAG = 'PM-GP-PDF-1';
+    private const KORREKTUR_TAG = 'PM-GP-KORREKTUR-1';
 
     // ------------------------------------------------------------ Rechte
 
@@ -78,10 +84,21 @@ final class PruefberichtService
         return !Kundenbereich::istKundenzugang() && Auth::can('geraetepruefung.view');
     }
 
-    /** Darf es unterschreiben (Recht und hinterlegte Qualifikation)? */
+    /**
+     * Darf es unterschreiben (Recht, hinterlegte Qualifikation und voller
+     * Name im Konto)? Ohne vollen Namen stünde im Bericht ein frei
+     * eingetippter – und ein Name wie der Prüfer laut Gerät übersprünge
+     * „Verantwortung übernehmen“.
+     */
     public static function darfUnterschreiben(): bool
     {
-        return self::sichtbar() && Auth::can('geraetepruefung.unterschreiben') && self::qualifikation() !== '';
+        return self::sichtbar() && Auth::can('geraetepruefung.unterschreiben') && self::qualifikation() !== '' && self::kontoName() !== '';
+    }
+
+    /** Der volle Name des angemeldeten Kontos (leer: keiner eingetragen). */
+    private static function kontoName(): string
+    {
+        return Unterschrift::text(Auth::user()['full_name'] ?? '', 120);
     }
 
     /** Die Prüfer-Qualifikation des angemeldeten Kontos (leer: keine). */
@@ -167,13 +184,6 @@ final class PruefberichtService
     {
         return array_map('strval', array_column(Database::select(
             "SELECT DISTINCT pruefer FROM gp_pruefungen WHERE pruefer <> '' ORDER BY pruefer LIMIT 200"), 'pruefer'));
-    }
-
-    /** Kunden mit Prüflingen (für den Filter „Besitzer“). @return list<array{id:int,name:string}> */
-    public static function kundenMitPrueflingen(): array
-    {
-        return array_map(static fn (array $k): array => ['id' => (int) $k['id'], 'name' => (string) $k['name']], Database::select(
-            'SELECT DISTINCT k.id, k.name FROM kunden k JOIN gp_prueflinge l ON l.kunde_id = k.id ORDER BY k.name, k.id'));
     }
 
     /**
@@ -284,14 +294,15 @@ final class PruefberichtService
         if (mb_strlen($name) < 2) {
             return $nein(422, 'Bitte den Namen in Druckbuchstaben eintragen.');
         }
-        // Der Name gehört zum angemeldeten Konto: wer am Gerät eines anderen
+        // Der Name gehört zum angemeldeten Konto (ohne vollen Namen dort kein
+        // Unterschreiben, siehe darfUnterschreiben): wer am Gerät eines anderen
         // unterschreibt, schriebe sich sonst dessen Qualifikation zu. Im Bericht
-        // steht er so, wie er im Konto steht (ohne vollen Namen: wie eingetragen).
-        $konto = Unterschrift::text(Auth::user()['full_name'] ?? '', 120);
-        if ($konto !== '' && self::nameVergleich($name) !== self::nameVergleich($konto)) {
+        // steht er so, wie er im Konto steht.
+        $konto = self::kontoName();
+        if (self::nameVergleich($name) !== self::nameVergleich($konto)) {
             return $nein(422, 'Der Name passt nicht zum angemeldeten Konto („' . $konto . '“). Wer als Prüfer unterschreibt, meldet sich mit dem eigenen Konto an.');
         }
-        $name = $konto !== '' ? $konto : $name;
+        $name = $konto;
         $ort = Unterschrift::text($u['ort'] ?? '', 120);
         if (mb_strlen($ort) < 2) {
             return $nein(422, 'Bitte den Ort der Unterschrift eintragen.');
@@ -316,7 +327,7 @@ final class PruefberichtService
                 || (string) $vorhanden['name'] !== $name || (string) $vorhanden['ort'] !== $ort) {
                 return $nein(409, 'Diese Kennung gehört zu einer anderen Unterschrift – bitte noch einmal unterschreiben.');
             }
-        } elseif (self::stricheBekannt($hash)) {
+        } elseif (Unterschrift::stricheBekannt($hash)) {
             return $nein(422, 'Diese Unterschrift gibt es schon – bitte neu unterschreiben.');
         }
 
@@ -324,7 +335,7 @@ final class PruefberichtService
             'anfrage' => $anfrage, 'name' => $name, 'ort' => $ort, 'qualifikation' => $qualifikation, 'pruefart' => $pruefart,
             'uebernehmen' => ($u['uebernehmen'] ?? false) === true,
             'striche' => $striche, 'striche_hash' => $hash,
-            'konto' => $konto !== '' ? $konto : (string) (Auth::user()['username'] ?? ''),
+            'konto' => $konto,
         ];
         $unterschrieben = [];
         $fehler = [];
@@ -392,7 +403,7 @@ final class PruefberichtService
                 // UNIQUE: dieselben Striche aus einem zweiten Durchgang, dieselbe
                 // Prüfung von einem zweiten Gerät oder dieselbe Nummer – nachsehen.
                 $eigene = Database::first('SELECT id FROM gp_unterschriften WHERE anfrage = ?', [$k['anfrage']]);
-                if ($eigene === null && self::stricheBekannt((string) $k['striche_hash'])) {
+                if ($eigene === null && Unterschrift::stricheBekannt((string) $k['striche_hash'])) {
                     return ['ok' => false, 'abbruch' => true, 'message' => 'Diese Unterschrift gibt es schon – bitte neu unterschreiben.'];
                 }
             }
@@ -404,13 +415,20 @@ final class PruefberichtService
         Audit::log('geraetepruefung.unterschrieben', 'gp_bericht', (string) $erg['id'],
             ['bericht_id' => $erg['id'], 'pruefung_id' => $id, 'nummer' => $erg['nummer'], 'fassung' => $erg['fassung']]);
         // Ein bestandener Bericht eines Kundengeräts wird Prüfnachweis im
-        // Kundenbereich – als Entwurf, sichtbar erst nach der Freigabe von Hand.
+        // Kundenbereich – als Entwurf, sichtbar erst nach der Freigabe von Hand,
+        // und nur, wenn der Unterzeichner Prüfnachweise geben darf (Daten eines
+        // anderen Moduls nur mit dessen Recht, wie neue Kunden beim Import).
         // Nach dem Einfrieren: gelingt das nicht (Kunde inzwischen gelöscht …),
         // bleibt der Bericht, und der Nachweis lässt sich auf seiner Seite nachholen.
         if ($erg['kunde_id'] !== null && $erg['ergebnis'] === 'bestanden') {
-            $n = Pruefnachweise::ausGeraetepruefung((int) $erg['kunde_id'], (int) $erg['id']);
-            if (!$n['ok']) {
-                $hinweise[] = $erg['nummer'] . ': kein Prüfnachweis für den Kunden – ' . $n['message'];
+            if (!Auth::can('kunden.nachweise')) {
+                $hinweise[] = $erg['nummer'] . ': kein Prüfnachweis für den Kunden angelegt (dazu fehlt das Recht „Prüfnachweise“) – '
+                    . 'nachholbar auf der Seite der Prüfung, von jemandem mit diesem Recht.';
+            } else {
+                $n = Pruefnachweise::ausGeraetepruefung((int) $erg['kunde_id'], (int) $erg['id']);
+                if (!$n['ok']) {
+                    $hinweise[] = $erg['nummer'] . ': kein Prüfnachweis für den Kunden – ' . $n['message'];
+                }
             }
         }
         return ['ok' => true, 'nummer' => (string) $erg['nummer'], 'hinweise' => $hinweise];
@@ -446,6 +464,18 @@ final class PruefberichtService
         if ($letzte !== null && (string) $letzte['status'] !== 'korrektur') {
             throw new \DomainException('Die Berichte dieser Prüfung sind uneinheitlich (Fassung ' . (int) $letzte['fassung'] . ' ist „'
                 . (self::STATUS[(string) $letzte['status']] ?? (string) $letzte['status']) . '“ ohne Nachfolger) – bitte prüfen lassen.');
+        }
+        if ($letzte !== null) {
+            if (!self::korrekturGesiegelt($letzte)) {
+                throw new \DomainException('Die Korrektur von ' . $letzte['nummer'] . ' ist nicht gesiegelt (Grund, Konto oder Zeit nachträglich geändert?) '
+                    . '– bitte „bin/power geraetepruefung:pruefen“ ausführen lassen.');
+            }
+            // Ein Neuversuch eines älteren Durchgangs (dieselbe Kennung) deckt keine Fassung, die erst
+            // nach seiner Unterschrift zur Korrektur ging – die hat der Prüfer nie gesehen.
+            if ($eigene !== null && (Database::scalar('SELECT id FROM gp_berichte WHERE pruefung_id = ? AND unterschrift_id = ?', [$pruefungId, (int) $eigene['id']]) !== false
+                || strcmp((string) $eigene['unterschrieben_am'], (string) $letzte['korrektur_am']) < 0)) {
+                throw new \DomainException('Für ' . $letzte['nummer'] . ' ist inzwischen eine Korrektur angefordert – bitte neu unterschreiben.');
+            }
         }
         $jetzt = gmdate('c');
         if ($eigene === null) {
@@ -578,8 +608,12 @@ final class PruefberichtService
         if (mb_strlen($grund) < 3) {
             return ['ok' => false, 'status' => 422, 'pruefung_id' => (int) $b['pruefung_id'], 'message' => 'Bitte den Grund der Korrektur angeben.'];
         }
-        $n = Database::execute("UPDATE gp_berichte SET status = 'korrektur', korrektur_grund = ?, korrektur_von = ?, korrektur_am = ?
-            WHERE id = ? AND status = 'gueltig'", [$grund, Auth::id(), gmdate('c'), $berichtId]);
+        // Gesiegelt: eine per SQL gesetzte Korrektur (Status, Grund) fiele sonst nicht auf – und ihr
+        // Grund stünde beim nächsten Unterschreiben eingefroren in Fassung n+1.
+        $am = gmdate('c');
+        $von = (int) Auth::id();
+        $n = Database::execute("UPDATE gp_berichte SET status = 'korrektur', korrektur_grund = ?, korrektur_von = ?, korrektur_am = ?, korrektur_siegel = ?
+            WHERE id = ? AND status = 'gueltig'", [$grund, $von, $am, self::korrekturSiegel($berichtId, (int) $b['fassung'], $grund, $von, $am), $berichtId]);
         if ($n !== 1) {
             return ['ok' => false, 'status' => 409, 'pruefung_id' => (int) $b['pruefung_id'], 'message' => 'Der Bericht wurde inzwischen geändert – bitte die Seite neu laden.'];
         }
@@ -623,6 +657,9 @@ final class PruefberichtService
             }
         } elseif ($nachfolger !== []) {
             $befunde[] = 'Eine neuere Fassung ersetzt diesen Bericht, er ist aber nicht als „ersetzt“ geführt – Status nachträglich geändert?';
+        }
+        if (($status === 'korrektur' || $b['korrektur_am'] !== null) && (string) $b['schluessel_id'] === self::schluesselId() && !self::korrekturGesiegelt($b)) {
+            $befunde[] = 'Die angeforderte Korrektur ist nicht gesiegelt oder verändert (Status, Grund, Konto oder Zeit) – nachträglich geändert?';
         }
 
         // ---------------------------------------------- Inhalt
@@ -722,7 +759,10 @@ final class PruefberichtService
      * Der eingefrorene Inhalt – nur Text (Kanon), mit festen Kopien von
      * allem, was sich später ändern kann: Firma, Kunde, Prüfling,
      * Prüfgerät mit Kalibrierung, Zubehör, Prüfer. Messwerte, Grenzwerte
-     * und Bewertung stammen unverändert aus der Prüfung.
+     * und Bewertung stammen unverändert aus der Prüfung. Kalibrierung und
+     * Zubehör tragen ihre Quelle („laut Verwaltung, Stand <Datum der
+     * Unterschrift>“ – „Prüfgeräte“ führt keine Geschichte); wurde ein Gerät
+     * nach dem Prüftag geändert (`updated_at`), steht ein Hinweis da.
      *
      * @param array<string,mixed> $p Prüfung (Pruefungen::find)
      * @param array<string,mixed> $l Prüfling
@@ -747,12 +787,22 @@ final class PruefberichtService
         if ($norm === '') {
             $norm = Messarten::norm((string) $p['ablauf_name'], (string) $k['pruefart']);
         }
+        // Kalibrierung und Zubehör kennt nur die Verwaltung („Prüfgeräte“), und die hält nur den Stand
+        // jetzt (keine Geschichte): eingefroren wird der Stand bei der Unterschrift, so gekennzeichnet,
+        // und wurde ein Gerät nach dem Prüftag geändert, steht ein Hinweis da.
+        $stand = 'laut Verwaltung, Stand ' . self::datumText((string) Messarten::ortsdatum((string) $u['unterschrieben_am']));
+        $geprueftTs = Zeit::ts((string) $p['geprueft_am']);
+        $spaeterGeaendert = static fn (array $g): bool => $geprueftTs !== null && ($ts = Zeit::ts((string) ($g['updated_at'] ?? ''))) !== null && $ts > $geprueftTs;
         $zubehoer = [];
         $zIds = is_string($ablauf['zubehoer'] ?? null) ? json_decode((string) $ablauf['zubehoer'], true) : null;
         foreach (is_array($zIds) ? array_slice($zIds, 0, 20) : [] as $zid) {
             $g = is_int($zid) || (is_string($zid) && ctype_digit($zid)) ? Database::first('SELECT * FROM pruefgeraete WHERE id = ?', [(int) $zid]) : null;
             if ($g !== null) {
                 $zubehoer[] = self::geraetAbbild($g);
+                if ($spaeterGeaendert($g)) {
+                    $hinweise[] = 'Die Angaben zum Zubehör „' . $t(trim((string) $g['fabrikat'] . ' ' . (string) $g['typ']), 160) . '“ wurden nach dem Prüftag geändert'
+                        . ' – sein Stand am Prüftag (Kalibrierung) ist damit nicht belegt.';
+                }
             }
         }
 
@@ -766,6 +816,10 @@ final class PruefberichtService
             $hinweise[] = 'Für das Prüfgerät ist keine Kalibrierung eingetragen.';
         } elseif ($kalibriert < $datum) {
             $hinweise[] = 'Die Kalibrierung des Prüfgeräts war am Prüftag abgelaufen (bis ' . self::datumText($kalibriert) . ').';
+        }
+        if ($pg !== null && $spaeterGeaendert($pg)) {
+            $hinweise[] = 'Die Angaben zum Prüfgerät wurden nach dem Prüftag geändert – die Kalibrierung am Prüftag ist damit nicht belegt'
+                . ' (der Bericht nennt den Stand bei der Unterschrift).';
         }
 
         // Sichtprüfung und Messschritte – unverändert aus der Prüfung, nur als Text
@@ -865,8 +919,10 @@ final class PruefberichtService
                 'firmware'       => $t($p['firmware'], 40),
                 'norm'           => $pg !== null ? $t($pg['norm'], 160) : '',
                 'kalibriert_bis' => $kalibriert,
+                'kalibrierung_quelle' => $pg !== null ? $stand : '',
             ],
             'zubehoer'      => $zubehoer,
+            'zubehoer_quelle' => $zubehoer !== [] ? $stand : '',
             'sicht'         => ['ergebnis' => (string) $p['sicht'], 'antworten' => $antworten],
             'schritte'      => $schritte,
             'ergebnis'      => $ergebnis,
@@ -959,11 +1015,23 @@ final class PruefberichtService
         return Crypto::ableiten(self::SIEGEL_ZWECK);
     }
 
-    /** Gibt es diese Striche schon – hier oder bei den Übergabeberichten? */
-    private static function stricheBekannt(string $hash): bool
+    /** Siegel einer angeforderten Korrektur (HMAC über Bericht, Fassung, Grund, Konto, Zeit). */
+    private static function korrekturSiegel(int $id, int $fassung, string $grund, int $von, string $am): string
     {
-        return Database::scalar('SELECT id FROM gp_unterschriften WHERE striche_hash = ?', [$hash]) !== false
-            || Database::scalar('SELECT id FROM bericht_unterschriften WHERE striche_hash = ?', [$hash]) !== false;
+        return hash_hmac('sha256', implode("\n", [self::KORREKTUR_TAG, (string) $id, (string) $fassung, $grund, (string) $von, $am]),
+            self::siegelSchluessel());
+    }
+
+    /** Ist die Korrektur dieser Zeile vollständig (Grund, Konto, Zeit) und gesiegelt? */
+    private static function korrekturGesiegelt(array $b): bool
+    {
+        $am = (string) ($b['korrektur_am'] ?? '');
+        $grund = (string) ($b['korrektur_grund'] ?? '');
+        if ($am === '' || $b['korrektur_von'] === null || trim($grund) === '') {
+            return false;
+        }
+        return hash_equals(self::korrekturSiegel((int) $b['id'], (int) $b['fassung'], $grund, (int) $b['korrektur_von'], $am),
+            (string) ($b['korrektur_siegel'] ?? ''));
     }
 
     /** Name zum Vergleich: Groß/klein, Leerzeichen und Umlaut-Schreibweise egal (wie bei den Übergabeberichten). */
@@ -986,8 +1054,13 @@ final class PruefberichtService
             : in_array($code, [1205, 1213], true);
     }
 
-    /** JJJJ-MM-TT → TT.MM.JJJJ (sonst unverändert). */
-    public static function datumText(string $d): string
+    /**
+     * JJJJ-MM-TT → TT.MM.JJJJ (sonst unverändert) – Teil des Formats des
+     * eingefrorenen Inhalts („nächste Prüfung“, Hinweise). Bewusst eigene
+     * Hilfe statt der Anzeigehilfe Pruefnachweise::datum(): Änderte sich die,
+     * änderten sich neue Berichte still mit.
+     */
+    private static function datumText(string $d): string
     {
         return preg_match('/^(\d{4})-(\d{2})-(\d{2})$/', $d, $m) === 1 ? $m[3] . '.' . $m[2] . '.' . $m[1] : $d;
     }

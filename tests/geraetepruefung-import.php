@@ -17,9 +17,11 @@ declare(strict_types=1);
  *
  * B – Ablehnen: keine SQLite, leer, zu groß, WAL, beschädigt, Ansicht statt
  * Tabelle, fehlende Tabelle und Spalte, zu viele Zeilen (echt und über
- * BenningDatei::$grenzen); Texte auf Spaltenlänge gekürzt; fremder Trigger
- * und unbekannte Tabelle → lesbar, aber keine Vorlage; keine Kopie bleibt in
- * storage/cache.
+ * BenningDatei::$grenzen); berechnete Spalte (auch in einer unbekannten
+ * Tabelle – ohne Speicheranstieg, quick_check läuft nicht), Funktions-DEFAULT,
+ * Ausdrucks- und Teilindex, CHECK; Texte auf Spaltenlänge gekürzt; fremder
+ * Trigger und unbekannte Tabelle → lesbar, aber keine Vorlage; keine Kopie
+ * bleibt in storage/cache.
  *
  * C – Vorlage: geleerte Tabellen ohne Zeilen und ohne sqlite_sequence,
  * Einstellungen (Pruefung, Grenzwerte, Systemdaten, DbInfos) per quote()
@@ -36,18 +38,25 @@ declare(strict_types=1);
  * Audit nur mit Zahlen), idempotent (dieselbe Datei, Sicherung), eine
  * zusätzliche Prüfung, „hier anders“ nur mit Haken und gesehenem Stand,
  * Inventar-Vorschlag (nie Tanksensor), Vorlage mit denselben Bytes wieder
- * aktiv statt doppelt; Vorschau ablegen/verwerfen/aufräumen.
+ * aktiv statt doppelt; am Gerät umbenannt → Prüfung „schon da“ beim
+ * bisherigen Prüfling mit Hinweis; Vorschau ablegen/verwerfen/aufräumen.
  *
  * E – Export: ohne Vorlage abgelehnt, Besitzer geprüft, Schema und
  * Einstellungen gleich der Vorlage, Kopf-Bytes, Kunden mit PM-EIGEN /
- * Kundennummer / PM-K<id>, Geräte (ohne gültigen Prüfablauf übergangen und
- * gezählt, außer Betrieb, REAL-Spalten als Zahl), Hersteller angehängt,
- * Fragen; Beleg und Audit; Re-Import des Exports mit zwei „am Gerät“
+ * Kundennummer / PM-K<id>, Geräte (ohne gültigen Prüfablauf, ohne
+ * Leitungsangaben bzw. mit Intervall 0 und mit einem Ablauf, der hier anders
+ * steht als in der Vorlage übergangen, gezählt und gemeldet – nie 0 m/0 mm²/
+ * 0 Leiter; außer Betrieb, REAL-Spalten als Zahl, Name des Ablaufs genau wie
+ * Pruefung_Name), Hersteller angehängt, Fragen; Beleg und Audit; Vorlage mit
+ * Funktions-DEFAULT → Meldung; Re-Import des Exports mit zwei „am Gerät“
  * eingetragenen Prüfungen ordnet Kunden über PM-… und die Kundennummer zu,
- * Prüflinge über die Kennung („schon da“), nur die neuen Prüfungen kommen.
+ * Prüflinge über die Kennung („schon da“), nur die neuen Prüfungen kommen;
+ * zweites Prüfgerät mit anderem Ablauf 1000001 → Hinweis, ohne Vorlage
+ * bleibt der Prüfling ohne ihn; Kunde gelöscht → gemerkte Zuordnung weg.
  *
  * F – HTTP (eigener PHP-Server): Seiten 200 ohne PHP-Meldung und ohne
- * Inline-JS, Dateifeld mit Grenze, Upload → Vorschau, ohne Token nichts,
+ * Inline-JS, Dateifeld mit Grenze und eigenem Rat (app.js unter Node, ohne
+ * den Rat für PDF), Upload → Vorschau, ohne Token nichts,
  * abgeschnittenes Formular nichts, Zuordnung ändern, geänderte Zuordnung
  * ohne Blick auf die Prüflinge nichts, Übernehmen, Export als Download
  * (Kopfzeilen), Prüfabläufe (Norm, Zubehör, fremde ID 404, falsches Zubehör),
@@ -299,7 +308,7 @@ try {
     fwrite($h, "SQLite format 3\0");
     ftruncate($h, BenningDatei::MAX_BYTES + 1);
     fclose($h);
-    $abgelehnt($gross, 'größer als 15 MB', 'zu groß (15 MB + 1 Byte)');
+    $abgelehnt($gross, 'größer als die Grenze dieser Installation (15 MB, rund 10 000 Prüfungen)', 'zu groß (15 MB + 1 Byte)');
     unlink($gross);
     $wal = $ordner . '/wal.db';
     $bytes = (string) file_get_contents($m1['datei']);
@@ -345,6 +354,36 @@ try {
     $fremd = $kopie($m1['datei'], static fn (PDO $pdo) => $pdo->exec('CREATE TABLE Notizen (text TEXT)'));
     $rf = BenningDatei::lesen($fremd, 'x.db');
     pruefe($rf['ok'] && !$rf['vorlage']['moeglich'] && str_contains($rf['vorlage']['grund'], 'Notizen'), 'unbekannte Tabelle: keine Vorlage');
+    // Nichts, was beim Prüfen rechnet (quick_check rechnet jede berechnete Spalte jeder Zeile – im
+    // Speicher von SQLite, an memory_limit vorbei): vor quick_check abgelehnt, ohne Speicheranstieg.
+    $rssVorher = (int) (getrusage()['ru_maxrss'] ?? 0);
+    $berechnet = $kopie($m1['datei'], static function (PDO $pdo): void {
+        // Erst die Zeile, dann die Spalte: INSERT rechnete sie schon hier aus, ALTER TABLE nicht.
+        $pdo->exec('CREATE TABLE Notizen (a INTEGER)');
+        $pdo->exec('INSERT INTO Notizen (a) VALUES (1)');
+        $pdo->exec("ALTER TABLE Notizen ADD COLUMN b TEXT GENERATED ALWAYS AS (printf('%200000000c', 65)) VIRTUAL");
+    });
+    $abgelehnt($berechnet, 'berechnete Spalte', 'berechnete Spalte in einer unbekannten Tabelle');
+    pruefe((int) (getrusage()['ru_maxrss'] ?? 0) - $rssVorher < 50 * 1024, '… ohne messbaren Speicheranstieg (quick_check lief nicht)');
+    pruefe(!BenningVorlage::bereinigen($berechnet)['ok'], '… und keine Vorlage daraus');
+    $mitDefault = static function (PDO $pdo): void {
+        // Kunden neu mit einem Funktions-DEFAULT (beim Einfügen des Exports ausgewertet)
+        $sql = (string) $pdo->query("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'Kunden'")->fetchColumn();
+        $spalten = implode(', ', array_map(static fn (string $s): string => '"' . $s . '"',
+            array_column($pdo->query('PRAGMA table_info(Kunden)')->fetchAll(PDO::FETCH_ASSOC), 'name')));
+        $pdo->exec('ALTER TABLE Kunden RENAME TO Kunden_alt');
+        $pdo->exec((string) preg_replace('/\[Kunden_Index\] INTEGER NOT NULL/', "[Kunden_Index] INTEGER NOT NULL, Notiz TEXT DEFAULT (printf('%10c', 65))", $sql, 1));
+        $pdo->exec('INSERT INTO Kunden (' . $spalten . ') SELECT ' . $spalten . ' FROM Kunden_alt');
+        $pdo->exec('DROP TABLE Kunden_alt');
+    };
+    $abgelehnt($kopie($m1['datei'], $mitDefault), 'berechneten Vorgabewert', 'Funktions-DEFAULT in Kunden');
+    $abgelehnt($kopie($m1['datei'], static fn (PDO $pdo) => $pdo->exec('CREATE INDEX idx_ausdruck ON Pruefung (lower(Pruefung_Name))')),
+        'über einen Ausdruck', 'Ausdrucksindex in Pruefung');
+    $abgelehnt($kopie($m1['datei'], static fn (PDO $pdo) => $pdo->exec('CREATE INDEX idx_teil ON Pruefung (Pruefung_ID) WHERE Pruefung_ID > 0')),
+        'Teil der Zeilen', 'Teilindex in Pruefung');
+    $abgelehnt($kopie($m1['datei'], static fn (PDO $pdo) => $pdo->exec('CREATE TABLE Pruefregel (a INTEGER CHECK (a > 0))')),
+        'Prüfbedingung', 'CHECK in einer Tabelle');
+    pruefe(BenningDatei::lesen($m1['datei'], 'x.db')['ok'], 'das Schema des Geräts (DEFAULT 0, Indizes über Spalten) bleibt lesbar');
     $reste = array_values(array_filter(glob($cache . '/gp-*.db*') ?: [], static fn (string $d): bool => !isset($cacheVorher[$d])));
     gleich($reste, [], 'keine Kopie bleibt in storage/cache');
 
@@ -480,6 +519,13 @@ try {
     gleich([$ss['zahlen']['prueflinge_gleich'], $ss['zahlen']['pruefungen_neu'], $ss['zahlen']['pruefungen_da'], $ss['vorlage']['gleich'], $ss['vorlage']['vorauswahl']],
         [17, 0, 18, true, false], 'Sicherung: alles schon da, Vorlage gleich (nicht vorausgewählt)');
     pruefe(str_contains((string) ($ss['kunden'][0]['vorschlag_grund'] ?? ''), 'letzten Import'), 'Grund des Vorschlags genannt');
+    // Kennung am Gerät geändert: dieselbe Prüfung bleibt „schon da“ am bisherigen Prüfling, nie doppelt.
+    $umbenannt = $kopie($m1['datei'], static fn (PDO $pdo) => $pdo->exec("UPDATE Geraete SET Geraete_ID = '000101X' WHERE Geraete_ID = '000101'"));
+    $su = GeraeteImport::pruefen(GeraeteImport::lesen($umbenannt, 'x.db')['paket'], ['1' => 'eigen', '2' => 'k' . $kK2, '3' => 'k' . $neuKunde], $erlaubtAlles);
+    $zu = array_values(array_filter($su['prueflinge'], static fn (array $z): bool => $z['kennung'] === '000101X'))[0] ?? [];
+    gleich([$zu['zustand'] ?? null, $zu['pruefungen_neu'] ?? null, $zu['pruefungen_da'] ?? null, $su['zahlen']['pruefungen_neu']], ['neu', 0, 1, 0],
+        'am Gerät umbenannt: neuer Prüfling ohne neue Prüfung – die Prüfung ist schon da');
+    pruefe(str_contains(implode(' ', $zu['hinweise'] ?? []), 'schon bei Prüfling „000101“ – Kennung am Gerät geändert?'), '… mit Hinweis auf den bisherigen Prüfling');
     $mehr = $ordner . '/mehr.db';
     copy($m1['datei'], $mehr);
     BenningMuster::pruefungAnhaengen($mehr, ['kennung' => '000101', 'datum' => '2026-06-01 10:00:00']);
@@ -545,18 +591,38 @@ try {
     $k3 = GeraeteImport::ablegen(['format' => 1]);
     touch($cache . '/gp-import-' . $k3 . '.json', time() - 7200);
     pruefe(GeraeteImport::aufraeumen() >= 1 && !is_file($cache . '/gp-import-' . $k3 . '.json'), 'aufraeumen() für die Wartung');
+    // Sperrdatei: dieselbe für denselben Pfad, wie auch immer geschrieben; alte fremde räumt die Wartung weg, die eigene bleibt.
+    $eigeneSperre = GeraeteImport::sperrdatei();
+    $pfadVorher = (string) Config::get('database.path');
+    Config::set('database.path', dirname($pfadVorher) . '/../' . basename(dirname($pfadVorher)) . '/' . basename($pfadVorher));
+    $andersGeschrieben = GeraeteImport::sperrdatei();
+    Config::set('database.path', $pfadVorher);
+    gleich($andersGeschrieben, $eigeneSperre, 'Sperrdatei aus dem echten Pfad (…/../… ergibt dieselbe)');
+    touch($eigeneSperre, time() - 7200);
+    $fremdeSperre = $cache . '/gp-import-' . str_repeat('0', 23) . 'f.lock';
+    touch($fremdeSperre, time() - 7200);
+    GeraeteImport::aufraeumen();
+    pruefe(!is_file($fremdeSperre) && is_file($eigeneSperre), 'alte fremde Sperrdatei weg, die eigene bleibt');
 
     // ================================================ E – Export
     $ohneAblauf = Prueflinge::anlegen(['kennung' => $kennung . '-OHNE', 'bezeichnung' => 'ohne Ablauf']);
     $ungueltig = Prueflinge::anlegen(['kennung' => $kennung . '-UNG', 'pruefablauf_id' => (int) Database::scalar("SELECT id FROM gp_pruefablaeufe WHERE geraet_id = '1000002'")]);
     $mitHersteller = Prueflinge::anlegen(['kennung' => $kennung . '-NEU', 'bezeichnung' => 'Neuer Strahler', 'hersteller' => 'Neuer Hersteller GmbH',
-        'pruefablauf_id' => $ablauf1, 'leitungslaenge' => '2.5', 'schutzklasse' => '1']);
+        'pruefablauf_id' => $ablauf1, 'leitungslaenge' => '2.5', 'querschnitt' => '1.5', 'leiter' => '3', 'schutzklasse' => '1']);
+    // Ohne Leitungsangaben bzw. mit Intervall 0: nie mit 0 oder erfundenen Werten in die Datei.
+    Prueflinge::anlegen(['kennung' => $kennung . '-LEER', 'pruefablauf_id' => $ablauf1, 'leitungslaenge' => '2.5', 'schutzklasse' => '1']);
+    Prueflinge::anlegen(['kennung' => $kennung . '-NULL', 'pruefablauf_id' => $ablauf1, 'leitungslaenge' => '2.5', 'querschnitt' => '1.5', 'leiter' => '3',
+        'intervall_monate' => 0, 'schutzklasse' => '1']);
+    gleich(array_column(array_filter(BenningVorlage::besitzer(), static fn (array $b): bool => $b['wert'] === 'eigen'), 'ohne_angaben'), [2],
+        'Exportseite zählt die Prüflinge ohne Leitungsangaben oder Intervall');
     gleich(BenningVorlage::exportieren([], 'x')['ok'], false, 'Export ohne Besitzer abgelehnt');
     gleich(BenningVorlage::exportieren(['999999'], 'x')['ok'], false, 'Export mit unbekanntem Kunden abgelehnt');
     $auditVorher = (int) Database::scalar('SELECT COALESCE(MAX(id), 0) FROM audit_log');
     $x = BenningVorlage::exportieren(['eigen', (string) $kK2, (string) $neuKunde], 'Test Export für Müller');
     pruefe($x['ok'] && $x['dateiname'] === 'Test-Export-f-r-M-ller.db', 'Export geschrieben (' . ($x['dateiname'] ?? '') . ')');
-    gleich($x['zahlen'] ?? [], ['kunden' => 3, 'prueflinge' => 18, 'ohne_ablauf' => 2, 'ausser_betrieb' => 1], 'Zahlen: 18 Prüflinge, 2 ohne gültigen Prüfablauf übergangen');
+    gleich($x['zahlen'] ?? [], ['kunden' => 3, 'prueflinge' => 18, 'ohne_ablauf' => 2, 'ablauf_abweichend' => 0, 'ohne_angaben' => 2, 'ausser_betrieb' => 1],
+        'Zahlen: 18 Prüflinge, 2 ohne gültigen Prüfablauf, 2 ohne Leitungsangaben bzw. Intervall übergangen');
+    pruefe(str_contains($x['message'] ?? '', '2 ohne Leitungslänge, Querschnitt, Leiterzahl oder Prüfintervall übergangen'), 'Meldung nennt sie: ' . ($x['message'] ?? ''));
     $xDatei = $ordner . '/export.db';
     file_put_contents($xDatei, $x['bytes']);
     $xp = $oeffnen($xDatei);
@@ -587,12 +653,35 @@ try {
     gleich([$fragen('000101'), $fragen('000103'), $fragen($kennung . '-NEU')], [[1, 2], [], [1, 2]], 'Fragen: aus dem Gerät, keine, Vorgabe (Stufe 1)');
     gleich((int) $xp->query("SELECT COUNT(*) FROM Geraete WHERE Geraete_ID IN (" . $xp->quote($kennung . '-OHNE') . ', ' . $xp->quote($kennung . '-UNG') . ')')->fetchColumn(),
         0, 'ohne bzw. mit ungültigem Prüfablauf: nicht in der Datei');
+    gleich([(int) $xp->query("SELECT COUNT(*) FROM Geraete WHERE Geraete_ID IN (" . $xp->quote($kennung . '-LEER') . ', ' . $xp->quote($kennung . '-NULL') . ')')->fetchColumn(),
+        (int) $xp->query('SELECT COUNT(*) FROM Geraete WHERE Geraete_Leitungslaenge <= 0 OR Geraete_Leitungsquerschnitt <= 0 OR Geraete_Anz_Leiter <= 0 OR Geraete_Pruefintervall < 1')->fetchColumn()],
+        [0, 0], 'ohne Leitungsangaben bzw. Intervall: nicht in der Datei – kein Gerät mit 0 m, 0 mm², 0 Leitern oder Intervall 0');
+    gleich((int) $xp->query("SELECT COUNT(*) FROM Geraete g JOIN Pruefung p ON p.Pruefung_ID = g.Geraete_Pruefablauf_Index WHERE g.Geraete_Pruefablauf_Name <> p.Pruefung_Name")->fetchColumn(),
+        0, 'Name des Prüfablaufs je Gerät genau wie in Pruefung');
     gleich((int) $xp->query('SELECT COUNT(*) FROM Ergebnisse')->fetchColumn(), 0, 'keine Prüfungen in der Datei');
     $xp = null;
     $vp = null;
     $audit = Database::select('SELECT action, details FROM audit_log WHERE id > ?', [$auditVorher]);
     pruefe($alle('gp_exporte') === 1 && in_array('geraetepruefung.export', array_column($audit, 'action'), true)
         && !str_contains(implode(' ', array_column($audit, 'details')), 'Beispiel'), 'Beleg und Audit des Exports (nur Zahlen)');
+    // Eine gespeicherte Vorlage mit Funktions-DEFAULT (an der Prüfung beim Import vorbei, etwa per SQL): der
+    // Export prüft das Schema selbst, bevor er einfügt – Meldung statt Fehlerseite, kein Beleg.
+    $boeseVorlage = $kopie($vDatei, $mitDefault);
+    BenningVorlage::speichern((string) file_get_contents($boeseVorlage), [], null);
+    $xb = BenningVorlage::exportieren(['eigen'], 'x');
+    pruefe(!$xb['ok'] && str_contains($xb['message'], 'berechneten Vorgabewert') && $alle('gp_exporte') === 1,
+        'Vorlage mit Funktions-DEFAULT: Export abgelehnt (' . $xb['message'] . ')');
+    BenningVorlage::speichern($v['bytes'], [], null);
+    pruefe(BenningVorlage::bytes((array) BenningVorlage::aktiv(true)) === $v['bytes'], '… die bisherige Vorlage ist wieder aktiv');
+    // Ein Prüfablauf, der hier anders steht als in der Vorlage: übergangen und gemeldet, nie mit fremden Schritten.
+    Database::execute("UPDATE gp_pruefablaeufe SET name = 'Anders benannt' WHERE geraet_id = '1000001'");
+    $xa = BenningVorlage::exportieren(['eigen'], 'x');
+    Database::execute("UPDATE gp_pruefablaeufe SET name = '40 Akkuleuchte mit Ladeplatte' WHERE geraet_id = '1000001'");
+    pruefe($xa['ok'] && ($xa['zahlen']['ablauf_abweichend'] ?? 0) === 1 && str_contains($xa['message'], 'anders steht als in der Vorlage'),
+        'Prüfablauf hier anders als in der Vorlage: Prüfling übergangen und gemeldet');
+    $xp = $oeffnen($datei($xa['bytes'] ?? ''));
+    gleich((int) $xp->query("SELECT COUNT(*) FROM Geraete WHERE Geraete_ID = '000109'")->fetchColumn(), 0, '… nicht in der Datei');
+    $xp = null;
 
     // Re-Import: zwei Prüfungen „am Gerät“ in den Export
     BenningMuster::pruefungAnhaengen($xDatei, ['kennung' => '000101', 'kunden_nummer' => 'PM-EIGEN', 'datum' => '2026-08-03 09:00:00']);
@@ -606,8 +695,47 @@ try {
     gleich([$nichtGleich, $sx['zahlen']['prueflinge_gleich'], $sx['zahlen']['pruefungen_neu']], [[], 18, 2], 'Re-Import: alle 18 Prüflinge schon da, 2 Prüfungen neu');
     $vorherAnzahl = $alle('gp_pruefungen');
     $e = GeraeteImport::uebernehmen($gx['paket'], $sx['zuordnung'], [], [], false, $erlaubtAlles);
-    pruefe($e['ok'] && ($e['zahlen']['pruefungen_neu'] ?? 0) === 2 && $alle('gp_pruefungen') === $vorherAnzahl + 2 && $alle('gp_prueflinge') === 20
+    pruefe($e['ok'] && ($e['zahlen']['pruefungen_neu'] ?? 0) === 2 && $alle('gp_pruefungen') === $vorherAnzahl + 2 && $alle('gp_prueflinge') === 22
         && $pl($kK2, '000200')['letzte_pruefung'] === '2026-08-03', 'Re-Import übernommen: an die vorhandenen Prüflinge');
+
+    // Am Gerät angelegter Prüfablauf eines zweiten Prüfgeräts: dieselbe ID 1000001, anderer Name und andere Maske.
+    $m3 = $muster(['start' => 7, 'messgeraet_sn' => '500000000999', 'kunden_nummern' => [1 => 'PM-EIGEN']]);
+    $zweites = $kopie($m3['datei'], static function (PDO $pdo): void {
+        $pdo->exec("UPDATE Pruefung SET Pruefung_Name = '40 Anderer Ablauf', Pruefung_Ablauf = Pruefung_Ablauf + 4 WHERE Pruefung_ID = 1000001");
+        $pdo->exec("DELETE FROM Geraete WHERE Geraete_ID <> '000109'");
+        $pdo->exec("UPDATE Geraete SET Geraete_ID = '000109B', Geraete_Pruefablauf_Name = '40 Anderer Ablauf' WHERE Geraete_ID = '000109'");
+    });
+    $g3 = GeraeteImport::lesen($zweites, 'zweites.db');
+    $s3 = GeraeteImport::pruefen($g3['paket'], ['1' => 'eigen', '2' => 'nicht', '3' => 'nicht'], $erlaubtAlles);
+    $z3 = array_values(array_filter($s3['prueflinge'], static fn (array $z): bool => $z['kennung'] === '000109B'))[0] ?? [];
+    pruefe(($z3['ablauf_abweichend'] ?? false) === true && $s3['zahlen']['ablaeufe_abweichend'] === 1
+        && str_contains(implode(' ', $s3['hinweise']), 'Prüfablauf 1000001 heißt im Prüfgerät „40 Anderer Ablauf“, hier „40 Akkuleuchte mit Ladeplatte“')
+        && str_contains(implode(' ', $z3['hinweise'] ?? []), 'steht hier anders als im Prüfgerät'),
+        'zweites Prüfgerät, Ablauf 1000001 mit anderem Inhalt: Hinweis in der Vorschau und am Prüfling – ' . json_encode([$z3['ablauf_abweichend'] ?? null,
+            $s3['zahlen']['ablaeufe_abweichend'] ?? null, $s3['hinweise'], $z3['hinweise'] ?? null], JSON_UNESCAPED_UNICODE));
+    $e = GeraeteImport::uebernehmen($g3['paket'], ['1' => 'eigen', '2' => 'nicht', '3' => 'nicht'], [], [], false, $erlaubtAlles);
+    $ablauf1000001 = Database::first("SELECT id, name FROM gp_pruefablaeufe WHERE geraet_id = '1000001'") ?? [];
+    $p109b = $pl(null, '000109B');
+    gleich([$e['ok'], $e['zahlen']['prueflinge_ohne_ablauf'] ?? null, array_key_exists('pruefablauf_id', $p109b) ? $p109b['pruefablauf_id'] : 'fehlt', $pl(null, '000109')['pruefablauf_id'] ?? null,
+        $ablauf1000001['name'] ?? null], [true, 1, null, (int) ($ablauf1000001['id'] ?? 0), '40 Akkuleuchte mit Ladeplatte'],
+        'ohne Vorlage: der neue Prüfling bleibt ohne den Ablauf, der bisherige behält seinen, der Ablauf hier bleibt');
+
+    // Ein Name mit Leerraum am Rand (wie in einer echten Datei): der Export schreibt ihn genau wie Pruefung_Name.
+    $randLeer = $kopie($m1['datei'], static fn (PDO $pdo) => $pdo->exec("UPDATE Pruefung SET Pruefung_Name = '40 Akkuleuchte mit Ladeplatte ' WHERE Pruefung_ID = 1000001"));
+    $gr = GeraeteImport::lesen($randLeer, 'rand.db');
+    $e = GeraeteImport::uebernehmen($gr['paket'], ['1' => 'eigen', '2' => 'k' . $kK2, '3' => 'k' . $neuKunde], [], [], true, $erlaubtAlles);
+    $xr = BenningVorlage::exportieren(['eigen'], 'x');
+    $xp = $oeffnen($datei($xr['bytes'] ?? ''));
+    gleich([$e['ok'], $xr['zahlen']['ablauf_abweichend'] ?? null, $xp->query("SELECT Geraete_Pruefablauf_Name FROM Geraete WHERE Geraete_ID = '000109'")->fetchColumn()],
+        [true, 0, '40 Akkuleuchte mit Ladeplatte '], 'Export: Name des Prüfablaufs genau wie Pruefung_Name der Vorlage (mit Leerzeichen am Ende)');
+    $xp = null;
+
+    // Kunde löschen: gemerkte Zuordnungen gehen mit.
+    $kWeg = (int) KundenService::speichern(null, ['name' => $kennung . ' geht', 'aktiv' => 0])['id'];
+    Database::insert('gp_kunden_zuordnung', ['schluessel' => hash('sha256', 'name:' . $kennung . ' geht'), 'kunde_id' => $kWeg, 'created_at' => gmdate('c')]);
+    $r = KundenService::loeschen($kWeg, $kennung . ' geht');
+    gleich([$r['ok'], (int) Database::scalar('SELECT COUNT(*) FROM gp_kunden_zuordnung WHERE kunde_id = ?', [$kWeg])], [true, 0],
+        'Kunde gelöscht: seine gemerkte Zuordnung ist weg');
 
     // ================================================ F – HTTP
     $port = freierPort();
@@ -625,8 +753,18 @@ try {
     $dose = anmeldenAls($basis, $kennung . '-planung', $kennwort, $dosen);
     $seite = anfrage($basis, $dose, 'GET', '/geraetepruefung/import');
     pruefe($seite['status'] === 200 && str_contains($seite['text'], 'data-max-bytes="' . BenningDatei::MAX_BYTES . '" data-max-text="15 MB"')
+        && preg_match('/data-max-rat="[^"]*richtige Datei[^"]*"/', $seite['text']) === 1 && !str_contains($seite['text'], 'Ein PDF wird')
         && str_contains($seite['text'], 'data-laeuft') && str_contains($seite['text'], 'enctype="multipart/form-data"') && !str_contains($seite['text'], 'onclick='),
         'Importseite: Dateifeld mit Grenze, data-laeuft, kein Inline-JS');
+    $node = trim((string) shell_exec('command -v node 2>/dev/null'));
+    if ($node !== '' && preg_match('/data-max-rat="([^"]*)"/', $seite['text'], $mr) === 1) {
+        $js = json_decode((string) shell_exec(escapeshellarg($node) . ' ' . escapeshellarg(__DIR__ . '/hilfen/datei-grenze.cjs') . ' '
+            . escapeshellarg(dirname(__DIR__) . '/public/assets/js/app.js') . ' ' . BenningDatei::MAX_BYTES . ' ' . escapeshellarg('15 MB') . ' '
+            . escapeshellarg(html_entity_decode($mr[1], ENT_QUOTES, 'UTF-8'))), true) ?: [];
+        $satz = (string) ($js['ueber']['meldung'] ?? '');
+        pruefe(str_contains($satz, 'hochladen lassen sich höchstens 15 MB. Das reicht für rund 10 000 Prüfungen') && !str_contains($satz, 'PDF'),
+            'Browser (app.js): Größenmeldung beim Geräte-Import ohne den Rat für PDF – ' . $satz);
+    }
     $token = csrfAus($seite['text']);
     // Für die Vorschau: ein Prüfling hier korrigiert, ein Inventarstück mit passender Kennung.
     alsBenutzer($planung);

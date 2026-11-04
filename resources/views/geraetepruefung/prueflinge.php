@@ -75,7 +75,7 @@ $neuLink = '/geraetepruefung/prueflinge/neu' . ($filter['besitzer'] !== '' && $f
                         <?php endif; ?></td>
                     <td data-label="Besitzer" class="small"><?= View::e((string) $p['besitzer']) ?></td>
                     <td data-label="Letzte Prüfung"><?= $p['letzte_pruefung'] !== null ? View::e(Pruefnachweise::datum((string) $p['letzte_pruefung'])) . ' ' : '' ?>
-                        <?= View::partial('geraetepruefung/_pruefling-ergebnis', ['ergebnis' => (string) $p['letztes_ergebnis']]) ?></td>
+                        <?= View::partial('geraetepruefung/_pruefling-ergebnis', ['ergebnis' => (string) $p['letztes_ergebnis'], 'geprueft' => $p['letzte_pruefung'] !== null]) ?></td>
                     <td data-label="Nächste Prüfung"><?= View::partial('geraetepruefung/_pruefling-faelligkeit', ['f' => $p['faelligkeit']]) ?>
                         <?php if ($p['naechste_pruefung'] !== null && !$p['ausser_betrieb']): ?><div class="small muted"><?= View::e(Pruefnachweise::datum((string) $p['naechste_pruefung'])) ?></div><?php endif; ?></td>
                 </tr>

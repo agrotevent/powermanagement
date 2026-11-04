@@ -45,7 +45,8 @@ $ohne = array_values(array_filter($besitzer, static fn (array $b): bool => $b['p
                         <td data-label="Besitzer"><strong><?= View::e($b['name']) ?></strong><?= $b['wert'] === 'eigen' ? ' <span class="badge">eigener Bestand</span>' : '' ?></td>
                         <td data-label="Kundennummer im Gerät" class="mono small"><?= View::e($b['kundennummer']) ?></td>
                         <td data-label="Prüflinge" class="num"><?= (int) $b['prueflinge'] ?>
-                            <?php if ($b['ohne_ablauf'] > 0): ?><div class="small text-warn"><?= (int) $b['ohne_ablauf'] ?> ohne gültigen Prüfablauf – bleiben weg</div><?php endif; ?></td>
+                            <?php if ($b['ohne_ablauf'] > 0): ?><div class="small text-warn"><?= (int) $b['ohne_ablauf'] ?> ohne gültigen Prüfablauf – bleiben weg</div><?php endif; ?>
+                            <?php if ($b['ohne_angaben'] > 0): ?><div class="small text-warn"><?= (int) $b['ohne_angaben'] ?> ohne Leitungslänge, Querschnitt, Leiterzahl oder Intervall – bleiben weg</div><?php endif; ?></td>
                     </tr>
                 <?php endforeach; ?>
                 </tbody>
@@ -93,6 +94,8 @@ $ohne = array_values(array_filter($besitzer, static fn (array $b): bool => $b['p
             ohne Kundennummer mit <code>PM-K…</code> – und ihre Prüflinge mit Prüfablauf, Schutzklasse, Leitung, Intervall und
             letzter Prüfung. Prüfungen kommen nicht mit; das Gerät prüft neu.</p>
         <p class="mb0">Daran erkennt der nächste Import Kunden und Prüflinge wieder. Ein Prüfling ohne Prüfablauf (oder mit einem, den die
-            Vorlage nicht kennt) bleibt weg – im Gerät ließe er sich nicht prüfen.</p>
+            Vorlage nicht kennt oder anders führt) bleibt weg – im Gerät ließe er sich nicht prüfen. Ebenso einer ohne Leitungslänge,
+            Querschnitt, Leiterzahl oder Prüfintervall: Daraus rechnet das Gerät seine Grenzwerte, eine 0 oder ein erfundener Wert stünde
+            dort als Vorgabe.</p>
     </div>
 </div>

@@ -11,7 +11,8 @@ declare(strict_types=1);
  * beim eigenen Bestand, nie ein Tanksensor, nie zweimal, nur mit
  * „Datenquellen ansehen“ (ohne bleibt es); Prüfablauf nur ein gültiger (ein
  * schon eingetragener ungültiger bleibt); Zahlen als Dezimaltext (Komma
- * erlaubt, Unsinn und Negatives abgelehnt), Intervall 0–600, Schutzklasse,
+ * erlaubt, Unsinn und Negatives abgelehnt), Intervall 0–600, mit Prüfablauf
+ * Länge, Querschnitt und Leiter Pflicht (> 0) und Intervall ab 1, Schutzklasse,
  * Textlängen; Daten von Hand nur ohne Prüfungen (nicht in der Zukunft,
  * nächste nicht vor der letzten, leer = letzte + Intervall), mit Prüfungen
  * gerechnet (neues Intervall → neue Fälligkeit); Besitzer wechseln nur ohne
@@ -211,7 +212,7 @@ $normal = static function (string $geprueftAm, string $kennungGeraet, string $er
             'werte' => [['name' => 'RPE Widerstand', 'wert' => '0.102 Ω', 'gueltig' => $ergebnis === 'bestanden']],
             'grenzwerte' => [['name' => 'R_PE max', 'wert' => '0.3 Ω']]]],
     ];
-    $p['schluessel'] = Pruefungen::schluessel($p, $kennungGeraet);
+    $p['schluessel'] = Pruefungen::schluessel($p);
     return $p;
 };
 $utc = static fn (string $tag, string $uhr = '10:00:00'): string => (new DateTimeImmutable($tag . ' ' . $uhr, new DateTimeZone('Europe/Berlin')))
@@ -302,6 +303,11 @@ try {
         'Intervall 601'                     => ['kennung' => $kennung . '-x', 'intervall_monate' => '601'],
         'Intervall negativ'                 => ['kennung' => $kennung . '-x', 'intervall_monate' => '-1'],
         'Intervall „x“'                     => ['kennung' => $kennung . '-x', 'intervall_monate' => 'x'],
+        'Prüfablauf ohne Leitungslänge'     => ['kennung' => $kennung . '-x', 'pruefablauf_id' => (string) $ablauf['a'], 'querschnitt' => '1,5', 'leiter' => '3'],
+        'Prüfablauf, Querschnitt 0'         => ['kennung' => $kennung . '-x', 'pruefablauf_id' => (string) $ablauf['a'], 'leitungslaenge' => '5', 'querschnitt' => '0,0', 'leiter' => '3'],
+        'Prüfablauf ohne Leiterzahl'        => ['kennung' => $kennung . '-x', 'pruefablauf_id' => (string) $ablauf['a'], 'leitungslaenge' => '5', 'querschnitt' => '1,5'],
+        'Prüfablauf, Intervall 0'           => ['kennung' => $kennung . '-x', 'pruefablauf_id' => (string) $ablauf['a'], 'leitungslaenge' => '5', 'querschnitt' => '1,5',
+            'leiter' => '3', 'intervall_monate' => '0'],
         'Schutzklasse 4'                    => ['kennung' => $kennung . '-x', 'schutzklasse' => '4'],
         'Bezeichnung über 120 Zeichen'      => ['kennung' => $kennung . '-x', 'bezeichnung' => str_repeat('b', 121)],
         'Bemerkung über 500 Zeichen'        => ['kennung' => $kennung . '-x', 'bemerkung' => str_repeat('b', 501)],
@@ -345,7 +351,8 @@ try {
 
     // Ein schon eingetragener ungültiger Prüfablauf bleibt
     Prueflinge::aendern($pOhneInv, ['pruefablauf_id' => $ablauf['c']]);
-    $r = Prueflinge::speichern($pOhneInv, $basisDaten(['kennung' => $kennung . '-ohneinv', 'pruefablauf_id' => (string) $ablauf['c'], 'bezeichnung' => 'neu']));
+    $r = Prueflinge::speichern($pOhneInv, $basisDaten(['kennung' => $kennung . '-ohneinv', 'pruefablauf_id' => (string) $ablauf['c'], 'bezeichnung' => 'neu',
+        'leitungslaenge' => '5', 'querschnitt' => '1,5', 'leiter' => '3']));
     gleich([$r['ok'], (int) ($zeile($pOhneInv)['pruefablauf_id'] ?? 0)], [true, $ablauf['c']], 'eingetragener ungültiger Prüfablauf bleibt beim Speichern');
     $ablaufIds = array_column(Prueflinge::ablaeufe($ablauf['c']), 'id');
     pruefe(in_array($ablauf['c'], $ablaufIds, true) && !in_array($ablauf['c'], array_column(Prueflinge::ablaeufe(), 'id'), true)
@@ -492,7 +499,8 @@ try {
     }
     pruefe(erreichbar('127.0.0.1', $port), 'eigener PHP-Server läuft');
     Database::insert('gp_importe', ['sha256' => hash('sha256', $kennung), 'dateiname' => $kennung . '-geheim.db', 'groesse' => 1000,
-        'messgeraet' => Messarten::MESSGERAET, 'messgeraet_sn' => '500000000001', 'zahlen' => json_encode(['pruefungen_neu' => 3, 'name' => $kennung . '-text']),
+        'messgeraet' => Messarten::MESSGERAET, 'messgeraet_sn' => '500000000001',
+        'zahlen' => json_encode(['pruefungen_neu' => 3, 'kunden_ergaenzt' => 0, 'ablaeufe_neu' => 53, 'vorlage' => 1, 'unbekannt_neu' => 7, 'name' => $kennung . '-text']),
         'created_at' => gmdate('c')]);
     $pr2 = Pruefungen::anlegen($pOhneInv, $normal($utc($tagIn(-3)), $kennung . '-ohneinv', 'nicht_bestanden'));
     Prueflinge::faelligkeitNeu($pOhneInv);
@@ -502,8 +510,10 @@ try {
     gleich($s['status'], 200, 'Übersicht: 200');
     pruefe(str_contains($s['text'], '/geraetepruefung/pruefungen/' . $pr2['id']) && !str_contains($s['text'], 'href="/geraetepruefung/pruefungen/' . $pr1['id'] . '"'),
         'Übersicht: offene Prüfung da, die mit gültigem Bericht nicht');
-    pruefe(str_contains($s['text'], '3 neue Prüfungen') && !str_contains($s['text'], $kennung . '-text') && !str_contains($s['text'], $kennung . '-geheim'),
-        'Übersicht: letzter Import nur mit Zahlen (kein Dateiname, kein Text)');
+    pruefe(str_contains($s['text'], '3 Prüfungen neu · 53 Prüfabläufe neu · Einstellungen als Vorlage übernommen') && !str_contains($s['text'], $kennung . '-text')
+        && !str_contains($s['text'], $kennung . '-geheim'), 'Übersicht: letzter Import nur mit Zahlen (kein Dateiname, kein Text)');
+    pruefe(!str_contains($s['text'], 'kunden ergaenzt') && !str_contains($s['text'], '0 Kunden') && !str_contains($s['text'], 'unbekannt')
+        && !str_contains($s['text'], '1 vorlage'), 'Übersicht: nur Zahlen über 0, mit deutschen Beschriftungen, nie rohe Schlüssel');
     pruefe(str_contains($s['text'], $kennung . '-F-ueber') && str_contains($s['text'], '/geraetepruefung/import'), 'Übersicht: Fälliges, Weg zum Import');
     pruefe(ohneInlineJs($s['text']), 'Übersicht ohne Inline-JS');
     foreach (['/geraetepruefung/prueflinge', '/geraetepruefung/prueflinge?faellig=faellig', '/geraetepruefung/prueflinge?besitzer=eigen&betrieb=alle&suche=' . urlencode($kennung),
@@ -541,10 +551,14 @@ try {
     $nachher = $zeile($pHand);
     unset($vorher['updated_at'], $nachher['updated_at']);
     gleich($nachher, $vorher, 'unverändert gespeichert (Daten von Hand): nichts geändert');
+    $s = anfrage($basis, $planung, 'GET', '/geraetepruefung/prueflinge/' . $pHand);
+    pruefe(str_contains($s['text'], 'Ergebnis nicht bekannt') && !str_contains($s['text'], 'noch nicht geprüft'),
+        'Detail: letzte Prüfung von Hand ohne Ergebnis → „Ergebnis nicht bekannt“, nicht „noch nicht geprüft“');
     // Neu anlegen über das Formular
     $s = anfrage($basis, $planung, 'GET', '/geraetepruefung/prueflinge/neu');
     $felder = ['_token' => csrfAus($s['text']), 'kennung' => $kennung . '-web', 'kunde_id' => (string) $kunden['b'], 'bezeichnung' => 'Leuchte <b>',
-        'schutzklasse' => '2', 'pruefablauf_id' => (string) $ablauf['b'], 'intervall_monate' => '12', 'leitungslaenge' => '3,25', 'bemerkung' => ''];
+        'schutzklasse' => '2', 'pruefablauf_id' => (string) $ablauf['b'], 'intervall_monate' => '12', 'leitungslaenge' => '3,25', 'querschnitt' => '0,75',
+        'leiter' => '2', 'bemerkung' => ''];
     $vorher = $anzahlPl();
     $r = anfrage($basis, $planung, 'POST', '/geraetepruefung/prueflinge/speichern', array_diff_key($felder, ['_token' => 1]));
     pruefe($anzahlPl() === $vorher && $r['status'] !== 200, 'ohne CSRF-Token: nichts angelegt');

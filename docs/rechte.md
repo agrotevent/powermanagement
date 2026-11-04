@@ -408,7 +408,7 @@ eigene Gruppe mit drei Rechten:
 |---|---|---|
 | „Geräteprüfung (DGUV V3): Prüflinge, Prüfungen und Prüfberichte ansehen und als PDF laden“ (`geraetepruefung.view`) | Übersicht, Prüflinge, Prüfungen, Prüfabläufe, PDFs der Prüfberichte; die Karte „DGUV V3“ am Inventarstück | Stromplanung, Elektrotechnik |
 | „Prüflinge pflegen, Datenbank des Prüfgeräts importieren und exportieren, Vorlage und Prüfabläufe pflegen“ (`geraetepruefung.manage`) | Prüflinge anlegen, ändern, löschen; Import mit Vorschau und Zuordnung, Vorlage, Export; Norm und Zubehör der Prüfabläufe | Stromplanung, Elektrotechnik |
-| „Prüfberichte der Geräteprüfung als Prüfer unterschreiben und Korrekturen anlegen …“ (`geraetepruefung.unterschreiben`) | unterschreiben (einzeln und gesammelt), Korrektur anfordern – nur mit hinterlegter **Prüfer-Qualifikation** im Konto | Elektrotechnik |
+| „Prüfberichte der Geräteprüfung als Prüfer unterschreiben und Korrekturen anlegen …“ (`geraetepruefung.unterschreiben`) | unterschreiben (einzeln und gesammelt), Korrektur anfordern – nur mit **vollem Namen** und hinterlegter **Prüfer-Qualifikation** im Konto | Elektrotechnik |
 
 Dazu gilt:
 
@@ -419,11 +419,18 @@ Dazu gilt:
   Kunden ergänzen braucht zusätzlich „Kunden pflegen“; ein
   **Inventarstück** verknüpfen „Datenquellen ansehen“ (nie ein Tanksensor).
 - Einen Prüfbericht **als Prüfnachweis an einen Kunden geben** braucht
-  „Prüfnachweise (DGUV V3) …“; freigegeben wird er wie jeder Nachweis in der
+  „Prüfnachweise (DGUV V3) …“ – auch der Entwurf, den das Unterschreiben
+  eines bestandenen Kundengeräts anlegt (ohne das Recht: Hinweis, nachholbar
+  auf der Seite der Prüfung); freigegeben wird er wie jeder Nachweis in der
   Kundenverwaltung.
-- Der Name beim Unterschreiben muss zum vollen Namen des angemeldeten
-  Kontos passen; wo laut Prüfgerät jemand anderes geprüft hat, nur mit
-  „Verantwortung übernehmen“.
+- Unterschreiben braucht im Konto einen **vollen Namen** und eine
+  Prüfer-Qualifikation. Der Name beim Unterschreiben muss zum vollen Namen
+  des angemeldeten Kontos passen; wo laut Prüfgerät jemand anderes geprüft
+  hat, nur mit „Verantwortung übernehmen“.
+- Prüfgeräte und Zubehör (etwa den Messadapter MA 4) pflegt, wer
+  „Übergabeberichte anlegen …“ (`berichte.manage`) hat – unter
+  *Übergabeberichte → Prüfgeräte*; „Geräteprüfung pflegen“ wählt sie nur als
+  Zubehör eines Prüfablaufs.
 - **Kundenzugänge** erreichen keine Seite der Geräteprüfung (Tor im
   Router), auch nicht mit einer Rolle per SQL. Sie sehen nur freigegebene
   Prüfnachweise im Kundenbereich; die Rolle *Kunde / Veranstalter* hat keins

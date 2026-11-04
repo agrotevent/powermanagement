@@ -2,12 +2,14 @@
  * Prüfung der Dateigröße vor dem Hochladen (public/assets/js/app.js,
  * `data-max-bytes`) ohne Browser: ein nachgebautes Dateifeld, gewählte
  * Dateien von Hand, Ergebnis als JSON auf der Standardausgabe.
- * Aufruf: node tests/hilfen/datei-grenze.cjs public/assets/js/app.js <grenze> <text>
+ * Aufruf: node tests/hilfen/datei-grenze.cjs public/assets/js/app.js <grenze> <text> [<rat>]
+ * (mit <rat> trägt das Feld `data-max-rat`)
  */
 const fs = require('fs');
 const code = fs.readFileSync(process.argv[2], 'utf8');
 const grenze = process.argv[3] || '104857600';
 const text = process.argv[4] || '100 MB';
+const rat = process.argv.length > 5 ? process.argv[5] : undefined;
 
 function element(tag) {
     return {
@@ -25,7 +27,7 @@ function element(tag) {
 
 const feld = element('input');
 feld.type = 'file';
-feld.dataset = { maxBytes: grenze, maxText: text };
+feld.dataset = rat === undefined ? { maxBytes: grenze, maxText: text } : { maxBytes: grenze, maxText: text, maxRat: rat };
 feld.files = [];
 feld.gueltigkeit = '';
 feld.setCustomValidity = function (t) { this.gueltigkeit = t; };

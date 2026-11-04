@@ -12,6 +12,11 @@ use App\Support\View;
 $title = 'Geräteprüfung: Prüfabläufe';
 $subtitle = 'aus den Einstellungen des Prüfgeräts – Norm und Zubehör hier';
 $darf = View::can('geraetepruefung.manage');
+// Prüfgeräte (auch Zubehör wie Messadapter) pflegt die Seite der Übergabeberichte – verlinkt nur für wen, der dort pflegen darf.
+$pruefgeraeteHinweis = View::can('berichte.view') && View::can('berichte.manage')
+    ? 'Prüfgeräte und Zubehör (etwa den Messadapter MA 4) trägst du unter <a href="/berichte/pruefgeraete">Übergabeberichte → Prüfgeräte</a> ein.'
+    : 'Prüfgeräte und Zubehör (etwa den Messadapter MA 4) trägt ein, wer Übergabeberichte anlegt (Recht „Übergabeberichte anlegen …“) – '
+        . 'unter Übergabeberichte → Prüfgeräte.';
 $geraetText = static fn (array $g): string => trim($g['fabrikat'] . ' ' . $g['typ']) . ($g['seriennummer'] !== '' ? ', Nr. ' . $g['seriennummer'] : '')
     . ((int) $g['aktiv'] === 1 ? '' : ' (stillgelegt)');
 ?>
@@ -53,9 +58,7 @@ $geraetText = static fn (array $g): string => trim($g['fabrikat'] . ' ' . $g['ty
                                     </div>
                                     <fieldset class="field">
                                         <legend>Zubehör (Prüfgeräte, etwa Messadapter)</legend>
-                                        <?php if ($pruefgeraete === []): ?>
-                                            <div class="help">Noch keine Prüfgeräte – sie stehen unter <a href="/berichte/pruefgeraete">Prüfgeräte</a>.</div>
-                                        <?php endif; ?>
+                                        <?php if ($pruefgeraete === []): ?><div class="help">Noch keine Prüfgeräte. <?= $pruefgeraeteHinweis ?></div><?php endif; ?>
                                         <?php foreach ($pruefgeraete as $g): ?>
                                             <?php $an = in_array((int) $g['id'], $a['zubehoer'], true); ?>
                                             <?php if ((int) $g['aktiv'] !== 1 && !$an) { continue; } ?>
@@ -74,3 +77,7 @@ $geraetText = static fn (array $g): string => trim($g['fabrikat'] . ' ' . $g['ty
         </table>
     </div>
 </div>
+<?php if ($darf): ?>
+    <p class="help">Zubehör sind Einträge unter „Prüfgeräte“ (mit Seriennummer und Kalibrierung); jeder Prüfbericht mit diesem Ablauf nennt sie
+        nach dem Stand bei der Unterschrift. <?= $pruefgeraeteHinweis ?></p>
+<?php endif; ?>

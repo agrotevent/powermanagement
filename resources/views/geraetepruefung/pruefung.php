@@ -21,6 +21,7 @@ use App\Geraetepruefung\Pruefungen;
 use App\Kunden\Pruefnachweise;
 use App\Support\Csrf;
 use App\Support\View;
+use App\Support\Zeit;
 
 $d = is_array($pruefung['daten'] ?? null) ? $pruefung['daten'] : [];
 $kennung = (string) ($pruefung['kennung'] ?? '');
@@ -50,11 +51,14 @@ $antworten = array_values(array_filter(is_array($d['sicht_antworten'] ?? null) ?
             <dt>Prüfablauf</dt><dd><?= View::e((string) $pruefung['ablauf_name'] !== '' ? (string) $pruefung['ablauf_name'] : '–') ?></dd>
             <dt>Prüfgerät</dt><dd><?= View::e(trim((string) $pruefung['messgeraet'] . ((string) $pruefung['messgeraet_sn'] !== '' ? ', Nr. ' . $pruefung['messgeraet_sn'] : '')
                 . ((string) $pruefung['firmware'] !== '' ? ', Firmware ' . $pruefung['firmware'] : ''))) ?>
-                <?php $kal = (string) ($pruefgeraet['kalibriert_bis'] ?? ''); $tag = (string) Messarten::ortsdatum((string) $pruefung['geprueft_am']); ?>
-                <div class="small <?= $pruefgeraet === null || $kal === '' || $kal < $tag ? 'text-warn' : 'muted' ?>"><?= $pruefgeraet === null
+                <?php $kal = (string) ($pruefgeraet['kalibriert_bis'] ?? ''); $tag = (string) Messarten::ortsdatum((string) $pruefung['geprueft_am']);
+                $spaeter = $pruefgeraet !== null && ($geaendert = Zeit::ts((string) ($pruefgeraet['updated_at'] ?? ''))) !== null
+                    && $geaendert > (int) Zeit::ts((string) $pruefung['geprueft_am']); ?>
+                <div class="small <?= $pruefgeraet === null || $kal === '' || $kal < $tag || $spaeter ? 'text-warn' : 'muted' ?>"><?= $pruefgeraet === null
                     ? 'Nicht unter „Prüfgeräte“ eingetragen – der Bericht nennt keine Kalibrierung.'
                     : ($kal === '' ? 'Unter „Prüfgeräte“ ohne Kalibrierung eingetragen.'
-                        : 'Kalibriert bis ' . View::e(PruefberichtService::datumText($kal)) . ($kal < $tag ? ' – am Prüftag abgelaufen' : '')) ?></div></dd>
+                        : 'Kalibriert bis ' . View::e(Pruefnachweise::datum($kal)) . ($kal < $tag ? ' – am Prüftag abgelaufen' : '') . ' (laut „Prüfgeräte“, Stand jetzt)')
+                    . ($spaeter ? ' Nach dem Prüftag geändert – der Stand am Prüftag ist nicht belegt; der Bericht nennt den Stand bei der Unterschrift.' : '') ?></div></dd>
             <?php if ((string) $pruefung['auftrag'] !== '' || (string) $pruefung['ort'] !== ''): ?>
                 <dt>Auftrag / Ort</dt><dd><?= View::e(trim((string) $pruefung['auftrag'] . ' ' . (string) $pruefung['ort'])) ?></dd>
             <?php endif; ?>

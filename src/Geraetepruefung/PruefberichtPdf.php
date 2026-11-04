@@ -35,7 +35,7 @@ final class PruefberichtPdf
      * abweichende Neuerzeugung bei gleichem Erzeuger als Befund, bei einem
      * älteren nur als Hinweis.
      */
-    public const ERZEUGER = 'pm-gp-pdf-1';
+    public const ERZEUGER = 'pm-gp-pdf-2';
 
     public const TITEL = 'Prüfprotokoll';
     public const UNTERTITEL = 'ortsveränderliche elektrische Betriebsmittel (DGUV Vorschrift 3)';
@@ -128,7 +128,7 @@ final class PruefberichtPdf
 
         $this->abschnitt('Auftrag');
         $this->kopfZeile('Auftragnehmer', [['t' => self::s($f['name'] ?? '') !== '' ? self::s($f['name']) : '–', 'fett' => true],
-            ['t' => self::einzeilig(self::s($f['anschrift'] ?? ''))]]);
+            ['t' => self::einzeilig(self::ohneName(self::s($f['anschrift'] ?? ''), self::s($f['name'] ?? '')))]]);
         $this->kopfZeile('Auftraggeber', [['t' => self::s($a['name'] ?? ''), 'fett' => true], ['t' => self::einzeilig(self::s($a['anschrift'] ?? ''))],
             ['t' => self::s($a['kundennummer'] ?? '') !== '' ? 'Kundennummer ' . self::s($a['kundennummer']) : '']]);
         $this->abschnittEnde();
@@ -172,8 +172,10 @@ final class PruefberichtPdf
             self::s($g['firmware'] ?? '') !== '' ? 'Firmware ' . self::s($g['firmware']) : '',
         ], ', ');
         $kal = self::s($g['kalibriert_bis'] ?? '');
+        $quelle = self::s($g['kalibrierung_quelle'] ?? '');
         $this->kopfZeile('Prüfgerät', [['t' => $geraet !== '' ? $geraet : '–'],
-            ['t' => $kal !== '' ? 'kalibriert bis ' . self::datum($kal) : 'Kalibrierung nicht bekannt', 'pt' => 7.0, 'grau' => $kal !== '' ? 0.0 : 0.35],
+            ['t' => ($kal !== '' ? 'kalibriert bis ' . self::datum($kal) : 'Kalibrierung nicht bekannt') . ($quelle !== '' ? ' (' . $quelle . ')' : ''),
+                'pt' => 7.0, 'grau' => $kal !== '' ? 0.0 : 0.35],
             ['t' => self::s($g['norm'] ?? ''), 'pt' => 7.0, 'grau' => 0.35]]);
         $zubehoer = [];
         foreach (is_array($this->i['zubehoer'] ?? null) ? $this->i['zubehoer'] : [] as $z) {
@@ -184,6 +186,10 @@ final class PruefberichtPdf
             }
         }
         if ($zubehoer !== []) {
+            $zQuelle = self::s($this->i['zubehoer_quelle'] ?? '');
+            if ($zQuelle !== '') {
+                $zubehoer[] = ['t' => $zQuelle, 'pt' => 7.0, 'grau' => 0.35];
+            }
             $this->kopfZeile('Zubehör', $zubehoer);
         }
         $this->abschnittEnde();
@@ -378,7 +384,7 @@ final class PruefberichtPdf
         $this->pdf->linie(self::LINKS, self::FUSS, self::RECHTS, self::FUSS, 0.3);
         $f = is_array($this->i['auftragnehmer'] ?? null) ? $this->i['auftragnehmer'] : [];
         $spalten = [
-            [['t' => self::s($f['name'] ?? ''), 'pt' => 6.5, 'fett' => true], ['t' => self::s($f['anschrift'] ?? ''), 'pt' => 6.5]],
+            [['t' => self::s($f['name'] ?? ''), 'pt' => 6.5, 'fett' => true], ['t' => self::ohneName(self::s($f['anschrift'] ?? ''), self::s($f['name'] ?? '')), 'pt' => 6.5]],
             [['t' => self::s($f['kontakt'] ?? ''), 'pt' => 6.5]],
             [['t' => self::s($f['bank'] ?? ''), 'pt' => 6.5]],
             [['t' => self::s($f['register'] ?? ''), 'pt' => 6.5]],
@@ -565,5 +571,19 @@ final class PruefberichtPdf
     private static function einzeilig(string $text): string
     {
         return self::verbinden(preg_split('/\R/u', $text) ?: [], ', ');
+    }
+
+    /**
+     * Die Anschrift ohne erste Zeile, wenn die nur den Firmennamen wiederholt
+     * (so steht sie oft in „firma.anschrift“) – der Name steht schon fett davor.
+     */
+    private static function ohneName(string $anschrift, string $name): string
+    {
+        $zeilen = preg_split('/\R/u', $anschrift) ?: [];
+        $gleich = static fn (string $t): string => mb_strtolower(trim((string) preg_replace('/\s+/u', ' ', $t)));
+        if ($name !== '' && $zeilen !== [] && $gleich($zeilen[0]) === $gleich($name)) {
+            array_shift($zeilen);
+        }
+        return implode("\n", $zeilen);
     }
 }
