@@ -4,10 +4,13 @@ declare(strict_types=1);
 namespace App\Geraetepruefung;
 
 use App\Auth\Auth;
+use App\Kunden\KundenService;
+use App\Kunden\Pruefnachweise;
+use App\Support\Audit;
 use App\Support\Database;
 
 /**
- * Prüflinge der Geräteprüfung (Tabelle `gp_prueflinge`) – Grundteil.
+ * Prüflinge der Geräteprüfung (Tabelle `gp_prueflinge`).
  *
  * Ein Prüfling gehört einem **Besitzer**: dem eigenen Bestand (`kunde_id`
  * NULL, optional mit einem Inventarstück verknüpft) oder einem Kunden
@@ -15,17 +18,29 @@ use App\Support\Database;
  * `Geraete_ID`) ist je Besitzer eindeutig, ohne Groß- und Kleinschreibung –
  * dieselbe Kennung darf bei zwei Kunden vorkommen (wie im Gerät).
  *
- * Diese Klasse ist die Datenschicht **ohne Rechteprüfung** für Import,
- * Oberfläche und Prüfskripte: {@see anlegen()} und {@see aendern()} säubern
- * und kürzen Texte auf die Spaltenlänge und halten die Form ein (Kennung,
- * Schutzklasse, Ergebnis, Daten, Zahlen als Dezimaltext). Ob jemand das darf,
- * ob Kunde, Inventarstück (nie ein Tanksensor, nie doppelt) und Prüfablauf
- * passen, prüft der Aufrufer – mit eigenen Meldungen. Formfehler werfen
- * \InvalidArgumentException.
+ * Zwei Schichten:
+ *
+ * - **Datenschicht ohne Rechteprüfung** für Import und Prüfskripte:
+ *   {@see anlegen()} und {@see aendern()} säubern und kürzen Texte auf die
+ *   Spaltenlänge und halten die Form ein (Kennung, Schutzklasse, Ergebnis,
+ *   Daten, Zahlen als Dezimaltext). Ob Kunde, Inventarstück und Prüfablauf
+ *   passen, prüft der Aufrufer. Formfehler werfen \InvalidArgumentException.
+ * - **Pflege aus der Oberfläche:** {@see speichern()} prüft jede Eingabe mit
+ *   eigener Meldung – Kennung Pflicht und je Besitzer eindeutig, der Kunde
+ *   existiert, ein Inventarstück nur beim eigenen Bestand, nie ein
+ *   Tanksensor (Kunden sehen nie Tanks), nie zweimal verknüpft und nur mit
+ *   „Datenquellen ansehen“ wählbar, ein Prüfablauf nur, wenn er am Gerät
+ *   gültig ist, Zahlen als Dezimaltext (Komma erlaubt) – und schreibt das
+ *   Audit (nur IDs). {@see loeschen()} löscht nur ohne Prüfungen (die sind
+ *   der Beweis hinter den Prüfberichten); sonst bleibt „außer Betrieb“.
+ *   Das Recht `geraetepruefung.manage` prüft die Route.
  *
  * Fälligkeit: {@see faelligkeitNeu()} rechnet `letzte_pruefung`,
  * `letztes_ergebnis` und `naechste_pruefung` aus den Prüfungen hier neu –
- * nach jedem Import und nach jeder Änderung des Intervalls.
+ * nach jedem Import und nach jeder Änderung des Intervalls. Ohne Prüfungen
+ * hier dürfen beide Daten von Hand stehen (Angaben aus dem Gerät oder
+ * einer Prüfung anderswo). {@see faelligkeit()} zeigt sie wie die
+ * Gültigkeit der Prüfnachweise: Symbol und Wort, nie nur eine Farbe.
  */
 final class Prueflinge
 {
@@ -51,6 +66,53 @@ final class Prueflinge
     public const ZAHLEN = ['leitungslaenge' => 16, 'querschnitt' => 16, 'leiter' => 8, 'nennleistung' => 16];
 
     public const KENNUNG_LAENGE = 50;
+
+    /** So heißt der eigene Bestand in Listen, Filtern und Formularen. */
+    public const EIGEN = 'Eigener Bestand';
+
+    /**
+     * Fälligkeit eines Prüflings: Code => [Symbol, Wort] – immer beides, nie
+     * nur eine Farbe (wie Pruefnachweise::GUELTIGKEIT, dieselben Codes und
+     * dieselbe Frist von Pruefnachweise::BALD_TAGE Tagen).
+     */
+    public const FAELLIGKEIT = [
+        'gueltig'        => ['✓', 'nicht fällig'],
+        'laeuft_ab'      => ['!', 'bald fällig'],
+        'abgelaufen'     => ['✗', 'überfällig'],
+        'unbekannt'      => ['?', 'ohne Termin'],
+        'ausser_betrieb' => ['–', 'außer Betrieb'],
+    ];
+
+    /** Filter der Liste: fällig → Beschriftung. */
+    public const FILTER_FAELLIG = [
+        ''             => 'alle',
+        'faellig'      => 'fällig (überfällig oder in 30 Tagen)',
+        'ueberfaellig' => 'überfällig',
+        'ohne'         => 'ohne Termin',
+    ];
+
+    /** Filter der Liste: Betrieb → Beschriftung (Vorgabe: nur in Betrieb). */
+    public const FILTER_BETRIEB = [
+        ''       => 'in Betrieb',
+        'ausser' => 'außer Betrieb',
+        'alle'   => 'alle',
+    ];
+
+    /** Beschriftungen der Zahlenfelder (Meldungen, Formular). */
+    public const ZAHLEN_NAMEN = [
+        'leitungslaenge' => 'Leitungslänge (m)',
+        'querschnitt'    => 'Querschnitt (mm²)',
+        'leiter'         => 'Anzahl der Leiter',
+        'nennleistung'   => 'Nennleistung (W)',
+    ];
+
+    /** Beschriftungen der Textfelder (Meldungen, Formular). */
+    public const TEXTE_NAMEN = [
+        'bezeichnung' => 'Bezeichnung', 'hersteller' => 'Hersteller', 'typ' => 'Typ', 'modell' => 'Modell',
+        'seriennummer' => 'Seriennummer', 'abteilung' => 'Abteilung', 'gebaeude' => 'Gebäude', 'bemerkung' => 'Bemerkung',
+    ];
+
+    public const INTERVALL_HOECHSTENS = 600;
 
     /**
      * Alle Spalten, die {@see anlegen()} und {@see aendern()} schreiben
@@ -211,6 +273,602 @@ final class Prueflinge
         $werte = ['letzte_pruefung' => $tag, 'letztes_ergebnis' => $ergebnis, 'naechste_pruefung' => $naechste];
         Database::update('gp_prueflinge', $id, $werte + ['updated_at' => gmdate('c')]);
         return $werte;
+    }
+
+    // ------------------------------------------------------------ Pflege (Oberfläche)
+
+    /**
+     * Einen Prüfling aus dem Formular anlegen ($id null) oder ändern – mit
+     * Prüfung jeder Eingabe und eigener Meldung (siehe Klassenkommentar) und
+     * Audit nur mit IDs (nie Kennung, Bezeichnung oder Seriennummer: das
+     * können Daten eines Kunden sein). Das Recht prüft die Route.
+     *
+     * - `kunde_id`: leer = eigener Bestand, sonst ein Kunde, den es gibt. Den
+     *   Besitzer wechseln geht nur, solange es zum Prüfling keinen Prüfbericht
+     *   gibt (der nennt den bisherigen).
+     * - `inventar_id` (nur mit „Datenquellen ansehen“, sonst bleibt der
+     *   bisherige Wert): nur beim eigenen Bestand, kein Tanksensor, nicht
+     *   schon mit einem anderen Prüfling verknüpft.
+     * - `pruefablauf_id`: ein Prüfablauf aus der Vorlage; ein am Gerät
+     *   ungültiger nur, wenn er schon eingetragen war.
+     * - Zahlen (Leitungslänge, Querschnitt, Leiter, Nennleistung) als
+     *   Dezimaltext, Komma erlaubt; Intervall 0 bis 600 Monate.
+     * - `letzte_pruefung`, `naechste_pruefung` (JJJJ-MM-TT oder TT.MM.JJJJ)
+     *   nur, solange es hier keine Prüfung gibt – sonst rechnet sie
+     *   {@see faelligkeitNeu()}. Ohne nächste Prüfung, aber mit letzter und
+     *   Intervall ergibt sie sich daraus.
+     *
+     * Fehlende Felder behalten beim Ändern ihren Wert (beim Anlegen die
+     * Vorgaben der Tabelle); `technik` und das letzte Ergebnis kommen nur
+     * aus dem Gerät.
+     *
+     * @param array<string,mixed> $daten
+     * @return array{ok:bool,message:string,id?:int}
+     */
+    public static function speichern(?int $id, array $daten): array
+    {
+        $vorher = null;
+        if ($id !== null) {
+            $vorher = self::find($id);
+            if ($vorher === null) {
+                return ['ok' => false, 'message' => 'Diesen Prüfling gibt es nicht.'];
+            }
+        }
+        $wert = static fn (string $feld): mixed => array_key_exists($feld, $daten) ? $daten[$feld] : ($vorher[$feld] ?? null);
+
+        // Kennung (Pflicht, getrimmt, höchstens 50 Zeichen – nicht still gekürzt)
+        $kennung = Messarten::text($wert('kennung'), 10000);
+        if ($kennung === '') {
+            return ['ok' => false, 'message' => 'Der Prüfling braucht eine Kennung (Prüflings-ID bzw. Barcode am Prüfgerät).'];
+        }
+        if (mb_strlen($kennung) > self::KENNUNG_LAENGE) {
+            return ['ok' => false, 'message' => 'Die Kennung hat höchstens ' . self::KENNUNG_LAENGE . ' Zeichen.'];
+        }
+
+        // Besitzer
+        $kundeId = self::idLesen($wert('kunde_id'));
+        if ($kundeId === false) {
+            return ['ok' => false, 'message' => 'Diesen Kunden gibt es nicht.'];
+        }
+        if ($kundeId !== null && KundenService::find($kundeId) === null) {
+            return ['ok' => false, 'message' => 'Diesen Kunden gibt es nicht.'];
+        }
+
+        // Inventarstück: wählen nur, wer das Inventar sieht – sonst bleibt es.
+        $inventarId = $vorher['inventar_id'] ?? null;
+        if (array_key_exists('inventar_id', $daten) && Auth::can('datenquellen.view')) {
+            $inventarId = self::idLesen($daten['inventar_id']);
+            if ($inventarId === false) {
+                return ['ok' => false, 'message' => 'Dieses Inventarstück gibt es nicht.'];
+            }
+        }
+        if ($kundeId !== null && $inventarId !== null) {
+            return ['ok' => false, 'message' => 'Ein Inventarstück lässt sich nur mit einem Prüfling des eigenen Bestands verknüpfen.'];
+        }
+
+        // Prüfablauf
+        $ablaufId = $vorher['pruefablauf_id'] ?? null;
+        if (array_key_exists('pruefablauf_id', $daten)) {
+            $neu = self::idLesen($daten['pruefablauf_id']);
+            if ($neu === false) {
+                return ['ok' => false, 'message' => 'Diesen Prüfablauf gibt es nicht.'];
+            }
+            if ($neu !== null && $neu !== $ablaufId) {
+                $a = Database::first('SELECT id, ungueltig FROM gp_pruefablaeufe WHERE id = ?', [$neu]);
+                if ($a === null) {
+                    return ['ok' => false, 'message' => 'Diesen Prüfablauf gibt es nicht.'];
+                }
+                if ((int) $a['ungueltig'] === 1) {
+                    return ['ok' => false, 'message' => 'Dieser Prüfablauf ist am Prüfgerät ungültig oder nicht mehr in der Vorlage – bitte einen anderen wählen.'];
+                }
+            }
+            $ablaufId = $neu;
+        }
+
+        $zeile = ['kennung' => $kennung, 'kunde_id' => $kundeId, 'inventar_id' => $inventarId, 'pruefablauf_id' => $ablaufId];
+
+        // Texte – zu lang wird abgelehnt, nicht still gekürzt
+        foreach (self::TEXTE as $feld => $laenge) {
+            $text = $feld === 'bemerkung' ? Messarten::absatz($wert($feld) ?? '', 10000) : Messarten::text($wert($feld) ?? '', 10000);
+            if (mb_strlen($text) > $laenge) {
+                return ['ok' => false, 'message' => '„' . self::TEXTE_NAMEN[$feld] . '“ hat höchstens ' . $laenge . ' Zeichen.'];
+            }
+            $zeile[$feld] = $text;
+        }
+
+        // Schutzklasse, Intervall, Zahlen
+        $sk = (string) ($wert('schutzklasse') ?? '1');
+        if (!array_key_exists($sk, self::SCHUTZKLASSEN)) {
+            return ['ok' => false, 'message' => 'Die Schutzklasse ist I, II oder III.'];
+        }
+        $zeile['schutzklasse'] = $sk;
+        $intervall = $wert('intervall_monate') ?? 12;
+        $intervall = is_string($intervall) ? trim($intervall) : $intervall;
+        if (is_string($intervall) && preg_match('/^\d{1,3}$/', $intervall) === 1) {
+            $intervall = (int) $intervall;
+        }
+        if (!is_int($intervall) || $intervall < 0 || $intervall > self::INTERVALL_HOECHSTENS) {
+            return ['ok' => false, 'message' => 'Das Prüfintervall ist eine ganze Zahl von 0 bis ' . self::INTERVALL_HOECHSTENS . ' Monaten (0 = keine Wiederholung).'];
+        }
+        $zeile['intervall_monate'] = $intervall;
+        foreach (self::ZAHLEN as $feld => $laenge) {
+            $roh = $wert($feld);
+            $text = Messarten::dezimal($roh);
+            if ($text === null || strlen($text) > $laenge) {
+                return ['ok' => false, 'message' => '„' . self::ZAHLEN_NAMEN[$feld] . '“ ist keine Zahl (etwa „1,5“; leer lassen geht auch).'];
+            }
+            $zeile[$feld] = $text;
+        }
+        $aus = $wert('ausser_betrieb');
+        $zeile['ausser_betrieb'] = $aus === true || $aus === 1 || $aus === '1' || $aus === 'on';
+
+        // Daten von Hand – nur ohne Prüfungen hier
+        $pruefungen = $id === null ? 0 : self::anzahlPruefungen($id);
+        if ($pruefungen === 0) {
+            $tage = [];
+            foreach (['letzte_pruefung' => 'Letzte Prüfung', 'naechste_pruefung' => 'Nächste Prüfung'] as $feld => $name) {
+                $roh = $wert($feld);
+                $tag = self::tagLesen($roh);
+                if ($tag === false) {
+                    return ['ok' => false, 'message' => '„' . $name . '“: kein gültiges Datum (TT.MM.JJJJ).'];
+                }
+                $tage[$feld] = $tag;
+            }
+            // Geprüft wird nur, was sich ändert – Angaben aus dem Gerät bleiben, wie sie sind.
+            $geaendert = $tage['letzte_pruefung'] !== ($vorher['letzte_pruefung'] ?? null) || $tage['naechste_pruefung'] !== ($vorher['naechste_pruefung'] ?? null);
+            if ($geaendert && $tage['letzte_pruefung'] !== null && $tage['letzte_pruefung'] > Pruefnachweise::heute()) {
+                return ['ok' => false, 'message' => 'Die letzte Prüfung liegt nicht in der Zukunft.'];
+            }
+            if ($tage['naechste_pruefung'] === null && $tage['letzte_pruefung'] !== null && $intervall > 0) {
+                $tage['naechste_pruefung'] = Messarten::monatePlus($tage['letzte_pruefung'], $intervall);
+            }
+            if ($geaendert && $tage['letzte_pruefung'] !== null && $tage['naechste_pruefung'] !== null && $tage['naechste_pruefung'] < $tage['letzte_pruefung']) {
+                return ['ok' => false, 'message' => 'Die nächste Prüfung liegt nicht vor der letzten.'];
+            }
+            $zeile += $tage;
+        }
+
+        try {
+            $id = Database::transaktion(static function () use ($id, $vorher, $zeile, $kennung, $kundeId, $inventarId): int {
+                // Erst hier geprüft (unter SQLite mit der Schreibsperre der Transaktion):
+                // zwei gleichzeitige Formulare legen nichts doppelt an.
+                $gleich = self::findEindeutig($kundeId, $kennung);
+                if ($gleich !== null && $gleich['id'] !== $id) {
+                    throw new \DomainException('Die Kennung „' . $kennung . '“ gibt es ' . ($kundeId === null ? 'im eigenen Bestand' : 'bei diesem Kunden') . ' schon.');
+                }
+                if ($vorher !== null && $vorher['kunde_id'] !== $kundeId && self::anzahlBerichte((int) $vorher['id']) > 0) {
+                    throw new \DomainException('Den Besitzer gibt es nicht mehr zu ändern: Zu diesem Prüfling gibt es schon Prüfberichte, und die nennen den bisherigen.');
+                }
+                if ($inventarId !== null && $inventarId !== ($vorher['inventar_id'] ?? null)) {
+                    $stueck = Database::first('SELECT id, art FROM inventar WHERE id = ?', [$inventarId]);
+                    if ($stueck === null) {
+                        throw new \DomainException('Dieses Inventarstück gibt es nicht.');
+                    }
+                    if ((string) $stueck['art'] === 'tanksensor') {
+                        throw new \DomainException('Ein Tanksensor ist kein Prüfling der Geräteprüfung.');
+                    }
+                    $belegt = Database::first('SELECT id, kennung FROM gp_prueflinge WHERE inventar_id = ? AND id <> ?', [$inventarId, $id ?? 0]);
+                    if ($belegt !== null) {
+                        throw new \DomainException('Dieses Inventarstück ist schon mit dem Prüfling „' . (string) $belegt['kennung'] . '“ verknüpft.');
+                    }
+                }
+                if ($id === null) {
+                    return self::anlegen($zeile);
+                }
+                self::aendern($id, $zeile);
+                return $id;
+            });
+        } catch (\DomainException $e) {
+            return ['ok' => false, 'message' => $e->getMessage()];
+        } catch (\PDOException $e) {
+            // Der eindeutige Index war schneller (gleichzeitig angelegt – oder
+            // unter MySQL eine Kennung, die sich nur im Akzent unterscheidet).
+            if (self::eindeutigVerletzt($e)) {
+                return ['ok' => false, 'message' => 'Die Kennung „' . $kennung . '“ (oder eine, die sich nur in Groß-/Kleinschreibung oder Akzenten unterscheidet) gibt es beim Besitzer schon.'];
+            }
+            throw $e;
+        }
+        if ($pruefungen > 0) {
+            self::faelligkeitNeu($id);
+        }
+        $details = ['pruefling_id' => $id, 'kunde_id' => $kundeId];
+        if ($vorher === null) {
+            $details['neu'] = true;
+        } elseif ($vorher['kunde_id'] !== $kundeId) {
+            $details['vorher_kunde_id'] = $vorher['kunde_id'];
+        }
+        if ($inventarId !== ($vorher['inventar_id'] ?? null)) {
+            $details['inventar_id'] = $inventarId;
+        }
+        Audit::log('geraetepruefung.pruefling', 'gp_pruefling', (string) $id, $details);
+        return ['ok' => true, 'message' => 'Prüfling „' . $kennung . '“ gespeichert.', 'id' => $id];
+    }
+
+    /**
+     * Einen Prüfling löschen – nur ohne Prüfungen (und damit ohne Berichte):
+     * Prüfungen sind der Beweis hinter den Prüfberichten und bleiben. Ein
+     * geprüfter Prüfling wird stattdessen „außer Betrieb“ gesetzt.
+     *
+     * @return array{ok:bool,message:string}
+     */
+    public static function loeschen(int $id): array
+    {
+        $p = self::find($id);
+        if ($p === null) {
+            return ['ok' => false, 'message' => 'Diesen Prüfling gibt es nicht.'];
+        }
+        try {
+            Database::transaktion(static function () use ($id): void {
+                if (self::anzahlPruefungen($id) > 0 || self::anzahlBerichte($id) > 0) {
+                    throw new \DomainException('Ein Prüfling mit Prüfungen bleibt (Nachweis, Aufbewahrung der Prüfberichte) – stattdessen „außer Betrieb“ setzen.');
+                }
+                Database::delete('gp_prueflinge', $id);
+            });
+        } catch (\DomainException $e) {
+            return ['ok' => false, 'message' => $e->getMessage()];
+        }
+        Audit::log('geraetepruefung.pruefling_geloescht', 'gp_pruefling', (string) $id, ['pruefling_id' => $id, 'kunde_id' => $p['kunde_id']]);
+        return ['ok' => true, 'message' => 'Prüfling „' . (string) $p['kennung'] . '“ gelöscht.'];
+    }
+
+    /**
+     * Haken aus InventarService::loeschen(): Prüflinge des Stücks bleiben, nur
+     * ohne Verweis (wie Prüfnachweise und Übergabeberichte). Gibt die Zahl der
+     * gelösten Verknüpfungen zurück.
+     */
+    public static function inventarEntfernt(int $inventarId): int
+    {
+        return Database::execute('UPDATE gp_prueflinge SET inventar_id = NULL, updated_at = ? WHERE inventar_id = ?', [gmdate('c'), $inventarId]);
+    }
+
+    /**
+     * Hat der Kunde Prüflinge? Dann lässt er sich nicht löschen
+     * (KundenService::loeschen): Prüflinge mit Prüfungen bleiben, und zum
+     * eigenen Bestand dürfen sie nicht werden.
+     */
+    public static function kundeHatPrueflinge(int $kundeId): bool
+    {
+        return self::anzahlBeiKunde($kundeId) > 0;
+    }
+
+    /** Wie viele Prüflinge der Kunde hat (auch außer Betrieb). */
+    public static function anzahlBeiKunde(int $kundeId): int
+    {
+        return (int) Database::scalar('SELECT COUNT(*) FROM gp_prueflinge WHERE kunde_id = ?', [$kundeId]);
+    }
+
+    /** Wie viele Prüfungen es zum Prüfling gibt. */
+    public static function anzahlPruefungen(int $id): int
+    {
+        return (int) Database::scalar('SELECT COUNT(*) FROM gp_pruefungen WHERE pruefling_id = ?', [$id]);
+    }
+
+    /** Wie viele Prüfberichte (alle Fassungen) es zum Prüfling gibt. */
+    public static function anzahlBerichte(int $id): int
+    {
+        return (int) Database::scalar('SELECT COUNT(*) FROM gp_berichte WHERE pruefling_id = ?', [$id]);
+    }
+
+    /**
+     * Prüflinge nach Filtern, je Zeile zusätzlich `kunde_name`,
+     * `inventar_kennung`, `ablauf_name`, `ablauf_ungueltig`, `pruefungen`
+     * (Zahl) und `faelligkeit` ({@see faelligkeit()}).
+     *
+     * Filter (alle freiwillig):
+     * - `besitzer`: 'eigen' oder eine Kunden-ID
+     * - `faellig`: 'faellig' (überfällig oder in Pruefnachweise::BALD_TAGE
+     *   Tagen fällig), 'ueberfaellig', 'ohne' (ohne Termin) – ein nicht
+     *   bestandener Prüfling ist immer überfällig (vor Wiederinbetriebnahme)
+     * - `betrieb`: '' nur in Betrieb (Vorgabe), 'ausser', 'alle'
+     * - `suche`: Teil der Kennung, Bezeichnung oder Seriennummer
+     * - `inventar_id` (int)
+     * - `limit` (Vorgabe 500, höchstens 5000), `offset`
+     * - `heute` (JJJJ-MM-TT, für Prüfskripte; sonst heute in der Zeitzone der Installation)
+     *
+     * Sortiert nach Kennung, mit Filter „fällig“ nach dem Termin.
+     *
+     * @param array<string,mixed> $filter
+     * @return list<array<string,mixed>>
+     */
+    public static function liste(array $filter = []): array
+    {
+        [$wo, $werte] = self::bedingungen($filter);
+        $limit = max(1, min(5000, (int) ($filter['limit'] ?? 500)));
+        $offset = max(0, (int) ($filter['offset'] ?? 0));
+        $nachTermin = in_array((string) ($filter['faellig'] ?? ''), ['faellig', 'ueberfaellig'], true);
+        $sql = 'SELECT l.*, k.name AS kunde_name, i.kennung AS inventar_kennung, a.name AS ablauf_name, a.ungueltig AS ablauf_ungueltig,
+                (SELECT COUNT(*) FROM gp_pruefungen p WHERE p.pruefling_id = l.id) AS pruefungen
+            FROM gp_prueflinge l
+            LEFT JOIN kunden k ON k.id = l.kunde_id
+            LEFT JOIN inventar i ON i.id = l.inventar_id
+            LEFT JOIN gp_pruefablaeufe a ON a.id = l.pruefablauf_id'
+            . ($wo === [] ? '' : ' WHERE ' . implode(' AND ', $wo))
+            . ($nachTermin ? ' ORDER BY CASE WHEN l.naechste_pruefung IS NULL THEN 1 ELSE 0 END, l.naechste_pruefung, l.kennung, l.id' : ' ORDER BY l.kennung, l.id')
+            . ' LIMIT ' . $limit . ' OFFSET ' . $offset;
+        $heute = self::heute($filter);
+        $out = [];
+        foreach (Database::select($sql, $werte) as $z) {
+            $z = self::aufbereiten($z);
+            $z['pruefungen'] = (int) $z['pruefungen'];
+            $z['ablauf_ungueltig'] = $z['ablauf_ungueltig'] !== null && (int) $z['ablauf_ungueltig'] === 1;
+            $z['besitzer'] = self::besitzerName($z);
+            $z['faelligkeit'] = self::faelligkeit($z, $heute);
+            $out[] = $z;
+        }
+        return $out;
+    }
+
+    /**
+     * Wie viele Prüflinge zu den Filtern von {@see liste()} passen (ohne Limit).
+     *
+     * @param array<string,mixed> $filter
+     */
+    public static function anzahl(array $filter = []): int
+    {
+        [$wo, $werte] = self::bedingungen($filter);
+        return (int) Database::scalar('SELECT COUNT(*) FROM gp_prueflinge l' . ($wo === [] ? '' : ' WHERE ' . implode(' AND ', $wo)), $werte);
+    }
+
+    /**
+     * Zahlen für die Übersicht: in Betrieb, davon überfällig, bald fällig
+     * (in Pruefnachweise::BALD_TAGE Tagen, nicht überfällig), ohne Termin;
+     * außer Betrieb.
+     *
+     * @return array{in_betrieb:int,ueberfaellig:int,bald:int,ohne_termin:int,ausser_betrieb:int}
+     */
+    public static function zahlen(?string $heute = null): array
+    {
+        $heute ??= Pruefnachweise::heute();
+        $bald = self::tagePlus($heute, Pruefnachweise::BALD_TAGE);
+        $z = Database::first("SELECT
+                SUM(CASE WHEN ausser_betrieb = 0 THEN 1 ELSE 0 END) AS in_betrieb,
+                SUM(CASE WHEN ausser_betrieb = 0 AND (letztes_ergebnis = 'nicht_bestanden' OR naechste_pruefung < ?) THEN 1 ELSE 0 END) AS ueberfaellig,
+                SUM(CASE WHEN ausser_betrieb = 0 AND letztes_ergebnis <> 'nicht_bestanden' AND naechste_pruefung >= ? AND naechste_pruefung <= ? THEN 1 ELSE 0 END) AS bald,
+                SUM(CASE WHEN ausser_betrieb = 0 AND letztes_ergebnis <> 'nicht_bestanden' AND naechste_pruefung IS NULL THEN 1 ELSE 0 END) AS ohne_termin,
+                SUM(CASE WHEN ausser_betrieb = 1 THEN 1 ELSE 0 END) AS ausser_betrieb
+            FROM gp_prueflinge", [$heute, $heute, $bald]) ?? [];
+        return [
+            'in_betrieb'     => (int) ($z['in_betrieb'] ?? 0),
+            'ueberfaellig'   => (int) ($z['ueberfaellig'] ?? 0),
+            'bald'           => (int) ($z['bald'] ?? 0),
+            'ohne_termin'    => (int) ($z['ohne_termin'] ?? 0),
+            'ausser_betrieb' => (int) ($z['ausser_betrieb'] ?? 0),
+        ];
+    }
+
+    /**
+     * Fälligkeit zum Zeigen – dieselbe Rechnung wie die Gültigkeit der
+     * Prüfnachweise (Pruefnachweise::gueltigkeit: tagesgenau in der Zeitzone
+     * der Installation, bald = in 30 Tagen), mit Symbol **und** Wort. Nicht
+     * bestanden heißt überfällig (vor Wiederinbetriebnahme), außer Betrieb
+     * zählt nicht.
+     *
+     * @param array<string,mixed> $p Prüfling (naechste_pruefung, letztes_ergebnis, ausser_betrieb)
+     * @return array{code:string,symbol:string,wort:string,text:string,klasse:string}
+     */
+    public static function faelligkeit(array $p, ?string $heute = null): array
+    {
+        $naechste = is_string($p['naechste_pruefung'] ?? null) ? (string) $p['naechste_pruefung'] : '';
+        if (!empty($p['ausser_betrieb'])) {
+            $code = 'ausser_betrieb';
+            $text = 'außer Betrieb – wird nicht geprüft';
+        } elseif ((string) ($p['letztes_ergebnis'] ?? '') === 'nicht_bestanden') {
+            $code = 'abgelaufen';
+            $text = 'nicht bestanden – erst nach Instandsetzung und neuer Prüfung wieder benutzen';
+        } else {
+            $g = Pruefnachweise::gueltigkeit(['naechste_pruefung' => $naechste], $heute);
+            $code = $g['code'];
+            $text = match ($code) {
+                'abgelaufen' => 'fällig seit ' . Pruefnachweise::datum($naechste),
+                'gueltig'    => 'nächste Prüfung am ' . Pruefnachweise::datum($naechste),
+                'unbekannt'  => 'kein Termin für die nächste Prüfung',
+                default      => $g['text'],
+            };
+        }
+        $klasse = ['gueltig' => 'ok', 'laeuft_ab' => 'warn', 'abgelaufen' => 'bad'][$code] ?? '';
+        return ['code' => $code, 'symbol' => self::FAELLIGKEIT[$code][0], 'wort' => self::FAELLIGKEIT[$code][1], 'text' => $text, 'klasse' => $klasse];
+    }
+
+    /** Der Besitzer zum Zeigen: „Eigener Bestand“ bzw. der Name des Kunden. */
+    public static function besitzerName(array $p): string
+    {
+        if (($p['kunde_id'] ?? null) === null) {
+            return self::EIGEN;
+        }
+        $name = (string) ($p['kunde_name'] ?? (KundenService::find((int) $p['kunde_id'])['name'] ?? ''));
+        return $name !== '' ? $name : 'Kunde ' . (int) $p['kunde_id'] . ' (gelöscht)';
+    }
+
+    /**
+     * Der Prüfling, der mit dem Inventarstück verknüpft ist (für die Karte
+     * „DGUV V3“ am Inventar) – mit `faelligkeit`; null ohne Verknüpfung.
+     *
+     * @return array<string,mixed>|null
+     */
+    public static function fuerInventar(int $inventarId): ?array
+    {
+        $z = self::liste(['inventar_id' => $inventarId, 'betrieb' => 'alle', 'limit' => 1]);
+        return $z[0] ?? null;
+    }
+
+    /**
+     * Die Prüfberichte eines Prüflings (alle Fassungen), der jüngste zuerst –
+     * nur Eckdaten, nie der Inhalt.
+     *
+     * @return list<array{id:int,pruefung_id:int,nummer:string,fassung:int,status:string,ergebnis:string,eingefroren_am:string}>
+     */
+    public static function berichte(int $prueflingId): array
+    {
+        $out = [];
+        foreach (Database::select('SELECT id, pruefung_id, nummer, fassung, status, ergebnis, eingefroren_am FROM gp_berichte
+            WHERE pruefling_id = ? ORDER BY jahr DESC, laufnr DESC, fassung DESC, id DESC', [$prueflingId]) as $b) {
+            $out[] = ['id' => (int) $b['id'], 'pruefung_id' => (int) $b['pruefung_id'], 'nummer' => (string) $b['nummer'], 'fassung' => (int) $b['fassung'],
+                'status' => (string) $b['status'], 'ergebnis' => (string) $b['ergebnis'], 'eingefroren_am' => (string) $b['eingefroren_am']];
+        }
+        return $out;
+    }
+
+    /**
+     * Prüfabläufe zur Auswahl im Formular: die am Gerät gültigen, dazu der
+     * schon eingetragene (auch wenn er inzwischen ungültig ist), nach Nummer.
+     *
+     * @return list<array{id:int,geraet_id:string,nr:string,name:string,schutzklasse:string,ungueltig:bool}>
+     */
+    public static function ablaeufe(?int $aktuell = null): array
+    {
+        $out = [];
+        foreach (Database::select('SELECT id, geraet_id, nr, name, schutzklasse, ungueltig FROM gp_pruefablaeufe WHERE ungueltig = 0 OR id = ?', [$aktuell ?? 0]) as $a) {
+            $out[] = ['id' => (int) $a['id'], 'geraet_id' => (string) $a['geraet_id'], 'nr' => (string) $a['nr'], 'name' => (string) $a['name'],
+                'schutzklasse' => (string) $a['schutzklasse'], 'ungueltig' => (int) $a['ungueltig'] === 1];
+        }
+        usort($out, static fn (array $x, array $y): int => strnatcmp($x['nr'], $y['nr']) ?: strnatcasecmp($x['name'], $y['name']) ?: $x['id'] <=> $y['id']);
+        return $out;
+    }
+
+    /**
+     * Inventarstücke zur Auswahl (nur mit „Datenquellen ansehen“, sonst
+     * leer): kein Tanksensor, nicht schon mit einem anderen Prüfling
+     * verknüpft – das eigene bleibt wählbar.
+     *
+     * @return list<array{id:int,kennung:string,name:string}>
+     */
+    public static function inventarAuswahl(?int $prueflingId = null): array
+    {
+        if (!Auth::can('datenquellen.view')) {
+            return [];
+        }
+        return array_map(static fn (array $i): array => ['id' => (int) $i['id'], 'kennung' => (string) $i['kennung'], 'name' => (string) $i['name']],
+            Database::select("SELECT i.id, i.kennung, i.name FROM inventar i WHERE i.art <> 'tanksensor'
+                AND NOT EXISTS (SELECT 1 FROM gp_prueflinge l WHERE l.inventar_id = i.id AND l.id <> ?) ORDER BY i.kennung, i.id", [$prueflingId ?? 0]));
+    }
+
+    /**
+     * Kunden, die Prüflinge haben (Filter der Liste), nach Name.
+     *
+     * @return list<array{id:int,name:string}>
+     */
+    public static function kundenMitPrueflingen(): array
+    {
+        return array_map(static fn (array $k): array => ['id' => (int) $k['id'], 'name' => (string) $k['name']],
+            Database::select('SELECT k.id, k.name FROM kunden k WHERE EXISTS (SELECT 1 FROM gp_prueflinge l WHERE l.kunde_id = k.id) ORDER BY k.name, k.id'));
+    }
+
+    /**
+     * Bedingungen der Liste aus den Filtern.
+     *
+     * @param array<string,mixed> $filter
+     * @return array{0:list<string>,1:list<mixed>}
+     */
+    private static function bedingungen(array $filter): array
+    {
+        $wo = [];
+        $werte = [];
+        $besitzer = $filter['besitzer'] ?? null;
+        if ($besitzer === 'eigen') {
+            $wo[] = 'l.kunde_id IS NULL';
+        } elseif (is_int($besitzer) || (is_string($besitzer) && ctype_digit($besitzer) && $besitzer !== '')) {
+            $wo[] = 'l.kunde_id = ?';
+            $werte[] = (int) $besitzer;
+        }
+        $betrieb = (string) ($filter['betrieb'] ?? '');
+        if ($betrieb === '') {
+            $wo[] = 'l.ausser_betrieb = 0';
+        } elseif ($betrieb === 'ausser') {
+            $wo[] = 'l.ausser_betrieb = 1';
+        }
+        $heute = self::heute($filter);
+        switch ((string) ($filter['faellig'] ?? '')) {
+            case 'faellig':
+                $wo[] = "(l.letztes_ergebnis = 'nicht_bestanden' OR l.naechste_pruefung <= ?)";
+                $werte[] = self::tagePlus($heute, Pruefnachweise::BALD_TAGE);
+                break;
+            case 'ueberfaellig':
+                $wo[] = "(l.letztes_ergebnis = 'nicht_bestanden' OR l.naechste_pruefung < ?)";
+                $werte[] = $heute;
+                break;
+            case 'ohne':
+                $wo[] = "l.naechste_pruefung IS NULL AND l.letztes_ergebnis <> 'nicht_bestanden'";
+                break;
+        }
+        if (isset($filter['inventar_id'])) {
+            $wo[] = 'l.inventar_id = ?';
+            $werte[] = (int) $filter['inventar_id'];
+        }
+        $suche = trim((string) ($filter['suche'] ?? ''));
+        if ($suche !== '') {
+            // „!“ als Fluchtzeichen: unter SQLite und MySQL gleich (ein Backslash nicht).
+            $muster = '%' . str_replace(['!', '%', '_'], ['!!', '!%', '!_'], mb_substr($suche, 0, 100)) . '%';
+            $wo[] = "(l.kennung LIKE ? ESCAPE '!' OR l.bezeichnung LIKE ? ESCAPE '!' OR l.seriennummer LIKE ? ESCAPE '!')";
+            array_push($werte, $muster, $muster, $muster);
+        }
+        return [$wo, $werte];
+    }
+
+    /** @param array<string,mixed> $filter */
+    private static function heute(array $filter): string
+    {
+        $heute = (string) ($filter['heute'] ?? '');
+        return preg_match('/^\d{4}-\d{2}-\d{2}$/', $heute) === 1 ? $heute : Pruefnachweise::heute();
+    }
+
+    /** JJJJ-MM-TT plus $tage Tage (in UTC gerechnet – ohne Zeitumstellung). */
+    private static function tagePlus(string $tag, int $tage): string
+    {
+        return (new \DateTimeImmutable($tag, new \DateTimeZone('UTC')))->modify('+' . $tage . ' days')->format('Y-m-d');
+    }
+
+    /**
+     * Eine ID aus dem Formular: null für leer, false für Unsinn.
+     */
+    private static function idLesen(mixed $wert): int|null|false
+    {
+        if ($wert === null || $wert === '' || $wert === 0 || $wert === '0') {
+            return null;
+        }
+        if (is_int($wert)) {
+            return $wert > 0 ? $wert : false;
+        }
+        if (is_string($wert) && preg_match('/^\d{1,10}$/', trim($wert)) === 1) {
+            return (int) trim($wert);
+        }
+        return false;
+    }
+
+    /**
+     * Ein Tag aus dem Formular (JJJJ-MM-TT oder TT.MM.JJJJ, Jahre 1990 bis
+     * 2100): null für leer, false für Unsinn.
+     */
+    private static function tagLesen(mixed $wert): string|null|false
+    {
+        if ($wert === null) {
+            return null;
+        }
+        if (!is_string($wert)) {
+            return false;
+        }
+        $wert = trim($wert);
+        if ($wert === '') {
+            return null;
+        }
+        if (preg_match('/^(\d{4})-(\d{2})-(\d{2})$/', $wert, $m) === 1) {
+            [$j, $mo, $t] = [(int) $m[1], (int) $m[2], (int) $m[3]];
+        } elseif (preg_match('/^(\d{1,2})\.(\d{1,2})\.(\d{4})$/', $wert, $m) === 1) {
+            [$j, $mo, $t] = [(int) $m[3], (int) $m[2], (int) $m[1]];
+        } else {
+            return false;
+        }
+        if ($j < 1990 || $j > 2100 || !checkdate($mo, $t, $j)) {
+            return false;
+        }
+        return sprintf('%04d-%02d-%02d', $j, $mo, $t);
+    }
+
+    /** Verletzt der Fehler einen eindeutigen Index? (SQLite und MySQL) */
+    private static function eindeutigVerletzt(\PDOException $e): bool
+    {
+        $info = $e->errorInfo ?? [];
+        return ($info[0] ?? '') === '23000' || (int) ($info[1] ?? 0) === 1062 || (int) ($info[1] ?? 0) === 19
+            || stripos($e->getMessage(), 'UNIQUE') !== false;
     }
 
     /**

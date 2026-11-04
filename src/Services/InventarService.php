@@ -6,6 +6,7 @@ namespace App\Services;
 use App\Auth\Auth;
 use App\Auth\Zugriff;
 use App\Berichte\BerichtService;
+use App\Geraetepruefung\Prueflinge;
 use App\Kunden\Pruefnachweise;
 use App\Support\Audit;
 use App\Support\Database;
@@ -356,6 +357,8 @@ final class InventarService
         BerichtService::inventarEntfernt($id);
         // Prüfnachweise des Stücks bleiben beim Kunden, nur ohne Verweis.
         Pruefnachweise::inventarEntfernt($id);
+        // Prüflinge der Geräteprüfung bleiben (mit ihren Prüfungen), nur ohne Verweis.
+        Prueflinge::inventarEntfernt($id);
         Database::delete('inventar', $id);
         Audit::log('inventar.delete', 'inventar', (string) $id, ['kennung' => $i['kennung']]);
         return ['ok' => true, 'message' => $i['kennung'] . ' gelöscht.'];
