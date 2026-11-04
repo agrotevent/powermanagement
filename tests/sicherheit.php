@@ -87,6 +87,8 @@ try {
         'Rechte der Übergabeberichte nur, wer sie selbst hat');
     pruefe(!BenutzerService::darfVergeben(['kunden.view']) && !BenutzerService::darfVergeben(['kunden.manage'])
         && !BenutzerService::darfVergeben(['kunden.nachweise']), 'Rechte des Kundenbereichs nur, wer sie selbst hat');
+    pruefe(!BenutzerService::darfVergeben(['geraetepruefung.view']) && !BenutzerService::darfVergeben(['geraetepruefung.manage'])
+        && !BenutzerService::darfVergeben(['geraetepruefung.unterschreiben']), 'Rechte der Geräteprüfung nur, wer sie selbst hat');
     // Anmeldung über SSO: einrichten (Gruppen → Rollen, Anmeldeanfragen) nur, wer es selbst darf.
     pruefe(Permissions::exists('sso.manage') && !BenutzerService::darfVergeben(['sso.manage']), '„SSO einrichten“ vergibt nur, wer es hat');
     foreach (Permissions::standardRollen() as $schluessel => $rolle) {
@@ -218,6 +220,13 @@ try {
     // Unterschriften nur als Linie: keine Zeit, kein Druck, keine Neigung im Erfassungscode.
     pruefe(preg_match('/pressure|timeStamp|Date\.now|performance\.now|tiltX|tiltY|twist|tangential/', (string) file_get_contents($js . 'unterschrift.js')) === 0,
         'unterschrift.js liest weder Zeit noch Druck');
+    // Geräteprüfung: Meldungen und Fehler aus Antworten nur per textContent, kein fetch ohne
+    // Zeitgrenze (PMNetz), in der Sammelunterschrift weder Zeit noch Druck.
+    $gpJs = (string) file_get_contents($js . 'geraetepruefung.js');
+    pruefe($gpJs !== '' && preg_match('/innerHTML|outerHTML|insertAdjacentHTML/', $gpJs) === 0 && str_contains($gpJs, 'textContent'),
+        'geraetepruefung.js setzt kein HTML aus Daten');
+    pruefe(preg_match('/pressure|timeStamp|Date\.now|performance\.now|tiltX|tiltY|twist|tangential|new Date/', $gpJs) === 0 && !str_contains($gpJs, 'fetch('),
+        'geraetepruefung.js: keine Zeit, kein Druck, kein fetch ohne Zeitgrenze');
     // Abmelden: bericht.js hört vorher (Capture) und schreibt danach nichts mehr zurück – sonst
     // legte pagehide den gerade gelöschten Entwurf mit Kundendaten wieder ab.
     pruefe(preg_match('/document\.addEventListener\(\'submit\', function \(e\) \{[^}]*form\[action="\/logout"\][\s\S]{0,600}?uebernahme = true;[\s\S]{0,200}?\}, true\);/',
@@ -332,6 +341,15 @@ try {
         $text = (string) file_get_contents($datei);
         $name = basename(dirname($datei)) . '/' . basename($datei);
         pruefe(preg_match('/<script(?![^>]*\bnonce=)/i', $text) !== 1, $name . ': kein <script> ohne Nonce');
+        pruefe(preg_match('/\son[a-z]+\s*=/i', $text) !== 1 && stripos($text, 'javascript:') === false, $name . ': kein on…= und kein javascript:');
+    }
+    // Die Ansichten der Geräteprüfung: gar kein Inline-Skript, kein on…=, kein javascript:.
+    $gpAnsichten = glob(dirname(__DIR__) . '/resources/views/geraetepruefung/*.php') ?: [];
+    pruefe(count($gpAnsichten) >= 3, 'Ansichten der Geräteprüfung gefunden');
+    foreach ($gpAnsichten as $datei) {
+        $text = (string) file_get_contents($datei);
+        $name = 'geraetepruefung/' . basename($datei);
+        pruefe(preg_match('/<script(?![^>]*\bsrc=)/i', $text) !== 1, $name . ': kein Inline-Skript');
         pruefe(preg_match('/\son[a-z]+\s*=/i', $text) !== 1 && stripos($text, 'javascript:') === false, $name . ': kein on…= und kein javascript:');
     }
 
