@@ -1,12 +1,14 @@
 <?php
 /**
  * Kunden & Kundenbereich – Liste der Kunden mit Zahlen, Suche und
- * Formular „Neuer Kunde“ (nur mit „kunden.manage“).
+ * Formular „Neuer Kunde“ (nur mit „kunden.manage“; Anschrift und Kontakt
+ * freiwillig, für Prüfberichte der Geräteprüfung).
  *
  * @var list<array<string,mixed>> $kunden KundenService::alle()
  * @var array{suche:string,aktiv:string} $filter
  * @var array<string,mixed> $eingabe Formular „Neuer Kunde“ (nach einem Fehler die Eingaben)
  */
+use App\Kunden\KundenService;
 use App\Support\Csrf;
 use App\Support\View;
 use App\Support\Zeit;
@@ -79,6 +81,20 @@ $neuDatum = (string) ($eingabe['gueltig_bis'] ?? '');
         </div>
         <div class="field"><label for="n-notizen">Notizen (nur für uns, nie im Kundenbereich)</label>
             <textarea id="n-notizen" name="notizen" rows="2" maxlength="5000"><?= View::e((string) $eingabe['notizen']) ?></textarea></div>
+        <?php $kontaktEingabe = array_filter(array_intersect_key($eingabe, KundenService::KONTAKT), static fn (mixed $v): bool => (string) $v !== ''); ?>
+        <details class="mt"<?= $kontaktEingabe !== [] ? ' open' : '' ?>>
+            <summary>Anschrift und Kontakt (freiwillig)</summary>
+            <p class="help">Für Prüfberichte der Geräteprüfung und die Datei des Prüfgeräts – nie im Kundenbereich, nie im Audit.</p>
+            <?php foreach ([['strasse', 'plz', 'ort'], ['telefon', 'fax', 'email'], ['ansprechpartner', 'ansprechpartner_abteilung', 'ansprechpartner_telefon', 'ansprechpartner_email']] as $felder): ?>
+                <div class="field-row">
+                    <?php foreach ($felder as $f): ?>
+                        <div class="field"><label for="n-<?= View::e($f) ?>"><?= View::e(KundenService::KONTAKT_NAMEN[$f]) ?></label>
+                            <input id="n-<?= View::e($f) ?>" name="<?= View::e($f) ?>" type="<?= str_contains($f, 'telefon') || $f === 'fax' ? 'tel' : 'text' ?>"<?= str_contains($f, 'email') ? ' inputmode="email"' : '' ?>
+                                   maxlength="<?= (int) KundenService::KONTAKT[$f] ?>" value="<?= View::e((string) ($eingabe[$f] ?? '')) ?>" autocomplete="off"></div>
+                    <?php endforeach; ?>
+                </div>
+            <?php endforeach; ?>
+        </details>
         <p class="help">Ein Kunde sieht zunächst nichts. Sichtbar wird, was ihm ausdrücklich gegeben wird: Standorte über Freigaben
             (mit Ende und Datenzeitraum), später Protokolle und Prüfnachweise.</p>
     </div>

@@ -6,6 +6,7 @@ namespace App\Controllers;
 use App\Auth\Auth;
 use App\Auth\Zugriff;
 use App\Berichte\BerichtService;
+use App\Geraetepruefung\Prueflinge;
 use App\Messung\Messdaten;
 use App\Services\AnlagenService;
 use App\Services\InventarService;
@@ -22,7 +23,10 @@ use App\Tanks\TankService;
  *
  * Ansehen darf, wer Datenquellen sehen darf (Planung, Technik); pflegen,
  * wer „Inventar pflegen“ hat. Einsetzen und Abbauen gehören zur Anlage:
- * dafür braucht es das Recht, diese Anlage zu bearbeiten.
+ * dafür braucht es das Recht, diese Anlage zu bearbeiten. Die Karte
+ * „DGUV V3“ (letzte Prüfung, Ergebnis, nächste Fälligkeit des verknüpften
+ * Prüflings) sieht nur, wer „geraetepruefung.view“ hat – nie an einem
+ * Tanksensor.
  */
 final class InventarController extends Controller
 {
@@ -59,6 +63,9 @@ final class InventarController extends Controller
             'geschichte'  => $geschichte,
             'darf'        => Auth::can('inventar.manage'),
             'letztePruefung' => Auth::can('berichte.view') ? BerichtService::letzteAnInventar((int) $item['id']) : null,
+            // Geräteprüfung (DGUV V3): der verknüpfte Prüfling – nur mit „geraetepruefung.view“, nie an einem Tanksensor.
+            'geraetepruefung' => Auth::can('geraetepruefung.view') && $item['art'] !== 'tanksensor'
+                ? ['pruefling' => Prueflinge::fuerInventar((int) $item['id']), 'pflegen' => Auth::can('geraetepruefung.manage')] : null,
         ]);
     }
 

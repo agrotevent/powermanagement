@@ -42,6 +42,11 @@ use App\Support\View;
  * Prüfnachweise) hinterlegt und gibt frei, wer „kunden.nachweise“ hat
  * (PruefnachweiseController).
  *
+ * Anschrift und Kontakt (Reiter Stammdaten, freiwillig) sind für die
+ * Geräteprüfung da (Auftraggeber im Prüfbericht, Datei des Prüfgeräts) –
+ * nie im Kundenbereich, nie im Audit. Einen Kunden mit Prüflingen der
+ * Geräteprüfung löscht KundenService nicht.
+ *
  * Eventworx-Vorgänge (Reiter Vorgänge): suchen und verknüpfen mit
  * „kunden.manage“ und „berichte.eventworx“ (die Suche zeigt alle Vorgänge
  * des Mandanten). Beides wartet auf Eventworx und hält dabei die Sitzung
@@ -77,7 +82,8 @@ final class KundenController extends Controller
         $this->view('kunden/index', [
             'kunden'  => KundenService::alle($filter),
             'filter'  => $filter,
-            'eingabe' => $eingabe + ['name' => '', 'kundennummer' => '', 'gueltig_bis' => '', 'notizen' => '', 'aktiv' => 1],
+            'eingabe' => $eingabe + ['name' => '', 'kundennummer' => '', 'gueltig_bis' => '', 'notizen' => '', 'aktiv' => 1]
+                + array_fill_keys(array_keys(KundenService::KONTAKT), ''),
         ]);
     }
 
@@ -91,6 +97,12 @@ final class KundenController extends Controller
             'gueltig_bis'  => $request->str('gueltig_bis'),
             'notizen'      => is_string($_POST['notizen'] ?? null) ? $_POST['notizen'] : '',
         ];
+        // Anschrift und Kontakt (freiwillig) – nur, was das Formular schickt.
+        foreach (array_keys(KundenService::KONTAKT) as $feld) {
+            if (array_key_exists($feld, $_POST)) {
+                $daten[$feld] = $request->str($feld);
+            }
+        }
         $r = KundenService::speichern($id, $daten);
         if (!$r['ok']) {
             Flash::error($r['message']);
@@ -368,6 +380,8 @@ final class KundenController extends Controller
             'pflegen'    => $pflegen,
             'zahlen'     => KundenService::zahlen($id),
             'eingabe'    => $eingabe,
+            // Geräteprüfung: Link „Prüflinge dieses Kunden“ nur, wer sie sehen darf.
+            'prueflingeSehen' => Auth::can('geraetepruefung.view'),
         ];
         if ($tab === 'uebersicht') {
             $daten['uebersicht'] = KundenService::uebersicht($id);

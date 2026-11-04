@@ -6,6 +6,8 @@ namespace App\Kunden;
 use App\Auth\Auth;
 use App\Auth\Zugriff;
 use App\Berichte\BerichtService;
+use App\Berichte\Unterschrift;
+use App\Geraetepruefung\Prueflinge;
 use App\Services\BenutzerService;
 use App\Services\Eventworx;
 use App\Services\EventworxFehler;
@@ -76,6 +78,24 @@ final class KundenService
     public const SSO_NAME = 'Unter diesem Namen meldet sich jemand über SSO an (Verknüpfung oder Anmeldeanfrage) – ein lokaler Zugang würde nie mit '
         . 'dieser Anmeldung verknüpft. Bitte einen anderen Benutzernamen wählen; Kundenzugänge über SSO entstehen über eine Kundengruppe.';
 
+    /**
+     * Anschrift und Kontakt eines Kunden (Migration 019) → Höchstlänge – alle
+     * freiwillig, für Prüfberichte der Geräteprüfung und die Datei des
+     * Prüfgeräts. Nie im Audit, nie im Kundenbereich (KundenSicht gibt sie
+     * nicht heraus).
+     */
+    public const KONTAKT = [
+        'strasse' => 120, 'plz' => 16, 'ort' => 120, 'telefon' => 64, 'fax' => 64, 'email' => 190,
+        'ansprechpartner' => 120, 'ansprechpartner_abteilung' => 120, 'ansprechpartner_telefon' => 64, 'ansprechpartner_email' => 190,
+    ];
+
+    /** Beschriftungen der Kontaktfelder (Formular, Meldungen). */
+    public const KONTAKT_NAMEN = [
+        'strasse' => 'Straße und Hausnummer', 'plz' => 'PLZ', 'ort' => 'Ort', 'telefon' => 'Telefon', 'fax' => 'Fax', 'email' => 'E-Mail',
+        'ansprechpartner' => 'Ansprechpartner', 'ansprechpartner_abteilung' => 'Abteilung', 'ansprechpartner_telefon' => 'Telefon des Ansprechpartners',
+        'ansprechpartner_email' => 'E-Mail des Ansprechpartners',
+    ];
+
     /** Wer nicht alles sieht, was der Kunde sieht, gibt keinen Zugang aus (darfZugangAusgeben). */
     public const NICHT_AUSGEBEN = 'Zugänge, Einrichtungslinks und vorläufige Kennwörter gibt nur aus – und einen Kunden oder Zugang wieder öffnen darf nur –, '
         . 'wer selbst alles sieht, was der Kunde sieht: das Recht „Alle Standorte, Anlagen und Messdaten“, dazu „Kunden ansehen“ und die Protokolle des Kunden.';
@@ -118,9 +138,9 @@ final class KundenService
     /**
      * Zahlen eines Kunden: Zugänge, jetzt sichtbare Locations (dasselbe
      * Prädikat wie im Kundenbereich), kommende, Freigaben, Protokolle,
-     * freigegebene Prüfnachweise.
+     * freigegebene Prüfnachweise, Prüflinge der Geräteprüfung.
      *
-     * @return array{zugaenge:int,locations_aktiv:int,kommend:int,freigaben:int,berichte:int,nachweise:int,vorgaenge:int,abrufe:int}
+     * @return array{zugaenge:int,locations_aktiv:int,kommend:int,freigaben:int,berichte:int,nachweise:int,vorgaenge:int,abrufe:int,prueflinge:int}
      */
     public static function zahlen(int $kundeId): array
     {
@@ -135,6 +155,7 @@ final class KundenService
                 WHERE n.kunde_id = ? AND n.status = 'freigegeben'", [$kundeId]),
             'vorgaenge'       => (int) Database::scalar('SELECT COUNT(*) FROM kunden_vorgaenge WHERE kunde_id = ?', [$kundeId]),
             'abrufe'          => (int) Database::scalar('SELECT COUNT(*) FROM kunden_abrufe WHERE kunde_id = ?', [$kundeId]),
+            'prueflinge'      => Prueflinge::anzahlBeiKunde($kundeId),
         ];
     }
 
@@ -174,7 +195,14 @@ final class KundenService
      * abgelaufen), enden die Sitzungen seiner Zugänge bei ihrer nächsten
      * Anfrage (Auth::zugangSperre).
      *
-     * @param array<string,mixed> $daten name, kundennummer, aktiv, gueltig_bis, notizen
+     * Anschrift und Kontakt ({@see KONTAKT}, alle freiwillig): einzeilig
+     * gesäubert (Steuer- und Richtungszeichen raus, Leerraum zusammengefasst,
+     * wie Unterschrift::text), zu lang wird
+     * abgelehnt, nicht gekürzt; eine E-Mail-Adresse braucht ein „@“ ohne
+     * Leerraum. Geschrieben wird nur, was in $daten steht – ein Aufruf ohne
+     * diese Felder lässt sie, wie sie sind. Ins Audit kommen sie nie.
+     *
+     * @param array<string,mixed> $daten name, kundennummer, aktiv, gueltig_bis, notizen, Felder aus KONTAKT
      * @return array{ok:bool,message:string,id?:int}
      */
     public static function speichern(?int $id, array $daten): array
@@ -206,6 +234,21 @@ final class KundenService
         if (mb_strlen($notizen) > 5000) {
             return ['ok' => false, 'message' => 'Die Notizen haben höchstens 5000 Zeichen.'];
         }
+        $kontakt = [];
+        foreach (self::KONTAKT as $feld => $laenge) {
+            if (!array_key_exists($feld, $daten) && $id !== null) {
+                continue; // nicht mitgegeben: bleibt, wie es ist
+            }
+            // Wie die Texte der Prüfberichte: Steuer- und Richtungszeichen raus (die Felder landen im PDF).
+            $wert = Unterschrift::text($daten[$feld] ?? '', 10000);
+            if (mb_strlen($wert) > $laenge) {
+                return ['ok' => false, 'message' => '„' . self::KONTAKT_NAMEN[$feld] . '“ hat höchstens ' . $laenge . ' Zeichen.'];
+            }
+            if ($wert !== '' && str_ends_with($feld, 'email') && preg_match('/^[^\s@]+@[^\s@]+$/u', $wert) !== 1) {
+                return ['ok' => false, 'message' => '„' . self::KONTAKT_NAMEN[$feld] . '“ ist keine E-Mail-Adresse.'];
+            }
+            $kontakt[$feld] = $wert;
+        }
         $felder = [
             'name'         => $name,
             'kundennummer' => $nummer,
@@ -213,7 +256,7 @@ final class KundenService
             'gueltig_bis'  => $bis,
             'notizen'      => $notizen,
             'updated_at'   => gmdate('c'),
-        ];
+        ] + $kontakt;
         // Wieder aktiv oder länger offen: die Zugänge des Kunden kommen damit
         // wieder an alles, was ihm freigegeben ist – das darf nur, wer es
         // selbst sieht (wie beim Ausgeben eines Zugangs).
@@ -244,6 +287,11 @@ final class KundenService
      * (mit den Dateien, die sonst niemand nutzt) und die Abrufe.
      * Übergabeberichte bleiben (Aufbewahrung), nur ohne Zuordnung zum Kunden.
      *
+     * Hat der Kunde Prüflinge der Geräteprüfung, wird nicht gelöscht: Ohne
+     * Prüfungen lassen sie sich vorher entfernen; geprüfte bleiben mit ihren
+     * Prüfberichten (Aufbewahrung) – und zum eigenen Bestand dürfen sie nicht
+     * werden. Ein solcher Kunde wird beendet, nicht gelöscht.
+     *
      * @return array{ok:bool,message:string}
      */
     public static function loeschen(int $id, string $bestaetigung): array
@@ -259,31 +307,43 @@ final class KundenService
         if ($gleich($bestaetigung) === '' || $gleich($bestaetigung) !== $gleich((string) $kunde['name'])) {
             return ['ok' => false, 'message' => 'Zum Löschen bitte den Namen des Kunden genau eintragen.'];
         }
+        if (Prueflinge::kundeHatPrueflinge($id)) {
+            return ['ok' => false, 'message' => self::mitPrueflingen($id)];
+        }
         $zahlen = self::zahlen($id);
         $nachweise = (int) Database::scalar('SELECT COUNT(*) FROM pruefnachweise WHERE kunde_id = ?', [$id]);
         // Alle zugeordneten Berichte (auch Entwürfe) verlieren die Zuordnung.
         $berichte = (int) Database::scalar('SELECT COUNT(*) FROM berichte WHERE kunde_id = ?', [$id]);
         $ssoGruppen = 0;
-        self::transaktion(static function () use ($id, &$ssoGruppen): void {
-            // Unter MySQL: wer gerade einen Vorgang verknüpft oder Nachweise
-            // übernimmt, sperrt dieselbe Zeile – erst danach wird gelöscht.
-            Database::first('SELECT id FROM kunden WHERE id = ?' . self::fuerUpdate(), [$id]);
-            foreach (Database::select('SELECT id FROM users WHERE kunde_id = ?', [$id]) as $u) {
-                BenutzerService::kontoEntfernen((int) $u['id']);
-            }
-            Database::execute("DELETE FROM freigaben WHERE subject_type = 'kunde' AND subject_id = ?", [$id]);
-            // Kundengruppen der Anmeldung über SSO (017) – eine stehen gebliebene
-            // Gruppe zeigte sonst auf eine ID, die ein neuer Kunde bekommen kann.
-            $ssoGruppen = Database::execute("DELETE FROM sso_zuordnungen WHERE art = 'kunde' AND ziel_id = ?", [$id]);
-            Database::execute('DELETE FROM kunden_vorgaenge WHERE kunde_id = ?', [$id]);
-            // Nachweise mit ihren Abrufen; gleiche Bytes liegen nur einmal da –
-            // eine Datei, die noch ein anderer Nachweis nutzt, bleibt.
-            Pruefnachweise::kundeEntfernt($id);
-            Database::execute('DELETE FROM kunden_abrufe WHERE kunde_id = ?', [$id]);
-            // Übergabeberichte bleiben für die Aufbewahrung – nur ohne Kunde.
-            BerichtService::kundeEntfernt($id);
-            Database::delete('kunden', $id);
-        });
+        try {
+            self::transaktion(static function () use ($id, &$ssoGruppen): void {
+                // Unter MySQL: wer gerade einen Vorgang verknüpft oder Nachweise
+                // übernimmt, sperrt dieselbe Zeile – erst danach wird gelöscht.
+                Database::first('SELECT id FROM kunden WHERE id = ?' . self::fuerUpdate(), [$id]);
+                // Noch einmal in der Transaktion: ein Import oder Formular kann
+                // inzwischen einen Prüfling angelegt haben.
+                if (Prueflinge::kundeHatPrueflinge($id)) {
+                    throw new \DomainException(self::mitPrueflingen($id));
+                }
+                foreach (Database::select('SELECT id FROM users WHERE kunde_id = ?', [$id]) as $u) {
+                    BenutzerService::kontoEntfernen((int) $u['id']);
+                }
+                Database::execute("DELETE FROM freigaben WHERE subject_type = 'kunde' AND subject_id = ?", [$id]);
+                // Kundengruppen der Anmeldung über SSO (017) – eine stehen gebliebene
+                // Gruppe zeigte sonst auf eine ID, die ein neuer Kunde bekommen kann.
+                $ssoGruppen = Database::execute("DELETE FROM sso_zuordnungen WHERE art = 'kunde' AND ziel_id = ?", [$id]);
+                Database::execute('DELETE FROM kunden_vorgaenge WHERE kunde_id = ?', [$id]);
+                // Nachweise mit ihren Abrufen; gleiche Bytes liegen nur einmal da –
+                // eine Datei, die noch ein anderer Nachweis nutzt, bleibt.
+                Pruefnachweise::kundeEntfernt($id);
+                Database::execute('DELETE FROM kunden_abrufe WHERE kunde_id = ?', [$id]);
+                // Übergabeberichte bleiben für die Aufbewahrung – nur ohne Kunde.
+                BerichtService::kundeEntfernt($id);
+                Database::delete('kunden', $id);
+            });
+        } catch (\DomainException $e) {
+            return ['ok' => false, 'message' => $e->getMessage()];
+        }
         self::vergessen();
         Zugriff::vergessen();
         Audit::log('kunden.loeschen', 'kunde', (string) $id, [
@@ -1207,6 +1267,14 @@ final class KundenService
             return 'Die E-Mail-Adresse sieht nicht gültig aus.';
         }
         return null;
+    }
+
+    /** Warum ein Kunde mit Prüflingen nicht gelöscht wird – mit ihrer Zahl. */
+    private static function mitPrueflingen(int $kundeId): string
+    {
+        $n = Prueflinge::anzahlBeiKunde($kundeId);
+        return 'Der Kunde hat ' . ($n === 1 ? 'einen Prüfling' : $n . ' Prüflinge') . ' der Geräteprüfung – gelöscht wird er erst, wenn sie entfernt sind. '
+            . 'Prüflinge ohne Prüfungen lassen sich löschen; geprüfte bleiben mit ihren Prüfberichten (Aufbewahrung), der Kunde bleibt dann beendet.';
     }
 
     /**

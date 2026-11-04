@@ -29,7 +29,7 @@ Drei Dinge heißen ähnlich und sind verschieden:
 
 | Begriff | Bedeutung |
 |---|---|
-| **Kunde** | Firma oder Verein, für den gearbeitet wird: Name, Kundennummer, aktiv, „Zugänge enden am“, Notizen (nur für das Personal). Keine Anschrift, kein Telefon – das steht im Bericht oder in Eventworx. |
+| **Kunde** | Firma oder Verein, für den gearbeitet wird: Name, Kundennummer, aktiv, „Zugänge enden am“, Notizen (nur für das Personal). Anschrift und Kontakt (Straße, PLZ, Ort, Telefon, Fax, E-Mail, Ansprechpartner mit Abteilung, Telefon und E-Mail) sind **freiwillig** und nur für die Geräteprüfung da: Sie stehen im Prüfbericht als Auftraggeber und in der Datei für das Prüfgerät – nie im Kundenbereich, nie im Audit. |
 | **Kundenzugang** | ein Konto mit Benutzername und Kennwort, das zu genau einem Kunden gehört. Ein Kunde kann mehrere haben (Produktionsleitung, Technik). Kundenzugänge haben **keine Rolle und keine Rechte** und stehen nicht in der Benutzerverwaltung. |
 | **Freigabe am Kunden** | „dieser Kunde sieht diesen Standort von … bis …, mit Messdaten von … bis …“. Gilt für alle Zugänge des Kunden; ein Widerruf genügt. Nur Standorte, nie „bearbeiten“ oder „schalten“. |
 | **Protokoll** | ein Übergabebericht, den das Personal dem Kunden ausdrücklich **zugeordnet** hat. |
@@ -441,6 +441,11 @@ Datenbank von vorher zurück, und was jemand eben gespeichert hat, wäre weg.
   als Bestätigung. Weg sind dann seine Zugänge, Freigaben, Vorgänge,
   Prüfnachweise (mit den Dateien, die sonst niemand nutzt) und Abrufe.
   **Übergabeberichte bleiben** (Aufbewahrung), nur ohne Zuordnung.
+- Hat der Kunde **Prüflinge der Geräteprüfung**, wird er nicht gelöscht:
+  Prüflinge ohne Prüfungen lassen sich vorher löschen; geprüfte bleiben mit
+  ihren Prüfberichten (Aufbewahrung) und werden nie still zum eigenen
+  Bestand – der Kunde bleibt dann beendet. Anschrift und Kontakt lassen
+  sich jederzeit leeren.
 - Wird ein **Standort** gelöscht, gehen die Freigaben der Kunden darauf
   mit; Vorgänge und Nachweise bleiben, nur ohne Standort.
 
@@ -455,7 +460,7 @@ Rechtsberatung**.
 |---|---|
 | Rechtsgrundlage | Vertrag und Nachweispflichten (Art. 6 Abs. 1 lit. b und c DSGVO; BetrSichV, DGUV V3). Prüfernamen in den PDFs sind Pflichtangaben. |
 | Datenschutz durch Technik (Art. 25) | Standard „nichts sichtbar“; Locations nur ausdrücklich, mit Ende und Datenzeitraum; Dokumente nur nach Zuordnung bzw. Freigabe durch eine Person; Kunden geben nie fremde Kennungen ein; Eventworx nie vom Kunden ausgelöst. |
-| Datenminimierung (Art. 5 c) | Kunden ohne Anschrift und Telefon; aus Eventworx nur Kennungen, Nummer, Titel, Mietzeit, Kunden-Kennung und -Name zur Kontrolle und die gewählten Dateien – keine Preise, Positionen, Kontakte. |
+| Datenminimierung (Art. 5 c) | Anschrift und Kontakt am Kunden nur freiwillig und nur für die Geräteprüfung (Auftraggeber im Prüfbericht, Datei für das Prüfgerät) – nie im Kundenbereich, nie im Audit, nicht aus Eventworx übernommen; aus Eventworx nur Kennungen, Nummer, Titel, Mietzeit, Kunden-Kennung und -Name zur Kontrolle und die gewählten Dateien – keine Preise, Positionen, Kontakte. |
 | Sicherheit (Art. 32) | Tor im Router, gleiche 404 für Fremdes, `no-store`, Anmelde-Bremse, Einrichtungslink nur als HMAC, Geheimnisse nie in Log, Audit oder Antwort, Prüfskripte gegen das Durchprobieren von Kennungen. |
 | Transparenz (Art. 13) | Datenschutzhinweis auf Einrichtungsseite, Konto und im Fuß. |
 | Cookies (§ 25 TDDDG) | nur Sitzung und CSRF-Schutz. |
@@ -464,7 +469,7 @@ Rechtsberatung**.
 
 | Daten | bleiben bis |
 |---|---|
-| Kunde, Zugänge | Löschung durch das Personal; ein beendeter Kunde hat keinen Zugang |
+| Kunde (mit Anschrift und Kontakt), Zugänge | Löschung durch das Personal; ein beendeter Kunde hat keinen Zugang. Ein Kunde mit geprüften Prüflingen der Geräteprüfung bleibt (beendet) für die Aufbewahrung der Prüfberichte – Anschrift und Kontakt lassen sich leeren, der eingefrorene Prüfbericht behält seine Kopie |
 | Freigaben am Kunden | mit Kunde oder Standort; abgelaufene bleiben als Verlauf, wirken aber nicht |
 | Übergabeberichte | ihre Aufbewahrung ([berichte.md](berichte.md#aufbewahrung)); beim Löschen des Kunden nur ohne Zuordnung |
 | Prüfnachweise und Dateien | `aufbewahren_bis` oder Löschen des Kunden; eine Datei, sobald sie niemand mehr nutzt |
@@ -491,11 +496,11 @@ einen fremden Nachweis bekommen:
 | Feld | Eintrag |
 |---|---|
 | Bezeichnung | Kundenbereich (Bereitstellung von Prüfprotokollen und Prüfnachweisen) |
-| Zweck | Kunden ihre Übergabeberichte, Prüfnachweise und Locations bereitstellen |
+| Zweck | Kunden ihre Übergabeberichte, Prüfnachweise und Locations bereitstellen; Prüfberichte der Geräteprüfung (DGUV V3) mit dem Kunden als Auftraggeber erstellen |
 | Rechtsgrundlage | Art. 6 Abs. 1 lit. b und c DSGVO |
-| Betroffene | Ansprechpartner der Kunden (Zugänge), Prüfer (in den Dokumenten) |
-| Daten | Benutzername, Name, E-Mail, letzte Anmeldung, Abrufe mit Zeit; Inhalte der Dokumente |
-| Empfänger | der jeweilige Kunde; Auftragsverarbeiter Hosting und Eventworx |
+| Betroffene | Ansprechpartner der Kunden (Zugänge; freiwillig hinterlegte Kontaktpersonen), Prüfer (in den Dokumenten) |
+| Daten | Benutzername, Name, E-Mail, letzte Anmeldung, Abrufe mit Zeit; Inhalte der Dokumente; freiwillig Anschrift, Telefon, Fax, E-Mail und Ansprechpartner (Name, Abteilung, Telefon, E-Mail) des Kunden – für Prüfberichte und die Datei des Prüfgeräts |
+| Empfänger | der jeweilige Kunde; Auftragsverarbeiter Hosting und Eventworx; die Datei für das Prüfgerät bleibt beim Betreiber (Export von Hand) |
 | Löschfristen | siehe Tabelle oben |
 | Technische Maßnahmen | siehe „Sicherheit“ oben und [rechte.md](rechte.md) |
 

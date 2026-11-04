@@ -1,4 +1,5 @@
 <?php
+use App\Kunden\Pruefnachweise;
 use App\Services\InventarService;
 use App\Support\Csrf;
 use App\Support\View;
@@ -98,6 +99,29 @@ if ($ts && $item['eigenschaften'] !== []) {
         <?php if ((string) $item['notizen'] !== ''): ?><div class="card-body small"><?= nl2br(View::e((string) $item['notizen'])) ?></div><?php endif; ?>
     </div>
     </div>
+    <div>
+    <?php if (!empty($geraetepruefung)): ?>
+        <?php $gp = $geraetepruefung['pruefling']; ?>
+        <section class="card">
+            <div class="card-head"><h2>DGUV V3</h2><span class="hint">Geräteprüfung</span></div>
+            <div class="card-body">
+                <?php if ($gp === null): ?>
+                    <p class="small muted">Kein Prüfling der Geräteprüfung verknüpft.</p>
+                    <?php if ($geraetepruefung['pflegen']): ?>
+                        <a class="btn btn-sm" href="/geraetepruefung/prueflinge/neu?inventar=<?= (int) $item['id'] ?>">Als Prüfling anlegen</a>
+                    <?php endif; ?>
+                <?php else: ?>
+                    <dl class="kv">
+                        <dt>Prüfling</dt><dd><a class="mono" href="/geraetepruefung/prueflinge/<?= (int) $gp['id'] ?>"><?= View::e((string) $gp['kennung']) ?></a></dd>
+                        <dt>Letzte Prüfung</dt><dd><?= $gp['letzte_pruefung'] !== null ? View::e(Pruefnachweise::datum((string) $gp['letzte_pruefung'])) : '<span class="muted">–</span>' ?></dd>
+                        <dt>Ergebnis</dt><dd><?= View::partial('geraetepruefung/_pruefling-ergebnis', ['ergebnis' => (string) $gp['letztes_ergebnis']]) ?></dd>
+                        <dt>Nächste Prüfung</dt><dd><?= $gp['naechste_pruefung'] !== null ? View::e(Pruefnachweise::datum((string) $gp['naechste_pruefung'])) : '<span class="muted">–</span>' ?></dd>
+                    </dl>
+                    <?= View::partial('geraetepruefung/_pruefling-faelligkeit', ['f' => $gp['faelligkeit'], 'mitText' => true]) ?>
+                <?php endif; ?>
+            </div>
+        </section>
+    <?php endif; ?>
     <div class="card">
         <div class="card-head"><h2>Einsätze</h2></div>
         <div class="card-body">
@@ -119,5 +143,6 @@ if ($ts && $item['eigenschaften'] !== []) {
                 <?php endforeach; ?>
             </ul>
         </div>
+    </div>
     </div>
 </div>
