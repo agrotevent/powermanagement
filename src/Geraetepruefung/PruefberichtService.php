@@ -466,6 +466,10 @@ final class PruefberichtService
                 . (self::STATUS[(string) $letzte['status']] ?? (string) $letzte['status']) . '“ ohne Nachfolger) – bitte prüfen lassen.');
         }
         if ($letzte !== null) {
+            if (!self::korrekturPruefbar($letzte)) {
+                throw new \DomainException('Die Korrektur von ' . $letzte['nummer'] . ' wurde unter einem früheren Schlüssel (app.key) angefordert und lässt sich '
+                    . 'nicht mehr bestätigen – bitte die Korrektur neu anfordern.');
+            }
             if (!self::korrekturGesiegelt($letzte)) {
                 throw new \DomainException('Die Korrektur von ' . $letzte['nummer'] . ' ist nicht gesiegelt (Grund, Konto oder Zeit nachträglich geändert?) '
                     . '– bitte „bin/power geraetepruefung:pruefen“ ausführen lassen.');
@@ -599,7 +603,10 @@ final class PruefberichtService
         if ($b === null) {
             return ['ok' => false, 'status' => 404, 'message' => 'Diesen Prüfbericht gibt es nicht.'];
         }
-        if ($b['status'] !== 'gueltig') {
+        // Eine Korrektur, die unter einem früheren Schlüssel (app.key) angefordert wurde, lässt sich nicht
+        // mehr bestätigen – sie wird mit dem jetzigen Schlüssel neu angefordert.
+        $neuAnfordern = $b['status'] === 'korrektur' && !self::korrekturPruefbar($b);
+        if ($b['status'] !== 'gueltig' && !$neuAnfordern) {
             return ['ok' => false, 'status' => 409, 'pruefung_id' => (int) $b['pruefung_id'], 'message' => $b['status'] === 'korrektur'
                 ? 'Für ' . $b['nummer'] . ' ist schon eine Korrektur angefordert.'
                 : $b['nummer'] . ' ist schon ersetzt – korrigiert wird die jüngste Fassung.'];
@@ -612,8 +619,9 @@ final class PruefberichtService
         // Grund stünde beim nächsten Unterschreiben eingefroren in Fassung n+1.
         $am = gmdate('c');
         $von = (int) Auth::id();
-        $n = Database::execute("UPDATE gp_berichte SET status = 'korrektur', korrektur_grund = ?, korrektur_von = ?, korrektur_am = ?, korrektur_siegel = ?
-            WHERE id = ? AND status = 'gueltig'", [$grund, $von, $am, self::korrekturSiegel($berichtId, (int) $b['fassung'], $grund, $von, $am), $berichtId]);
+        $n = Database::execute("UPDATE gp_berichte SET status = 'korrektur', korrektur_grund = ?, korrektur_von = ?, korrektur_am = ?, korrektur_siegel = ?,
+            korrektur_schluessel_id = ? WHERE id = ? AND status = ?", [$grund, $von, $am, self::korrekturSiegel($berichtId, (int) $b['fassung'], $grund, $von, $am),
+            self::schluesselId(), $berichtId, (string) $b['status']]);
         if ($n !== 1) {
             return ['ok' => false, 'status' => 409, 'pruefung_id' => (int) $b['pruefung_id'], 'message' => 'Der Bericht wurde inzwischen geändert – bitte die Seite neu laden.'];
         }
@@ -658,8 +666,13 @@ final class PruefberichtService
         } elseif ($nachfolger !== []) {
             $befunde[] = 'Eine neuere Fassung ersetzt diesen Bericht, er ist aber nicht als „ersetzt“ geführt – Status nachträglich geändert?';
         }
-        if (($status === 'korrektur' || $b['korrektur_am'] !== null) && (string) $b['schluessel_id'] === self::schluesselId() && !self::korrekturGesiegelt($b)) {
-            $befunde[] = 'Die angeforderte Korrektur ist nicht gesiegelt oder verändert (Status, Grund, Konto oder Zeit) – nachträglich geändert?';
+        if ($status === 'korrektur' || $b['korrektur_am'] !== null) {
+            if (!self::korrekturPruefbar($b)) {
+                $befunde[] = 'Korrektur mit anderem Schlüssel angefordert (' . preg_replace('/[^0-9a-f]/', '', (string) $b['korrektur_schluessel_id'])
+                    . '), nicht prüfbar – bitte die Korrektur neu anfordern.';
+            } elseif (!self::korrekturGesiegelt($b)) {
+                $befunde[] = 'Die angeforderte Korrektur ist nicht gesiegelt oder verändert (Status, Grund, Konto oder Zeit) – nachträglich geändert?';
+            }
         }
 
         // ---------------------------------------------- Inhalt
@@ -1020,6 +1033,17 @@ final class PruefberichtService
     {
         return hash_hmac('sha256', implode("\n", [self::KORREKTUR_TAG, (string) $id, (string) $fassung, $grund, (string) $von, $am]),
             self::siegelSchluessel());
+    }
+
+    /**
+     * Lässt sich das Siegel der Korrektur mit dem jetzigen Schlüssel prüfen? Nur eine Kennung eines
+     * anderen Schlüssels (Wechsel von app.key) macht es unprüfbar; ohne Kennung (per SQL gesetzt)
+     * wird geprüft – und scheitert als „nicht gesiegelt“.
+     */
+    private static function korrekturPruefbar(array $b): bool
+    {
+        $id = (string) ($b['korrektur_schluessel_id'] ?? '');
+        return $id === '' || hash_equals(self::schluesselId(), $id);
     }
 
     /** Ist die Korrektur dieser Zeile vollständig (Grund, Konto, Zeit) und gesiegelt? */

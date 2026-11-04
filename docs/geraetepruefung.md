@@ -466,7 +466,11 @@ nie** – sie kommen unverändert aus der Prüfung. Eine angeforderte
 Korrektur lässt sich nicht zurücknehmen; die Prüfung bleibt offen, bis
 jemand unterschreibt. Die Anforderung ist **gesiegelt** (Grund, Konto,
 Zeit): Eine per Datenbank gesetzte „Korrektur angefordert“ meldet die
-Integritätsprüfung, und ihr Grund kommt nie in eine Fassung. Ein Neuversuch
+Integritätsprüfung, und ihr Grund kommt nie in eine Fassung. Wurde
+`app.key` seit der Anforderung gewechselt, lässt sich ihr Siegel nicht mehr
+prüfen: Unterschreiben geht dann nicht, die Integritätsprüfung nennt sie
+„nicht prüfbar“, und wer unterschreiben darf, fordert die Korrektur einfach
+neu an. Ein Neuversuch
 eines älteren Durchgangs (nach einem Netzfehler) unterschreibt keine
 Fassung, die erst danach zur Korrektur ging – sie steht mit „bitte neu
 unterschreiben“ in der Fehlerliste.

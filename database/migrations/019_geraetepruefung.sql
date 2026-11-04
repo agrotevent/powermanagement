@@ -231,6 +231,9 @@ CREATE UNIQUE INDEX idx_gp_kunden_zuordnung ON gp_kunden_zuordnung (schluessel)
 -- korrektur_siegel  HMAC über Bericht, Fassung, Grund, Konto und Zeit der
 --                   Korrektur (Schlüssel wie siegel) – ohne ihn gilt eine per
 --                   SQL gesetzte „Korrektur angefordert“ als Befund
+-- korrektur_schluessel_id  Kennung des Schlüssels, mit dem korrektur_siegel
+--                   entstand (nach einem Wechsel von app.key: nicht prüfbar,
+--                   die Korrektur wird neu angefordert)
 CREATE TABLE gp_berichte (
     id {{PK}},
     pruefung_id INT NOT NULL,
@@ -258,6 +261,7 @@ CREATE TABLE gp_berichte (
     korrektur_von INT NULL,
     korrektur_am {{TS}} NULL,
     korrektur_siegel VARCHAR(64) NOT NULL DEFAULT '',
+    korrektur_schluessel_id VARCHAR(16) NOT NULL DEFAULT '',
     created_at {{TS}} NOT NULL
 ){{ENGINE}}
 ;--split

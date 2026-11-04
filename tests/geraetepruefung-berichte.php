@@ -384,6 +384,19 @@ try {
     $k = PruefberichtService::korrektur($bK2['id'], 'Seriennummer falsch');
     pruefe($k['ok'] && PruefberichtService::find($bK2['id'])['status'] === 'korrektur', 'Korrektur angefordert');
     gleich(PruefberichtService::korrektur($bK2['id'], 'noch einmal')['status'], 409, 'nicht zweimal');
+    // Nach einem Wechsel von app.key ist das Siegel der Korrektur nicht prüfbar: kein Unterschreiben,
+    // ein Befund in der Integrität – und die Korrektur lässt sich neu anfordern.
+    $kAlt = Database::first('SELECT korrektur_grund, korrektur_von, korrektur_am, korrektur_siegel, korrektur_schluessel_id FROM gp_berichte WHERE id = ?', [$bK2['id']]);
+    gleich($kAlt['korrektur_schluessel_id'], PruefberichtService::schluesselId(), 'Korrektur mit der Kennung des Schlüssels');
+    Database::execute("UPDATE gp_berichte SET korrektur_schluessel_id = '0000aaaa' WHERE id = ?", [$bK2['id']]);
+    $e = PruefberichtService::unterschreiben([$pKunde2], $u($anfrage()));
+    pruefe(!$e['ok'] && str_contains(implode(' ', array_column($e['fehler'] ?? [], 'message')), 'neu anfordern')
+        && Database::scalar('SELECT COUNT(*) FROM gp_berichte WHERE pruefung_id = ?', [$pKunde2]) === 1, 'Korrektur unter altem Schlüssel: nicht unterschrieben');
+    pruefe(str_contains(implode(' ', PruefberichtService::integritaet($bK2['id'])['befunde']), 'anderem Schlüssel'), '… Befund „nicht prüfbar“');
+    $k = PruefberichtService::korrektur($bK2['id'], 'Seriennummer falsch');
+    $kNeu = Database::first('SELECT korrektur_schluessel_id FROM gp_berichte WHERE id = ?', [$bK2['id']]);
+    pruefe($k['ok'] && $kNeu['korrektur_schluessel_id'] === PruefberichtService::schluesselId() && PruefberichtService::integritaet($bK2['id'])['ok'],
+        '… neu angefordert: mit dem jetzigen Schlüssel gesiegelt');
     pruefe(in_array($pKunde2, array_column(PruefberichtService::liste(['status' => 'offen']), 'id'), true)
         && !in_array($pKunde2, array_column(PruefberichtService::liste(['status' => 'unterschrieben']), 'id'), true), 'die Prüfung ist wieder offen');
     $nAlt = Database::first('SELECT * FROM pruefnachweise WHERE gp_bericht_id = ?', [$bK2['id']]);
