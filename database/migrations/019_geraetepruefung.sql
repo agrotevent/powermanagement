@@ -215,7 +215,8 @@ CREATE UNIQUE INDEX idx_gp_kunden_zuordnung ON gp_kunden_zuordnung (schluessel)
 -- Prüfberichte: eine Zeile je unterschriebener Fassung, eingefroren ab dem
 -- Anlegen (Unterschrift, Nummer, Inhalt, Siegel und PDF in einem Schritt).
 -- nummer            GP-<jahr>-<laufnr>, Korrektur: dieselbe + '-K<fassung-1>'
--- status            gueltig | ersetzt (durch die Fassung ersetzt_durch_id)
+-- status            gueltig | korrektur (angefordert, noch gültig bis zur neuen
+--                   Fassung) | ersetzt (durch die Fassung ersetzt_durch_id)
 -- grund             Grund der Korrektur
 -- kunde_id          Kopie zum Filtern; der Inhalt trägt die eingefrorene Kopie
 -- ergebnis          Kopie aus dem Inhalt (bestanden | nicht_bestanden)
@@ -223,6 +224,10 @@ CREATE UNIQUE INDEX idx_gp_kunden_zuordnung ON gp_kunden_zuordnung (schluessel)
 -- kette_hash, siegel  Kette über Inhalt, Unterschrift und Konto; siegel =
 --                   HMAC darüber mit einem aus app.key abgeleiteten Schlüssel
 -- pruefer_id        users.id des Unterzeichners
+-- Strang C: korrektur_grund, korrektur_von, korrektur_am – eine angeforderte
+--                   Korrektur (status korrektur): die Prüfung ist wieder offen,
+--                   beim nächsten Unterschreiben entsteht Fassung n+1 mit
+--                   diesem Grund; nicht Teil der Kette (kein Inhalt)
 CREATE TABLE gp_berichte (
     id {{PK}},
     pruefung_id INT NOT NULL,
@@ -246,6 +251,9 @@ CREATE TABLE gp_berichte (
     schluessel_id VARCHAR(16) NOT NULL,
     pdf_hash CHAR(64) NOT NULL,
     eingefroren_am {{TS}} NOT NULL,
+    korrektur_grund VARCHAR(500) NOT NULL DEFAULT '',
+    korrektur_von INT NULL,
+    korrektur_am {{TS}} NULL,
     created_at {{TS}} NOT NULL
 ){{ENGINE}}
 ;--split
