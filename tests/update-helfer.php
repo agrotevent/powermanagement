@@ -1154,6 +1154,17 @@ try {
     sort($zustandNachher);
     gleich($zustandNachher, $zustandVorher, '--auftrag-pruefen: der Zustand bleibt unberührt');
 
+    // Jeder Hinweis, den update-debian.sh schreibt, steht in der Liste des
+    // Helfers – einen unbekannten nimmt ergebnis_lesen() als ungültige
+    // Ergebnisdatei („abgebrochen“/„unterbrochen“) – und hat einen Satz in PHP.
+    preg_match_all('/WARNUNGEN\+=\(([a-z_]+)\)/', (string) file_get_contents(dirname(__DIR__) . '/deploy/update-debian.sh'), $treffer);
+    preg_match('/^WARNUNGEN_BEKANNT="([^"]*)"/m', (string) file_get_contents(HELFER), $bekannt);
+    $codes = array_values(array_unique($treffer[1]));
+    gleich(array_values(array_diff($codes, preg_split('/\s+/', trim($bekannt[1] ?? '')) ?: [])), [],
+        'jeder Hinweis aus update-debian.sh ist dem Helfer bekannt (' . implode(', ', $codes) . ')');
+    gleich(array_values(array_filter($codes, static fn (string $c): bool => str_starts_with(\App\Services\UpdateService::warnungText($c), 'Hinweis: '))), [],
+        '… und hat einen eigenen Satz (UpdateService::warnungText)');
+
     // --------------------------------------------- 15 · nur als root: Code-Prüfung und setpriv
     if (!ALS_ROOT) {
         fwrite(STDOUT, "  (Prüfung des Codes und setpriv übersprungen – nur als root)\n");

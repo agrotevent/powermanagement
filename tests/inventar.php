@@ -295,6 +295,17 @@ try {
         MesspunktService::speichern($fremd, null, ['geraet' => $gr('mehrkanal'), 'kanal' => '']);
         alsBenutzer($techniker);
         gleich(Zugriff::darfSteuern($mehr, 'switch:0', AnlagenService::find($eigen)), false, '… misst das ganze Gerät (ohne Kanal) auch an der fremden, schaltet auch Kanal 0 nicht');
+        // Das ganze Gerät an der eigenen, Kanal 1 an der fremden: Kanal 1 auch
+        // unter anderem Namen nicht (shelly() schaltet switch:01 und relay:1
+        // wie switch:1).
+        Database::execute('DELETE FROM messpunkte WHERE geraet = ?', [$gr('mehrkanal')]);
+        alsBenutzer($benutzer);
+        pruefe(MesspunktService::speichern($eigen, null, ['geraet' => $gr('mehrkanal'), 'kanal' => ''])['ok']
+            && MesspunktService::speichern($fremd, null, ['geraet' => $gr('mehrkanal'), 'kanal' => 'switch:1'])['ok'], 'Mehrkanal-Shelly: ganzes Gerät eigen, Kanal 1 fremd');
+        alsBenutzer($techniker);
+        gleich([Zugriff::darfSteuern($mehr, 'switch:0'), Zugriff::darfSteuern($mehr, 'switch:1'), Zugriff::darfSteuern($mehr, 'switch:01'),
+            Zugriff::darfSteuern($mehr, 'relay:1'), Zugriff::darfSteuern($mehr, 'relay:01', AnlagenService::find($eigen))], [true, false, false, false, false],
+            '… Kanal 0 schaltet, Kanal 1 weder als switch:1 noch als switch:01 oder relay:1');
         Database::execute('DELETE FROM messpunkte WHERE geraet = ?', [$gr('mehrkanal')]);
         Zugriff::vergessen();
     } finally {

@@ -684,19 +684,34 @@ final class Zugriff
      * Die Anlagen, an denen hängt, was darfSteuern() schaltet: beim Shelly mit
      * Kanal die, an denen ein jetziger Messpunkt dieses Kanals oder einer ohne
      * Kanal misst – sonst (ohne Kanal, andere Geräte, Kanal nirgends) alle
-     * Anlagen des Geräts.
+     * Anlagen des Geräts. Verglichen wird das Relais (shellyRelais()), nicht
+     * der Text: switch:1, switch:01 und relay:1 schaltet Steuerung::shelly()
+     * gleich – sonst ginge der fremde Kanal unter anderem Namen durch.
      *
      * @param list<array<string,mixed>> $objekte objekteZuGeraet()
      * @return list<array<string,mixed>>
      */
     private static function anlagenZumKanal(array $datenquelle, string $kanal, array $objekte): array
     {
-        if ($kanal === '' || (string) ($datenquelle['art'] ?? '') !== 'shelly') {
+        $relais = self::shellyRelais($kanal);
+        if ($relais === null || (string) ($datenquelle['art'] ?? '') !== 'shelly') {
             return $objekte;
         }
         $kanaele = self::$geraeteKanaele[(string) $datenquelle['geraet']] ?? [];
-        $treffer = array_values(array_filter($objekte, static fn (array $o): bool
-            => isset($kanaele[(int) $o['id']][$kanal]) || isset($kanaele[(int) $o['id']][''])));
+        $treffer = array_values(array_filter($objekte, static function (array $o) use ($kanaele, $relais): bool {
+            foreach (array_keys($kanaele[(int) $o['id']] ?? []) as $k) {
+                if ((string) $k === '' || self::shellyRelais((string) $k) === $relais) {
+                    return true;
+                }
+            }
+            return false;
+        }));
         return $treffer !== [] ? $treffer : $objekte;
+    }
+
+    /** Das Relais, das Steuerung::shelly() für diesen Kanal schaltet – null, wenn es keins ist. */
+    private static function shellyRelais(string $kanal): ?int
+    {
+        return preg_match('/^(switch|relay):(\d+)$/', $kanal, $m) === 1 ? (int) $m[2] : null;
     }
 }
