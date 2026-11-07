@@ -929,15 +929,39 @@ ordner_anlegen() {
     install -d -m 700 "$PROTOKOLLE" "$ZUSTAND"
 }
 
+# Ohne fs.protected_hardlinks darf der Anwendungsbenutzer feste Verweise auf
+# Dateien anlegen, die ihm nicht gehören (etwa deploy/update-helfer.sh, das
+# der Update-Dienst als root startet). Ein rekursives chown als root in
+# storage/ übereignete ihm dann deren Inhalt – und rennfrei geht ein chown
+# als root in einem Ordner, der ihm gehört, ohne diesen Schutz nicht.
+# Debian und Proxmox schalten ihn ein; im LXC gilt der Wert des Hosts.
+HARDLINK_SCHUTZ="/proc/sys/fs/protected_hardlinks"
+hardlinks_geschuetzt() {
+    [[ "$(cat -- "$HARDLINK_SCHUTZ" 2>/dev/null || true)" == 1 ]]
+}
+hardlinks_hinweis() {
+    hinweis "fs.protected_hardlinks ist aus – ohne diesen Schutz übergibt root storage/ nicht rekursiv der Anwendung"
+    hinweis "(ein fester Verweis dort bekäme sonst eine fremde Datei). Einschalten – im LXC auf dem Host:"
+    hinweis "  sysctl -w fs.protected_hardlinks=1, dauerhaft mit einer Datei in /etc/sysctl.d/ – dann das Update noch einmal."
+}
+
 # Rechte wie bei der Installation: Code gehört root, storage/ der
 # Anwendung. storage/ und config.php bleiben dabei außen vor – die
 # Oberfläche läuft weiter und soll nicht kurz ihre Dateien verlieren.
+# rechte_setzen zurueck: beim Zurückrollen fehlt der Schutz nur mit Hinweis
+# (stufe1 beginnt ohne ihn gar nicht erst).
 rechte_setzen() {
     find "$ZIEL" -path "$ZIEL/storage" -prune -o ! -path "$ZIEL/config/config.php" \
         -exec chown root:root {} + -exec chmod go+rX,go-w {} +
     # Was git eben als root in storage/ angelegt hat (neue .gitkeep-Ordner),
     # erst der Anwendung übereignen – sonst darf sie dort keine Rechte setzen.
-    chown -R -P "$APP_USER:$APP_USER" "$ZIEL/storage"
+    # Nur mit fs.protected_hardlinks (siehe oben), sonst Abbruch.
+    if hardlinks_geschuetzt; then
+        chown -R -P "$APP_USER:$APP_USER" "$ZIEL/storage"
+    else
+        hardlinks_hinweis
+        [[ "${1:-}" == "zurueck" ]] || return 1
+    fi
     ordner_anlegen
     if [[ -f "$ZIEL/config/config.php" ]]; then
         chown "root:$APP_USER" "$ZIEL/config/config.php"
@@ -1183,6 +1207,10 @@ abgleichen() {
                 if ! grep -q 'location = /standorte/grundriss' "$SITE"; then
                     hinweis "  Darin fehlt der Block für Grundrisse bis 100 MB (location = /standorte/grundriss,"
                     hinweis "  client_max_body_size 105m) – von dort übernehmen, sonst lehnt nginx große Pläne ab."
+                fi
+                if ! grep -q 'location = /login' "$SITE"; then
+                    hinweis "  Darin fehlen die Bremsen für Anmeldung und Grundriss-Upload (location = /login,"
+                    hinweis "  limit_conn pm_plan, die Zonen oben) – zum Schutz von dort übernehmen."
                 fi
                 WARNUNGEN+=(site_behalten) ;;
         esac
@@ -1668,7 +1696,7 @@ zurueckrollen() {   # zurueckrollen <grund> [<zeile>]
         exit 3
     fi
 
-    rechte_setzen
+    rechte_setzen zurueck
     FPM_VERSION="$(fpm_version)"
     local fpm_angehalten="nein" daten_luecke="nein" flows_zurueck="nein" v
     if [[ "$MIGRIERT" == "ja" ]]; then
@@ -1880,6 +1908,16 @@ stufe1() {
             exit 1
         else
             hinweis "--erzwingen: die Änderungen werden verworfen."
+        fi
+    fi
+
+    # Ohne fs.protected_hardlinks gar nicht erst beginnen – rechte_setzen
+    # bräche sonst nach dem Checkout ab, und das Update rollte zurück.
+    if ! hardlinks_geschuetzt; then
+        hardlinks_hinweis
+        if [[ "$NUR_ZEIGEN" != "ja" ]]; then
+            ergebnis nicht_begonnen einrichtung
+            exit 1
         fi
     fi
 

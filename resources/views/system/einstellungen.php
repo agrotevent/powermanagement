@@ -59,7 +59,8 @@ $feld = static function (string $schluessel, string $typ = 'text', string $platz
                 <?= $feld('influx.url') ?><?= $feld('influx.database') ?><?= $feld('influx.org') ?><?= $feld('influx.username') ?>
                 <div class="field"><label for="influx_token">API-Token (2.x/3.x)</label><input id="influx_token" name="influx_token" type="password" autocomplete="new-password" placeholder="<?= $geheim['influx'] ? 'hinterlegt – leer lassen zum Behalten' : '' ?>"></div>
                 <div class="field"><label for="influx_password">Kennwort (1.8)</label><input id="influx_password" name="influx_password" type="password" autocomplete="new-password"></div>
-                <p class="help">Abgefragt wird mit InfluxQL über /query – das verstehen 1.8, 2.x (DBRP-Zuordnung) und 3.x. „-“ entfernt ein Geheimnis.</p>
+                <p class="help">Abgefragt wird mit InfluxQL über /query – das verstehen 1.8, 2.x (DBRP-Zuordnung) und 3.x. „-“ entfernt ein Geheimnis.
+                    Token und Kennwort gelten nur für die Adresse (das Kennwort auch nur für den Benutzer), für die sie eingetragen sind – wer sie ändert, trägt sie neu ein.</p>
             </div>
         </div>
         <div class="card">
@@ -69,7 +70,7 @@ $feld = static function (string $schluessel, string $typ = 'text', string $platz
                 <div class="field"><label for="mqtt_password">Kennwort</label><input id="mqtt_password" name="mqtt_password" type="password" autocomplete="new-password" placeholder="<?= $geheim['mqtt'] ? 'hinterlegt – leer lassen zum Behalten' : '' ?>"></div>
                 <?= $feld('sammler.ziel', 'text', 'mqtt') ?>
                 <p class="help">Der Sammler (Modbus, Clouds) schreibt nach <code>pm/messwert/&lt;gerät&gt;/&lt;kanal&gt;</code>; Node-RED übernimmt in die InfluxDB.
-                    Mit „influx“ schreibt er direkt, ohne Node-RED.</p>
+                    Mit „influx“ schreibt er direkt, ohne Node-RED. Das Kennwort gilt nur für Host, Port und Benutzer, für die es eingetragen ist – wer sie ändert, trägt es neu ein.</p>
             </div>
         </div>
     </div>
@@ -94,7 +95,7 @@ $feld = static function (string $schluessel, string $typ = 'text', string $platz
         <div>
             <div class="field"><label for="token">Zugangstoken</label><input id="token" name="token" type="password" autocomplete="new-password"
                 placeholder="<?= $geheim['repo'] === 'eingetragen' ? 'hinterlegt – leer lassen zum Behalten' : ($geheim['repo'] === 'umgebung' ? 'kommt aus der Umgebung' : '') ?>">
-                <div class="help">Verschlüsselt abgelegt, nie wieder angezeigt. „-“ entfernt es. Alternativ Umgebungsvariable POWERMANAGEMENT_REPO_TOKEN im PHP-FPM-Pool.</div></div>
+                <div class="help">Verschlüsselt abgelegt, nie wieder angezeigt. „-“ entfernt es. Gilt nur für den Server, für den es eingetragen ist. Alternativ Umgebungsvariable POWERMANAGEMENT_REPO_TOKEN im PHP-FPM-Pool – die gilt nur für den Server aus config.php (inventory.repo_url).</div></div>
         </div>
     </div>
     <div class="card-footer"><button class="btn btn-primary" type="submit">Speichern</button></div>

@@ -105,9 +105,12 @@ MQTT-Zugänge*). Der Benutzer ist bei Gen2+ das Präfix (`<id>` oder
 Baum des Geräts lesen und schreiben (`<präfix>/#` bzw. `shellies/<id>/#`)
 und `shellies/command` lesen. Sobald bestätigt ist, dass das Gerät über
 den eigenen Zugang verbunden ist, sperrt der Broker diesen Baum für den
-gemeinsamen Zugang `shelly`. Gen1-Geräte mit eigenem Zugang dürfen
+gemeinsamen Zugang `shelly` – bei einem Gen1-Gerät auch den Rundruf
+`shellies/command`. Gen1-Geräte mit eigenem Zugang dürfen
 `shellies/announce` nicht schreiben; Modell und Firmware kommen dann aus
-`shellies/<id>/announce`.
+`shellies/<id>/announce`. Node-RED fragt `announce` je Gerät über
+`shellies/<id>/command`, sobald sich ein Gerät meldet (danach alle sechs
+Stunden), nie über den Rundruf.
 
 **Schutz vor Doppelgängern:** Node-RED bildet den Gerätenamen aus dem
 Präfix (letztes Segment, klein). `kuehlhaus/…` ergibt also denselben Namen

@@ -665,6 +665,12 @@ pruefe_grenzen() {
     code="$(head -c $((17 * 1024 * 1024)) /dev/zero | curl -s -o /dev/null -w '%{http_code}' --max-time 60 -H 'Host: powermanagement.lan' \
         -H 'Expect:' -H 'Transfer-Encoding: chunked' -H 'Content-Type: application/octet-stream' --data-binary @- http://127.0.0.1/login 2>/dev/null)" || true
     pruefe "nginx: 17 MiB in Stücken an /login → 413 (kam: ${code:-000})" test "${code:-000}" = 413
+    # Die Anmeldung hat ihren eigenen Block mit 64k (und einer Bremse nur für POST).
+    if grep -q 'location = /login' "$ZIEL/deploy/nginx-powermanagement.conf"; then
+        code="$(head -c $((70 * 1024)) /dev/zero | curl -s -o /dev/null -w '%{http_code}' --max-time 20 -H 'Host: powermanagement.lan' \
+            -H 'Expect:' -H 'Transfer-Encoding: chunked' -H 'Content-Type: application/octet-stream' --data-binary @- http://127.0.0.1/login 2>/dev/null)" || true
+        pruefe "nginx: 70 KiB in Stücken an /login → 413 (kam: ${code:-000})" test "${code:-000}" = 413
+    fi
     seite="$(head -c $((51 * 1024 * 1024)) /dev/zero | curl -s --max-time 60 -H 'Host: powermanagement.lan' -H 'Expect:' \
         -H 'Transfer-Encoding: chunked' -H 'Content-Type: application/json' --data-binary @- http://127.0.0.1/api/v1/locations/x/vorschlaege 2>/dev/null)" || true
     pruefe "nginx: 51 MiB in Stücken an /api/ → 413 als JSON" grep -q 'Der Körper ist zu groß' <<<"$seite"
