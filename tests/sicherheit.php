@@ -504,6 +504,158 @@ try {
         && Response::sichererPfad("/\t/evil.example") === null && Response::sichererPfad('//evil.example') === null
         && Response::sichererPfad('https://evil.example') === null, 'Weiterleitungen nur auf eigene Pfade');
 
+    // ------------------------------------------------ Konten und Anmeldung (Prüfung 2026-11)
+    // Eine Rolle gibt ihre Freigaben mit: vergeben nur, wer ihre Rechte hat und jede ihrer
+    // Freigaben vergeben dürfte; ein Konto verwaltet nur, wer auch seine Freigaben vergeben dürfte.
+    $rollen['vw'] = (int) BenutzerService::rolleSpeichern(null, $k . ' vw', '', ['system.users.manage', 'dashboard.view', 'anlagen.view', 'steuern'])['id'];
+    $rollen['schicht'] = (int) BenutzerService::rolleSpeichern(null, $k . ' schicht', '', ['dashboard.view', 'anlagen.view', 'steuern'])['id'];
+    $rollen['mitte'] = (int) BenutzerService::rolleSpeichern(null, $k . ' mitte', '', ['dashboard.view', 'anlagen.view', 'steuern'])['id'];
+    BenutzerService::freigabeSpeichern(['subject_type' => 'role', 'subject_id' => $rollen['schicht'], 'ziel_art' => 'alles', 'darf_bearbeiten' => 1, 'darf_steuern' => 1]);
+    $benutzer['vw'] = BenutzerService::anlegen($k . '-vw', 'Pruefung2026!!', $rolleKey($rollen['vw']), false);
+    $benutzer['techn'] = BenutzerService::anlegen($k . '-techn', 'Pruefung2026!!', $rolleKey($rollen['mitte']), false);
+    $benutzer['schichtler'] = BenutzerService::anlegen($k . '-schichtler', 'Pruefung2026!!', $rolleKey($rollen['schicht']), false);
+    $benutzer['mitte'] = BenutzerService::anlegen($k . '-mitte', 'Pruefung2026!!', $rolleKey($rollen['mitte']), false);
+    BenutzerService::freigabeSpeichern(['subject_type' => 'user', 'subject_id' => $benutzer['techn'], 'ziel_art' => 'alles', 'darf_bearbeiten' => 1, 'darf_steuern' => 1]);
+    alsBenutzer($benutzer['vw']);
+    pruefe(str_contains((string) BenutzerService::rolleVergebenFehler($rollen['schicht']), 'Freigaben') && BenutzerService::darfRolleVergeben($rollen['mitte']),
+        'Rolle mit Freigabe „alles + schalten“ vergibt der Verwalter nicht, obwohl er alle ihre Rechte hat – dieselbe ohne Freigabe schon');
+    pruefe(BenutzerService::vergabeFehler($benutzer['vw'], [], [$rollen['vw'] => ['aktiv' => 1], $rollen['schicht'] => ['aktiv' => 1]]) !== null
+        && BenutzerService::vergabeFehler(null, [], [$rollen['schicht'] => ['aktiv' => 1]]) !== null
+        && BenutzerService::vergabeFehler($benutzer['mitte'], [], [$rollen['mitte'] => ['aktiv' => 1], $rollen['schicht'] => ['aktiv' => 1]]) !== null,
+        '… weder sich selbst noch einem neuen noch einem anderen Konto');
+    gleich(BenutzerService::vergabeFehler($benutzer['mitte'], [], [$rollen['mitte'] => ['aktiv' => 1]]), null, 'eine Rolle ohne Freigaben vergibt er weiter');
+    $ssoAnfrage = Database::insert('sso_anfragen', ['schluessel' => hash('sha256', $k . '-anfrage'), 'aussteller' => \App\Auth\Sso\Einstellungen::aussteller(),
+        'subjekt' => $k . '-sub', 'name_dort' => $k . '-dort', 'gruppen' => '[]', 'erste_am' => gmdate('c'), 'letzte_am' => gmdate('c')]);
+    $r = \App\Auth\Sso\Konten::anfrageAnlegen($ssoAnfrage, ['username' => $k . '-ausanfrage', 'rollen' => [(string) $rollen['schicht']]]);
+    if (isset($r['user_id'])) {
+        $benutzer['ausanfrage'] = (int) $r['user_id'];
+    }
+    pruefe(!$r['ok'] && str_contains($r['message'], 'Freigaben') && Database::first('SELECT id FROM users WHERE username = ?', [$k . '-ausanfrage']) === null,
+        'Anmeldeanfrage: kein Konto mit dieser Rolle (Freigaben) – ' . $r['message']);
+    pruefe(str_contains((string) \App\Auth\Sso\Konten::zuordnungRechtFehler('rolle', $rollen['schicht']), 'Freigaben'), 'Gruppe → Rolle mit Freigaben ebenso nicht');
+    Database::delete('sso_anfragen', $ssoAnfrage);
+    // Konten mit Freigaben, die er nicht vergeben dürfte – am Konto oder an einer Rolle, auch einer künftigen.
+    pruefe(!BenutzerService::darfVerwalten($benutzer['techn']) && !BenutzerService::darfVerwalten($benutzer['schichtler']),
+        'ein Konto mit Freigabe „alles + schalten“ (am Konto oder über die Rolle) verwaltet er nicht (Kennwort setzen, SSO anhängen)');
+    pruefe(BenutzerService::darfVerwalten($benutzer['mitte']) && BenutzerService::darfVerwalten($benutzer['vw']), '… eines ohne Freigaben und das eigene schon');
+    Database::insert('user_roles', ['user_id' => $benutzer['mitte'], 'role_id' => $rollen['schicht'], 'gueltig_ab' => gmdate('c', time() + 86400), 'gueltig_bis' => null]);
+    pruefe(!BenutzerService::darfVerwalten($benutzer['mitte']), '… auch nicht, wenn die Rolle mit der Freigabe erst morgen gilt');
+    pruefe(!\App\Auth\Sso\Konten::anfrageFreischalten(0, $benutzer['techn'])['ok'], 'Anmeldeanfrage nicht an ein solches Konto');
+    Database::execute('DELETE FROM user_roles WHERE user_id = ? AND role_id = ?', [$benutzer['mitte'], $rollen['schicht']]);
+    // Bestehende, von der Administration vergebene Rolle am eigenen Konto: bleibt, solange sie nicht verlängert wird.
+    Database::insert('user_roles', ['user_id' => $benutzer['vw'], 'role_id' => $rollen['schicht'], 'gueltig_ab' => null, 'gueltig_bis' => Zeit::ausEingabe(date('Y-m-d', time() + 30 * 86400), true)]);
+    $schichtBis = date('Y-m-d', time() + 30 * 86400);
+    gleich(BenutzerService::vergabeFehler($benutzer['vw'], [], [$rollen['vw'] => ['aktiv' => 1], $rollen['schicht'] => ['aktiv' => 1, 'bis' => $schichtBis]]), null,
+        'eigenes Konto mit einer Rolle der Administration speichern: geht, die Rolle bleibt');
+    pruefe(BenutzerService::vergabeFehler($benutzer['vw'], [], [$rollen['vw'] => ['aktiv' => 1], $rollen['schicht'] => ['aktiv' => 1]]) !== null,
+        '… aber nicht unbefristet verlängern');
+    Database::execute('DELETE FROM user_roles WHERE user_id = ? AND role_id = ?', [$benutzer['vw'], $rollen['schicht']]);
+
+    // Wer befristet Benutzer verwaltet, vergibt Enden höchstens bis zum eigenen und verlängert sich nicht.
+    $morgen = date('Y-m-d', time() + 86400);
+    $inZwei = date('Y-m-d', time() + 2 * 86400);
+    $inDrei = date('Y-m-d', time() + 3 * 86400);
+    Database::update('users', $benutzer['vw'], ['gueltig_bis' => Zeit::ausEingabe($inZwei, true)]);
+    alsBenutzer($benutzer['vw']);
+    gleich(BenutzerService::eigenesEnde(), Zeit::ts(Zeit::ausEingabe($inZwei, true)), 'eigenes Ende: das des Kontos');
+    pruefe(BenutzerService::vergabeFehler(null, ['gueltig_bis' => ''], [$rollen['mitte'] => ['aktiv' => 1]]) !== null
+        && BenutzerService::vergabeFehler(null, ['gueltig_bis' => $inDrei], []) !== null,
+        'befristeter Verwalter: neues Konto ohne Ende oder nach dem eigenen → abgelehnt');
+    gleich([BenutzerService::vergabeFehler(null, ['gueltig_bis' => $morgen], [$rollen['mitte'] => ['aktiv' => 1]]),
+        BenutzerService::vergabeFehler($benutzer['mitte'], ['gueltig_bis' => ''], [$rollen['mitte'] => ['aktiv' => 1]])], [null, null],
+        '… bis zum eigenen Ende schon (die Rolle endet mit dem Konto); ein bestehendes Konto ohne Ende bleibt, wie es ist');
+    pruefe(BenutzerService::vergabeFehler($benutzer['mitte'], ['gueltig_bis' => ''], [$rollen['vw'] => ['aktiv' => 1]]) !== null
+        && BenutzerService::vergabeFehler($benutzer['mitte'], ['gueltig_bis' => ''], [$rollen['vw'] => ['aktiv' => 1, 'bis' => $inDrei]]) !== null
+        && BenutzerService::vergabeFehler($benutzer['mitte'], ['gueltig_bis' => ''], [$rollen['vw'] => ['aktiv' => 1, 'bis' => $morgen]]) === null,
+        '… eine neue Rolle an einem Konto ohne Ende nur mit Ende bis zum eigenen');
+    pruefe(BenutzerService::vergabeFehler($benutzer['vw'], ['gueltig_bis' => ''], [$rollen['vw'] => ['aktiv' => 1]]) !== null
+        && BenutzerService::vergabeFehler($benutzer['vw'], ['gueltig_bis' => $inDrei], [$rollen['vw'] => ['aktiv' => 1]]) !== null
+        && BenutzerService::vergabeFehler($benutzer['vw'], ['gueltig_bis' => $morgen], [$rollen['vw'] => ['aktiv' => 1]]) === null,
+        '… das eigene Konto nicht verlängern (kürzen schon)');
+    Database::update('users', $benutzer['vw'], ['gueltig_bis' => null]);
+    Database::execute('UPDATE user_roles SET gueltig_bis = ? WHERE user_id = ? AND role_id = ?', [Zeit::ausEingabe($inZwei, true), $benutzer['vw'], $rollen['vw']]);
+    alsBenutzer($benutzer['vw']);
+    pruefe(BenutzerService::eigenesEnde() === Zeit::ts(Zeit::ausEingabe($inZwei, true))
+        && BenutzerService::vergabeFehler($benutzer['vw'], [], [$rollen['vw'] => ['aktiv' => 1]]) !== null
+        && BenutzerService::vergabeFehler($benutzer['vw'], [], [$rollen['vw'] => ['aktiv' => 1, 'bis' => $inDrei]]) !== null
+        && BenutzerService::vergabeFehler($benutzer['vw'], [], [$rollen['vw'] => ['aktiv' => 1, 'bis' => $inZwei]]) === null,
+        'eigenes Ende aus der Rolle mit „Benutzer verwalten“: die eigene Rolle nicht verlängern, unverändert speichern geht');
+    Database::execute("UPDATE user_roles SET quelle = 'sso' WHERE user_id = ? AND role_id = ?", [$benutzer['vw'], $rollen['vw']]);
+    alsBenutzer($benutzer['vw']);
+    gleich(BenutzerService::eigenesEnde(), null, 'eine Rolle aus einer Gruppe beim Anmeldedienst zählt als unbefristet (ihr Ende ist das der Sitzung)');
+    Database::execute("UPDATE user_roles SET quelle = 'hand', gueltig_bis = NULL WHERE user_id = ? AND role_id = ?", [$benutzer['vw'], $rollen['vw']]);
+    Database::insert('user_roles', ['user_id' => $benutzer['vw'], 'role_id' => $rollen['mitte'], 'gueltig_ab' => null, 'gueltig_bis' => Zeit::ausEingabe($morgen, true)]);
+    alsBenutzer($benutzer['vw']);
+    pruefe(BenutzerService::eigenesEnde() === null
+        && BenutzerService::vergabeFehler($benutzer['vw'], [], [$rollen['vw'] => ['aktiv' => 1], $rollen['mitte'] => ['aktiv' => 1, 'bis' => $inDrei]]) !== null
+        && BenutzerService::vergabeFehler($benutzer['vw'], [], [$rollen['vw'] => ['aktiv' => 1], $rollen['mitte'] => ['aktiv' => 1, 'bis' => $morgen]]) === null,
+        'unbefristeter Verwalter ohne „*“: eine eigene Rolle verlängert er nicht selbst');
+    Database::execute('DELETE FROM user_roles WHERE user_id = ? AND role_id = ?', [$benutzer['vw'], $rollen['mitte']]);
+    alsBenutzer($benutzer['admin']);
+    gleich([BenutzerService::eigenesEnde(), BenutzerService::vergabeFehler(null, ['gueltig_bis' => ''], [$rollen['schicht'] => ['aktiv' => 1]])], [null, null],
+        'die Administration ist nicht gedeckelt');
+    alsBenutzer(null);
+
+    // Fehlgeschlagene Anmeldungen: der Name höchstens 64 Zeichen im Audit, die Bremse einmal je Fenster.
+    $ipLang = '203.0.113.' . random_int(1, 254);
+    $lang = $k . '-' . str_repeat('x', 300000);
+    gleich(Auth::attempt($lang, 'falsch', $ipLang)['message'], 'Benutzername oder Passwort falsch.', 'überlanger Benutzername: dieselbe Meldung');
+    gleich(Auth::attempt($k . "-\xff\xfe" . str_repeat('y', 80), 'falsch', $ipLang)['message'], 'Benutzername oder Passwort falsch.', 'kein UTF-8: dieselbe Meldung');
+    $namen = array_column(Database::select("SELECT username FROM audit_log WHERE action = 'auth.login_failed' AND ip = ? ORDER BY id", [$ipLang]), 'username');
+    pruefe(count($namen) === 2 && max(array_map('strlen', $namen)) <= 4 * 64 && max(array_map('mb_strlen', $namen)) <= 64
+        && array_filter($namen, static fn (string $n): bool => !mb_check_encoding($n, 'UTF-8') || !str_starts_with($n, $k)) === [],
+        'im Audit höchstens 64 Zeichen gültiges UTF-8 (' . implode(', ', array_map('strlen', $namen)) . ' Bytes)');
+    $ipBremse = '203.0.113.' . random_int(1, 254);
+    $grenzenVorher = [Config::get('security.ip_attempts'), Config::get('security.lockout_attempts')];
+    Config::set('security.ip_attempts', 3);
+    Config::set('security.lockout_attempts', 3);
+    $meldungen = [];
+    for ($i = 0; $i < 12; $i++) {
+        $meldungen[] = Auth::attempt($k . '-flut-' . $i, 'falsch', $ipBremse)['message'];
+    }
+    Config::set('security.ip_attempts', $grenzenVorher[0]);
+    Config::set('security.lockout_attempts', $grenzenVorher[1]);
+    $gebremst = (int) Database::scalar("SELECT COUNT(*) FROM audit_log WHERE action = 'auth.login_failed' AND ip = ? AND details = ?",
+        [$ipBremse, '{"reason":"Adresse gebremst"}']);
+    pruefe(str_starts_with($meldungen[11], 'Zu viele fehlgeschlagene Anmeldungen von dieser Adresse') && $gebremst === 1,
+        'gebremste Adresse: höchstens ein Vermerk je Fenster (' . $gebremst . ' bei 9 gebremsten Versuchen)');
+
+    // Antwortzeit: Platzhalter mit den Kosten von password_hash(), auch ein gesperrtes Konto rechnet.
+    $kosten = static fn (string $hash): ?int => password_get_info($hash)['algoName'] === 'bcrypt' ? (int) password_get_info($hash)['options']['cost'] : null;
+    gleich($kosten(Auth::platzhalter()), $kosten(password_hash('x', PASSWORD_DEFAULT)), 'Platzhalter-Hash: bcrypt mit den Kosten von PASSWORD_DEFAULT');
+    $benutzer['zu'] = BenutzerService::anlegen($k . '-zu', 'Pruefung2026!!', $rolleKey($rollen['klein']), false);
+    Database::update('users', $benutzer['zu'], ['locked_until' => gmdate('c', time() + 900)]);
+    $dauer = static function (callable $f): float {
+        $t = hrtime(true);
+        $f();
+        return (hrtime(true) - $t) / 1e6;
+    };
+    $rechnen = min($dauer(static fn () => password_verify('x', Auth::platzhalter())), $dauer(static fn () => password_verify('x', Auth::platzhalter())));
+    $gesperrtMs = $dauer(static fn () => Auth::attempt($k . '-zu', 'falsch', '203.0.113.' . random_int(1, 254)));
+    pruefe($gesperrtMs >= 0.5 * $rechnen, sprintf('gesperrtes Konto antwortet nicht schneller als ein unbekanntes (%.0f ms, Platzhalter %.0f ms)', $gesperrtMs, $rechnen));
+
+    // Kennwort raten in einer offenen Sitzung: nach zu vielen Fehlversuchen wird es nicht mehr geprüft.
+    $benutzer['rater'] = BenutzerService::anlegen($k . '-rater', 'Pruefung2026!!', $rolleKey($rollen['klein']), false);
+    alsBenutzer($benutzer['rater']);
+    $konto = Auth::user();
+    $antworten = [];
+    for ($i = 0; $i < 5; $i++) {
+        $antworten[] = Auth::kennwortAendern($konto, 'falsch-' . $i, 'Neu2026Kennwort!', 'Neu2026Kennwort!')['message'];
+    }
+    $danach = Auth::kennwortAendern($konto, 'Pruefung2026!!', 'Neu2026Kennwort!', 'Neu2026Kennwort!');
+    pruefe(array_unique($antworten) === ['Das aktuelle Passwort stimmt nicht.'] && !$danach['ok'] && str_starts_with($danach['message'], 'Zu viele falsche Kennwörter')
+        && password_verify('Pruefung2026!!', (string) Database::scalar('SELECT password_hash FROM users WHERE id = ?', [$benutzer['rater']])),
+        'Kennwort ändern: nach fünf falschen wird auch das richtige nicht mehr geprüft – ' . $danach['message']);
+    gleich(Database::first('SELECT failed_logins, locked_until FROM users WHERE id = ?', [$benutzer['rater']]), ['failed_logins' => 0, 'locked_until' => null],
+        '… das Konto bleibt für die Anmeldung offen');
+    pruefe(Auth::bestaetigen('token:1', 'Pruefung2026!!'), '… und das Bestätigen eines Tokens zählt für sich');
+    for ($i = 0; $i < 5; $i++) {
+        Auth::bestaetigen('token:' . (1 + $i), 'falsch-' . $i);
+    }
+    pruefe(!Auth::bestaetigen('token:9', 'Pruefung2026!!') && Auth::bestaetigungGebremst('token:9') > 0,
+        'Token anzeigen: nach fünf falschen Kennwörtern (über alle Tokens) wird auch das richtige nicht mehr angenommen');
+    alsBenutzer(null);
+
     // ------------------------------------------------ Geräte zuordnen und schalten
     $sites['a'] = SiteService::saveSite(null, ['name' => $k . ' A']);
     $sites['b'] = SiteService::saveSite(null, ['name' => $k . ' B']);
@@ -727,6 +879,7 @@ try {
     foreach ($rollen as $id) {
         BenutzerService::rolleLoeschen($id);
     }
+    Database::execute('DELETE FROM sso_anfragen WHERE subjekt LIKE ?', [$k . '%']);
     Database::execute('DELETE FROM audit_log WHERE username LIKE ? OR ip = ? OR details LIKE ?', [$k . '%', $ip, '%' . $k . '%']);
 }
 

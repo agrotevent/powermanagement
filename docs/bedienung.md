@@ -1218,7 +1218,13 @@ Audit-Log*) zeichnet Anmeldungen, Änderungen und Schaltvorgänge auf.
   verraten nicht, ob es ein Konto gibt – auch ein unbekannter Name ist nach
   fünf Versuchen „gesperrt“. Von einer Adresse aus sind im selben Zeitraum
   höchstens 20 Fehlversuche möglich (`security.ip_attempts`), gleich für
-  welche Konten.
+  welche Konten. Im Audit-Log steht je Fehlversuch der Benutzername (höchstens
+  64 Zeichen), für eine gebremste Adresse höchstens ein Eintrag je Zeitraum.
+- Auch in einer offenen Sitzung lässt sich das Kennwort nicht beliebig oft
+  raten: Nach fünf falschen „aktuellen Passwörtern“ beim Ändern (Profil und
+  Kundenbereich) bzw. fünf falschen Kennwörtern beim Anzeigen eines Tokens
+  wird es 15 Minuten lang nicht mehr geprüft (`security.lockout_*`). Die
+  Anmeldung des Kontos bleibt davon unberührt.
 - Wird ein Kennwort geändert – selbst im Profil oder von der Verwaltung –,
   enden alle anderen Sitzungen dieses Kontos. Eine Sitzung endet außerdem
   nach einer Stunde ohne Aktivität (`security.idle_timeout`) und spätestens

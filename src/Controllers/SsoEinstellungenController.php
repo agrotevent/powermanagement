@@ -54,8 +54,8 @@ final class SsoEinstellungenController extends Controller
                 'id'         => (int) $r['id'],
                 'name'       => (string) $r['name'],
                 'verwaltend' => $verwaltend,
-                // Wählbar nur, was man selbst vergeben darf und womit sich ein Mitglied auch anmelden kann.
-                'waehlbar'   => BenutzerService::darfVergeben($r['permissions']) && (!$verwaltend || $admins),
+                // Wählbar nur, was man selbst vergeben darf (Rechte und Freigaben) und womit sich ein Mitglied auch anmelden kann.
+                'waehlbar'   => BenutzerService::darfRolleVergeben((int) $r['id']) && (!$verwaltend || $admins),
                 'freigaben'  => (int) Database::scalar("SELECT COUNT(*) FROM freigaben WHERE subject_type = 'role' AND subject_id = ?", [(int) $r['id']]),
             ];
         }

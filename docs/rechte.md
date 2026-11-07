@@ -31,10 +31,24 @@ aber nicht die Administration hat, kann:
 - keine Rolle mit Rechten anlegen oder ändern, die er selbst nicht hat (und
   nie „alle Rechte“),
 - keine solche Rolle zuweisen – auch nicht sich selbst,
-- kein Konto ändern, sperren, entsperren, löschen oder mit neuem Kennwort
-  versehen, das Rechte hat, die ihm fehlen (etwa einen Administrator),
+- keine Rolle zuweisen, ändern oder löschen, deren Freigaben er selbst nicht
+  vergeben dürfte (siehe unten): Wer eine Rolle bekommt, bekommt ihre
+  Freigaben mit. Eine Rolle, die ein Konto schon hat – etwa von der
+  Administration –, bleibt beim Speichern stehen, solange sie nicht
+  verlängert wird,
+- kein Konto ändern, sperren, entsperren, löschen, mit neuem Kennwort
+  versehen oder mit einer Anmeldung über SSO verknüpfen, das Rechte hat, die
+  ihm fehlen (etwa einen Administrator), oder Freigaben, die er nicht
+  vergeben dürfte – am Konto oder an einer seiner Rollen, auch einer, die
+  erst später gilt,
 - Freigaben nur vergeben, wenn er selbst alle Standorte sieht, und keine auf
-  „alles“ oder mit „schalten“ – die vergibt nur die Administration.
+  „alles“ oder mit „schalten“ – die vergibt nur die Administration,
+- ist sein eigener Zugang befristet (Konto oder die Rolle mit „Benutzer
+  verwalten“), Konten und Rollen höchstens bis zu diesem Ende vergeben – ein
+  neues Konto also nur mit Ende, eine neue Rolle an einem Konto ohne Ende
+  nur mit eigenem Ende –, und das eigene Konto und die eigenen Rollen nicht
+  verlängern (kürzen geht). Rollen aus Gruppen beim Anmeldedienst zählen
+  dabei als unbefristet.
 
 Sonst wäre „Benutzer verwalten“ eine Hintertür zu allem.
 
@@ -182,7 +196,7 @@ Benutzers, sondern die Befugnisse und Standorte des Tokens – Einzelheiten in
 
 | Recht | erlaubt | zusätzlich geprüft |
 |-------|---------|--------------------|
-| „Zugänge (Tokens) für andere Instanzen …“ (`api.manage`) | *System → Schnittstelle (API)*: Zugänge ansehen und widerrufen | Anlegen, Ändern, Anzeigen und Löschen nur mit „Alle Standorte, Anlagen und Messdaten“. Eine Befugnis vergibt nur, wer die Rechte dahinter hat: `plaene.lesen` „Karte ansehen“, `plaene.vorschlagen` und `plaene.schreiben` dazu „Grundrisse pflegen“, `feststrom` „Anlagen ansehen“, `plaene.schreiben` mit `feststrom` dazu „Anlagen ändern“ und „Kabel zeichnen“. Binden nur an das eigene Konto oder eines, das man verwalten darf; eine Bindung lösen oder umbinden nur, wer den bisher gebundenen Benutzer verwalten darf. Anzeigen nur mit dem eigenen Kennwort und nur, wer das Token mit allen Befugnissen und seiner Bindung selbst anlegen dürfte. Ohne „Alle Standorte …“ zeigt die Liste nur die Namen der eigenen Standorte, die übrigen als Anzahl. |
+| „Zugänge (Tokens) für andere Instanzen …“ (`api.manage`) | *System → Schnittstelle (API)*: Zugänge ansehen und widerrufen | Anlegen, Ändern, Anzeigen und Löschen nur mit „Alle Standorte, Anlagen und Messdaten“. Eine Befugnis vergibt nur, wer die Rechte dahinter hat: `plaene.lesen` „Karte ansehen“, `plaene.vorschlagen` und `plaene.schreiben` dazu „Grundrisse pflegen“, `feststrom` „Anlagen ansehen“, `plaene.schreiben` mit `feststrom` dazu „Anlagen ändern“ und „Kabel zeichnen“. Binden nur an das eigene Konto oder eines, das man verwalten darf; eine Bindung lösen oder umbinden nur, wer den bisher gebundenen Benutzer verwalten darf. Anzeigen nur mit dem eigenen Kennwort (nach fünf falschen in 15 Minuten wird es eine Weile nicht mehr geprüft, `security.lockout_*`) und nur, wer das Token mit allen Befugnissen und seiner Bindung selbst anlegen dürfte. Ohne „Alle Standorte …“ zeigt die Liste nur die Namen der eigenen Standorte, die übrigen als Anzahl. |
 | „Andere Instanzen eintragen …“ (`api.partner`) | *Standorte → Andere Instanzen*: eintragen, prüfen, austragen, die Locations dort ansehen | Übernehmen, Zuordnen, Verknüpfen, Hochladen und Zurückschicken nur mit „Grundrisse pflegen“ und *bearbeiten* am Standort hier (ein neuer Standort: nur „Grundrisse pflegen“); Lösen mit *bearbeiten*, Austragen mit *bearbeiten* an allen verknüpften Standorten. Feststrom dazu „Anlagen ändern“, „Kabel zeichnen“ und Anlegen auf dem Standort, fehlende Steckertypen „Steckverbinder-Katalog pflegen“ – sonst wird gar nichts übernommen. Jede gewählte Etage muss zum Standort gehören. |
 | „Änderungsvorschläge anderer Instanzen …“ (`api.vorschlaege`) | *Standorte → Änderungsvorschläge*: Vorschläge zu Standorten, die man **ganz** sieht (eine Freigabe für eine einzelne Anlage genügt nicht) | Annehmen: „Grundrisse pflegen“ und *bearbeiten* am Standort, für Feststrom dazu „Anlagen ändern“, „Kabel zeichnen“ und Anlegen auf dem Standort, für neue Steckertypen „Steckverbinder-Katalog pflegen“. Ablehnen: *bearbeiten* am Standort (ist er gelöscht: alle Standorte). |
 
@@ -458,8 +472,9 @@ Rollen auch aus **Gruppen beim Anmeldedienst** kommen:
   will, legt eine eigene Rolle mit Rollen-Freigaben an.
 - **Rechte vergibt nur, wer sie hat** – auch hier: Eine Gruppe einer Rolle
   zuordnen darf nur, wer „Benutzer verwalten“ hat und die Rolle selbst
-  vergeben dürfte. Eine Rolle mit „alle Rechte“ nur mit allen Rechten, eine
-  mit einer Freigabe auf „alles“ ebenso.
+  vergeben dürfte – ihre Rechte und jede ihrer Freigaben. Eine Rolle mit
+  „alle Rechte“ nur mit allen Rechten, eine mit einer Freigabe auf „alles“
+  oder mit „schalten“ ebenso.
 - **Verwaltende Rollen** (mit „alle Rechte“, „Benutzer verwalten“,
   „Einstellungen“, „Anmeldung über SSO einrichten“, „Schnittstelle“ oder
   „PowerManagement aktualisieren“)

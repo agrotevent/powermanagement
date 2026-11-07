@@ -41,6 +41,20 @@ final class Auth
      */
     private const KONTO = 'konto';
 
+    /** Höchstens so viele Zeichen hat ein Benutzername (users.username) – und im Audit. */
+    private const NAME_ZEICHEN = 64;
+
+    /** Grund im Audit, wenn eine Adresse gebremst ist (höchstens ein Eintrag je Fenster). */
+    private const GEBREMST = 'Adresse gebremst';
+
+    /**
+     * Ein gültiger bcrypt-Hash ohne Kennwort dahinter; die Kosten setzt
+     * platzhalter() auf die, mit denen password_hash() jetzt rechnet.
+     */
+    private const PLATZHALTER_REST = 'YnWyU29DhYoOmLUr16oDDurdyU6gqHQrKUb1Jp4lB27uKmlTUyo8i';
+
+    private static ?string $platzhalter = null;
+
     public static function attempt(string $username, string $password, string $ip): array
     {
         $max     = max(1, (int) Config::get('security.lockout_attempts', 5));
@@ -49,12 +63,25 @@ final class Auth
 
         // Je Adresse: wer viele Konten durchprobiert, wird gebremst – ganz
         // gleich, ob es sie gibt. Das begrenzt auch, wie viele Konten sich von
-        // einer Adresse aus sperren lassen.
+        // einer Adresse aus sperren lassen. Vermerkt wird die Bremse höchstens
+        // einmal je Adresse und Fenster: ohne Kennwortprüfung kämen die
+        // Anfragen sonst schnell genug, um das Audit (und die Platte) zu füllen.
         $vonHier = self::fehlversuche('ip', $ip, time() - $fenster);
         if (count($vonHier) >= max($max, (int) Config::get('security.ip_attempts', 20))) {
             $min = max(1, (int) ceil(((int) Zeit::ts($vonHier[0]) + $fenster - time()) / 60));
-            self::logFailure($username, $ip, 'Adresse gebremst');
+            if (!self::schonGebremst($ip, time() - $fenster)) {
+                self::logFailure($username, $ip, self::GEBREMST);
+            }
             return ['ok' => false, 'message' => "Zu viele fehlgeschlagene Anmeldungen von dieser Adresse. Bitte in {$min} Minute(n) erneut versuchen."];
+        }
+
+        // Ein Benutzername hat höchstens 64 Zeichen (users.username). Was
+        // länger oder kein UTF-8 ist, ist kein Konto: ohne Abfrage abweisen –
+        // mit derselben Rechenzeit und Meldung wie ein unbekannter Name.
+        if (strlen($username) > 4 * self::NAME_ZEICHEN || !mb_check_encoding($username, 'UTF-8') || mb_strlen($username) > self::NAME_ZEICHEN) {
+            password_verify($password, self::platzhalter());
+            self::logFailure($username, $ip, 'ungültiger Benutzername');
+            return $falsch;
         }
 
         $user = Database::first('SELECT * FROM users WHERE username = ?', [$username]);
@@ -63,7 +90,7 @@ final class Auth
             // Ein unbekanntes Konto verhält sich wie ein bekanntes: gleiche
             // Rechenzeit, gleiche Meldung, und nach zu vielen Versuchen auch
             // „gesperrt“ – sonst verriete die Sperre, welche Namen es gibt.
-            password_verify($password, '$2y$12$usesomesillystringfore7hnbRJHxXVLeakoG8K30M1OVGm5Buu');
+            password_verify($password, self::platzhalter());
             $versuche = self::fehlversuche('username', $username, time() - $fenster);
             if (count($versuche) >= $max) {
                 $min = max(1, (int) ceil(((int) Zeit::ts($versuche[count($versuche) - 1]) + $fenster - time()) / 60));
@@ -74,6 +101,9 @@ final class Auth
         }
 
         if (!empty($user['locked_until']) && strtotime((string) $user['locked_until']) > time()) {
+            // Auch gesperrt so lange wie ein unbekannter Name, der gesperrt
+            // ist – sonst verriete die schnelle Antwort, dass es das Konto gibt.
+            password_verify($password, self::platzhalter());
             $min = max(1, (int) ceil((strtotime((string) $user['locked_until']) - time()) / 60));
             return ['ok' => false, 'message' => "Konto gesperrt. Bitte in {$min} Minute(n) erneut versuchen."];
         }
@@ -294,11 +324,47 @@ final class Auth
         return hash('sha256', 'pm-sitzung|' . $kennwortHash);
     }
 
+    /**
+     * Der Hash, gegen den ein Name ohne Konto (oder ein gesperrtes) rechnet:
+     * mit denselben Kosten wie password_hash(…, PASSWORD_DEFAULT) – unter PHP
+     * 8.4 12, davor 10. Mit festen Kosten antwortete je nach PHP entweder ein
+     * unbekannter oder ein bekannter Name schneller. Je Prozess einmal
+     * gebildet, ohne selbst zu hashen (das kostete einen zweiten bcrypt-Lauf).
+     */
+    public static function platzhalter(): string
+    {
+        if (self::$platzhalter === null) {
+            $kosten = defined('PASSWORD_BCRYPT_DEFAULT_COST') ? (int) PASSWORD_BCRYPT_DEFAULT_COST : 10;
+            $hash = sprintf('$2y$%02d$', $kosten) . self::PLATZHALTER_REST;
+            // Rechnet password_hash() einmal mit etwas anderem als bcrypt,
+            // rechnet der Platzhalter wie ein echter Hash.
+            self::$platzhalter = password_needs_rehash($hash, PASSWORD_DEFAULT)
+                ? password_hash(bin2hex(random_bytes(16)), PASSWORD_DEFAULT)
+                : $hash;
+        }
+        return self::$platzhalter;
+    }
+
+    /** Steht für diese Adresse seit $seit schon ein Vermerk „Adresse gebremst“? */
+    private static function schonGebremst(string $ip, int $seit): bool
+    {
+        return Database::scalar(
+            "SELECT id FROM audit_log WHERE action = 'auth.login_failed' AND ip = ? AND created_at > ? AND details = ? LIMIT 1",
+            [$ip, gmdate('c', $seit), json_encode(['reason' => self::GEBREMST], JSON_UNESCAPED_UNICODE)]
+        ) !== false;
+    }
+
+    /**
+     * Eine fehlgeschlagene Anmeldung ins Audit – der Name höchstens 64
+     * Zeichen (wie Audit::log), ungültiges UTF-8 ersetzt: Ein anonymer
+     * Aufruf von /login füllte sonst mit jedem Megabyte im Namensfeld die
+     * Platte, und ein versehentlich dort getipptes Kennwort stünde ganz da.
+     */
     private static function logFailure(string $username, string $ip, string $reason): void
     {
         Database::insert('audit_log', [
             'user_id'     => null,
-            'username'    => $username,
+            'username'    => mb_substr(mb_scrub(substr($username, 0, 4 * self::NAME_ZEICHEN), 'UTF-8'), 0, self::NAME_ZEICHEN),
             'action'      => 'auth.login_failed',
             'target_type' => 'user',
             'target_id'   => '',
@@ -325,6 +391,10 @@ final class Auth
      * sperrte ein Kunde, der am Tablet herumtippt, den Prüfer für 15 Minuten
      * aus. Er steht im Audit (`auth.bestaetigung_fehlversuch` mit dem
      * Zweck); beim Kundenmodus zählt die Sitzung (Kundenmodus::fehlversuch).
+     * Für ein Token gilt die Bremse je Konto (bestaetigungGebremst()): Wer
+     * eine offene Sitzung in die Hand bekommt, rät das Kennwort nicht mit
+     * jeder Anfrage weiter – gesperrt wird nur das Bestätigen, nicht die
+     * Anmeldung.
      */
     public static function bestaetigen(string $zweck, #[\SensitiveParameter] string $kennwort): bool
     {
@@ -335,6 +405,10 @@ final class Auth
         if ($user === null) {
             return false;
         }
+        // Gebremst: ohne Kennwortprüfung und ohne weiteren Vermerk ablehnen.
+        if ($kennwort !== '' && self::bestaetigungGebremst($zweck) > 0) {
+            return false;
+        }
         $ok = $kennwort === ''
             ? Anmeldung::bestaetigt($zweck)
             : !Schutz::nurSso($user) && password_verify($kennwort, (string) $user['password_hash']);
@@ -342,6 +416,43 @@ final class Auth
             Audit::log('auth.bestaetigung_fehlversuch', 'user', (string) $user['id'], ['zweck' => $zweck]);
         }
         return $ok;
+    }
+
+    /**
+     * Wie viele Minuten das Kennwort des angemeldeten Kontos für diesen
+     * Zweck nicht mehr geprüft wird – 0 = es wird geprüft.
+     *
+     * In einer offenen Sitzung (liegen gelassenes Tablet, abgegriffenes
+     * Cookie) ließe sich das Kennwort sonst Anfrage um Anfrage raten: beim
+     * Ändern des Kennworts (`kennwort`, auch im Kundenbereich) und beim
+     * Anzeigen eines Tokens (`token:<id>` – alle Tokens zusammen). Nach
+     * `security.lockout_attempts` Fehlversuchen (`auth.bestaetigung_fehlversuch`
+     * im Audit) im Fenster `security.lockout_minutes` – wie die Anmeldung,
+     * aber ohne das Konto für sie zu sperren. Der Kundenmodus hat seine
+     * eigene Bremse in der Sitzung (Kundenmodus::fehlversuch), Verbinden mit
+     * SSO die seine (Sso\Anmeldung::verbindenVorbereiten).
+     */
+    public static function bestaetigungGebremst(string $zweck, ?int $userId = null): int
+    {
+        $userId ??= self::id();
+        $muster = match (true) {
+            $zweck === 'kennwort'           => '%"zweck":"kennwort"%',
+            str_starts_with($zweck, 'token:') => '%"zweck":"token:%',
+            default                         => null,
+        };
+        if ($userId === null || $muster === null) {
+            return 0;
+        }
+        $fenster = 60 * max(1, (int) Config::get('security.lockout_minutes', 15));
+        $versuche = array_column(Database::select(
+            "SELECT created_at FROM audit_log WHERE action = 'auth.bestaetigung_fehlversuch' AND target_type = 'user' AND target_id = ?
+             AND details LIKE ? AND created_at > ? ORDER BY created_at",
+            [(string) $userId, $muster, gmdate('c', time() - $fenster)]
+        ), 'created_at');
+        if (count($versuche) < max(1, (int) Config::get('security.lockout_attempts', 5))) {
+            return 0;
+        }
+        return max(1, (int) ceil(((int) Zeit::ts((string) $versuche[0]) + $fenster - time()) / 60));
     }
 
     /**
@@ -570,13 +681,20 @@ final class Auth
      *
      * Verlangt das aktuelle Kennwort und die Wiederholung. Danach enden alle
      * anderen Sitzungen mit dem alten Kennwort (user()); diese läuft mit
-     * neuer Sitzungs-ID und neuem Token weiter.
+     * neuer Sitzungs-ID und neuem Token weiter. Ein falsches aktuelles
+     * Kennwort steht im Audit; nach zu vielen wird es eine Weile gar nicht
+     * mehr geprüft (bestaetigungGebremst(), Zweck `kennwort`).
      *
      * @return array{ok:bool,message:string}
      */
-    public static function kennwortAendern(array $user, string $aktuell, string $neu, string $wiederholung): array
+    public static function kennwortAendern(array $user, #[\SensitiveParameter] string $aktuell, #[\SensitiveParameter] string $neu, #[\SensitiveParameter] string $wiederholung): array
     {
+        $min = self::bestaetigungGebremst('kennwort', (int) $user['id']);
+        if ($min > 0) {
+            return ['ok' => false, 'message' => "Zu viele falsche Kennwörter – ändern lässt es sich in {$min} Minute(n) wieder."];
+        }
         if (!password_verify($aktuell, (string) $user['password_hash'])) {
+            Audit::log('auth.bestaetigung_fehlversuch', 'user', (string) $user['id'], ['zweck' => 'kennwort']);
             return ['ok' => false, 'message' => 'Das aktuelle Passwort stimmt nicht.'];
         }
         if ($neu !== $wiederholung) {

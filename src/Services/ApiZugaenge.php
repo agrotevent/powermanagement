@@ -382,6 +382,8 @@ final class ApiZugaenge
             return ['ok' => false, 'message' => match (true) {
                 $kennwort === ''                    => 'Nicht bestätigt (oder die Bestätigung über ' . $sso . ' ist abgelaufen) – das Token wird nicht angezeigt.',
                 \App\Auth\Sso\Schutz::nurSso($user) => 'Dieses Konto bestätigt nur über ' . $sso . ' – das Token wird nicht angezeigt.',
+                Auth::bestaetigungGebremst('token:' . $id) > 0
+                    => 'Zu viele falsche Kennwörter – ein Token lässt sich in ' . Auth::bestaetigungGebremst('token:' . $id) . ' Minute(n) wieder anzeigen.',
                 default                             => 'Das Kennwort stimmt nicht – das Token wird nicht angezeigt.',
             }];
         }

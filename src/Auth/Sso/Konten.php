@@ -481,8 +481,10 @@ final class Konten
      * Rolle: Benutzer verwalten, alle Rechte der Rolle selbst haben
      * (darfVergeben); die Rolle mit allen Rechten (Systemrolle oder „*“) und
      * Rollen mit Freigaben auf alles oder mit „schalten“ nur mit allen
-     * Rechten. Kunde: Kunden pflegen und die Zugänge dieses Kunden ausgeben
-     * dürfen (wie ein Zugang von Hand – jedes Gruppenmitglied bekommt einen).
+     * Rechten, jede andere Freigabe der Rolle nur, wer sie selbst vergeben
+     * dürfte (BenutzerService::rolleVergebenFehler). Kunde: Kunden pflegen
+     * und die Zugänge dieses Kunden ausgeben dürfen (wie ein Zugang von Hand
+     * – jedes Gruppenmitglied bekommt einen).
      */
     public static function zuordnungRechtFehler(string $art, int $zielId): ?string
     {
@@ -513,7 +515,9 @@ final class Konten
                 return 'Die Rolle hat Freigaben auf alles oder mit „schalten“ – einer Gruppe zuordnen darf sie nur die Administration.';
             }
         }
-        return null;
+        // Und jede übrige Freigabe der Rolle nur, wer sie selbst vergeben
+        // dürfte (wie von Hand: BenutzerService::rolleVergebenFehler).
+        return BenutzerService::rolleVergebenFehler($zielId);
     }
 
     /** @return array{ok:bool,message:string,id?:int,hinweis?:string} */
@@ -695,7 +699,7 @@ final class Konten
             return ['ok' => false, 'message' => self::T_KUNDE_NIE];
         }
         if (!BenutzerService::darfVerwalten($userId)) {
-            return ['ok' => false, 'message' => 'Dieses Konto hat Rechte, die du selbst nicht hast – verknüpfen darf es nur, wer sie alle hat.'];
+            return ['ok' => false, 'message' => 'Dieses Konto hat Rechte, die du selbst nicht hast, oder Freigaben, die du nicht vergeben darfst – verknüpfen darf es nur, wer sie alle vergeben dürfte.'];
         }
         if (!hash_equals(Einstellungen::aussteller(), (string) $a['aussteller'])) {
             return ['ok' => false, 'message' => 'Die Anfrage gehört zu einem anderen Aussteller – bitte verwerfen.'];
@@ -718,7 +722,8 @@ final class Konten
 
     /**
      * Zu einer Anfrage ein neues Konto anlegen (nur SSO, Rollen von Hand,
-     * die der Angemeldete vergeben darf) und verknüpfen – alles oder nichts.
+     * die der Angemeldete vergeben darf – Rechte und Freigaben –, ein Ende
+     * höchstens bis zu seinem eigenen) und verknüpfen – alles oder nichts.
      *
      * @param array{username?:mixed, rollen?:mixed, gueltig_bis?:mixed} $daten
      * @return array{ok:bool,message:string,user_id?:int}
@@ -749,9 +754,11 @@ final class Konten
             if ($rolle === null) {
                 return ['ok' => false, 'message' => 'Diese Rolle gibt es nicht.'];
             }
+            // Wie von Hand: Rechte und Freigaben der Rolle nur, wer sie selbst vergeben dürfte.
             $rechte = BenutzerService::rollenRechte($r);
-            if (!BenutzerService::darfVergeben($rechte)) {
-                return ['ok' => false, 'message' => 'Die Rolle „' . $rolle['name'] . '“ hat Rechte, die du selbst nicht hast – vergeben darf sie nur, wer sie alle hat.'];
+            $fehler = BenutzerService::rolleVergebenFehler($r);
+            if ($fehler !== null) {
+                return ['ok' => false, 'message' => $fehler];
             }
             if ((Schutz::verwaltend($rechte) || (int) $rolle['is_system'] === 1) && !Einstellungen::schalter(Einstellungen::ADMINS)) {
                 return ['ok' => false, 'message' => 'Mit der Rolle „' . $rolle['name'] . '“ könnte sich das Konto nicht über SSO anmelden – erst ‚Verwaltung per SSO‘ einschalten.'];
@@ -759,6 +766,11 @@ final class Konten
             $rollen[$r] = ['aktiv' => 1];
         }
         $bis = is_string($daten['gueltig_bis'] ?? null) ? trim($daten['gueltig_bis']) : '';
+        // Wer selbst befristet Benutzer verwaltet, vergibt kein späteres Ende (BenutzerService::vergabeFehler).
+        $fehler = BenutzerService::vergabeFehler(null, ['gueltig_bis' => $bis], $rollen);
+        if ($fehler !== null) {
+            return ['ok' => false, 'message' => $fehler];
+        }
         $userId = 0;
         try {
             Database::transaktion(static function () use ($a, $username, $rollen, $bis, &$userId): void {
