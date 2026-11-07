@@ -38,8 +38,31 @@ final class EinstellungenController extends Controller
         ]);
     }
 
+    /**
+     * Die Zugangsdaten dieses Formulars: Feld → [Schlüssel, Bezeichnung].
+     * Jedes gilt für sein Ziel (Settings::BINDUNG).
+     */
+    private const GEHEIMNISSE = [
+        'influx_token'    => [Settings::GEHEIM_INFLUX_TOKEN, 'das Token der InfluxDB'],
+        'influx_password' => [Settings::GEHEIM_INFLUX_KENNWORT, 'das Kennwort der InfluxDB'],
+        'mqtt_password'   => [Settings::GEHEIM_MQTT_KENNWORT, 'das Kennwort am MQTT-Broker'],
+    ];
+
     public function speichern(Request $request): void
     {
+        // Die Adresse der InfluxDB bekommt Token bzw. Kennwort mitgeschickt.
+        if (array_key_exists('influx__url', $_POST)) {
+            $fehler = Influx::adresseFehler(trim((string) $_POST['influx__url']));
+            if ($fehler !== null) {
+                Flash::error($fehler . ' Nichts gespeichert.');
+                $this->redirect('/system/einstellungen');
+                return;
+            }
+        }
+        $zielVorher = [];
+        foreach (self::GEHEIMNISSE as [$schluessel]) {
+            $zielVorher[$schluessel] = Settings::ziel($schluessel);
+        }
         $geaendert = [];
         foreach (Settings::OVERRIDABLE as $schluessel => $_beschriftung) {
             if (str_starts_with($schluessel, 'inventory.')) {
@@ -57,11 +80,25 @@ final class EinstellungenController extends Controller
             }
             $geaendert[] = $schluessel;
         }
-        Settings::geheimnisSetzen(Settings::GEHEIM_INFLUX_TOKEN, $request->str('influx_token'));
-        Settings::geheimnisSetzen(Settings::GEHEIM_INFLUX_KENNWORT, $request->str('influx_password'));
-        Settings::geheimnisSetzen(Settings::GEHEIM_MQTT_KENNWORT, $request->str('mqtt_password'));
-        Audit::log('einstellungen.speichern', 'settings', '', ['schluessel' => $geaendert]);
-        Flash::success('Einstellungen gespeichert.');
+        $entfernt = [];
+        foreach (self::GEHEIMNISSE as $feld => [$schluessel, $bezeichnung]) {
+            $neu = $request->str($feld);
+            if ($neu === '' && Settings::geheimnisHinterlegt($schluessel) && Settings::ziel($schluessel) !== $zielVorher[$schluessel]) {
+                // Ein Geheimnis gilt für sein Ziel. Zieht die Adresse (oder der
+                // Benutzer) um, ginge es sonst an das neue – wer immer das ist.
+                Settings::geheimnisSetzen($schluessel, '-');
+                $entfernt[$schluessel] = $bezeichnung;
+            } else {
+                Settings::geheimnisSetzen($schluessel, $neu);
+            }
+        }
+        Audit::log('einstellungen.speichern', 'settings', '', ['schluessel' => $geaendert, 'entfernt' => array_keys($entfernt)]);
+        if ($entfernt !== []) {
+            Flash::warning('Einstellungen gespeichert. Entfernt, weil für das bisherige Ziel eingetragen: '
+                . implode(', ', $entfernt) . ' – für das neue Ziel bitte neu eintragen.');
+        } else {
+            Flash::success('Einstellungen gespeichert.');
+        }
         $this->redirect('/system/einstellungen');
     }
 
@@ -93,8 +130,10 @@ final class EinstellungenController extends Controller
             LocationSync::tokenSetzen('');
             $meldung .= ' Das hinterlegte Token galt für den bisherigen Server und ist entfernt – für den neuen bitte eines eintragen.';
         }
+        // Das Token aus der Umgebung zieht nie mit um (Settings::UMGEBUNG_REPO) – sagen, statt erst am 401.
+        $fremd = LocationSync::umgebungFremdHinweis();
         Audit::log('einstellungen.location', 'settings', '', ['repo' => $adresse]);
-        Flash::success($meldung);
+        $fremd !== null ? Flash::warning($meldung . ' ' . $fremd) : Flash::success($meldung);
         $this->redirect('/system/einstellungen');
     }
 
@@ -190,6 +229,13 @@ final class EinstellungenController extends Controller
             }
             return $meldungen;
         });
+        // Für ein anderes Ziel eingetragen (etwa per bin/power umgestellt):
+        // geht nicht mit – das erklärt eine abgelehnte Anmeldung.
+        foreach (self::GEHEIMNISSE as [$schluessel, $bezeichnung]) {
+            if (Settings::geheimnisFremd($schluessel)) {
+                $meldungen[] = ['warning', 'Hinterlegt ist ' . $bezeichnung . ' für ein anderes Ziel – es wird nicht mitgeschickt. Für das jetzige bitte neu eintragen.'];
+            }
+        }
         foreach ($meldungen as [$art, $text]) {
             Flash::add($art, $text);
         }

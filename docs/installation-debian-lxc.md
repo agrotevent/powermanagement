@@ -287,6 +287,24 @@ keinen Benutzer hat – etwa wenn der erste Lauf vorher abbrach (dann mit neuem
 Erstkennwort in der Zusammenfassung). Gibt es Benutzer, legt es niemanden an,
 auch keinen gelöschten oder umbenannten `admin`.
 
+**Zugangsdaten gelten für ihr Ziel.** Token und Kennwort der InfluxDB, das
+Kennwort am Broker und das Token des Repositories sind an das Ziel gebunden,
+für das sie eingetragen wurden (Schema, Host, Port, Benutzer – ob in der
+Oberfläche oder mit `bin/power einstellung`). Wer in *System →
+Einstellungen* Adresse, Host, Port oder Benutzer ändert, ohne das Geheimnis
+neu einzutragen, verliert es (mit Meldung) – so kann niemand mit dem Recht
+„Systemeinstellungen ändern“ es auf einen eigenen Dienst umlenken. Werte aus
+`config.php` gelten nur, solange die Einstellungen das Ziel nicht von dem in
+`config.php` wegbewegen; das Token aus `POWERMANAGEMENT_REPO_TOKEN` nur für
+den Server aus `inventory.repo_url` in `config.php` – und für den Server,
+auf den die in der Oberfläche eingetragene Adresse beim Update zeigte, das
+diese Regel einführte (einmal gebunden, nie wieder neu). Zeigt die Adresse
+später auf einen anderen Server, gilt es dort nicht; *System →
+Einstellungen* und der Location-Abgleich sagen das – dann das Token in der
+Oberfläche eintragen oder `inventory.repo_url` in `config.php` auf die neue
+Adresse stellen. Ältere Geheimnisse bindet `bin/power migrate` beim Update
+einmal an das damals gültige Ziel.
+
 | Datei | Inhalt |
 |-------|--------|
 | `/etc/powermanagement/zugaenge.txt` | alle Zugänge (600, root) |
@@ -386,12 +404,17 @@ Das Kennwort des Node-RED-Editors ändern:
 ```bash
 KW='NeuesKennwort'   # nur Buchstaben/Ziffern vermeidet Ärger mit der Shell
 PM_KENNWORT="$KW" php -r '$h = password_hash(getenv("PM_KENNWORT"), PASSWORD_BCRYPT); echo "\$2b\$", substr($h, 4), "\n";' \
-  > /var/lib/powermanagement/node-red/admin-kennwort.bcrypt
+  | runuser -u nodered -- sh -c 'umask 077; rm -f -- "$1"; cat > "$1"' _ /var/lib/powermanagement/node-red/admin-kennwort.bcrypt
 systemctl restart powermanagement-nodered
 ```
 
 (PHP schreibt bcrypt als `$2y$`, Node-RED erwartet `$2b$` – das Verfahren
 ist dasselbe.) Danach den Wert in `zugaenge.txt` nachtragen.
+
+Geschrieben wird die Datei als `nodered`, nicht per `>` als root – wie im
+Installationsskript: Der Ordner gehört dem Dienst, und wer im Editor Code
+ausführt (exec-Node, eine Palette-Node), könnte dort einen Verweis anlegen,
+durch den root sonst eine beliebige Datei überschriebe.
 
 ## 5 · Shelly-Geräte anbinden
 
@@ -531,9 +554,14 @@ umstellen, bis geklärt ist, welches das echte Gerät ist.
   Kennwort kennt, kann ein umgestelltes Gerät vom Broker werfen, indem er
   sich mit dessen Client-ID anmeldet. Schalten oder mitlesen kann er es
   nicht.
-* Den Gen1-Rundruf `shellies/command` darf der gemeinsame Zugang weiter
-  schreiben (`announce`, `update`, `update_fw` – nur offizielle Firmware);
-  Gen1-Geräte am gemeinsamen Zugang brauchen ihn.
+* Den Gen1-Rundruf `shellies/command` (`announce`, `update`, `update_fw`)
+  nimmt der Helfer dem gemeinsamen Zugang, sobald ein Gen1-Gerät einen
+  eigenen Zugang hat (`topic deny shellies/command` in der wirksamen ACL) –
+  sonst erreichte er darüber auch dieses Gerät. Mosquitto kennt kein „nur
+  Schreiben verbieten“: Gen1-Geräte am gemeinsamen Zugang bekommen den
+  Rundruf dann ebenfalls nicht mehr. Node-RED braucht ihn nicht – es fragt
+  `announce` je Gerät über `shellies/<id>/command`, sobald sich ein Gerät
+  meldet.
 * Gespeicherte (retained) Nachrichten, die der gemeinsame Zugang vor der
   Umstellung im Baum des Geräts abgelegt hat, liefert der Broker danach
   nicht mehr aus (`check_retain_source true` in
@@ -583,12 +611,14 @@ pattern readwrite shellies/%u/#
 pattern read shellies/command
 ```
 
-und für den gemeinsamen Zugang je umgestelltem Gerät eine Sperre:
+und für den gemeinsamen Zugang je umgestelltem Gerät eine Sperre, mit einem
+Gen1-Gerät dazu den Rundruf:
 
 ```
 user shelly
 topic deny shellypro4pm-a0b1c2d3e4f5/#
 topic deny shellies/shelly1-B929CC/#
+topic deny shellies/command
 ```
 
 Dazu in der Broker-Konfiguration `check_retain_source true`, damit
@@ -1631,7 +1661,9 @@ Wenn etwas nicht klappt:
   `diff -u /etc/nginx/sites-available/powermanagement /etc/nginx/powermanagement.powermanagement-neu`.
   Den Block `location = /standorte/grundriss { … }` samt
   `location @pm_plan_413` (und die neuen `fastcgi_…`-Zeilen in
-  `location ^~ /api/`) in die eigene Site übernehmen – oder, wenn die
+  `location ^~ /api/`) in die eigene Site übernehmen, ebenso die Bremsen
+  (`limit_req_zone`/`limit_conn_zone` oben, `location ~ ^/login/*$ { … }`
+  samt `@pm_anmeldung_429`, `limit_conn pm_plan` beim Grundriss) – oder, wenn die
   eigenen Änderungen entbehrlich sind, die neue Fassung ganz:
   `cp /etc/nginx/powermanagement.powermanagement-neu /etc/nginx/sites-available/powermanagement` –,
   dann `nginx -t && systemctl reload nginx` (*Größe der Uploads*,
@@ -1720,7 +1752,7 @@ ausschalten
 |-----|----|-------|
 | `config/config.php` | `/opt/powermanagement/config/` | enthält `app.key` – **ohne ihn sind alle hinterlegten Zugänge (Modbus, Cloud, InfluxDB-Token, Eventworx) verloren**, und die Siegel der Übergabeberichte lassen sich nicht mehr prüfen |
 | Datenbank | `/opt/powermanagement/storage/database.sqlite` | Anlagen, Standorte, Benutzer, Einstellungen, Übergabeberichte samt Unterschriften und PDF |
-| Grundrisse | `/opt/powermanagement/storage/plans/` | hochgeladene Pläne |
+| Grundrisse | `/opt/powermanagement/storage/plans/` | hochgeladene Pläne (samt Kacheln) |
 | Zugänge | `/etc/powermanagement/` | Kennwörter, Tokens, Node-RED-Umgebung |
 | Node-RED | `/var/lib/powermanagement/node-red/` | Flows, `flows_cred.json`, eigene Paletten-Nodes |
 | Messwerte | InfluxDB | per `influx backup` |
@@ -1734,15 +1766,21 @@ cat > /usr/local/sbin/powermanagement-sicherung <<'EOF'
 set -euo pipefail
 ZIEL=/var/backups/powermanagement/$(date +%F)
 install -d -m 700 "$ZIEL"
+# storage/ gehört der Anwendung: dort nur als www-data lesen und schreiben –
+# als root folgten rm, mv und tar sonst einem Verweis, den www-data
+# untergeschoben haben könnte. root schreibt nur in $ZIEL (über die Umleitung).
 # SQLite im laufenden Betrieb stimmig kopieren – in ein Verzeichnis, das nur
 # www-data lesen kann (die Datenbank enthält verschlüsselte Zugänge)
 KOPIE=/opt/powermanagement/storage/backups/.nacht.sqlite
-rm -f "$KOPIE"
+runuser -u www-data -- rm -f -- "$KOPIE"
 runuser -u www-data -- php -r '$p = new PDO("sqlite:/opt/powermanagement/storage/database.sqlite");
     $p->exec("VACUUM INTO " . $p->quote($argv[1]));' "$KOPIE"
-mv "$KOPIE" "$ZIEL/database.sqlite"
+runuser -u www-data -- cat -- "$KOPIE" > "$ZIEL/database.sqlite"
+runuser -u www-data -- rm -f -- "$KOPIE"
+runuser -u www-data -- tar czf - -C /opt/powermanagement/storage plans > "$ZIEL/plaene.tar.gz"
+# Was root gehört (bzw. Node-RED), packt root
 tar czf "$ZIEL/dateien.tar.gz" /opt/powermanagement/config/config.php \
-    /opt/powermanagement/storage/plans /etc/powermanagement /var/lib/powermanagement/node-red \
+    /etc/powermanagement /var/lib/powermanagement/node-red \
     --exclude=/var/lib/powermanagement/node-red/node_modules
 # InfluxDB: Token über die Umgebung, nicht über die Kommandozeile
 INFLUX_TOKEN="$(sed -n 's/^INFLUX_OPERATOR_TOKEN=//p' /etc/powermanagement/zugaenge.txt)" \
@@ -1773,6 +1811,21 @@ systemctl daemon-reload && systemctl enable --now powermanagement-sicherung.time
 Die Sicherungen gehören zusätzlich auf einen anderen Rechner – eine Kopie auf
 derselben Platte hilft beim Plattenausfall nicht. Vor jedem Update lohnt ein
 Proxmox-Snapshot des Containers (`pct snapshot 150 vor-update`).
+
+**Zurückspielen** von Datenbank und Grundrissen – in `storage/` schreibt
+dabei nur `www-data`, die Sicherung kommt über die Standardeingabe (wie beim
+Zurückrollen von Hand, Abschnitt 10):
+
+```bash
+systemctl stop powermanagement-sammler php8.4-fpm
+runuser -u www-data -- sh -c 'cat > "$1.zurueck" && [ -s "$1.zurueck" ] && rm -f -- "$1-wal" "$1-shm" && mv -f -- "$1.zurueck" "$1"' \
+  sh /opt/powermanagement/storage/database.sqlite < /var/backups/powermanagement/<datum>/database.sqlite
+runuser -u www-data -- tar xzf - -C /opt/powermanagement/storage < /var/backups/powermanagement/<datum>/plaene.tar.gz
+systemctl start php8.4-fpm powermanagement-sammler
+```
+
+`config.php` und `/etc/powermanagement` gehören root und kommen als root aus
+`dateien.tar.gz` zurück – nie etwas davon nach `storage/`.
 
 **Zurückspielen** der InfluxDB auf einer frisch eingerichteten Datenbank:
 
@@ -1834,7 +1887,8 @@ printf 'Authorization: Token %s\n' "$T" | curl -sG -H @- http://127.0.0.1:8086/q
 | Herzschlag fehlt (`pruefen`: „kein Herzschlag“) | Node-RED läuft nicht oder ist nicht mit dem Broker verbunden: `journalctl -u powermanagement-nodered`; Zugang in `flows_cred.json` (Benutzer `nodered`). |
 | Node-RED-Editor: „Verbindung verloren“ | WebSocket wird nicht durchgereicht – die nginx-Vorlage aus `deploy/` verwenden (`location ^~ /node-red/` mit `Upgrade`). Ein vorgeschalteter Proxy muss WebSockets ebenfalls durchlassen. |
 | Node-RED-Editor lässt niemanden hinein | `admin-kennwort.bcrypt` fehlt oder ist kaputt – dann sperrt `settings.js` bewusst. Neues Kennwort setzen (Abschnitt 4). |
-| Installation bricht ab: `chmod: changing permissions of '/opt/powermanagement/storage/logs': Operation not permitted` | Ältere Fassungen des Skripts setzten die Rechte an den mitgelieferten Ordnern in `storage/` als `www-data`, obwohl `git clone` sie root gegeben hatte. Neuen Stand holen (`git -C /opt/powermanagement pull`) und das Skript mit denselben Optionen noch einmal aufrufen – es macht dort weiter, Kennwörter und `app.key` bleiben. Ohne neuen Stand vorher `chown -R -P www-data:www-data /opt/powermanagement/storage`. |
+| Installation bricht ab: `chmod: changing permissions of '/opt/powermanagement/storage/logs': Operation not permitted` | Ältere Fassungen des Skripts setzten die Rechte an den mitgelieferten Ordnern in `storage/` als `www-data`, obwohl `git clone` sie root gegeben hatte. Neuen Stand holen (`git -C /opt/powermanagement pull`) und das Skript mit denselben Optionen noch einmal aufrufen – es macht dort weiter, Kennwörter und `app.key` bleiben. Ohne neuen Stand vorher `chown -R -P www-data:www-data /opt/powermanagement/storage` – aber nur, wenn `cat /proc/sys/fs/protected_hardlinks` `1` ergibt: Sonst könnte www-data in `storage/` einen festen Verweis auf eine Datei von root abgelegt haben, die das chown dann www-data übergäbe. |
+| Installation bricht ab bzw. Update meldet: „fs.protected_hardlinks ist aus“ | Ohne diesen Schutz des Kernels übergibt root `storage/` nicht (mehr) rekursiv der Anwendung – ein fester Verweis des App-Benutzers bekäme sonst eine fremde Datei (etwa das Skript, das der Update-Dienst als root startet). Das Update läuft trotzdem durch (die Ordner legt es als App-Benutzer an) und zeigt den Hinweis in *System → Update*; das Installationsskript bricht ab, sobald in `storage/` etwas nicht root gehört. Debian und Proxmox schalten den Schutz ab Werk ein; im LXC gilt der Wert des **Hosts**: dort `sysctl -w fs.protected_hardlinks=1` und dauerhaft `echo 'fs.protected_hardlinks = 1' > /etc/sysctl.d/90-protected-hardlinks.conf`, dann die Installation noch einmal. |
 | Dienst scheitert mit `status=226/NAMESPACE` | Nesting ist am Container aus – `pct set <id> --features nesting=1` (Abschnitt 1). |
 | Sammler erreicht GX/ComAp nicht | Route bzw. Tunnel: `ip route get 192.168.50.10`, `wg show`, `nc -vz 192.168.50.10 502`. Modbus TCP am GX eingeschaltet? |
 | Speichern auf einer Anlagen-Seite mit Livewerten hängt bis zum Timeout, im Audit-Log steht nichts | Ältere Fassungen: jede Live-Abfrage hielt die Sitzung, bis die InfluxDB antwortete – bei einer trägen InfluxDB stauten sie sich, und alles Weitere aus demselben Browser wartete. Neuen Stand einspielen (Abschnitt 10). Wie schnell die InfluxDB antwortet: `grep 'InfluxDB antwortet langsam' /opt/powermanagement/storage/logs/app.log`, `systemctl status influxdb`. |

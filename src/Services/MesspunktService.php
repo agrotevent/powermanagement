@@ -182,6 +182,21 @@ final class MesspunktService
         return ['ok' => true, 'message' => 'Messgerät zugeordnet.', 'id' => $id];
     }
 
+    /**
+     * Steckt das Gerät in einem Inventarstück? Dann dessen Inventarnummer –
+     * sonst null.
+     *
+     * Ein solcher Shelly misst, wo das Stück eingesetzt ist, und wird nie
+     * zusätzlich direkt zugeordnet (AnlagenController::messpunktSpeichern()):
+     * Sonst stünde er an zwei Anlagen, und wer das Stück in die eigene
+     * einsetzt, bekäme mit ihr die fremde – Messwerte und Schalten.
+     */
+    public static function inventarstueck(string $geraet): ?string
+    {
+        $kennung = Database::scalar('SELECT i.kennung FROM inventar_messgeraete g JOIN inventar i ON i.id = g.inventar_id WHERE g.geraet = ? ORDER BY i.id LIMIT 1', [$geraet]);
+        return $kennung !== null && $kennung !== false ? (string) $kennung : null;
+    }
+
     /** Eine Geräte- oder Kanalkennung, die in Themen und Abfragen nichts anrichtet. */
     public static function kennungGueltig(string $kennung): bool
     {

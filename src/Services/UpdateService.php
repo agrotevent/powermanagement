@@ -1453,6 +1453,8 @@ final class UpdateService
             'mqtt_helfer'    => 'Der Abgleich der MQTT-Zugänge meldete Fehler.',
             'nachgeholt'     => 'Fehlende Einrichtung wurde nachgeholt.',
             'treiber'        => 'Die Datenbank ist nicht SQLite – zurück nur mit eigener Sicherung.',
+            'hardlinks'      => 'fs.protected_hardlinks ist aus: storage/ wurde nicht rekursiv der Anwendung übergeben (ein fester Verweis bekäme sonst eine fremde Datei). '
+                . 'Bitte einschalten – im LXC auf dem Host: sysctl -w fs.protected_hardlinks=1, dauerhaft mit einer Datei in /etc/sysctl.d/.',
             default          => 'Hinweis: ' . $code,
         };
     }

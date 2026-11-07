@@ -31,10 +31,27 @@ aber nicht die Administration hat, kann:
 - keine Rolle mit Rechten anlegen oder ändern, die er selbst nicht hat (und
   nie „alle Rechte“),
 - keine solche Rolle zuweisen – auch nicht sich selbst,
-- kein Konto ändern, sperren, entsperren, löschen oder mit neuem Kennwort
-  versehen, das Rechte hat, die ihm fehlen (etwa einen Administrator),
+- keine Rolle zuweisen, ändern oder löschen, deren Freigaben er selbst nicht
+  vergeben dürfte (siehe unten): Wer eine Rolle bekommt, bekommt ihre
+  Freigaben mit. Eine Rolle, die ein Konto schon hat – etwa von der
+  Administration –, bleibt beim Speichern stehen, solange sie nicht
+  verlängert wird,
+- kein Konto ändern, sperren, entsperren, löschen, mit neuem Kennwort
+  versehen oder mit einer Anmeldung über SSO verknüpfen, das Rechte hat, die
+  ihm fehlen (etwa einen Administrator), oder Freigaben, die er nicht
+  vergeben dürfte – am Konto oder an einer seiner Rollen, auch einer, die
+  erst später gilt,
 - Freigaben nur vergeben, wenn er selbst alle Standorte sieht, und keine auf
-  „alles“ oder mit „schalten“ – die vergibt nur die Administration.
+  „alles“ oder mit „schalten“ – die vergibt nur die Administration,
+- ist sein eigener Zugang befristet (Konto oder die Rolle mit „Benutzer
+  verwalten“), Konten und Rollen höchstens bis zu diesem Ende vergeben – ein
+  neues Konto also nur mit Ende, eine neue Rolle an einem Konto ohne Ende
+  nur mit eigenem Ende –, und das eigene Konto und die eigenen Rollen nicht
+  verlängern (kürzen geht). Rollen aus Gruppen beim Anmeldedienst zählen
+  dabei als unbefristet. Auch nicht über ein anderes Konto: Einer Rolle, die
+  jemand über sein Ende hinaus (oder ohne Ende) hat, gibt er keine neuen
+  Rechte, und ein Konto, das länger Benutzer verwaltet als er, verwaltet er
+  nicht (kein Kennwort setzen, kein SSO anhängen).
 
 Sonst wäre „Benutzer verwalten“ eine Hintertür zu allem.
 
@@ -110,8 +127,11 @@ eine Freigabe mit *bearbeiten* – nicht nur eine, die ihn sichtbar macht:
 | Kabel, Kabelweg, Kabelbrücke zeichnen, ändern, löschen | „Kabel zeichnen“ + *bearbeiten* für den Standort **oder** für eine Anlage an einem Kabelende; ein neues Kabelende steht auf der Etage des Kabels |
 | Etagen, Grundriss, Maßstab, Georeferenz | „Grundrisse pflegen“ + *bearbeiten* für den Standort |
 | Grundriss neu rechnen (Karte, Standorte) | „Grundrisse pflegen“ + *bearbeiten* für jeden Standort, dessen Etagen den Plan nutzen; den Zustand sieht jeder, der die Karte sieht |
-| ein Messgerät einer Anlage zuordnen | es darf gerade an keiner Anlage messen, die man nicht bearbeiten darf; ohne „alle Standorte“ bzw. „Datenquellen verwalten“ zählen seine Messwerte erst ab der Zuordnung |
+| ein Messgerät einer Anlage zuordnen | es darf gerade an keiner Anlage messen, die man nicht bearbeiten darf; ohne „alle Standorte“ bzw. „Datenquellen verwalten“ zählen seine Messwerte erst ab der Zuordnung. Der Shelly eines Inventarstücks wird nie direkt zugeordnet (auch nicht von der Administration) – er misst über den Einsatz des Stücks |
 | ein Inventarstück einsetzen, das gerade woanders steckt | *bearbeiten* auch dort, wo es herauskommt |
+| ein Inventarstück einsetzen | keiner seiner Shellys darf gerade an einer Anlage messen, die man nicht bearbeiten darf (wie beim Zuordnen) |
+| eine neue Anlage aus einer Vorlage | Vorlage ist nur ein Katalog-Typ – eine andere Anlage gibt ihre Anschlüsse und Notizen nicht her |
+| eine Location aus dem Repository übernehmen | siehe [Location-Abgleich](#location-abgleich) |
 
 Eine Anlage oder ein Kabel, das man nicht sieht, erscheint auch in Listen
 und Fenstern nur als „nicht freigegeben“ – etwa als Ende eines Kabels oder
@@ -139,6 +159,14 @@ So bekommt die Elektrikerin auf dem Gelände eine Schalt-Freigabe nur für den
 Shelly der Geländebeleuchtung (oder nur dessen `switch:0`). Alles andere
 sieht sie, kann es aber nicht schalten.
 
+Misst ein Gerät an **mehreren Anlagen**, schaltet es über Freigaben für
+Anlagen bzw. Standorte nur, wenn sie **jede** Anlage decken, an der das
+Geschaltete hängt. Beim Shelly hat jeder Kanal sein eigenes Relais: Für
+`switch:0` zählen die Anlagen, an denen ein Messpunkt mit `switch:0` (oder
+einer ohne Kanal – das ganze Gerät) misst. Ohne Kanal, bei anderen Geräten
+oder wenn der Kanal nirgends misst, zählt jede Anlage des Geräts. Eine
+Freigabe genau für das Gerät (oder für alles) gilt für das Gerät selbst.
+
 Jeder Versuch landet im **Schaltprotokoll** (*Auswertung → Schaltprotokoll*):
 Benutzer, Gerät, Kanal, Befehl, Ergebnis. Abgelehnte Versuche werden
 ebenfalls protokolliert. Schaltknöpfe erscheinen in der Oberfläche nur, wo
@@ -163,6 +191,22 @@ Technik), pflegen, wer „Inventar pflegen“ hat. Ein Stück **einsetzen** oder
 einem Einsatz zählen für Datenfenster und Schalt-Freigaben nur, solange sie
 dort stecken.
 
+## Location-Abgleich
+
+Den Location-Abgleich sieht, wer „Locations und Verteiler übernehmen“ hat;
+vom Bestand hier nur die Standorte, die er sieht. **Übernehmen** ändert den
+Standort hier – Etagen, Grundrisse, Maßstab, Feststromanschlüsse samt
+Schaltsperre und Messgeräten. Dafür braucht es dieselben Rechte wie von
+Hand und über eine andere Instanz: „Grundrisse pflegen“ und *bearbeiten* am
+Standort mit diesem Schlüssel; einen neuen Standort legt so nur an, wer alle
+Standorte bearbeiten darf. Bringt die Location Feststromanschlüsse mit,
+zusätzlich „Anlagen ändern“, „Kabel zeichnen“ und Anlegen auf dem Standort,
+für fehlende Steckertypen „Steckverbinder-Katalog pflegen“ – sonst wird gar
+nichts übernommen. Ohne diese Rechte zeigt die Liste nur „nur ansehen“.
+Hochladen braucht „… ins Repository hochladen“ und einen Standort, den man
+sieht. Die Kommandozeile (`bin/power location:uebernehmen`) handelt als
+Betreiber.
+
 ## Verteiler-Abgleich
 
 Den Verteiler-Abgleich sieht, wer „Locations und Verteiler übernehmen“ hat.
@@ -182,7 +226,7 @@ Benutzers, sondern die Befugnisse und Standorte des Tokens – Einzelheiten in
 
 | Recht | erlaubt | zusätzlich geprüft |
 |-------|---------|--------------------|
-| „Zugänge (Tokens) für andere Instanzen …“ (`api.manage`) | *System → Schnittstelle (API)*: Zugänge ansehen und widerrufen | Anlegen, Ändern, Anzeigen und Löschen nur mit „Alle Standorte, Anlagen und Messdaten“. Eine Befugnis vergibt nur, wer die Rechte dahinter hat: `plaene.lesen` „Karte ansehen“, `plaene.vorschlagen` und `plaene.schreiben` dazu „Grundrisse pflegen“, `feststrom` „Anlagen ansehen“, `plaene.schreiben` mit `feststrom` dazu „Anlagen ändern“ und „Kabel zeichnen“. Binden nur an das eigene Konto oder eines, das man verwalten darf; eine Bindung lösen oder umbinden nur, wer den bisher gebundenen Benutzer verwalten darf. Anzeigen nur mit dem eigenen Kennwort und nur, wer das Token mit allen Befugnissen und seiner Bindung selbst anlegen dürfte. Ohne „Alle Standorte …“ zeigt die Liste nur die Namen der eigenen Standorte, die übrigen als Anzahl. |
+| „Zugänge (Tokens) für andere Instanzen …“ (`api.manage`) | *System → Schnittstelle (API)*: Zugänge ansehen und widerrufen | Anlegen, Ändern, Anzeigen und Löschen nur mit „Alle Standorte, Anlagen und Messdaten“. Eine Befugnis vergibt nur, wer die Rechte dahinter hat: `plaene.lesen` „Karte ansehen“, `plaene.vorschlagen` und `plaene.schreiben` dazu „Grundrisse pflegen“, `feststrom` „Anlagen ansehen“, `plaene.schreiben` mit `feststrom` dazu „Anlagen ändern“ und „Kabel zeichnen“. Binden nur an das eigene Konto oder eines, das man verwalten darf; eine Bindung lösen oder umbinden nur, wer den bisher gebundenen Benutzer verwalten darf. Anzeigen nur mit dem eigenen Kennwort (nach fünf falschen in 15 Minuten wird es eine Weile nicht mehr geprüft, `security.lockout_*`) und nur, wer das Token mit allen Befugnissen und seiner Bindung selbst anlegen dürfte. Ohne „Alle Standorte …“ zeigt die Liste nur die Namen der eigenen Standorte, die übrigen als Anzahl. |
 | „Andere Instanzen eintragen …“ (`api.partner`) | *Standorte → Andere Instanzen*: eintragen, prüfen, austragen, die Locations dort ansehen | Übernehmen, Zuordnen, Verknüpfen, Hochladen und Zurückschicken nur mit „Grundrisse pflegen“ und *bearbeiten* am Standort hier (ein neuer Standort: nur „Grundrisse pflegen“); Lösen mit *bearbeiten*, Austragen mit *bearbeiten* an allen verknüpften Standorten. Feststrom dazu „Anlagen ändern“, „Kabel zeichnen“ und Anlegen auf dem Standort, fehlende Steckertypen „Steckverbinder-Katalog pflegen“ – sonst wird gar nichts übernommen. Jede gewählte Etage muss zum Standort gehören. |
 | „Änderungsvorschläge anderer Instanzen …“ (`api.vorschlaege`) | *Standorte → Änderungsvorschläge*: Vorschläge zu Standorten, die man **ganz** sieht (eine Freigabe für eine einzelne Anlage genügt nicht) | Annehmen: „Grundrisse pflegen“ und *bearbeiten* am Standort, für Feststrom dazu „Anlagen ändern“, „Kabel zeichnen“ und Anlegen auf dem Standort, für neue Steckertypen „Steckverbinder-Katalog pflegen“. Ablehnen: *bearbeiten* am Standort (ist er gelöscht: alle Standorte). |
 
@@ -458,8 +502,9 @@ Rollen auch aus **Gruppen beim Anmeldedienst** kommen:
   will, legt eine eigene Rolle mit Rollen-Freigaben an.
 - **Rechte vergibt nur, wer sie hat** – auch hier: Eine Gruppe einer Rolle
   zuordnen darf nur, wer „Benutzer verwalten“ hat und die Rolle selbst
-  vergeben dürfte. Eine Rolle mit „alle Rechte“ nur mit allen Rechten, eine
-  mit einer Freigabe auf „alles“ ebenso.
+  vergeben dürfte – ihre Rechte und jede ihrer Freigaben. Eine Rolle mit
+  „alle Rechte“ nur mit allen Rechten, eine mit einer Freigabe auf „alles“
+  oder mit „schalten“ ebenso.
 - **Verwaltende Rollen** (mit „alle Rechte“, „Benutzer verwalten“,
   „Einstellungen“, „Anmeldung über SSO einrichten“, „Schnittstelle“ oder
   „PowerManagement aktualisieren“)

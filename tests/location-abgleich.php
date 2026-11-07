@@ -621,6 +621,179 @@ try {
         && LocationSync::fernerStand() === $dortVorher, 'Frist der Anfrage um: Hochladen meldet es, nichts hochgeladen – ' . $hoch['message']);
     pruefe(!$holen['ok'] && str_contains($holen['message'], 'bin/power location:uebernehmen'), 'Frist der Anfrage um: Übernehmen meldet es, mit dem Weg über die Kommandozeile');
 
+    // ------------------------------------------------ Übernehmen nur mit Rechten am Standort
+    // Aus der Oberfläche wie von Hand und über eine andere Instanz: „Grundrisse
+    // pflegen“ und *bearbeiten* am Standort, mit strom.json dazu „Anlagen
+    // ändern“, „Kabel einzeichnen“ und Anlegen auf dem Standort – vor dem
+    // Holen geprüft und noch einmal vor dem Eintragen. Sonst nichts.
+    $rolleNur = (int) \App\Services\BenutzerService::rolleSpeichern(null, $marke . ' nur holen', '', ['inventory.pull', 'plans.manage', 'karte.view'])['id'];
+    $rolleVoll = (int) \App\Services\BenutzerService::rolleSpeichern(null, $marke . ' holen mit Strom', '', ['inventory.pull', 'plans.manage', 'karte.view', 'anlagen.manage', 'leitungen.manage'])['id'];
+    $puller = Database::insert('users', ['username' => $marke . '-puller', 'full_name' => '', 'email' => '', 'password_hash' => password_hash(bin2hex(random_bytes(8)), PASSWORD_DEFAULT),
+        'is_active' => 1, 'must_change_password' => 0, 'created_at' => gmdate('c')]);
+    $pullerRolle = Database::insert('user_roles', ['user_id' => $puller, 'role_id' => $rolleNur, 'gueltig_ab' => null, 'gueltig_bis' => null]);
+    Database::execute('UPDATE sites SET name = ? WHERE id = ?', [$marke . ' Lager hier', $siteId]);
+    Database::update('objekte', $an, ['steuerung_gesperrt' => 1]);
+    $vorher = static fn (): array => [(string) Database::scalar('SELECT name FROM sites WHERE id = ?', [$siteId]), (int) Database::scalar('SELECT steuerung_gesperrt FROM objekte WHERE id = ?', [$an])];
+    $stand = $vorher();
+    $urlEcht = Config::get('inventory.repo_url');
+    try {
+        \App\Auth\Auth::alsBenutzer($puller);
+        // Vor dem Holen: ein unerreichbares Repository wird gar nicht erst gefragt.
+        Config::set('inventory.repo_url', 'file://' . $tmp . '/gibt-es-nicht.git');
+        $u = LocationSync::uebernehmen('lager', true);
+        pruefe(!$u['ok'] && str_contains($u['message'], 'Freigabe mit „bearbeiten“') && is_dir($kopie . '/.git'),
+            'ohne Freigabe: abgelehnt, bevor das Repository gefragt wird – ' . $u['message']);
+        Config::set('inventory.repo_url', $urlEcht);
+        gleich($vorher(), $stand, 'ohne Freigabe: Name und Schaltsperre hier unverändert');
+        pruefe(LocationSync::uebernehmenVerboten('pm-gibt-es-hier-nicht', false) !== null, 'ohne „alle Standorte“ legt das Übernehmen keinen neuen Standort an');
+        \App\Services\BenutzerService::freigabeSpeichern(['subject_type' => 'user', 'subject_id' => $puller, 'ziel_art' => 'site', 'ziel_id' => $siteId]);
+        \App\Auth\Zugriff::vergessen();
+        pruefe(LocationSync::uebernehmenVerboten('lager', false) !== null, 'den Standort nur zu sehen genügt nicht');
+        Database::execute("UPDATE freigaben SET darf_bearbeiten = 1 WHERE subject_type = 'user' AND subject_id = ?", [$puller]);
+        \App\Auth\Zugriff::vergessen();
+        $u = LocationSync::uebernehmen('lager', true);
+        pruefe(!$u['ok'] && str_contains($u['message'], 'Feststromanschlüsse mit') && $vorher() === $stand,
+            'mit *bearbeiten*, aber ohne „Anlagen ändern“: strom.json verhindert alles, nichts halb übernommen – ' . $u['message']);
+        Database::update('user_roles', $pullerRolle, ['role_id' => $rolleVoll]);
+        \App\Auth\Auth::alsBenutzer($puller);
+        $u = LocationSync::uebernehmen('lager', true);
+        pruefe($u['ok'] && $vorher()[0] === 'Lager', 'mit *bearbeiten*, „Anlagen ändern“ und „Kabel einzeichnen“: übernommen – ' . $u['message']);
+    } finally {
+        Config::set('inventory.repo_url', $urlEcht);
+        \App\Auth\Auth::alsBenutzer(null);
+        Database::execute("DELETE FROM freigaben WHERE subject_type = 'user' AND subject_id = ?", [$puller]);
+        Database::execute('DELETE FROM user_roles WHERE user_id = ?', [$puller]);
+        Database::execute('DELETE FROM users WHERE id = ?', [$puller]);
+        \App\Services\BenutzerService::rolleLoeschen($rolleNur);
+        \App\Services\BenutzerService::rolleLoeschen($rolleVoll);
+    }
+    Database::update('objekte', $an, ['steuerung_gesperrt' => 0]);
+    pruefe(LocationSync::uebernehmen('lager')['ok'], 'die Kommandozeile (ohne Benutzer) übernimmt weiter als Betreiber');
+
+    // ------------------------------------------------ Messpunkte haben eine Zeit (Übernehmen)
+    // Ein Messpunkt, der hier misst und in strom.json steht, bleibt mit ID und
+    // Beginn; einer, der dort fehlt, endet (gueltig_bis), statt mit seinem
+    // Verlauf zu verschwinden.
+    $haMp = Database::first("SELECT id, gueltig_ab FROM messpunkte WHERE objekt_id = ? AND geraet = 'shellypro3em-lager-ha' AND gueltig_bis IS NULL", [$an]);
+    $nurHierMp = (int) MesspunktService::speichern($an, null, ['geraet' => $marke . '-nur-hier', 'kanal' => 'em:0'])['id'];
+    pruefe($haMp !== null && LocationSync::uebernehmen('lager')['ok'], 'mit einem Messpunkt nur hier noch einmal übernommen');
+    $haNach = Database::first("SELECT id, gueltig_ab, gueltig_bis FROM messpunkte WHERE objekt_id = ? AND geraet = 'shellypro3em-lager-ha'", [$an]);
+    gleich($haNach !== null ? [(int) $haNach['id'], $haNach['gueltig_ab'], $haNach['gueltig_bis']] : [], [(int) $haMp['id'], $haMp['gueltig_ab'], null],
+        'der Messpunkt aus strom.json bleibt mit ID und Beginn');
+    $nurHier = Database::first('SELECT gueltig_bis FROM messpunkte WHERE id = ?', [$nurHierMp]);
+    pruefe($nurHier !== null && $nurHier['gueltig_bis'] !== null, 'der Messpunkt, der in strom.json fehlt, endet, statt gelöscht zu werden');
+
+    // ------------------------------------------------ Messgeräte aus strom.json nur wie von Hand
+    // Wer ins Repository pushen kann, trägt dort an „seiner“ Anlage einen
+    // Shelly ein, der an einer Anlage eines anderen Standorts misst oder in
+    // einem Inventarstück steckt. Übernommen hätte er sonst Messwerte und
+    // Schalten der fremden Anlage – an darfGeraetZuordnen() vorbei.
+    $fremdSite = SiteService::saveSite(null, ['name' => $marke . ' fremd']);
+    $fremdEtage = SiteService::saveFloor(null, ['site_id' => $fremdSite, 'name' => 'Halle']);
+    $fremdAnlage = (int) AnlagenService::speichern(null, ['art' => 'verteilung', 'name' => $marke . ' fremd', 'floor_id' => $fremdEtage, 'ohne_anschluesse' => true])['id'];
+    MesspunktService::speichern($fremdAnlage, null, ['geraet' => $marke . '-fremd', 'kanal' => 'switch:0']);
+    $stueck = (int) InventarService::speichern(null, ['art' => 'zwischenstecker', 'kennung' => $marke . '-ZS',
+        'steckertyp_id' => (int) Database::scalar("SELECT id FROM steckertypen WHERE schluessel = 'cee16'"),
+        'messgeraete' => [['geraet' => $marke . '-stueck', 'kanal' => 'switch:0']]])['id'];
+    $git($mo, 'pull -q origin main');
+    $stromVorher = (string) file_get_contents($mo . '/locations/lager/strom.json');
+    $mitGeraeten = json_decode($stromVorher, true);
+    foreach ($mitGeraeten['anlagen'] as &$a) {
+        if (($a['name'] ?? '') === 'Hausanschluss Lager') {
+            foreach (['fremd', 'stueck', 'frei'] as $g) {
+                $a['messpunkte'][] = ['geraet' => $marke . '-' . $g, 'kanal' => 'switch:0', 'rolle' => 'einspeisung', 'bezeichnung' => ''];
+            }
+        }
+    }
+    unset($a);
+    file_put_contents($mo . '/locations/lager/strom.json', json_encode($mitGeraeten, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE));
+    $git($mo, 'commit -q -am "fremde Messgeräte"');
+    $git($mo, 'push -q origin main');
+    $jetzigeAn = static fn (): array => array_column(Database::select('SELECT geraet FROM messpunkte WHERE objekt_id = ? AND gueltig_bis IS NULL AND geraet LIKE ? ORDER BY geraet',
+        [$an, $marke . '-%']), 'geraet');
+    $rolleStrom = (int) \App\Services\BenutzerService::rolleSpeichern(null, $marke . ' holen mit Strom 2', '', ['inventory.pull', 'plans.manage', 'karte.view', 'anlagen.manage', 'leitungen.manage'])['id'];
+    $techniker = Database::insert('users', ['username' => $marke . '-technik', 'full_name' => '', 'email' => '', 'password_hash' => password_hash(bin2hex(random_bytes(8)), PASSWORD_DEFAULT),
+        'is_active' => 1, 'must_change_password' => 0, 'created_at' => gmdate('c')]);
+    Database::insert('user_roles', ['user_id' => $techniker, 'role_id' => $rolleStrom, 'gueltig_ab' => null, 'gueltig_bis' => null]);
+    try {
+        \App\Services\BenutzerService::freigabeSpeichern(['subject_type' => 'user', 'subject_id' => $techniker, 'ziel_art' => 'site', 'ziel_id' => $siteId, 'darf_bearbeiten' => 1]);
+        \App\Auth\Auth::alsBenutzer($techniker);
+        $u = LocationSync::uebernehmen('lager', true);
+        \App\Auth\Auth::alsBenutzer(null);
+        gleich($jetzigeAn(), [$marke . '-frei'], 'Oberfläche (*bearbeiten* am Standort): nur das freie Gerät misst danach an der Anlage – ' . $u['message']);
+        pruefe($u['ok'] && str_contains($u['message'], $marke . '-fremd') && str_contains($u['message'], $marke . '-stueck') && str_contains($u['message'], 'Nicht zugeordnet'),
+            '… die übergangenen nennt die Meldung');
+        Database::execute('DELETE FROM messpunkte WHERE objekt_id = ? AND geraet LIKE ?', [$an, $marke . '-%']);
+        $u = LocationSync::uebernehmen('lager');
+        gleich($jetzigeAn(), [$marke . '-frei'], 'Kommandozeile: ebenso kein Gerät eines anderen Standorts und keins aus dem Inventar – ' . $u['message']);
+        \App\Auth\Zugriff::vergessen();
+        gleich(array_map('intval', array_column(\App\Auth\Zugriff::objekteZuGeraet($marke . '-fremd'), 'id')), [$fremdAnlage],
+            '… das fremde Gerät misst weiter nur an der fremden Anlage');
+    } finally {
+        \App\Auth\Auth::alsBenutzer(null);
+        Database::execute("DELETE FROM freigaben WHERE subject_type = 'user' AND subject_id = ?", [$techniker]);
+        Database::execute('DELETE FROM user_roles WHERE user_id = ?', [$techniker]);
+        Database::execute('DELETE FROM users WHERE id = ?', [$techniker]);
+        \App\Services\BenutzerService::rolleLoeschen($rolleStrom);
+        Database::execute('DELETE FROM messpunkte WHERE geraet LIKE ?', [$marke . '-%']);
+        InventarService::loeschen($stueck);
+        AnlagenService::loeschen($fremdAnlage);
+        SiteService::deleteSite($fremdSite);
+        \App\Auth\Zugriff::vergessen();
+        file_put_contents($mo . '/locations/lager/strom.json', $stromVorher);
+        $git($mo, 'commit -q -am "fremde Messgeräte wieder weg"');
+        $git($mo, 'push -q origin main');
+    }
+
+    // ------------------------------------------------ Verweise (Symlinks) im Repository
+    // Wer ins Repository pushen kann, legt strom.json als Verweis auf eine
+    // Datei des App-Benutzers an. Das nächste „Hochladen“ schriebe durch ihn
+    // hindurch (hier: in die Datenbank). Der Abgleich lehnt den Stand ab: Der
+    // Kanarienvogel bleibt, eine Meldung kommt, nichts geht hinaus.
+    $kanari = dirname(__DIR__) . '/storage/pm-kanari-' . bin2hex(random_bytes(3)) . '.txt';
+    file_put_contents($kanari, 'KANARIENVOGEL');
+    try {
+        $git($mo, 'pull -q origin main');
+        unlink($mo . '/locations/lager/strom.json');
+        symlink('../../../../' . basename($kanari), $mo . '/locations/lager/strom.json');
+        $git($mo, 'add -A');
+        $git($mo, 'commit -q -m "strom.json als Verweis"');
+        $git($mo, 'push -q origin main');
+        $dortVorher = LocationSync::fernerStand();
+        Database::update('floors', $floorId, ['notes' => 'nach dem Verweis ' . $marke]);
+        $hoch = LocationSync::locationHochladen($siteId, 'pruefung');
+        clearstatcache();
+        pruefe(!$hoch['ok'] && str_contains($hoch['message'], 'locations/lager/strom.json') && str_contains($hoch['message'], 'Verweis'),
+            'Verweis im Repository: Hochladen abgelehnt mit Meldung – ' . $hoch['message']);
+        gleich([(string) file_get_contents($kanari), is_link($kopie . '/locations/lager/strom.json'), LocationSync::fernerStand()], ['KANARIENVOGEL', false, $dortVorher],
+            'Verweis im Repository: der Kanarienvogel bleibt, git checkt keinen Verweis aus, nichts hochgeladen');
+        pruefe(!LocationSync::uebernehmen('lager')['ok'] && !LocationSync::locationsImRepo()['ok'], 'Verweis im Repository: auch Übernehmen und Abfragen lehnen ab');
+        // Die dritte Tür: eine Arbeitskopie, die noch mit Verweisen ausgecheckt
+        // ist (ältere Fassung) – Lesen, Schreiben und das Gerüst gehen nie hindurch.
+        $sh('rm -f ' . escapeshellarg($kopie . '/locations/lager/strom.json'));
+        symlink($kanari, $kopie . '/locations/lager/strom.json');
+        symlink(dirname($kanari), $kopie . '/locations/lager/umweg');
+        pruefe(LocationSync::pfadInKopie('locations/lager/strom.json') === null && LocationSync::ausKopieLesen('locations/lager/strom.json') === null
+            && LocationSync::stromLesen('lager') === null, 'Verweis in der Arbeitskopie: nicht gelesen');
+        pruefe(LocationSync::inKopieSchreiben('locations/lager/strom.json', '{}') !== null
+            && LocationSync::inKopieSchreiben('locations/lager/umweg/' . basename($kanari), '{}') !== null
+            && LocationSync::inKopieSchreiben('locations/lager/../../x', '{}') !== null, 'Verweis in der Arbeitskopie: nichts hindurch geschrieben, kein „..“');
+        gleich((string) file_get_contents($kanari), 'KANARIENVOGEL', 'der Kanarienvogel bleibt auch dann');
+        pruefe(LocationSync::inKopieSchreiben('locations/lager/neu/probe.txt', 'probe') === null
+            && (string) file_get_contents($kopie . '/locations/lager/neu/probe.txt') === 'probe' && glob(dirname($kopie) . '/.schreiben-*') === [],
+            'ein gewöhnlicher Pfad wird geschrieben, ohne Zwischendatei zurückzulassen');
+        $sh('rm -rf ' . escapeshellarg($kopie . '/locations/lager/umweg') . ' ' . escapeshellarg($kopie . '/locations/lager/neu'));
+        // Der Verweis kommt aus dem Repository wieder heraus – danach geht es wie gewohnt.
+        $git($mo, 'rm -q locations/lager/strom.json');
+        $git($mo, 'commit -q -m "Verweis entfernt"');
+        $git($mo, 'push -q origin main');
+        $hoch = LocationSync::locationHochladen($siteId, 'pruefung');
+        pruefe($hoch['ok'] && !is_link($kopie . '/locations/lager/strom.json') && (string) file_get_contents($kanari) === 'KANARIENVOGEL',
+            'Verweis entfernt: Hochladen geht wieder, die Arbeitskopie ist ohne Verweis – ' . $hoch['message']);
+    } finally {
+        @unlink($kanari);
+    }
+
     // ------------------------------------------------ Tanks und Kraftstoffschläuche über die Schnittstelle
     // Ein fester Tank (Bodentank) ist feste Infrastruktur wie über Git: Er geht
     // mit „feststrom“ hinaus – ohne Anschlüsse, Schutzorgane und Messpunkte –,

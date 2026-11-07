@@ -11,7 +11,9 @@
 #                                                Konten (nur Mosquitto-Hashes)
 #   /etc/mosquitto/powermanagement-wirksam.acl   Grundlage (powermanagement.acl)
 #                                                + „topic deny <präfix>/#“ für den
-#                                                gemeinsamen Zugang shelly
+#                                                gemeinsamen Zugang shelly, mit
+#                                                einem gesperrten Gen1-Gerät dazu
+#                                                „topic deny shellies/command“
 #
 # Danach lädt er Mosquitto neu (SIGHUP – bestehende Verbindungen bleiben) und
 # schreibt das Ergebnis als App-Benutzer nach storage/mqtt/ist/ergebnis.txt.
@@ -809,6 +811,20 @@ runde() {
                 printf '\n%s\n%s\nuser shelly\n' "$ERZEUGT_KOPF" "$ERZEUGT_TEXT"
                 for p in "${sperren[@]}"; do
                     printf 'topic deny %s/#\n' "$p"
+                done
+                # Gen1 mit eigenem Zugang liest den Rundruf shellies/command
+                # (pattern read in der Grundlage) – über ihn erreichte der
+                # gemeinsame Zugang auch dieses Gerät (update_fw). Senden muss
+                # ihn niemand außer Node-RED, und das fragt je Gerät. „Nur
+                # Schreiben verbieten“ kennt Mosquitto nicht: deny sperrt auch
+                # das Lesen – Geräte am gemeinsamen Zugang bekommen den
+                # Rundruf dann nicht mehr. Keine Sperre eines Geräts (RE_DENY
+                # verlangt „/#“), gesperrt_aus_datei übergeht die Zeile.
+                for p in "${sperren[@]}"; do
+                    if [[ "$p" == shellies/* ]]; then
+                        printf 'topic deny shellies/command\n'
+                        break
+                    fi
                 done
             fi
         } > "$ARBEIT/wirksam.neu"

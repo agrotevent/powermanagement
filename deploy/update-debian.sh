@@ -929,15 +929,43 @@ ordner_anlegen() {
     install -d -m 700 "$PROTOKOLLE" "$ZUSTAND"
 }
 
+# Ohne fs.protected_hardlinks darf der Anwendungsbenutzer feste Verweise auf
+# Dateien anlegen, die ihm nicht gehören (etwa deploy/update-helfer.sh, das
+# der Update-Dienst als root startet). Ein rekursives chown als root in
+# storage/ übereignete ihm dann deren Inhalt – und rennfrei geht ein chown
+# als root in einem Ordner, der ihm gehört, ohne diesen Schutz nicht.
+# Debian und Proxmox schalten ihn ein; im LXC gilt der Wert des Hosts.
+HARDLINK_SCHUTZ="/proc/sys/fs/protected_hardlinks"
+hardlinks_geschuetzt() {
+    [[ "$(cat -- "$HARDLINK_SCHUTZ" 2>/dev/null || true)" == 1 ]]
+}
+hardlinks_hinweis() {
+    hinweis "fs.protected_hardlinks ist aus – ohne diesen Schutz übergibt root storage/ nicht rekursiv der Anwendung"
+    hinweis "(ein fester Verweis dort bekäme sonst eine fremde Datei); die Ordner legt sie selbst an. Einschalten – im LXC auf dem Host:"
+    hinweis "  sysctl -w fs.protected_hardlinks=1, dauerhaft mit einer Datei in /etc/sysctl.d/."
+}
+
 # Rechte wie bei der Installation: Code gehört root, storage/ der
 # Anwendung. storage/ und config.php bleiben dabei außen vor – die
 # Oberfläche läuft weiter und soll nicht kurz ihre Dateien verlieren.
 rechte_setzen() {
     find "$ZIEL" -path "$ZIEL/storage" -prune -o ! -path "$ZIEL/config/config.php" \
         -exec chown root:root {} + -exec chmod go+rX,go-w {} +
-    # Was git eben als root in storage/ angelegt hat (neue .gitkeep-Ordner),
-    # erst der Anwendung übereignen – sonst darf sie dort keine Rechte setzen.
-    chown -R -P "$APP_USER:$APP_USER" "$ZIEL/storage"
+    # Was git eben als root in storage/ angelegt hat (ein .gitkeep-Ordner, den
+    # es dort noch nicht gab), erst der Anwendung übereignen – sonst darf sie
+    # dort keine Rechte setzen. Nur mit fs.protected_hardlinks (siehe oben).
+    # Ohne den Schutz kein Abbruch: Das Update liefe sonst bei jedem Versuch
+    # auf denselben Fehler (bei einem älteren Stufe-1-Skript erst nach dem
+    # Checkout, mit Zurückrollen und „gescheitert“). Es bleibt beim Hinweis
+    # (auch in System → Update), und die Ordner legt ordner_anlegen als
+    # Anwendungsbenutzer an – neue Ordner in storage/ kommen deshalb nur über
+    # APP_ORDNER, nie als .gitkeep aus dem Repository.
+    if hardlinks_geschuetzt; then
+        chown -R -P "$APP_USER:$APP_USER" "$ZIEL/storage"
+    else
+        hardlinks_hinweis
+        [[ " ${WARNUNGEN[*]+"${WARNUNGEN[*]}"} " == *" hardlinks "* ]] || WARNUNGEN+=(hardlinks)
+    fi
     ordner_anlegen
     if [[ -f "$ZIEL/config/config.php" ]]; then
         chown "root:$APP_USER" "$ZIEL/config/config.php"
@@ -1183,6 +1211,10 @@ abgleichen() {
                 if ! grep -q 'location = /standorte/grundriss' "$SITE"; then
                     hinweis "  Darin fehlt der Block für Grundrisse bis 100 MB (location = /standorte/grundriss,"
                     hinweis "  client_max_body_size 105m) – von dort übernehmen, sonst lehnt nginx große Pläne ab."
+                fi
+                if ! grep -qF 'location ~ ^/login/*$' "$SITE"; then
+                    hinweis "  Darin fehlen die Bremsen für Anmeldung und Grundriss-Upload (location ~ ^/login/*$,"
+                    hinweis "  limit_conn pm_plan, die Zonen oben) – zum Schutz von dort übernehmen."
                 fi
                 WARNUNGEN+=(site_behalten) ;;
         esac

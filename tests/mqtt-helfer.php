@@ -329,9 +329,27 @@ try {
     gleich($behalten($g1, $kwG1, 'shellies/' . $g1 . '/relay/0/command', 'g1-retain-nach'), [],
         'Gen1 gesperrt: Retained-Schaltbefehl des gemeinsamen Zugangs erreicht das Gerät nicht mehr');
     $nr->veroeffentlichen('shellies/' . $g1 . '/relay/0/command', '', 1, true);
+    // Den Rundruf shellies/command liest das Gerät (pattern read) – über ihn
+    // erreichte der gemeinsame Zugang es sonst weiter (update_fw). Mit einem
+    // gesperrten Gen1-Gerät nimmt der Helfer ihn dem gemeinsamen Zugang;
+    // Node-RED fragt je Gerät (shellies/<id>/command).
+    $w = (string) file_get_contents($broker['wirksam']);
+    pruefe(str_ends_with($w, "user shelly\ntopic deny {$g2}/#\ntopic deny shellies/{$g1}/#\ntopic deny shellies/command\n")
+        || str_ends_with($w, "user shelly\ntopic deny shellies/{$g1}/#\ntopic deny {$g2}/#\ntopic deny shellies/command\n"),
+        'Gen1 gesperrt: wirksame ACL sperrt dem gemeinsamen Zugang auch shellies/command');
+    $sh3 = $verbinden('shelly', $kw['shelly'], 'shelly-rundruf');
+    pruefe(!mqttKommtAn($sh3, $d1, 'shellies/command'), 'Gen1 gesperrt: gemeinsamer Zugang erreicht das Gerät nicht mehr über den Rundruf');
+    pruefe(!mqttKommtAn($sh3, $nr, 'shellies/command'), 'Gen1 gesperrt: gemeinsamer Zugang schreibt shellies/command nicht mehr');
+    pruefe(!mqttKommtAn($nr, $sh3, 'shellies/command'), 'Gen1 gesperrt: … und liest ihn nicht mehr (deny sperrt beides)');
+    pruefe(mqttKommtAn($nr, $d1, 'shellies/command'), 'Gen1 gesperrt: Node-RED erreicht das Gerät weiter über den Rundruf');
+    pruefe(mqttKommtAn($nr, $d1, 'shellies/' . $g1 . '/command'), 'Gen1 gesperrt: announce je Gerät (shellies/<id>/command) kommt beim Gerät an');
+    pruefe(mqttKommtAn($nr, $sh3, 'shellies/shelly1-' . $kennung . 'X/command'), 'Gen1 gesperrt: announce je Gerät erreicht Geräte am gemeinsamen Zugang');
     $soll([[$g2, 2, $hG2, 'dauerhaft'], [$g2Name, 2, $hG2Name, '-'], [$g1, 1, $hG1, '-']]);
     $r = $helfer();
     gleich($ergebnis()['gesperrt'], [$g2], 'Gen1 wieder frei');
+    pruefe(!str_contains((string) file_get_contents($broker['wirksam']), 'topic deny shellies/command'), 'Gen1 wieder frei: Rundruf nicht mehr gesperrt');
+    $sh4 = $verbinden('shelly', $kw['shelly'], 'shelly-rundruf-frei');
+    pruefe(mqttKommtAn($nr, $sh4, 'shellies/command'), 'Gen1 wieder frei: gemeinsamer Zugang liest den Rundruf wieder');
 
     // --------------------------------------------- Ablehnungen
     $ablehnen = static function (string $text, string $fehler, string $was) use ($broker, $helfer, $ergebnis, $sollRoh, $datei): void {

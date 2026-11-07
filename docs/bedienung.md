@@ -958,8 +958,11 @@ Gerät ist – dann lässt sich keines umstellen, bis das geklärt ist.
 - Wer das gemeinsame Kennwort kennt, kann ein umgestelltes Gerät vom Broker
   werfen, indem er sich mit dessen Client-ID anmeldet (Mosquitto bindet
   Client-IDs nicht an Benutzer). Schalten oder mitlesen kann er es nicht.
-- Den Gen1-Rundruf `shellies/command` darf der gemeinsame Zugang weiter
-  schreiben (announce, update, update_fw – nur offizielle Firmware).
+- Den Gen1-Rundruf `shellies/command` (announce, update, update_fw) sperrt
+  der Broker dem gemeinsamen Zugang, sobald ein Gen1-Gerät einen eigenen
+  Zugang hat – lesen dann auch die Gen1-Geräte am gemeinsamen Zugang nicht
+  mehr. Modell und Firmware fragt Node-RED je Gerät
+  (`shellies/<id>/command`).
 
 In der Datenquellen-Liste steht an jedem schaltbaren Shelly, welchen Zugang
 er nutzt. Was dazu am Broker passiert, steht in
@@ -1092,6 +1095,23 @@ Etage), `--veraltet` (alle einer älteren Fassung), `--qualitaet=fein`,
 Adresse und Token des Repositorys stehen unter **System → Einstellungen →
 Location- und Verteiler-Abgleich**.
 
+**Übernehmen** darf, wer den Standort auch von Hand ändern dürfte:
+„Grundrisse pflegen“ und *bearbeiten* am Standort, mit Feststromanschlüssen
+dazu „Anlagen ändern“ und „Kabel zeichnen“ (Einzelheiten in
+[rechte.md](rechte.md#location-abgleich)); sonst steht in der Liste „nur
+ansehen“. Messgeräte, die in `strom.json` nicht mehr stehen, enden beim
+Übernehmen – ihr Verlauf bleibt. Ein neues Messgerät aus `strom.json` kommt
+nur dazu, wenn es auch von Hand ginge: nicht, wenn es in einem
+Inventarstück steckt (das misst nur über einen Einsatz) oder gerade an einer
+Anlage eines anderen Standorts bzw. einer, die du nicht bearbeiten darfst,
+misst – die Meldung nennt die übergangenen Geräte.
+
+Was im Repository steht, kommt von außen. Ein Verweis (Symlink) unter
+`locations/` oder `verteiler/` – das Format von MasterAdmin kennt keine –
+hält den ganzen Abgleich an: Holen, Übernehmen und Hochladen melden die
+Datei, und nichts wird geschrieben. Den Verweis im Repository durch die
+Datei bzw. den Ordner selbst ersetzen, dann geht es weiter.
+
 Grundrisse wandern beim Hochladen mit ins Repository. Über **50 MB** gibt es
 dazu einen Hinweis: GitHub warnt ab dieser Größe, und jede Fassung bleibt
 für immer in der Geschichte des Repositorys, die jede Installation beim
@@ -1218,7 +1238,13 @@ Audit-Log*) zeichnet Anmeldungen, Änderungen und Schaltvorgänge auf.
   verraten nicht, ob es ein Konto gibt – auch ein unbekannter Name ist nach
   fünf Versuchen „gesperrt“. Von einer Adresse aus sind im selben Zeitraum
   höchstens 20 Fehlversuche möglich (`security.ip_attempts`), gleich für
-  welche Konten.
+  welche Konten. Im Audit-Log steht je Fehlversuch der Benutzername (höchstens
+  64 Zeichen), für eine gebremste Adresse höchstens ein Eintrag je Zeitraum.
+- Auch in einer offenen Sitzung lässt sich das Kennwort nicht beliebig oft
+  raten: Nach fünf falschen „aktuellen Passwörtern“ beim Ändern (Profil und
+  Kundenbereich) bzw. fünf falschen Kennwörtern beim Anzeigen eines Tokens
+  wird es 15 Minuten lang nicht mehr geprüft (`security.lockout_*`). Die
+  Anmeldung des Kontos bleibt davon unberührt.
 - Wird ein Kennwort geändert – selbst im Profil oder von der Verwaltung –,
   enden alle anderen Sitzungen dieses Kontos. Eine Sitzung endet außerdem
   nach einer Stunde ohne Aktivität (`security.idle_timeout`) und spätestens

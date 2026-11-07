@@ -1474,6 +1474,32 @@ try {
     aufruf($basis, $verwalter['dose'], 'POST', '/system/benutzer/speichern', ['id' => $benutzer['klein'], 'username' => $kennung . '-klein', 'full_name' => 'Geändert', 'is_active' => 1,
         'rollen' => [$kleinRolle => ['aktiv' => 1]], '_token' => $verwalter['token']]);
     gleich((string) Database::scalar('SELECT full_name FROM users WHERE id = ?', [$benutzer['klein']]), 'Geändert', 'ein Konto mit weniger Rechten lässt sich verwalten');
+    // Konten und Anmeldung (Prüfung 2026-11): Eine Rolle gibt ihre Freigaben mit – vergeben
+    // (und Konten mit solchen Freigaben verwalten) nur, wer jede davon selbst vergeben dürfte.
+    $schichtRolle = (int) BenutzerService::rolleSpeichern(null, $kennung . ' schicht', '', ['dashboard.view'])['id'];
+    BenutzerService::freigabeSpeichern(['subject_type' => 'role', 'subject_id' => $schichtRolle, 'ziel_art' => 'alles', 'darf_bearbeiten' => 1, 'darf_steuern' => 1]);
+    $r = aufruf($basis, $verwalter['dose'], 'POST', '/system/benutzer/speichern', ['id' => $benutzer['verwalter'], 'username' => $kennung . '-verwalter', 'is_active' => 1,
+        'rollen' => [$verwalterRolle => ['aktiv' => 1], $schichtRolle => ['aktiv' => 1]], '_token' => $verwalter['token']]);
+    pruefe(Database::first('SELECT id FROM user_roles WHERE user_id = ? AND role_id = ?', [$benutzer['verwalter'], $schichtRolle]) === null
+        && str_contains(aufruf($basis, $verwalter['dose'], 'GET', '/system/benutzer')['text'], 'hat Freigaben, die du selbst nicht vergeben dürftest'),
+        'Rolle mit Freigabe „alles + schalten“ gibt sich der Verwalter nicht – auch wenn er alle ihre Rechte hat');
+    aufruf($basis, $verwalter['dose'], 'POST', '/system/benutzer/speichern', ['id' => $benutzer['klein'], 'username' => $kennung . '-klein', 'is_active' => 1,
+        'rollen' => [$kleinRolle => ['aktiv' => 1], $schichtRolle => ['aktiv' => 1]], '_token' => $verwalter['token']]);
+    pruefe(Database::first('SELECT id FROM user_roles WHERE user_id = ? AND role_id = ?', [$benutzer['klein'], $schichtRolle]) === null, '… und keinem anderen Konto');
+    // Von der Administration vergeben: Das eigene Konto speichert er weiter, die Rolle bleibt.
+    Database::insert('user_roles', ['user_id' => $benutzer['verwalter'], 'role_id' => $schichtRolle, 'gueltig_ab' => null, 'gueltig_bis' => null, 'quelle' => 'hand']);
+    aufruf($basis, $verwalter['dose'], 'POST', '/system/benutzer/speichern', ['id' => $benutzer['verwalter'], 'username' => $kennung . '-verwalter', 'full_name' => 'Selbst',
+        'is_active' => 1, 'rollen' => [$verwalterRolle => ['aktiv' => 1], $schichtRolle => ['aktiv' => 1]], '_token' => $verwalter['token']]);
+    pruefe((string) Database::scalar('SELECT full_name FROM users WHERE id = ?', [$benutzer['verwalter']]) === 'Selbst'
+        && Database::first('SELECT id FROM user_roles WHERE user_id = ? AND role_id = ?', [$benutzer['verwalter'], $schichtRolle]) !== null,
+        'eine von der Administration vergebene Rolle bleibt beim Speichern des eigenen Kontos stehen');
+    // Ein Konto mit solchen Freigaben (am Konto oder an einer Rolle) übernimmt er nicht.
+    Database::insert('user_roles', ['user_id' => $benutzer['klein'], 'role_id' => $schichtRolle, 'gueltig_ab' => null, 'gueltig_bis' => null, 'quelle' => 'hand']);
+    aufruf($basis, $verwalter['dose'], 'POST', '/system/benutzer/speichern', ['id' => $benutzer['klein'], 'username' => $kennung . '-klein', 'is_active' => 1,
+        'password' => 'Uebernommen2026!x', 'rollen' => [$kleinRolle => ['aktiv' => 1], $schichtRolle => ['aktiv' => 1]], '_token' => $verwalter['token']]);
+    pruefe(password_verify($kennwort, (string) Database::scalar('SELECT password_hash FROM users WHERE id = ?', [$benutzer['klein']])),
+        'ein Konto mit Freigabe „alles + schalten“ (über eine Rolle) bekommt vom Verwalter kein neues Kennwort');
+    Database::execute('DELETE FROM user_roles WHERE role_id = ?', [$schichtRolle]);
 
     // ---------------------------------------------------- Ändern nur, wo „bearbeiten“ freigegeben ist
     $fremd = Database::first('SELECT l.id AS leitung, l.floor_id, f.site_id, f.name AS etage FROM leitungen l JOIN floors f ON f.id = l.floor_id ORDER BY l.id LIMIT 1');

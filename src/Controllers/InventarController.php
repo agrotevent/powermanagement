@@ -175,6 +175,17 @@ final class InventarController extends Controller
             $this->verweigern($request, 'Das Stück steckt gerade in einer Anlage, die du nicht bearbeiten darfst.');
             return;
         }
+        // Jeder Shelly des Stücks misst danach an dieser Anlage – also nur, wenn
+        // er gerade an keiner Anlage misst, die man nicht bearbeiten darf (wie
+        // beim Zuordnen von Hand). Sonst holte man sich über die eigene Anlage
+        // Messwerte und Schalten einer fremden. Die bisherige Anlage des Stücks
+        // ist oben schon geprüft.
+        foreach ($item !== null ? InventarService::messgeraete((int) $item['id']) : [] as $g) {
+            if (!Zugriff::darfGeraetZuordnen((string) $g['geraet'])) {
+                $this->verweigern($request, $g['geraet'] . ' aus diesem Stück misst gerade an einer Anlage, die du nicht bearbeiten darfst – nicht eingesetzt.');
+                return;
+            }
+        }
         $anschluss = $request->int('anschluss_id');
         // Tanksensor: wie hoch über dem Boden die Sonde bzw. die Sensorfläche sitzt.
         $einbau = is_array($_POST['einbau'] ?? null) ? $_POST['einbau'] : [];

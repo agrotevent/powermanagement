@@ -376,6 +376,17 @@ final class AnlagenController extends Controller
                 '/anlagen/' . (int) $objekt['id'] . '?reiter=messung');
             return;
         }
+        // Der Shelly eines Inventarstücks misst nur über dessen Einsatz – nie
+        // zusätzlich direkt (MesspunktService::inventarstueck()). Ein schon so
+        // zugeordneter (Altbestand) lässt sich weiter bearbeiten.
+        $bisher = $request->int('messpunkt_id') > 0
+            ? Database::scalar('SELECT geraet FROM messpunkte WHERE id = ? AND objekt_id = ?', [$request->int('messpunkt_id'), (int) $objekt['id']]) : null;
+        $stueck = $geraet !== '' && $geraet !== $bisher ? MesspunktService::inventarstueck($geraet) : null;
+        if ($stueck !== null) {
+            $this->antwort($request, ['ok' => false, 'message' => $geraet . ' steckt im Inventarstück ' . $stueck
+                . ' – über das Inventar einsetzen („Einsetzen“ an der Anlage), nicht direkt zuordnen.'], '/anlagen/' . (int) $objekt['id'] . '?reiter=messung');
+            return;
+        }
         $ergebnis = MesspunktService::speichern((int) $objekt['id'], $request->int('messpunkt_id') ?: null, $daten, !Zugriff::geraetMitGeschichte());
         $this->antwort($request, $ergebnis, '/anlagen/' . (int) $objekt['id'] . '?reiter=messung');
     }

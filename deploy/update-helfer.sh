@@ -99,7 +99,9 @@ GRUENDE=" besetzt offen lokal_geaendert abruf kein_zugang kein_zweig nicht_linea
           abgebrochen checkout neue_fassung migration pakete einrichtung nginx dienste pruefung
           zeitueberschreitung unterbrochen intern "
 GRUENDE="${GRUENDE//$'\n'/ }"
-WARNUNGEN_BEKANNT=" kacheln pruefung flows_behalten site_behalten acl_behalten mqtt_helfer nachgeholt treiber "
+# Ein Hinweis, den diese Liste nicht kennt, macht die ganze Ergebnisdatei
+# ungültig (ergebnis_lesen) – jeder neue aus update-debian.sh gehört hierher.
+WARNUNGEN_BEKANNT=" kacheln pruefung flows_behalten site_behalten acl_behalten mqtt_helfer nachgeholt treiber hardlinks "
 # Gründe, die einen Stand als gescheitert vermerken (ein Signal ist kein Urteil über den Commit)
 GESCHEITERT_GRUENDE=" checkout neue_fassung migration pakete einrichtung nginx dienste pruefung zeitueberschreitung "
 
