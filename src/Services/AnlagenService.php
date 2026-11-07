@@ -548,9 +548,13 @@ final class AnlagenService
         Audit::log('anlage.create', 'objekt', (string) $id, ['name' => $name, 'art' => $art]);
 
         // Anschlüsse: aus einer Vorlage oder der Vorschlag je Art – ein Tank
-        // bekommt keine.
+        // bekommt keine. Vorlage ist nur ein Katalog-Typ (elektrisch wie die
+        // Anlage): Eine beliebige Anlage als „Vorlage“ kopierte deren
+        // Belegung, Bezeichnungen und Notizen – auch die eines Standorts, den
+        // man nicht sieht.
         $vorlageId = (int) ($daten['vorlage_id'] ?? 0);
-        if ($elektrisch && $vorlageId > 0 && ($vorlage = self::find($vorlageId)) !== null) {
+        $vorlage = $vorlageId > 0 ? self::find($vorlageId) : null;
+        if ($elektrisch && $vorlage !== null && (int) $vorlage['ist_vorlage'] === 1 && self::elektrisch((string) $vorlage['art'])) {
             self::anschluesseKopieren($vorlageId, $id);
         } elseif ($elektrisch && empty($daten['ohne_anschluesse'])) {
             self::vorschlagAnlegen($id, $art);

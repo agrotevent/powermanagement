@@ -1092,6 +1092,19 @@ Etage), `--veraltet` (alle einer älteren Fassung), `--qualitaet=fein`,
 Adresse und Token des Repositorys stehen unter **System → Einstellungen →
 Location- und Verteiler-Abgleich**.
 
+**Übernehmen** darf, wer den Standort auch von Hand ändern dürfte:
+„Grundrisse pflegen“ und *bearbeiten* am Standort, mit Feststromanschlüssen
+dazu „Anlagen ändern“ und „Kabel zeichnen“ (Einzelheiten in
+[rechte.md](rechte.md#location-abgleich)); sonst steht in der Liste „nur
+ansehen“. Messgeräte, die in `strom.json` nicht mehr stehen, enden beim
+Übernehmen – ihr Verlauf bleibt.
+
+Was im Repository steht, kommt von außen. Ein Verweis (Symlink) unter
+`locations/` oder `verteiler/` – das Format von MasterAdmin kennt keine –
+hält den ganzen Abgleich an: Holen, Übernehmen und Hochladen melden die
+Datei, und nichts wird geschrieben. Den Verweis im Repository durch die
+Datei bzw. den Ordner selbst ersetzen, dann geht es weiter.
+
 Grundrisse wandern beim Hochladen mit ins Repository. Über **50 MB** gibt es
 dazu einen Hinweis: GitHub warnt ab dieser Größe, und jede Fassung bleibt
 für immer in der Geschichte des Repositorys, die jede Installation beim

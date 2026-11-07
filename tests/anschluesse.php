@@ -48,6 +48,22 @@ try {
     gleich(count(array_unique(array_column(Database::select('SELECT nr FROM anschluesse WHERE objekt_id = ? AND richtung = ?', [$v, 'abgang']), 'nr'))),
         (int) Database::scalar('SELECT COUNT(*) FROM anschluesse WHERE objekt_id = ? AND richtung = ?', [$v, 'abgang']), 'Nummern der Abgänge sind eindeutig');
 
+    // Vorlage ist nur ein Katalog-Typ: Eine gewöhnliche Anlage (auch auf einem
+    // Standort, den man nicht sieht) als „Vorlage“ gibt ihre Belegung nicht her.
+    Database::execute("UPDATE anschluesse SET notizen = 'GEHEIM: Abgang zur Kasse' WHERE objekt_id = ?", [$v]);
+    $keineVorlage = (int) AnlagenService::speichern(null, ['art' => 'verteilung', 'name' => 'Prüf-Kopie', 'floor_id' => $floorId, 'vorlage_id' => $v])['id'];
+    $angelegt[] = $keineVorlage;
+    pruefe((int) Database::scalar("SELECT COUNT(*) FROM anschluesse WHERE objekt_id = ? AND notizen LIKE 'GEHEIM%'", [$keineVorlage]) === 0
+        && (AnlagenService::anzahlen($keineVorlage)['abgang'][$typ['powerlock']] ?? 0) === 0 && (AnlagenService::anzahlen($keineVorlage)['abgang'][$typ['schuko']] ?? 0) === 6,
+        'eine Anlage als Vorlage: nichts kopiert, der Vorschlag der Art');
+    $katalogTyp = (int) AnlagenService::speichern(null, ['art' => 'verteilung', 'name' => 'Prüf-Typ', 'modell' => 'Prüf-Typ', 'ist_vorlage' => 1, 'ohne_anschluesse' => true])['id'];
+    $angelegt[] = $katalogTyp;
+    AnlagenService::anzahlSetzen($katalogTyp, ['abgang' => [$typ['cee32'] => 3]]);
+    $ausTyp = (int) AnlagenService::speichern(null, ['art' => 'verteilung', 'name' => 'Prüf-aus-Typ', 'floor_id' => $floorId, 'vorlage_id' => $katalogTyp])['id'];
+    $angelegt[] = $ausTyp;
+    gleich([AnlagenService::anzahlen($ausTyp)['abgang'][$typ['cee32']] ?? 0, AnlagenService::anzahlen($ausTyp)['abgang'][$typ['schuko']] ?? 0], [3, 0],
+        'ein Katalog-Typ als Vorlage: seine Anschlüsse kopiert');
+
     // Schutzorgane
     $erg = SchutzService::vorschlagen($v);
     pruefe($erg['ok'], 'Bestückung vorgeschlagen');
@@ -325,6 +341,28 @@ try {
         WHERE m.objekt_id = ? AND m.schutzorgan_id IS NOT NULL AND s.id IS NULL', [$bel]), 0, 'kein Messpunkt zeigt auf ein gelöschtes Schutzorgan');
     gleich((int) Database::scalar('SELECT COUNT(*) FROM einsaetze e LEFT JOIN anschluesse a ON a.id = e.anschluss_id
         WHERE e.objekt_id = ? AND e.anschluss_id IS NOT NULL AND a.id IS NULL', [$bel]), 0, 'kein Einsatz zeigt auf einen gelöschten Anschluss');
+
+    // Mit Messpunkten in der Datei (Git-Abgleich): Messpunkte haben eine Zeit.
+    // Der, der hier misst und in der Datei steht, bleibt mit ID und Beginn und
+    // folgt der Datei; der, der fehlt, endet (gueltig_bis) – sein Verlauf
+    // bleibt; ein neuer misst ab jetzt; der frühere und der des Einsatzes
+    // bleiben, wie sie sind; eine Kennung mit MQTT-Platzhaltern kommt nicht an.
+    $beginnJetzt = Database::scalar('SELECT gueltig_ab FROM messpunkte WHERE id = ?', [$mJetzt]);
+    LocationBundle::belegungErsetzen($bel, ['schutzorgane' => $belegung['schutzorgane'], 'anschluesse' => $ohneVierten, 'messpunkte' => [
+        ['geraet' => $geraet, 'kanal' => 'em:0', 'rolle' => 'abgang', 'bezeichnung' => 'aus der Datei', 'anschluss' => 'abgang:' . (int) $abg[1]['nr'], 'schutz' => null],
+        ['geraet' => $geraet . '-neu', 'kanal' => 'em:1', 'rolle' => 'abgang', 'anschluss' => null],
+        ['geraet' => 'shelly+#' . $geraet, 'kanal' => 'em:0'],
+    ]], LocationBundle::steckertypenSichern(LocationBundle::steckertypenFuerDatei($benutzt)));
+    $mp = static fn (int $id): ?array => Database::first('SELECT * FROM messpunkte WHERE id = ?', [$id]);
+    $jetztNach = $mp($mJetzt);
+    pruefe($jetztNach !== null && $jetztNach['gueltig_bis'] === null && $jetztNach['gueltig_ab'] === $beginnJetzt && $jetztNach['bezeichnung'] === 'aus der Datei'
+        && $anRef($jetztNach['anschluss_id']) === 'abgang:' . (int) $abg[1]['nr'], 'Messpunkt aus der Datei: dieselbe ID, derselbe Beginn, Abgang und Bezeichnung aus der Datei');
+    pruefe($mp($mWeg) !== null && $mp($mWeg)['gueltig_bis'] !== null, 'Messpunkt, der in der Datei fehlt: endet, statt gelöscht zu werden');
+    $neuMp = Database::first('SELECT * FROM messpunkte WHERE objekt_id = ? AND geraet = ?', [$bel, $geraet . '-neu']);
+    pruefe($neuMp !== null && $neuMp['gueltig_ab'] !== null && $neuMp['gueltig_bis'] === null, 'neuer Messpunkt aus der Datei misst ab jetzt');
+    pruefe(Database::first('SELECT id FROM messpunkte WHERE geraet = ?', ['shelly+#' . $geraet]) === null, 'Kennung mit MQTT-Platzhaltern aus der Datei übergangen');
+    gleich([$mp($mFrueher) !== null ? $mp($mFrueher)['gueltig_bis'] : 'weg', $mp($mEinsatz) !== null ? $mp($mEinsatz)['gueltig_bis'] : 'weg'],
+        ['2026-02-01T00:00:00+00:00', null], 'früherer und Einsatz-Messpunkt unverändert');
 } finally {
     if ($inventarId !== null) {
         foreach (Database::select('SELECT id FROM einsaetze WHERE inventar_id = ? AND bis IS NULL', [$inventarId]) as $e) {

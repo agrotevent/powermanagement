@@ -441,6 +441,49 @@ try {
     $tankTyp = AnlagenService::find($tankTypId);
     gleich([count(AnlagenService::anschluesse($tankTypId)), $tankTyp['nennleistung_kva'], (int) $tankTyp['ist_vorlage']], [0, null, 1], 'ein Tank-Typ bleibt ohne Anschlüsse und Leistung');
 
+    // ------------------------------------------------ Verweise (Symlinks) im Repository
+    // Die andere Installation macht verteiler/inventar zu einem Verweis auf
+    // einen Ordner des App-Benutzers und eine Typ-Datei zu einem auf eine
+    // seiner Dateien. Hochladen schriebe <schlüssel>.json dorthin. Der
+    // Abgleich lehnt den Stand ab: Kanarienvögel unverändert, Meldung, nichts
+    // hinaus.
+    $kanariOrdner = dirname(__DIR__) . '/storage/pm-kanari-' . $k;
+    mkdir($kanariOrdner, 0775, true);
+    file_put_contents($kanariOrdner . '/vogel.txt', 'KANARIENVOGEL');
+    $kanariZustand = static function () use ($kanariOrdner): array {
+        clearstatcache();
+        return [array_values(array_diff((array) scandir($kanariOrdner), ['.', '..'])), (string) file_get_contents($kanariOrdner . '/vogel.txt')];
+    };
+    try {
+        $git($andere, 'pull -q origin main');
+        $sh('rm -rf ' . escapeshellarg($andere . '/verteiler/inventar'));
+        symlink('../../../pm-kanari-' . $k, $andere . '/verteiler/inventar');
+        $sh('rm -f ' . escapeshellarg($andere . '/verteiler/typen/' . $typSchluessel . '.json'));
+        symlink('../../../../pm-kanari-' . $k . '/vogel.txt', $andere . '/verteiler/typen/' . $typSchluessel . '.json');
+        $git($andere, 'add -A');
+        $git($andere, 'commit -q -m "Verweise"');
+        $git($andere, 'push -q origin main');
+        $dortVorher = LocationSync::fernerStand();
+        $hoch = VerteilerSync::hochladen([['inventar', $vKey], ['typ', $typSchluessel]], 'pruefung');
+        pruefe(!$hoch['ok'] && str_contains($hoch['message'], 'Verweis'), 'Verweis im Repository: Hochladen abgelehnt mit Meldung – ' . $hoch['message']);
+        gleich([$kanariZustand(), LocationSync::fernerStand(), is_link($kopie . '/verteiler/inventar')], [[['vogel.txt'], 'KANARIENVOGEL'], $dortVorher, false],
+            'Verweis im Repository: Ordner und Datei des App-Benutzers unverändert, nichts hochgeladen, kein Verweis ausgecheckt');
+        pruefe(!VerteilerSync::uebernehmen(null, ['typ' => true, 'inventar' => true])['ok'] && !VerteilerSync::entfernen('inventar', $vKey, 'pruefung')['ok']
+            && $kanariZustand() === [['vogel.txt'], 'KANARIENVOGEL'], 'Verweis im Repository: auch Übernehmen und Entfernen lehnen ab, ohne etwas anzufassen');
+        $git($andere, 'revert --no-edit HEAD');
+        $git($andere, 'push -q origin main');
+        pruefe(LocationSync::holen()['ok'], 'Verweise aus dem Repository genommen: Holen geht wieder');
+        // Die dritte Tür: ein Verweis in der Arbeitskopie selbst (ältere Fassung)
+        $sh('rm -rf ' . escapeshellarg($kopie . '/verteiler/typen'));
+        symlink($kanariOrdner, $kopie . '/verteiler/typen');
+        pruefe(VerteilerSync::dort()['typ'] === [] && LocationSync::inKopieSchreiben('verteiler/typen/' . $typSchluessel . '.json', '{}') !== null
+            && $kanariZustand() === [['vogel.txt'], 'KANARIENVOGEL'], 'Verweis in der Arbeitskopie: der Ordner wird weder gelesen noch beschrieben');
+        pruefe(LocationSync::holen()['ok'] && !is_link($kopie . '/verteiler/typen') && is_file($kopie . '/verteiler/typen/' . $typSchluessel . '.json'),
+            'das nächste Holen setzt den Ordner wieder ein');
+    } finally {
+        $sh('rm -rf ' . escapeshellarg($kanariOrdner));
+    }
+
     // ------------------------------------------------ Fingerabdruck (gemeinsam mit der Schnittstelle)
     // Derselbe Inhalt gibt denselben Wert wie vor dem Umzug nach
     // Support\Fingerabdruck – sonst gälte nach einem Update jeder Verteiler
