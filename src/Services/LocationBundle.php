@@ -814,6 +814,9 @@ final class LocationBundle
      *                       hat (TankService::KENNLINIE_HIER)
      *   stecker_anlegen     false: fehlende Steckertypen nicht anlegen (deren
      *                       Anschlüsse fallen weg – vorher prüfen)
+     *   als_benutzer        true (Oberfläche): ein neues Messgerät aus der
+     *                       Datei nur, wenn der Handelnde es zuordnen dürfte
+     *                       (belegungErsetzen())
      *
      * Kabelenden bei 'partner' und 'standort': ein Ende an einer Anlage, die
      * dieser Lauf nicht anwendet (andere Etage, ohne Etage, nicht gewählt),
@@ -831,7 +834,7 @@ final class LocationBundle
      * trifft der Schlüssel eines Kabels hier einen Schlauch, wird auch er
      * übergangen – der Schlauch bleibt ein Schlauch.
      *
-     * @param array{etagen?:array<string,int>,zuordnung?:string,token_id?:int,georeferenz_leeren?:bool,sperre_behalten?:bool,ohne_messpunkte?:bool,stecker_anlegen?:bool} $optionen
+     * @param array{etagen?:array<string,int>,zuordnung?:string,token_id?:int,georeferenz_leeren?:bool,sperre_behalten?:bool,ohne_messpunkte?:bool,stecker_anlegen?:bool,als_benutzer?:bool} $optionen
      * @return array{ok:bool,message:string,anlagen:int,leitungen:int,uebergangen:int,schluessel:array{anlagen:array<string,string>,leitungen:array<string,string>}}
      *         schluessel: je angewandtem Eintrag Schlüssel in der Datei → Schlüssel hier (nur bei 'standort')
      */
@@ -848,6 +851,8 @@ final class LocationBundle
         $tokenId = $zuordnung === 'standort' && (int) ($optionen['token_id'] ?? 0) > 0 ? (int) $optionen['token_id'] : null;
         $sperreBehalten = (bool) ($optionen['sperre_behalten'] ?? false);
         $ohneMesspunkte = (bool) ($optionen['ohne_messpunkte'] ?? false);
+        $alsBenutzer = (bool) ($optionen['als_benutzer'] ?? false);
+        $geraeteUebergangen = [];
         $stecker = self::steckertypenSichern((array) ($daten['steckertypen'] ?? []), (bool) ($optionen['stecker_anlegen'] ?? true));
         // Schlüssel von außen: bei Git wie bisher, sonst im Format der Schnittstelle.
         $schluesselOk = static fn (string $k): bool => $k !== '' && ($zuordnung === 'git' || self::schluesselFormat($k));
@@ -960,7 +965,7 @@ final class LocationBundle
             if ($ohneMesspunkte) {
                 unset($a['messpunkte']);
             }
-            $anschlussIds[$key] = self::belegungErsetzen($id, $a, $stecker);
+            $anschlussIds[$key] = self::belegungErsetzen($id, $a, $stecker, $alsBenutzer, $geraeteUebergangen);
             $anlagenZahl++;
         }
         $angewandt = array_flip(array_values($objektIds));
@@ -1059,7 +1064,12 @@ final class LocationBundle
         if ($leitungenZahl > 0) {
             $meldung .= ' und ' . ($leitungenZahl === 1 ? '1 fest verlegte Leitung' : $leitungenZahl . ' fest verlegte Leitungen');
         }
-        return ['ok' => true, 'message' => $meldung . ' übernommen.', 'anlagen' => $anlagenZahl, 'leitungen' => $leitungenZahl, 'uebergangen' => $uebergangen,
+        $meldung .= ' übernommen.';
+        if ($geraeteUebergangen !== []) {
+            $meldung .= ' Nicht zugeordnet (steckt in einem Inventarstück, misst an einer Anlage eines anderen Standorts oder an einer, '
+                . 'die du nicht bearbeiten darfst): ' . implode(', ', array_unique($geraeteUebergangen)) . '.';
+        }
+        return ['ok' => true, 'message' => $meldung, 'anlagen' => $anlagenZahl, 'leitungen' => $leitungenZahl, 'uebergangen' => $uebergangen,
             'schluessel' => ['anlagen' => $zuordnungAnlagen, 'leitungen' => $zuordnungLeitungen]];
     }
 
@@ -1174,10 +1184,21 @@ final class LocationBundle
      * Messpunkte auf das Schutzorgan an derselben Stelle (s1, s2 …). Fehlt
      * das Gegenstück, wird der Verweis leer – nie zeigt er ins Leere.
      *
+     * Ein neuer Messpunkt aus der Datei kommt nur für ein Gerät, das in
+     * keinem Inventarstück steckt (MesspunktService::inventarstueck() – es
+     * misst nur über einen Einsatz) und gerade an keiner Anlage eines
+     * anderen Standorts misst; mit $alsBenutzer (die Oberfläche) zudem nur,
+     * wenn der Handelnde es zuordnen dürfte (Zugriff::darfGeraetZuordnen()) –
+     * wie von Hand. Sonst holte sich, wer den eigenen Standort bearbeitet,
+     * über das Repository Messwerte und Schalten einer fremden Anlage. Die
+     * Kommandozeile handelt als Betreiber. Übergangene Geräte landen in
+     * $uebergangen.
+     *
      * @param array<string,int> $stecker schluessel => id
+     * @param list<string> $uebergangen
      * @return array<string,int> „richtung:nr“ => neue anschluss_id
      */
-    public static function belegungErsetzen(int $objektId, array $a, array $stecker): array
+    public static function belegungErsetzen(int $objektId, array $a, array $stecker, bool $alsBenutzer = false, array &$uebergangen = []): array
     {
         // Ein Tank hat keine Anschlüsse und Schutzorgane – auch nicht aus einer
         // Datei. Gemessen wird an ihm nur mit einem Tanksensor aus dem Inventar.
@@ -1283,6 +1304,10 @@ final class LocationBundle
                     Database::update('messpunkte', $id, $felder);
                     continue;
                 }
+                if (!self::geraetAusDateiZulaessig($geraet, $objektId, $alsBenutzer)) {
+                    $uebergangen[] = $geraet;
+                    continue;
+                }
                 Database::insert('messpunkte', $felder + [
                     'objekt_id' => $objektId, 'geraet' => $geraet, 'kanal' => $kanal, 'gueltig_ab' => $jetzt, 'created_at' => $jetzt,
                 ]);
@@ -1293,5 +1318,20 @@ final class LocationBundle
             Zugriff::vergessen();
         }
         return $neu;
+    }
+
+    /** Darf ein Gerät aus der Datei neu an dieser Anlage messen? (belegungErsetzen()) */
+    private static function geraetAusDateiZulaessig(string $geraet, int $objektId, bool $alsBenutzer): bool
+    {
+        if (MesspunktService::inventarstueck($geraet) !== null) {
+            return false;
+        }
+        $siteId = Database::scalar('SELECT site_id FROM objekte WHERE id = ?', [$objektId]);
+        foreach (Zugriff::objekteZuGeraet($geraet) as $o) {
+            if ($o['site_id'] === null || $siteId === null || (int) $o['site_id'] !== (int) $siteId) {
+                return false;
+            }
+        }
+        return !$alsBenutzer || Zugriff::darfGeraetZuordnen($geraet);
     }
 }

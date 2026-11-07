@@ -278,6 +278,25 @@ try {
         Database::execute('DELETE FROM messpunkte WHERE objekt_id = ? AND geraet = ?', [$fremd, $gr('doppelt')]);
         Zugriff::vergessen();
         pruefe(Zugriff::darfSteuern($geraet, 'switch:0', AnlagenService::find($eigen)), 'misst es nur noch an der eigenen, schaltet es');
+        // Mehrkanal-Shelly: je Kanal ein Relais. Kanal 0 misst an der eigenen,
+        // Kanal 1 an der fremden Anlage – die Freigabe der eigenen schaltet
+        // Kanal 0, nie Kanal 1, ohne Kanal oder einen Kanal, der nirgends misst.
+        alsBenutzer($benutzer);
+        pruefe(MesspunktService::speichern($eigen, null, ['geraet' => $gr('mehrkanal'), 'kanal' => 'switch:0'])['ok']
+            && MesspunktService::speichern($fremd, null, ['geraet' => $gr('mehrkanal'), 'kanal' => 'switch:1'])['ok'], 'Mehrkanal-Shelly: Kanal 0 eigen, Kanal 1 fremd');
+        alsBenutzer($techniker);
+        $mehr = ['id' => 0, 'geraet' => $gr('mehrkanal'), 'art' => 'shelly'];
+        gleich([Zugriff::darfSteuern($mehr, 'switch:0', AnlagenService::find($eigen)), Zugriff::darfSteuern($mehr, 'switch:0'),
+            Zugriff::darfSteuern($mehr, 'switch:1'), Zugriff::darfSteuern($mehr, 'switch:1', AnlagenService::find($eigen)),
+            Zugriff::darfSteuern($mehr, ''), Zugriff::darfSteuern($mehr, 'switch:2')], [true, true, false, false, false, false],
+            'Mehrkanal-Shelly: der eigene Kanal schaltet, der fremde, „ohne Kanal“ und ein Kanal ohne Messpunkt nicht');
+        gleich(Zugriff::darfSteuern(['id' => 0, 'geraet' => $gr('mehrkanal'), 'art' => 'modbus'], 'switch:0'), false, '… bei anderen Geräten zählt jede Anlage');
+        alsBenutzer($benutzer);
+        MesspunktService::speichern($fremd, null, ['geraet' => $gr('mehrkanal'), 'kanal' => '']);
+        alsBenutzer($techniker);
+        gleich(Zugriff::darfSteuern($mehr, 'switch:0', AnlagenService::find($eigen)), false, '… misst das ganze Gerät (ohne Kanal) auch an der fremden, schaltet auch Kanal 0 nicht');
+        Database::execute('DELETE FROM messpunkte WHERE geraet = ?', [$gr('mehrkanal')]);
+        Zugriff::vergessen();
     } finally {
         $_POST = $postVorher;
         if ($acceptVorher === null) {

@@ -94,8 +94,9 @@ $feld = static function (string $schluessel, string $typ = 'text', string $platz
         </div>
         <div>
             <div class="field"><label for="token">Zugangstoken</label><input id="token" name="token" type="password" autocomplete="new-password"
-                placeholder="<?= $geheim['repo'] === 'eingetragen' ? 'hinterlegt – leer lassen zum Behalten' : ($geheim['repo'] === 'anderes_ziel' ? 'für einen anderen Server hinterlegt – geht hier nicht mit' : ($geheim['repo'] === 'umgebung' ? 'kommt aus der Umgebung' : '')) ?>">
-                <div class="help">Verschlüsselt abgelegt, nie wieder angezeigt. „-“ entfernt es. Gilt nur für den Server, für den es eingetragen ist. Alternativ Umgebungsvariable POWERMANAGEMENT_REPO_TOKEN im PHP-FPM-Pool – die gilt nur für den Server aus config.php (inventory.repo_url).</div></div>
+                placeholder="<?= $geheim['repo'] === 'eingetragen' ? 'hinterlegt – leer lassen zum Behalten' : ($geheim['repo'] === 'anderes_ziel' ? 'für einen anderen Server hinterlegt – geht hier nicht mit' : ($geheim['repo'] === 'umgebung' ? 'kommt aus der Umgebung' : ($geheim['repo'] === 'umgebung_fremd' ? 'aus der Umgebung – gilt nicht für diesen Server' : ''))) ?>">
+                <div class="help">Verschlüsselt abgelegt, nie wieder angezeigt. „-“ entfernt es. Gilt nur für den Server, für den es eingetragen ist. Alternativ Umgebungsvariable POWERMANAGEMENT_REPO_TOKEN im PHP-FPM-Pool – die gilt nur für den Server aus config.php (inventory.repo_url) und für den, auf den die Adresse beim Update zeigte, das diese Regel einführte.</div>
+                <?php if ($geheim['repo'] === 'umgebung_fremd'): ?><div class="help">Das Token aus der Umgebung gilt nicht für den Server dieser Adresse – hier eintragen oder inventory.repo_url in config.php auf diese Adresse stellen.</div><?php endif; ?></div>
         </div>
     </div>
     <div class="card-footer"><button class="btn btn-primary" type="submit">Speichern</button></div>

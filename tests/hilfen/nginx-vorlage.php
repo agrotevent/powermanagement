@@ -133,6 +133,7 @@ function pruefNginxGrenzen(string $vorlage, string $tmp, array $faelle): ?array
  *   login-get      Status je GET /login (30 schnell hintereinander)
  *   login-post     Status je POST /login (30 schnell hintereinander, klein)
  *   login-429      Anfang der Antwort auf den ersten gebremsten POST
+ *   login-schraeg  Status je POST /login/ und /login// gleich danach (dieselbe Bremse)
  *
  * @return array<string,mixed>|null
  */
@@ -175,6 +176,7 @@ function pruefNginxBremsen(string $vorlage, string $tmp): ?array
                 $ergebnis['login-429'] = $anfang;
             }
         }
+        $ergebnis['login-schraeg'] = [nginxAnfrage($d, $port, '/login/', 200)[0], nginxAnfrage($d, $port, '/login//', 200)[0]];
         return $ergebnis;
     });
 }

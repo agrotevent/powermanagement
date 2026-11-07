@@ -190,7 +190,9 @@ final class LocationSync
      *
      * Jedes gilt nur für seinen Server: das eingetragene für den, für den es
      * eingetragen wurde (Settings::BINDUNG), das aus der Umgebung für den
-     * aus config.php (`inventory.repo_url`). Zeigt die Adresse woandershin,
+     * aus config.php (`inventory.repo_url`) und für den, an den das Update es
+     * einmal gebunden hat (Settings::UMGEBUNG_REPO – die Adresse zur Zeit des
+     * Updates, das die Bindung einführte). Zeigt die Adresse woandershin,
      * geht keins mit.
      */
     public static function token(): string
@@ -201,7 +203,29 @@ final class LocationSync
         }
 
         $wert = getenv(self::TOKEN_VARIABLE);
-        return is_string($wert) && Settings::zielWieInDatei(Settings::GEHEIM_REPO_TOKEN) ? trim($wert) : '';
+        return is_string($wert) && Settings::umgebungPasst() ? trim($wert) : '';
+    }
+
+    /** Steht ein Token in der Umgebung des Dienstes – egal, für welchen Server? */
+    private static function tokenInUmgebung(): bool
+    {
+        $wert = getenv(self::TOKEN_VARIABLE);
+        return is_string($wert) && trim($wert) !== '';
+    }
+
+    /**
+     * Ein Token aus der Umgebung, das für die jetzige Adresse nicht gilt –
+     * als Satz für Einstellungen und Hindernis, sonst null.
+     */
+    public static function umgebungFremdHinweis(): ?string
+    {
+        if (!self::tokenInUmgebung() || Settings::umgebungPasst() || Settings::gebunden(Settings::GEHEIM_REPO_TOKEN) !== '') {
+            return null;
+        }
+        return 'Das Token aus der Umgebungsvariable ' . self::TOKEN_VARIABLE . ' gilt nicht für den Server dieser Adresse ('
+            . self::server(self::repoUrl()) . ') – nur für den aus config.php (inventory.repo_url) bzw. den, für den es beim Update '
+            . 'gebunden wurde. Entweder das Token unter System → Einstellungen → Location- und Verteiler-Abgleich eintragen '
+            . 'oder inventory.repo_url in config.php auf diese Adresse stellen.';
     }
 
     /** Steht ein Token in der Systemverwaltung? */
@@ -218,8 +242,11 @@ final class LocationSync
             // Für einen anderen Server eingetragen: geht nicht mit (token()), also nicht „eingetragen“ nennen.
             return Settings::geheimnisFremd(Settings::GEHEIM_REPO_TOKEN) ? 'anderes_ziel' : 'eingetragen';
         }
-        $wert = getenv(self::TOKEN_VARIABLE);
-        return is_string($wert) && trim($wert) !== '' ? 'umgebung' : 'fehlt';
+        if (!self::tokenInUmgebung()) {
+            return 'fehlt';
+        }
+        // Aus der Umgebung, aber für einen anderen Server: geht nicht mit (token()).
+        return Settings::umgebungPasst() ? 'umgebung' : 'umgebung_fremd';
     }
 
     /** Token eintragen oder entfernen. */
@@ -284,6 +311,9 @@ final class LocationSync
          * ohne aus – und die Prüfung darf das nicht verlangen, sonst
          * bleibt eine funktionierende Einrichtung abgeschaltet.
          */
+        if (self::token() === '' && str_starts_with(self::repoUrl(), 'http') && ($fremd = self::umgebungFremdHinweis()) !== null) {
+            return $fremd;
+        }
         if (self::token() === '' && str_starts_with(self::repoUrl(), 'http')) {
             return 'Es ist kein Zugangstoken hinterlegt. Unter System → Einstellungen → '
                 . 'Location- und Verteiler-Abgleich eintragen (es wird verschlüsselt abgelegt und nie wieder '
@@ -910,7 +940,8 @@ final class LocationSync
         }
         $meldung = $ergebnis['message'];
         if ($strom !== null) {
-            $teil = LocationBundle::stromAnwenden((int) $ergebnis['site_id'], $strom);
+            // Messgeräte aus strom.json: aus der Oberfläche nur, wer sie auch von Hand zuordnen dürfte.
+            $teil = LocationBundle::stromAnwenden((int) $ergebnis['site_id'], $strom, ['als_benutzer' => $alsBenutzer]);
             $meldung .= ' ' . $teil['message'];
         }
         Database::execute(

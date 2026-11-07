@@ -48,7 +48,10 @@ aber nicht die Administration hat, kann:
   neues Konto also nur mit Ende, eine neue Rolle an einem Konto ohne Ende
   nur mit eigenem Ende –, und das eigene Konto und die eigenen Rollen nicht
   verlängern (kürzen geht). Rollen aus Gruppen beim Anmeldedienst zählen
-  dabei als unbefristet.
+  dabei als unbefristet. Auch nicht über ein anderes Konto: Einer Rolle, die
+  jemand über sein Ende hinaus (oder ohne Ende) hat, gibt er keine neuen
+  Rechte, und ein Konto, das länger Benutzer verwaltet als er, verwaltet er
+  nicht (kein Kennwort setzen, kein SSO anhängen).
 
 Sonst wäre „Benutzer verwalten“ eine Hintertür zu allem.
 
@@ -157,9 +160,12 @@ Shelly der Geländebeleuchtung (oder nur dessen `switch:0`). Alles andere
 sieht sie, kann es aber nicht schalten.
 
 Misst ein Gerät an **mehreren Anlagen**, schaltet es über Freigaben für
-Anlagen bzw. Standorte nur, wenn sie **jede** dieser Anlagen decken – das
-Relais hängt an allen. Eine Freigabe genau für das Gerät (oder für alles)
-gilt für das Gerät selbst.
+Anlagen bzw. Standorte nur, wenn sie **jede** Anlage decken, an der das
+Geschaltete hängt. Beim Shelly hat jeder Kanal sein eigenes Relais: Für
+`switch:0` zählen die Anlagen, an denen ein Messpunkt mit `switch:0` (oder
+einer ohne Kanal – das ganze Gerät) misst. Ohne Kanal, bei anderen Geräten
+oder wenn der Kanal nirgends misst, zählt jede Anlage des Geräts. Eine
+Freigabe genau für das Gerät (oder für alles) gilt für das Gerät selbst.
 
 Jeder Versuch landet im **Schaltprotokoll** (*Auswertung → Schaltprotokoll*):
 Benutzer, Gerät, Kanal, Befehl, Ergebnis. Abgelehnte Versuche werden

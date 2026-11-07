@@ -75,6 +75,14 @@ final class Settings
         self::GEHEIM_REPO_TOKEN      => 'inventory.token_fuer',
     ];
 
+    /**
+     * Bindung des Repository-Tokens aus der Umgebung des Dienstes
+     * (LocationSync::TOKEN_VARIABLE): der Server, für den es außer dem aus
+     * config.php gilt. Gesetzt nur einmal von bindungenNachholen() – nie aus
+     * der Oberfläche, nie beim Speichern einer Adresse.
+     */
+    public const UMGEBUNG_REPO = 'inventory.umgebung_fuer';
+
     /** Die Einstellungen, die das Ziel eines Geheimnisses bilden (Schema, Host, Port, Benutzer). */
     public const ZIEL = [
         self::GEHEIM_INFLUX_TOKEN    => ['influx.url'],
@@ -269,7 +277,8 @@ final class Settings
     /**
      * Ältere Geheimnisse (vor der Bindung eingetragen) an das jetzige Ziel
      * binden – aus `bin/power migrate`, also während des Updates unter der
-     * Schreibsperre. Gibt die gebundenen Schlüssel zurück.
+     * Schreibsperre –, ebenso einmal das Repository-Token aus der Umgebung
+     * (UMGEBUNG_REPO). Gibt zurück, was gebunden wurde.
      *
      * @return list<string>
      */
@@ -282,7 +291,34 @@ final class Settings
                 $gebunden[] = $schluessel;
             }
         }
+        /*
+         * Das Repository-Token aus der Umgebung galt vorher für jede Adresse –
+         * und die meisten Installationen pflegen die Adresse in der
+         * Oberfläche, nicht in config.php (config.example.php lässt sie leer).
+         * Einmal an den Server der jetzigen Adresse binden; ohne Adresse an
+         * nichts. Die Kommandozeile sieht die Umgebung des PHP-FPM-Pools
+         * nicht, also unabhängig davon, ob sie hier gesetzt ist. Danach nie
+         * wieder: sonst bände das nächste Update eine inzwischen umgestellte
+         * Adresse.
+         */
+        if (!isset(self::all()[self::UMGEBUNG_REPO])) {
+            $server = self::ziel(self::GEHEIM_REPO_TOKEN);
+            self::schreiben(self::UMGEBUNG_REPO, $server);
+            if ($server !== '') {
+                $gebunden[] = \App\Services\LocationSync::TOKEN_VARIABLE . ' (' . $server . ')';
+            }
+        }
         return $gebunden;
+    }
+
+    /** Gilt das Repository-Token aus der Umgebung für die jetzige Adresse? (config.php oder UMGEBUNG_REPO) */
+    public static function umgebungPasst(): bool
+    {
+        if (self::zielWieInDatei(self::GEHEIM_REPO_TOKEN)) {
+            return true;
+        }
+        $bindung = self::all()[self::UMGEBUNG_REPO] ?? '';
+        return $bindung !== '' && hash_equals($bindung, self::ziel(self::GEHEIM_REPO_TOKEN));
     }
 
     /** Der Wert aus config.php (vor jeder Einstellung), sonst die Vorgabe der Clients. */

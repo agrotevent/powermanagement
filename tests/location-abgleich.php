@@ -683,6 +683,68 @@ try {
     $nurHier = Database::first('SELECT gueltig_bis FROM messpunkte WHERE id = ?', [$nurHierMp]);
     pruefe($nurHier !== null && $nurHier['gueltig_bis'] !== null, 'der Messpunkt, der in strom.json fehlt, endet, statt gelöscht zu werden');
 
+    // ------------------------------------------------ Messgeräte aus strom.json nur wie von Hand
+    // Wer ins Repository pushen kann, trägt dort an „seiner“ Anlage einen
+    // Shelly ein, der an einer Anlage eines anderen Standorts misst oder in
+    // einem Inventarstück steckt. Übernommen hätte er sonst Messwerte und
+    // Schalten der fremden Anlage – an darfGeraetZuordnen() vorbei.
+    $fremdSite = SiteService::saveSite(null, ['name' => $marke . ' fremd']);
+    $fremdEtage = SiteService::saveFloor(null, ['site_id' => $fremdSite, 'name' => 'Halle']);
+    $fremdAnlage = (int) AnlagenService::speichern(null, ['art' => 'verteilung', 'name' => $marke . ' fremd', 'floor_id' => $fremdEtage, 'ohne_anschluesse' => true])['id'];
+    MesspunktService::speichern($fremdAnlage, null, ['geraet' => $marke . '-fremd', 'kanal' => 'switch:0']);
+    $stueck = (int) InventarService::speichern(null, ['art' => 'zwischenstecker', 'kennung' => $marke . '-ZS',
+        'steckertyp_id' => (int) Database::scalar("SELECT id FROM steckertypen WHERE schluessel = 'cee16'"),
+        'messgeraete' => [['geraet' => $marke . '-stueck', 'kanal' => 'switch:0']]])['id'];
+    $git($mo, 'pull -q origin main');
+    $stromVorher = (string) file_get_contents($mo . '/locations/lager/strom.json');
+    $mitGeraeten = json_decode($stromVorher, true);
+    foreach ($mitGeraeten['anlagen'] as &$a) {
+        if (($a['name'] ?? '') === 'Hausanschluss Lager') {
+            foreach (['fremd', 'stueck', 'frei'] as $g) {
+                $a['messpunkte'][] = ['geraet' => $marke . '-' . $g, 'kanal' => 'switch:0', 'rolle' => 'einspeisung', 'bezeichnung' => ''];
+            }
+        }
+    }
+    unset($a);
+    file_put_contents($mo . '/locations/lager/strom.json', json_encode($mitGeraeten, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE));
+    $git($mo, 'commit -q -am "fremde Messgeräte"');
+    $git($mo, 'push -q origin main');
+    $jetzigeAn = static fn (): array => array_column(Database::select('SELECT geraet FROM messpunkte WHERE objekt_id = ? AND gueltig_bis IS NULL AND geraet LIKE ? ORDER BY geraet',
+        [$an, $marke . '-%']), 'geraet');
+    $rolleStrom = (int) \App\Services\BenutzerService::rolleSpeichern(null, $marke . ' holen mit Strom 2', '', ['inventory.pull', 'plans.manage', 'karte.view', 'anlagen.manage', 'leitungen.manage'])['id'];
+    $techniker = Database::insert('users', ['username' => $marke . '-technik', 'full_name' => '', 'email' => '', 'password_hash' => password_hash(bin2hex(random_bytes(8)), PASSWORD_DEFAULT),
+        'is_active' => 1, 'must_change_password' => 0, 'created_at' => gmdate('c')]);
+    Database::insert('user_roles', ['user_id' => $techniker, 'role_id' => $rolleStrom, 'gueltig_ab' => null, 'gueltig_bis' => null]);
+    try {
+        \App\Services\BenutzerService::freigabeSpeichern(['subject_type' => 'user', 'subject_id' => $techniker, 'ziel_art' => 'site', 'ziel_id' => $siteId, 'darf_bearbeiten' => 1]);
+        \App\Auth\Auth::alsBenutzer($techniker);
+        $u = LocationSync::uebernehmen('lager', true);
+        \App\Auth\Auth::alsBenutzer(null);
+        gleich($jetzigeAn(), [$marke . '-frei'], 'Oberfläche (*bearbeiten* am Standort): nur das freie Gerät misst danach an der Anlage – ' . $u['message']);
+        pruefe($u['ok'] && str_contains($u['message'], $marke . '-fremd') && str_contains($u['message'], $marke . '-stueck') && str_contains($u['message'], 'Nicht zugeordnet'),
+            '… die übergangenen nennt die Meldung');
+        Database::execute('DELETE FROM messpunkte WHERE objekt_id = ? AND geraet LIKE ?', [$an, $marke . '-%']);
+        $u = LocationSync::uebernehmen('lager');
+        gleich($jetzigeAn(), [$marke . '-frei'], 'Kommandozeile: ebenso kein Gerät eines anderen Standorts und keins aus dem Inventar – ' . $u['message']);
+        \App\Auth\Zugriff::vergessen();
+        gleich(array_map('intval', array_column(\App\Auth\Zugriff::objekteZuGeraet($marke . '-fremd'), 'id')), [$fremdAnlage],
+            '… das fremde Gerät misst weiter nur an der fremden Anlage');
+    } finally {
+        \App\Auth\Auth::alsBenutzer(null);
+        Database::execute("DELETE FROM freigaben WHERE subject_type = 'user' AND subject_id = ?", [$techniker]);
+        Database::execute('DELETE FROM user_roles WHERE user_id = ?', [$techniker]);
+        Database::execute('DELETE FROM users WHERE id = ?', [$techniker]);
+        \App\Services\BenutzerService::rolleLoeschen($rolleStrom);
+        Database::execute('DELETE FROM messpunkte WHERE geraet LIKE ?', [$marke . '-%']);
+        InventarService::loeschen($stueck);
+        AnlagenService::loeschen($fremdAnlage);
+        SiteService::deleteSite($fremdSite);
+        \App\Auth\Zugriff::vergessen();
+        file_put_contents($mo . '/locations/lager/strom.json', $stromVorher);
+        $git($mo, 'commit -q -am "fremde Messgeräte wieder weg"');
+        $git($mo, 'push -q origin main');
+    }
+
     // ------------------------------------------------ Verweise (Symlinks) im Repository
     // Wer ins Repository pushen kann, legt strom.json als Verweis auf eine
     // Datei des App-Benutzers an. Das nächste „Hochladen“ schriebe durch ihn

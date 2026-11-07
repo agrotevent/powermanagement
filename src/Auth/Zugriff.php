@@ -44,10 +44,14 @@ final class Zugriff
     /** @var array<int,list<array<string,mixed>>> Messpunkte je Gerät (Kennung → Objekt-IDs) */
     private static ?array $geraeteObjekte = null;
 
+    /** @var array<string,array<int,array<string,true>>> Kanäle der jetzigen Messpunkte je Gerät und Anlage */
+    private static array $geraeteKanaele = [];
+
     public static function vergessen(): void
     {
         self::$cache = [];
         self::$geraeteObjekte = null;
+        self::$geraeteKanaele = [];
         Kundenbereich::vergessen();
     }
 
@@ -397,9 +401,13 @@ final class Zugriff
      * Gerät, sobald eine seiner Anlagen gesperrt ist.
      *
      * Misst das Gerät an mehreren Anlagen, schaltet es über Anlagen-Freigaben
-     * nur, wenn sie **jede** davon decken – das Relais hängt an allen, und
-     * eine Freigabe für die eigene Anlage ist keine für die fremde. Eine
-     * Freigabe genau für das Gerät (oder für alles) gilt für das Gerät selbst.
+     * nur, wenn sie **jede** Anlage decken, an der das Geschaltete hängt – eine
+     * Freigabe für die eigene Anlage ist keine für die fremde. Beim Shelly ist
+     * das je Kanal ein eigenes Relais: gefordert sind die Anlagen, an denen
+     * ein jetziger Messpunkt dieses Kanals (oder einer ohne Kanal – das ganze
+     * Gerät) misst (anlagenZumKanal()). Ohne Kanal, bei anderen Geräten oder
+     * wenn der Kanal nirgends misst, jede Anlage des Geräts. Eine Freigabe
+     * genau für das Gerät (oder für alles) gilt für das Gerät selbst.
      *
      * @param array<string,mixed>|null $objekt  die Anlage, an der das Gerät hängt (falls bekannt)
      */
@@ -434,7 +442,7 @@ final class Zugriff
         if ($objekte === []) {
             return false;
         }
-        foreach ($objekte as $o) {
+        foreach (self::anlagenZumKanal($datenquelle, $kanal, $objekte) as $o) {
             $gedeckt = false;
             foreach ($schaltFreigaben as $freigabe) {
                 if (self::decktObjekt($freigabe, $o)) {
@@ -656,17 +664,39 @@ final class Zugriff
     {
         if (self::$geraeteObjekte === null) {
             self::$geraeteObjekte = [];
+            self::$geraeteKanaele = [];
             // Nur, wo das Gerät jetzt misst – ein Shelly, der mit seinem
             // Verteiler weitergezogen ist, gehört nicht mehr zur alten Anlage.
             $rows = Database::select(
-                'SELECT m.geraet, o.* FROM messpunkte m JOIN objekte o ON o.id = m.objekt_id WHERE m.gueltig_bis IS NULL'
+                'SELECT m.geraet, m.kanal AS messpunkt_kanal, o.* FROM messpunkte m JOIN objekte o ON o.id = m.objekt_id WHERE m.gueltig_bis IS NULL'
             );
             foreach ($rows as $row) {
                 $kennung = (string) $row['geraet'];
-                unset($row['geraet']);
+                self::$geraeteKanaele[$kennung][(int) $row['id']][(string) $row['messpunkt_kanal']] = true;
+                unset($row['geraet'], $row['messpunkt_kanal']);
                 self::$geraeteObjekte[$kennung][(int) $row['id']] = $row;
             }
         }
         return array_values(self::$geraeteObjekte[$geraet] ?? []);
+    }
+
+    /**
+     * Die Anlagen, an denen hängt, was darfSteuern() schaltet: beim Shelly mit
+     * Kanal die, an denen ein jetziger Messpunkt dieses Kanals oder einer ohne
+     * Kanal misst – sonst (ohne Kanal, andere Geräte, Kanal nirgends) alle
+     * Anlagen des Geräts.
+     *
+     * @param list<array<string,mixed>> $objekte objekteZuGeraet()
+     * @return list<array<string,mixed>>
+     */
+    private static function anlagenZumKanal(array $datenquelle, string $kanal, array $objekte): array
+    {
+        if ($kanal === '' || (string) ($datenquelle['art'] ?? '') !== 'shelly') {
+            return $objekte;
+        }
+        $kanaele = self::$geraeteKanaele[(string) $datenquelle['geraet']] ?? [];
+        $treffer = array_values(array_filter($objekte, static fn (array $o): bool
+            => isset($kanaele[(int) $o['id']][$kanal]) || isset($kanaele[(int) $o['id']][''])));
+        return $treffer !== [] ? $treffer : $objekte;
     }
 }

@@ -89,8 +89,8 @@ try {
         'nginx-Vorlage: Grundriss (105m) und Schnittstelle (50m) mit eigenem FastCGI-Block, index.php mit der Grenze der Site (16m)');
     // Bremse und kleine Grenze bei /login, Verbindungsgrenze beim Grundriss,
     // beide Zonen im http-Kontext der Vorlage (vor dem server-Block).
-    pruefe(str_contains($block('= /login'), 'client_max_body_size 64k;') && str_contains($block('= /login'), 'limit_req zone=pm_anmeldung')
-        && str_contains($block('= /login'), 'fastcgi_pass ') && !str_contains($block('= /login'), 'try_files')
+    pruefe(str_contains($block('~ ^/login/*$'), 'client_max_body_size 64k;') && str_contains($block('~ ^/login/*$'), 'limit_req zone=pm_anmeldung')
+        && str_contains($block('~ ^/login/*$'), 'fastcgi_pass ') && !str_contains($block('~ ^/login/*$'), 'try_files')
         && str_contains($block('= /standorte/grundriss'), 'limit_conn pm_plan 2;') && str_contains($block('= /standorte/grundriss'), 'limit_conn_status 429;')
         && preg_match('/^limit_conn_zone \$binary_remote_addr zone=pm_plan:/m', $site) === 1
         && preg_match('/^limit_req_zone \$pm_anmeldung_adresse zone=pm_anmeldung:/m', $site) === 1
@@ -190,6 +190,8 @@ try {
         'login'         => ['/login', 17 * $mib, false],
         'login-stuecke' => ['/login', 17 * $mib, true],
         'login-70k'     => ['/login', 70 * 1024, true],
+        'login-schraeg' => ['/login/', 70 * 1024, true],
+        'login-schraeg2' => ['/login//', 70 * 1024, false],
         'login-klein'   => ['/login', 2 * 1024, false],
         'nachweis-11'   => ['/kunden/1/nachweise/hochladen', 11 * $mib, true],
         'nachweis-17'   => ['/kunden/1/nachweise/hochladen', 17 * $mib, false],
@@ -201,9 +203,10 @@ try {
     if ($ng === null) {
         fwrite(STDOUT, "  (ohne nginx: Grenzen der Vorlage im Betrieb übersprungen – das prüft tests/installation-debian.sh)\n");
     } elseif ($ng !== []) {
-        gleich(array_map(static fn (array $r): int => $r[0], $ng), ['login' => 413, 'login-stuecke' => 413, 'login-70k' => 413, 'login-klein' => 502,
+        gleich(array_map(static fn (array $r): int => $r[0], $ng), ['login' => 413, 'login-stuecke' => 413, 'login-70k' => 413,
+            'login-schraeg' => 413, 'login-schraeg2' => 413, 'login-klein' => 502,
             'nachweis-11' => 502, 'nachweis-17' => 413, 'api-stuecke' => 413, 'api-20' => 502, 'plan-100' => 502, 'plan-106' => 413],
-            'nginx mit der Vorlage (502 = an PHP weitergereicht): 64k für /login (eigener Block), 16m für Prüfnachweise (11 MB durch, die App meldet '
+            'nginx mit der Vorlage (502 = an PHP weitergereicht): 64k für /login (eigener Block, auch /login/ und /login//), 16m für Prüfnachweise (11 MB durch, die App meldet '
             . 'die Größe), 50m für /api/, 105m nur für den Grundriss – auch in Stücken (chunked)');
         pruefe(str_contains($ng['api-stuecke'][1], '"ok":false') && str_contains($ng['plan-106'][1], 'Grundrisse lassen sich bis 100 MB hochladen'),
             'nginx: 413 in Stücken mit der eigenen Antwort (JSON für /api/, Seite für den Grundriss)');
@@ -220,6 +223,7 @@ try {
             pruefe(array_slice($br['login-post'], 0, 20) === array_fill(0, 20, 502) && $gebremst >= 5,
                 'nginx: POST /login – 20 sofort, danach gebremst (' . $gebremst . ' von 30 mit 429)');
             pruefe(str_contains($br['login-429'], 'Zu viele Anmeldeversuche'), 'nginx: 429 bei der Anmeldung mit eigener Seite');
+            gleich($br['login-schraeg'], [429, 429], 'nginx: POST /login/ und /login// (die App kürzt den Schrägstrich) unter derselben Bremse');
         }
     }
 

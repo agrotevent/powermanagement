@@ -167,6 +167,30 @@ try {
     gleich(LocationSync::token(), 'UMGEBUNG-TOKEN', 'Repository: eingetragenes Token nicht für einen anderen Server (dort gilt das aus der Umgebung)');
     putenv(LocationSync::TOKEN_VARIABLE);
     gleich(LocationSync::token(), '', 'Repository: ohne Umgebung kein Token für den anderen Server');
+    $zuruecksetzen();
+
+    // ---- Bestandsinstallation: Adresse in der Oberfläche (config.php leer oder anders), Token aus der Umgebung
+    $umgebungVorher = Settings::get(Settings::UMGEBUNG_REPO);
+    putenv(LocationSync::TOKEN_VARIABLE . '=UMGEBUNG-TOKEN');
+    Settings::forget(Settings::UMGEBUNG_REPO);
+    Settings::put('inventory.repo_url', 'https://github.example.test/firma/locations.git');
+    gleich(LocationSync::token(), '', 'Bestand vor dem Update: Adresse aus der Oberfläche – ohne Bindung kein Token aus der Umgebung');
+    gleich(Settings::bindungenNachholen(), [LocationSync::TOKEN_VARIABLE . ' (github.example.test)'], 'bindungenNachholen bindet das Token aus der Umgebung an den Server der jetzigen Adresse');
+    gleich([LocationSync::token(), LocationSync::tokenQuelle()], ['UMGEBUNG-TOKEN', 'umgebung'], '… danach gilt es dort weiter (Location- und Verteiler-Abgleich ohne 401)');
+    gleich(LocationSync::umgebungFremdHinweis(), null, '… ohne Hinweis');
+    Settings::put('inventory.repo_url', 'https://boese.example.test/x.git');
+    gleich([LocationSync::token(), LocationSync::tokenQuelle()], ['', 'umgebung_fremd'], '… nicht für einen anderen Server, und die Anzeige sagt es');
+    pruefe(str_contains((string) LocationSync::hindernis(), 'gilt nicht für den Server dieser Adresse (boese.example.test)'),
+        '… das Hindernis nennt es: ' . (string) LocationSync::hindernis());
+    gleich(Settings::bindungenNachholen(), [], '… ein weiteres Update bindet nicht neu');
+    gleich(LocationSync::token(), '', '… auch danach nicht für den anderen Server');
+    Settings::put('inventory.repo_url', 'https://github.example.test/firma/anders.git');
+    gleich(LocationSync::token(), 'UMGEBUNG-TOKEN', '… zurück auf dem gebundenen Server gilt es wieder');
+    Settings::forget(Settings::UMGEBUNG_REPO);
+    if (is_string($umgebungVorher)) {
+        Settings::put(Settings::UMGEBUNG_REPO, $umgebungVorher);
+    }
+    putenv(LocationSync::TOKEN_VARIABLE);
     if (is_string($envVorher)) {
         putenv(LocationSync::TOKEN_VARIABLE . '=' . $envVorher);
     }

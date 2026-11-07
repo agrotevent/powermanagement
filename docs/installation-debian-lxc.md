@@ -296,8 +296,14 @@ neu einzutragen, verliert es (mit Meldung) – so kann niemand mit dem Recht
 „Systemeinstellungen ändern“ es auf einen eigenen Dienst umlenken. Werte aus
 `config.php` gelten nur, solange die Einstellungen das Ziel nicht von dem in
 `config.php` wegbewegen; das Token aus `POWERMANAGEMENT_REPO_TOKEN` nur für
-den Server aus `inventory.repo_url` in `config.php`. Ältere Geheimnisse
-bindet `bin/power migrate` beim Update einmal an das damals gültige Ziel.
+den Server aus `inventory.repo_url` in `config.php` – und für den Server,
+auf den die in der Oberfläche eingetragene Adresse beim Update zeigte, das
+diese Regel einführte (einmal gebunden, nie wieder neu). Zeigt die Adresse
+später auf einen anderen Server, gilt es dort nicht; *System →
+Einstellungen* und der Location-Abgleich sagen das – dann das Token in der
+Oberfläche eintragen oder `inventory.repo_url` in `config.php` auf die neue
+Adresse stellen. Ältere Geheimnisse bindet `bin/power migrate` beim Update
+einmal an das damals gültige Ziel.
 
 | Datei | Inhalt |
 |-------|--------|
@@ -1655,7 +1661,9 @@ Wenn etwas nicht klappt:
   `diff -u /etc/nginx/sites-available/powermanagement /etc/nginx/powermanagement.powermanagement-neu`.
   Den Block `location = /standorte/grundriss { … }` samt
   `location @pm_plan_413` (und die neuen `fastcgi_…`-Zeilen in
-  `location ^~ /api/`) in die eigene Site übernehmen – oder, wenn die
+  `location ^~ /api/`) in die eigene Site übernehmen, ebenso die Bremsen
+  (`limit_req_zone`/`limit_conn_zone` oben, `location ~ ^/login/*$ { … }`
+  samt `@pm_anmeldung_429`, `limit_conn pm_plan` beim Grundriss) – oder, wenn die
   eigenen Änderungen entbehrlich sind, die neue Fassung ganz:
   `cp /etc/nginx/powermanagement.powermanagement-neu /etc/nginx/sites-available/powermanagement` –,
   dann `nginx -t && systemctl reload nginx` (*Größe der Uploads*,
@@ -1880,7 +1888,7 @@ printf 'Authorization: Token %s\n' "$T" | curl -sG -H @- http://127.0.0.1:8086/q
 | Node-RED-Editor: „Verbindung verloren“ | WebSocket wird nicht durchgereicht – die nginx-Vorlage aus `deploy/` verwenden (`location ^~ /node-red/` mit `Upgrade`). Ein vorgeschalteter Proxy muss WebSockets ebenfalls durchlassen. |
 | Node-RED-Editor lässt niemanden hinein | `admin-kennwort.bcrypt` fehlt oder ist kaputt – dann sperrt `settings.js` bewusst. Neues Kennwort setzen (Abschnitt 4). |
 | Installation bricht ab: `chmod: changing permissions of '/opt/powermanagement/storage/logs': Operation not permitted` | Ältere Fassungen des Skripts setzten die Rechte an den mitgelieferten Ordnern in `storage/` als `www-data`, obwohl `git clone` sie root gegeben hatte. Neuen Stand holen (`git -C /opt/powermanagement pull`) und das Skript mit denselben Optionen noch einmal aufrufen – es macht dort weiter, Kennwörter und `app.key` bleiben. Ohne neuen Stand vorher `chown -R -P www-data:www-data /opt/powermanagement/storage` – aber nur, wenn `cat /proc/sys/fs/protected_hardlinks` `1` ergibt: Sonst könnte www-data in `storage/` einen festen Verweis auf eine Datei von root abgelegt haben, die das chown dann www-data übergäbe. |
-| Installation oder Update bricht ab: „fs.protected_hardlinks ist aus“ | Ohne diesen Schutz des Kernels übergibt root `storage/` nicht (mehr) rekursiv der Anwendung – ein fester Verweis des App-Benutzers bekäme sonst eine fremde Datei (etwa das Skript, das der Update-Dienst als root startet). Debian und Proxmox schalten ihn ab Werk ein; im LXC gilt der Wert des **Hosts**: dort `sysctl -w fs.protected_hardlinks=1` und dauerhaft `echo 'fs.protected_hardlinks = 1' > /etc/sysctl.d/90-protected-hardlinks.conf`, dann Installation bzw. Update noch einmal. |
+| Installation bricht ab bzw. Update meldet: „fs.protected_hardlinks ist aus“ | Ohne diesen Schutz des Kernels übergibt root `storage/` nicht (mehr) rekursiv der Anwendung – ein fester Verweis des App-Benutzers bekäme sonst eine fremde Datei (etwa das Skript, das der Update-Dienst als root startet). Das Update läuft trotzdem durch (die Ordner legt es als App-Benutzer an) und zeigt den Hinweis in *System → Update*; das Installationsskript bricht ab, sobald in `storage/` etwas nicht root gehört. Debian und Proxmox schalten den Schutz ab Werk ein; im LXC gilt der Wert des **Hosts**: dort `sysctl -w fs.protected_hardlinks=1` und dauerhaft `echo 'fs.protected_hardlinks = 1' > /etc/sysctl.d/90-protected-hardlinks.conf`, dann die Installation noch einmal. |
 | Dienst scheitert mit `status=226/NAMESPACE` | Nesting ist am Container aus – `pct set <id> --features nesting=1` (Abschnitt 1). |
 | Sammler erreicht GX/ComAp nicht | Route bzw. Tunnel: `ip route get 192.168.50.10`, `wg show`, `nc -vz 192.168.50.10 502`. Modbus TCP am GX eingeschaltet? |
 | Speichern auf einer Anlagen-Seite mit Livewerten hängt bis zum Timeout, im Audit-Log steht nichts | Ältere Fassungen: jede Live-Abfrage hielt die Sitzung, bis die InfluxDB antwortete – bei einer trägen InfluxDB stauten sie sich, und alles Weitere aus demselben Browser wartete. Neuen Stand einspielen (Abschnitt 10). Wie schnell die InfluxDB antwortet: `grep 'InfluxDB antwortet langsam' /opt/powermanagement/storage/logs/app.log`, `systemctl status influxdb`. |

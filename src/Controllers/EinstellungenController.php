@@ -130,8 +130,10 @@ final class EinstellungenController extends Controller
             LocationSync::tokenSetzen('');
             $meldung .= ' Das hinterlegte Token galt für den bisherigen Server und ist entfernt – für den neuen bitte eines eintragen.';
         }
+        // Das Token aus der Umgebung zieht nie mit um (Settings::UMGEBUNG_REPO) – sagen, statt erst am 401.
+        $fremd = LocationSync::umgebungFremdHinweis();
         Audit::log('einstellungen.location', 'settings', '', ['repo' => $adresse]);
-        Flash::success($meldung);
+        $fremd !== null ? Flash::warning($meldung . ' ' . $fremd) : Flash::success($meldung);
         $this->redirect('/system/einstellungen');
     }
 

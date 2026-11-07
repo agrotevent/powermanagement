@@ -100,6 +100,11 @@ final class BenutzerService
      * „Benutzer verwalten“ über das Konto eines Technikers „schalten“ auf
      * allen Standorten. Das eigene Konto zählt seine Freigaben nicht – es hat
      * sie schon.
+     *
+     * Wer befristet verwaltet (eigenesEnde()), übernimmt kein Konto, das
+     * länger Benutzer verwaltet als er (auch ohne Ende oder über eine Rolle,
+     * die erst später gilt): Er setzte sonst dessen Kennwort und verlängerte
+     * sich als dieses Konto selbst.
      */
     public static function darfVerwalten(int $userId): bool
     {
@@ -108,6 +113,19 @@ final class BenutzerService
         }
         if ($userId === Auth::id()) {
             return true;
+        }
+        $ende = self::eigenesEnde();
+        if ($ende !== null) {
+            $verwaltet = Database::select(
+                "SELECT ur.gueltig_bis, ur.quelle, u.gueltig_bis AS konto_bis FROM user_roles ur
+                 JOIN users u ON u.id = ur.user_id
+                 JOIN role_permissions rp ON rp.role_id = ur.role_id AND rp.permission IN ('system.users.manage', '*')
+                 WHERE ur.user_id = ?",
+                [$userId]
+            );
+            if ($verwaltet !== [] && self::giltUeber($verwaltet, $ende)) {
+                return false;
+            }
         }
         foreach (self::freigabenVon($userId) as $f) {
             if (!self::darfFreigabeVergeben((string) $f['ziel_art'], (int) $f['darf_steuern'] === 1)) {
@@ -165,6 +183,62 @@ final class BenutzerService
             }
         }
         return null;
+    }
+
+    /**
+     * Darf der angemeldete Benutzer der Rolle $rolleId (null = neu) diese
+     * Rechte geben? null = ja, sonst die Meldung.
+     *
+     * Nur Rechte, die er selbst hat (darfVergeben). Wer befristet verwaltet
+     * (eigenesEnde()), gibt einer Rolle zudem keine neuen Rechte, solange eine
+     * ihrer Zuweisungen über sein Ende hinaus gilt oder keins hat – sonst gäbe
+     * er sie über die Rolle unbefristet weiter, bis hin zu „Benutzer
+     * verwalten“ an ein Konto, dessen Kennwort er setzen darf und mit dem er
+     * sich dann selbst verlängert. Wegnehmen geht immer.
+     *
+     * @param array<int|string,mixed> $rechte
+     */
+    public static function rollenRechteFehler(?int $rolleId, array $rechte): ?string
+    {
+        $rechte = array_values(array_filter(array_map('strval', array_filter($rechte, 'is_scalar')),
+            static fn (string $r): bool => $r === '*' || Permissions::exists($r)));
+        if (!self::darfVergeben($rechte)) {
+            return 'Rechte vergeben darfst du nur, wenn du sie selbst hast.';
+        }
+        $ende = self::eigenesEnde();
+        if ($rolleId === null || $ende === null || array_diff($rechte, self::rollenRechte($rolleId)) === []) {
+            return null;
+        }
+        $zuweisungen = Database::select(
+            'SELECT ur.gueltig_bis, ur.quelle, u.gueltig_bis AS konto_bis FROM user_roles ur JOIN users u ON u.id = ur.user_id WHERE ur.role_id = ?',
+            [$rolleId]
+        );
+        if ($zuweisungen !== [] && self::giltUeber($zuweisungen, $ende)) {
+            return 'Du verwaltest Benutzer selbst nur bis ' . Zeit::anzeige(Zeit::iso($ende)) . ' – einer Rolle, die jemand länger (oder ohne Ende) hat, '
+                . 'gibst du keine neuen Rechte. Das macht, wer unbefristet verwaltet.';
+        }
+        return null;
+    }
+
+    /**
+     * Gilt eine dieser Rollenzuweisungen über $ende hinaus? Eine Zuweisung
+     * endet mit ihrem Ende oder dem ihres Kontos (dem früheren); eine aus
+     * einer Gruppe beim Anmeldedienst nur mit dem Konto (sie kommt bei jeder
+     * Anmeldung neu).
+     *
+     * @param list<array<string,mixed>> $zuweisungen gueltig_bis, quelle, konto_bis
+     */
+    private static function giltUeber(array $zuweisungen, int $ende): bool
+    {
+        foreach ($zuweisungen as $z) {
+            $konto = Zeit::ts(is_string($z['konto_bis'] ?? null) ? $z['konto_bis'] : null);
+            $rolle = (string) ($z['quelle'] ?? '') === 'sso' ? null : Zeit::ts(is_string($z['gueltig_bis'] ?? null) ? $z['gueltig_bis'] : null);
+            $bis = $rolle === null ? $konto : ($konto === null ? $rolle : min($rolle, $konto));
+            if ($bis === null || $bis > $ende) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /** Darf der angemeldete Benutzer diese Rolle einem Konto geben? (rolleVergebenFehler) */

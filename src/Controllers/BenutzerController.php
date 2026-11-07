@@ -244,8 +244,9 @@ final class BenutzerController extends Controller
             // Eine Rolle ändert nur, wer sie auch vergeben dürfte – Rechte und Freigaben.
             $id !== null && !self::rolleAendernErlaubt($id)
                 => ['ok' => false, 'message' => 'Diese Rolle hat Rechte oder Freigaben, die du selbst nicht vergeben darfst – ändern darf sie nur, wer sie vergeben dürfte.'],
-            !BenutzerService::darfVergeben($request->arr('rechte'))
-                => ['ok' => false, 'message' => 'Rechte vergeben darfst du nur, wenn du sie selbst hast.'],
+            // Nur eigene Rechte – und befristet keine neuen an eine Rolle, die jemand länger hat.
+            ($fehler = BenutzerService::rollenRechteFehler($id, $request->arr('rechte'))) !== null
+                => ['ok' => false, 'message' => $fehler],
             default => BenutzerService::rolleSpeichern($id, $request->str('name'), $request->str('description'), $request->arr('rechte')),
         };
         $ergebnis['ok'] ? Flash::success($ergebnis['message']) : Flash::error($ergebnis['message']);

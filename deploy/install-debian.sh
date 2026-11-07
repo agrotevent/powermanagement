@@ -781,13 +781,16 @@ find "$ZIEL" -path "$ZIEL/storage" -prune -o ! -path "$ZIEL/config/config.php" \
 # hat git als root angelegt – erst der Anwendung übereignen, sonst darf sie
 # die Rechte daran nicht setzen. -R folgt keinen Verweisen (-P ist die
 # Vorgabe) und ändert nur die Einträge selbst – ein fester Verweis aber ist
-# die Datei selbst. Gehört storage/ schon der Anwendung (weiterer Lauf),
-# könnte sie dort einen auf eine fremde Datei gelegt haben; das verhindert
-# nur fs.protected_hardlinks. Beim ersten Lauf gehört storage/ noch root, und
-# chown -R übereignet einen Ordner erst nach seinem Inhalt – darum vor
-# „install -d -o“ und dann auch ohne den Schutz.
-if [[ "$(stat -c %U -- "$ZIEL/storage" 2>/dev/null || echo root)" != root \
-      && "$(cat /proc/sys/fs/protected_hardlinks 2>/dev/null || true)" != 1 ]]; then
+# die Datei selbst. Gehört in storage/ schon irgendetwas nicht root
+# (weiterer Lauf – oder ein Rest, bei dem nur storage/ selbst wieder root
+# gehört), könnte die Anwendung dort einen auf eine fremde Datei gelegt
+# haben; das verhindert nur fs.protected_hardlinks. Beim ersten Lauf gehört
+# alles darin root, und chown -R übereignet einen Ordner erst nach seinem
+# Inhalt – darum vor „install -d -o“ und dann auch ohne den Schutz.
+storage_nicht_nur_root() {
+    [[ -n "$(find "$ZIEL/storage" ! -user root -print -quit 2>/dev/null || true)" ]]
+}
+if storage_nicht_nur_root && [[ "$(cat /proc/sys/fs/protected_hardlinks 2>/dev/null || true)" != 1 ]]; then
     hinweis "fs.protected_hardlinks ist aus – ohne diesen Schutz übergibt root $ZIEL/storage nicht noch einmal der Anwendung"
     hinweis "(ein fester Verweis dort bekäme sonst eine fremde Datei). Einschalten – im LXC auf dem Host:"
     hinweis "  sysctl -w fs.protected_hardlinks=1, dauerhaft mit einer Datei in /etc/sysctl.d/ – dann dieses Skript noch einmal."
@@ -1277,8 +1280,8 @@ if [[ "$VORLAGE_ERGEBNIS" == "behalten" ]]; then
         hinweis "Darin fehlt der Block für Grundrisse bis 100 MB (location = /standorte/grundriss, client_max_body_size 105m) –"
         hinweis "von dort übernehmen, sonst lehnt nginx große Pläne ab."
     fi
-    if ! grep -q 'location = /login' "$SITE"; then
-        hinweis "Darin fehlen die Bremsen für Anmeldung und Grundriss-Upload (location = /login, limit_conn pm_plan, die Zonen oben) –"
+    if ! grep -qF 'location ~ ^/login/*$' "$SITE"; then
+        hinweis "Darin fehlen die Bremsen für Anmeldung und Grundriss-Upload (location ~ ^/login/*$, limit_conn pm_plan, die Zonen oben) –"
         hinweis "zum Schutz von dort übernehmen."
     fi
 fi

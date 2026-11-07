@@ -1100,7 +1100,11 @@ Location- und Verteiler-Abgleich**.
 dazu „Anlagen ändern“ und „Kabel zeichnen“ (Einzelheiten in
 [rechte.md](rechte.md#location-abgleich)); sonst steht in der Liste „nur
 ansehen“. Messgeräte, die in `strom.json` nicht mehr stehen, enden beim
-Übernehmen – ihr Verlauf bleibt.
+Übernehmen – ihr Verlauf bleibt. Ein neues Messgerät aus `strom.json` kommt
+nur dazu, wenn es auch von Hand ginge: nicht, wenn es in einem
+Inventarstück steckt (das misst nur über einen Einsatz) oder gerade an einer
+Anlage eines anderen Standorts bzw. einer, die du nicht bearbeiten darfst,
+misst – die Meldung nennt die übergangenen Geräte.
 
 Was im Repository steht, kommt von außen. Ein Verweis (Symlink) unter
 `locations/` oder `verteiler/` – das Format von MasterAdmin kennt keine –

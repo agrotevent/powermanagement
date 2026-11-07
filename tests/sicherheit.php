@@ -572,6 +572,33 @@ try {
         && BenutzerService::vergabeFehler($benutzer['vw'], ['gueltig_bis' => $inDrei], [$rollen['vw'] => ['aktiv' => 1]]) !== null
         && BenutzerService::vergabeFehler($benutzer['vw'], ['gueltig_bis' => $morgen], [$rollen['vw'] => ['aktiv' => 1]]) === null,
         '… das eigene Konto nicht verlängern (kürzen schon)');
+    // Umweg über eine Rolle, die schon jemand unbefristet hat: „Benutzer verwalten“
+    // dazugeben, das Kennwort des Kontos setzen, als dieses sich selbst verlängern.
+    $mitteRechte = BenutzerService::rollenRechte($rollen['mitte']);
+    pruefe(str_contains((string) BenutzerService::rollenRechteFehler($rollen['mitte'], array_merge($mitteRechte, ['system.users.manage'])), 'keine neuen Rechte')
+        && BenutzerService::rollenRechteFehler($rollen['mitte'], array_merge($mitteRechte, ['karte.view'])) !== null,
+        'befristeter Verwalter: einer Rolle, die ein Konto unbefristet hat, gibt er keine neuen Rechte (auch nicht „Benutzer verwalten“)');
+    gleich([BenutzerService::rollenRechteFehler($rollen['mitte'], $mitteRechte), BenutzerService::rollenRechteFehler($rollen['mitte'], ['dashboard.view'])], [null, null],
+        '… unverändert speichern und wegnehmen geht');
+    $rollen['befristet'] = (int) BenutzerService::rolleSpeichern(null, $k . ' befristet', '', ['dashboard.view'])['id'];
+    gleich(BenutzerService::rollenRechteFehler($rollen['befristet'], ['dashboard.view', 'system.users.manage']), null, '… einer Rolle ohne Zuweisung schon');
+    Database::insert('user_roles', ['user_id' => $benutzer['mitte'], 'role_id' => $rollen['befristet'], 'gueltig_ab' => null, 'gueltig_bis' => Zeit::ausEingabe($morgen, true)]);
+    gleich(BenutzerService::rollenRechteFehler($rollen['befristet'], ['dashboard.view', 'system.users.manage']), null, '… einer, die nur bis vor seinem Ende vergeben ist, auch');
+    Database::update('users', $benutzer['techn'], ['gueltig_bis' => Zeit::ausEingabe($morgen, true)]);
+    Database::insert('user_roles', ['user_id' => $benutzer['techn'], 'role_id' => $rollen['befristet'], 'gueltig_ab' => null, 'gueltig_bis' => null]);
+    gleich(BenutzerService::rollenRechteFehler($rollen['befristet'], ['dashboard.view', 'system.users.manage']), null, '… ohne eigenes Ende endet die Zuweisung mit dem Konto');
+    Database::execute("UPDATE user_roles SET quelle = 'sso', gueltig_bis = ? WHERE user_id = ? AND role_id = ?", [Zeit::ausEingabe($morgen, true), $benutzer['mitte'], $rollen['befristet']]);
+    Database::update('users', $benutzer['mitte'], ['gueltig_bis' => null]);
+    pruefe(BenutzerService::rollenRechteFehler($rollen['befristet'], ['dashboard.view', 'system.users.manage']) !== null, '… eine aus einer Gruppe beim Anmeldedienst gilt so lange wie das Konto');
+    // Ein Konto, das länger Benutzer verwaltet, übernimmt er nicht (Kennwort setzen).
+    Database::execute('DELETE FROM user_roles WHERE role_id = ?', [$rollen['befristet']]);
+    Database::update('users', $benutzer['techn'], ['gueltig_bis' => null]);
+    $benutzer['vw2'] = BenutzerService::anlegen($k . '-vw2', 'Pruefung2026!!', $rolleKey($rollen['vw']), false);
+    pruefe(!BenutzerService::darfVerwalten($benutzer['vw2']), 'befristeter Verwalter: ein Konto, das unbefristet Benutzer verwaltet, verwaltet er nicht');
+    Database::execute('UPDATE user_roles SET gueltig_bis = ? WHERE user_id = ?', [Zeit::ausEingabe($morgen, true), $benutzer['vw2']]);
+    pruefe(BenutzerService::darfVerwalten($benutzer['vw2']) && BenutzerService::darfVerwalten($benutzer['mitte']), '… eines, das es nur bis vor seinem Ende tut, und eines ohne „Benutzer verwalten“ schon');
+    Database::execute('UPDATE user_roles SET gueltig_ab = ?, gueltig_bis = NULL WHERE user_id = ?', [Zeit::ausEingabe($inDrei), $benutzer['vw2']]);
+    pruefe(!BenutzerService::darfVerwalten($benutzer['vw2']), '… auch nicht, wenn die unbefristete Rolle erst später gilt');
     Database::update('users', $benutzer['vw'], ['gueltig_bis' => null]);
     Database::execute('UPDATE user_roles SET gueltig_bis = ? WHERE user_id = ? AND role_id = ?', [Zeit::ausEingabe($inZwei, true), $benutzer['vw'], $rollen['vw']]);
     alsBenutzer($benutzer['vw']);

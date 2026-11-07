@@ -2021,50 +2021,77 @@ stream_wrapper_register("langsam", LangsamAttrappe::class);
 
     // rechte_setzen aus update-debian.sh: storage/ übergibt root nur mit
     // fs.protected_hardlinks rekursiv der Anwendung – sonst bekäme sie über
-    // einen festen Verweis eine fremde Datei (etwa update-helfer.sh). Ohne
-    // den Schutz bricht es ab (Stufe 2, --nur-abgleichen), beim Zurückrollen
-    // bleibt es beim Hinweis; Stufe 1 beginnt dann gar nicht erst, und das
-    // Installationsskript übergibt nur beim ersten Lauf (storage/ gehört root).
+    // einen festen Verweis eine fremde Datei (etwa update-helfer.sh). Ohne den
+    // Schutz bricht es nicht ab (sonst scheiterte das Update bei jedem Versuch,
+    // nach einem älteren Stufe-1-Skript erst nach dem Checkout mit Zurückrollen
+    // und „gescheitert“): Hinweis, Warnung „hardlinks“ (einmal), Ordner als
+    // Anwendungsbenutzer. Stufe 1 beginnt auch ohne den Schutz. Das
+    // Installationsskript übergibt ohne ihn nur, solange alles in storage/ root gehört.
     file_put_contents($ordner . '/rechte.sh', <<<'SH'
         set -Eeuo pipefail
-        ZIEL="$1"; APP_USER=pm-app
+        ZIEL="$1"; APP_USER=pm-app; WARNUNGEN=()
         eval "$(sed -n '/^hardlinks_geschuetzt() {$/,/^}$/p;/^hardlinks_hinweis() {$/,/^}$/p;/^rechte_setzen() {$/,/^}$/p' "$3")"
         HARDLINK_SCHUTZ="$2"
         find() { :; }; chmod() { :; }
         chown() { echo "chown $*"; }
         ordner_anlegen() { echo "ordner"; }
         hinweis() { echo "hinweis $1"; }
-        if rechte_setzen ${4:+"$4"}; then echo "rc 0"; else echo "rc $?"; fi
+        if rechte_setzen && rechte_setzen; then echo "rc 0"; else echo "rc $?"; fi
+        echo "warnungen ${WARNUNGEN[*]+"${WARNUNGEN[*]}"}."
         SH);
-    $rechte = static function (?string $schutz, string $art = '') use ($ordner, $wurzel): string {
+    $rechte = static function (?string $schutz) use ($ordner, $wurzel): string {
         $datei = $ordner . '/protected_hardlinks';
         @unlink($datei);
         if ($schutz !== null) {
             file_put_contents($datei, $schutz . "\n");
         }
         return (string) shell_exec('bash ' . escapeshellarg($ordner . '/rechte.sh') . ' ' . escapeshellarg('/opt/pm-pruefung') . ' '
-            . escapeshellarg($datei) . ' ' . escapeshellarg($wurzel . '/deploy/update-debian.sh') . ($art !== '' ? ' ' . escapeshellarg($art) : '') . ' 2>&1');
+            . escapeshellarg($datei) . ' ' . escapeshellarg($wurzel . '/deploy/update-debian.sh') . ' 2>&1');
     };
     $mit = $rechte('1');
-    pruefe(str_contains($mit, 'chown -R -P pm-app:pm-app /opt/pm-pruefung/storage') && str_contains($mit, 'ordner') && str_contains($mit, 'rc 0'),
-        'rechte_setzen mit fs.protected_hardlinks: storage/ rekursiv der Anwendung – ' . trim($mit));
+    pruefe(str_contains($mit, 'chown -R -P pm-app:pm-app /opt/pm-pruefung/storage') && str_contains($mit, 'ordner') && str_contains($mit, 'rc 0')
+        && str_contains($mit, "warnungen .\n"), 'rechte_setzen mit fs.protected_hardlinks: storage/ rekursiv der Anwendung, keine Warnung – ' . trim($mit));
     foreach (['0' => '0', 'fehlt' => null] as $was => $schutz) {
         $ohne = $rechte($schutz);
-        pruefe(!str_contains($ohne, 'chown -R') && str_contains($ohne, 'hinweis fs.protected_hardlinks ist aus') && !str_contains($ohne, 'ordner')
-            && str_contains($ohne, 'rc 1'), 'rechte_setzen ohne Schutz (' . $was . '): kein chown -R, Hinweis, Abbruch – ' . trim($ohne));
+        pruefe(!str_contains($ohne, 'chown -R') && str_contains($ohne, 'hinweis fs.protected_hardlinks ist aus') && substr_count($ohne, 'ordner') === 2
+            && str_contains($ohne, 'rc 0') && str_contains($ohne, "warnungen hardlinks.\n"),
+            'rechte_setzen ohne Schutz (' . $was . '): kein chown -R, Hinweis, Ordner, weiter, Warnung „hardlinks“ einmal – ' . trim($ohne));
     }
-    $zurueck = $rechte('0', 'zurueck');
-    pruefe(!str_contains($zurueck, 'chown -R') && str_contains($zurueck, 'hinweis fs.protected_hardlinks') && str_contains($zurueck, 'ordner')
-        && str_contains($zurueck, 'rc 0'), 'rechte_setzen zurueck ohne Schutz: kein chown -R, Hinweis, weiter – ' . trim($zurueck));
+    gleich(UpdateService::warnungText('hardlinks') !== 'Hinweis: hardlinks' && str_contains(UpdateService::warnungText('hardlinks'), 'fs.protected_hardlinks'), true,
+        'System → Update erklärt die Warnung „hardlinks“');
     $skript = (string) file_get_contents($wurzel . '/deploy/update-debian.sh');
     $stufe1 = preg_match('/^stufe1\(\) \{\n(.*?)\n\}\n/ms', $skript, $m) === 1 ? $m[1] : '';
-    $vorAbruf = strstr($stufe1, 'schritt 2 "Änderungen holen"', true);
-    pruefe(is_string($vorAbruf) && str_contains($vorAbruf, 'if ! hardlinks_geschuetzt; then') && str_contains($vorAbruf, 'ergebnis nicht_begonnen einrichtung')
-        && str_contains($skript, "\n    rechte_setzen zurueck\n"), 'update-debian.sh: Stufe 1 prüft den Schutz vor dem Abruf, das Zurückrollen ruft rechte_setzen zurueck');
+    pruefe($stufe1 !== '' && !str_contains($stufe1, 'hardlinks_geschuetzt') && !str_contains($stufe1, 'nicht_begonnen einrichtung')
+        && !str_contains($skript, 'rechte_setzen zurueck'), 'update-debian.sh: Stufe 1 beginnt auch ohne den Schutz, rechte_setzen überall gleich');
+    // Neue Ordner in storage/ kommen nur über APP_ORDNER (als Anwendungsbenutzer),
+    // nie als .gitkeep aus dem Repository – ohne den Schutz gehörten sie sonst root.
+    preg_match('/^APP_ORDNER=\((.*)\)$/m', $skript, $m);
+    $appOrdner = explode(' ', $m[1] ?? '');
+    $imRepo = array_filter(explode("\n", trim((string) shell_exec('git -C ' . escapeshellarg($wurzel) . ' ls-files storage'))));
+    $fremd = array_filter($imRepo, static fn (string $f): bool => $f !== 'storage/.gitkeep'
+        && !in_array(substr(dirname($f), strlen('storage/')), ['logs', 'plans', 'demo', 'cache', 'inventar'], true));
+    pruefe($fremd === [] && array_diff(['logs', 'plans', 'demo', 'cache', 'inventar'], $appOrdner) === [],
+        'storage/ im Repository nur mit den bekannten .gitkeep-Ordnern, alle in APP_ORDNER – ' . implode(', ', $fremd));
     $install = (string) file_get_contents($wurzel . '/deploy/install-debian.sh');
     $vorChown = strstr($install, "\n    chown -R -P \"\$APP_USER:\$APP_USER\" \"\$ZIEL/storage\"", true);
-    pruefe(is_string($vorChown) && str_contains(substr($vorChown, -1200), '/proc/sys/fs/protected_hardlinks') && substr_count($install, 'chown -R -P') === 1,
-        'install-debian.sh: chown -R über storage/ nur nach der Prüfung (erster Lauf oder mit Schutz)');
+    pruefe(is_string($vorChown) && str_contains(substr($vorChown, -1200), '/proc/sys/fs/protected_hardlinks') && str_contains(substr($vorChown, -1200), 'storage_nicht_nur_root &&')
+        && substr_count($install, 'chown -R -P') === 1, 'install-debian.sh: chown -R über storage/ nur nach der Prüfung (alles darin root oder mit Schutz)');
+    // storage_nicht_nur_root: nicht nur storage/ selbst – auch ein Eintrag darin, der nicht root gehört.
+    $nurRoot = static function (string $ziel) use ($wurzel): string {
+        return trim((string) shell_exec('bash -c ' . escapeshellarg('set -Eeuo pipefail; ZIEL="$1"; eval "$(sed -n \'/^storage_nicht_nur_root() {$/,/^}$/p\' "$2")"; '
+            . 'if storage_nicht_nur_root; then echo fremd; else echo root; fi') . ' sh ' . escapeshellarg($ziel) . ' ' . escapeshellarg($wurzel . '/deploy/install-debian.sh') . ' 2>&1'));
+    };
+    $baum = $ordner . '/install-baum';
+    @mkdir($baum . '/storage/logs', 0755, true);
+    touch($baum . '/storage/logs/.gitkeep');
+    if (function_exists('posix_geteuid') && posix_geteuid() === 0) {
+        gleich($nurRoot($baum), 'root', 'install-debian.sh: storage/ ganz von root (erster Lauf) → übergeben auch ohne Schutz');
+        chown($baum . '/storage/logs/.gitkeep', 'nobody');
+        gleich($nurRoot($baum), 'fremd', 'install-debian.sh: storage/ gehört root, eine Datei darin nicht → ohne Schutz nicht rekursiv');
+    } else {
+        gleich($nurRoot($baum), 'fremd', 'install-debian.sh: storage/ nicht von root → ohne Schutz nicht rekursiv');
+    }
+    exec('rm -rf ' . escapeshellarg($baum));
 
     // vorlage_uebernehmen aus update-debian.sh und install-debian.sh (gleiche
     // Logik): Ersetzt wird nur, was seit der letzten Auslieferung niemand
