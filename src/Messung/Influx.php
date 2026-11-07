@@ -29,6 +29,34 @@ final class Influx
         return rtrim((string) Config::get('influx.url', 'http://127.0.0.1:8086'), '/');
     }
 
+    /**
+     * Taugt die Adresse? null = ja (leer: die aus config.php). Sie bekommt
+     * Token bzw. Kennwort mit – darum nur http(s) mit Server, ohne
+     * Zugangsdaten, Abfrage und Anker. Token und Kennwort gelten nur für die
+     * Adresse, für die sie eingetragen sind (Settings::BINDUNG).
+     */
+    public static function adresseFehler(string $url): ?string
+    {
+        if ($url === '') {
+            return null;
+        }
+        if (preg_match('/[\x00-\x20\x7f]/', $url) === 1) {
+            return 'Die Adresse der InfluxDB darf keine Leer- oder Steuerzeichen enthalten.';
+        }
+        $teile = parse_url($url);
+        $schema = is_array($teile) ? strtolower((string) ($teile['scheme'] ?? '')) : '';
+        if (!in_array($schema, ['http', 'https'], true) || (string) ($teile['host'] ?? '') === '') {
+            return 'Die Adresse der InfluxDB beginnt mit http:// oder https:// und nennt den Server, z. B. http://127.0.0.1:8086.';
+        }
+        if (isset($teile['user']) || isset($teile['pass'])) {
+            return 'Zugangsdaten gehören nicht in die Adresse der InfluxDB – Token und Kennwort haben eigene Felder.';
+        }
+        if (str_contains($url, '?') || str_contains($url, '#')) {
+            return 'Die Adresse der InfluxDB enthält weder „?“ noch „#“ – Datenbank und Zugang haben eigene Felder.';
+        }
+        return null;
+    }
+
     public static function datenbank(): string
     {
         return (string) Config::get('influx.database', 'strom');
@@ -101,7 +129,7 @@ final class Influx
         }
         $daten = json_decode($antwort['rumpf'], true);
         if ($antwort['status'] >= 300 || !is_array($daten)) {
-            $fehler = 'InfluxDB antwortet mit ' . $antwort['status'] . ': ' . mb_substr(trim($antwort['rumpf']), 0, 300);
+            $fehler = self::antwortFehler($antwort['status'], $antwort['rumpf']);
             return null;
         }
         if (isset($daten['error'])) {
@@ -150,10 +178,22 @@ final class Influx
             return false;
         }
         if ($antwort['status'] >= 300) {
-            $fehler = 'InfluxDB antwortet mit ' . $antwort['status'] . ': ' . mb_substr(trim($antwort['rumpf']), 0, 300);
+            $fehler = self::antwortFehler($antwort['status'], $antwort['rumpf']);
             return false;
         }
         return true;
+    }
+
+    /**
+     * Fehlermeldung zu einer Antwort: Status und – nur aus gültigem JSON –
+     * der Text unter `error`. Nie der rohe Rumpf: Was immer unter der
+     * Adresse antwortet, landet sonst in Meldung und Log.
+     */
+    private static function antwortFehler(int $status, string $rumpf): string
+    {
+        $daten = json_decode($rumpf, true);
+        $text = is_array($daten) && is_string($daten['error'] ?? null) ? trim((string) preg_replace('/[\x00-\x1f\x7f]+/', ' ', $daten['error'])) : '';
+        return 'InfluxDB antwortet mit ' . $status . ($text !== '' ? ': ' . mb_substr($text, 0, 200) : '.');
     }
 
     /** Erreichbar und die Datenbank vorhanden? */

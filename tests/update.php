@@ -2019,6 +2019,53 @@ stream_wrapper_register("langsam", LangsamAttrappe::class);
     $zp = null;
     gleich($zlZeilen(), 'vorher,danach', 'db_zuruecklegen zum zweiten Mal: was danach gespeichert wurde, bleibt');
 
+    // rechte_setzen aus update-debian.sh: storage/ übergibt root nur mit
+    // fs.protected_hardlinks rekursiv der Anwendung – sonst bekäme sie über
+    // einen festen Verweis eine fremde Datei (etwa update-helfer.sh). Ohne
+    // den Schutz bricht es ab (Stufe 2, --nur-abgleichen), beim Zurückrollen
+    // bleibt es beim Hinweis; Stufe 1 beginnt dann gar nicht erst, und das
+    // Installationsskript übergibt nur beim ersten Lauf (storage/ gehört root).
+    file_put_contents($ordner . '/rechte.sh', <<<'SH'
+        set -Eeuo pipefail
+        ZIEL="$1"; APP_USER=pm-app
+        eval "$(sed -n '/^hardlinks_geschuetzt() {$/,/^}$/p;/^hardlinks_hinweis() {$/,/^}$/p;/^rechte_setzen() {$/,/^}$/p' "$3")"
+        HARDLINK_SCHUTZ="$2"
+        find() { :; }; chmod() { :; }
+        chown() { echo "chown $*"; }
+        ordner_anlegen() { echo "ordner"; }
+        hinweis() { echo "hinweis $1"; }
+        if rechte_setzen ${4:+"$4"}; then echo "rc 0"; else echo "rc $?"; fi
+        SH);
+    $rechte = static function (?string $schutz, string $art = '') use ($ordner, $wurzel): string {
+        $datei = $ordner . '/protected_hardlinks';
+        @unlink($datei);
+        if ($schutz !== null) {
+            file_put_contents($datei, $schutz . "\n");
+        }
+        return (string) shell_exec('bash ' . escapeshellarg($ordner . '/rechte.sh') . ' ' . escapeshellarg('/opt/pm-pruefung') . ' '
+            . escapeshellarg($datei) . ' ' . escapeshellarg($wurzel . '/deploy/update-debian.sh') . ($art !== '' ? ' ' . escapeshellarg($art) : '') . ' 2>&1');
+    };
+    $mit = $rechte('1');
+    pruefe(str_contains($mit, 'chown -R -P pm-app:pm-app /opt/pm-pruefung/storage') && str_contains($mit, 'ordner') && str_contains($mit, 'rc 0'),
+        'rechte_setzen mit fs.protected_hardlinks: storage/ rekursiv der Anwendung – ' . trim($mit));
+    foreach (['0' => '0', 'fehlt' => null] as $was => $schutz) {
+        $ohne = $rechte($schutz);
+        pruefe(!str_contains($ohne, 'chown -R') && str_contains($ohne, 'hinweis fs.protected_hardlinks ist aus') && !str_contains($ohne, 'ordner')
+            && str_contains($ohne, 'rc 1'), 'rechte_setzen ohne Schutz (' . $was . '): kein chown -R, Hinweis, Abbruch – ' . trim($ohne));
+    }
+    $zurueck = $rechte('0', 'zurueck');
+    pruefe(!str_contains($zurueck, 'chown -R') && str_contains($zurueck, 'hinweis fs.protected_hardlinks') && str_contains($zurueck, 'ordner')
+        && str_contains($zurueck, 'rc 0'), 'rechte_setzen zurueck ohne Schutz: kein chown -R, Hinweis, weiter – ' . trim($zurueck));
+    $skript = (string) file_get_contents($wurzel . '/deploy/update-debian.sh');
+    $stufe1 = preg_match('/^stufe1\(\) \{\n(.*?)\n\}\n/ms', $skript, $m) === 1 ? $m[1] : '';
+    $vorAbruf = strstr($stufe1, 'schritt 2 "Änderungen holen"', true);
+    pruefe(is_string($vorAbruf) && str_contains($vorAbruf, 'if ! hardlinks_geschuetzt; then') && str_contains($vorAbruf, 'ergebnis nicht_begonnen einrichtung')
+        && str_contains($skript, "\n    rechte_setzen zurueck\n"), 'update-debian.sh: Stufe 1 prüft den Schutz vor dem Abruf, das Zurückrollen ruft rechte_setzen zurueck');
+    $install = (string) file_get_contents($wurzel . '/deploy/install-debian.sh');
+    $vorChown = strstr($install, "\n    chown -R -P \"\$APP_USER:\$APP_USER\" \"\$ZIEL/storage\"", true);
+    pruefe(is_string($vorChown) && str_contains(substr($vorChown, -1200), '/proc/sys/fs/protected_hardlinks') && substr_count($install, 'chown -R -P') === 1,
+        'install-debian.sh: chown -R über storage/ nur nach der Prüfung (erster Lauf oder mit Schutz)');
+
     // vorlage_uebernehmen aus update-debian.sh und install-debian.sh (gleiche
     // Logik): Ersetzt wird nur, was seit der letzten Auslieferung niemand
     // verändert hat. Wer nach „von Hand verändert“ die daneben gelegte neue

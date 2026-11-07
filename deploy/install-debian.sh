@@ -777,12 +777,26 @@ fi
 # config/config.php und storage/ bekommen weiter unten eigene Rechte.
 find "$ZIEL" -path "$ZIEL/storage" -prune -o ! -path "$ZIEL/config/config.php" \
     -exec chown root:root {} + -exec chmod go+rX,go-w {} +
-install -d -o "$APP_USER" -g "$APP_USER" -m 750 "$ZIEL/storage"
 # Was aus dem Repository kommt (storage/logs, cache, plans … mit .gitkeep),
 # hat git als root angelegt – erst der Anwendung übereignen, sonst darf sie
 # die Rechte daran nicht setzen. -R folgt keinen Verweisen (-P ist die
-# Vorgabe) und ändert nur die Einträge selbst.
-chown -R -P "$APP_USER:$APP_USER" "$ZIEL/storage"
+# Vorgabe) und ändert nur die Einträge selbst – ein fester Verweis aber ist
+# die Datei selbst. Gehört storage/ schon der Anwendung (weiterer Lauf),
+# könnte sie dort einen auf eine fremde Datei gelegt haben; das verhindert
+# nur fs.protected_hardlinks. Beim ersten Lauf gehört storage/ noch root, und
+# chown -R übereignet einen Ordner erst nach seinem Inhalt – darum vor
+# „install -d -o“ und dann auch ohne den Schutz.
+if [[ "$(stat -c %U -- "$ZIEL/storage" 2>/dev/null || echo root)" != root \
+      && "$(cat /proc/sys/fs/protected_hardlinks 2>/dev/null || true)" != 1 ]]; then
+    hinweis "fs.protected_hardlinks ist aus – ohne diesen Schutz übergibt root $ZIEL/storage nicht noch einmal der Anwendung"
+    hinweis "(ein fester Verweis dort bekäme sonst eine fremde Datei). Einschalten – im LXC auf dem Host:"
+    hinweis "  sysctl -w fs.protected_hardlinks=1, dauerhaft mit einer Datei in /etc/sysctl.d/ – dann dieses Skript noch einmal."
+    exit 1
+fi
+if [[ -d "$ZIEL/storage" ]]; then
+    chown -R -P "$APP_USER:$APP_USER" "$ZIEL/storage"
+fi
+install -d -o "$APP_USER" -g "$APP_USER" -m 750 "$ZIEL/storage"
 # mqtt/: Soll und Ergebnis der eigenen MQTT-Zugänge (deploy/mqtt-zugaenge.sh);
 # update/: Aufträge an den Update-Dienst (soll) und dessen Rückmeldungen (ist)
 for d in logs plans demo cache inventar sessions backups mqtt mqtt/soll mqtt/ist update update/soll update/ist; do
@@ -1262,6 +1276,10 @@ if [[ "$VORLAGE_ERGEBNIS" == "behalten" ]]; then
     if ! grep -q 'location = /standorte/grundriss' "$SITE"; then
         hinweis "Darin fehlt der Block für Grundrisse bis 100 MB (location = /standorte/grundriss, client_max_body_size 105m) –"
         hinweis "von dort übernehmen, sonst lehnt nginx große Pläne ab."
+    fi
+    if ! grep -q 'location = /login' "$SITE"; then
+        hinweis "Darin fehlen die Bremsen für Anmeldung und Grundriss-Upload (location = /login, limit_conn pm_plan, die Zonen oben) –"
+        hinweis "zum Schutz von dort übernehmen."
     fi
 fi
 ln -sf "$SITE" /etc/nginx/sites-enabled/powermanagement

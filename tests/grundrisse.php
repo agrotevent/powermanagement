@@ -87,6 +87,15 @@ try {
         && !str_contains($block('~ ^/index\\.php$'), 'client_max_body_size') && $block('~ ^/index\\.php$') !== ''
         && preg_match('#\n    client_max_body_size 16m;#', $site) === 1,
         'nginx-Vorlage: Grundriss (105m) und Schnittstelle (50m) mit eigenem FastCGI-Block, index.php mit der Grenze der Site (16m)');
+    // Bremse und kleine Grenze bei /login, Verbindungsgrenze beim Grundriss,
+    // beide Zonen im http-Kontext der Vorlage (vor dem server-Block).
+    pruefe(str_contains($block('= /login'), 'client_max_body_size 64k;') && str_contains($block('= /login'), 'limit_req zone=pm_anmeldung')
+        && str_contains($block('= /login'), 'fastcgi_pass ') && !str_contains($block('= /login'), 'try_files')
+        && str_contains($block('= /standorte/grundriss'), 'limit_conn pm_plan 2;') && str_contains($block('= /standorte/grundriss'), 'limit_conn_status 429;')
+        && preg_match('/^limit_conn_zone \$binary_remote_addr zone=pm_plan:/m', $site) === 1
+        && preg_match('/^limit_req_zone \$pm_anmeldung_adresse zone=pm_anmeldung:/m', $site) === 1
+        && strpos($site, 'zone=pm_plan:') < strpos($site, "\nserver {"),
+        'nginx-Vorlage: /login mit eigenem FastCGI-Block, 64k und Bremse (nur POST), Grundriss mit limit_conn 2 und 429');
     // Die übrigen Uploads (Prüfnachweise des Kundenbereichs, Katalog-Import)
     // bleiben mit Rand für die Formularfelder unter der Grenze der Site –
     // sonst käme statt der Meldung der App die 413-Seite von nginx.
@@ -180,6 +189,8 @@ try {
     $ng = pruefNginxGrenzen(dirname(__DIR__) . '/deploy/nginx-powermanagement.conf', $tmp, [
         'login'         => ['/login', 17 * $mib, false],
         'login-stuecke' => ['/login', 17 * $mib, true],
+        'login-70k'     => ['/login', 70 * 1024, true],
+        'login-klein'   => ['/login', 2 * 1024, false],
         'nachweis-11'   => ['/kunden/1/nachweise/hochladen', 11 * $mib, true],
         'nachweis-17'   => ['/kunden/1/nachweise/hochladen', 17 * $mib, false],
         'api-stuecke'   => ['/api/v1/locations/x/vorschlaege', 51 * $mib, true],
@@ -190,12 +201,26 @@ try {
     if ($ng === null) {
         fwrite(STDOUT, "  (ohne nginx: Grenzen der Vorlage im Betrieb übersprungen – das prüft tests/installation-debian.sh)\n");
     } elseif ($ng !== []) {
-        gleich(array_map(static fn (array $r): int => $r[0], $ng), ['login' => 413, 'login-stuecke' => 413, 'nachweis-11' => 502, 'nachweis-17' => 413,
-            'api-stuecke' => 413, 'api-20' => 502, 'plan-100' => 502, 'plan-106' => 413],
-            'nginx mit der Vorlage (502 = an PHP weitergereicht): 16m für /login und Prüfnachweise (11 MB durch, die App meldet die Größe), 50m für /api/, '
-            . '105m nur für den Grundriss – auch in Stücken (chunked)');
+        gleich(array_map(static fn (array $r): int => $r[0], $ng), ['login' => 413, 'login-stuecke' => 413, 'login-70k' => 413, 'login-klein' => 502,
+            'nachweis-11' => 502, 'nachweis-17' => 413, 'api-stuecke' => 413, 'api-20' => 502, 'plan-100' => 502, 'plan-106' => 413],
+            'nginx mit der Vorlage (502 = an PHP weitergereicht): 64k für /login (eigener Block), 16m für Prüfnachweise (11 MB durch, die App meldet '
+            . 'die Größe), 50m für /api/, 105m nur für den Grundriss – auch in Stücken (chunked)');
         pruefe(str_contains($ng['api-stuecke'][1], '"ok":false') && str_contains($ng['plan-106'][1], 'Grundrisse lassen sich bis 100 MB hochladen'),
             'nginx: 413 in Stücken mit der eigenen Antwort (JSON für /api/, Seite für den Grundriss)');
+        // Bremsen: je Adresse höchstens zwei Uploads zugleich an den
+        // Grundriss (sonst füllten viele langsame anonyme Uploads die Platte,
+        // nginx puffert vor der App), POST /login gebremst, die Seite nicht.
+        $br = pruefNginxBremsen(dirname(__DIR__) . '/deploy/nginx-powermanagement.conf', $tmp);
+        if ($br !== null && $br !== []) {
+            gleich([$br['plan-zweiter'][0], $br['plan-dritter'][0], $br['plan-danach'][0]], [502, 429, 502],
+                'nginx: Grundriss – zweiter Upload neben einem langsamen durch, der dritte neben zweien 429, danach wieder durch');
+            pruefe(str_contains($br['plan-dritter'][1], 'schon zwei Uploads'), 'nginx: 429 beim Grundriss mit eigener Seite');
+            gleich(array_unique($br['login-get']), [502], 'nginx: GET /login nie gebremst (30 hintereinander)');
+            $gebremst = count(array_filter($br['login-post'], static fn (int $s): bool => $s === 429));
+            pruefe(array_slice($br['login-post'], 0, 20) === array_fill(0, 20, 502) && $gebremst >= 5,
+                'nginx: POST /login – 20 sofort, danach gebremst (' . $gebremst . ' von 30 mit 429)');
+            pruefe(str_contains($br['login-429'], 'Zu viele Anmeldeversuche'), 'nginx: 429 bei der Anmeldung mit eigener Seite');
+        }
     }
 
     // ------------------------------------------------ Streifen

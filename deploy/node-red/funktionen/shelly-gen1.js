@@ -19,6 +19,15 @@
  * still. Die Geräteinfo kommt dann aus shellies/<id>/announce, das das
  * Gerät beim Verbinden mit dem Broker ebenfalls schickt.
  *
+ * Nach der Geräteinfo fragt diese Funktion je Gerät – nicht mehr mit dem
+ * Rundruf shellies/command: Sobald ein Gen1-Gerät einen eigenen Zugang hat,
+ * sperrt der Broker den Rundruf für den gemeinsamen Zugang (sonst könnte
+ * jedes Gerät daran allen Gen1-Geräten update_fw schicken), und die Geräte
+ * daran bekämen ihn nicht mehr. Ausgang 2: „announce" an
+ * shellies/<id>/command, wenn ein Gerät zum ersten Mal (bzw. nach sechs
+ * Stunden wieder) etwas meldet – nach einem Neustart von Node-RED also
+ * bald für jedes Gerät.
+ *
  * Themen unter shellies/<id>/pm-…/ (Prüfungen der Oberfläche im Baum des
  * Geräts, z. B. shellies/<id>/pm-probe/…) stammen nicht vom Gerät und
  * werden übergangen.
@@ -170,13 +179,16 @@ function messwert(kanal, phasen, zustand) {
 }
 
 // Das Gerät in die Liste eintragen, sobald es sich überhaupt meldet –
-// announce kommt nur beim Verbinden und auf Nachfrage.
+// announce kommt nur beim Verbinden und auf Nachfrage. Die Nachfrage geht
+// an dieses eine Gerät (Ausgang 2), nie an shellies/command.
 const bekannte = flow.get('gen1_geraete') || {};
 const zuletzt = eigen(bekannte, geraet);
+let nachfrage = null;
 if (!zuletzt || jetzt - zuletzt > INFO_ALLE_MS) {
     bekannte[geraet] = jetzt;
     flow.set('gen1_geraete', bekannte);
     ausgabe.push(geraetePunkt(id, {}));
+    nachfrage = { topic: 'shellies/' + id + '/command', payload: 'announce' };
     node.status({ fill: 'green', shape: 'dot', text: Object.keys(bekannte).length + ' Geräte' });
 }
 
@@ -270,4 +282,4 @@ if (rest.length === 1 && rest[0] === 'online') {
     }
 }
 
-return ausgabe.length > 0 ? [ausgabe] : null;
+return ausgabe.length > 0 || nachfrage ? [ausgabe, nachfrage] : null;

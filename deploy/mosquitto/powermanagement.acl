@@ -22,7 +22,9 @@
 # Pipeline; ein falsch eingestelltes oder übernommenes Gerät soll dort
 # nichts hineinschreiben können, was die Oberfläche für echte Messwerte
 # hält. Die Themenbäume der Shellys mit eigenem Zugang nimmt der Helfer
-# diesem Zugang in der wirksamen Datei weg (topic deny <präfix>/#).
+# diesem Zugang in der wirksamen Datei weg (topic deny <präfix>/#); hat ein
+# Gen1-Gerät einen eigenen Zugang, auch den Rundruf (topic deny
+# shellies/command) – Node-RED fragt announce dann je Gerät.
 # Die Zeile „user shelly" muss genau so lauten – sonst kann der Helfer
 # nichts sperren (im Ergebnis: sperre_moeglich nein).
 user shelly
@@ -48,7 +50,9 @@ pattern readwrite %u/#
 pattern readwrite shellies/%u/#
 # Gen1-Rundruf an alle Geräte (announce, update). Mosquitto meldet beim
 # Laden „ACL pattern 'shellies/command' does not contain '%c' or '%u'“ –
-# das ist hier gewollt: alle eigenen Zugänge dürfen ihn lesen.
+# das ist hier gewollt: alle eigenen Zugänge dürfen ihn lesen. Schreiben
+# dürfen ihn nur Node-RED und die Oberfläche; dem gemeinsamen Zugang nimmt
+# der Helfer ihn, sobald ein Gen1-Gerät einen eigenen Zugang hat.
 # shellies/announce schreiben dürfen eigene Zugänge nicht; Mosquitto
 # verwirft das still. Node-RED bekommt die Geräte-Info auch über
 # shellies/<id>/announce.

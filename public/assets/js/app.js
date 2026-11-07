@@ -475,6 +475,11 @@ document.addEventListener('DOMContentLoaded', function () {
                     throw new Error('Die Anfrage ist für den Webserver zu groß (HTTP 413) – client_max_body_size in nginx'
                         + ' bzw. die Grenze eines Proxys davor ist kleiner als die der Anwendung');
                 }
+                // 429 ebenso von nginx (z. B. höchstens zwei Grundriss-Uploads je Adresse zugleich).
+                if (antwort.status === 429) {
+                    throw new Error('Der Webserver bremst gerade (HTTP 429) – von dieser Adresse läuft schon zu viel'
+                        + ' zugleich, etwa zwei Uploads. Kurz warten');
+                }
                 /*
                  * Neu laden stellt die Scrollposition wieder her. Steht
                  * der Knopf weit unten und die Meldung ganz oben, bleibt

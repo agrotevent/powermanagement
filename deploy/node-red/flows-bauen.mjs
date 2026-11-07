@@ -240,11 +240,13 @@ const flows = [
         'Shelly Uni: `adc/N` (Spannung in V) wird zum Kanal `adc:N` mit `u` –',
         'ein Rohwert für Tanksensoren, Liter rechnet die App.',
         '',
-        'Nach dem Start fragt der Flow einmal mit `announce` an `shellies/command`',
-        'alle Gen1-Geräte nach Modell und Firmware. Geräte mit eigenem Zugang',
-        'dürfen `shellies/announce` nicht schreiben; ihre Angaben kommen aus',
-        '`shellies/<id>/announce`. Themen unter `shellies/<id>/pm-…` sind',
-        'Prüfungen der Oberfläche und werden übergangen.',
+        'Modell und Firmware fragt der Flow je Gerät mit `announce` an',
+        '`shellies/<id>/command` – sobald sich ein Gerät meldet (nach dem Start,',
+        'dann alle sechs Stunden), nie über den Rundruf `shellies/command`: den',
+        'sperrt der Broker dem gemeinsamen Zugang, sobald ein Gen1-Gerät einen',
+        'eigenen hat. Geräte mit eigenem Zugang dürfen `shellies/announce` nicht',
+        'schreiben; ihre Angaben kommen aus `shellies/<id>/announce`. Themen unter',
+        '`shellies/<id>/pm-…` sind Prüfungen der Oberfläche und werden übergangen.',
         '',
         'Für ein Gerät mit eigenem Zugang gilt nur sein genaues Präfix (Liste',
         'von `pm/status/mqtt-zugaenge`): Meldungen unter einer anders',
@@ -252,14 +254,14 @@ const flows = [
         'auf `shellies/announce` werden verworfen.',
     ].join('\n'), 130, 40),
     mqttIn('pm_gen1_in', T_GEN1, 'shellies/#', 'shellies/#', '0', 120, 120, ['pm_gen1_uebersetzen']),
-    funktion('pm_gen1_uebersetzen', T_GEN1, 'Shelly Gen1 übersetzen', 'shelly-gen1.js', 1,
-        'Übersetzt die Gen1-Themen unter `shellies/<id>/…` in normalisierte Messwerte und Geräteeinträge.',
-        350, 120, [['pm_link_gen1']]),
+    funktion('pm_gen1_uebersetzen', T_GEN1, 'Shelly Gen1 übersetzen', 'shelly-gen1.js', 2,
+        'Übersetzt die Gen1-Themen unter `shellies/<id>/…` in normalisierte Messwerte und Geräteeinträge.\n\n'
+        + 'Ausgang 2: `announce` an `shellies/<id>/command`, wenn sich ein Gerät zum ersten Mal '
+        + '(bzw. nach sechs Stunden wieder) meldet – nie an den Rundruf `shellies/command`.',
+        350, 120, [['pm_link_gen1'], ['pm_gen1_befehl_aus']]),
     linkOut('pm_link_gen1', T_GEN1, 'zu „Schreiben"', [LINK_ZIEL], 535, 120),
-    inject('pm_gen1_announce', T_GEN1, 'announce nach dem Start',
-        [{ p: 'payload' }, { p: 'topic', vt: 'str' }], '', 10, 170, 200, ['pm_gen1_befehl_aus'],
-        { topic: 'shellies/command', payload: 'announce', payloadType: 'str' }),
-    mqttOut('pm_gen1_befehl_aus', T_GEN1, 'shellies/command', '', '0', 'false', 420, 200),
+    // Thema aus der Nachricht (shellies/<id>/command) – darum leer.
+    mqttOut('pm_gen1_befehl_aus', T_GEN1, 'announce je Gerät', '', '0', 'false', 560, 200),
 
     // -------------------------------------------------------- Schreiben
     kommentar('pm_kommentar_schreiben', T_SCHREIBEN, 'Line Protocol und InfluxDB', [

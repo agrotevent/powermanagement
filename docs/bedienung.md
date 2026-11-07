@@ -958,8 +958,11 @@ Gerät ist – dann lässt sich keines umstellen, bis das geklärt ist.
 - Wer das gemeinsame Kennwort kennt, kann ein umgestelltes Gerät vom Broker
   werfen, indem er sich mit dessen Client-ID anmeldet (Mosquitto bindet
   Client-IDs nicht an Benutzer). Schalten oder mitlesen kann er es nicht.
-- Den Gen1-Rundruf `shellies/command` darf der gemeinsame Zugang weiter
-  schreiben (announce, update, update_fw – nur offizielle Firmware).
+- Den Gen1-Rundruf `shellies/command` (announce, update, update_fw) sperrt
+  der Broker dem gemeinsamen Zugang, sobald ein Gen1-Gerät einen eigenen
+  Zugang hat – lesen dann auch die Gen1-Geräte am gemeinsamen Zugang nicht
+  mehr. Modell und Firmware fragt Node-RED je Gerät
+  (`shellies/<id>/command`).
 
 In der Datenquellen-Liste steht an jedem schaltbaren Shelly, welchen Zugang
 er nutzt. Was dazu am Broker passiert, steht in

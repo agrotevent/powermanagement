@@ -187,19 +187,21 @@ final class LocationSync
      * gilt. Ein hinterlegtes Token liegt damit auch in jeder Sicherung –
      * verschlüsselt, aber es liegt dort. Wem das zu viel ist, lässt das
      * Feld leer und setzt die Umgebungsvariable.
+     *
+     * Jedes gilt nur für seinen Server: das eingetragene für den, für den es
+     * eingetragen wurde (Settings::BINDUNG), das aus der Umgebung für den
+     * aus config.php (`inventory.repo_url`). Zeigt die Adresse woandershin,
+     * geht keins mit.
      */
     public static function token(): string
     {
-        $abgelegt = Settings::all()[Settings::GEHEIM_REPO_TOKEN] ?? '';
-        if (is_string($abgelegt) && $abgelegt !== '') {
-            $klar = Crypto::decrypt($abgelegt);
-            if ($klar !== '') {
-                return trim($klar);
-            }
+        $klar = trim(Settings::gebunden(Settings::GEHEIM_REPO_TOKEN));
+        if ($klar !== '') {
+            return $klar;
         }
 
         $wert = getenv(self::TOKEN_VARIABLE);
-        return is_string($wert) ? trim($wert) : '';
+        return is_string($wert) && Settings::zielWieInDatei(Settings::GEHEIM_REPO_TOKEN) ? trim($wert) : '';
     }
 
     /** Steht ein Token in der Systemverwaltung? */

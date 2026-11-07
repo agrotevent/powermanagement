@@ -740,6 +740,32 @@ pruefe('Shelly Gen1: announce ergibt einen Geräteeintrag mit generation=1', () 
     ]);
 });
 
+// Den Rundruf shellies/command sperrt der Broker dem gemeinsamen Zugang,
+// sobald ein Gen1-Gerät einen eigenen hat (deploy/mqtt-zugaenge.sh) – Node-RED
+// fragt darum je Gerät, und nichts im Flow schickt an shellies/command.
+pruefe('Shelly Gen1: announce je Gerät an shellies/<id>/command, nie an den Rundruf', () => {
+    const gen1 = funktion('Shelly Gen1 übersetzen');
+    // Nachrichten aus der Sandbox haben deren Object-Prototyp – als JSON vergleichen.
+    const ausgang2 = (msg) => JSON.parse(JSON.stringify(gen1.lauf(msg)[1]));
+    const nachfrage = [{ topic: 'shellies/shelly1-C0FFEE/command', payload: 'announce' }];
+    assert.deepEqual(ausgang2({ topic: 'shellies/shelly1-C0FFEE/relay/0', payload: 'on' }), nachfrage, 'erste Meldung: Nachfrage beim Gerät');
+    assert.deepEqual(ausgang2({ topic: 'shellies/shelly1-C0FFEE/relay/0/power', payload: '5' }), [], 'zweite Meldung: keine Nachfrage');
+    assert.deepEqual(ausgang2({ topic: 'shellies/shelly1-C0FFEE/announce', payload: '{"model":"SHSW-1"}' }), [], 'announce selbst: keine Nachfrage');
+    assert.deepEqual(gen1.lauf({ topic: 'shellies/shelly1-C0FFEE/relay/0/command', payload: 'off' }), [[], []], 'Befehlsthema: nichts');
+    assert.deepEqual(ausgang2({ topic: 'shellies/shelly1-BEEF00/online', payload: 'true' }),
+        [{ topic: 'shellies/shelly1-BEEF00/command', payload: 'announce' }], 'anderes Gerät: eigene Nachfrage');
+    uhr.jetzt += 6 * 3600 * 1000 + 1;
+    assert.deepEqual(ausgang2({ topic: 'shellies/shelly1-C0FFEE/relay/0', payload: 'off' }), nachfrage, 'nach sechs Stunden: wieder');
+    // Im Flow: Ausgang 2 an eine mqtt-out-Node, deren Thema aus der Nachricht
+    // kommt; keine Node schickt (fest oder per inject) an shellies/command.
+    assert.equal(gen1.def.outputs, 2);
+    assert.deepEqual(gen1.def.wires, [['pm_link_gen1'], ['pm_gen1_befehl_aus']]);
+    const aus = flows.find((n) => n.id === 'pm_gen1_befehl_aus');
+    assert.equal(aus.type, 'mqtt out');
+    assert.equal(aus.topic, '');
+    assert.deepEqual(flows.filter((n) => (n.type === 'mqtt out' || n.type === 'inject') && n.topic === 'shellies/command'), []);
+});
+
 pruefe('Shelly Gen1 Uni: adc/0 ergibt Kanal adc:0 mit u', () => {
     const gen1 = funktion('Shelly Gen1 übersetzen');
     const zustand = (thema, text) => zeilenAus(gen1.lauf({ topic: thema, payload: text })[0])
@@ -765,7 +791,7 @@ pruefe('Shelly Gen1: Prüf-Themen pm-… im Baum übergangen, announce im Baum d
     const gen1 = funktion('Shelly Gen1 übersetzen', { flow });
     for (const thema of ['shellies/shelly1-B929CC/pm-probe/0a1b2c3d', 'shellies/shelly1-B929CC/pm-probe/relay/0',
         'shellies/shelly1-B929CC/pm-konto-0a1b2c3d/rpc']) {
-        assert.deepEqual(gen1.lauf({ topic: thema, payload: 'on' }), [[]], thema);
+        assert.deepEqual(gen1.lauf({ topic: thema, payload: 'on' }), [[], []], thema);
     }
     assert.equal(flow.get('gen1_geraete'), undefined, 'Prüf-Thema hat ein Gerät angelegt');
 
@@ -795,14 +821,14 @@ pruefe('Shelly Gen1: Prüf-Themen pm-… im Baum übergangen, announce im Baum d
         assert.ok(zeilen.includes(`geraet,geraet=${name.toLowerCase()},typ=shelly generation=1,praefix="${p}" ${T()}`), name + ': kein Geräteeintrag');
         assert.ok(zeilen.includes(`strom,geraet=${name.toLowerCase()},kanal=emeter,phase=sum,typ=shelly p=201 ${T()}`), name + ': keine Summe');
     }
-    assert.deepEqual(gen1.lauf({ topic: 'shellies/__proto__/emeter/0/power', payload: '1' }), [[]]);
-    assert.deepEqual(gen1.lauf({ topic: 'shellies/__proto__/announce', payload: '{"model":"x"}' }), [[]]);
+    assert.deepEqual(gen1.lauf({ topic: 'shellies/__proto__/emeter/0/power', payload: '1' }), [[], []]);
+    assert.deepEqual(gen1.lauf({ topic: 'shellies/__proto__/announce', payload: '{"model":"x"}' }), [[], []]);
     assert.equal(Object.getPrototypeOf(flow.get('gen1_geraete')), Object.getPrototypeOf(flow.get('gen1_emeter')));
     assert.equal(Object.keys(flow.get('gen1_geraete')).includes('__proto__'), false);
 
     // shellies/announce: die ID aus der Nutzlast muss genau eine Themenebene sein
     for (const id of ['a/b', 'x/pm-probe', '+', '#', '', 42, null, { id: 'x' }]) {
-        assert.deepEqual(gen1.lauf({ topic: 'shellies/announce', payload: JSON.stringify({ id, model: 'SHSW-1' }) }), [[]], JSON.stringify(id));
+        assert.deepEqual(gen1.lauf({ topic: 'shellies/announce', payload: JSON.stringify({ id, model: 'SHSW-1' }) }), [[], []], JSON.stringify(id));
     }
 });
 
@@ -1017,7 +1043,7 @@ pruefe('MQTT-Zugänge: Doppelgänger eines Geräts mit eigenem Zugang verworfen,
             ['shellies/kuehlhaus/relay/0', 'off'],
             ['shellies/shellypro4pm-a0b1c2d3e4f5/emeter/0/power', '1'],
         ]) {
-            assert.deepEqual(gen1.lauf({ topic: thema, payload }), [[]], thema);
+            assert.deepEqual(gen1.lauf({ topic: thema, payload }), [[], []], thema);
         }
         assert.equal(flowGen1.get('gen1_geraete'), undefined, 'Doppelgänger hat ein Gerät angelegt');
         assert.equal(flowGen1.get('gen1_emeter'), undefined);
@@ -1040,7 +1066,7 @@ pruefe('MQTT-Zugänge: Doppelgänger eines Geräts mit eigenem Zugang verworfen,
         zug.lauf({ topic: ZUGAENGE_THEMA, payload: '' });
         zug.lauf({ topic: ZUGAENGE_THEMA, payload: JSON.stringify({ ts: 1, geschuetzt: { kuehlhaus: 'kuehlhaus/#' } }) });
         assert.deepEqual(gen2.lauf({ topic: 'kuehlhaus/status/switch:0', payload: schalter }), [[], []]);
-        assert.deepEqual(gen1.lauf({ topic: 'shellies/SHELLY1-b929cc/relay/0', payload: 'on' }), [[]]);
+        assert.deepEqual(gen1.lauf({ topic: 'shellies/SHELLY1-b929cc/relay/0', payload: 'on' }), [[], []]);
 
         // leere Liste: kein Schutz mehr, alles wie vorher
         zug.lauf(schutzliste({}));

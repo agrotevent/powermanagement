@@ -300,6 +300,12 @@ $grundbestand = static function () use ($aus): void {
     foreach ($applied as $m) {
         $aus('  Migration ' . $m);
     }
+    // Zugangsdaten von vor der Bindung an ihr Ziel: einmal an das jetzige
+    // binden – im Update unter der Schreibsperre (Settings::BINDUNG).
+    $gebunden = Settings::bindungenNachholen();
+    if ($gebunden !== []) {
+        $aus('  Zugangsdaten an ihr jetziges Ziel gebunden: ' . implode(', ', $gebunden));
+    }
     $rollen = BenutzerService::standardRollenAnlegen();
     $stecker = AnlagenService::grundbestand();
     $profile = Profile::grundbestand();
@@ -387,10 +393,22 @@ switch ($befehl) {
         }
         if (isset($geheim[$schluessel])) {
             Settings::geheimnisSetzen($geheim[$schluessel], $wert);
-            $aus($schluessel . ' verschlüsselt abgelegt.');
+            // Gebunden an das jetzt wirksame Ziel (Settings::BINDUNG).
+            $aus($schluessel . ' verschlüsselt abgelegt' . (isset(Settings::BINDUNG[$geheim[$schluessel]]) && trim($wert) !== '-'
+                ? ' – gilt für ' . Settings::ziel($geheim[$schluessel]) . '.' : '.'));
         } elseif (array_key_exists($schluessel, Settings::OVERRIDABLE)) {
+            if ($schluessel === 'influx.url' && ($grund = Influx::adresseFehler(trim($wert))) !== null) {
+                $fehler($grund);
+            }
             Settings::put($schluessel, $wert);
             $aus($schluessel . ' = ' . $wert);
+            // Zugangsdaten gelten für ihr Ziel: zeigt es jetzt woandershin,
+            // gehen sie nicht mehr mit – das soll niemand erst am Fehler merken.
+            foreach ($geheim as $name => $g) {
+                if (in_array($schluessel, Settings::ZIEL[$g] ?? [], true) && Settings::geheimnisFremd($g)) {
+                    $aus('Hinweis: ' . $name . ' gilt für ein anderes Ziel und geht nicht mehr mit – für das neue neu eintragen (bin/power einstellung ' . $name . ' --stdin).');
+                }
+            }
         } else {
             $fehler('Unbekannter Schlüssel. Möglich: ' . implode(', ', array_merge(array_keys(Settings::OVERRIDABLE), array_keys($geheim))));
         }

@@ -12,6 +12,14 @@ namespace App\Support;
  * Shell herankommt. Zugangsdaten stehen nicht in OVERRIDABLE – sie werden
  * verschlüsselt unter eigenen Schlüsseln abgelegt und nie wieder
  * angezeigt (GEHEIM_*).
+ *
+ * **Ein Geheimnis gilt für sein Ziel.** InfluxDB-Token und -Kennwort, das
+ * Kennwort am MQTT-Broker und das Token des Repositories werden beim Setzen
+ * an das dann wirksame Ziel gebunden (BINDUNG, ziel()) – wie
+ * `eventworx.token_host` und `sso.secret_fuer`. Zeigt die Adresse danach
+ * woandershin, gibt geheimnis() es nicht heraus; der Wert aus config.php
+ * gilt nur, solange die Einstellungen das Ziel nicht von dem aus config.php
+ * wegbewegt haben (zielWieInDatei()).
  */
 final class Settings
 {
@@ -54,7 +62,46 @@ final class Settings
     /** Client-Secret der Anmeldung über SSO – gilt nur für `sso.secret_fuer` (App\Auth\Sso\Einstellungen). */
     public const GEHEIM_SSO_SECRET = 'sso.client_secret_enc';
 
+    /**
+     * Geheimnis → Schlüssel seiner Bindung. put() schreibt sie beim Setzen,
+     * nie beim ersten Gebrauch (sonst bände ein vorher umgestelltes Ziel).
+     * Ältere Geheimnisse ohne Bindung bindet `bin/power migrate` einmal an
+     * das Ziel zur Zeit des Updates (bindungenNachholen()).
+     */
+    public const BINDUNG = [
+        self::GEHEIM_INFLUX_TOKEN    => 'influx.token_fuer',
+        self::GEHEIM_INFLUX_KENNWORT => 'influx.password_fuer',
+        self::GEHEIM_MQTT_KENNWORT   => 'mqtt.password_fuer',
+        self::GEHEIM_REPO_TOKEN      => 'inventory.token_fuer',
+    ];
+
+    /** Die Einstellungen, die das Ziel eines Geheimnisses bilden (Schema, Host, Port, Benutzer). */
+    public const ZIEL = [
+        self::GEHEIM_INFLUX_TOKEN    => ['influx.url'],
+        self::GEHEIM_INFLUX_KENNWORT => ['influx.url', 'influx.username'],
+        self::GEHEIM_MQTT_KENNWORT   => ['mqtt.host', 'mqtt.port', 'mqtt.username'],
+        self::GEHEIM_REPO_TOKEN      => ['inventory.repo_url'],
+    ];
+
+    /** Dieselben Vorgaben wie in Influx::url() und Mqtt::ausKonfiguration(). */
+    private const ZIEL_VORGABE = [
+        'influx.url'         => 'http://127.0.0.1:8086',
+        'influx.username'    => '',
+        'mqtt.host'          => '127.0.0.1',
+        'mqtt.port'          => '1883',
+        'mqtt.username'      => '',
+        'inventory.repo_url' => '',
+    ];
+
     private static ?array $cache = null;
+
+    /**
+     * Die Werte aus config.php, bevor eine Einstellung sie überschrieb –
+     * gemerkt beim ersten apply()/put()/forget().
+     *
+     * @var array<string,mixed>|null
+     */
+    private static ?array $datei = null;
 
     /** @return array<string,string> */
     public static function all(): array
@@ -84,6 +131,38 @@ final class Settings
 
     public static function put(string $key, string $value): void
     {
+        self::dateiMerken();
+        self::schreiben($key, $value);
+        if (array_key_exists($key, self::OVERRIDABLE)) {
+            // Leer heißt wie in apply(): der Wert aus config.php gilt.
+            if ($value !== '') {
+                Config::set($key, $value);
+            } elseif ((self::$datei[$key] ?? null) !== null) {
+                Config::set($key, self::$datei[$key]);
+            }
+        }
+        if (isset(self::BINDUNG[$key])) {
+            // Ein Geheimnis gilt für das Ziel, für das es jetzt eingetragen wird.
+            self::schreiben(self::BINDUNG[$key], self::ziel($key));
+        }
+    }
+
+    public static function forget(string $key): void
+    {
+        self::dateiMerken();
+        Database::execute('DELETE FROM settings WHERE setting_key = ?', [$key]);
+        if (isset(self::BINDUNG[$key])) {
+            Database::execute('DELETE FROM settings WHERE setting_key = ?', [self::BINDUNG[$key]]);
+        }
+        self::$cache = null;
+        // Wie in der nächsten Anfrage: wieder der Wert aus config.php.
+        if (array_key_exists($key, self::OVERRIDABLE) && (self::$datei[$key] ?? null) !== null) {
+            Config::set($key, self::$datei[$key]);
+        }
+    }
+
+    private static function schreiben(string $key, string $value): void
+    {
         $existing = Database::first('SELECT setting_key FROM settings WHERE setting_key = ?', [$key]);
         if ($existing) {
             Database::execute('UPDATE settings SET setting_value = ?, updated_at = ? WHERE setting_key = ?', [$value, gmdate('c'), $key]);
@@ -91,20 +170,24 @@ final class Settings
             Database::execute('INSERT INTO settings (setting_key, setting_value, updated_at) VALUES (?, ?, ?)', [$key, $value, gmdate('c')]);
         }
         self::$cache = null;
-        if (array_key_exists($key, self::OVERRIDABLE)) {
-            Config::set($key, $value);
-        }
     }
 
-    public static function forget(string $key): void
+    /** Die Werte aus config.php merken, bevor eine Einstellung sie überschreibt. */
+    private static function dateiMerken(): void
     {
-        Database::execute('DELETE FROM settings WHERE setting_key = ?', [$key]);
-        self::$cache = null;
+        if (self::$datei !== null) {
+            return;
+        }
+        self::$datei = [];
+        foreach (array_keys(self::OVERRIDABLE) as $key) {
+            self::$datei[$key] = Config::get($key);
+        }
     }
 
     /** Überschreibungen in die Laufzeitkonfiguration übernehmen. */
     public static function apply(): void
     {
+        self::dateiMerken();
         foreach (self::all() as $key => $value) {
             if (array_key_exists($key, self::OVERRIDABLE) && $value !== '') {
                 Config::set($key, $value);
@@ -114,18 +197,125 @@ final class Settings
 
     /**
      * Ein Geheimnis lesen: zuerst das in der Oberfläche eingetragene
-     * (verschlüsselt), sonst der Wert aus der Konfigurationsdatei.
+     * (verschlüsselt) – nur für das Ziel, für das es eingetragen wurde –,
+     * sonst der Wert aus der Konfigurationsdatei, solange das Ziel das aus
+     * der Datei ist. Sonst leer: lieber ohne Anmeldung scheitern, als das
+     * Geheimnis an ein umgestelltes Ziel zu schicken.
      */
     public static function geheimnis(string $schluessel, string $configKey): string
     {
+        $klar = self::gebunden($schluessel);
+        if ($klar !== '') {
+            return $klar;
+        }
+        $ausDatei = trim((string) Config::get($configKey, ''));
+        if ($ausDatei !== '' && isset(self::ZIEL[$schluessel]) && !self::zielWieInDatei($schluessel)) {
+            return '';
+        }
+        return $ausDatei;
+    }
+
+    /** Das eingetragene Geheimnis – leer, wenn keins da ist oder es für ein anderes Ziel gilt. */
+    public static function gebunden(string $schluessel): string
+    {
         $abgelegt = self::all()[$schluessel] ?? '';
-        if ($abgelegt !== '') {
-            $klar = Crypto::decrypt($abgelegt);
-            if ($klar !== '') {
-                return $klar;
+        if ($abgelegt === '' || (isset(self::BINDUNG[$schluessel]) && !self::bindungPasst($schluessel))) {
+            return '';
+        }
+        return Crypto::decrypt($abgelegt);
+    }
+
+    /** Gilt das eingetragene Geheimnis für das jetzige Ziel? */
+    public static function bindungPasst(string $schluessel): bool
+    {
+        $bindung = self::all()[self::BINDUNG[$schluessel] ?? ''] ?? null;
+        return $bindung !== null && hash_equals($bindung, self::ziel($schluessel));
+    }
+
+    /** Eingetragen, aber für ein anderes Ziel – für Hinweise, ohne das Geheimnis. */
+    public static function geheimnisFremd(string $schluessel): bool
+    {
+        return isset(self::BINDUNG[$schluessel]) && self::geheimnisHinterlegt($schluessel) && !self::bindungPasst($schluessel);
+    }
+
+    /**
+     * Das wirksame Ziel eines Geheimnisses als Text (Schema, Host, Port,
+     * Benutzer) – aus den Einstellungen, sonst aus config.php. So wird es
+     * gebunden und verglichen.
+     */
+    public static function ziel(string $schluessel): string
+    {
+        $werte = [];
+        foreach (self::ZIEL[$schluessel] ?? [] as $key) {
+            $eingestellt = trim(self::all()[$key] ?? '');
+            $werte[$key] = $eingestellt !== '' ? $eingestellt : self::ausDatei($key);
+        }
+        return self::zielText($schluessel, $werte);
+    }
+
+    /**
+     * Zeigt das Ziel noch dahin, wohin config.php es stellt? Nur dann gilt ein
+     * Geheimnis aus config.php (bzw. aus der Umgebung des Dienstes).
+     */
+    public static function zielWieInDatei(string $schluessel): bool
+    {
+        $werte = [];
+        foreach (self::ZIEL[$schluessel] ?? [] as $key) {
+            $werte[$key] = self::ausDatei($key);
+        }
+        return self::zielText($schluessel, $werte) === self::ziel($schluessel);
+    }
+
+    /**
+     * Ältere Geheimnisse (vor der Bindung eingetragen) an das jetzige Ziel
+     * binden – aus `bin/power migrate`, also während des Updates unter der
+     * Schreibsperre. Gibt die gebundenen Schlüssel zurück.
+     *
+     * @return list<string>
+     */
+    public static function bindungenNachholen(): array
+    {
+        $gebunden = [];
+        foreach (self::BINDUNG as $schluessel => $bindung) {
+            if ((self::all()[$schluessel] ?? '') !== '' && !isset(self::all()[$bindung])) {
+                self::schreiben($bindung, self::ziel($schluessel));
+                $gebunden[] = $schluessel;
             }
         }
-        return trim((string) Config::get($configKey, ''));
+        return $gebunden;
+    }
+
+    /** Der Wert aus config.php (vor jeder Einstellung), sonst die Vorgabe der Clients. */
+    private static function ausDatei(string $key): string
+    {
+        self::dateiMerken();
+        $wert = array_key_exists($key, self::$datei) ? self::$datei[$key] : Config::get($key);
+        $wert = is_scalar($wert) ? trim((string) $wert) : '';
+        return $wert !== '' ? $wert : (self::ZIEL_VORGABE[$key] ?? '');
+    }
+
+    /** @param array<string,string> $w */
+    private static function zielText(string $schluessel, array $w): string
+    {
+        return match ($schluessel) {
+            self::GEHEIM_INFLUX_TOKEN    => self::adresse($w['influx.url']),
+            self::GEHEIM_INFLUX_KENNWORT => self::adresse($w['influx.url']) . ' ' . $w['influx.username'],
+            self::GEHEIM_MQTT_KENNWORT   => 'mqtt://' . strtolower($w['mqtt.host']) . ':' . (int) $w['mqtt.port'] . ' ' . $w['mqtt.username'],
+            self::GEHEIM_REPO_TOKEN      => \App\Services\LocationSync::server($w['inventory.repo_url']),
+            default                      => '',
+        };
+    }
+
+    /** Schema, Host und Port einer Adresse (klein, Port ausgeschrieben) – der Pfad zählt nicht. */
+    private static function adresse(string $url): string
+    {
+        $teile = parse_url($url);
+        if (!is_array($teile) || !isset($teile['scheme'], $teile['host'])) {
+            return strtolower($url);
+        }
+        $schema = strtolower($teile['scheme']);
+        $port = $teile['port'] ?? ($schema === 'https' ? 443 : 80);
+        return $schema . '://' . strtolower($teile['host']) . ':' . $port;
     }
 
     /** Geheimnis eintragen; leer heißt: nichts ändern. „-“ entfernt es. */
