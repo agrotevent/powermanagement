@@ -161,8 +161,9 @@ try {
     Settings::put('inventory.repo_url', 'https://boese.example.test/x.git');
     gleich(LocationSync::token(), '', 'Repository: anderer Server – kein Token aus der Umgebung');
     LocationSync::tokenSetzen('EINGETRAGEN-TOKEN');
-    gleich(LocationSync::token(), 'EINGETRAGEN-TOKEN', 'Repository: eingetragenes Token für seinen Server');
+    gleich([LocationSync::token(), LocationSync::tokenQuelle()], ['EINGETRAGEN-TOKEN', 'eingetragen'], 'Repository: eingetragenes Token für seinen Server');
     Settings::put('inventory.repo_url', 'https://git.example.test/firma/locations.git');
+    gleich(LocationSync::tokenQuelle(), 'anderes_ziel', 'Repository: Anzeige nennt ein Token für einen anderen Server nicht „eingetragen“');
     gleich(LocationSync::token(), 'UMGEBUNG-TOKEN', 'Repository: eingetragenes Token nicht für einen anderen Server (dort gilt das aus der Umgebung)');
     putenv(LocationSync::TOKEN_VARIABLE);
     gleich(LocationSync::token(), '', 'Repository: ohne Umgebung kein Token für den anderen Server');

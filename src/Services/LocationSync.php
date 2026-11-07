@@ -215,7 +215,8 @@ final class LocationSync
     public static function tokenQuelle(): string
     {
         if (self::tokenHinterlegt()) {
-            return 'eingetragen';
+            // Für einen anderen Server eingetragen: geht nicht mit (token()), also nicht „eingetragen“ nennen.
+            return Settings::geheimnisFremd(Settings::GEHEIM_REPO_TOKEN) ? 'anderes_ziel' : 'eingetragen';
         }
         $wert = getenv(self::TOKEN_VARIABLE);
         return is_string($wert) && trim($wert) !== '' ? 'umgebung' : 'fehlt';
