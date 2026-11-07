@@ -91,10 +91,218 @@ final class BenutzerService
      * ihm Freigaben geben? Einen Kundenzugang nie – auch nicht die
      * Administration: ein Konto ohne Rechte wäre sonst für jeden mit „Benutzer
      * verwalten“ zu haben (Kennwort setzen, Freigaben am Konto).
+     *
+     * Wer ein Konto verwaltet, kann es übernehmen (Kennwort setzen, eine
+     * SSO-Identität anhängen) – also nur, wer alle seine Rechte selbst hat
+     * (darfVergeben) und jede seiner Freigaben selbst vergeben dürfte
+     * (darfFreigabeVergeben): am Konto und an jeder zugewiesenen Rolle, auch
+     * an einer, die erst später gilt (freigabenVon). Sonst bekäme jemand mit
+     * „Benutzer verwalten“ über das Konto eines Technikers „schalten“ auf
+     * allen Standorten. Das eigene Konto zählt seine Freigaben nicht – es hat
+     * sie schon.
      */
     public static function darfVerwalten(int $userId): bool
     {
-        return !self::istKundenzugang($userId) && self::darfVergeben(self::benutzerRechte($userId));
+        if (self::istKundenzugang($userId) || !self::darfVergeben(self::benutzerRechte($userId))) {
+            return false;
+        }
+        if ($userId === Auth::id()) {
+            return true;
+        }
+        foreach (self::freigabenVon($userId) as $f) {
+            if (!self::darfFreigabeVergeben((string) $f['ziel_art'], (int) $f['darf_steuern'] === 1)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
+     * Die Freigaben, die ein Konto jetzt hat oder noch bekommt – am Konto
+     * und an allen zugewiesenen Rollen (auch denen, die erst später gelten,
+     * wie benutzerRechte()); abgelaufene zählen nicht.
+     *
+     * @return list<array{ziel_art:string,darf_steuern:int|string}>
+     */
+    public static function freigabenVon(int $userId): array
+    {
+        return Database::select(
+            "SELECT ziel_art, darf_steuern FROM freigaben
+             WHERE ((subject_type = 'user' AND subject_id = ?)
+                OR (subject_type = 'role' AND subject_id IN (SELECT role_id FROM user_roles WHERE user_id = ?)))
+               AND (gueltig_bis IS NULL OR gueltig_bis >= ?)",
+            [$userId, $userId, gmdate('c')]
+        );
+    }
+
+    /**
+     * Darf der angemeldete Benutzer diese Rolle einem Konto geben? null = ja,
+     * sonst die Meldung.
+     *
+     * Wer eine Rolle bekommt, bekommt auch ihre Freigaben (Zugriff::freigaben)
+     * – also nur, wer alle ihre Rechte selbst hat (darfVergeben) und jede
+     * ihrer jetzigen oder künftigen Freigaben selbst vergeben dürfte
+     * (darfFreigabeVergeben: „alles“ und „schalten“ nur die Administration).
+     * Für die Benutzerverwaltung, Anmeldeanfragen und Gruppen beim
+     * Anmeldedienst (Sso\Konten).
+     */
+    public static function rolleVergebenFehler(int $rolleId): ?string
+    {
+        $rolle = Database::first('SELECT id, name FROM roles WHERE id = ?', [$rolleId]);
+        if ($rolle === null) {
+            return 'Diese Rolle gibt es nicht.';
+        }
+        if (!self::darfVergeben(self::rollenRechte($rolleId))) {
+            return 'Die Rolle „' . $rolle['name'] . '“ hat Rechte, die du selbst nicht hast – vergeben darf sie nur, wer sie alle hat.';
+        }
+        $freigaben = Database::select(
+            "SELECT ziel_art, darf_steuern FROM freigaben WHERE subject_type = 'role' AND subject_id = ? AND (gueltig_bis IS NULL OR gueltig_bis >= ?)",
+            [$rolleId, gmdate('c')]
+        );
+        foreach ($freigaben as $f) {
+            if (!self::darfFreigabeVergeben((string) $f['ziel_art'], (int) $f['darf_steuern'] === 1)) {
+                return 'Die Rolle „' . $rolle['name'] . '“ hat Freigaben, die du selbst nicht vergeben dürftest – vergeben darf sie nur, wer auch jede ihrer Freigaben vergeben dürfte.';
+            }
+        }
+        return null;
+    }
+
+    /** Darf der angemeldete Benutzer diese Rolle einem Konto geben? (rolleVergebenFehler) */
+    public static function darfRolleVergeben(int $rolleId): bool
+    {
+        return self::rolleVergebenFehler($rolleId) === null;
+    }
+
+    /**
+     * Bis wann verwaltet der angemeldete Benutzer selbst Benutzer? Unix-Zeit,
+     * null = unbefristet (oder mit „*“ – die Administration ist nie
+     * gedeckelt).
+     *
+     * Das frühere von zwei Enden: dem des eigenen Kontos und dem der jetzt
+     * gültigen Rollen, die „Benutzer verwalten“ geben (das späteste davon).
+     * Rollen aus Gruppen beim Anmeldedienst zählen als unbefristet – ihr Ende
+     * ist das der Sitzung und kommt bei jeder Anmeldung neu.
+     */
+    public static function eigenesEnde(): ?int
+    {
+        $user = Auth::user();
+        if ($user === null || in_array('*', Auth::permissions(), true)) {
+            return null;
+        }
+        $konto = Zeit::ts($user['gueltig_bis'] ?? null);
+        $rolle = null;
+        $jetzt = time();
+        $zuweisungen = Database::select(
+            "SELECT ur.gueltig_ab, ur.gueltig_bis, ur.quelle FROM user_roles ur
+             JOIN role_permissions rp ON rp.role_id = ur.role_id AND rp.permission = 'system.users.manage'
+             WHERE ur.user_id = ?",
+            [(int) $user['id']]
+        );
+        foreach ($zuweisungen as $z) {
+            if (!Zeit::imFenster($jetzt, $z['gueltig_ab'], $z['gueltig_bis'])) {
+                continue;
+            }
+            $bis = (string) $z['quelle'] === 'sso' ? null : Zeit::ts($z['gueltig_bis']);
+            if ($bis === null) {
+                $rolle = PHP_INT_MAX;
+                break;
+            }
+            $rolle = max($rolle ?? 0, $bis);
+        }
+        $rolle = $rolle === PHP_INT_MAX ? null : $rolle;
+        return match (true) {
+            $konto === null => $rolle,
+            $rolle === null => $konto,
+            default         => min($konto, $rolle),
+        };
+    }
+
+    /**
+     * Was eine Speicherung des Kontos $id (null = neu) vergibt, darf der
+     * angemeldete Benutzer das? null = ja, sonst die Meldung. Für die
+     * Benutzerverwaltung und Anmeldeanfragen (Sso\Konten::anfrageAnlegen) –
+     * vor BenutzerService::speichern(), das selbst nicht prüft.
+     *
+     * Geprüft wird nur, was neu ist oder länger gilt als bisher – eine Rolle,
+     * die das Konto schon (von Hand) hat und die nicht verlängert wird,
+     * bleibt beim Speichern stehen, auch wenn sie die Administration
+     * vergeben hat:
+     *   - jede neue oder verlängerte Rolle: rolleVergebenFehler() (Rechte und
+     *     Freigaben),
+     *   - wer selbst befristet Benutzer verwaltet (eigenesEnde()), vergibt
+     *     ein Ende höchstens bis zu seinem eigenen – für das Konto (neu oder
+     *     verlängert) und für jede neue oder verlängerte Rolle (ihr Ende oder,
+     *     ohne eigenes, das des Kontos),
+     *   - am eigenen Konto verlängert ohne „*“ niemand eine Rolle.
+     *
+     * @param array<string,mixed> $daten Formular (gueltig_bis des Kontos)
+     * @param array<int|string,mixed> $rollen role_id => Zuweisung {aktiv, ab, bis}
+     */
+    public static function vergabeFehler(?int $id, array $daten, array $rollen): ?string
+    {
+        $vorher = $id !== null ? self::find($id) : null;
+        $eigenes = $id !== null && $id === Auth::id();
+        $alles = in_array('*', Auth::permissions(), true);
+        $ende = self::eigenesEnde();
+        $kontoBis = Zeit::ausEingabe(is_scalar($daten['gueltig_bis'] ?? null) ? (string) $daten['gueltig_bis'] : '', true);
+        $endeText = $ende === null ? '' : Zeit::anzeige(Zeit::iso($ende));
+        $zuSpaet = static fn (?string $bis): bool => $ende !== null && (Zeit::ts($bis) === null || Zeit::ts($bis) > $ende);
+
+        // Das Konto selbst: neu, oder sein Ende rückt nach hinten (oder fällt weg).
+        if ($vorher === null || self::spaeter($kontoBis, $vorher['gueltig_bis'] ?? null)) {
+            if ($zuSpaet($kontoBis)) {
+                return 'Du verwaltest Benutzer selbst nur bis ' . $endeText . ' – ein Konto gilt dann höchstens bis dahin (mit Ende).';
+            }
+        }
+        $bisher = [];
+        if ($id !== null) {
+            foreach (Database::select("SELECT role_id, gueltig_ab, gueltig_bis FROM user_roles WHERE user_id = ? AND quelle = 'hand'", [$id]) as $z) {
+                $bisher[(int) $z['role_id']] = $z;
+            }
+        }
+        foreach ($rollen as $rolleId => $zuweisung) {
+            if (!is_array($zuweisung) || empty($zuweisung['aktiv'])) {
+                continue;
+            }
+            $rolleId = (int) $rolleId;
+            $ab = Zeit::ausEingabe(is_scalar($zuweisung['ab'] ?? null) ? (string) $zuweisung['ab'] : '');
+            $bis = Zeit::ausEingabe(is_scalar($zuweisung['bis'] ?? null) ? (string) $zuweisung['bis'] : '', true);
+            $alt = $bisher[$rolleId] ?? null;
+            $verlaengert = $alt !== null && (self::frueher($ab, $alt['gueltig_ab']) || self::spaeter($bis, $alt['gueltig_bis']));
+            if ($alt !== null && !$verlaengert) {
+                continue;
+            }
+            $fehler = self::rolleVergebenFehler($rolleId);
+            if ($fehler !== null) {
+                return $fehler;
+            }
+            $name = (string) Database::scalar('SELECT name FROM roles WHERE id = ?', [$rolleId]);
+            if ($eigenes && $verlaengert && !$alles) {
+                return 'Die eigene Rolle „' . $name . '“ verlängerst du nicht selbst – das macht, wer alle Rechte hat.';
+            }
+            // Ohne eigenes Ende endet die Rolle mit dem Konto.
+            $wirksam = $bis === null ? $kontoBis : ($kontoBis === null ? $bis : (Zeit::ts($bis) <= Zeit::ts($kontoBis) ? $bis : $kontoBis));
+            if ($zuSpaet($wirksam)) {
+                return 'Du verwaltest Benutzer selbst nur bis ' . $endeText . ' – die Rolle „' . $name . '“ vergibst du höchstens bis dahin (mit Ende an der Rolle oder am Konto).';
+            }
+        }
+        return null;
+    }
+
+    /** Endet $neu später als $alt (null = nie)? */
+    private static function spaeter(?string $neu, mixed $alt): bool
+    {
+        $n = Zeit::ts($neu);
+        $a = Zeit::ts(is_string($alt) ? $alt : null);
+        return $a !== null && ($n === null || $n > $a);
+    }
+
+    /** Beginnt $neu früher als $alt (null = schon immer)? */
+    private static function frueher(?string $neu, mixed $alt): bool
+    {
+        $n = Zeit::ts($neu);
+        $a = Zeit::ts(is_string($alt) ? $alt : null);
+        return $a !== null && ($n === null || $n < $a);
     }
 
     /** Ist dieses Konto ein Kundenzugang (users.kunde_id)? */

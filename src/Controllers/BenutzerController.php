@@ -67,8 +67,8 @@ final class BenutzerController extends Controller
         ]);
     }
 
-    /** Die Meldung, wenn ein Konto mehr Rechte hat als der, der es ändern will. */
-    private const UEBER_MIR = 'Dieses Konto hat Rechte, die du selbst nicht hast – ändern, sperren und löschen darf es nur, wer sie alle hat.';
+    /** Die Meldung, wenn ein Konto mehr Rechte oder Freigaben hat, als der vergeben darf, der es ändern will (darfVerwalten). */
+    private const UEBER_MIR = 'Dieses Konto hat Rechte, die du selbst nicht hast, oder Freigaben, die du nicht vergeben darfst – ändern, sperren und löschen darf es nur, wer sie alle vergeben dürfte.';
 
     public function speichern(Request $request): void
     {
@@ -80,16 +80,11 @@ final class BenutzerController extends Controller
         } elseif ($id !== null && !BenutzerService::darfVerwalten($id)) {
             $ergebnis = ['ok' => false, 'message' => self::UEBER_MIR];
         }
-        foreach ($rollen as $rolleId => $zuweisung) {
-            if ($ergebnis !== null || empty($zuweisung['aktiv'])) {
-                continue;
-            }
-            $rolle = Database::first('SELECT name FROM roles WHERE id = ?', [(int) $rolleId]);
-            if ($rolle === null) {
-                $ergebnis = ['ok' => false, 'message' => 'Diese Rolle gibt es nicht.'];
-            } elseif (!BenutzerService::darfVergeben(BenutzerService::rollenRechte((int) $rolleId))) {
-                $ergebnis = ['ok' => false, 'message' => 'Die Rolle „' . $rolle['name'] . '“ hat Rechte, die du selbst nicht hast – vergeben darf sie nur, wer sie alle hat.'];
-            }
+        // Neue oder verlängerte Rollen (Rechte und Freigaben) und Enden – nur,
+        // was der Angemeldete selbst vergeben darf (BenutzerService::vergabeFehler).
+        if ($ergebnis === null) {
+            $fehler = BenutzerService::vergabeFehler($id, $_POST, $rollen);
+            $ergebnis = $fehler === null ? null : ['ok' => false, 'message' => $fehler];
         }
         $ergebnis ??= BenutzerService::speichern($id, $_POST, $rollen);
         $ergebnis['ok'] ? Flash::success($ergebnis['message']) : Flash::error($ergebnis['message']);
@@ -186,7 +181,7 @@ final class BenutzerController extends Controller
     private function darfFreigabenAendern(string $art, int $id): bool
     {
         return match ($art) {
-            'role'  => BenutzerService::darfVergeben(BenutzerService::rollenRechte($id)),
+            'role'  => self::rolleAendernErlaubt($id),
             'user'  => !BenutzerService::istKundenzugang($id) && BenutzerService::darfVerwalten($id),
             default => false,
         };
@@ -226,6 +221,17 @@ final class BenutzerController extends Controller
         $this->redirect($f !== null ? '/system/freigaben?art=' . $f['subject_type'] . '&id=' . (int) $f['subject_id'] : '/system/benutzer');
     }
 
+    /**
+     * Eine Rolle (oder ihre Freigaben) ändern und löschen darf nur, wer sie
+     * auch vergeben dürfte – ihre Rechte und ihre Freigaben
+     * (BenutzerService::darfRolleVergeben). Eine Rolle, die es nicht gibt,
+     * meldet der Dienst selbst.
+     */
+    private static function rolleAendernErlaubt(int $id): bool
+    {
+        return Database::first('SELECT id FROM roles WHERE id = ?', [$id]) === null || BenutzerService::darfRolleVergeben($id);
+    }
+
     public function rollen(Request $request): void
     {
         $this->view('benutzer/rollen', ['rollen' => BenutzerService::rollen(), 'bearbeiten' => $request->int('id')]);
@@ -235,8 +241,9 @@ final class BenutzerController extends Controller
     {
         $id = $request->int('id') ?: null;
         $ergebnis = match (true) {
-            $id !== null && !BenutzerService::darfVergeben(BenutzerService::rollenRechte($id))
-                => ['ok' => false, 'message' => 'Diese Rolle hat Rechte, die du selbst nicht hast – ändern darf sie nur, wer sie alle hat.'],
+            // Eine Rolle ändert nur, wer sie auch vergeben dürfte – Rechte und Freigaben.
+            $id !== null && !self::rolleAendernErlaubt($id)
+                => ['ok' => false, 'message' => 'Diese Rolle hat Rechte oder Freigaben, die du selbst nicht vergeben darfst – ändern darf sie nur, wer sie vergeben dürfte.'],
             !BenutzerService::darfVergeben($request->arr('rechte'))
                 => ['ok' => false, 'message' => 'Rechte vergeben darfst du nur, wenn du sie selbst hast.'],
             default => BenutzerService::rolleSpeichern($id, $request->str('name'), $request->str('description'), $request->arr('rechte')),
@@ -247,9 +254,9 @@ final class BenutzerController extends Controller
 
     public function rolleLoeschen(Request $request): void
     {
-        $ergebnis = BenutzerService::darfVergeben(BenutzerService::rollenRechte($request->int('id')))
+        $ergebnis = self::rolleAendernErlaubt($request->int('id'))
             ? BenutzerService::rolleLoeschen($request->int('id'))
-            : ['ok' => false, 'message' => 'Diese Rolle hat Rechte, die du selbst nicht hast – löschen darf sie nur, wer sie alle hat.'];
+            : ['ok' => false, 'message' => 'Diese Rolle hat Rechte oder Freigaben, die du selbst nicht vergeben darfst – löschen darf sie nur, wer sie vergeben dürfte.'];
         $ergebnis['ok'] ? Flash::success($ergebnis['message']) : Flash::error($ergebnis['message']);
         $this->redirect('/system/rollen');
     }
