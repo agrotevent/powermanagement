@@ -80,13 +80,22 @@ final class VerteilerSync
     {
         $out = ['typ' => [], 'inventar' => []];
         foreach (VerteilerBundle::BEREICHE as $bereich => $b) {
+            // Ein Ordner, der ein Verweis (Symlink) ist, zeigt aus dem Repository hinaus – übergangen.
+            if (LocationSync::pfadInKopie($b['ordner']) === null) {
+                continue;
+            }
             foreach (glob(LocationSync::arbeitsKopie() . '/' . $b['ordner'] . '/*.json') ?: [] as $datei) {
                 $schluessel = basename($datei, '.json');
-                if (self::pfad($bereich, $schluessel) === null) {
+                $pfad = self::pfad($bereich, $schluessel);
+                if ($pfad === null) {
                     continue;
                 }
-                $daten = json_decode((string) file_get_contents($datei), true);
-                $fehler = VerteilerBundle::fehler($bereich, $daten);
+                // Nie durch einen Verweis, nie über LocationSync::JSON_HOECHSTENS.
+                $inhalt = LocationSync::ausKopieLesen($pfad);
+                $daten = $inhalt !== null ? json_decode($inhalt, true) : null;
+                $fehler = $inhalt === null
+                    ? 'Die Datei ist ein Verweis, keine gewöhnliche Datei oder größer als ' . intdiv(LocationSync::JSON_HOECHSTENS, 1024 * 1024) . ' MB.'
+                    : VerteilerBundle::fehler($bereich, $daten);
                 $out[$bereich][$schluessel] = [
                     'daten'  => $fehler === null ? $daten : null,
                     'fehler' => $fehler,
@@ -418,7 +427,6 @@ final class VerteilerSync
             }
         }
 
-        $kopie = LocationSync::arbeitsKopie();
         $pfade = [];
         $geschrieben = [];
         $vermerken = [];
@@ -435,10 +443,10 @@ final class VerteilerSync
             if (($dort[$bereich][$schluessel]['hash'] ?? '') === $h['hash']) {
                 continue;
             }
-            if (!is_dir(dirname($kopie . '/' . $pfad)) && !mkdir(dirname($kopie . '/' . $pfad), 0775, true) && !is_dir(dirname($kopie . '/' . $pfad))) {
-                return ['ok' => false, 'message' => 'Der Ordner ' . dirname($pfad) . ' ließ sich in der Arbeitskopie nicht anlegen.'];
+            // Nie durch einen Verweis aus dem Repository (LocationSync::inKopieSchreiben()).
+            if (($fehler = LocationSync::inKopieSchreiben($pfad, LocationSync::json($h['daten']))) !== null) {
+                return ['ok' => false, 'message' => $fehler];
             }
-            file_put_contents($kopie . '/' . $pfad, LocationSync::json($h['daten']));
             $pfade[] = $pfad;
             $geschrieben[] = ($bereich === 'typ' ? 'Standard-Verteiler ' : 'Verteiler ') . $h['titel'];
             $zahl[$bereich]++;
@@ -507,11 +515,17 @@ final class VerteilerSync
         if (($sperre = LocationSync::updateBegonnen(UpdateService::NICHTS_HOCHGELADEN)) !== null) {
             return $sperre;
         }
-        $datei = LocationSync::arbeitsKopie() . '/' . $pfad;
+        // Gelöscht wird nur in der Arbeitskopie selbst – nie über einen
+        // Verweis (Symlink) auf dem Weg, der aus ihr hinausführt.
+        $datei = LocationSync::pfadInKopie($pfad);
+        if ($datei === null) {
+            return ['ok' => false, 'message' => $pfad . ' führt in der Arbeitskopie über einen Verweis (Symlink) – nichts entfernt.'];
+        }
         if (!is_file($datei)) {
             return ['ok' => false, 'message' => 'Dieser Verteiler steht nicht (mehr) im Repository.'];
         }
-        $daten = json_decode((string) file_get_contents($datei), true);
+        $inhalt = LocationSync::ausKopieLesen($pfad);
+        $daten = $inhalt !== null ? json_decode($inhalt, true) : null;
         $titel = self::titel($bereich, is_array($daten) && VerteilerBundle::fehler($bereich, $daten) === null ? $daten : null, $schluessel);
         unlink($datei);
         $ergebnis = LocationSync::abschliessen([$pfad], null,

@@ -22,6 +22,14 @@ final class LocationController extends Controller
             if (!$liste['ok']) {
                 Flash::error($liste['message']);
             }
+            // Was es hier schon gibt, nur, wenn man den Standort sieht; und
+            // „Übernehmen“ nur, wo man es darf (LocationSync::uebernehmenVerboten()).
+            $liste['locations'] = array_values(array_filter($liste['locations'],
+                static fn (array $l): bool => (int) $l['site_id'] === 0 || Zugriff::siehtStandort((int) $l['site_id'])));
+            foreach ($liste['locations'] as &$l) {
+                $l['darf'] = LocationSync::uebernehmenVerboten((string) $l['schluessel'], (bool) $l['hat_strom']) === null;
+            }
+            unset($l);
         }
         // Je Standort: wie viel beim Hochladen übertragen wird und wie viel hier bleibt.
         $anzahl = [];
@@ -47,7 +55,8 @@ final class LocationController extends Controller
 
     public function uebernehmen(Request $request): void
     {
-        $ergebnis = LocationSync::uebernehmen($request->str('schluessel'));
+        // Mit den Rechten des Benutzers – vor dem Holen und vor dem Eintragen geprüft.
+        $ergebnis = LocationSync::uebernehmen($request->str('schluessel'), true);
         // „wartung“: Während des Holens begann ein Update (LocationSync::updateBegonnen()).
         !empty($ergebnis['wartung']) ? Flash::warning($ergebnis['message'])
             : ($ergebnis['ok'] ? Flash::success($ergebnis['message']) : Flash::error($ergebnis['message']));

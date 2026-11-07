@@ -45,9 +45,11 @@ $statusText = ['neu' => 'noch nicht hier', 'aktuell' => 'aktuell', 'neuer' => 'd
                     <td data-label="Hier"><span class="badge <?= $l['status'] === 'aktuell' ? 'ok' : ($l['status'] === 'neuer' ? 'warn' : '') ?>"><?= View::e($statusText[$l['status']] ?? $l['status']) ?></span>
                         <?= $l['synced_at'] !== '' ? '<div class="small muted">' . View::e(Zeit::anzeige($l['synced_at'])) . '</div>' : '' ?></td>
                     <td class="right">
+                        <?php if ($l['darf'] ?? false): ?>
                         <form method="post" action="/location/uebernehmen" data-laeuft="übernimmt …"
                               data-laeuft-hinweis="Holt die Location aus dem Repository. Mit Grundrissen kann das einige Minuten dauern. Bitte nicht noch einmal klicken."><?= Csrf::field() ?><input type="hidden" name="schluessel" value="<?= View::e($l['schluessel']) ?>">
                             <button class="btn btn-sm<?= $l['status'] !== 'aktuell' ? ' btn-primary' : '' ?>" type="submit">Übernehmen</button></form>
+                        <?php else: ?><span class="small muted">nur ansehen</span><?php endif; ?>
                     </td>
                 </tr>
             <?php endforeach; ?>

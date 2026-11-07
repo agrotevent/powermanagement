@@ -396,6 +396,11 @@ final class Zugriff
      * Sperre ließe sich mit einer anderen Anlage umgehen. Gesperrt ist ein
      * Gerät, sobald eine seiner Anlagen gesperrt ist.
      *
+     * Misst das Gerät an mehreren Anlagen, schaltet es über Anlagen-Freigaben
+     * nur, wenn sie **jede** davon decken – das Relais hängt an allen, und
+     * eine Freigabe für die eigene Anlage ist keine für die fremde. Eine
+     * Freigabe genau für das Gerät (oder für alles) gilt für das Gerät selbst.
+     *
      * @param array<string,mixed>|null $objekt  die Anlage, an der das Gerät hängt (falls bekannt)
      */
     public static function darfSteuern(array $datenquelle, string $kanal = '', ?array $objekt = null): bool
@@ -414,29 +419,34 @@ final class Zugriff
         if ($objekt !== null && !AnlagenService::elektrisch((string) ($objekt['art'] ?? ''))) {
             return false;
         }
-        if ($objekt !== null) {
-            $objekte = array_values(array_filter($objekte, static fn (array $o): bool => (int) $o['id'] === (int) ($objekt['id'] ?? 0)));
-            if ($objekte === []) {
-                return false;
-            }
+        if ($objekt !== null && array_filter($objekte, static fn (array $o): bool => (int) $o['id'] === (int) ($objekt['id'] ?? 0)) === []) {
+            return false;
         }
         if (self::alles()) {
             return true;
         }
-        foreach (self::freigaben() as $freigabe) {
-            if ((int) $freigabe['darf_steuern'] !== 1) {
-                continue;
-            }
+        $schaltFreigaben = array_values(array_filter(self::freigaben(), static fn (array $f): bool => (int) $f['darf_steuern'] === 1));
+        foreach ($schaltFreigaben as $freigabe) {
             if (self::decktGeraet($freigabe, (int) $datenquelle['id'], $kanal)) {
                 return true;
             }
-            foreach ($objekte as $o) {
+        }
+        if ($objekte === []) {
+            return false;
+        }
+        foreach ($objekte as $o) {
+            $gedeckt = false;
+            foreach ($schaltFreigaben as $freigabe) {
                 if (self::decktObjekt($freigabe, $o)) {
-                    return true;
+                    $gedeckt = true;
+                    break;
                 }
             }
+            if (!$gedeckt) {
+                return false;
+            }
         }
-        return false;
+        return true;
     }
 
     // ------------------------------------------------------------ Datenzeitraum

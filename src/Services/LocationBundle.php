@@ -3,6 +3,7 @@ declare(strict_types=1);
 
 namespace App\Services;
 
+use App\Auth\Zugriff;
 use App\Support\Anfragezeit;
 use App\Support\Config;
 use App\Support\Database;
@@ -1248,20 +1249,48 @@ final class LocationBundle
         }
 
         if (array_key_exists('messpunkte', $a)) {
-            Database::execute('DELETE FROM messpunkte WHERE objekt_id = ? AND einsatz_id IS NULL', [$objektId]);
+            /*
+             * Messpunkte haben eine Zeit. Was hier jetzt direkt misst und in
+             * der Datei steht (Gerät und Kanal), bleibt mit seiner ID und
+             * seinem Beginn – Bereiche, Auswertung und ein Beginn „ab jetzt“
+             * (MesspunktService::speichern()) hängen daran – und bekommt
+             * Anschluss, Schutzorgan, Rolle und Bezeichnung aus der Datei. Was
+             * nicht mehr darin steht, endet jetzt (gueltig_bis), statt mit
+             * seinem Verlauf zu verschwinden; was neu ist, misst ab jetzt.
+             * Beendete und die eines Inventar-Einsatzes bleiben, wie sie sind.
+             */
+            $jetzt = gmdate('c');
+            $bisher = [];
+            foreach (Database::select('SELECT id, geraet, kanal FROM messpunkte WHERE objekt_id = ? AND einsatz_id IS NULL AND gueltig_bis IS NULL ORDER BY id', [$objektId]) as $m) {
+                $bisher[$m['geraet'] . '|' . $m['kanal']][] = (int) $m['id'];
+            }
             foreach ((array) $a['messpunkte'] as $m) {
-                if (trim((string) ($m['geraet'] ?? '')) === '') {
+                $geraet = mb_substr(trim((string) ($m['geraet'] ?? '')), 0, 128);
+                $kanal = mb_substr(trim((string) ($m['kanal'] ?? '')), 0, 64);
+                // Gerät und Kanal landen in MQTT-Themen und InfluxDB-Abfragen – wie von Hand.
+                if ($geraet === '' || !MesspunktService::kennungGueltig($geraet) || ($kanal !== '' && !MesspunktService::kennungGueltig($kanal))) {
                     continue;
                 }
-                Database::insert('messpunkte', [
-                    'objekt_id' => $objektId,
+                $felder = [
                     'anschluss_id' => !empty($m['anschluss']) ? ($neu[(string) $m['anschluss']] ?? null) : null,
                     'schutzorgan_id' => !empty($m['schutz']) ? ($schutzIds[(string) $m['schutz']] ?? null) : null,
-                    'geraet' => mb_substr((string) $m['geraet'], 0, 128), 'kanal' => mb_substr((string) ($m['kanal'] ?? ''), 0, 64),
                     'rolle' => isset(MesspunktService::ROLLEN[$m['rolle'] ?? '']) && !in_array($m['rolle'], MesspunktService::NUR_INVENTAR, true) ? $m['rolle'] : 'einspeisung',
-                    'bezeichnung' => mb_substr((string) ($m['bezeichnung'] ?? ''), 0, 190), 'created_at' => gmdate('c'),
+                    'bezeichnung' => mb_substr((string) ($m['bezeichnung'] ?? ''), 0, 190),
+                ];
+                $geraetKanal = $geraet . '|' . $kanal;
+                $id = ($bisher[$geraetKanal] ?? []) !== [] ? array_shift($bisher[$geraetKanal]) : null;
+                if ($id !== null) {
+                    Database::update('messpunkte', $id, $felder);
+                    continue;
+                }
+                Database::insert('messpunkte', $felder + [
+                    'objekt_id' => $objektId, 'geraet' => $geraet, 'kanal' => $kanal, 'gueltig_ab' => $jetzt, 'created_at' => $jetzt,
                 ]);
             }
+            foreach (array_merge([], ...array_values($bisher)) as $id) {
+                Database::execute('UPDATE messpunkte SET gueltig_bis = ? WHERE id = ?', [$jetzt, $id]);
+            }
+            Zugriff::vergessen();
         }
         return $neu;
     }

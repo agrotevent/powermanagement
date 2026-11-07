@@ -124,8 +124,11 @@ eine Freigabe mit *bearbeiten* – nicht nur eine, die ihn sichtbar macht:
 | Kabel, Kabelweg, Kabelbrücke zeichnen, ändern, löschen | „Kabel zeichnen“ + *bearbeiten* für den Standort **oder** für eine Anlage an einem Kabelende; ein neues Kabelende steht auf der Etage des Kabels |
 | Etagen, Grundriss, Maßstab, Georeferenz | „Grundrisse pflegen“ + *bearbeiten* für den Standort |
 | Grundriss neu rechnen (Karte, Standorte) | „Grundrisse pflegen“ + *bearbeiten* für jeden Standort, dessen Etagen den Plan nutzen; den Zustand sieht jeder, der die Karte sieht |
-| ein Messgerät einer Anlage zuordnen | es darf gerade an keiner Anlage messen, die man nicht bearbeiten darf; ohne „alle Standorte“ bzw. „Datenquellen verwalten“ zählen seine Messwerte erst ab der Zuordnung |
+| ein Messgerät einer Anlage zuordnen | es darf gerade an keiner Anlage messen, die man nicht bearbeiten darf; ohne „alle Standorte“ bzw. „Datenquellen verwalten“ zählen seine Messwerte erst ab der Zuordnung. Der Shelly eines Inventarstücks wird nie direkt zugeordnet (auch nicht von der Administration) – er misst über den Einsatz des Stücks |
 | ein Inventarstück einsetzen, das gerade woanders steckt | *bearbeiten* auch dort, wo es herauskommt |
+| ein Inventarstück einsetzen | keiner seiner Shellys darf gerade an einer Anlage messen, die man nicht bearbeiten darf (wie beim Zuordnen) |
+| eine neue Anlage aus einer Vorlage | Vorlage ist nur ein Katalog-Typ – eine andere Anlage gibt ihre Anschlüsse und Notizen nicht her |
+| eine Location aus dem Repository übernehmen | siehe [Location-Abgleich](#location-abgleich) |
 
 Eine Anlage oder ein Kabel, das man nicht sieht, erscheint auch in Listen
 und Fenstern nur als „nicht freigegeben“ – etwa als Ende eines Kabels oder
@@ -153,6 +156,11 @@ So bekommt die Elektrikerin auf dem Gelände eine Schalt-Freigabe nur für den
 Shelly der Geländebeleuchtung (oder nur dessen `switch:0`). Alles andere
 sieht sie, kann es aber nicht schalten.
 
+Misst ein Gerät an **mehreren Anlagen**, schaltet es über Freigaben für
+Anlagen bzw. Standorte nur, wenn sie **jede** dieser Anlagen decken – das
+Relais hängt an allen. Eine Freigabe genau für das Gerät (oder für alles)
+gilt für das Gerät selbst.
+
 Jeder Versuch landet im **Schaltprotokoll** (*Auswertung → Schaltprotokoll*):
 Benutzer, Gerät, Kanal, Befehl, Ergebnis. Abgelehnte Versuche werden
 ebenfalls protokolliert. Schaltknöpfe erscheinen in der Oberfläche nur, wo
@@ -176,6 +184,22 @@ Technik), pflegen, wer „Inventar pflegen“ hat. Ein Stück **einsetzen** oder
 ändern“ und eine Freigabe mit „bearbeiten“ für diese Anlage. Messgeräte aus
 einem Einsatz zählen für Datenfenster und Schalt-Freigaben nur, solange sie
 dort stecken.
+
+## Location-Abgleich
+
+Den Location-Abgleich sieht, wer „Locations und Verteiler übernehmen“ hat;
+vom Bestand hier nur die Standorte, die er sieht. **Übernehmen** ändert den
+Standort hier – Etagen, Grundrisse, Maßstab, Feststromanschlüsse samt
+Schaltsperre und Messgeräten. Dafür braucht es dieselben Rechte wie von
+Hand und über eine andere Instanz: „Grundrisse pflegen“ und *bearbeiten* am
+Standort mit diesem Schlüssel; einen neuen Standort legt so nur an, wer alle
+Standorte bearbeiten darf. Bringt die Location Feststromanschlüsse mit,
+zusätzlich „Anlagen ändern“, „Kabel zeichnen“ und Anlegen auf dem Standort,
+für fehlende Steckertypen „Steckverbinder-Katalog pflegen“ – sonst wird gar
+nichts übernommen. Ohne diese Rechte zeigt die Liste nur „nur ansehen“.
+Hochladen braucht „… ins Repository hochladen“ und einen Standort, den man
+sieht. Die Kommandozeile (`bin/power location:uebernehmen`) handelt als
+Betreiber.
 
 ## Verteiler-Abgleich
 

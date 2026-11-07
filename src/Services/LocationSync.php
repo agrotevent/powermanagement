@@ -3,6 +3,8 @@ declare(strict_types=1);
 
 namespace App\Services;
 
+use App\Auth\Auth;
+use App\Auth\Zugriff;
 use App\Support\Anfragezeit;
 use App\Support\Audit;
 use App\Support\Config;
@@ -93,6 +95,20 @@ final class LocationSync
 
     /** Was ein zweiter Abgleich meldet, während einer läuft. */
     public const BELEGT = 'Das Repository wird gerade schon abgeglichen (anderer Reiter oder anderer Benutzer) – nichts doppelt gemacht. Gleich die Seite neu laden.';
+
+    /**
+     * So groß darf eine JSON-Datei aus der Arbeitskopie höchstens sein
+     * (location.json, strom.json, ein Verteiler) – was darüber liegt, wird
+     * nicht gelesen. Wie die übrigen Grenzen für Eingaben von außen.
+     */
+    public const JSON_HOECHSTENS = 16 * 1024 * 1024;
+
+    /**
+     * Wo der Abgleich in der Arbeitskopie liest und schreibt. Unter diesen
+     * Pfaden darf das Repository keinen Verweis (Symlink, Modus 120000)
+     * führen – das Format von MasterAdmin kennt keine (verweisImRepo()).
+     */
+    private const OHNE_VERWEISE = ['locations', 'verteiler', 'README.md', 'POWERMANAGEMENT.md'];
 
     /** Wie tief diese Anfrage in gesperrt() steckt – darin geht es ohne zweite Sperre weiter. */
     private static int $sperrTiefe = 0;
@@ -402,8 +418,147 @@ final class LocationSync
         if (!$stand['ok']) {
             return ['ok' => false, 'message' => $stand['message'], 'commit' => self::kopfCommit()];
         }
+        $verweis = self::verweisImRepo();
+        if ($verweis !== null) {
+            return ['ok' => false, 'message' => $verweis, 'commit' => self::kopfCommit()];
+        }
 
         return ['ok' => true, 'message' => $stand['message'], 'commit' => self::kopfCommit()];
+    }
+
+    /**
+     * Führt das Repository dort, wo der Abgleich liest und schreibt, einen
+     * Verweis (Symlink)? Dann die Meldung – sonst null.
+     *
+     * Was im Repository steht, kommt von außen: Wer dorthin pushen kann
+     * (MasterAdmin, eine andere Installation, ein abgeflossenes Token), legte
+     * sonst `locations/<schlüssel>/strom.json → ../../../../database.sqlite`
+     * an, und das nächste „Hochladen“ hier schriebe durch den Verweis in die
+     * Datenbank. Git checkt deshalb ohne Verweise aus (core.symlinks=false in
+     * git()) – das allein genügt nicht: `git add` nähme die geschriebene
+     * Datei dann als neues Ziel des Verweises. Also wird ein solcher Stand
+     * gar nicht erst abgeglichen, und jedes Lesen und Schreiben geht
+     * zusätzlich über pfadInKopie().
+     */
+    private static function verweisImRepo(): ?string
+    {
+        $eintraege = self::git(array_merge(['ls-files', '-s', '-z', '--'], self::OHNE_VERWEISE), self::arbeitsKopie());
+        if (!$eintraege['ok']) {
+            return 'Die Arbeitskopie ließ sich nicht prüfen: ' . $eintraege['message'];
+        }
+        foreach (explode("\0", $eintraege['ausgabe']) as $zeile) {
+            // „<modus> <objekt> <stufe>\t<pfad>“
+            if (str_starts_with($zeile, '120000 ')) {
+                $pfad = mb_substr((string) substr($zeile, (int) strpos($zeile, "\t") + 1), 0, 200);
+                return sprintf('Im Repository ist „%s“ ein Verweis (Symlink). Das Format von MasterAdmin kennt keine, und durch einen Verweis '
+                    . 'schriebe der Abgleich an Stellen außerhalb des Repositorys – nichts abgeglichen. Den Verweis im Repository durch die '
+                    . 'Datei bzw. den Ordner selbst ersetzen.', $pfad);
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Der Pfad einer Datei oder eines Ordners in der Arbeitskopie – oder
+     * null, wenn $relativ kein schlichter Pfad ist oder auf dem Weg dorthin
+     * ein Verweis (Symlink) liegt, auch am Ziel selbst.
+     *
+     * Die dritte Tür gegen Verweise aus dem Repository (siehe
+     * verweisImRepo()): Jedes Lesen, Schreiben und Löschen in der
+     * Arbeitskopie fragt hier, auch eine Arbeitskopie, die eine ältere
+     * Fassung noch mit Verweisen ausgecheckt hat.
+     */
+    public static function pfadInKopie(string $relativ): ?string
+    {
+        if ($relativ === '' || str_contains($relativ, "\0")) {
+            return null;
+        }
+        $pfad = self::arbeitsKopie();
+        foreach (explode('/', $relativ) as $teil) {
+            if ($teil === '' || $teil === '.' || $teil === '..') {
+                return null;
+            }
+            $pfad .= '/' . $teil;
+            clearstatcache(true, $pfad);
+            if (is_link($pfad)) {
+                return null;
+            }
+        }
+        return $pfad;
+    }
+
+    /**
+     * Eine Datei aus der Arbeitskopie lesen: nur ohne Verweis auf dem Weg
+     * (pfadInKopie()), nur eine gewöhnliche Datei und höchstens $hoechstens
+     * Bytes – sonst null.
+     */
+    public static function ausKopieLesen(string $relativ, int $hoechstens = self::JSON_HOECHSTENS): ?string
+    {
+        $pfad = self::pfadInKopie($relativ);
+        if ($pfad === null || !is_file($pfad)) {
+            return null;
+        }
+        $groesse = @filesize($pfad);
+        if ($groesse === false || $groesse > $hoechstens) {
+            return null;
+        }
+        $inhalt = @file_get_contents($pfad, false, null, 0, $hoechstens + 1);
+        return is_string($inhalt) && strlen($inhalt) <= $hoechstens ? $inhalt : null;
+    }
+
+    /**
+     * Eine Datei in die Arbeitskopie schreiben – nie durch einen Verweis
+     * (pfadInKopie()): fehlende Ordner anlegen, den Inhalt (bzw. die Datei
+     * $quelle) in eine frische Zwischendatei neben der Arbeitskopie
+     * schreiben und mit rename() an ihren Platz setzen. rename() ersetzt
+     * einen Verweis am Ziel, statt ihm zu folgen; die Zwischendatei liegt
+     * außerhalb des Repositorys, damit ein abgebrochener Lauf dort nichts
+     * hinterlässt, was das nächste `git add` mitnähme.
+     *
+     * @return string|null null = geschrieben, sonst die Meldung
+     */
+    public static function inKopieSchreiben(string $relativ, string $inhalt, ?string $quelle = null): ?string
+    {
+        $nicht = 'In der Arbeitskopie ließ sich ' . $relativ . ' nicht schreiben – nichts hochgeladen.';
+        $ziel = self::pfadInKopie($relativ);
+        if ($ziel === null) {
+            return self::verweisMeldung($relativ);
+        }
+        $ordner = dirname($ziel);
+        if (!is_dir($ordner) && !@mkdir($ordner, 0775, true) && !is_dir($ordner)) {
+            return 'Der Ordner ' . dirname($relativ) . ' ließ sich in der Arbeitskopie nicht anlegen.';
+        }
+        // Die eben angelegten Ordner noch einmal ansehen – und ein Ordner am Ziel taugt nicht.
+        if (self::pfadInKopie($relativ) === null || is_dir($ziel)) {
+            return self::verweisMeldung($relativ);
+        }
+        $zwischen = dirname(self::arbeitsKopie()) . '/.schreiben-' . bin2hex(random_bytes(8)) . '.tmp';
+        $griff = @fopen($zwischen, 'xb');   // „x“ legt neu an und folgt keinem Verweis
+        if ($griff === false) {
+            return $nicht;
+        }
+        if ($quelle !== null) {
+            $von = @fopen($quelle, 'rb');
+            $ok = $von !== false && stream_copy_to_stream($von, $griff) !== false;
+            if ($von !== false) {
+                fclose($von);
+            }
+        } else {
+            $ok = fwrite($griff, $inhalt) === strlen($inhalt);
+        }
+        $ok = fclose($griff) && $ok;
+        if (!$ok || !@rename($zwischen, $ziel)) {
+            @unlink($zwischen);
+            return $nicht;
+        }
+        return null;
+    }
+
+    /** Was gemeldet wird, wenn ein Pfad in der Arbeitskopie über einen Verweis führt. */
+    private static function verweisMeldung(string $relativ): string
+    {
+        return mb_substr($relativ, 0, 200) . ' führt in der Arbeitskopie über einen Verweis (Symlink) oder ist kein gewöhnlicher Pfad – '
+            . 'nichts geschrieben. Den Verweis im Repository durch die Datei bzw. den Ordner selbst ersetzen.';
     }
 
     /**
@@ -465,7 +620,10 @@ final class LocationSync
             // an dieser Stelle ist kein Schönheitsfehler: es bedeutet,
             // dass die Arbeitskopie nicht das zeigt, was im Repository
             // steht – und alles Weitere rechnet mit dem falschen Stand.
-            $wechsel = self::git(['checkout', '-B', $zweig, 'origin/' . $zweig], $kopie);
+            // „-f“: Was hier geändert herumliegt (ein abgebrochenes
+            // Hochladen, ein Verweis einer älteren Fassung), hielte den
+            // Wechsel sonst für immer auf – die Arbeitskopie ist ein Spiegel.
+            $wechsel = self::git(['checkout', '-f', '-B', $zweig, 'origin/' . $zweig], $kopie);
             if (!$wechsel['ok']) {
                 return ['ok' => false, 'message' => 'Der Wechsel auf ' . $zweig . ' scheiterte: ' . $wechsel['message']];
             }
@@ -499,7 +657,9 @@ final class LocationSync
             \RecursiveIteratorIterator::CHILD_FIRST
         );
         foreach ($lauf as $eintrag) {
-            $eintrag->isDir() ? @rmdir($eintrag->getPathname()) : @unlink($eintrag->getPathname());
+            // Ein Verweis wird entfernt, nicht das, worauf er zeigt (der
+            // Iterator steigt ohne FOLLOW_SYMLINKS auch nicht hinein).
+            $eintrag->isDir() && !$eintrag->isLink() ? @rmdir($eintrag->getPathname()) : @unlink($eintrag->getPathname());
         }
         @rmdir($pfad);
     }
@@ -551,7 +711,8 @@ final class LocationSync
         }
 
         foreach (glob(self::arbeitsKopie() . '/locations/*/location.json') ?: [] as $pfad) {
-            $daten = json_decode((string) file_get_contents($pfad), true);
+            // Nie durch einen Verweis und nie über JSON_HOECHSTENS (ausKopieLesen()).
+            $daten = json_decode((string) self::ausKopieLesen('locations/' . basename(dirname($pfad)) . '/location.json'), true);
             if (!is_array($daten)) {
                 continue;
             }
@@ -597,25 +758,19 @@ final class LocationSync
             : 'neuer';
     }
 
-    /** location.json einer Location aus der Arbeitskopie. */
+    /** location.json einer Location aus der Arbeitskopie – nie durch einen Verweis, nie über JSON_HOECHSTENS. */
     public static function locationLesen(string $schluessel): ?array
     {
         $pfad = self::bestandPfad($schluessel, 'location.json');
-        if ($pfad === null || !is_file($pfad)) {
-            return null;
-        }
-        $daten = json_decode((string) file_get_contents($pfad), true);
+        $daten = $pfad !== null ? json_decode((string) self::ausKopieLesen($pfad), true) : null;
         return is_array($daten) ? $daten : null;
     }
 
-    /** strom.json einer Location aus der Arbeitskopie – oder null. */
+    /** strom.json einer Location aus der Arbeitskopie – oder null (auch für einen Verweis oder über JSON_HOECHSTENS). */
     public static function stromLesen(string $schluessel): ?array
     {
         $pfad = self::bestandPfad($schluessel, 'strom.json');
-        if ($pfad === null || !is_file($pfad)) {
-            return null;
-        }
-        $daten = json_decode((string) file_get_contents($pfad), true);
+        $daten = $pfad !== null ? json_decode((string) self::ausKopieLesen($pfad), true) : null;
         return is_array($daten) ? $daten : null;
     }
 
@@ -639,11 +794,19 @@ final class LocationSync
      * dem Kacheln noch eingetragen würde, käme womöglich nach der Sicherung
      * und ginge beim Zurückrollen verloren, während die Etagen blieben.
      *
+     * Aus der Oberfläche ($alsBenutzer) mit denselben Rechten wie von Hand
+     * und über eine andere Instanz (uebernehmenVerboten()) – geprüft vor dem
+     * Holen und noch einmal, bevor etwas eingetragen wird. Die Kommandozeile
+     * (bin/power location:uebernehmen) handelt als Betreiber.
+     *
      * @return array{ok:bool,message:string}
      */
-    public static function uebernehmen(string $schluessel): array
+    public static function uebernehmen(string $schluessel, bool $alsBenutzer = false): array
     {
-        $ergebnis = self::gesperrt(static fn (): array => self::uebernehmenGesperrt($schluessel));
+        if ($alsBenutzer && ($nein = self::uebernehmenVerboten($schluessel, false)) !== null) {
+            return ['ok' => false, 'message' => $nein];
+        }
+        $ergebnis = self::gesperrt(static fn (): array => self::uebernehmenGesperrt($schluessel, $alsBenutzer));
         $kacheln = $ergebnis['kacheln'] ?? [];
         unset($ergebnis['kacheln']);
         if ($kacheln !== []) {
@@ -652,8 +815,54 @@ final class LocationSync
         return $ergebnis;
     }
 
+    /**
+     * Darf der angemeldete Benutzer diese Location aus dem Repository
+     * übernehmen? null = ja, sonst der Grund.
+     *
+     * Wie von Hand und wie über eine andere Instanz (PartnerAbgleich):
+     * „Grundrisse pflegen“ und am Standort mit diesem Schlüssel *bearbeiten*;
+     * einen neuen Standort legt so nur an, wer alle Standorte bearbeiten
+     * darf. Bringt die Location Feststromanschlüsse mit ($mitStrom),
+     * zusätzlich „Anlagen ändern“, „Kabel einzeichnen“ und Anlegen auf dem
+     * Standort, für Steckertypen, die es hier nicht gibt ($strom), „Steckverbinder
+     * pflegen“. Sonst wird gar nichts übernommen – auch nicht halb: Schaltsperren,
+     * Messpunkte, Etagen und Pläne gehören zum Standort, den nur ändert, wer
+     * ihn bearbeiten darf.
+     *
+     * @param array<string,mixed>|null $strom strom.json, wenn schon gelesen
+     */
+    public static function uebernehmenVerboten(string $schluessel, bool $mitStrom, ?array $strom = null): ?string
+    {
+        if (!Auth::can('plans.manage')) {
+            return 'Übernehmen braucht das Recht „Standorte, Etagen und Grundrisse pflegen“ – nichts übernommen.';
+        }
+        $site = $schluessel !== '' ? Database::first('SELECT id FROM sites WHERE sync_key = ?', [$schluessel]) : null;
+        $siteId = $site !== null ? (int) $site['id'] : null;
+        if ($siteId !== null && !Zugriff::darfStandortAendern($siteId)) {
+            return 'Den Standort dieser Location darfst du nicht ändern – dafür braucht es eine Freigabe mit „bearbeiten“. Nichts übernommen.';
+        }
+        if ($siteId === null && !Zugriff::alles() && !Zugriff::darfAufStandortAnlegen(null)) {
+            return 'Diese Location gibt es hier noch nicht – einen neuen Standort legt so nur an, wer alle Standorte bearbeiten darf. Nichts übernommen.';
+        }
+        if (!$mitStrom) {
+            return null;
+        }
+        if (!Auth::can('anlagen.manage') || !Auth::can('leitungen.manage')) {
+            return 'Die Location bringt Feststromanschlüsse mit – übernehmen braucht dafür die Rechte „Anlagen ändern“ und „Kabel einzeichnen“. Nichts übernommen.';
+        }
+        if (!Zugriff::darfAufStandortAnlegen($siteId)) {
+            return 'Auf dem Standort dieser Location darfst du keine Anlagen anlegen – nichts übernommen.';
+        }
+        $fehlen = $strom !== null ? LocationUebertrag::fehlendeSteckertypen($strom) : [];
+        if ($fehlen !== [] && !Auth::can('stecker.manage')) {
+            return 'Diese Steckertypen gibt es hier noch nicht: ' . implode(', ', $fehlen)
+                . ' – anlegen darf sie nur, wer die Steckverbinder pflegt. Nichts übernommen.';
+        }
+        return null;
+    }
+
     /** uebernehmen() unter der Sperre der Arbeitskopie – vom Holen bis zum Eintragen. */
-    private static function uebernehmenGesperrt(string $schluessel): array
+    private static function uebernehmenGesperrt(string $schluessel, bool $alsBenutzer): array
     {
         $holen = self::holen();
         if (!$holen['ok']) {
@@ -666,7 +875,18 @@ final class LocationSync
         if ($daten === null) {
             return ['ok' => false, 'message' => 'Diese Location gibt es im Repository nicht.'];
         }
-        $ordner = dirname((string) self::bestandPfad($schluessel, 'location.json'));
+        // Eingetragen wird auf den Standort mit dem Schlüssel aus der Datei
+        // (LocationBundle::locationAnwenden()) – geprüft ist der aus dem Ordner.
+        if ((string) ($daten['schluessel'] ?? '') !== $schluessel) {
+            return ['ok' => false, 'message' => 'Der Schlüssel in location.json passt nicht zum Ordner der Location im Repository – nichts übernommen.'];
+        }
+        $strom = self::stromLesen($schluessel);
+        // Noch einmal, mit dem, was jetzt im Repository steht – und mit dem
+        // Standort, den es inzwischen geben kann.
+        if ($alsBenutzer && ($nein = self::uebernehmenVerboten($schluessel, $strom !== null, $strom)) !== null) {
+            return ['ok' => false, 'message' => $nein];
+        }
+        $ordner = self::arbeitsKopie() . '/' . dirname((string) self::bestandPfad($schluessel, 'location.json'));
         // Der Ordner selbst darf kein Verweis sein – sonst läge die Grenze
         // unten, wo der Verweis hinzeigt.
         $basis = realpath($ordner);
@@ -686,7 +906,6 @@ final class LocationSync
             return $ergebnis;
         }
         $meldung = $ergebnis['message'];
-        $strom = self::stromLesen($schluessel);
         if ($strom !== null) {
             $teil = LocationBundle::stromAnwenden((int) $ergebnis['site_id'], $strom);
             $meldung .= ' ' . $teil['message'];
@@ -766,29 +985,33 @@ final class LocationSync
             return ['ok' => false, 'message' => 'Der Schlüssel dieses Standorts ist ungültig.'];
         }
         $ordnerImRepo = 'locations/' . $schluessel;
-        $ziel = self::arbeitsKopie() . '/' . $ordnerImRepo;
-        if (!is_dir($ziel) && !mkdir($ziel, 0775, true) && !is_dir($ziel)) {
-            return ['ok' => false, 'message' => 'Der Ordner im Repository ließ sich nicht anlegen.'];
-        }
-        $geruest = self::grundgeruestAnlegen();
-
         $vorhanden = self::locationLesen($schluessel);
         $location = LocationBundle::locationFuerRepo($siteId, $vorhanden);
         $groesse = self::planGroessen($location['dateien'], $location['daten']);
         if ($groesse['fehler'] !== '') {
             return ['ok' => false, 'message' => $groesse['fehler']];
         }
-        foreach ($location['dateien'] as $imRepo => $aufPlatte) {
-            $dateiZiel = $ziel . '/' . $imRepo;
-            if (!is_dir(dirname($dateiZiel))) {
-                mkdir(dirname($dateiZiel), 0775, true);
+        // Jeder Pfad, der geschrieben wird, vorher – nie durch einen Verweis
+        // (pfadInKopie()), und lieber gar nichts als die Hälfte.
+        $ziele = array_map(static fn (string $imRepo): string => $ordnerImRepo . '/' . $imRepo, array_keys($location['dateien']));
+        array_push($ziele, $ordnerImRepo . '/location.json', $ordnerImRepo . '/strom.json');
+        foreach ($ziele as $relativ) {
+            if (self::pfadInKopie($relativ) === null) {
+                return ['ok' => false, 'message' => self::verweisMeldung($relativ)];
             }
-            copy($aufPlatte, $dateiZiel);
         }
-        if ($location['geaendert']) {
-            file_put_contents($ziel . '/location.json', self::json($location['daten']));
+        $geruest = self::grundgeruestAnlegen();
+        foreach ($location['dateien'] as $imRepo => $aufPlatte) {
+            if (($fehler = self::inKopieSchreiben($ordnerImRepo . '/' . $imRepo, '', $aufPlatte)) !== null) {
+                return ['ok' => false, 'message' => $fehler];
+            }
         }
-        file_put_contents($ziel . '/strom.json', self::json(LocationBundle::stromLesen($siteId)));
+        if ($location['geaendert'] && ($fehler = self::inKopieSchreiben($ordnerImRepo . '/location.json', self::json($location['daten']))) !== null) {
+            return ['ok' => false, 'message' => $fehler];
+        }
+        if (($fehler = self::inKopieSchreiben($ordnerImRepo . '/strom.json', self::json(LocationBundle::stromLesen($siteId)))) !== null) {
+            return ['ok' => false, 'message' => $fehler];
+        }
 
         $ergebnis = self::abschliessen(
             array_merge([$ordnerImRepo], $geruest),
@@ -1041,6 +1264,9 @@ final class LocationSync
      * Wer das Repository später im Browser öffnet, soll nicht raten müssen,
      * was die JSON-Dateien sind und ob er sie von Hand ändern darf.
      *
+     * Geschrieben wird nur über inKopieSchreiben() – nie durch einen
+     * Verweis; was sich so nicht schreiben lässt, fehlt im Gerüst.
+     *
      * @return list<string> angelegte Pfade, relativ zur Arbeitskopie
      */
     public static function grundgeruestAnlegen(): array
@@ -1048,22 +1274,21 @@ final class LocationSync
         if (!self::istLeer()) {
             return [];
         }
-        $kopie = self::arbeitsKopie();
         $angelegt = [];
 
         foreach (array_keys(self::GERUEST_ORDNER) as $ordner) {
-            if (!is_dir($kopie . '/' . $ordner) && !mkdir($kopie . '/' . $ordner, 0775, true) && !is_dir($kopie . '/' . $ordner)) {
+            $gitkeep = self::pfadInKopie($ordner . '/.gitkeep');
+            if ($gitkeep === null || (!is_file($gitkeep) && self::inKopieSchreiben($ordner . '/.gitkeep', '') !== null)) {
                 continue;
-            }
-            if (!is_file($kopie . '/' . $ordner . '/.gitkeep')) {
-                file_put_contents($kopie . '/' . $ordner . '/.gitkeep', '');
             }
             $angelegt[] = $ordner . '/.gitkeep';
         }
 
-        $readme = is_file($kopie . '/README.md') ? 'POWERMANAGEMENT.md' : 'README.md';
-        file_put_contents($kopie . '/' . $readme, self::grundgeruestText());
-        $angelegt[] = $readme;
+        $vorhanden = self::pfadInKopie('README.md');
+        $readme = $vorhanden !== null && !is_file($vorhanden) ? 'README.md' : 'POWERMANAGEMENT.md';
+        if (self::inKopieSchreiben($readme, self::grundgeruestText()) === null) {
+            $angelegt[] = $readme;
+        }
 
         return $angelegt;
     }
@@ -1106,6 +1331,7 @@ final class LocationSync
         return implode("\n", $zeilen);
     }
 
+    /** Der Pfad von location.json bzw. strom.json einer Location, relativ zur Arbeitskopie – oder null. */
     private static function bestandPfad(string $schluessel, string $datei): ?string
     {
         // Der Schlüssel kommt aus der Oberfläche – er darf kein Pfad sein.
@@ -1113,7 +1339,7 @@ final class LocationSync
         if ($sauber === '' || $sauber !== $schluessel || !in_array($datei, ['location.json', 'strom.json'], true)) {
             return null;
         }
-        return self::arbeitsKopie() . '/locations/' . $sauber . '/' . $datei;
+        return 'locations/' . $sauber . '/' . $datei;
     }
 
     private static function gitName(): string
@@ -1203,6 +1429,11 @@ final class LocationSync
             self::TOKEN_VARIABLE   => self::token(),
             // Ohne das fragt Git bei einem abgelaufenen Token endlos nach.
             'GIT_CONFIG_NOSYSTEM'  => '1',
+            // Verweise (Symlinks) aus dem Repository als gewöhnliche Dateien
+            // auschecken – auch beim Klonen (verweisImRepo(), pfadInKopie()).
+            'GIT_CONFIG_COUNT'     => '1',
+            'GIT_CONFIG_KEY_0'     => 'core.symlinks',
+            'GIT_CONFIG_VALUE_0'   => 'false',
         ];
 
         /*

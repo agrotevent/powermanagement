@@ -41,6 +41,7 @@ $siteId = SiteService::saveSite(null, ['name' => 'Prüfung Inventar ' . $kennung
 $floorId = SiteService::saveFloor(null, ['site_id' => $siteId, 'name' => 'Halle']);
 $benutzer = BenutzerService::anlegen($kennung, 'Pruefung2026!!', 'admin', false);
 $angelegt = [];
+$fremdSite = null;
 $gr = static fn (string $n): string => $kennung . '-' . $n;
 
 try {
@@ -232,6 +233,64 @@ try {
     gleich(InventarService::find($zs)['zustand'], 'lager', 'Anlage gelöscht: Zwischenstecker wieder im Lager');
     pruefe(InventarService::geschichte($zs) !== [] && InventarService::geschichte($zs)[0]['bis'] !== null, 'Geschichte behält den beendeten Einsatz');
 
+    // ------------------------------------------------ Einsetzen holt keine fremden Shellys herein
+    // Ein Shelly steckt in einem Stück im Lager und misst zugleich direkt an
+    // einer fremden Anlage (Altbestand – neu lässt sich das nicht mehr
+    // anlegen). Wer nur den eigenen Standort bearbeitet, setzt das Stück nicht
+    // ein: sonst sähe und schaltete er über die eigene Anlage die fremde.
+    $fremdSite = SiteService::saveSite(null, ['name' => 'Prüfung Inventar fremd ' . $kennung]);
+    $fremdEtage = SiteService::saveFloor(null, ['site_id' => $fremdSite, 'name' => 'Halle']);
+    $fremd = (int) AnlagenService::speichern(null, ['art' => 'verteilung', 'name' => $kennung . ' fremd', 'floor_id' => $fremdEtage, 'ohne_anschluesse' => true])['id'];
+    $angelegt[] = $fremd;
+    $eigen = $neu(['art' => 'verteilung', 'name' => $kennung . ' eigen', 'ohne_anschluesse' => true]);
+    pruefe(MesspunktService::speichern($fremd, null, ['geraet' => $gr('doppelt'), 'kanal' => 'switch:0'])['ok'], 'Shelly direkt an der fremden Anlage');
+    $zsDoppelt = (int) InventarService::speichern(null, ['art' => 'zwischenstecker', 'kennung' => $gr('ZS-D'), 'steckertyp_id' => $typ['cee16'],
+        'messgeraete' => [['geraet' => $gr('doppelt'), 'kanal' => 'switch:0']]])['id'];
+    $techniker = BenutzerService::anlegen($kennung . '-t', 'Pruefung2026!!', 'technik', false);
+    BenutzerService::freigabeSpeichern(['subject_type' => 'user', 'subject_id' => $techniker, 'ziel_art' => 'site', 'ziel_id' => $siteId, 'darf_bearbeiten' => 1, 'darf_steuern' => 1]);
+    $postVorher = $_POST;
+    $acceptVorher = $_SERVER['HTTP_ACCEPT'] ?? null;
+    try {
+        $_SERVER['HTTP_ACCEPT'] = 'application/json';
+        // Neu entsteht das nicht mehr: Den Shelly eines Stücks ordnet auch die
+        // Administration nicht direkt zu – er misst nur über einen Einsatz.
+        $_POST = ['geraet' => $gr('doppelt'), 'kanal' => 'switch:1'];
+        ob_start();
+        (new \App\Controllers\AnlagenController())->messpunktSpeichern(new \App\Support\Request(), ['id' => (string) $eigen]);
+        $direkt = json_decode((string) ob_get_clean(), true);
+        pruefe(is_array($direkt) && $direkt['ok'] === false && str_contains((string) $direkt['message'], $gr('ZS-D')) && str_contains((string) $direkt['message'], 'Inventar')
+            && MesspunktService::fuerObjekt($eigen) === [], 'den Shelly eines Inventarstücks direkt zuordnen: abgelehnt, mit Hinweis aufs Einsetzen – ' . (string) ($direkt['message'] ?? ''));
+        alsBenutzer($techniker);
+        $_POST = ['inventar_id' => (string) $zsDoppelt];
+        ob_start();
+        (new \App\Controllers\InventarController())->einsetzen(new \App\Support\Request(), ['id' => (string) $eigen]);
+        $antwort = json_decode((string) ob_get_clean(), true);
+        pruefe(is_array($antwort) && $antwort['ok'] === false && str_contains((string) $antwort['message'], $gr('doppelt')) && InventarService::aktuellerEinsatz($zsDoppelt) === null,
+            'Stück mit einem Shelly, der an einer fremden Anlage misst: nicht eingesetzt – ' . (string) ($antwort['message'] ?? ''));
+        // Schalten: Misst ein Gerät an der eigenen und an einer fremden Anlage
+        // (Altbestand), genügt die Freigabe für die eigene nicht.
+        alsBenutzer($benutzer);
+        InventarService::einsetzen($zsDoppelt, $eigen);
+        alsBenutzer($techniker);
+        $geraet = ['id' => 0, 'geraet' => $gr('doppelt'), 'art' => 'shelly'];
+        pruefe(!Zugriff::darfSteuern($geraet, 'switch:0', AnlagenService::find($eigen)) && !Zugriff::darfSteuern($geraet, 'switch:0'),
+            'ein Gerät an der eigenen und an einer fremden Anlage schaltet nicht über die Freigabe der eigenen');
+        Database::execute('DELETE FROM messpunkte WHERE objekt_id = ? AND geraet = ?', [$fremd, $gr('doppelt')]);
+        Zugriff::vergessen();
+        pruefe(Zugriff::darfSteuern($geraet, 'switch:0', AnlagenService::find($eigen)), 'misst es nur noch an der eigenen, schaltet es');
+    } finally {
+        $_POST = $postVorher;
+        if ($acceptVorher === null) {
+            unset($_SERVER['HTTP_ACCEPT']);
+        } else {
+            $_SERVER['HTTP_ACCEPT'] = $acceptVorher;
+        }
+        alsBenutzer($benutzer);
+        Database::execute("DELETE FROM freigaben WHERE subject_type = 'user' AND subject_id = ?", [$techniker]);
+        Database::execute('DELETE FROM user_roles WHERE user_id = ?', [$techniker]);
+        Database::execute('DELETE FROM users WHERE id = ?', [$techniker]);
+    }
+
     // Defekt: nicht einsetzbar
     InventarService::speichern($v1, ['art' => 'verteilung', 'kennung' => $gr('PD63-01'), 'vorlage_id' => $pd63, 'defekt' => 1]);
     pruefe(!InventarService::einsetzen($v1, $planB)['ok'], 'defektes Stück nicht einsetzbar');
@@ -251,6 +310,9 @@ try {
         AnlagenService::loeschen((int) $id);
     }
     SiteService::deleteSite($siteId);
+    if ($fremdSite !== null) {
+        SiteService::deleteSite($fremdSite);
+    }
     Database::execute('DELETE FROM user_roles WHERE user_id = ?', [$benutzer]);
     Database::execute('DELETE FROM users WHERE id = ?', [$benutzer]);
     Database::execute('DELETE FROM audit_log WHERE username = ? OR details LIKE ?', [$kennung, '%' . $kennung . '%']);
